@@ -1,7 +1,7 @@
 # Thiết kế hệ thống so sánh odds và thực thi arbitrage Football + LoL
 
 Ngày: 2026-08-09  
-Trạng thái: Chờ người dùng duyệt spec  
+Trạng thái: Đã được người dùng duyệt
 Phạm vi ban đầu: SABA/Estorb và Techplay/InPlayMatrix
 
 ## 1. Mục tiêu
