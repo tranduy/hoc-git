@@ -1,13 +1,16 @@
 import {
+  CategorySchema,
   ProviderConnectionStatusSchema,
   ProviderEventSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema,
   type Category
 } from "@tool-chenh/contracts";
+import { z } from "zod";
 import type {
   AdapterRecordKind,
   AdapterSchemaError,
+  AdapterSchemaIssue,
   ProviderAdapter,
   ProviderSink
 } from "./provider-adapter.js";
@@ -37,12 +40,37 @@ export interface FixtureAdapterOptions {
   readonly scheduler?: ReplayScheduler;
 }
 
+interface PreparedFixtureRecord {
+  readonly valid: boolean;
+  readonly offsetMs: number;
+  readonly kind: AdapterRecordKind;
+  readonly payload: unknown;
+  readonly issues: readonly AdapterSchemaIssue[];
+  readonly originalIndex: number;
+}
+
 interface SafeSchemaFailure {
   readonly issues: readonly {
     readonly code: string;
     readonly path: readonly PropertyKey[];
   }[];
 }
+
+const FixtureSnapshotEnvelopeSchema = z.strictObject({
+  version: z.literal(1),
+  adapterId: z.string().min(1),
+  provider: z.string().min(1),
+  category: CategorySchema,
+  records: z.array(z.unknown())
+});
+
+const FixtureRecordSchema = z.strictObject({
+  offsetMs: z.number().finite().nonnegative(),
+  kind: z.enum(["EVENT", "MARKET", "QUOTE", "STATUS"]),
+  payload: z.unknown()
+});
+
+const fixtureRecordKinds = new Set<FixtureRecordKind>(["EVENT", "MARKET", "QUOTE", "STATUS"]);
 
 const defaultScheduler: ReplayScheduler = {
   wait(delayMs, signal) {
@@ -62,37 +90,74 @@ const defaultScheduler: ReplayScheduler = {
   }
 };
 
+function safeRecordMetadata(record: unknown): {
+  readonly offsetMs: number;
+  readonly kind: AdapterRecordKind;
+} {
+  if (typeof record !== "object" || record === null) {
+    return { offsetMs: 0, kind: "UNKNOWN" };
+  }
+
+  const candidate = record as Record<string, unknown>;
+  const offsetMs = typeof candidate.offsetMs === "number"
+    && Number.isFinite(candidate.offsetMs)
+    && candidate.offsetMs >= 0
+    ? candidate.offsetMs
+    : 0;
+  const kind = typeof candidate.kind === "string"
+    && fixtureRecordKinds.has(candidate.kind as FixtureRecordKind)
+    ? candidate.kind as FixtureRecordKind
+    : "UNKNOWN";
+  return { offsetMs, kind };
+}
+
+function safeIssues(error: SafeSchemaFailure): readonly AdapterSchemaIssue[] {
+  return error.issues.map((issue) => ({
+    code: issue.code,
+    path: issue.path.map(String)
+  }));
+}
+
 export class FixtureAdapter implements ProviderAdapter {
   readonly id: string;
   readonly categories: readonly Category[];
   readonly #provider: string;
   readonly #category: Category;
-  readonly #records: readonly FixtureRecord[];
+  readonly #records: readonly unknown[];
   readonly #speed: number;
   readonly #scheduler: ReplayScheduler;
 
-  constructor(snapshot: FixtureSnapshot, options: FixtureAdapterOptions = {}) {
+  constructor(snapshot: unknown, options: FixtureAdapterOptions = {}) {
     const speed = options.speed ?? 1;
     if (!Number.isFinite(speed) || speed <= 0) {
       throw new Error("Fixture replay speed must be a positive finite number");
     }
 
-    this.id = snapshot.adapterId;
-    this.categories = Object.freeze([snapshot.category]);
-    this.#provider = snapshot.provider;
-    this.#category = snapshot.category;
-    this.#records = snapshot.records.map((record) => ({ ...record }));
+    let clonedSnapshot: unknown;
+    try {
+      clonedSnapshot = structuredClone(snapshot);
+    } catch {
+      throw new Error("Invalid fixture snapshot");
+    }
+    const result = FixtureSnapshotEnvelopeSchema.safeParse(clonedSnapshot);
+    if (!result.success) throw new Error("Invalid fixture snapshot");
+
+    this.id = result.data.adapterId;
+    this.categories = Object.freeze([result.data.category]);
+    this.#provider = result.data.provider;
+    this.#category = result.data.category;
+    this.#records = result.data.records;
     this.#speed = speed;
     this.#scheduler = options.scheduler ?? defaultScheduler;
   }
 
   async start(sink: ProviderSink, signal: AbortSignal): Promise<void> {
     const scheduled = this.#records
-      .map((record, index) => ({ record, index }))
-      .sort((left, right) => left.record.offsetMs - right.record.offsetMs || left.index - right.index);
+      .map((record, originalIndex) => this.#prepareRecord(record, originalIndex))
+      .sort((left, right) => left.offsetMs - right.offsetMs || left.originalIndex - right.originalIndex);
     let previousOffsetMs = 0;
 
-    for (const { record } of scheduled) {
+    for (const record of scheduled) {
       if (signal.aborted) return;
       const waitMs = (record.offsetMs - previousOffsetMs) / this.#speed;
       if (waitMs > 0) {
@@ -105,40 +170,81 @@ export class FixtureAdapter implements ProviderAdapter {
       }
       if (signal.aborted) return;
 
-      this.#validateAndEmit(record, sink);
+      if (record.valid) this.#validateAndEmit(record, sink);
+      else sink.onSchemaError(this.#schemaError(record, record.issues));
       previousOffsetMs = record.offsetMs;
     }
   }
 
-  #validateAndEmit(record: FixtureRecord, sink: ProviderSink): void {
+  #prepareRecord(record: unknown, originalIndex: number): PreparedFixtureRecord {
+    const result = FixtureRecordSchema.safeParse(record);
+    if (result.success) {
+      return { ...result.data, valid: true, issues: [], originalIndex };
+    }
+
+    const metadata = safeRecordMetadata(record);
+    return {
+      ...metadata,
+      valid: false,
+      payload: undefined,
+      issues: safeIssues(result.error),
+      originalIndex
+    };
+  }
+
+  #validateAndEmit(record: PreparedFixtureRecord, sink: ProviderSink): void {
     switch (record.kind) {
       case "EVENT": {
         const result = ProviderEventSchema.safeParse(record.payload);
-        if (result.success) sink.onEvent(result.data);
-        else sink.onSchemaError(this.#schemaError(record, result.error));
+        if (!result.success) sink.onSchemaError(this.#schemaError(record, safeIssues(result.error)));
+        else if (this.#matchesProvenance(result.data)) sink.onEvent(result.data);
+        else sink.onSchemaError(this.#provenanceError(record, result.data));
         return;
       }
       case "MARKET": {
         const result = ProviderMarketSchema.safeParse(record.payload);
-        if (result.success) sink.onMarket(result.data);
-        else sink.onSchemaError(this.#schemaError(record, result.error));
+        if (!result.success) sink.onSchemaError(this.#schemaError(record, safeIssues(result.error)));
+        else if (this.#matchesProvenance(result.data)) sink.onMarket(result.data);
+        else sink.onSchemaError(this.#provenanceError(record, result.data));
         return;
       }
       case "QUOTE": {
         const result = ProviderQuoteSchema.safeParse(record.payload);
-        if (result.success) sink.onQuote(result.data);
-        else sink.onSchemaError(this.#schemaError(record, result.error));
+        if (!result.success) sink.onSchemaError(this.#schemaError(record, safeIssues(result.error)));
+        else if (this.#matchesProvenance(result.data)) sink.onQuote(result.data);
+        else sink.onSchemaError(this.#provenanceError(record, result.data));
         return;
       }
       case "STATUS": {
         const result = ProviderConnectionStatusSchema.safeParse(record.payload);
-        if (result.success) sink.onStatus(result.data);
-        else sink.onSchemaError(this.#schemaError(record, result.error));
+        if (!result.success) sink.onSchemaError(this.#schemaError(record, safeIssues(result.error)));
+        else if (this.#matchesProvenance(result.data)) sink.onStatus(result.data);
+        else sink.onSchemaError(this.#provenanceError(record, result.data));
+        return;
       }
+      case "UNKNOWN":
+        sink.onSchemaError(this.#schemaError(record, [{ code: "invalid_kind", path: ["kind"] }]));
     }
   }
 
-  #schemaError(record: FixtureRecord, error: SafeSchemaFailure): AdapterSchemaError {
+  #matchesProvenance(value: { provider: string; category: Category }): boolean {
+    return value.provider === this.#provider && value.category === this.#category;
+  }
+
+  #provenanceError(
+    record: PreparedFixtureRecord,
+    value: { provider: string; category: Category }
+  ): AdapterSchemaError {
+    const issues: AdapterSchemaIssue[] = [];
+    if (value.provider !== this.#provider) issues.push({ code: "custom", path: ["provider"] });
+    if (value.category !== this.#category) issues.push({ code: "custom", path: ["category"] });
+    return this.#schemaError(record, issues);
+  }
+
+  #schemaError(
+    record: Pick<PreparedFixtureRecord, "kind" | "offsetMs">,
+    issues: readonly AdapterSchemaIssue[]
+  ): AdapterSchemaError {
     return {
       code: "SCHEMA_ERROR",
       adapterId: this.id,
@@ -146,10 +252,7 @@ export class FixtureAdapter implements ProviderAdapter {
       category: this.#category,
       recordKind: record.kind,
       offsetMs: record.offsetMs,
-      issues: error.issues.map((issue) => ({
-        code: issue.code,
-        path: issue.path.map(String)
-      }))
+      issues
     };
   }
 }

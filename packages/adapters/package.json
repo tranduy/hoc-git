@@ -11,6 +11,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@tool-chenh/contracts": "*"
+    "@tool-chenh/contracts": "*",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "decimal.js": "^10.5.0"
   }
 }

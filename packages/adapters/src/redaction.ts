@@ -28,7 +28,14 @@ function normalizeKey(key: string): string {
 }
 
 function isSecretKey(key: string): boolean {
-  return secretKeys.has(normalizeKey(key));
+  const normalized = normalizeKey(key);
+  return secretKeys.has(normalized)
+    || normalized.endsWith("token")
+    || normalized.endsWith("cookie")
+    || normalized.endsWith("password")
+    || normalized.endsWith("secret")
+    || normalized.endsWith("apikey")
+    || normalized.endsWith("authorization");
 }
 
 function decodeQueryKey(key: string): string {

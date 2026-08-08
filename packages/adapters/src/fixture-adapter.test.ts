@@ -5,6 +5,7 @@ import type {
   ProviderMarket,
   ProviderQuote
 } from "@tool-chenh/contracts";
+import { Decimal } from "decimal.js";
 import { describe, expect, it } from "vitest";
 import {
   FixtureAdapter,
@@ -148,6 +149,51 @@ describe("FixtureAdapter", () => {
     expect(sink.emissions[0]).toBe("ERROR:EVENT");
   });
 
+  it("reports malformed record envelopes without silently dropping them", async () => {
+    const sink = new RecordingSink();
+    const snapshot = fixture([
+      { offsetMs: 0, kind: "NOT_A_KIND", payload: event("hidden-event") },
+      { offsetMs: -1, kind: "EVENT", payload: event("negative-offset") }
+    ] as unknown as FixtureSnapshot["records"]);
+
+    await new FixtureAdapter(snapshot, { scheduler: new ImmediateScheduler() })
+      .start(sink, new AbortController().signal);
+
+    expect(sink.events).toEqual([]);
+    expect(sink.schemaErrors).toHaveLength(2);
+    expect(sink.schemaErrors.map((error) => error.recordKind)).toEqual(["UNKNOWN", "EVENT"]);
+    expect(sink.schemaErrors.every((error) => error.code === "SCHEMA_ERROR")).toBe(true);
+  });
+
+  it("rejects payload provenance that conflicts with the trusted fixture envelope", async () => {
+    const sink = new RecordingSink();
+    const conflicting = {
+      ...event("wrong-source"),
+      provider: "IM",
+      category: "LOL",
+      eventScope: "SERIES",
+      bestOf: 3
+    } as const;
+    const adapter = new FixtureAdapter(fixture([
+      { offsetMs: 0, kind: "EVENT", payload: conflicting }
+    ]), { scheduler: new ImmediateScheduler() });
+
+    await adapter.start(sink, new AbortController().signal);
+
+    expect(sink.events).toEqual([]);
+    expect(sink.schemaErrors).toHaveLength(1);
+    expect(sink.schemaErrors[0]).toMatchObject({
+      code: "SCHEMA_ERROR",
+      provider: "SABA",
+      category: "FOOTBALL",
+      recordKind: "EVENT"
+    });
+    expect(sink.schemaErrors[0]?.issues.map((issue) => issue.path)).toEqual([
+      ["provider"],
+      ["category"]
+    ]);
+  });
+
   it("stops replay cleanly when its AbortSignal is aborted during a wait", async () => {
     const scheduler: ReplayScheduler = {
       wait(_delayMs, signal) {
@@ -217,26 +263,92 @@ describe("redacted fixture snapshots", () => {
     expect([...quoteHistory.values()].some((odds) => odds.size > 1)).toBe(true);
   });
 
-  it("contains a cross-provider arbitrage market and a non-arbitrage market per category", () => {
+  it("encodes compatible and rejected event pairs with identity-compatible markets", () => {
     const football = fixturePaths.slice(0, 2).map(loadFixture);
     const lol = fixturePaths.slice(2).map(loadFixture);
+
+    const events = (snapshot: FixtureSnapshot): ProviderEvent[] => snapshot.records
+      .filter((record) => record.kind === "EVENT")
+      .map((record) => record.payload as ProviderEvent);
+    const identity = (item: ProviderEvent) => ({
+      category: item.category,
+      competition: item.competition,
+      seasonStage: item.seasonStage,
+      startAtUtcMs: item.startAtUtcMs,
+      participantA: item.participantA,
+      participantB: item.participantB,
+      eventScope: item.eventScope,
+      bestOf: item.bestOf,
+      isLive: item.isLive
+    });
+
+    expect(identity(events(football[0]!)[0]!)).toEqual(identity(events(football[1]!)[0]!));
+    expect(identity(events(lol[0]!)[0]!)).toEqual(identity(events(lol[1]!)[0]!));
+    expect(identity(events(football[0]!)[1]!)).not.toEqual(identity(events(football[1]!)[1]!));
+    expect(identity(events(lol[0]!)[1]!)).not.toEqual(identity(events(lol[1]!)[1]!));
+
+    for (const snapshots of [football, lol]) {
+      const markets = snapshots.map((snapshot) => snapshot.records
+        .filter((record) => record.kind === "MARKET")
+        .map((record) => record.payload as ProviderMarket));
+      expect(markets[0]?.map(({ category, marketType, scope, line, settlementProfile }) => ({
+        category,
+        marketType,
+        scope,
+        line,
+        settlementProfile
+      }))).toEqual(markets[1]?.map(({ category, marketType, scope, line, settlementProfile }) => ({
+        category,
+        marketType,
+        scope,
+        line,
+        settlementProfile
+      })));
+    }
+  });
+
+  it("contains fee-adjusted arbitrage and non-arbitrage markets at a fixed replay offset", () => {
+    const football = fixturePaths.slice(0, 2).map(loadFixture);
+    const lol = fixturePaths.slice(2).map(loadFixture);
+    const feeRate = new Decimal("0.01");
+    const cutoffMs = 99;
 
     const inverseSum = (
       snapshots: readonly FixtureSnapshot[],
       marketType: string,
       selections: readonly string[]
-    ): number => selections.reduce((sum, selection) => {
-      const best = Math.max(...snapshots.flatMap((snapshot) => snapshot.records
-        .filter((record) => record.kind === "QUOTE")
-        .map((record) => record.payload as ProviderQuote)
-        .filter((quote) => quote.marketType === marketType && quote.status === "OPEN" && quote.selection === selection)
-        .map((quote) => Number(quote.rawOdds))));
-      return sum + 1 / best;
-    }, 0);
+    ): Decimal => {
+      const marketIds = new Set(snapshots.flatMap((snapshot) => snapshot.records
+        .filter((record) => record.kind === "MARKET")
+        .map((record) => record.payload as ProviderMarket)
+        .filter((item) => item.marketType === marketType)
+        .map((item) => item.providerMarketId)));
+      const latestBySelectionId = new Map<string, ProviderQuote>();
+      for (const snapshot of snapshots) {
+        for (const record of snapshot.records) {
+          if (record.offsetMs > cutoffMs || record.kind !== "QUOTE") continue;
+          const quote = record.payload as ProviderQuote;
+          if (marketIds.has(quote.providerMarketId)) {
+            latestBySelectionId.set(quote.providerSelectionId, quote);
+          }
+        }
+      }
 
-    expect(inverseSum(football, "FT_TOTAL", ["OVER", "UNDER"])).toBeLessThan(0.98);
-    expect(inverseSum(football, "FT_1X2", ["HOME", "DRAW", "AWAY"])).toBeGreaterThan(1);
-    expect(inverseSum(lol, "SERIES_WINNER", ["TEAM_A", "TEAM_B"])).toBeLessThan(0.98);
-    expect(inverseSum(lol, "MAP_WINNER", ["TEAM_A", "TEAM_B"])).toBeGreaterThan(1);
+      return selections.reduce((sum, selection) => {
+        const effectiveOdds = [...latestBySelectionId.values()]
+          .filter((quote) => quote.selection === selection && quote.status === "OPEN")
+          .map((quote) => new Decimal(quote.rawOdds)
+            .minus(1)
+            .times(new Decimal(1).minus(feeRate))
+            .plus(1));
+        const best = Decimal.max(...effectiveOdds);
+        return sum.plus(new Decimal(1).div(best));
+      }, new Decimal(0));
+    };
+
+    expect(inverseSum(football, "FT_TOTAL", ["OVER", "UNDER"]).lt(1)).toBe(true);
+    expect(inverseSum(football, "FT_1X2", ["HOME", "DRAW", "AWAY"]).gt(1)).toBe(true);
+    expect(inverseSum(lol, "SERIES_WINNER", ["TEAM_A", "TEAM_B"]).lt(1)).toBe(true);
+    expect(inverseSum(lol, "MAP_WINNER", ["TEAM_A", "TEAM_B"]).gt(1)).toBe(true);
   });
 });

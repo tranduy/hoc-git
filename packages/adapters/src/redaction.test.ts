@@ -52,6 +52,24 @@ describe("redactCapture", () => {
     });
   });
 
+  it("redacts prefixed and compound credential keys, including encoded URL keys", () => {
+    const capture = {
+      id_token: "secret-id-token",
+      session_token: "secret-session-token",
+      "X-Auth-Token": "secret-header-token",
+      "x-api-key": "secret-api-key",
+      callback: "https://fixture.invalid/callback?session%5Ftoken=secret-url-token&providerEventId=event-1"
+    };
+
+    expect(redactCapture(capture)).toEqual({
+      id_token: "REDACTED",
+      session_token: "REDACTED",
+      "X-Auth-Token": "REDACTED",
+      "x-api-key": "REDACTED",
+      callback: "https://fixture.invalid/callback?session%5Ftoken=REDACTED&providerEventId=event-1"
+    });
+  });
+
   it("replaces circular references with a safe marker", () => {
     const capture: Record<string, unknown> = { providerEventId: "event-1" };
     capture.self = capture;
