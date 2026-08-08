@@ -284,13 +284,25 @@ describe("redacted fixture snapshots", () => {
 
     expect(identity(events(football[0]!)[0]!)).toEqual(identity(events(football[1]!)[0]!));
     expect(identity(events(lol[0]!)[0]!)).toEqual(identity(events(lol[1]!)[0]!));
-    expect(identity(events(football[0]!)[1]!)).not.toEqual(identity(events(football[1]!)[1]!));
-    expect(identity(events(lol[0]!)[1]!)).not.toEqual(identity(events(lol[1]!)[1]!));
+    const [sabaFootballRejected, imFootballRejected] = [events(football[0]!)[1]!, events(football[1]!)[1]!];
+    expect(imFootballRejected.startAtUtcMs - sabaFootballRejected.startAtUtcMs).toBe(600_000);
+    expect([imFootballRejected.participantA, imFootballRejected.participantB]).toEqual([
+      sabaFootballRejected.participantB,
+      sabaFootballRejected.participantA
+    ]);
+    const [sabaLolRejected, imLolRejected] = [events(lol[0]!)[1]!, events(lol[1]!)[1]!];
+    expect(imLolRejected.participantA).toBe(sabaLolRejected.participantA);
+    expect(sabaLolRejected.participantB).toBe("Beta Academy");
+    expect(imLolRejected.participantB).toBe("Gamma Academy");
 
     for (const snapshots of [football, lol]) {
       const markets = snapshots.map((snapshot) => snapshot.records
         .filter((record) => record.kind === "MARKET")
         .map((record) => record.payload as ProviderMarket));
+      snapshots.forEach((snapshot, providerIndex) => {
+        const acceptedEventId = events(snapshot)[0]!.providerEventId;
+        expect(markets[providerIndex]?.every((item) => item.providerEventId === acceptedEventId)).toBe(true);
+      });
       expect(markets[0]?.map(({ category, marketType, scope, line, settlementProfile }) => ({
         category,
         marketType,
@@ -317,7 +329,7 @@ describe("redacted fixture snapshots", () => {
       snapshots: readonly FixtureSnapshot[],
       marketType: string,
       selections: readonly string[]
-    ): Decimal => {
+    ): { readonly inverseSum: Decimal; readonly selected: readonly ProviderQuote[] } => {
       const marketIds = new Set(snapshots.flatMap((snapshot) => snapshot.records
         .filter((record) => record.kind === "MARKET")
         .map((record) => record.payload as ProviderMarket)
@@ -334,21 +346,48 @@ describe("redacted fixture snapshots", () => {
         }
       }
 
-      return selections.reduce((sum, selection) => {
-        const effectiveOdds = [...latestBySelectionId.values()]
-          .filter((quote) => quote.selection === selection && quote.status === "OPEN")
-          .map((quote) => new Decimal(quote.rawOdds)
-            .minus(1)
-            .times(new Decimal(1).minus(feeRate))
-            .plus(1));
-        const best = Decimal.max(...effectiveOdds);
-        return sum.plus(new Decimal(1).div(best));
-      }, new Decimal(0));
+      const effective = (quote: ProviderQuote): Decimal => new Decimal(quote.rawOdds)
+        .minus(1)
+        .times(new Decimal(1).minus(feeRate))
+        .plus(1);
+      const selected = selections.map((selection) => {
+        const candidates = [...latestBySelectionId.values()]
+          .filter((quote) => quote.selection === selection && quote.status === "OPEN");
+        return candidates.reduce((best, candidate) => effective(candidate).gt(effective(best))
+          ? candidate
+          : best);
+      });
+      return {
+        inverseSum: selected.reduce(
+          (sum, quote) => sum.plus(new Decimal(1).div(effective(quote))),
+          new Decimal(0)
+        ),
+        selected
+      };
     };
 
-    expect(inverseSum(football, "FT_TOTAL", ["OVER", "UNDER"]).lt(1)).toBe(true);
-    expect(inverseSum(football, "FT_1X2", ["HOME", "DRAW", "AWAY"]).gt(1)).toBe(true);
-    expect(inverseSum(lol, "SERIES_WINNER", ["TEAM_A", "TEAM_B"]).lt(1)).toBe(true);
-    expect(inverseSum(lol, "MAP_WINNER", ["TEAM_A", "TEAM_B"]).gt(1)).toBe(true);
+    const footballArbitrage = inverseSum(football, "FT_TOTAL", ["OVER", "UNDER"]);
+    expect(footballArbitrage.inverseSum.lt(1)).toBe(true);
+    expect(footballArbitrage.selected.map((quote) => [
+      quote.provider,
+      quote.providerMarketId,
+      quote.selection
+    ])).toEqual([
+      ["SABA", "saba-fb-total-25", "OVER"],
+      ["IM", "im-fb-total-25", "UNDER"]
+    ]);
+    expect(inverseSum(football, "FT_1X2", ["HOME", "DRAW", "AWAY"]).inverseSum.gt(1)).toBe(true);
+
+    const lolArbitrage = inverseSum(lol, "SERIES_WINNER", ["TEAM_A", "TEAM_B"]);
+    expect(lolArbitrage.inverseSum.lt(1)).toBe(true);
+    expect(lolArbitrage.selected.map((quote) => [
+      quote.provider,
+      quote.providerMarketId,
+      quote.selection
+    ])).toEqual([
+      ["SABA", "saba-lol-series-winner", "TEAM_A"],
+      ["IM", "im-lol-series-winner", "TEAM_B"]
+    ]);
+    expect(inverseSum(lol, "MAP_WINNER", ["TEAM_A", "TEAM_B"]).inverseSum.gt(1)).toBe(true);
   });
 });
