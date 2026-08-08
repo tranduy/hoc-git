@@ -17,3 +17,22 @@ export type {
   VersionedAliasRegistry,
   VersionedAliasResolution
 } from "./identity/normalize-name.js";
+export { mapEvents } from "./mapping/event-mapper.js";
+export type {
+  EventMappingResult,
+  EventSource,
+  FootballLiveState,
+  LolLiveState,
+  MappingPolicy,
+  NormalizedEvent,
+  NormalizedFootballEvent,
+  NormalizedLolEvent,
+  ParticipantOrientation
+} from "./mapping/event-mapper.js";
+export { mapMarkets } from "./mapping/market-mapper.js";
+export type {
+  MarketMappingResult,
+  NormalizedMarket,
+  NormalizedSelection,
+  SelectionMapping
+} from "./mapping/market-mapper.js";
