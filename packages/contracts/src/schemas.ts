@@ -59,6 +59,45 @@ export const ScopeSchema = z.enum([
   "MAP_5"
 ]) satisfies z.ZodType<Scope>;
 
+export const DecimalStringSchema = z
+  .string()
+  .regex(/^[+-]?(?:0|[1-9]\d*)(?:\.\d+)?$/, "must be a plain decimal string");
+
+const footballMarketTypes = new Set<MarketType>(["FT_1X2", "FT_AH", "FT_TOTAL", "FH_1X2", "FH_AH", "FH_TOTAL"]);
+const lolMarketTypes = new Set<MarketType>([
+  "SERIES_WINNER",
+  "MAP_WINNER",
+  "MAP_TOTAL_KILLS",
+  "MAP_KILL_HANDICAP",
+  "MAP_DURATION"
+]);
+const footballScopes = new Set<Scope>(["FULL_TIME", "FIRST_HALF"]);
+const lolScopes = new Set<Scope>(["SERIES", "MAP_1", "MAP_2", "MAP_3", "MAP_4", "MAP_5"]);
+
+function validateCategoryCompatibility(
+  value: { category: Category; marketType: MarketType; scope: Scope },
+  context: z.RefinementCtx
+): void {
+  const compatibleMarketTypes = value.category === "FOOTBALL" ? footballMarketTypes : lolMarketTypes;
+  const compatibleScopes = value.category === "FOOTBALL" ? footballScopes : lolScopes;
+
+  if (value.marketType !== "OBSERVE_ONLY" && !compatibleMarketTypes.has(value.marketType)) {
+    context.addIssue({
+      code: "custom",
+      path: ["marketType"],
+      message: "market type is incompatible with category"
+    });
+  }
+
+  if (!compatibleScopes.has(value.scope)) {
+    context.addIssue({
+      code: "custom",
+      path: ["scope"],
+      message: "scope is incompatible with category"
+    });
+  }
+}
+
 export const ProviderEventSchema = z.strictObject({
   provider: z.string(),
   category: CategorySchema,
@@ -80,10 +119,10 @@ export const ProviderMarketSchema = z.strictObject({
   providerMarketId: z.string(),
   marketType: MarketTypeSchema,
   scope: ScopeSchema,
-  line: z.string().nullable(),
+  line: DecimalStringSchema.nullable(),
   settlementProfile: z.string(),
   status: QuoteStatusSchema
-}) satisfies z.ZodType<ProviderMarket>;
+}).superRefine(validateCategoryCompatibility) satisfies z.ZodType<ProviderMarket>;
 
 export const ProviderQuoteSchema = z.strictObject({
   provider: z.string(),
@@ -94,15 +133,15 @@ export const ProviderQuoteSchema = z.strictObject({
   marketType: MarketTypeSchema,
   scope: ScopeSchema,
   selection: z.string(),
-  line: z.string().nullable(),
-  rawOdds: z.string(),
+  line: DecimalStringSchema.nullable(),
+  rawOdds: DecimalStringSchema,
   rawFormat: OddsFormatSchema,
   status: QuoteStatusSchema,
   isLive: z.boolean(),
   sourceTimestampMs: z.number().nullable(),
   receivedMonotonicMs: z.number(),
   sequence: z.number().nullable()
-}) satisfies z.ZodType<ProviderQuote>;
+}).superRefine(validateCategoryCompatibility) satisfies z.ZodType<ProviderQuote>;
 
 export const MappingEvidenceSchema = z.strictObject({
   gate: z.string(),
@@ -131,7 +170,7 @@ export const CanonicalMarketSchema = z.strictObject({
   category: CategorySchema,
   marketType: MarketTypeSchema,
   scope: ScopeSchema,
-  line: z.string().nullable(),
+  line: DecimalStringSchema.nullable(),
   settlementProfile: z.string(),
   providerMarketIds: z.array(z.string()),
   mappingStatus: MappingStatusSchema,
@@ -144,15 +183,21 @@ export const StakeLegSchema = z.strictObject({
   providerMarketId: z.string(),
   providerSelectionId: z.string(),
   selection: z.string(),
-  rawOdds: z.string(),
+  rawOdds: DecimalStringSchema,
   rawFormat: OddsFormatSchema,
-  decimalOdds: z.string(),
-  effectiveDecimal: z.string(),
-  stake: z.string(),
-  minStake: z.string(),
-  maxStake: z.string(),
-  payout: z.string(),
-  quoteAgeMs: z.number()
+  decimalOdds: DecimalStringSchema,
+  effectiveDecimal: DecimalStringSchema,
+  stake: DecimalStringSchema,
+  minStake: DecimalStringSchema,
+  maxStake: DecimalStringSchema,
+  payout: DecimalStringSchema,
+  quoteAgeMs: z.number(),
+  quoteStatus: QuoteStatusSchema,
+  sourceTimestampMs: z.number().nullable(),
+  receivedMonotonicMs: z.number(),
+  sequence: z.number().nullable(),
+  eligible: z.boolean(),
+  ineligibleReasons: z.array(z.string())
 }) satisfies z.ZodType<StakeLeg>;
 
 export const OpportunitySchema = z.strictObject({
@@ -162,13 +207,13 @@ export const OpportunitySchema = z.strictObject({
   category: CategorySchema,
   marketType: MarketTypeSchema,
   scope: ScopeSchema,
-  line: z.string().nullable(),
+  line: DecimalStringSchema.nullable(),
   settlementProfile: z.string(),
   legs: z.array(StakeLegSchema),
-  inverseSum: z.string(),
-  netMargin: z.string(),
-  worstCaseProfit: z.string(),
-  roi: z.string(),
+  inverseSum: DecimalStringSchema,
+  netMargin: DecimalStringSchema,
+  worstCaseProfit: DecimalStringSchema,
+  roi: DecimalStringSchema,
   quoteAgeMs: z.number(),
   mappingEvidence: z.array(MappingEvidenceSchema),
   executionConfidence: z.enum(["HIGH", "BLOCKED"])
@@ -218,4 +263,35 @@ export const AppSnapshotSchema = z.strictObject({
   markets: z.array(CanonicalMarketSchema),
   opportunities: z.array(OpportunitySchema),
   blockedDiagnostics: z.array(BlockedDiagnosticSchema)
+}).superRefine((snapshot, context) => {
+  const marketsById = new Map(snapshot.markets.map((market) => [market.canonicalMarketId, market]));
+
+  snapshot.opportunities.forEach((opportunity, opportunityIndex) => {
+    const market = marketsById.get(opportunity.canonicalMarketId);
+    if (market?.mappingStatus !== "VERIFIED") {
+      context.addIssue({
+        code: "custom",
+        path: ["opportunities", opportunityIndex, "canonicalMarketId"],
+        message: "opportunity must reference a verified market in the snapshot"
+      });
+    }
+
+    if (opportunity.executionConfidence !== "HIGH") {
+      context.addIssue({
+        code: "custom",
+        path: ["opportunities", opportunityIndex, "executionConfidence"],
+        message: "published opportunities must have HIGH execution confidence"
+      });
+    }
+
+    opportunity.legs.forEach((leg, legIndex) => {
+      if (leg.quoteStatus !== "OPEN" || !leg.eligible) {
+        context.addIssue({
+          code: "custom",
+          path: ["opportunities", opportunityIndex, "legs", legIndex],
+          message: "published opportunity legs must be open and eligible"
+        });
+      }
+    });
+  });
 }) satisfies z.ZodType<AppSnapshot>;

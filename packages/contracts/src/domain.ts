@@ -124,6 +124,12 @@ export interface StakeLeg {
   readonly maxStake: string;
   readonly payout: string;
   readonly quoteAgeMs: number;
+  readonly quoteStatus: QuoteStatus;
+  readonly sourceTimestampMs: number | null;
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number | null;
+  readonly eligible: boolean;
+  readonly ineligibleReasons: readonly string[];
 }
 
 export interface Opportunity {
