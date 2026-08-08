@@ -37,6 +37,17 @@ describe("effectiveDecimal", () => {
     ).toThrow("fee rate must be at least 0 and less than 1");
   });
 
+  it.each([
+    ["", "[DecimalError] Invalid argument"],
+    ["not-a-rate", "[DecimalError] Invalid argument"],
+    ["NaN", "fee rate must be at least 0 and less than 1"],
+    ["Infinity", "fee rate must be at least 0 and less than 1"]
+  ] as const)("rejects malformed or non-finite fee rate %s", (rate, expected) => {
+    expect(() =>
+      effectiveDecimal(new Decimal("2"), { type: "PROFIT", rate })
+    ).toThrow(expected);
+  });
+
   it("rejects withdrawal-only fees because they cannot normalize opportunity odds", () => {
     const unsupported = { type: "WITHDRAWAL", rate: "0.10" } as unknown as FeeModel;
 
@@ -65,5 +76,25 @@ describe("convertStake", () => {
     expect(() => convertStake(new Decimal("100"), { ...fx, spreadRate: "1" })).toThrow(
       "FX spread rate must be at least 0 and less than 1"
     );
+  });
+
+  it.each([
+    ["", "[DecimalError] Invalid argument"],
+    ["not-a-rate", "[DecimalError] Invalid argument"],
+    ["NaN", "FX rate must be greater than 0"],
+    ["Infinity", "FX rate must be greater than 0"],
+    ["-0.128", "FX rate must be greater than 0"]
+  ] as const)("rejects malformed, non-finite, or negative FX rate %s", (rate, expected) => {
+    expect(() => convertStake(new Decimal("100"), { ...fx, rate })).toThrow(expected);
+  });
+
+  it.each([
+    ["", "[DecimalError] Invalid argument"],
+    ["not-a-spread", "[DecimalError] Invalid argument"],
+    ["NaN", "FX spread rate must be at least 0 and less than 1"],
+    ["Infinity", "FX spread rate must be at least 0 and less than 1"],
+    ["-0.01", "FX spread rate must be at least 0 and less than 1"]
+  ] as const)("rejects malformed, non-finite, or negative FX spread %s", (spreadRate, expected) => {
+    expect(() => convertStake(new Decimal("100"), { ...fx, spreadRate })).toThrow(expected);
   });
 });

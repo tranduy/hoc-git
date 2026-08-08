@@ -32,13 +32,17 @@ export function toDecimal(raw: string, format: OddsFormat): Decimal {
     return value.plus(1);
   }
 
-  if (value.gte(100)) {
-    return value.div(100).plus(1);
+  if (format === "AMERICAN") {
+    if (value.gte(100)) {
+      return value.div(100).plus(1);
+    }
+
+    if (value.lte(-100)) {
+      return new Decimal(100).div(value.abs()).plus(1);
+    }
+
+    throw new Error("American odds must be at least +100 or at most -100");
   }
 
-  if (value.lte(-100)) {
-    return new Decimal(100).div(value.abs()).plus(1);
-  }
-
-  throw new Error("American odds must be at least +100 or at most -100");
+  throw new Error("unsupported odds format");
 }
