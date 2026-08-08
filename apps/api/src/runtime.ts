@@ -873,12 +873,28 @@ export class Runtime {
     const eventMappingCounts = statusCounts(events);
     const marketMappingCounts = statusCounts(markets);
     const blockedDiagnostics = [
-      ...this.#blockedByMarket.values(),
-      ...this.#runtimeBlockedBySource.values()
+      ...[...this.#blockedByMarket.entries()].map(([sourceIdentity, diagnostic]) => ({
+        diagnostic,
+        sourceIdentity: composite(["MARKET", sourceIdentity])
+      })),
+      ...[...this.#runtimeBlockedBySource.entries()].map(([sourceIdentity, diagnostic]) => ({
+        diagnostic,
+        sourceIdentity: composite(["ADAPTER_CATEGORY", sourceIdentity])
+      }))
     ].sort((left, right) =>
-      compareText(left.canonicalMarketId ?? "", right.canonicalMarketId ?? "") ||
-      compareText(left.code, right.code)
-    );
+      compareText(left.diagnostic.category, right.diagnostic.category) ||
+      compareText(left.diagnostic.code, right.diagnostic.code) ||
+      compareText(
+        left.diagnostic.canonicalMarketId ?? "",
+        right.diagnostic.canonicalMarketId ?? ""
+      ) ||
+      compareText(left.sourceIdentity, right.sourceIdentity) ||
+      compareText(left.diagnostic.reason, right.diagnostic.reason) ||
+      compareText(
+        JSON.stringify(left.diagnostic.mappingEvidence),
+        JSON.stringify(right.diagnostic.mappingEvidence)
+      )
+    ).map(({ diagnostic }) => diagnostic);
     return {
       revision,
       generatedAtMs: clock.wallClockNowMs,

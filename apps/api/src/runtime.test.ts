@@ -521,6 +521,55 @@ describe("Runtime", () => {
     ]));
   });
 
+  it("orders Football and LoL source diagnostics independently of callback order", async () => {
+    const sourceError = (
+      id: string,
+      provider: string,
+      category: Category,
+      recordKind: "EVENT" | "QUOTE"
+    ): ProviderAdapter => ({
+      id,
+      categories: [category],
+      async start(sink): Promise<void> {
+        sink.onSchemaError({
+          code: "SCHEMA_ERROR",
+          adapterId: "untrusted-payload-id",
+          provider,
+          category,
+          recordKind,
+          offsetMs: 1,
+          issues: [{ code: "unrecognized_keys", path: ["authorization"] }]
+        });
+      }
+    });
+    const sources = [
+      sourceError("z-football", "SABA", "FOOTBALL", "EVENT"),
+      sourceError("a-lol", "IM", "LOL", "QUOTE")
+    ];
+    const diagnosticsByOrder: string[] = [];
+    for (const ordered of [sources, [...sources].reverse()]) {
+      const runtime = new Runtime({ adapters: ordered, clock, mappingPolicy: mappingPolicy() });
+
+      await runtime.start(new AbortController().signal);
+
+      diagnosticsByOrder.push(JSON.stringify(runtime.getSnapshot().blockedDiagnostics));
+    }
+
+    expect(new Set(diagnosticsByOrder).size).toBe(1);
+    expect(JSON.parse(diagnosticsByOrder[0]!) as unknown).toEqual([
+      expect.objectContaining({
+        category: "FOOTBALL",
+        code: "QUOTE_SCHEMA_ERROR",
+        reason: "adapter/category quarantined after schema validation failure"
+      }),
+      expect.objectContaining({
+        category: "LOL",
+        code: "QUOTE_SCHEMA_ERROR",
+        reason: "adapter/category quarantined after schema validation failure"
+      })
+    ]);
+  });
+
   it("publishes frozen snapshots with strictly increasing revisions", async () => {
     const runtime = new Runtime({ adapters: adapters(), clock, mappingPolicy: mappingPolicy() });
     const revisions: number[] = [];
