@@ -56,7 +56,13 @@ function resolveExactAlias(value: string, aliasMaps: readonly (Readonly<Record<s
   for (const aliases of aliasMaps) {
     for (const [alias, canonical] of Object.entries(aliases)) {
       if (normalizeName(alias) === normalized) {
-        canonicalMatches.add(normalizeName(canonical));
+        const normalizedCanonical = normalizeName(canonical);
+
+        if (!normalizedCanonical) {
+          throw new AliasRegistryError(`explicit alias target is empty: ${normalized}`);
+        }
+
+        canonicalMatches.add(normalizedCanonical);
       }
     }
   }

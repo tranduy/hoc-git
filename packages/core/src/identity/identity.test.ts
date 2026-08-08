@@ -67,6 +67,12 @@ describe("resolveAlias", () => {
 
     expect(() => resolveAliasForCategory("NAVI", "LOL", registry)).toThrow(AliasRegistryError);
   });
+
+  it.each(["   ", "!!!"])("rejects an alias target that normalizes to an empty ID: %s", (target) => {
+    const aliases = { FOOTBALL: {}, LOL: { navi: target } };
+
+    expect(() => resolveAlias("NAVI", aliases)).toThrow(AliasRegistryError);
+  });
 });
 
 describe("canonical event keys", () => {
@@ -131,6 +137,20 @@ describe("canonical event keys", () => {
       buildLolEventKey({ ...lol, teamA: "natus_vincere", aliasRegistry })
     );
   });
+
+  it.each(["   ", "!!!"])(
+    "rejects an empty canonical participant resolved from an alias target: %s",
+    (target) => {
+      const aliasRegistry: VersionedAliasRegistry = {
+        version: "2026-08-09.1",
+        aliases: { FOOTBALL: {}, LOL: { navi: target } }
+      };
+
+      expect(() => buildLolEventKey({ ...lol, teamA: "NAVI", aliasRegistry })).toThrow(
+        AliasRegistryError
+      );
+    }
+  );
 
   it("treats participant values as already-canonical IDs when no registry is supplied", () => {
     expect(buildLolEventKey({ ...lol, teamA: "NAVI" })).not.toBe(
