@@ -23,6 +23,10 @@ export function CategoryPage({ category, snapshot }: { readonly category: Catego
       && (mappingStatus === all || event.mappingStatus === mappingStatus);
   }), [categoryEvents, categoryMarkets, competition, mappingStatus, marketType, snapshot.generatedAtMs, timing]);
   const visibleMarketIds = new Set(visibleEvents.map((event) => event.canonicalEventId));
+  const visibleMarkets = categoryMarkets.filter((market) =>
+    visibleMarketIds.has(market.canonicalEventId)
+      && (marketType === all || market.marketType === marketType)
+      && (mappingStatus === all || market.mappingStatus === mappingStatus));
 
   return (
     <>
@@ -33,7 +37,7 @@ export function CategoryPage({ category, snapshot }: { readonly category: Catego
         <label>Market<select value={marketType} onChange={(event) => setMarketType(event.target.value as typeof marketType)}><option value={all}>All markets</option>{marketTypes.map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
         <label>Mapping<select value={mappingStatus} onChange={(event) => setMappingStatus(event.target.value as typeof mappingStatus)}><option value={all}>All mapping states</option><option value="VERIFIED">Verified</option><option value="REVIEW_REQUIRED">Review required</option><option value="REJECTED">Rejected</option></select></label>
       </section>
-      <EventTable events={visibleEvents} markets={categoryMarkets.filter((market) => visibleMarketIds.has(market.canonicalEventId))} />
+      <EventTable events={visibleEvents} markets={visibleMarkets} />
     </>
   );
 }

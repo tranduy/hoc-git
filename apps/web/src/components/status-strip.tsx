@@ -14,7 +14,7 @@ export function StatusStrip({ statuses }: { readonly statuses: readonly Provider
       {statuses.map((status) => {
         const label = `${status.provider} ${status.category === "FOOTBALL" ? "Football" : "LoL"}: ${status.status}`;
         return (
-          <div className={`provider-status provider-status--${status.status.toLowerCase()}`} key={status.adapterId} aria-label={label}>
+          <div className={`provider-status provider-status--${status.status.toLowerCase()} provider-status--${status.provider.toLowerCase()}`} key={status.adapterId} aria-label={label}>
             <span aria-hidden="true" className="status-icon">{iconFor[status.status]}</span>
             <span className="provider-name">{status.provider} · {status.category === "FOOTBALL" ? "Football" : "LoL"}</span>
             <strong>{status.status}</strong>

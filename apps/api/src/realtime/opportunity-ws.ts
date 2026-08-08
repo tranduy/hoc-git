@@ -1,11 +1,11 @@
-import type { AppSnapshot } from "@tool-chenh/contracts";
+import {
+  RealtimeMessageSchema,
+  type AppSnapshot,
+  type RealtimeMessage
+} from "@tool-chenh/contracts";
 import type { FastifyInstance } from "fastify";
 import type WebSocket from "ws";
 import type { Runtime } from "../runtime.js";
-
-export type RealtimeMessage =
-  | { readonly type: "SNAPSHOT"; readonly revision: number; readonly data: AppSnapshot }
-  | { readonly type: "HEARTBEAT"; readonly revision: number; readonly serverTimeMs: number };
 
 const webSocketOpen = 1;
 
@@ -23,7 +23,7 @@ export interface BoundedSocket {
 }
 
 function serialize(message: RealtimeMessage): string {
-  return JSON.stringify(message);
+  return JSON.stringify(RealtimeMessageSchema.parse(message));
 }
 
 function closeQuietly(socket: BoundedSocket, code: number, reason: string): void {

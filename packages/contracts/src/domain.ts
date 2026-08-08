@@ -211,3 +211,7 @@ export interface AppSnapshot {
   readonly opportunities: readonly Opportunity[];
   readonly blockedDiagnostics: readonly BlockedDiagnostic[];
 }
+
+export type RealtimeMessage =
+  | { readonly type: "SNAPSHOT"; readonly revision: number; readonly data: AppSnapshot }
+  | { readonly type: "HEARTBEAT"; readonly revision: number; readonly serverTimeMs: number };

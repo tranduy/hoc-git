@@ -6,6 +6,7 @@ import {
   ProviderConnectionStatusSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema,
+  RealtimeMessageSchema,
   StakeLegSchema
 } from "./schemas.js";
 
@@ -292,5 +293,28 @@ describe("AppSnapshotSchema", () => {
 
   it("rejects unknown snapshot fields", () => {
     expect(AppSnapshotSchema.safeParse({ ...completeSnapshot(), executionReady: true }).success).toBe(false);
+  });
+});
+
+describe("RealtimeMessageSchema", () => {
+  it("accepts strict snapshot and heartbeat envelopes", () => {
+    expect(RealtimeMessageSchema.safeParse({
+      type: "SNAPSHOT", revision: 1, data: completeSnapshot()
+    }).success).toBe(true);
+    expect(RealtimeMessageSchema.safeParse({
+      type: "HEARTBEAT", revision: 1, serverTimeMs: 2
+    }).success).toBe(true);
+  });
+
+  it("rejects malformed, mismatched, and unknown realtime data", () => {
+    expect(RealtimeMessageSchema.safeParse({
+      type: "SNAPSHOT", revision: 1, data: { revision: "wrong" }
+    }).success).toBe(false);
+    expect(RealtimeMessageSchema.safeParse({
+      type: "SNAPSHOT", revision: 2, data: completeSnapshot()
+    }).success).toBe(false);
+    expect(RealtimeMessageSchema.safeParse({
+      type: "HEARTBEAT", revision: 1, serverTimeMs: 2, extra: true
+    }).success).toBe(false);
   });
 });

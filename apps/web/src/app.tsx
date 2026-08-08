@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import type { AppSnapshot } from "@tool-chenh/contracts";
 import { SnapshotClient, type ConnectionState } from "./api/client.js";
 import { DashboardPage } from "./pages/dashboard-page.js";
@@ -26,6 +26,8 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
   const [snapshot, setSnapshot] = useState<AppSnapshot | undefined>(initialSnapshot);
   const [connectionState, setConnectionState] = useState<ConnectionState>(initialSnapshot === undefined ? "CONNECTING" : "LIVE");
   const [route, setRoute] = useState<Route>(() => routeFor(window.location.pathname));
+  const mainRef = useRef<HTMLElement>(null);
+  const routeLabel = routes.find((item) => item.path === route)?.label ?? "Dashboard";
 
   useEffect(() => {
     if (initialSnapshot !== undefined) return;
@@ -34,7 +36,17 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
     return () => client.stop();
   }, [initialSnapshot]);
 
-  const navigate = (path: Route) => (event: React.MouseEvent<HTMLAnchorElement>) => {
+  useEffect(() => {
+    const onPopState = () => setRoute(routeFor(window.location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
+    mainRef.current?.focus();
+  }, [route]);
+
+  const navigate = (path: Route) => (event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     window.history.pushState({}, "", path);
     setRoute(path);
@@ -42,8 +54,8 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
   const content = snapshot === undefined
     ? <header className="page-header"><h1>Loading dashboard</h1><p>Waiting for a fresh local snapshot.</p></header>
     : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} />
-    : route === "/football" ? <CategoryPage category="FOOTBALL" snapshot={snapshot} />
-    : route === "/lol" ? <CategoryPage category="LOL" snapshot={snapshot} />
+    : route === "/football" ? <CategoryPage key="FOOTBALL" category="FOOTBALL" snapshot={snapshot} />
+    : route === "/lol" ? <CategoryPage key="LOL" category="LOL" snapshot={snapshot} />
     : route === "/opportunities" ? <PlaceholderPage title="Opportunities" detail="Opportunity details are read-only and arrive in the next view." />
     : <PlaceholderPage title="Mapping Review" detail="Mapping evidence inspection arrives in the next view." />;
 
@@ -54,7 +66,8 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
         <span className="brand">Fieldline</span>
         {routes.map((item) => <a aria-current={route === item.path ? "page" : undefined} href={item.path} key={item.path} onClick={navigate(item.path)}>{item.label}</a>)}
       </nav>
-      <main id="main">{content}</main>
+      <p className="visually-hidden" role="status" aria-live="polite">Now viewing {routeLabel}</p>
+      <main id="main" ref={mainRef} tabIndex={-1}>{content}</main>
     </div>
   );
 }

@@ -15,6 +15,7 @@ import type {
   ProviderEvent,
   ProviderMarket,
   ProviderQuote,
+  RealtimeMessage,
   QuoteIneligibilityReason,
   QuoteStatus,
   Scope,
@@ -344,3 +345,24 @@ export const AppSnapshotSchema = z.strictObject({
     });
   });
 }) satisfies z.ZodType<AppSnapshot>;
+
+export const RealtimeMessageSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("SNAPSHOT"),
+    revision: z.number(),
+    data: AppSnapshotSchema
+  }).superRefine((message, context) => {
+    if (message.revision !== message.data.revision) {
+      context.addIssue({
+        code: "custom",
+        path: ["revision"],
+        message: "snapshot envelope revision must match data revision"
+      });
+    }
+  }),
+  z.strictObject({
+    type: z.literal("HEARTBEAT"),
+    revision: z.number(),
+    serverTimeMs: z.number()
+  })
+]) satisfies z.ZodType<RealtimeMessage>;

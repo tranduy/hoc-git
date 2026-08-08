@@ -6,7 +6,7 @@ import {
   type ProviderSink,
   type ReplayScheduler
 } from "@tool-chenh/adapters";
-import { AppSnapshotSchema, type Category } from "@tool-chenh/contracts";
+import { AppSnapshotSchema, RealtimeMessageSchema, type Category } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket as WebSocketClient, type WebSocket } from "ws";
 import {
@@ -500,6 +500,7 @@ describe("Fastify realtime API", () => {
     const firstSocket = await app.injectWS("/api/realtime", {}, { onInit: firstMessages.onInit });
     sockets.push(firstSocket);
     const initial = await firstMessages.next();
+    expect(RealtimeMessageSchema.safeParse(initial).success).toBe(true);
     expect(initial).toEqual({
       type: "SNAPSHOT",
       revision: runtime.getSnapshot().revision,

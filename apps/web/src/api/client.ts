@@ -1,15 +1,17 @@
-import type { AppSnapshot } from "@tool-chenh/contracts";
+import {
+  AppSnapshotSchema,
+  RealtimeMessageSchema,
+  type AppSnapshot,
+  type RealtimeMessage
+} from "@tool-chenh/contracts";
 
 export type ConnectionState = "CONNECTING" | "LIVE" | "DISCONNECTED";
-
-export type RealtimeMessage =
-  | { readonly type: "SNAPSHOT"; readonly revision: number; readonly data: AppSnapshot }
-  | { readonly type: "HEARTBEAT"; readonly revision: number; readonly serverTimeMs: number };
 
 export interface SnapshotClientOptions {
   readonly initialSnapshot?: AppSnapshot;
   readonly onSnapshot: (snapshot: AppSnapshot) => void;
   readonly onConnectionState: (state: ConnectionState) => void;
+  readonly onDiagnostic?: (message: string) => void;
   readonly fetchSnapshot?: typeof fetch;
   readonly createWebSocket?: (url: string) => WebSocket;
 }
@@ -27,6 +29,7 @@ export class SnapshotClient {
   #retryTimer: number | undefined;
   readonly #onSnapshot: (snapshot: AppSnapshot) => void;
   readonly #onConnectionState: (state: ConnectionState) => void;
+  readonly #onDiagnostic: (message: string) => void;
   readonly #fetchSnapshot: typeof fetch;
   readonly #createWebSocket: (url: string) => WebSocket;
 
@@ -34,6 +37,7 @@ export class SnapshotClient {
     this.#revision = options.initialSnapshot?.revision ?? -1;
     this.#onSnapshot = options.onSnapshot;
     this.#onConnectionState = options.onConnectionState;
+    this.#onDiagnostic = options.onDiagnostic ?? (() => {});
     this.#fetchSnapshot = options.fetchSnapshot ?? window.fetch.bind(window);
     this.#createWebSocket = options.createWebSocket ?? ((url) => new WebSocket(url));
   }
@@ -43,7 +47,12 @@ export class SnapshotClient {
     try {
       const response = await this.#fetchSnapshot("/api/snapshot", { cache: "no-store" });
       if (!response.ok) throw new Error(`Snapshot request failed with ${response.status}`);
-      this.#acceptSnapshot(await response.json() as AppSnapshot);
+      const parsed = AppSnapshotSchema.safeParse(await response.json());
+      if (!parsed.success) {
+        this.#onDiagnostic("Ignored invalid snapshot response.");
+      } else {
+        this.#acceptSnapshot(parsed.data);
+      }
     } catch {
       this.#onConnectionState("DISCONNECTED");
     }
@@ -77,10 +86,15 @@ export class SnapshotClient {
   #handleMessage(payload: unknown): void {
     if (typeof payload !== "string") return;
     try {
-      const message = JSON.parse(payload) as RealtimeMessage;
+      const parsed = RealtimeMessageSchema.safeParse(JSON.parse(payload));
+      if (!parsed.success) {
+        this.#onDiagnostic("Ignored invalid realtime message.");
+        return;
+      }
+      const message: RealtimeMessage = parsed.data;
       if (message.type === "SNAPSHOT") this.#acceptSnapshot(message.data);
     } catch {
-      // Ignore malformed realtime payloads until the next complete snapshot.
+      this.#onDiagnostic("Ignored invalid realtime message.");
     }
   }
 
