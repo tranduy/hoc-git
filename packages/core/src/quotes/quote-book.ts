@@ -337,6 +337,8 @@ export class QuoteBook {
         (umbrellaQuarantined && !hasRecoveredSnapshot)) &&
       update.kind !== "FULL_SNAPSHOT"
     ) {
+      market.needsSnapshot = true;
+      this.#markets.set(marketKey, market);
       return this.#reject(
         "NEEDS_SNAPSHOT",
         marketKey,

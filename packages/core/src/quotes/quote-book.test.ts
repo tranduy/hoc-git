@@ -389,6 +389,38 @@ describe("QuoteBook ordering and freshness", () => {
     expect(book.snapshot(clock()).quotes.every((item) => item.eligible)).toBe(true);
   });
 
+  it("requires a full snapshot after an umbrella quarantine discards an unseen-market delta", () => {
+    const book = new QuoteBook(policies);
+    const existing = quote();
+    const unseen = quote({
+      providerEventId: "event-unseen",
+      providerMarketId: "market-unseen",
+      providerSelectionId: "over-unseen"
+    });
+    book.apply(update([existing], { kind: "FULL_SNAPSHOT" }));
+    book.apply(update([{ rawOdds: "NaN" }]));
+
+    expect(book.apply(update([unseen]))).toMatchObject({
+      accepted: false,
+      reason: "NEEDS_SNAPSHOT"
+    });
+    book.apply(update([quote({ sequence: 2 })], { kind: "FULL_SNAPSHOT" }));
+
+    expect(book.apply(update([{ ...unseen, sequence: 2 }]))).toMatchObject({
+      accepted: false,
+      reason: "NEEDS_SNAPSHOT"
+    });
+    expect(book.snapshot(clock()).byKey[quoteKey(unseen)]).toBeUndefined();
+
+    expect(book.apply(update([
+      { ...unseen, sequence: 2, rawOdds: "2.2" }
+    ], { kind: "FULL_SNAPSHOT" }))).toMatchObject({ accepted: true, reason: null });
+    expect(book.snapshot(clock()).byKey[quoteKey(unseen)]).toMatchObject({
+      eligible: true,
+      quote: { rawOdds: "2.2", sequence: 2 }
+    });
+  });
+
   it("uses the trusted envelope when malformed payload provenance conflicts", () => {
     const book = new QuoteBook(policies);
     const im = quote({
