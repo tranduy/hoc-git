@@ -19,7 +19,7 @@ export interface BoundedSocket {
   readonly bufferedAmount: number;
   close(code?: number, reason?: string): void;
   terminate(): void;
-  send(payload: string, callback?: (error?: Error) => void): void;
+  send(payload: string, callback?: (error?: Error | null) => void): void;
 }
 
 function serialize(message: RealtimeMessage): string {
@@ -51,7 +51,7 @@ export function sendBoundedMessage(
   }
   try {
     socket.send(payload, (error) => {
-      if (error !== undefined) closeQuietly(socket, 1011, "send failed");
+      if (error != null) closeQuietly(socket, 1011, "send failed");
     });
     return true;
   } catch {

@@ -1,17 +1,23 @@
 {
   "name": "tool-chenh",
   "private": true,
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "dev": "npm run dev --workspace @tool-chenh/api",
     "dev:web": "npm run dev --workspace @tool-chenh/web",
+    "dev:fixture": "npm run build && node scripts/start-fixture-stack.mjs",
     "test": "npm run test --workspaces --if-present",
     "test:integration": "vitest run tests/integration",
+    "test:e2e": "playwright test",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "verify": "npm run typecheck && npm test && npm run test:integration"
   },
   "devDependencies": {
+    "@playwright/test": "^1.55.1",
     "@types/node": "^22.0.0",
     "fast-check": "^4.9.0",
     "typescript": "^5.9.0",

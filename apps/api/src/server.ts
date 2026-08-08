@@ -19,6 +19,31 @@ const fixtureSources = [
   ["lol/im-snapshot.json", "IM", "LOL"]
 ] as const;
 
+const fixtureMappingPolicy = {
+  prematchToleranceMs: 120_000,
+  liveClockToleranceMs: 20_000,
+  aliasRegistry: {
+    version: "fixture-v1",
+    aliases: {
+      FOOTBALL: {
+        northbridge_fc: "northbridge_fc",
+        riverside_united: "riverside_united",
+        city_academy: "city_academy",
+        united_academy: "united_academy"
+      },
+      LOL: {
+        blue_comets: "blue_comets",
+        red_phoenix: "red_phoenix",
+        alpha_academy: "alpha_academy",
+        beta_academy: "beta_academy",
+        gamma_academy: "gamma_academy"
+      }
+    }
+  }
+} as const;
+
+const inspectableFixtureEndMs = 90;
+
 function positiveNumber(value: string | undefined, fallback: number, name: string): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
@@ -53,9 +78,13 @@ export function resolveServerConfig(env: Readonly<Record<string, string | undefi
 
 export function createFixtureRuntime(speed: number): Runtime {
   const adapters = fixtureSources.map(([path, provider, category]) => {
-    const fixture = JSON.parse(
+    const sourceFixture = JSON.parse(
       readFileSync(new URL(`../../../fixtures/${path}`, import.meta.url), "utf8")
     ) as FixtureSnapshot;
+    const fixture: FixtureSnapshot = {
+      ...sourceFixture,
+      records: sourceFixture.records.filter((record) => record.offsetMs <= inspectableFixtureEndMs)
+    };
     return new FixtureAdapter(fixture, {
       id: fixture.adapterId,
       provider,
@@ -65,6 +94,7 @@ export function createFixtureRuntime(speed: number): Runtime {
   });
   return new Runtime({
     adapters,
+    mappingPolicy: fixtureMappingPolicy,
     clock: {
       now: () => ({ monotonicNowMs: 100, wallClockNowMs: Date.now() })
     }

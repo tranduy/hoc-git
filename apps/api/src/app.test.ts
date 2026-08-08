@@ -17,7 +17,7 @@ import {
 } from "./app.js";
 import { sendBoundedMessage } from "./realtime/opportunity-ws.js";
 import { Runtime, type RuntimeClock } from "./runtime.js";
-import { resolveServerConfig } from "./server.js";
+import { createFixtureRuntime, resolveServerConfig } from "./server.js";
 
 const immediateScheduler: ReplayScheduler = {
   async wait(): Promise<void> {}
@@ -162,6 +162,19 @@ function collectMessages(): {
 }
 
 describe("Fastify snapshot API", () => {
+  it("builds an inspectable fixture snapshot with verified opportunities", async () => {
+    const runtime = createFixtureRuntime(1_000);
+    await runtime.start(new AbortController().signal);
+
+    const snapshot = runtime.getSnapshot();
+    expect(snapshot.events.filter((event) => event.mappingStatus === "VERIFIED")).toHaveLength(2);
+    expect(snapshot.markets).toHaveLength(4);
+    expect(snapshot.opportunities.map((opportunity) => opportunity.category).sort()).toEqual([
+      "FOOTBALL",
+      "LOL"
+    ]);
+  });
+
   it("defaults server binding to loopback and reads the established API env names", () => {
     expect(resolveServerConfig({})).toEqual({
       host: "127.0.0.1",
@@ -486,6 +499,24 @@ describe("Fastify realtime API", () => {
 
     expect(sendBoundedMessage(socket, "x".repeat(200), 1_024)).toBe(false);
     expect(closedWith).toBe(1013);
+  });
+
+  it("keeps a client open when ws reports null for a successful send", () => {
+    let closed = false;
+    const socket = {
+      readyState: 1,
+      bufferedAmount: 0,
+      close(): void {
+        closed = true;
+      },
+      terminate(): void {},
+      send(_payload: string, callback?: (error?: Error | null) => void): void {
+        callback?.(null);
+      }
+    };
+
+    expect(sendBoundedMessage(socket, "snapshot", 1_024)).toBe(true);
+    expect(closed).toBe(false);
   });
 
   it("sends a full snapshot, publishes only a higher revision, and recovers on reconnect", async () => {
