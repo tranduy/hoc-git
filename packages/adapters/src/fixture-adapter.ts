@@ -40,6 +40,12 @@ export interface FixtureAdapterOptions {
   readonly scheduler?: ReplayScheduler;
 }
 
+export interface FixtureAdapterConfig extends FixtureAdapterOptions {
+  readonly id: string;
+  readonly provider: string;
+  readonly category: Category;
+}
+
 interface PreparedFixtureRecord {
   readonly valid: boolean;
   readonly offsetMs: number;
@@ -62,6 +68,12 @@ const FixtureSnapshotEnvelopeSchema = z.strictObject({
   provider: z.string().min(1),
   category: CategorySchema,
   records: z.array(z.unknown())
+});
+
+const FixtureAdapterIdentitySchema = z.strictObject({
+  id: z.string().min(1),
+  provider: z.string().min(1),
+  category: CategorySchema
 });
 
 const FixtureRecordSchema = z.strictObject({
@@ -124,34 +136,67 @@ export class FixtureAdapter implements ProviderAdapter {
   readonly #provider: string;
   readonly #category: Category;
   readonly #records: readonly unknown[];
+  readonly #snapshotIssues: readonly AdapterSchemaIssue[];
   readonly #speed: number;
   readonly #scheduler: ReplayScheduler;
 
-  constructor(snapshot: unknown, options: FixtureAdapterOptions = {}) {
-    const speed = options.speed ?? 1;
+  constructor(snapshot: unknown, config: FixtureAdapterConfig) {
+    const identity = FixtureAdapterIdentitySchema.safeParse(config === undefined
+      ? undefined
+      : { id: config.id, provider: config.provider, category: config.category });
+    if (!identity.success) throw new Error("Invalid fixture adapter configuration");
+
+    const speed = config.speed ?? 1;
     if (!Number.isFinite(speed) || speed <= 0) {
       throw new Error("Fixture replay speed must be a positive finite number");
     }
+
+    this.id = identity.data.id;
+    this.categories = Object.freeze([identity.data.category]);
+    this.#provider = identity.data.provider;
+    this.#category = identity.data.category;
+    this.#speed = speed;
+    this.#scheduler = config.scheduler ?? defaultScheduler;
 
     let clonedSnapshot: unknown;
     try {
       clonedSnapshot = structuredClone(snapshot);
     } catch {
-      throw new Error("Invalid fixture snapshot");
+      this.#records = [];
+      this.#snapshotIssues = [{ code: "invalid_snapshot", path: [] }];
+      return;
     }
     const result = FixtureSnapshotEnvelopeSchema.safeParse(clonedSnapshot);
-    if (!result.success) throw new Error("Invalid fixture snapshot");
+    if (!result.success) {
+      this.#records = [];
+      this.#snapshotIssues = safeIssues(result.error);
+      return;
+    }
 
-    this.id = result.data.adapterId;
-    this.categories = Object.freeze([result.data.category]);
-    this.#provider = result.data.provider;
-    this.#category = result.data.category;
-    this.#records = result.data.records;
-    this.#speed = speed;
-    this.#scheduler = options.scheduler ?? defaultScheduler;
+    const identityIssues: AdapterSchemaIssue[] = [];
+    if (result.data.adapterId !== this.id) {
+      identityIssues.push({ code: "custom", path: ["adapterId"] });
+    }
+    if (result.data.provider !== this.#provider) {
+      identityIssues.push({ code: "custom", path: ["provider"] });
+    }
+    if (result.data.category !== this.#category) {
+      identityIssues.push({ code: "custom", path: ["category"] });
+    }
+    this.#records = identityIssues.length === 0 ? result.data.records : [];
+    this.#snapshotIssues = identityIssues;
   }
 
   async start(sink: ProviderSink, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    if (this.#snapshotIssues.length > 0) {
+      sink.onSchemaError(this.#schemaError(
+        { kind: "UNKNOWN", offsetMs: 0 },
+        this.#snapshotIssues
+      ));
+      return;
+    }
+
     const scheduled = this.#records
       .map((record, originalIndex) => this.#prepareRecord(record, originalIndex))
       .sort((left, right) => left.offsetMs - right.offsetMs || left.originalIndex - right.originalIndex);

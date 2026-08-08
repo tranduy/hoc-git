@@ -35,7 +35,10 @@ function isSecretKey(key: string): boolean {
     || normalized.endsWith("password")
     || normalized.endsWith("secret")
     || normalized.endsWith("apikey")
-    || normalized.endsWith("authorization");
+    || normalized.endsWith("authorization")
+    || normalized.endsWith("accountid")
+    || normalized.endsWith("membercode")
+    || normalized.endsWith("sessionid");
 }
 
 function decodeQueryKey(key: string): string {

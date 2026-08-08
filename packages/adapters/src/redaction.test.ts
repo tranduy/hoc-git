@@ -58,7 +58,10 @@ describe("redactCapture", () => {
       session_token: "secret-session-token",
       "X-Auth-Token": "secret-header-token",
       "x-api-key": "secret-api-key",
-      callback: "https://fixture.invalid/callback?session%5Ftoken=secret-url-token&providerEventId=event-1"
+      "User_Account-ID": "secret-user-account",
+      "customer-MEMBER_code": "secret-customer-member",
+      "user.Session_ID": "secret-user-session",
+      callback: "https://fixture.invalid/callback?session%5Ftoken=secret-url-token&User%5FAccount-ID=secret-url-account&customer-MEMBER_code=secret-url-member&user.Session_ID=secret-url-session&providerEventId=event-1&providerMarketId=market-1&providerSelectionId=selection-1"
     };
 
     expect(redactCapture(capture)).toEqual({
@@ -66,7 +69,10 @@ describe("redactCapture", () => {
       session_token: "REDACTED",
       "X-Auth-Token": "REDACTED",
       "x-api-key": "REDACTED",
-      callback: "https://fixture.invalid/callback?session%5Ftoken=REDACTED&providerEventId=event-1"
+      "User_Account-ID": "REDACTED",
+      "customer-MEMBER_code": "REDACTED",
+      "user.Session_ID": "REDACTED",
+      callback: "https://fixture.invalid/callback?session%5Ftoken=REDACTED&User%5FAccount-ID=REDACTED&customer-MEMBER_code=REDACTED&user.Session_ID=REDACTED&providerEventId=event-1&providerMarketId=market-1&providerSelectionId=selection-1"
     });
   });
 

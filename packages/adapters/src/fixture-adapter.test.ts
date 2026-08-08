@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   FixtureAdapter,
   type AdapterSchemaError,
+  type FixtureAdapterConfig,
   type FixtureSnapshot,
   type ReplayScheduler
 } from "./fixture-adapter.js";
@@ -99,6 +100,14 @@ const fixture = (records: FixtureSnapshot["records"]): FixtureSnapshot => ({
   records
 });
 
+const trustedConfig = (overrides: Partial<FixtureAdapterConfig> = {}): FixtureAdapterConfig => ({
+  id: "saba-football",
+  provider: "SABA",
+  category: "FOOTBALL",
+  scheduler: new ImmediateScheduler(),
+  ...overrides
+});
+
 describe("FixtureAdapter", () => {
   it("replays records by stable offset order and applies replay speed", async () => {
     const scheduler = new ImmediateScheduler();
@@ -107,7 +116,7 @@ describe("FixtureAdapter", () => {
       { offsetMs: 0, kind: "STATUS", payload: status },
       { offsetMs: 20, kind: "EVENT", payload: event("event-b") },
       { offsetMs: 40, kind: "MARKET", payload: market }
-    ]), { scheduler, speed: 2 });
+    ]), trustedConfig({ scheduler, speed: 2 }));
     const sink = new RecordingSink();
 
     await adapter.start(sink, new AbortController().signal);
@@ -131,7 +140,7 @@ describe("FixtureAdapter", () => {
     const adapter = new FixtureAdapter(fixture([
       { offsetMs: 0, kind: "EVENT", payload: malformed },
       { offsetMs: 1, kind: "EVENT", payload: event("good-event") }
-    ]), { scheduler: new ImmediateScheduler() });
+    ]), trustedConfig());
 
     await adapter.start(sink, new AbortController().signal);
 
@@ -149,6 +158,60 @@ describe("FixtureAdapter", () => {
     expect(sink.emissions[0]).toBe("ERROR:EVENT");
   });
 
+  it("uses only trusted configured identity when malformed envelope values contain secrets", async () => {
+    const secrets = [
+      "secret-adapter-token",
+      "secret-provider-cookie",
+      "secret-category-session"
+    ] as const;
+    const untrustedSnapshot = {
+      ...fixture([]),
+      adapterId: secrets[0],
+      provider: secrets[1],
+      category: secrets[2]
+    };
+    const sink = new RecordingSink();
+    const adapter = new FixtureAdapter(untrustedSnapshot, trustedConfig({
+      id: "trusted-saba-football"
+    }));
+
+    await adapter.start(sink, new AbortController().signal);
+
+    expect(sink.schemaErrors).toHaveLength(1);
+    expect(sink.schemaErrors[0]).toMatchObject({
+      code: "SCHEMA_ERROR",
+      adapterId: "trusted-saba-football",
+      provider: "SABA",
+      category: "FOOTBALL",
+      recordKind: "UNKNOWN"
+    });
+    const serialized = JSON.stringify(sink.schemaErrors);
+    for (const secret of secrets) expect(serialized).not.toContain(secret);
+  });
+
+  it("rejects a structurally valid envelope that mismatches trusted configured identity", async () => {
+    const secrets = ["untrusted-adapter-token", "untrusted-provider-cookie"] as const;
+    const untrustedSnapshot = {
+      ...fixture([]),
+      adapterId: secrets[0],
+      provider: secrets[1],
+      category: "LOL"
+    };
+    const sink = new RecordingSink();
+    const adapter = new FixtureAdapter(untrustedSnapshot, trustedConfig());
+
+    await adapter.start(sink, new AbortController().signal);
+
+    expect(sink.schemaErrors).toHaveLength(1);
+    expect(sink.schemaErrors[0]?.issues.map((issue) => issue.path)).toEqual([
+      ["adapterId"],
+      ["provider"],
+      ["category"]
+    ]);
+    const serialized = JSON.stringify(sink.schemaErrors);
+    for (const secret of secrets) expect(serialized).not.toContain(secret);
+  });
+
   it("reports malformed record envelopes without silently dropping them", async () => {
     const sink = new RecordingSink();
     const snapshot = fixture([
@@ -156,7 +219,7 @@ describe("FixtureAdapter", () => {
       { offsetMs: -1, kind: "EVENT", payload: event("negative-offset") }
     ] as unknown as FixtureSnapshot["records"]);
 
-    await new FixtureAdapter(snapshot, { scheduler: new ImmediateScheduler() })
+    await new FixtureAdapter(snapshot, trustedConfig())
       .start(sink, new AbortController().signal);
 
     expect(sink.events).toEqual([]);
@@ -165,7 +228,7 @@ describe("FixtureAdapter", () => {
     expect(sink.schemaErrors.every((error) => error.code === "SCHEMA_ERROR")).toBe(true);
   });
 
-  it("rejects payload provenance that conflicts with the trusted fixture envelope", async () => {
+  it("rejects payload provenance that conflicts with trusted adapter configuration", async () => {
     const sink = new RecordingSink();
     const conflicting = {
       ...event("wrong-source"),
@@ -176,7 +239,7 @@ describe("FixtureAdapter", () => {
     } as const;
     const adapter = new FixtureAdapter(fixture([
       { offsetMs: 0, kind: "EVENT", payload: conflicting }
-    ]), { scheduler: new ImmediateScheduler() });
+    ]), trustedConfig());
 
     await adapter.start(sink, new AbortController().signal);
 
@@ -209,7 +272,7 @@ describe("FixtureAdapter", () => {
     const adapter = new FixtureAdapter(fixture([
       { offsetMs: 0, kind: "STATUS", payload: status },
       { offsetMs: 10, kind: "EVENT", payload: event("not-emitted") }
-    ]), { scheduler });
+    ]), trustedConfig({ scheduler }));
 
     const replay = adapter.start(sink, controller.signal);
     await Promise.resolve();
@@ -220,7 +283,7 @@ describe("FixtureAdapter", () => {
   });
 
   it("rejects invalid replay speed without exposing fixture contents", () => {
-    expect(() => new FixtureAdapter(fixture([]), { speed: 0 })).toThrow(
+    expect(() => new FixtureAdapter(fixture([]), trustedConfig({ speed: 0 }))).toThrow(
       "Fixture replay speed must be a positive finite number"
     );
   });
@@ -242,7 +305,11 @@ describe("redacted fixture snapshots", () => {
     const snapshot = loadFixture(path);
     const sink = new RecordingSink();
 
-    await new FixtureAdapter(snapshot, { scheduler: new ImmediateScheduler() })
+    await new FixtureAdapter(snapshot, trustedConfig({
+      id: snapshot.adapterId,
+      provider: snapshot.provider,
+      category: snapshot.category
+    }))
       .start(sink, new AbortController().signal);
 
     expect(sink.schemaErrors).toEqual([]);
