@@ -80,8 +80,25 @@ describe("optimizeStakes", () => {
       ]
     });
 
-    expect(plan?.stakes).toEqual(["100", "100"]);
-    expect(plan?.worstCaseProfit).toBe("5");
+    expect(plan?.stakes).toEqual(["98", "100"]);
+    expect(plan?.totalStake).toBe("198");
+    expect(plan?.worstCaseProfit).toBe("7");
+  });
+
+  it("centers the search around forced minimum stakes", () => {
+    const plan = optimizeStakes({
+      odds: ["4", "4", "4"],
+      constraints: [
+        { minStake: "40", maxStake: "100", stakeStep: "1", balance: "100" },
+        { minStake: "1", maxStake: "100", stakeStep: "1", balance: "100" },
+        { minStake: "1", maxStake: "100", stakeStep: "1", balance: "100" }
+      ],
+      bankroll: "100"
+    });
+
+    expect(plan?.stakes).toEqual(["40", "30", "30"]);
+    expect(plan?.worstCasePayout).toBe("120");
+    expect(plan?.worstCaseProfit).toBe("20");
   });
 
   it("fails closed when configured thresholds are not met", () => {
@@ -136,6 +153,55 @@ describe("optimizeStakes", () => {
     expect(() => optimizeStakes(input as OptimizeStakesInput)).toThrow(message);
   });
 
+  it.each([
+    [{ ...baseInput, odds: [2.1, "2.05"] }, "odds"],
+    [{ ...baseInput, odds: [Number.MAX_SAFE_INTEGER + 1, "2.05"] }, "odds"],
+    [{ ...baseInput, bankroll: 1000 }, "bankroll"],
+    [{ ...baseInput, bankroll: Number.MAX_SAFE_INTEGER + 1 }, "bankroll"],
+    [
+      {
+        ...baseInput,
+        constraints: [
+          { ...baseInput.constraints[0]!, minStake: 10 },
+          baseInput.constraints[1]!
+        ]
+      },
+      "minStake"
+    ],
+    [
+      {
+        ...baseInput,
+        constraints: [
+          { ...baseInput.constraints[0]!, balance: Number.MAX_SAFE_INTEGER + 1 },
+          baseInput.constraints[1]!
+        ]
+      },
+      "balance"
+    ],
+    [
+      {
+        ...baseInput,
+        constraints: [
+          { ...baseInput.constraints[0]!, maxStake: Number.MAX_SAFE_INTEGER + 1 },
+          baseInput.constraints[1]!
+        ]
+      },
+      "maxStake"
+    ],
+    [{ ...baseInput, minimumWorstCaseProfit: 0 }, "minimumWorstCaseProfit"],
+    [
+      { ...baseInput, minimumWorstCaseProfit: Number.MAX_SAFE_INTEGER + 1 },
+      "minimumWorstCaseProfit"
+    ],
+    [{ ...baseInput, minimumRoi: 0 }, "minimumRoi"],
+    [{ ...baseInput, minimumRoi: Number.MAX_SAFE_INTEGER + 1 }, "minimumRoi"]
+  ])("rejects numeric values at exact-string runtime boundaries %#", (input, message) => {
+    const runtimeCall = optimizeStakes as unknown as (input: unknown) => unknown;
+
+    expect(() => runtimeCall(input)).toThrow(StakeOptimizationValidationError);
+    expect(() => runtimeCall(input)).toThrow(message);
+  });
+
   it("caps the Cartesian search space", () => {
     expect(() =>
       optimizeStakes({
@@ -151,4 +217,21 @@ describe("optimizeStakes", () => {
       })
     ).toThrow(StakeSearchSpaceError);
   });
+
+  it.each([6_250, 100_000])(
+    "rejects radius %i before iterating a narrow candidate range",
+    (searchRadiusSteps) => {
+      expect(() =>
+        optimizeStakes({
+          odds: ["2.1", "2.1"],
+          constraints: [
+            { minStake: "10", maxStake: "10", stakeStep: "1", balance: "10" },
+            { minStake: "10", maxStake: "10", stakeStep: "1", balance: "10" }
+          ],
+          bankroll: "20",
+          searchRadiusSteps
+        })
+      ).toThrow(StakeSearchSpaceError);
+    }
+  );
 });

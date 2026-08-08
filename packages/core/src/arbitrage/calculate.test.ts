@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { calculateArbitrage } from "../index.js";
+import { ArbitrageCalculationError, calculateArbitrage } from "../index.js";
 
 describe("calculateArbitrage", () => {
   it("finds a two-outcome surebet", () => {
@@ -47,4 +47,15 @@ describe("calculateArbitrage", () => {
       expect(() => calculateArbitrage(odds)).toThrow();
     });
   });
+
+  it.each([2.1, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects non-string odds at the runtime boundary: %s",
+    (odd) => {
+      const runtimeCall = calculateArbitrage as unknown as (
+        odds: readonly unknown[]
+      ) => unknown;
+
+      expect(() => runtimeCall([odd, "2.05"])).toThrow(ArbitrageCalculationError);
+    }
+  );
 });

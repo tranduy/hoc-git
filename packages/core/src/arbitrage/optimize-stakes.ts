@@ -64,8 +64,8 @@ interface CandidatePlan {
   readonly roi: Decimal;
 }
 
-function decimalInput(value: string, field: string, allowZero: boolean): Decimal {
-  if (!PLAIN_DECIMAL.test(value)) {
+function decimalInput(value: unknown, field: string, allowZero: boolean): Decimal {
+  if (typeof value !== "string" || !PLAIN_DECIMAL.test(value)) {
     throw new StakeOptimizationValidationError(`${field} must be a plain decimal string`);
   }
 
@@ -91,6 +91,60 @@ function comparePlans(left: CandidatePlan, right: CandidatePlan): number {
   if (roiComparison !== 0) return roiComparison;
 
   return right.totalStake.comparedTo(left.totalStake);
+}
+
+function constrainedContinuousCenter(
+  odds: readonly Decimal[],
+  constraints: readonly ValidatedConstraint[],
+  bankroll: Decimal
+): Decimal[] | null {
+  const lowerStakes = constraints.map((constraint) =>
+    constraint.lowerIndex.times(constraint.stakeStep)
+  );
+  const upperStakes = constraints.map((constraint) =>
+    constraint.upperIndex.times(constraint.stakeStep)
+  );
+  const minimumTotal = lowerStakes.reduce((sum, stake) => sum.plus(stake), new Decimal(0));
+  if (minimumTotal.gt(bankroll)) return null;
+
+  const lowerPayouts = lowerStakes.map((stake, index) => stake.times(odds[index]!));
+  const upperPayouts = upperStakes.map((stake, index) => stake.times(odds[index]!));
+  const payoutCap = Decimal.min(...upperPayouts);
+  let currentPayout = Decimal.min(...lowerPayouts);
+  let remaining = bankroll.minus(minimumTotal);
+
+  const eventPayouts = new Map<string, Decimal>();
+  for (const payout of [...lowerPayouts, payoutCap]) {
+    if (payout.gt(currentPayout) && payout.lte(payoutCap)) {
+      eventPayouts.set(payout.toString(), payout);
+    }
+  }
+
+  for (const targetPayout of [...eventPayouts.values()].sort((left, right) =>
+    left.comparedTo(right)
+  )) {
+    if (remaining.eq(0)) break;
+    const inverseOdds = lowerPayouts.reduce(
+      (sum, lowerPayout, index) =>
+        lowerPayout.lte(currentPayout)
+          ? sum.plus(new Decimal(1).div(odds[index]!))
+          : sum,
+      new Decimal(0)
+    );
+    const costToTarget = targetPayout.minus(currentPayout).times(inverseOdds);
+    if (costToTarget.gt(remaining)) {
+      currentPayout = currentPayout.plus(remaining.div(inverseOdds));
+      remaining = new Decimal(0);
+      break;
+    }
+
+    currentPayout = targetPayout;
+    remaining = remaining.minus(costToTarget);
+  }
+
+  return lowerStakes.map((lowerStake, index) =>
+    Decimal.max(lowerStake, currentPayout.div(odds[index]!))
+  );
 }
 
 function evaluateCandidate(
@@ -191,6 +245,10 @@ export function optimizeStakes(input: OptimizeStakesInput): StakePlan | null {
       "searchRadiusSteps must be a non-negative safe integer"
     );
   }
+  const estimatedNeighborhoodWork = input.odds.length * (4 * radius + 2);
+  if (estimatedNeighborhoodWork > MAX_CANDIDATE_COMBINATIONS) {
+    throw new StakeSearchSpaceError(estimatedNeighborhoodWork);
+  }
 
   const odds = input.odds.map((odd, index) => {
     const value = decimalInput(odd, `odds[${index}]`, false);
@@ -222,15 +280,18 @@ export function optimizeStakes(input: OptimizeStakesInput): StakePlan | null {
     };
   });
 
-  const arbitrage = calculateArbitrage(odds);
+  const arbitrage = calculateArbitrage(input.odds);
   if (!arbitrage.isArbitrage) return null;
+
+  const continuousCenter = constrainedContinuousCenter(odds, constraints, bankroll);
+  if (continuousCenter === null) return null;
 
   const candidates = constraints.map((_, index) =>
     candidateStakes(
       index,
       odds,
       constraints,
-      bankroll.times(arbitrage.equalizedFractions[index]!),
+      continuousCenter[index]!,
       radius
     )
   );

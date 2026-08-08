@@ -27,6 +27,53 @@ const inputArbitrary = fc
     bankroll: bankroll.toString()
   }));
 
+const constrainedWitnessArbitrary = fc
+  .record({
+    stakeStep: fc.constantFrom(1, 2, 5),
+    equalStakeUnits: fc.integer({ min: 10, max: 100 })
+  })
+  .chain(({ stakeStep, equalStakeUnits }) =>
+    fc
+      .record({
+        forcedExtraUnits: fc.integer({ min: 1, max: equalStakeUnits - 1 }),
+        secondMaxHeadroom: fc.integer({ min: 0, max: 20 }),
+        secondBalanceHeadroom: fc.integer({ min: 0, max: 20 }),
+        thirdMaxHeadroom: fc.integer({ min: 0, max: 20 }),
+        thirdBalanceHeadroom: fc.integer({ min: 0, max: 20 }),
+        oddsHundredths: fc.integer({ min: 400, max: 2_000 })
+      })
+      .map((generated): OptimizeStakesInput => {
+        const equalStake = equalStakeUnits * stakeStep;
+        const forcedStake = (equalStakeUnits + generated.forcedExtraUnits) * stakeStep;
+        const bankroll = forcedStake + 2 * equalStake;
+        const odds = new Decimal(generated.oddsHundredths).div(100).toFixed(2);
+        return {
+          odds: [odds, odds, odds],
+          constraints: [
+            {
+              minStake: forcedStake.toString(),
+              maxStake: forcedStake.toString(),
+              stakeStep: stakeStep.toString(),
+              balance: forcedStake.toString()
+            },
+            {
+              minStake: stakeStep.toString(),
+              maxStake: (equalStake + generated.secondMaxHeadroom * stakeStep).toString(),
+              stakeStep: stakeStep.toString(),
+              balance: (equalStake + generated.secondBalanceHeadroom * stakeStep).toString()
+            },
+            {
+              minStake: stakeStep.toString(),
+              maxStake: (equalStake + generated.thirdMaxHeadroom * stakeStep).toString(),
+              stakeStep: stakeStep.toString(),
+              balance: (equalStake + generated.thirdBalanceHeadroom * stakeStep).toString()
+            }
+          ],
+          bankroll: bankroll.toString()
+        };
+      })
+  );
+
 describe("optimizeStakes properties", () => {
   it("keeps every returned plan inside all discrete financial constraints", () => {
     fc.assert(
@@ -75,6 +122,18 @@ describe("optimizeStakes properties", () => {
         expect(new Decimal(plan.worstCaseProfit).gt(0)).toBe(true);
       }),
       { numRuns: 300 }
+    );
+  });
+
+  it("finds a plan when randomized binding constraints contain a profitable witness", () => {
+    fc.assert(
+      fc.property(constrainedWitnessArbitrary, (input) => {
+        const plan = optimizeStakes(input);
+
+        expect(plan).not.toBeNull();
+        expect(new Decimal(plan!.worstCaseProfit).gt(0)).toBe(true);
+      }),
+      { numRuns: 200 }
     );
   });
 });
