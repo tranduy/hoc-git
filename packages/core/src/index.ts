@@ -33,6 +33,8 @@ export type {
 } from "./mapping/event-mapper.js";
 export { mapMarkets } from "./mapping/market-mapper.js";
 export type {
+  MappedMarketSource,
+  MappedMarketSources,
   MarketMappingResult,
   NormalizedMarket,
   NormalizedSelection,
@@ -53,3 +55,25 @@ export type {
   StakeConstraint,
   StakePlan
 } from "./arbitrage/optimize-stakes.js";
+export {
+  QuoteBook,
+  quoteKey,
+  quoteMarketKey
+} from "./quotes/quote-book.js";
+export type {
+  ApplyResult,
+  QuoteDiagnostic,
+  QuoteIneligibilityReason,
+  QuoteSnapshot,
+  QuoteSnapshotEntry,
+  QuoteTransport,
+  QuoteUpdate,
+  QuoteUpdateKind,
+  SourceFreshnessPolicy
+} from "./quotes/quote-book.js";
+export { OpportunityEngine } from "./opportunities/engine.js";
+export type {
+  OpportunityCandidate,
+  OpportunityEvaluationContext,
+  OpportunityLegCandidate
+} from "./opportunities/engine.js";

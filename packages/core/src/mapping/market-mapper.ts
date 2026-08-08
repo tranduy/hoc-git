@@ -24,11 +24,23 @@ export interface SelectionMapping {
   readonly rightProviderSelectionId: string;
 }
 
+export interface MappedMarketSource {
+  readonly provider: string;
+  readonly providerEventId: string;
+  readonly providerMarketId: string;
+}
+
+export interface MappedMarketSources {
+  readonly left: MappedMarketSource;
+  readonly right: MappedMarketSource;
+}
+
 export interface MarketMappingResult {
   readonly status: MappingStatus;
   readonly canonicalMarketId: string | null;
   readonly normalizedLine: string | null;
   readonly selectionMappings: readonly SelectionMapping[];
+  readonly sourceMarkets: MappedMarketSources;
   readonly executionConfidence: "HIGH" | "BLOCKED";
   readonly evidence: readonly MappingEvidence[];
 }
@@ -550,6 +562,18 @@ export function mapMarkets(
     canonicalMarketId: canonicalMarketId(status, eventMapping, left, normalizedLine),
     normalizedLine,
     selectionMappings: buildSelectionMappings(status, left, right),
+    sourceMarkets: {
+      left: {
+        provider: left.provider,
+        providerEventId: left.providerEventId,
+        providerMarketId: left.providerMarketId
+      },
+      right: {
+        provider: right.provider,
+        providerEventId: right.providerEventId,
+        providerMarketId: right.providerMarketId
+      }
+    },
     executionConfidence,
     evidence
   };
