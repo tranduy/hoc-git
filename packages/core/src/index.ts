@@ -62,6 +62,7 @@ export {
 } from "./quotes/quote-book.js";
 export type {
   ApplyResult,
+  QuoteClockContext,
   QuoteDiagnostic,
   QuoteIneligibilityReason,
   QuoteSnapshot,
@@ -69,6 +70,7 @@ export type {
   QuoteTransport,
   QuoteUpdate,
   QuoteUpdateKind,
+  QuoteUpdateSource,
   SourceFreshnessPolicy
 } from "./quotes/quote-book.js";
 export { OpportunityEngine } from "./opportunities/engine.js";

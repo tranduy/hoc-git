@@ -265,7 +265,10 @@ export class OpportunityEngine {
           diagnostic: diagnostic(candidate, quoteReasonCode(entry), "quote is not eligible")
         };
       }
-      if (entry.expiresAtMs - snapshot.generatedAtMs < context.minimumRemainingTtlMs) {
+      if (
+        entry.expiresAtMonotonicMs - snapshot.monotonicGeneratedAtMs <
+        context.minimumRemainingTtlMs
+      ) {
         return {
           diagnostic: diagnostic(candidate, "OPPORTUNITY_TTL", "quote lifetime is below the configured reserve")
         };

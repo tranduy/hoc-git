@@ -3,9 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   QuoteBook,
   quoteKey,
+  type QuoteClockContext,
   type QuoteUpdate,
   type SourceFreshnessPolicy
 } from "./quote-book.js";
+
+const WALL_CLOCK_EPOCH_MS = 1_800_000_000_000;
+const clock = (
+  monotonicNowMs = 1_000,
+  wallClockNowMs = WALL_CLOCK_EPOCH_MS + monotonicNowMs - 1_000
+): QuoteClockContext => ({ monotonicNowMs, wallClockNowMs });
 
 const policies: Readonly<Record<string, SourceFreshnessPolicy>> = {
   SABA: {
@@ -36,7 +43,7 @@ const quote = (overrides: Partial<ProviderQuote> = {}): ProviderQuote => ({
   rawFormat: "DECIMAL",
   status: "OPEN",
   isLive: true,
-  sourceTimestampMs: 1_000,
+  sourceTimestampMs: WALL_CLOCK_EPOCH_MS,
   receivedMonotonicMs: 1_000,
   sequence: 1,
   ...overrides
@@ -46,9 +53,10 @@ const update = (
   quotes: readonly unknown[],
   overrides: Partial<QuoteUpdate> = {}
 ): QuoteUpdate => ({
+  source: { provider: "SABA", category: "FOOTBALL" },
   kind: "DELTA",
   transport: "WEBSOCKET",
-  nowMs: 1_000,
+  clock: clock(),
   quotes,
   ...overrides
 });
@@ -61,7 +69,7 @@ describe("QuoteBook ordering and freshness", () => {
     const result = book.apply(update([quote({ rawOdds: "2.2", sequence: 2 })]));
 
     expect(result).toMatchObject({ accepted: true, reason: null });
-    expect(book.snapshot(1_000).quotes[0]?.quote.rawOdds).toBe("2.2");
+    expect(book.snapshot(clock()).quotes[0]?.quote.rawOdds).toBe("2.2");
   });
 
   it.each([1, 0])("ignores duplicate or lower sequence %s", (sequence) => {
@@ -71,7 +79,48 @@ describe("QuoteBook ordering and freshness", () => {
     const result = book.apply(update([quote({ rawOdds: "9", sequence })]));
 
     expect(result).toMatchObject({ accepted: false, reason: "OUT_OF_ORDER" });
-    expect(book.snapshot(1_000).quotes[0]?.quote.rawOdds).toBe("2.1");
+    expect(book.snapshot(clock()).quotes[0]?.quote.rawOdds).toBe("2.1");
+  });
+
+  it("rejects an unsequenced delta without mutation and recovers through an unsequenced full snapshot", () => {
+    const book = new QuoteBook(policies);
+    book.apply(update([quote()]));
+
+    const rejected = book.apply(update([quote({ sequence: null, rawOdds: "9" })]));
+
+    expect(rejected).toMatchObject({ accepted: false, reason: "NEEDS_SNAPSHOT" });
+    expect(book.snapshot(clock()).quotes[0]).toMatchObject({
+      quote: { rawOdds: "2.1", sequence: 1 },
+      eligible: false,
+      ineligibilityReasons: ["NEEDS_SNAPSHOT"]
+    });
+
+    expect(book.apply(update([
+      quote({ sequence: null, rawOdds: "2.2" })
+    ], { kind: "FULL_SNAPSHOT" }))).toMatchObject({ accepted: true, reason: null });
+    expect(book.snapshot(clock()).quotes[0]).toMatchObject({
+      quote: { rawOdds: "2.2", sequence: null },
+      eligible: true
+    });
+    expect(book.apply(update([quote({ sequence: 1, rawOdds: "2.3" })]))).toMatchObject({
+      accepted: true,
+      reason: null
+    });
+  });
+
+  it("treats a full snapshot as authoritative over an older sequence baseline", () => {
+    const book = new QuoteBook(policies);
+    book.apply(update([quote({ sequence: 10 })]));
+    book.apply(update([quote({ sequence: 12 })]));
+
+    expect(book.apply(update([
+      quote({ sequence: 1, rawOdds: "2.2" })
+    ], { kind: "FULL_SNAPSHOT" }))).toMatchObject({ accepted: true, reason: null });
+    expect(book.apply(update([quote({ sequence: 2, rawOdds: "2.3" })]))).toMatchObject({
+      accepted: true,
+      reason: null
+    });
+    expect(book.snapshot(clock()).quotes[0]?.quote.rawOdds).toBe("2.3");
   });
 
   it("quarantines every selection in a market after a sequence gap until a fresh full snapshot", () => {
@@ -83,7 +132,7 @@ describe("QuoteBook ordering and freshness", () => {
 
     const gap = book.apply(update([quote({ sequence: 3 })]));
     expect(gap).toMatchObject({ accepted: false, reason: "SEQUENCE_GAP" });
-    expect(book.snapshot(1_000).quotes.map((item) => item.ineligibilityReasons)).toEqual([
+    expect(book.snapshot(clock()).quotes.map((item) => item.ineligibilityReasons)).toEqual([
       ["NEEDS_SNAPSHOT"],
       ["NEEDS_SNAPSHOT"]
     ]);
@@ -103,7 +152,7 @@ describe("QuoteBook ordering and freshness", () => {
       })
     ], { kind: "FULL_SNAPSHOT" }));
     expect(recovered).toMatchObject({ accepted: true, reason: null });
-    expect(book.snapshot(1_000).quotes.every((item) => item.eligible)).toBe(true);
+    expect(book.snapshot(clock()).quotes.every((item) => item.eligible)).toBe(true);
   });
 
   it("immediately invalidates a suspended provider selection", () => {
@@ -111,7 +160,7 @@ describe("QuoteBook ordering and freshness", () => {
     book.apply(update([quote()]));
 
     const result = book.apply(update([quote({ sequence: 2, status: "SUSPENDED" })]));
-    const stored = book.snapshot(1_000).quotes[0]!;
+    const stored = book.snapshot(clock()).quotes[0]!;
 
     expect(result).toMatchObject({ accepted: true, reason: "SUSPENDED" });
     expect(stored.eligible).toBe(false);
@@ -124,7 +173,7 @@ describe("QuoteBook ordering and freshness", () => {
     const result = book.apply(update([quote({ status: "CLOSED" })]));
 
     expect(result).toMatchObject({ accepted: true, reason: "CLOSED" });
-    expect(book.snapshot(1_000).quotes[0]).toMatchObject({
+    expect(book.snapshot(clock()).quotes[0]).toMatchObject({
       eligible: false,
       ineligibilityReasons: ["CLOSED"]
     });
@@ -134,8 +183,8 @@ describe("QuoteBook ordering and freshness", () => {
     const book = new QuoteBook(policies);
     book.apply(update([quote()]));
 
-    expect(book.snapshot(1_999).quotes[0]?.eligible).toBe(true);
-    expect(book.snapshot(2_000).quotes[0]).toMatchObject({
+    expect(book.snapshot(clock(1_999)).quotes[0]?.eligible).toBe(true);
+    expect(book.snapshot(clock(2_000)).quotes[0]).toMatchObject({
       eligible: false,
       ineligibilityReasons: ["STALE"]
     });
@@ -143,19 +192,22 @@ describe("QuoteBook ordering and freshness", () => {
 
   it("reports the earliest source or receive expiry for deterministic opportunity TTL", () => {
     const book = new QuoteBook(policies);
-    book.apply(update([quote({ sourceTimestampMs: 500, receivedMonotonicMs: 1_000 })]));
+    book.apply(update([quote({
+      sourceTimestampMs: WALL_CLOCK_EPOCH_MS - 500,
+      receivedMonotonicMs: 1_000
+    })]));
 
-    expect(book.snapshot(1_000).quotes[0]?.expiresAtMs).toBe(1_500);
-    expect(book.snapshot(1_499).quotes[0]?.eligible).toBe(true);
-    expect(book.snapshot(1_500).quotes[0]?.ineligibilityReasons).toContain("STALE");
+    expect(book.snapshot(clock()).quotes[0]?.expiresAtMonotonicMs).toBe(1_500);
+    expect(book.snapshot(clock(1_499)).quotes[0]?.eligible).toBe(true);
+    expect(book.snapshot(clock(1_500)).quotes[0]?.ineligibilityReasons).toContain("STALE");
   });
 
   it("expires a polling quote at its independently configured TTL", () => {
     const book = new QuoteBook(policies);
     book.apply(update([quote()], { transport: "POLLING" }));
 
-    expect(book.snapshot(5_999).quotes[0]?.eligible).toBe(true);
-    expect(book.snapshot(6_000).quotes[0]).toMatchObject({
+    expect(book.snapshot(clock(5_999)).quotes[0]?.eligible).toBe(true);
+    expect(book.snapshot(clock(6_000)).quotes[0]).toMatchObject({
       eligible: false,
       ineligibilityReasons: ["STALE"]
     });
@@ -164,13 +216,24 @@ describe("QuoteBook ordering and freshness", () => {
   it("blocks a quote whose source timestamp exceeds allowed future clock skew", () => {
     const book = new QuoteBook(policies);
 
-    const result = book.apply(update([quote({ sourceTimestampMs: 1_101 })]));
+    const result = book.apply(update([quote({
+      sourceTimestampMs: WALL_CLOCK_EPOCH_MS + 101
+    })]));
 
     expect(result).toMatchObject({ accepted: true, reason: "CLOCK_SKEW" });
-    expect(book.snapshot(1_000).quotes[0]).toMatchObject({
+    expect(book.snapshot(clock()).quotes[0]).toMatchObject({
       eligible: false,
       ineligibilityReasons: ["CLOCK_SKEW"]
     });
+  });
+
+  it("checks future monotonic receive time independently from the wall clock", () => {
+    const book = new QuoteBook(policies);
+
+    const result = book.apply(update([quote({ receivedMonotonicMs: 1_101 })]));
+
+    expect(result).toMatchObject({ accepted: true, reason: "CLOCK_SKEW" });
+    expect(book.snapshot(clock()).quotes[0]?.ineligibilityReasons).toEqual(["CLOCK_SKEW"]);
   });
 
   it("applies the configured missing timestamp policy with explicit provenance", () => {
@@ -182,9 +245,12 @@ describe("QuoteBook ordering and freshness", () => {
     });
     const allowed = quote({ sourceTimestampMs: null });
 
-    book.apply(update([rejected], { transport: "POLLING" }));
+    book.apply(update([rejected], {
+      transport: "POLLING",
+      source: { provider: "IM", category: "FOOTBALL" }
+    }));
     book.apply(update([allowed], { transport: "POLLING" }));
-    const snapshot = book.snapshot(1_000);
+    const snapshot = book.snapshot(clock());
 
     expect(snapshot.byKey[quoteKey(rejected)]?.ineligibilityReasons).toEqual([
       "MISSING_TIMESTAMP"
@@ -202,7 +268,7 @@ describe("QuoteBook ordering and freshness", () => {
       accepted: false,
       reason: "POLICY_MISSING"
     });
-    expect(book.snapshot(1_000).quotes).toEqual([]);
+    expect(book.snapshot(clock()).quotes).toEqual([]);
   });
 
   it("rejects malformed quote payloads without replacing a valid quote", () => {
@@ -213,8 +279,8 @@ describe("QuoteBook ordering and freshness", () => {
 
     expect(result).toMatchObject({ accepted: false, reason: "SCHEMA_ERROR" });
     expect(result.diagnostics[0]?.reason).toBe("SCHEMA_ERROR");
-    expect(book.snapshot(1_000).quotes[0]?.quote.sequence).toBe(1);
-    expect(book.snapshot(1_000).quotes[0]).toMatchObject({
+    expect(book.snapshot(clock()).quotes[0]?.quote.sequence).toBe(1);
+    expect(book.snapshot(clock()).quotes[0]).toMatchObject({
       eligible: false,
       ineligibilityReasons: ["SCHEMA_ERROR"]
     });
@@ -225,7 +291,7 @@ describe("QuoteBook ordering and freshness", () => {
     });
 
     book.apply(update([quote({ sequence: 3 })], { kind: "FULL_SNAPSHOT" }));
-    expect(book.snapshot(1_000).quotes[0]?.eligible).toBe(true);
+    expect(book.snapshot(clock()).quotes[0]?.eligible).toBe(true);
   });
 
   it("quarantines a newly observed market after its first payload fails schema validation", () => {
@@ -241,7 +307,7 @@ describe("QuoteBook ordering and freshness", () => {
       accepted: true,
       reason: null
     });
-    expect(book.snapshot(1_000).quotes[0]?.eligible).toBe(true);
+    expect(book.snapshot(clock()).quotes[0]?.eligible).toBe(true);
 
     book.apply(update([
       quote({ sequence: 4 }),
@@ -263,9 +329,143 @@ describe("QuoteBook ordering and freshness", () => {
     ]));
 
     expect(result).toMatchObject({ accepted: false, reason: "SCHEMA_ERROR" });
-    expect(book.snapshot(1_000).quotes[0]).toMatchObject({
+    expect(book.snapshot(clock()).quotes[0]).toMatchObject({
       eligible: false,
       ineligibilityReasons: ["SCHEMA_ERROR"]
     });
+  });
+
+  it("uses trusted source identity to quarantine only that source and category", () => {
+    const book = new QuoteBook(policies);
+    const anotherSaba = quote({
+      providerEventId: "event-2",
+      providerMarketId: "market-2",
+      providerSelectionId: "home",
+      marketType: "FT_1X2",
+      line: null,
+      selection: "HOME"
+    });
+    const im = quote({
+      provider: "IM",
+      providerEventId: "im-event",
+      providerMarketId: "im-market",
+      providerSelectionId: "im-over"
+    });
+    const sabaLol = quote({
+      category: "LOL",
+      providerEventId: "lol-event",
+      providerMarketId: "lol-market",
+      providerSelectionId: "team-a",
+      marketType: "MAP_WINNER",
+      scope: "MAP_1",
+      line: null,
+      selection: "TEAM_A"
+    });
+    book.apply(update([quote()], { kind: "FULL_SNAPSHOT" }));
+    book.apply(update([anotherSaba], { kind: "FULL_SNAPSHOT" }));
+    book.apply(update([im], {
+      kind: "FULL_SNAPSHOT",
+      source: { provider: "IM", category: "FOOTBALL" }
+    }));
+    book.apply(update([sabaLol], {
+      kind: "FULL_SNAPSHOT",
+      source: { provider: "SABA", category: "LOL" }
+    }));
+
+    book.apply(update([{ rawOdds: "NaN" }]));
+    const quarantined = book.snapshot(clock());
+
+    expect(quarantined.byKey[quoteKey(quote())]?.ineligibilityReasons).toEqual(["SCHEMA_ERROR"]);
+    expect(quarantined.byKey[quoteKey(anotherSaba)]?.ineligibilityReasons).toEqual(["SCHEMA_ERROR"]);
+    expect(quarantined.byKey[quoteKey(im)]?.eligible).toBe(true);
+    expect(quarantined.byKey[quoteKey(sabaLol)]?.eligible).toBe(true);
+
+    book.apply(update([quote({ sequence: 2 })], { kind: "FULL_SNAPSHOT" }));
+    expect(book.apply(update([quote({ sequence: 3, rawOdds: "2.2" })]))).toMatchObject({
+      accepted: true,
+      reason: null
+    });
+    book.apply(update([{ ...anotherSaba, sequence: 2 }], { kind: "FULL_SNAPSHOT" }));
+    expect(book.snapshot(clock()).quotes.every((item) => item.eligible)).toBe(true);
+  });
+
+  it("uses the trusted envelope when malformed payload provenance conflicts", () => {
+    const book = new QuoteBook(policies);
+    const im = quote({
+      provider: "IM",
+      providerEventId: "im-event",
+      providerMarketId: "im-market",
+      providerSelectionId: "im-over"
+    });
+    book.apply(update([quote()], { kind: "FULL_SNAPSHOT" }));
+    book.apply(update([im], {
+      kind: "FULL_SNAPSHOT",
+      source: { provider: "IM", category: "FOOTBALL" }
+    }));
+
+    book.apply(update([{
+      ...im,
+      rawOdds: "NaN"
+    }]));
+
+    expect(book.snapshot(clock()).byKey[quoteKey(quote())]?.ineligibilityReasons).toEqual([
+      "SCHEMA_ERROR"
+    ]);
+    expect(book.snapshot(clock()).byKey[quoteKey(im)]?.eligible).toBe(true);
+  });
+
+  it("does not let a different trusted category reuse an existing market identity", () => {
+    const book = new QuoteBook(policies);
+    const football = quote();
+    const conflictingLol = quote({
+      category: "LOL",
+      providerSelectionId: "team-a",
+      marketType: "MAP_WINNER",
+      scope: "MAP_1",
+      line: null,
+      selection: "TEAM_A"
+    });
+    book.apply(update([football], { kind: "FULL_SNAPSHOT" }));
+
+    const result = book.apply(update([conflictingLol], {
+      kind: "FULL_SNAPSHOT",
+      source: { provider: "SABA", category: "LOL" }
+    }));
+
+    expect(result).toMatchObject({ accepted: false, reason: "SCHEMA_ERROR" });
+    expect(book.snapshot(clock()).byKey[quoteKey(football)]?.eligible).toBe(true);
+  });
+
+  it("quarantines all cached markets when the runtime envelope is not trustworthy", () => {
+    const book = new QuoteBook(policies);
+    const im = quote({
+      provider: "IM",
+      providerEventId: "im-event",
+      providerMarketId: "im-market",
+      providerSelectionId: "im-over"
+    });
+    book.apply(update([quote()], { kind: "FULL_SNAPSHOT" }));
+    book.apply(update([im], {
+      kind: "FULL_SNAPSHOT",
+      source: { provider: "IM", category: "FOOTBALL" }
+    }));
+
+    book.apply({
+      ...update([{ rawOdds: "NaN" }]),
+      source: { provider: "", category: "FOOTBALL" }
+    });
+
+    expect(book.snapshot(clock()).quotes.every((item) =>
+      item.ineligibilityReasons.includes("SCHEMA_ERROR")
+    )).toBe(true);
+
+    book.apply(update([quote({ sequence: 2 })], { kind: "FULL_SNAPSHOT" }));
+    expect(book.apply(update([quote({ sequence: 3, rawOdds: "2.2" })]))).toMatchObject({
+      accepted: true,
+      reason: null
+    });
+    expect(book.snapshot(clock()).byKey[quoteKey(im)]?.ineligibilityReasons).toEqual([
+      "SCHEMA_ERROR"
+    ]);
   });
 });

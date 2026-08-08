@@ -6,8 +6,15 @@ import {
   QuoteBook,
   quoteKey,
   quoteMarketKey,
+  type QuoteClockContext,
   type QuoteSnapshot
 } from "../quotes/quote-book.js";
+
+const WALL_CLOCK_EPOCH_MS = 1_800_000_000_000;
+const clock = (monotonicNowMs = 1_000): QuoteClockContext => ({
+  monotonicNowMs,
+  wallClockNowMs: WALL_CLOCK_EPOCH_MS + monotonicNowMs - 1_000
+});
 
 const policy = {
   SABA: {
@@ -38,7 +45,7 @@ const quote = (overrides: Partial<ProviderQuote> = {}): ProviderQuote => ({
   rawFormat: "DECIMAL",
   status: "OPEN",
   isLive: true,
-  sourceTimestampMs: 1_000,
+  sourceTimestampMs: WALL_CLOCK_EPOCH_MS,
   receivedMonotonicMs: 1_000,
   sequence: 1,
   ...overrides
@@ -127,13 +134,17 @@ function snapshot(
   }
   for (const marketQuotes of byMarket.values()) {
     book.apply({
+      source: {
+        provider: marketQuotes[0]!.provider,
+        category: marketQuotes[0]!.category
+      },
       kind: "FULL_SNAPSHOT",
       transport: "WEBSOCKET",
-      nowMs: 1_000,
+      clock: clock(),
       quotes: marketQuotes
     });
   }
-  return book.snapshot(nowMs);
+  return book.snapshot(clock(nowMs));
 }
 
 function context(
@@ -360,8 +371,18 @@ describe("OpportunityEngine fail-closed policy", () => {
       { ...rightQuote, providerMarketId: "m-z-im", rawOdds: "2.4" }
     ];
     const older = [
-      { ...leftQuote, providerMarketId: "m-c", receivedMonotonicMs: 900, sourceTimestampMs: 900 },
-      { ...rightQuote, providerMarketId: "m-c-im", receivedMonotonicMs: 900, sourceTimestampMs: 900 }
+      {
+        ...leftQuote,
+        providerMarketId: "m-c",
+        receivedMonotonicMs: 900,
+        sourceTimestampMs: WALL_CLOCK_EPOCH_MS - 100
+      },
+      {
+        ...rightQuote,
+        providerMarketId: "m-c-im",
+        receivedMonotonicMs: 900,
+        sourceTimestampMs: WALL_CLOCK_EPOCH_MS - 100
+      }
     ];
     const allQuotes = [...freshHighMargin, ...older, leftQuote, rightQuote];
     const baseCandidate = context().candidates[0]!;
