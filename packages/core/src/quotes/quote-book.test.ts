@@ -446,12 +446,12 @@ describe("QuoteBook ordering and freshness", () => {
     expect(book.snapshot(clock()).byKey[quoteKey(im)]?.eligible).toBe(true);
   });
 
-  it("does not let a different trusted category reuse an existing market identity", () => {
+  it("isolates the same provider market identity across trusted categories", () => {
     const book = new QuoteBook(policies);
     const football = quote();
     const conflictingLol = quote({
       category: "LOL",
-      providerSelectionId: "team-a",
+      providerSelectionId: "over",
       marketType: "MAP_WINNER",
       scope: "MAP_1",
       line: null,
@@ -464,8 +464,11 @@ describe("QuoteBook ordering and freshness", () => {
       source: { provider: "SABA", category: "LOL" }
     }));
 
-    expect(result).toMatchObject({ accepted: false, reason: "SCHEMA_ERROR" });
+    expect(result).toMatchObject({ accepted: true, reason: null });
+    expect(quoteKey(conflictingLol)).not.toBe(quoteKey(football));
+    expect(book.snapshot(clock()).quotes).toHaveLength(2);
     expect(book.snapshot(clock()).byKey[quoteKey(football)]?.eligible).toBe(true);
+    expect(book.snapshot(clock()).byKey[quoteKey(conflictingLol)]?.eligible).toBe(true);
   });
 
   it("quarantines all cached markets when the runtime envelope is not trustworthy", () => {

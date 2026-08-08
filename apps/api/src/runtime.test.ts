@@ -136,6 +136,7 @@ describe("Runtime", () => {
 
   it("quarantines one adapter without suppressing a healthy sibling source", async () => {
     const saba = loadFixture("football/saba-snapshot.json");
+    const poison = "failed-owner-poison";
     const hiddenEvent = {
       ...(saba.records.find((record) => record.kind === "EVENT")!.payload as ProviderEvent),
       providerEventId: "must-stay-quarantined"
@@ -145,7 +146,19 @@ describe("Runtime", () => {
       categories: ["FOOTBALL"],
       async start(sink): Promise<void> {
         for (const record of saba.records.filter((item) => item.offsetMs <= 70)) {
-          if (record.kind === "MARKET") {
+          if (record.kind === "EVENT" &&
+            (record.payload as ProviderEvent).providerEventId === "saba-fb-verified") {
+            const event = record.payload as ProviderEvent;
+            sink.onEvent({
+              ...event,
+              competition: `${poison}-competition`,
+              seasonStage: `${poison}-stage`,
+              participantA: `${poison}-a`,
+              participantB: `${poison}-b`,
+              startAtUtcMs: event.startAtUtcMs + 86_400_000,
+              isLive: true
+            });
+          } else if (record.kind === "MARKET") {
             sink.onMarket({ ...(record.payload as ProviderMarket), status: "SUSPENDED" });
           } else {
             emitRecord(sink, record, "failing-");
@@ -172,6 +185,23 @@ describe("Runtime", () => {
         }
       }
     };
+    const partialSibling: ProviderAdapter = {
+      id: "a-partial-saba-football",
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        for (const record of saba.records.filter((item) => item.offsetMs <= 70)) {
+          if (record.kind === "QUOTE") {
+            const quote = record.payload as ProviderQuote;
+            sink.onQuote({
+              ...quote,
+              selection: quote.marketType === "FT_TOTAL" ? "UNKNOWN_OUTCOME" : "HOME"
+            });
+          } else {
+            emitRecord(sink, record);
+          }
+        }
+      }
+    };
     const im = loadFixture("football/im-snapshot.json");
     const healthyIm: ProviderAdapter = {
       id: "im-football",
@@ -182,9 +212,10 @@ describe("Runtime", () => {
         }
       }
     };
+    const observableSnapshots: string[] = [];
     for (const siblings of [
-      [failing, healthySibling],
-      [healthySibling, failing]
+      [failing, partialSibling, healthySibling],
+      [healthySibling, partialSibling, failing]
     ]) {
       const runtime = new Runtime({
         adapters: [healthyIm, ...siblings],
@@ -201,13 +232,232 @@ describe("Runtime", () => {
       expect(snapshot.providerStatuses.filter((status) =>
         status.provider === "SABA" && status.category === "FOOTBALL"
       ).map((status) => ({ adapterId: status.adapterId, status: status.status }))).toEqual([
+        { adapterId: "a-partial-saba-football", status: "LIVE" },
         { adapterId: "failing-saba-football", status: "SCHEMA_ERROR" },
         { adapterId: "healthy-saba-football", status: "LIVE" }
       ]);
       expect(runtime.getDiagnostics()).toEqual(expect.arrayContaining([
         expect.objectContaining({ code: "SCHEMA_ERROR", adapterId: "failing-saba-football" })
       ]));
+      expect(JSON.stringify(snapshot)).not.toContain(poison);
+      observableSnapshots.push(JSON.stringify({
+        counts: snapshot.counts,
+        providerStatuses: snapshot.providerStatuses,
+        events: snapshot.events,
+        markets: snapshot.markets,
+        opportunities: snapshot.opportunities,
+        blockedDiagnostics: snapshot.blockedDiagnostics
+      }));
     }
+    expect(new Set(observableSnapshots).size).toBe(1);
+  });
+
+  it("isolates reused provider identities inside one multi-category adapter", async () => {
+    const merged = ([provider, footballPath, lolPath]: readonly [string, string, string]): ProviderAdapter => ({
+      id: `${provider.toLowerCase()}-multi`,
+      categories: ["FOOTBALL", "LOL"],
+      async start(sink): Promise<void> {
+        const football = loadFixture(footballPath);
+        const lol = loadFixture(lolPath);
+        const footballMarketId = provider === "SABA" ? "saba-fb-total-25" : "im-fb-total-25";
+        const footballSelectionIds = provider === "SABA"
+          ? ["saba-fb-over-25", "saba-fb-under-25"]
+          : ["im-fb-over-25", "im-fb-under-25"];
+        for (const record of football.records.filter((item) => {
+          const payload = item.payload as { providerEventId?: string; providerMarketId?: string };
+          return item.offsetMs <= 70 && (item.kind === "STATUS" ||
+            (payload.providerEventId?.endsWith("-fb-verified") === true &&
+              (payload.providerMarketId === undefined || payload.providerMarketId === footballMarketId)));
+        })) emitRecord(sink, record);
+        let selectionIndex = 0;
+        for (const record of lol.records.filter((item) => {
+          const payload = item.payload as { providerEventId?: string; marketType?: string };
+          return item.offsetMs <= 70 && (item.kind === "STATUS" ||
+            (payload.providerEventId?.endsWith("-lol-verified") === true &&
+              (item.kind === "EVENT" || payload.marketType === "SERIES_WINNER")));
+        })) {
+          const payload = record.payload as Record<string, unknown>;
+          const transformed = {
+            ...record,
+            payload: {
+              ...payload,
+              ...(typeof payload.providerEventId === "string"
+                ? { providerEventId: payload.providerEventId.replace("-lol-", "-fb-") }
+                : {}),
+              ...(typeof payload.providerMarketId === "string"
+                ? { providerMarketId: footballMarketId }
+                : {}),
+              ...(record.kind === "QUOTE"
+                ? { providerSelectionId: footballSelectionIds[selectionIndex++] }
+                : {})
+            }
+          } as FixtureSnapshot["records"][number];
+          emitRecord(sink, transformed);
+        }
+      }
+    });
+    const runtime = new Runtime({
+      adapters: [
+        merged(["SABA", "football/saba-snapshot.json", "lol/saba-snapshot.json"]),
+        merged(["IM", "football/im-snapshot.json", "lol/im-snapshot.json"])
+      ],
+      clock,
+      mappingPolicy: mappingPolicy()
+    });
+
+    await runtime.start(new AbortController().signal);
+
+    expect(runtime.getSnapshot().opportunities.map((item) => item.category).sort()).toEqual([
+      "FOOTBALL",
+      "LOL"
+    ]);
+  });
+
+  it("prefers a complete participant-domain handicap owner over a lexical partial sibling", async () => {
+    const eventFrom = (path: string): ProviderEvent => {
+      const snapshot = loadFixture(path);
+      return snapshot.records.find((record) =>
+        record.kind === "EVENT" &&
+        (record.payload as ProviderEvent).providerEventId.endsWith("-verified")
+      )!.payload as ProviderEvent;
+    };
+    const sabaEvent = eventFrom("football/saba-snapshot.json");
+    const imEvent = eventFrom("football/im-snapshot.json");
+    const marketFor = (event: ProviderEvent, providerMarketId: string): ProviderMarket => ({
+      provider: event.provider,
+      category: event.category,
+      providerEventId: event.providerEventId,
+      providerMarketId,
+      marketType: "FT_AH",
+      scope: "FULL_TIME",
+      line: "0",
+      settlementProfile: "football-regulation-including-added-time",
+      status: "OPEN"
+    });
+    const quoteFor = (
+      market: ProviderMarket,
+      selection: "TEAM_A" | "TEAM_B",
+      rawOdds: string
+    ): ProviderQuote => ({
+      ...market,
+      providerSelectionId: `${market.providerMarketId}-${selection.toLowerCase()}`,
+      selection,
+      rawOdds,
+      rawFormat: "DECIMAL",
+      isLive: false,
+      sourceTimestampMs: null,
+      receivedMonotonicMs: 50,
+      sequence: 1
+    });
+    const sabaMarket = marketFor(sabaEvent, "saba-fb-ah-0");
+    const imMarket = marketFor(imEvent, "im-fb-ah-0");
+    const adapter = (
+      id: string,
+      event: ProviderEvent,
+      market: ProviderMarket,
+      quotes: readonly ProviderQuote[]
+    ): ProviderAdapter => ({
+      id,
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        sink.onEvent(event);
+        sink.onMarket(market);
+        for (const quote of quotes) sink.onQuote(quote);
+      }
+    });
+    const runtime = new Runtime({
+      adapters: [
+        adapter("a-partial-saba-football", sabaEvent, sabaMarket, [
+          quoteFor(sabaMarket, "TEAM_A", "2.20")
+        ]),
+        adapter("z-complete-saba-football", sabaEvent, sabaMarket, [
+          quoteFor(sabaMarket, "TEAM_A", "2.20"),
+          quoteFor(sabaMarket, "TEAM_B", "1.80")
+        ]),
+        adapter("im-football", imEvent, imMarket, [
+          quoteFor(imMarket, "TEAM_A", "1.80"),
+          quoteFor(imMarket, "TEAM_B", "2.20")
+        ])
+      ],
+      clock,
+      mappingPolicy: mappingPolicy()
+    });
+
+    await runtime.start(new AbortController().signal);
+
+    const snapshot = runtime.getSnapshot();
+    const handicap = snapshot.markets.find((market) => market.marketType === "FT_AH");
+    expect(handicap?.mappingStatus).toBe("VERIFIED");
+  });
+
+  it("fails closed when the only non-quarantined sibling has partial event ownership", async () => {
+    const saba = loadFixture("football/saba-snapshot.json");
+    const im = loadFixture("football/im-snapshot.json");
+    const poison = "partial-failed-owner-poison";
+    const fullFailing: ProviderAdapter = {
+      id: "a-failing-saba-football",
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        for (const record of saba.records.filter((item) => item.offsetMs <= 70)) {
+          if (record.kind === "EVENT" &&
+            (record.payload as ProviderEvent).providerEventId === "saba-fb-verified") {
+            sink.onEvent({
+              ...(record.payload as ProviderEvent),
+              competition: poison,
+              participantA: `${poison}-a`
+            });
+          } else {
+            emitRecord(sink, record, "failed-");
+          }
+        }
+        await Promise.resolve();
+        sink.onSchemaError({
+          code: "SCHEMA_ERROR",
+          adapterId: this.id,
+          provider: "SABA",
+          category: "FOOTBALL",
+          recordKind: "EVENT",
+          offsetMs: 1,
+          issues: [{ code: "unrecognized_keys", path: ["authorization"] }]
+        });
+      }
+    };
+    const partialSibling: ProviderAdapter = {
+      id: "z-partial-saba-football",
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        for (const record of saba.records.filter((item) =>
+          item.offsetMs <= 40 && item.kind !== "QUOTE")) {
+          emitRecord(sink, record);
+        }
+      }
+    };
+    const healthyIm: ProviderAdapter = {
+      id: "im-football",
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        for (const record of im.records.filter((item) => item.offsetMs <= 70)) emitRecord(sink, record);
+      }
+    };
+    const runtime = new Runtime({
+      adapters: [healthyIm, fullFailing, partialSibling],
+      clock,
+      mappingPolicy: mappingPolicy()
+    });
+    const opportunityCounts: number[] = [];
+    runtime.subscribe((snapshot) => opportunityCounts.push(snapshot.opportunities.length));
+
+    await runtime.start(new AbortController().signal);
+
+    const snapshot = runtime.getSnapshot();
+    expect(snapshot.counts.FOOTBALL).toEqual({ events: 2, markets: 2 });
+    expect(snapshot.opportunities).toHaveLength(0);
+    expect(opportunityCounts.every((count) => count === 0)).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain(poison);
+    expect(snapshot.providerStatuses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ adapterId: "a-failing-saba-football", status: "SCHEMA_ERROR" }),
+      expect.objectContaining({ adapterId: "z-partial-saba-football", status: "LIVE" })
+    ]));
   });
 
   it("maximizes verified event pairs instead of consuming the shortest edge greedily", async () => {

@@ -74,11 +74,20 @@ function fixture(path: string, category: Category): FixtureSnapshot {
       const collisionMarketId = payload.marketType === "MAP_WINNER"
         ? payload.provider === "SABA" ? "saba-fb-total-25" : "im-fb-total-25"
         : payload.providerMarketId;
-      const adjustedPayload = payload.providerEventId === "im-fb-rejected"
-        ? { ...payload, startAtUtcMs: 1_786_305_610_000 }
-        : collisionMarketId !== payload.providerMarketId
-          ? { ...payload, providerMarketId: collisionMarketId }
-          : payload;
+      const collisionEventId = category === "LOL"
+        ? payload.providerEventId?.replace("-lol-", "-fb-")
+        : payload.providerEventId;
+      const identityAdjustedPayload = collisionEventId !== payload.providerEventId ||
+        collisionMarketId !== payload.providerMarketId
+        ? {
+            ...payload,
+            ...(collisionEventId === undefined ? {} : { providerEventId: collisionEventId }),
+            ...(collisionMarketId === undefined ? {} : { providerMarketId: collisionMarketId })
+          }
+        : payload;
+      const adjustedPayload = collisionEventId === "im-fb-rejected" && category === "FOOTBALL"
+        ? { ...identityAdjustedPayload, startAtUtcMs: 1_786_305_610_000 }
+        : identityAdjustedPayload;
       if (record.kind !== "QUOTE" || offsetMs === record.offsetMs) {
         return { ...record, payload: adjustedPayload };
       }

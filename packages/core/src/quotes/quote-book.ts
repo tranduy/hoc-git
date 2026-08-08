@@ -99,19 +99,20 @@ function compositeKey(parts: readonly string[]): string {
 }
 
 export function quoteMarketKey(
-  quote: Pick<ProviderQuote, "provider" | "providerEventId" | "providerMarketId">
+  quote: Pick<ProviderQuote, "provider" | "category" | "providerEventId" | "providerMarketId">
 ): string {
-  return compositeKey([quote.provider, quote.providerEventId, quote.providerMarketId]);
+  return compositeKey([quote.provider, quote.category, quote.providerEventId, quote.providerMarketId]);
 }
 
 export function quoteKey(
   quote: Pick<
     ProviderQuote,
-    "provider" | "providerEventId" | "providerMarketId" | "providerSelectionId"
+    "provider" | "category" | "providerEventId" | "providerMarketId" | "providerSelectionId"
   >
 ): string {
   return compositeKey([
     quote.provider,
+    quote.category,
     quote.providerEventId,
     quote.providerMarketId,
     quote.providerSelectionId
@@ -157,12 +158,13 @@ function untrustedMarketKey(value: unknown): string | null {
   const item = value as Record<string, unknown>;
   if (
     typeof item.provider !== "string" || item.provider.trim() === "" ||
+    (item.category !== "FOOTBALL" && item.category !== "LOL") ||
     typeof item.providerEventId !== "string" || item.providerEventId.trim() === "" ||
     typeof item.providerMarketId !== "string" || item.providerMarketId.trim() === ""
   ) {
     return null;
   }
-  return compositeKey([item.provider, item.providerEventId, item.providerMarketId]);
+  return compositeKey([item.provider, item.category, item.providerEventId, item.providerMarketId]);
 }
 
 function validSource(value: unknown): value is QuoteUpdateSource {
