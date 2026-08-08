@@ -3,6 +3,8 @@ import type { AppSnapshot } from "@tool-chenh/contracts";
 import { SnapshotClient, type ConnectionState } from "./api/client.js";
 import { DashboardPage } from "./pages/dashboard-page.js";
 import { CategoryPage } from "./pages/category-page.js";
+import { OpportunitiesPage } from "./pages/opportunities-page.js";
+import { MappingsPage } from "./pages/mappings-page.js";
 
 type Route = "/" | "/football" | "/lol" | "/opportunities" | "/mappings";
 
@@ -16,10 +18,6 @@ const routes: ReadonlyArray<{ readonly path: Route; readonly label: string }> = 
 
 function routeFor(pathname: string): Route {
   return routes.some((route) => route.path === pathname) ? pathname as Route : "/";
-}
-
-function PlaceholderPage({ title, detail }: { readonly title: string; readonly detail: string }) {
-  return <header className="page-header"><p className="eyebrow">Read-only inspection</p><h1>{title}</h1><p>{detail}</p></header>;
 }
 
 export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapshot }) {
@@ -52,12 +50,12 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
     setRoute(path);
   };
   const content = snapshot === undefined
-    ? <header className="page-header"><h1>Loading dashboard</h1><p>Waiting for a fresh local snapshot.</p></header>
+    ? <header className="page-header"><h1>Loading {routeLabel}</h1><p>Waiting for a fresh local snapshot. No opportunity or mapping decision is available yet.</p></header>
     : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} />
     : route === "/football" ? <CategoryPage key="FOOTBALL" category="FOOTBALL" snapshot={snapshot} />
     : route === "/lol" ? <CategoryPage key="LOL" category="LOL" snapshot={snapshot} />
-    : route === "/opportunities" ? <PlaceholderPage title="Opportunities" detail="Opportunity details are read-only and arrive in the next view." />
-    : <PlaceholderPage title="Mapping Review" detail="Mapping evidence inspection arrives in the next view." />;
+    : route === "/opportunities" ? <OpportunitiesPage snapshot={snapshot} connectionState={connectionState} />
+    : <MappingsPage snapshot={snapshot} />;
 
   return (
     <div className="app-shell">
