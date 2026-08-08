@@ -38,3 +38,18 @@ export type {
   NormalizedSelection,
   SelectionMapping
 } from "./mapping/market-mapper.js";
+export {
+  ArbitrageCalculationError,
+  calculateArbitrage
+} from "./arbitrage/calculate.js";
+export type { ArbitrageResult } from "./arbitrage/calculate.js";
+export {
+  optimizeStakes,
+  StakeOptimizationValidationError,
+  StakeSearchSpaceError
+} from "./arbitrage/optimize-stakes.js";
+export type {
+  OptimizeStakesInput,
+  StakeConstraint,
+  StakePlan
+} from "./arbitrage/optimize-stakes.js";
