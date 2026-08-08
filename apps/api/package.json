@@ -1,0 +1,18 @@
+{
+  "name": "@tool-chenh/api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": "./dist/runtime.js",
+  "types": "./dist/runtime.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@tool-chenh/adapters": "*",
+    "@tool-chenh/contracts": "*",
+    "@tool-chenh/core": "*"
+  }
+}
