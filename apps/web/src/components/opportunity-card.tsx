@@ -37,7 +37,7 @@ function LegDetails({ leg, renderedAtMs }: { readonly leg: StakeLeg; readonly re
     <li className="opportunity-leg">
       <h3>{leg.provider} · {leg.selection}</h3>
       <dl>
-        <div><dt>Raw odds ({leg.rawFormat})</dt><dd><ExactNumber label="Raw odds" value={leg.rawOdds} /></dd></div>
+        <div><dt>Raw odds ({leg.rawFormat})</dt><dd><ExactNumber label={`Raw odds (${leg.rawFormat})`} value={leg.rawOdds} /></dd></div>
         <div><dt>Decimal odds</dt><dd><ExactNumber label="Decimal odds" value={leg.decimalOdds} /></dd></div>
         <div><dt>Effective decimal</dt><dd><ExactNumber label="Effective decimal odds" value={leg.effectiveDecimal} /></dd></div>
         <div><dt>Exact stake</dt><dd><ExactNumber label="Exact stake" value={leg.stake} /></dd></div>

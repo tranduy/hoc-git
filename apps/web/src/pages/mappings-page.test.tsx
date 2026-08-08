@@ -3,7 +3,7 @@ import type { AppSnapshot } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { MappingsPage } from "./mappings-page.js";
 
-const evidence = (gate: string, passed: boolean) => ({ gate, passed, expected: `${gate} expected`, actual: `${gate} actual`, reason: passed ? "matched" : "conflicts" });
+const evidence = (gate: string, passed: boolean) => ({ gate, passed, expected: `${gate} expected`, actual: `${gate} actual`, reason: passed ? `${gate} matched` : `${gate} conflicts` });
 
 const snapshot: AppSnapshot = {
   revision: 9,
@@ -11,14 +11,14 @@ const snapshot: AppSnapshot = {
   providerStatuses: [],
   counts: { FOOTBALL: { events: 2, markets: 1 }, LOL: { events: 1, markets: 1 }, mappings: { VERIFIED: 2, REVIEW_REQUIRED: 2, REJECTED: 2 }, opportunities: 0 },
   events: [
-    { canonicalEventId: "event-verified", category: "FOOTBALL", competition: "Premier League", seasonStage: null, startAtUtcMs: 1, participantA: "Northbridge", participantB: "Riverside", providerEventIds: ["a", "b"], mappingStatus: "VERIFIED", mappingEvidence: [evidence("same participants", true)] },
+    { canonicalEventId: "event-verified", category: "FOOTBALL", competition: "Premier League", seasonStage: null, startAtUtcMs: 1, participantA: "Northbridge", participantB: "Riverside", providerEventIds: ["a", "b"], mappingStatus: "VERIFIED", mappingEvidence: [evidence("same participants", true), evidence("distinct sources", true)] },
     { canonicalEventId: "event-review", category: "LOL", competition: "Summer Split", seasonStage: "Playoffs", startAtUtcMs: 2, participantA: "Blue", participantB: "Red", providerEventIds: ["c", "d"], mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [evidence("same tournament", true), evidence("same stage", false)] },
-    { canonicalEventId: "event-rejected", category: "FOOTBALL", competition: "Cup", seasonStage: null, startAtUtcMs: 3, participantA: "Alpha", participantB: "Beta", providerEventIds: ["e", "f"], mappingStatus: "REJECTED", mappingEvidence: [evidence("same category", false)] }
+    { canonicalEventId: "event-rejected", category: "FOOTBALL", competition: "Cup", seasonStage: null, startAtUtcMs: 3, participantA: "Alpha", participantB: "Beta", providerEventIds: ["e", "f"], mappingStatus: "REJECTED", mappingEvidence: [evidence("same category", false), evidence("same participants", false)] }
   ],
   markets: [
-    { canonicalMarketId: "market-verified", canonicalEventId: "event-verified", category: "FOOTBALL", marketType: "FT_1X2", scope: "FULL_TIME", line: null, settlementProfile: "football", providerMarketIds: ["m1", "m2"], mappingStatus: "VERIFIED", mappingEvidence: [evidence("same market", true)] },
-    { canonicalMarketId: "market-review", canonicalEventId: "event-review", category: "LOL", marketType: "MAP_WINNER", scope: "MAP_3", line: null, settlementProfile: "lol", providerMarketIds: ["m3", "m4"], mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [evidence("compatible map", false)] },
-    { canonicalMarketId: "market-rejected", canonicalEventId: "event-rejected", category: "FOOTBALL", marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5", settlementProfile: "football", providerMarketIds: ["m5", "m6"], mappingStatus: "REJECTED", mappingEvidence: [evidence("same settlement", false)] }
+    { canonicalMarketId: "market-verified", canonicalEventId: "event-verified", category: "FOOTBALL", marketType: "FT_1X2", scope: "FULL_TIME", line: null, settlementProfile: "football", providerMarketIds: ["m1", "m2"], mappingStatus: "VERIFIED", mappingEvidence: [evidence("same market", true), evidence("same settlement", true)] },
+    { canonicalMarketId: "market-review", canonicalEventId: "event-review", category: "LOL", marketType: "MAP_WINNER", scope: "MAP_3", line: null, settlementProfile: "lol", providerMarketIds: ["m3", "m4"], mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [evidence("compatible map", false), evidence("same selection", true)] },
+    { canonicalMarketId: "market-rejected", canonicalEventId: "event-rejected", category: "FOOTBALL", marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5", settlementProfile: "football", providerMarketIds: ["m5", "m6"], mappingStatus: "REJECTED", mappingEvidence: [evidence("same settlement", false), evidence("compatible line", false)] }
   ],
   opportunities: [],
   blockedDiagnostics: []
@@ -58,6 +58,37 @@ describe("MappingsPage", () => {
 
     expect(screen.getByText("No mappings match this filter.")).toBeTruthy();
     expect(screen.getByText(/Wait for a fresh server snapshot/i)).toBeTruthy();
+  });
+
+  it("opens every fixture row and exposes every evidence gate in a labelled keyboard-focusable region", () => {
+    const { container } = render(<MappingsPage snapshot={snapshot} connectionState="LIVE" />);
+    const mappings = [...snapshot.events, ...snapshot.markets];
+    const rows = [...container.querySelectorAll<HTMLDetailsElement>("details.mapping-row")];
+
+    expect(rows).toHaveLength(mappings.length);
+    rows.forEach((row, index) => {
+      fireEvent.click(row.querySelector("summary")!);
+      expect(row.open).toBe(true);
+      const mapping = mappings[index]!;
+      const mappingId = "canonicalMarketId" in mapping
+        ? mapping.canonicalMarketId
+        : mapping.canonicalEventId;
+      const region = within(row).getByRole("region", { name: new RegExp(`evidence for .*${mappingId}`, "i") });
+      expect(region.getAttribute("tabindex")).toBe("0");
+      region.focus();
+      expect(document.activeElement).toBe(region);
+      expect(within(row).queryAllByText("PASS")).toHaveLength(
+        mapping.mappingEvidence.filter((gate) => gate.passed).length
+      );
+      expect(within(row).queryAllByText("FAIL")).toHaveLength(
+        mapping.mappingEvidence.filter((gate) => !gate.passed).length
+      );
+      mapping.mappingEvidence.forEach((gate) => {
+        expect(within(row).getByText(gate.expected)).toBeTruthy();
+        expect(within(row).getByText(gate.actual)).toBeTruthy();
+        expect(within(row).getByText(gate.reason)).toBeTruthy();
+      });
+    });
   });
 
   it("labels disconnected evidence as last-known and gives stale diagnostics a safe next action", () => {

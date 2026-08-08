@@ -38,8 +38,8 @@ describe("OpportunitiesPage", () => {
     expect(within(card).getByText("HIGH confidence")).toBeTruthy();
     expect(within(card).getByRole("heading", { name: /SABA.*Over 2\.5/u })).toBeTruthy();
     expect(within(card).getByRole("heading", { name: /IM.*Under 2\.5/u })).toBeTruthy();
-    expect(within(card).getByLabelText("Raw odds: 0.98")).toBeTruthy();
-    expect(within(card).getByLabelText("Raw odds: 1.02")).toBeTruthy();
+    expect(within(card).getByLabelText("Raw odds (HK): 0.98")).toBeTruthy();
+    expect(within(card).getByLabelText("Raw odds (HK): 1.02")).toBeTruthy();
     expect(within(card).getByLabelText("Decimal odds: 1.98")).toBeTruthy();
     expect(within(card).getByLabelText("Decimal odds: 2.02")).toBeTruthy();
     expect(within(card).getByLabelText("Effective decimal odds: 1.98")).toBeTruthy();
@@ -55,6 +55,8 @@ describe("OpportunitiesPage", () => {
     expect(within(card).getByLabelText("Source timestamp: 1,799,999,999,020 ms")).toBeTruthy();
     expect(within(card).getByTitle("50.505050505050505")).toBeTruthy();
     expect(within(card).getByTitle("49.504950495049505")).toBeTruthy();
+    expect(within(card).getByLabelText("Exact stake: 50.505050505050505")).toBeTruthy();
+    expect(within(card).getByLabelText("Exact stake: 49.504950495049505")).toBeTruthy();
     expect(within(card).getByLabelText("Minimum stake: 10; maximum stake: 500")).toBeTruthy();
     expect(within(card).getByLabelText("Minimum stake: 5; maximum stake: 250")).toBeTruthy();
     expect(screen.queryByText("negative margin")).toBeNull();

@@ -17,11 +17,12 @@ function mappingRows(snapshot: AppSnapshot): readonly MappingRow[] {
 
 function MappingRowDetails({ row }: { readonly row: MappingRow }) {
   const { item } = row;
+  const evidenceLabel = `${row.type} mapping evidence for ${row.id}`;
   return (
     <details className="mapping-row">
       <summary><span className="mapping-row-label">{row.label}</span><span className={`mapping mapping--${item.mappingStatus.toLowerCase()}`}>{item.mappingStatus.replace("_", " ")}</span><span className="mapping-kind">{row.type} mapping</span></summary>
       <div className="mapping-meta"><span>Category {item.category}</span><span>Canonical ID {row.id}</span></div>
-      <MappingEvidenceList evidence={item.mappingEvidence} />
+      <MappingEvidenceList evidence={item.mappingEvidence} label={evidenceLabel} />
     </details>
   );
 }
