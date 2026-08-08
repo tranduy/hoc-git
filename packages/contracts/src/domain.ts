@@ -4,6 +4,15 @@ export type MappingStatus = "VERIFIED" | "REVIEW_REQUIRED" | "REJECTED";
 
 export type QuoteStatus = "OPEN" | "SUSPENDED" | "CLOSED";
 
+export type QuoteIneligibilityReason =
+  | "STALE"
+  | "SUSPENDED"
+  | "CLOSED"
+  | "OUT_OF_ORDER"
+  | "SEQUENCE_GAP"
+  | "NEEDS_SNAPSHOT"
+  | "SCHEMA_ERROR";
+
 export type OddsFormat = "DECIMAL" | "HK" | "AMERICAN";
 
 export type MarketType =
@@ -129,7 +138,7 @@ export interface StakeLeg {
   readonly receivedMonotonicMs: number;
   readonly sequence: number | null;
   readonly eligible: boolean;
-  readonly ineligibleReasons: readonly string[];
+  readonly ineligibleReasons: readonly QuoteIneligibilityReason[];
 }
 
 export interface Opportunity {

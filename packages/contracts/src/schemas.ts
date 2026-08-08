@@ -15,6 +15,7 @@ import type {
   ProviderEvent,
   ProviderMarket,
   ProviderQuote,
+  QuoteIneligibilityReason,
   QuoteStatus,
   Scope,
   SnapshotCounts,
@@ -30,6 +31,16 @@ export const MappingStatusSchema = z.enum([
 ]) satisfies z.ZodType<MappingStatus>;
 
 export const QuoteStatusSchema = z.enum(["OPEN", "SUSPENDED", "CLOSED"]) satisfies z.ZodType<QuoteStatus>;
+
+export const QuoteIneligibilityReasonSchema = z.enum([
+  "STALE",
+  "SUSPENDED",
+  "CLOSED",
+  "OUT_OF_ORDER",
+  "SEQUENCE_GAP",
+  "NEEDS_SNAPSHOT",
+  "SCHEMA_ERROR"
+]) satisfies z.ZodType<QuoteIneligibilityReason>;
 
 export const OddsFormatSchema = z.enum(["DECIMAL", "HK", "AMERICAN"]) satisfies z.ZodType<OddsFormat>;
 
@@ -175,7 +186,7 @@ export const CanonicalMarketSchema = z.strictObject({
   providerMarketIds: z.array(z.string()),
   mappingStatus: MappingStatusSchema,
   mappingEvidence: z.array(MappingEvidenceSchema)
-}) satisfies z.ZodType<CanonicalMarket>;
+}).superRefine(validateCategoryCompatibility) satisfies z.ZodType<CanonicalMarket>;
 
 export const StakeLegSchema = z.strictObject({
   provider: z.string(),
@@ -197,7 +208,31 @@ export const StakeLegSchema = z.strictObject({
   receivedMonotonicMs: z.number(),
   sequence: z.number().nullable(),
   eligible: z.boolean(),
-  ineligibleReasons: z.array(z.string())
+  ineligibleReasons: z.array(QuoteIneligibilityReasonSchema)
+}).superRefine((leg, context) => {
+  if (leg.eligible) {
+    if (leg.quoteStatus !== "OPEN") {
+      context.addIssue({
+        code: "custom",
+        path: ["quoteStatus"],
+        message: "eligible legs must have an open quote"
+      });
+    }
+
+    if (leg.ineligibleReasons.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["ineligibleReasons"],
+        message: "eligible legs cannot have ineligibility reasons"
+      });
+    }
+  } else if (leg.ineligibleReasons.length === 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["ineligibleReasons"],
+      message: "ineligible legs must provide at least one reason"
+    });
+  }
 }) satisfies z.ZodType<StakeLeg>;
 
 export const OpportunitySchema = z.strictObject({
@@ -217,7 +252,7 @@ export const OpportunitySchema = z.strictObject({
   quoteAgeMs: z.number(),
   mappingEvidence: z.array(MappingEvidenceSchema),
   executionConfidence: z.enum(["HIGH", "BLOCKED"])
-}) satisfies z.ZodType<Opportunity>;
+}).superRefine(validateCategoryCompatibility) satisfies z.ZodType<Opportunity>;
 
 export const ProviderConnectionStateSchema = z.enum([
   "CONNECTING",

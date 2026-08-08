@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   AppSnapshotSchema,
+  CanonicalMarketSchema,
+  OpportunitySchema,
   ProviderMarketSchema,
-  ProviderQuoteSchema
+  ProviderQuoteSchema,
+  StakeLegSchema
 } from "./schemas.js";
 
 const completeQuote = () => ({
@@ -145,6 +148,54 @@ describe("ProviderMarketSchema", () => {
   });
 });
 
+describe("read-model category compatibility", () => {
+  it("rejects a Football canonical market with a LoL market type", () => {
+    expect(CanonicalMarketSchema.safeParse({
+      canonicalMarketId: "canonical-market-1",
+      canonicalEventId: "canonical-event-1",
+      category: "FOOTBALL",
+      marketType: "MAP_WINNER",
+      scope: "FULL_TIME",
+      line: null,
+      settlementProfile: "regular-time",
+      providerMarketIds: ["market-1"],
+      mappingStatus: "VERIFIED",
+      mappingEvidence: []
+    }).success).toBe(false);
+  });
+
+  it("rejects a LoL opportunity with a Football scope", () => {
+    expect(OpportunitySchema.safeParse({
+      ...completeOpportunity(),
+      category: "LOL",
+      marketType: "MAP_WINNER",
+      scope: "FULL_TIME"
+    }).success).toBe(false);
+  });
+});
+
+describe("StakeLegSchema", () => {
+  it("rejects an eligible leg with ineligibility reasons", () => {
+    expect(StakeLegSchema.safeParse({ ...completeStakeLeg(), ineligibleReasons: ["STALE"] }).success).toBe(false);
+  });
+
+  it("rejects an eligible leg whose quote is suspended", () => {
+    expect(StakeLegSchema.safeParse({ ...completeStakeLeg(), quoteStatus: "SUSPENDED" }).success).toBe(false);
+  });
+
+  it("rejects an ineligible leg without a reason", () => {
+    expect(StakeLegSchema.safeParse({ ...completeStakeLeg(), eligible: false }).success).toBe(false);
+  });
+
+  it("accepts an ineligible leg with a planned reason", () => {
+    expect(StakeLegSchema.safeParse({ ...completeStakeLeg(), eligible: false, ineligibleReasons: ["STALE"] }).success).toBe(true);
+  });
+
+  it("rejects an unrecognized ineligibility reason", () => {
+    expect(StakeLegSchema.safeParse({ ...completeStakeLeg(), eligible: false, ineligibleReasons: ["NOT_READY"] }).success).toBe(false);
+  });
+});
+
 describe("AppSnapshotSchema", () => {
   it("accepts a HIGH opportunity for a verified market with eligible open legs", () => {
     expect(AppSnapshotSchema.safeParse(completeSnapshot()).success).toBe(true);
@@ -187,6 +238,18 @@ describe("AppSnapshotSchema", () => {
     expect(AppSnapshotSchema.safeParse({
       ...snapshot,
       opportunities: [{ ...opportunity, legs: [{ ...opportunity.legs[0]!, stake: "1e3" }] }]
+    }).success).toBe(false);
+  });
+
+  it("rejects an opportunity leg with contradictory eligibility provenance", () => {
+    const snapshot = completeSnapshot();
+    const opportunity = snapshot.opportunities[0]!;
+    expect(AppSnapshotSchema.safeParse({
+      ...snapshot,
+      opportunities: [{
+        ...opportunity,
+        legs: [{ ...opportunity.legs[0]!, ineligibleReasons: ["STALE"] }]
+      }]
     }).success).toBe(false);
   });
 
