@@ -1,0 +1,19 @@
+{
+  "name": "tool-chenh",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev": "npm run dev --workspace @tool-chenh/api",
+    "dev:web": "npm run dev --workspace @tool-chenh/web",
+    "test": "npm run test --workspaces --if-present",
+    "test:integration": "vitest run tests/integration",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "verify": "npm run typecheck && npm test && npm run test:integration"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  }
+}
