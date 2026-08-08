@@ -7,12 +7,20 @@
   "types": "./dist/runtime.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "dev": "npm run build && node dist/server.js",
+    "start": "node dist/server.js",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/websocket": "^11.3.0",
     "@tool-chenh/adapters": "*",
     "@tool-chenh/contracts": "*",
-    "@tool-chenh/core": "*"
+    "@tool-chenh/core": "*",
+    "fastify": "^5.11.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.0"
   }
 }

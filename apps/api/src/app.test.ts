@@ -1,0 +1,494 @@
+import { readFileSync } from "node:fs";
+import {
+  FixtureAdapter,
+  type FixtureSnapshot,
+  type ProviderAdapter,
+  type ProviderSink,
+  type ReplayScheduler
+} from "@tool-chenh/adapters";
+import { AppSnapshotSchema, type Category } from "@tool-chenh/contracts";
+import { afterEach, describe, expect, it } from "vitest";
+import type WebSocket from "ws";
+import {
+  buildApp,
+  safeRequestSerializer,
+  safeResponseSerializer,
+  validateViteOrigin
+} from "./app.js";
+import { sendBoundedMessage } from "./realtime/opportunity-ws.js";
+import { Runtime, type RuntimeClock } from "./runtime.js";
+import { resolveServerConfig } from "./server.js";
+
+const immediateScheduler: ReplayScheduler = {
+  async wait(): Promise<void> {}
+};
+
+const clock: RuntimeClock = {
+  now: () => ({ monotonicNowMs: 100, wallClockNowMs: 1_800_000_000_100 })
+};
+
+const fixturePaths = [
+  ["football/saba-snapshot.json", "SABA", "FOOTBALL"],
+  ["football/im-snapshot.json", "IM", "FOOTBALL"],
+  ["lol/saba-snapshot.json", "SABA", "LOL"],
+  ["lol/im-snapshot.json", "IM", "LOL"]
+] as const;
+
+function loadFixture(path: string): FixtureSnapshot {
+  return JSON.parse(
+    readFileSync(new URL(`../../../fixtures/${path}`, import.meta.url), "utf8")
+  ) as FixtureSnapshot;
+}
+
+function mappingPolicy() {
+  return {
+    prematchToleranceMs: 120_000,
+    liveClockToleranceMs: 20_000,
+    aliasRegistry: {
+      version: "fixture-v1",
+      aliases: {
+        FOOTBALL: {
+          northbridge_fc: "northbridge_fc",
+          riverside_united: "riverside_united",
+          city_academy: "city_academy",
+          united_academy: "united_academy"
+        },
+        LOL: {
+          blue_comets: "blue_comets",
+          red_phoenix: "red_phoenix",
+          alpha_academy: "alpha_academy",
+          beta_academy: "beta_academy",
+          gamma_academy: "gamma_academy"
+        }
+      }
+    }
+  } as const;
+}
+
+function fixtureAdapters(degraded = false) {
+  return fixturePaths.map(([path, provider, category], index) => {
+    const original = loadFixture(path);
+    const records = original.records
+      .filter((record) => record.offsetMs <= 90)
+      .map((record) => degraded && index === 0 && record.kind === "STATUS"
+        ? {
+            ...record,
+            payload: { ...record.payload as object, status: "DEGRADED" }
+          }
+        : record);
+    const snapshot: FixtureSnapshot = { ...original, records };
+    return new FixtureAdapter(snapshot, {
+      id: snapshot.adapterId,
+      provider,
+      category: category as Category,
+      scheduler: immediateScheduler
+    });
+  });
+}
+
+async function readyRuntime(degraded = false): Promise<Runtime> {
+  const runtime = new Runtime({
+    adapters: fixtureAdapters(degraded),
+    clock,
+    mappingPolicy: mappingPolicy()
+  });
+  await runtime.start(new AbortController().signal);
+  return runtime;
+}
+
+const apps: Array<ReturnType<typeof buildApp>> = [];
+const sockets: WebSocket[] = [];
+
+afterEach(async () => {
+  for (const socket of sockets.splice(0)) socket.terminate();
+  await Promise.all(apps.splice(0).map((app) => app.close()));
+});
+
+class AdvancingFixtureAdapter implements ProviderAdapter {
+  readonly id = "fixture-football";
+  readonly categories = ["FOOTBALL"] as const;
+  #sink: ProviderSink | undefined;
+  #updatedAtMs = 1_800_000_000_100;
+
+  async start(sink: ProviderSink): Promise<void> {
+    this.#sink = sink;
+    this.#emitStatus();
+  }
+
+  advanceClock(deltaMs: number): void {
+    this.#updatedAtMs += deltaMs;
+    this.#emitStatus();
+  }
+
+  #emitStatus(): void {
+    this.#sink?.onStatus({
+      adapterId: this.id,
+      provider: "SABA",
+      category: "FOOTBALL",
+      status: "LIVE",
+      detail: null,
+      updatedAtMs: this.#updatedAtMs
+    });
+  }
+}
+
+function collectMessages(): {
+  readonly onInit: (socket: WebSocket) => void;
+  readonly next: () => Promise<unknown>;
+} {
+  const queued: unknown[] = [];
+  const waiters: Array<(value: unknown) => void> = [];
+  return {
+    onInit(socket) {
+      socket.on("message", (data) => {
+        const parsed: unknown = JSON.parse(data.toString());
+        const waiter = waiters.shift();
+        if (waiter === undefined) queued.push(parsed);
+        else waiter(parsed);
+      });
+    },
+    next() {
+      const queuedValue = queued.shift();
+      if (queuedValue !== undefined) return Promise.resolve(queuedValue);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Timed out waiting for WebSocket message")), 1_000);
+        waiters.push((value) => {
+          clearTimeout(timer);
+          resolve(value);
+        });
+      });
+    }
+  };
+}
+
+describe("Fastify snapshot API", () => {
+  it("defaults server binding to loopback and reads the established API env names", () => {
+    expect(resolveServerConfig({})).toEqual({
+      host: "127.0.0.1",
+      port: 4310,
+      viteOrigin: "http://127.0.0.1:4311",
+      fixtureReplaySpeed: 1
+    });
+    expect(resolveServerConfig({
+      API_HOST: "localhost",
+      API_PORT: "5310",
+      VITE_ORIGIN: "http://localhost:5311",
+      FIXTURE_REPLAY_SPEED: "2"
+    })).toEqual({
+      host: "localhost",
+      port: 5310,
+      viteOrigin: "http://localhost:5311",
+      fixtureReplaySpeed: 2
+    });
+    expect(() => resolveServerConfig({ API_HOST: "0.0.0.0" })).toThrow(/loopback/u);
+    expect(() => resolveServerConfig({ VITE_ORIGIN: "https://attacker.example" })).toThrow(
+      /local HTTP origin/u
+    );
+  });
+
+  it("rejects a non-local Vite origin at the application boundary", () => {
+    expect(() => validateViteOrigin("https://attacker.example")).toThrow(/local HTTP origin/u);
+    expect(validateViteOrigin("http://localhost:4311")).toBe("http://localhost:4311");
+  });
+
+  it("serializes logs without headers, query values, bodies, or session material", () => {
+    const secret = "never-log-this-secret";
+    const request = safeRequestSerializer({
+      method: "POST",
+      url: `/api/snapshot?token=${secret}&accountId=${secret}`,
+      headers: {
+        authorization: `Bearer ${secret}`,
+        cookie: `session=${secret}`
+      },
+      query: { token: secret },
+      body: { account: secret, bet: secret }
+    });
+    const response = safeResponseSerializer({
+      statusCode: 200,
+      headers: { "set-cookie": `session=${secret}` },
+      body: { token: secret }
+    });
+
+    expect(request).toEqual({ method: "POST", url: "/api/snapshot" });
+    expect(response).toEqual({ statusCode: 200 });
+    expect(JSON.stringify({ request, response })).not.toContain(secret);
+  });
+
+  it("reports observe-mode health with the current revision and all adapter statuses", async () => {
+    const runtime = await readyRuntime();
+    const app = buildApp(runtime);
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/health" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toEqual({
+      status: "ok",
+      mode: "OBSERVE",
+      executionReady: false,
+      revision: runtime.getSnapshot().revision,
+      providerStatuses: runtime.getSnapshot().providerStatuses
+    });
+    expect(response.json().providerStatuses).toHaveLength(4);
+  });
+
+  it("returns a strict AppSnapshot and disables caching", async () => {
+    const runtime = await readyRuntime();
+    const app = buildApp(runtime);
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/snapshot" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(AppSnapshotSchema.safeParse(response.json()).success).toBe(true);
+    expect(response.json()).toEqual(runtime.getSnapshot());
+  });
+
+  it("returns a strict category snapshot and rejects invalid or repeated categories", async () => {
+    const runtime = await readyRuntime();
+    const app = buildApp(runtime);
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/snapshot?category=LOL" });
+    const snapshot = response.json();
+
+    expect(response.statusCode).toBe(200);
+    expect(AppSnapshotSchema.safeParse(snapshot).success).toBe(true);
+    expect(snapshot.events.every((event: { category: string }) => event.category === "LOL")).toBe(true);
+    expect(snapshot.markets.every((market: { category: string }) => market.category === "LOL")).toBe(true);
+    expect(snapshot.opportunities.every((opportunity: { category: string }) =>
+      opportunity.category === "LOL")).toBe(true);
+    expect(snapshot.blockedDiagnostics.every((diagnostic: { category: string }) =>
+      diagnostic.category === "LOL")).toBe(true);
+    expect(snapshot.providerStatuses.every((status: { category: string }) =>
+      status.category === "LOL")).toBe(true);
+    expect(snapshot.counts.FOOTBALL).toEqual({ events: 0, markets: 0 });
+    expect(snapshot.counts.opportunities).toBe(snapshot.opportunities.length);
+
+    for (const url of [
+      "/api/snapshot?category=TENNIS",
+      "/api/snapshot?category=LOL&category=FOOTBALL"
+    ]) {
+      expect((await app.inject({ method: "GET", url })).statusCode).toBe(400);
+    }
+  });
+
+  it("stays available while degraded without advertising execution readiness", async () => {
+    const runtime = await readyRuntime(true);
+    const app = buildApp(runtime);
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/health" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      status: "degraded",
+      mode: "OBSERVE",
+      executionReady: false
+    });
+    expect(response.json().providerStatuses).toContainEqual(
+      expect.objectContaining({ status: "DEGRADED" })
+    );
+  });
+
+  it("does not report healthy for four live statuses with unexpected identities", async () => {
+    const unexpectedAdapters: ProviderAdapter[] = Array.from({ length: 4 }, (_, index) => ({
+      id: `unexpected-${index}`,
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        sink.onStatus({
+          adapterId: `unexpected-${index}`,
+          provider: "SABA",
+          category: "FOOTBALL",
+          status: "LIVE",
+          detail: null,
+          updatedAtMs: index
+        });
+      }
+    }));
+    const runtime = new Runtime({ adapters: unexpectedAdapters, clock });
+    await runtime.start(new AbortController().signal);
+    const app = buildApp(runtime);
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/health" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ status: "degraded", executionReady: false });
+  });
+
+  it("does not report healthy when an extra adapter duplicates an expected identity", async () => {
+    const extraAdapter: ProviderAdapter = {
+      id: "extra-saba-football",
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        sink.onStatus({
+          adapterId: "extra-saba-football",
+          provider: "SABA",
+          category: "FOOTBALL",
+          status: "LIVE",
+          detail: null,
+          updatedAtMs: 1
+        });
+      }
+    };
+    const runtime = new Runtime({
+      adapters: [...fixtureAdapters(), extraAdapter],
+      clock,
+      mappingPolicy: mappingPolicy()
+    });
+    await runtime.start(new AbortController().signal);
+    const app = buildApp(runtime);
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/health" });
+
+    expect(response.json()).toMatchObject({ status: "degraded", executionReady: false });
+    expect(response.json().providerStatuses).toHaveLength(5);
+  });
+
+  it("allows only no-origin, same-origin, or the configured local Vite origin", async () => {
+    const runtime = await readyRuntime();
+    const app = buildApp(runtime, { viteOrigin: "http://127.0.0.1:4311" });
+    apps.push(app);
+
+    const noOrigin = await app.inject({ method: "GET", url: "/api/health" });
+    expect(noOrigin.statusCode).toBe(200);
+    expect(noOrigin.headers["access-control-allow-origin"]).toBeUndefined();
+
+    const vite = await app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: { origin: "http://127.0.0.1:4311" }
+    });
+    expect(vite.statusCode).toBe(200);
+    expect(vite.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:4311");
+
+    const sameOrigin = await app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: { host: "127.0.0.1:4310", origin: "http://127.0.0.1:4310" }
+    });
+    expect(sameOrigin.statusCode).toBe(200);
+    expect(sameOrigin.headers["access-control-allow-origin"]).toBeUndefined();
+
+    const foreign = await app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: { origin: "https://attacker.example" }
+    });
+    expect(foreign.statusCode).toBe(403);
+    const wrongScheme = await app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: { host: "127.0.0.1:4310", origin: "https://127.0.0.1:4310" }
+    });
+    expect(wrongScheme.statusCode).toBe(403);
+  });
+});
+
+describe("Fastify realtime API", () => {
+  it("drops a slow client before queuing another revision", () => {
+    let closedWith: number | undefined;
+    const socket = {
+      readyState: 1,
+      bufferedAmount: 900,
+      close(code: number): void {
+        closedWith = code;
+      },
+      terminate(): void {},
+      send(): never {
+        throw new Error("must not queue on a slow client");
+      }
+    };
+
+    expect(sendBoundedMessage(socket, "x".repeat(200), 1_024)).toBe(false);
+    expect(closedWith).toBe(1013);
+  });
+
+  it("sends a full snapshot, publishes only a higher revision, and recovers on reconnect", async () => {
+    const adapter = new AdvancingFixtureAdapter();
+    const runtime = new Runtime({ adapters: [adapter], clock });
+    await runtime.start(new AbortController().signal);
+    const app = buildApp(runtime, { heartbeatIntervalMs: 60_000 });
+    apps.push(app);
+    await app.ready();
+
+    const firstMessages = collectMessages();
+    const firstSocket = await app.injectWS("/api/realtime", {}, { onInit: firstMessages.onInit });
+    sockets.push(firstSocket);
+    const initial = await firstMessages.next();
+    expect(initial).toEqual({
+      type: "SNAPSHOT",
+      revision: runtime.getSnapshot().revision,
+      data: runtime.getSnapshot()
+    });
+
+    adapter.advanceClock(1_000);
+    const advanced = await firstMessages.next();
+    expect(advanced).toEqual({
+      type: "SNAPSHOT",
+      revision: runtime.getSnapshot().revision,
+      data: runtime.getSnapshot()
+    });
+    expect((advanced as { revision: number }).revision).toBeGreaterThan(
+      (initial as { revision: number }).revision
+    );
+
+    firstSocket.terminate();
+    const reconnectMessages = collectMessages();
+    const reconnected = await app.injectWS("/api/realtime", {}, {
+      onInit: reconnectMessages.onInit
+    });
+    sockets.push(reconnected);
+    expect(await reconnectMessages.next()).toEqual({
+      type: "SNAPSHOT",
+      revision: runtime.getSnapshot().revision,
+      data: runtime.getSnapshot()
+    });
+  });
+
+  it("emits heartbeats carrying the current revision", async () => {
+    const adapter = new AdvancingFixtureAdapter();
+    const runtime = new Runtime({ adapters: [adapter], clock });
+    await runtime.start(new AbortController().signal);
+    const app = buildApp(runtime, { heartbeatIntervalMs: 5 });
+    apps.push(app);
+    await app.ready();
+
+    const messages = collectMessages();
+    const socket = await app.injectWS("/api/realtime", {}, { onInit: messages.onInit });
+    sockets.push(socket);
+    await messages.next();
+
+    expect(await messages.next()).toMatchObject({
+      type: "HEARTBEAT",
+      revision: runtime.getSnapshot().revision,
+      serverTimeMs: expect.any(Number)
+    });
+  });
+
+  it("fails closed when the initial full snapshot exceeds the configured cap", async () => {
+    const adapter = new AdvancingFixtureAdapter();
+    const runtime = new Runtime({ adapters: [adapter], clock });
+    await runtime.start(new AbortController().signal);
+    const app = buildApp(runtime, { maxBufferedBytes: 1 });
+    apps.push(app);
+    await app.ready();
+
+    let resolveClose: ((code: number) => void) | undefined;
+    const closed = new Promise<number>((resolve) => {
+      resolveClose = resolve;
+    });
+    const socket = await app.injectWS("/api/realtime", {}, {
+      onInit(client) {
+        client.once("close", (code) => resolveClose?.(code));
+      }
+    });
+    sockets.push(socket);
+
+    await expect(closed).resolves.toBe(1009);
+  });
+});
