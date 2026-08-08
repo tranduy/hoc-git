@@ -5,12 +5,22 @@ import {
   type MappingPolicy,
   type NormalizedMarket,
   type NormalizedFootballEvent,
-  type NormalizedLolEvent
+  type NormalizedLolEvent,
+  type VersionedAliasRegistry
 } from "../index.js";
+
+const aliasRegistry: VersionedAliasRegistry = {
+  version: "2026-08-09.mapping-1",
+  aliases: {
+    FOOTBALL: { arsenal: "arsenal", chelsea: "chelsea" },
+    LOL: { geng: "gen_g", gen_g: "gen_g", t1: "t1" }
+  }
+};
 
 const policy: MappingPolicy = {
   prematchToleranceMs: 120_000,
-  liveClockToleranceMs: 20_000
+  liveClockToleranceMs: 20_000,
+  aliasRegistry
 };
 
 const footballEvent = (provider: string, providerEventId: string): NormalizedFootballEvent => ({
@@ -53,6 +63,8 @@ const lolEvent = (
   bestOf: 3,
   isLive: false,
   gameVariant: "LOL_PC",
+  rematchCandidate: false,
+  fixtureDiscriminator: null,
   liveState: null
 });
 

@@ -7,21 +7,30 @@ import {
   buildFootballEventKey,
   buildLolEventKey
 } from "../identity/canonical-key.js";
+import {
+  resolveAliasForCategory,
+  type VersionedAliasRegistry,
+  type VersionedAliasResolution
+} from "../identity/normalize-name.js";
 
 export interface MappingPolicy {
   readonly prematchToleranceMs: number;
   readonly liveClockToleranceMs: number;
+  readonly aliasRegistry: VersionedAliasRegistry;
 }
 
 type NormalizedEventBase = Omit<
   ProviderEvent,
-  "category" | "seasonStage" | "startAtUtcMs" | "bestOf"
+  "category" | "seasonStage" | "startAtUtcMs" | "bestOf" | "eventScope"
 > & {
   readonly seasonStage: string | null;
   readonly startAtUtcMs: number | null;
   readonly canonicalParticipantA: string | null;
   readonly canonicalParticipantB: string | null;
 };
+
+export type FootballEventScope = "REGULAR_TIME" | "FIRST_HALF" | "SECOND_HALF";
+export type LolEventScope = "SERIES" | "MAP_1" | "MAP_2" | "MAP_3" | "MAP_4" | "MAP_5";
 
 export interface FootballLiveState {
   readonly period: string | null;
@@ -32,6 +41,7 @@ export interface FootballLiveState {
 
 export interface NormalizedFootballEvent extends NormalizedEventBase {
   readonly category: "FOOTBALL";
+  readonly eventScope: FootballEventScope | null;
   readonly bestOf: null;
   readonly isVirtual: boolean | null;
   readonly sportVariant: string | null;
@@ -49,8 +59,11 @@ export interface LolLiveState {
 
 export interface NormalizedLolEvent extends NormalizedEventBase {
   readonly category: "LOL";
+  readonly eventScope: LolEventScope | null;
   readonly bestOf: number | null;
   readonly gameVariant: string | null;
+  readonly rematchCandidate: boolean | null;
+  readonly fixtureDiscriminator: string | null;
   readonly liveState: LolLiveState | null;
 }
 
@@ -150,9 +163,19 @@ function validMappingPolicy(
 ): MappingEvidence {
   const gate = "validMappingPolicy";
   const values = [policy.prematchToleranceMs, policy.liveClockToleranceMs];
+  if (
+    policy.aliasRegistry === undefined ||
+    isMissing(policy.aliasRegistry.version)
+  ) {
+    return missing(gate, "versioned alias registry", policy.aliasRegistry?.version);
+  }
+
   const valid = values.every((value) => Number.isSafeInteger(value) && value >= 0);
   return valid
-    ? passed(gate, "finite nonnegative integer tolerances", values)
+    ? passed(gate, "finite tolerances and versioned aliases", {
+        tolerances: values,
+        aliasRegistryVersion: policy.aliasRegistry.version
+      })
     : contradicted(gate, "finite nonnegative integer tolerances", values);
 }
 
@@ -324,22 +347,126 @@ function sameCompetitionAndStage(left: NormalizedEvent, right: NormalizedEvent):
     : contradicted(gate, expected, actual);
 }
 
-function sameHomeAway(left: NormalizedEvent, right: NormalizedEvent): MappingEvidence {
+interface ParticipantAliasProof {
+  readonly provider: string;
+  readonly side: "A" | "B";
+  readonly raw: string;
+  readonly claimedCanonical: string;
+  readonly resolution: VersionedAliasResolution;
+}
+
+function participantProofs(
+  left: NormalizedEvent,
+  right: NormalizedEvent,
+  policy: MappingPolicy
+): readonly ParticipantAliasProof[] | null {
+  if (
+    policy.aliasRegistry === undefined ||
+    [
+      left.participantA,
+      left.participantB,
+      right.participantA,
+      right.participantB,
+      left.canonicalParticipantA,
+      left.canonicalParticipantB,
+      right.canonicalParticipantA,
+      right.canonicalParticipantB
+    ].some(isMissing)
+  ) {
+    return null;
+  }
+
+  return [
+    {
+      provider: left.provider,
+      side: "A",
+      raw: left.participantA,
+      claimedCanonical: left.canonicalParticipantA!,
+      resolution: resolveAliasForCategory(left.participantA, left.category, policy.aliasRegistry)
+    },
+    {
+      provider: left.provider,
+      side: "B",
+      raw: left.participantB,
+      claimedCanonical: left.canonicalParticipantB!,
+      resolution: resolveAliasForCategory(left.participantB, left.category, policy.aliasRegistry)
+    },
+    {
+      provider: right.provider,
+      side: "A",
+      raw: right.participantA,
+      claimedCanonical: right.canonicalParticipantA!,
+      resolution: resolveAliasForCategory(right.participantA, right.category, policy.aliasRegistry)
+    },
+    {
+      provider: right.provider,
+      side: "B",
+      raw: right.participantB,
+      claimedCanonical: right.canonicalParticipantB!,
+      resolution: resolveAliasForCategory(right.participantB, right.category, policy.aliasRegistry)
+    }
+  ];
+}
+
+function participantAliasEvidence(
+  gate: string,
+  left: NormalizedEvent,
+  right: NormalizedEvent,
+  policy: MappingPolicy,
+  ordered: boolean
+): MappingEvidence {
+  let proofs: readonly ParticipantAliasProof[] | null;
+  try {
+    proofs = participantProofs(left, right, policy);
+  } catch (error) {
+    return contradicted(
+      gate,
+      "valid explicit alias evidence",
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+
+  if (proofs === null) {
+    return missing(gate, "complete explicit alias evidence", "<missing>");
+  }
+
+  if (
+    proofs.some(
+      (proof) => proof.resolution.canonical !== proof.claimedCanonical
+    )
+  ) {
+    return contradicted(gate, "claimed canonical IDs match explicit aliases", proofs);
+  }
+
+  const leftCanonical = [proofs[0]!.resolution.canonical, proofs[1]!.resolution.canonical];
+  const rightCanonical = [proofs[2]!.resolution.canonical, proofs[3]!.resolution.canonical];
+  const same = leftCanonical[0] === rightCanonical[0] && leftCanonical[1] === rightCanonical[1];
+  const reversed = leftCanonical[0] === rightCanonical[1] && leftCanonical[1] === rightCanonical[0];
+  const compatible = ordered ? same : same || reversed;
+
+  if (!compatible) {
+    return contradicted(gate, { ordered, canonical: leftCanonical }, proofs);
+  }
+
+  if (proofs.some((proof) => proof.resolution.source !== "EXPLICIT_ALIAS")) {
+    return missing(gate, "EXPLICIT_ALIAS for every participant", proofs);
+  }
+
+  return passed(gate, { ordered, canonical: leftCanonical }, proofs);
+}
+
+function sameHomeAway(
+  left: NormalizedEvent,
+  right: NormalizedEvent,
+  policy: MappingPolicy
+): MappingEvidence {
   const gate = "sameHomeAway";
 
   if (left.category !== "FOOTBALL" || right.category !== "FOOTBALL") {
     return contradicted(gate, "ordered Football participants", `${left.category}/${right.category}`);
   }
 
-  const expected = [left.canonicalParticipantA, left.canonicalParticipantB];
-  const actual = [right.canonicalParticipantA, right.canonicalParticipantB];
-  if ([...expected, ...actual].some(isMissing)) {
-    return missing(gate, expected, actual);
-  }
-
-  return expected[0] === actual[0] && expected[1] === actual[1]
-    ? passed(gate, expected, actual)
-    : contradicted(gate, expected, actual);
+  return participantAliasEvidence(gate, left, right, policy, true);
 }
 
 function compatibleKickoff(
@@ -360,8 +487,8 @@ function compatibleKickoff(
 
 function compatibleRematchEvidence(left: NormalizedEvent, right: NormalizedEvent): MappingEvidence {
   const gate = "compatibleRematchEvidence";
-  if (left.category !== "FOOTBALL" || right.category !== "FOOTBALL") {
-    return contradicted(gate, "Football rematch evidence", `${left.category}/${right.category}`);
+  if (left.category !== right.category) {
+    return contradicted(gate, "same-category rematch evidence", `${left.category}/${right.category}`);
   }
 
   if (left.rematchCandidate === null || right.rematchCandidate === null) {
@@ -433,6 +560,23 @@ function compatibleLiveState(
     : contradicted(gate, left.liveState, right.liveState);
 }
 
+const footballEventScopes = new Set<string>(["REGULAR_TIME", "FIRST_HALF", "SECOND_HALF"]);
+const lolEventScopes = new Set<string>(["SERIES", "MAP_1", "MAP_2", "MAP_3", "MAP_4", "MAP_5"]);
+
+function validCategoryEventScope(left: NormalizedEvent, right: NormalizedEvent): MappingEvidence {
+  const gate = "validCategoryEventScope";
+  if (isMissing(left.eventScope) || isMissing(right.eventScope)) {
+    return missing(gate, "category-specific event scopes", [left.eventScope, right.eventScope]);
+  }
+
+  const leftAllowed = left.category === "FOOTBALL" ? footballEventScopes : lolEventScopes;
+  const rightAllowed = right.category === "FOOTBALL" ? footballEventScopes : lolEventScopes;
+  const valid = leftAllowed.has(left.eventScope!) && rightAllowed.has(right.eventScope!);
+  return valid
+    ? passed(gate, "category-specific event scopes", [left.eventScope, right.eventScope])
+    : contradicted(gate, "category-specific event scopes", [left.eventScope, right.eventScope]);
+}
+
 function compatibleEventScope(left: NormalizedEvent, right: NormalizedEvent): MappingEvidence {
   return compareRequired("compatibleEventScope", left.eventScope, right.eventScope);
 }
@@ -488,22 +632,17 @@ function orientationOf(
   return null;
 }
 
-function sameLolTeams(left: NormalizedEvent, right: NormalizedEvent): MappingEvidence {
+function sameLolTeams(
+  left: NormalizedEvent,
+  right: NormalizedEvent,
+  policy: MappingPolicy
+): MappingEvidence {
   const gate = "sameLolTeams";
   if (left.category !== "LOL" || right.category !== "LOL") {
     return contradicted(gate, "same LoL teams", `${left.category}/${right.category}`);
   }
 
-  const expected = [left.canonicalParticipantA, left.canonicalParticipantB];
-  const actual = [right.canonicalParticipantA, right.canonicalParticipantB];
-  if ([...expected, ...actual].some(isMissing)) {
-    return missing(gate, expected, actual);
-  }
-
-  const orientation = orientationOf(left, right);
-  return orientation === null
-    ? contradicted(gate, expected, actual)
-    : passed(gate, expected, `${printable(actual)} (${orientation})`);
+  return participantAliasEvidence(gate, left, right, policy, false);
 }
 
 function sameBestOf(left: NormalizedEvent, right: NormalizedEvent): MappingEvidence {
@@ -580,6 +719,7 @@ const footballGates: readonly EventGate[] = [
   compatibleKickoff,
   compatibleRematchEvidence,
   compatibleLiveState,
+  validCategoryEventScope,
   compatibleEventScope
 ];
 
@@ -592,8 +732,10 @@ const lolGates: readonly EventGate[] = [
   sameTournamentAndStage,
   sameLolTeams,
   compatibleKickoff,
+  compatibleRematchEvidence,
   sameBestOf,
   compatibleLolLiveState,
+  validCategoryEventScope,
   compatibleEventScope
 ];
 
@@ -625,7 +767,7 @@ function canonicalEventId(
       kickoffUtc: startAtUtc,
       home: left.canonicalParticipantA!,
       away: left.canonicalParticipantB!,
-      eventScope: left.eventScope
+      eventScope: left.eventScope!
     });
 
     return left.rematchCandidate
@@ -633,7 +775,7 @@ function canonicalEventId(
       : baseId;
   }
 
-  return buildLolEventKey({
+  const baseId = buildLolEventKey({
     tournament: left.competition,
     seasonStage: left.seasonStage!,
     startAtUtc,
@@ -641,6 +783,10 @@ function canonicalEventId(
     teamB: left.canonicalParticipantB!,
     bestOf: left.bestOf!
   });
+
+  return left.rematchCandidate
+    ? `${baseId}|fixture:${encodeURIComponent(left.fixtureDiscriminator!.trim())}`
+    : baseId;
 }
 
 export function mapEvents(

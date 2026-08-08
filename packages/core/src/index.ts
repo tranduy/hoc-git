@@ -21,7 +21,9 @@ export { mapEvents } from "./mapping/event-mapper.js";
 export type {
   EventMappingResult,
   EventSource,
+  FootballEventScope,
   FootballLiveState,
+  LolEventScope,
   LolLiveState,
   MappingPolicy,
   NormalizedEvent,

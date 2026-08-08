@@ -3,12 +3,30 @@ import {
   mapEvents,
   type MappingPolicy,
   type NormalizedFootballEvent,
-  type NormalizedLolEvent
+  type NormalizedLolEvent,
+  type VersionedAliasRegistry
 } from "../index.js";
+
+const aliasRegistry: VersionedAliasRegistry = {
+  version: "2026-08-09.mapping-1",
+  aliases: {
+    FOOTBALL: {
+      arsenal: "arsenal",
+      chelsea: "chelsea"
+    },
+    LOL: {
+      geng: "gen_g",
+      gen_g: "gen_g",
+      t1: "t1",
+      t_one: "t1"
+    }
+  }
+};
 
 const policy: MappingPolicy = {
   prematchToleranceMs: 120_000,
-  liveClockToleranceMs: 20_000
+  liveClockToleranceMs: 20_000,
+  aliasRegistry
 };
 
 const footballStartAtMs = Date.parse("2026-08-09T12:00:00.000Z");
@@ -63,6 +81,8 @@ const sabaLol: NormalizedLolEvent = {
   bestOf: 3,
   isLive: true,
   gameVariant: "LOL_PC",
+  rematchCandidate: false,
+  fixtureDiscriminator: null,
   liveState: {
     seriesScoreA: 1,
     seriesScoreB: 0,
@@ -251,6 +271,138 @@ describe("mapEvents LoL hard gates", () => {
     expect(result.status).toBe("REJECTED");
     expect(result.canonicalEventId).toBeNull();
     expect(result.evidence.find((item) => item.gate === "validEventSemantics")?.passed).toBe(false);
+  });
+
+  it("verifies a repeated-series candidate with matching fixture evidence and distinct identity", () => {
+    const first = mapEvents(
+      { ...sabaLol, rematchCandidate: true, fixtureDiscriminator: "series-slot-1" },
+      { ...imLol, rematchCandidate: true, fixtureDiscriminator: "series-slot-1" },
+      policy
+    );
+    const second = mapEvents(
+      { ...sabaLol, rematchCandidate: true, fixtureDiscriminator: "series-slot-2" },
+      { ...imLol, rematchCandidate: true, fixtureDiscriminator: "series-slot-2" },
+      policy
+    );
+
+    expect(first.status).toBe("VERIFIED");
+    expect(second.status).toBe("VERIFIED");
+    expect(first.canonicalEventId).not.toBe(second.canonicalEventId);
+    expect(first.evidence.find((item) => item.gate === "compatibleRematchEvidence")?.passed).toBe(true);
+  });
+
+  it("requires review when repeated-series fixture evidence is missing", () => {
+    const result = mapEvents(
+      { ...sabaLol, rematchCandidate: true, fixtureDiscriminator: null },
+      { ...imLol, rematchCandidate: true, fixtureDiscriminator: "series-slot-1" },
+      policy
+    );
+
+    expect(result.status).toBe("REVIEW_REQUIRED");
+    expect(result.evidence.find((item) => item.gate === "compatibleRematchEvidence")?.passed).toBe(false);
+  });
+
+  it("rejects conflicting repeated-series fixture evidence", () => {
+    const result = mapEvents(
+      { ...sabaLol, rematchCandidate: true, fixtureDiscriminator: "series-slot-1" },
+      { ...imLol, rematchCandidate: true, fixtureDiscriminator: "series-slot-2" },
+      policy
+    );
+
+    expect(result.status).toBe("REJECTED");
+    expect(result.evidence.find((item) => item.gate === "compatibleRematchEvidence")?.passed).toBe(false);
+  });
+});
+
+describe("mapEvents category-specific event scopes", () => {
+  it("rejects equal LoL scopes on Football events", () => {
+    const left = { ...sabaFootball, eventScope: "SERIES" } as unknown as NormalizedFootballEvent;
+    const right = { ...imFootball, eventScope: "SERIES" } as unknown as NormalizedFootballEvent;
+    const result = mapEvents(left, right, policy);
+
+    expect(result.status).toBe("REJECTED");
+    expect(result.evidence.find((item) => item.gate === "validCategoryEventScope")?.passed).toBe(false);
+  });
+
+  it("rejects equal Football scopes on LoL events", () => {
+    const left = { ...sabaLol, eventScope: "REGULAR_TIME" } as unknown as NormalizedLolEvent;
+    const right = { ...imLol, eventScope: "REGULAR_TIME" } as unknown as NormalizedLolEvent;
+    const result = mapEvents(left, right, policy);
+
+    expect(result.status).toBe("REJECTED");
+    expect(result.evidence.find((item) => item.gate === "validCategoryEventScope")?.passed).toBe(false);
+  });
+});
+
+describe("mapEvents alias evidence", () => {
+  it("records explicit alias source, canonical value and registry version", () => {
+    const result = mapEvents(sabaLol, imLol, policy);
+    const evidence = result.evidence.find((item) => item.gate === "sameLolTeams");
+
+    expect(result.status).toBe("VERIFIED");
+    expect(evidence?.passed).toBe(true);
+    expect(evidence?.actual).toContain("EXPLICIT_ALIAS");
+    expect(evidence?.actual).toContain("2026-08-09.mapping-1");
+    expect(evidence?.actual).toContain("gen_g");
+  });
+
+  it("requires review for a normalized name without explicit registry proof", () => {
+    const left = {
+      ...sabaLol,
+      participantA: "Mystery Team",
+      participantB: "T1",
+      canonicalParticipantA: "mystery_team",
+      canonicalParticipantB: "t1"
+    };
+    const right = {
+      ...imLol,
+      participantA: "Mystery Team",
+      participantB: "T1",
+      canonicalParticipantA: "mystery_team",
+      canonicalParticipantB: "t1",
+      liveState: { ...sabaLol.liveState! }
+    };
+    const result = mapEvents(left, right, policy);
+    const evidence = result.evidence.find((item) => item.gate === "sameLolTeams");
+
+    expect(result.status).toBe("REVIEW_REQUIRED");
+    expect(evidence?.passed).toBe(false);
+    expect(evidence?.reason).toContain("MISSING_MANDATORY_EVIDENCE");
+  });
+
+  it("rejects cross-provider canonical conflict even when both names lack explicit proof", () => {
+    const left = {
+      ...sabaLol,
+      participantA: "Mystery Team",
+      participantB: "T1",
+      canonicalParticipantA: "mystery_team",
+      canonicalParticipantB: "t1"
+    };
+    const right = {
+      ...imLol,
+      participantA: "Other Team",
+      participantB: "T1",
+      canonicalParticipantA: "other_team",
+      canonicalParticipantB: "t1",
+      liveState: { ...sabaLol.liveState! }
+    };
+    const result = mapEvents(left, right, policy);
+    const evidence = result.evidence.find((item) => item.gate === "sameLolTeams");
+
+    expect(result.status).toBe("REJECTED");
+    expect(evidence?.passed).toBe(false);
+    expect(evidence?.reason).toContain("CONTRADICTION");
+  });
+
+  it("rejects a caller canonical ID that conflicts with explicit alias evidence", () => {
+    const result = mapEvents(
+      sabaLol,
+      { ...imLol, canonicalParticipantA: "weibo" },
+      policy
+    );
+
+    expect(result.status).toBe("REJECTED");
+    expect(result.evidence.find((item) => item.gate === "sameLolTeams")?.passed).toBe(false);
   });
 });
 
