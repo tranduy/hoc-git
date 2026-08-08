@@ -4,7 +4,13 @@ import {
   buildFootballEventKey,
   buildLolEventKey
 } from "./canonical-key.js";
-import { normalizeName, resolveAlias } from "./normalize-name.js";
+import {
+  AliasRegistryError,
+  normalizeName,
+  resolveAlias,
+  resolveAliasForCategory,
+  type VersionedAliasRegistry
+} from "./normalize-name.js";
 
 describe("normalizeName", () => {
   it("removes accents and punctuation while collapsing whitespace and underscores", () => {
@@ -31,6 +37,35 @@ describe("resolveAlias", () => {
       canonical: "na_vi",
       source: "NORMALIZED_NAME"
     });
+  });
+
+  it("resolves the same spelling independently within each category and records its version", () => {
+    const registry: VersionedAliasRegistry = {
+      version: "2026-08-09.1",
+      aliases: {
+        FOOTBALL: { navi: "navy_fc" },
+        LOL: { navi: "natus_vincere" }
+      }
+    };
+
+    expect(resolveAliasForCategory("NAVI", "LOL", registry)).toEqual({
+      category: "LOL",
+      normalized: "navi",
+      canonical: "natus_vincere",
+      source: "EXPLICIT_ALIAS",
+      registryVersion: "2026-08-09.1"
+    });
+    expect(resolveAliasForCategory("NAVI", "FOOTBALL", registry).canonical).toBe("navy_fc");
+    expect(() => resolveAlias("NAVI", registry.aliases)).toThrow("ambiguous explicit alias");
+  });
+
+  it("rejects a versioned alias registry without a real version", () => {
+    const registry: VersionedAliasRegistry = {
+      version: " ",
+      aliases: { FOOTBALL: {}, LOL: {} }
+    };
+
+    expect(() => resolveAliasForCategory("NAVI", "LOL", registry)).toThrow(AliasRegistryError);
   });
 });
 
@@ -74,6 +109,32 @@ describe("canonical event keys", () => {
   it("sorts LoL teams for candidate identity lookup", () => {
     expect(buildLolEventKey(lol)).toBe(
       buildLolEventKey({ ...lol, teamA: "t1", teamB: "gen_g" })
+    );
+  });
+
+  it("uses code-unit ordering for normalized LoL participant IDs", () => {
+    expect(buildLolEventKey({ ...lol, teamA: "a_1", teamB: "a1" })).toBe(
+      "lol|lck|summer_2026|2026-08-09T12:00:00.000Z|a1|a_1|3"
+    );
+  });
+
+  it("resolves LoL aliases with a supplied versioned registry", () => {
+    const aliasRegistry: VersionedAliasRegistry = {
+      version: "2026-08-09.1",
+      aliases: {
+        FOOTBALL: {},
+        LOL: { navi: "natus_vincere" }
+      }
+    };
+
+    expect(buildLolEventKey({ ...lol, teamA: "NAVI", aliasRegistry })).toBe(
+      buildLolEventKey({ ...lol, teamA: "natus_vincere", aliasRegistry })
+    );
+  });
+
+  it("treats participant values as already-canonical IDs when no registry is supplied", () => {
+    expect(buildLolEventKey({ ...lol, teamA: "NAVI" })).not.toBe(
+      buildLolEventKey({ ...lol, teamA: "natus_vincere" })
     );
   });
 

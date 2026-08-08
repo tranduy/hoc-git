@@ -1,4 +1,8 @@
-import { normalizeName } from "./normalize-name.js";
+import {
+  normalizeName,
+  resolveAliasForCategory,
+  type VersionedAliasRegistry
+} from "./normalize-name.js";
 
 export class CanonicalIdentityError extends Error {
   constructor(message: string) {
@@ -14,6 +18,8 @@ export interface FootballIdentity {
   readonly home: string;
   readonly away: string;
   readonly eventScope: string;
+  /** Optional versioned aliases; without one, participants are canonical IDs. */
+  readonly aliasRegistry?: VersionedAliasRegistry;
 }
 
 export interface LolIdentity {
@@ -31,6 +37,8 @@ export interface LolIdentity {
   readonly participantA?: string;
   readonly participantB?: string;
   readonly bestOf: number;
+  /** Optional versioned aliases; without one, participants are canonical IDs. */
+  readonly aliasRegistry?: VersionedAliasRegistry;
 }
 
 function requiredName(value: string | undefined, field: string): string {
@@ -77,6 +85,31 @@ function canonicalKey(parts: readonly string[]): string {
   return parts.join("|");
 }
 
+function canonicalParticipant(
+  value: string | undefined,
+  field: string,
+  category: "FOOTBALL" | "LOL",
+  aliasRegistry: VersionedAliasRegistry | undefined
+): string {
+  const normalized = requiredName(value, field);
+
+  return aliasRegistry
+    ? resolveAliasForCategory(normalized, category, aliasRegistry).canonical
+    : normalized;
+}
+
+function compareCanonicalIds(left: string, right: string): number {
+  if (left < right) {
+    return -1;
+  }
+
+  if (left > right) {
+    return 1;
+  }
+
+  return 0;
+}
+
 /** Preserves provider home/away orientation as part of Football identity. */
 export function buildFootballEventKey(input: FootballIdentity): string {
   return canonicalKey([
@@ -84,8 +117,8 @@ export function buildFootballEventKey(input: FootballIdentity): string {
     requiredName(input.competition, "competition"),
     requiredName(input.seasonStage, "seasonStage"),
     requiredUtc(input.kickoffUtc, "kickoffUtc"),
-    requiredName(input.home, "home"),
-    requiredName(input.away, "away"),
+    canonicalParticipant(input.home, "home", "FOOTBALL", input.aliasRegistry),
+    canonicalParticipant(input.away, "away", "FOOTBALL", input.aliasRegistry),
     requiredName(input.eventScope, "eventScope")
   ]);
 }
@@ -95,10 +128,22 @@ export function buildFootballEventKey(input: FootballIdentity): string {
  * remain separate mapping evidence and is intentionally absent from this key.
  */
 export function buildLolEventKey(input: LolIdentity): string {
-  const teamA = requiredName(input.teamA ?? input.participantA, "teamA");
-  const teamB = requiredName(input.teamB ?? input.participantB, "teamB");
+  const teamA = canonicalParticipant(
+    input.teamA ?? input.participantA,
+    "teamA",
+    "LOL",
+    input.aliasRegistry
+  );
+  const teamB = canonicalParticipant(
+    input.teamB ?? input.participantB,
+    "teamB",
+    "LOL",
+    input.aliasRegistry
+  );
   const [firstTeam, secondTeam] =
-    teamA.localeCompare(teamB) <= 0 ? ([teamA, teamB] as const) : ([teamB, teamA] as const);
+    compareCanonicalIds(teamA, teamB) <= 0
+      ? ([teamA, teamB] as const)
+      : ([teamB, teamA] as const);
 
   return canonicalKey([
     "lol",
