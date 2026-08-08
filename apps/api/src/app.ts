@@ -52,15 +52,6 @@ export function safeResponseSerializer(response: unknown): { readonly statusCode
   return { statusCode: typeof value.statusCode === "number" ? value.statusCode : 0 };
 }
 
-function isSameOrigin(origin: string, protocol: string, host: string | undefined): boolean {
-  if (host === undefined) return false;
-  try {
-    return new URL(origin).origin === `${protocol}://${host}`;
-  } catch {
-    return false;
-  }
-}
-
 export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyInstance {
   const viteOrigin = validateViteOrigin(options.viteOrigin ?? defaultViteOrigin);
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? defaultHeartbeatIntervalMs;
@@ -100,13 +91,13 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
     }
   });
   void app.register(websocket, { options: { maxPayload: maxBufferedBytes } });
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (request.url.startsWith("/api/")) reply.header("cache-control", "no-store");
+    return payload;
+  });
   app.addHook("onRequest", async (request, reply) => {
     const origin = request.headers.origin;
-    if (
-      origin !== undefined &&
-      origin !== viteOrigin &&
-      !isSameOrigin(origin, request.protocol, request.headers.host)
-    ) {
+    if (origin !== undefined && origin !== viteOrigin) {
       await reply.code(403).send({ error: "Origin not allowed" });
     }
   });

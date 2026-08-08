@@ -18,14 +18,12 @@ export function registerHealthRoute(app: FastifyInstance, runtime: Runtime): voi
       && [...expectedProviderStatuses].every((identity) => statusIdentities.has(identity))
       && snapshot.providerStatuses.every((provider) => provider.status === "LIVE");
 
-    return reply
-      .header("cache-control", "no-store")
-      .send({
-        status: allExpectedProvidersLive ? "ok" : "degraded",
-        mode: "OBSERVE",
-        executionReady: false,
-        revision: snapshot.revision,
-        providerStatuses: snapshot.providerStatuses
-      });
+    return reply.send({
+      status: allExpectedProvidersLive ? "ok" : "degraded",
+      mode: "OBSERVE",
+      executionReady: false,
+      revision: snapshot.revision,
+      providerStatuses: snapshot.providerStatuses
+    });
   });
 }

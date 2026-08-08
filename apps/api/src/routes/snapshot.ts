@@ -66,7 +66,7 @@ export function registerSnapshotRoute(app: FastifyInstance, runtime: Runtime): v
       const body = request.query.category === undefined
         ? AppSnapshotSchema.parse(snapshot)
         : filterSnapshot(snapshot, request.query.category);
-      return reply.header("cache-control", "no-store").send(body);
+      return reply.send(body);
     }
   );
 }

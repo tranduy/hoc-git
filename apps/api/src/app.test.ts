@@ -8,7 +8,7 @@ import {
 } from "@tool-chenh/adapters";
 import { AppSnapshotSchema, type Category } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import type WebSocket from "ws";
+import { WebSocket as WebSocketClient, type WebSocket } from "ws";
 import {
   buildApp,
   safeRequestSerializer,
@@ -349,7 +349,7 @@ describe("Fastify snapshot API", () => {
     expect(response.json().providerStatuses).toHaveLength(5);
   });
 
-  it("allows only no-origin, same-origin, or the configured local Vite origin", async () => {
+  it("allows only no-origin requests or the independently configured Vite origin", async () => {
     const runtime = await readyRuntime();
     const app = buildApp(runtime, { viteOrigin: "http://127.0.0.1:4311" });
     apps.push(app);
@@ -371,8 +371,19 @@ describe("Fastify snapshot API", () => {
       url: "/api/health",
       headers: { host: "127.0.0.1:4310", origin: "http://127.0.0.1:4310" }
     });
-    expect(sameOrigin.statusCode).toBe(200);
-    expect(sameOrigin.headers["access-control-allow-origin"]).toBeUndefined();
+    expect(sameOrigin.statusCode).toBe(403);
+
+    const attackerControlledHost = await app.inject({
+      method: "GET",
+      url: "/api/health",
+      headers: {
+        host: "attacker.example",
+        origin: "http://attacker.example",
+        "x-forwarded-host": "127.0.0.1:4310",
+        "x-forwarded-proto": "http"
+      }
+    });
+    expect(attackerControlledHost.statusCode).toBe(403);
 
     const foreign = await app.inject({
       method: "GET",
@@ -387,9 +398,78 @@ describe("Fastify snapshot API", () => {
     });
     expect(wrongScheme.statusCode).toBe(403);
   });
+
+  it("sets no-store on every API response including early and generated errors", async () => {
+    const runtime = await readyRuntime();
+    const app = buildApp(runtime, { viteOrigin: "http://127.0.0.1:4311" });
+    apps.push(app);
+    app.get("/api/test-server-error", async () => {
+      throw new Error("synthetic test failure");
+    });
+
+    const responses = await Promise.all([
+      app.inject({
+        method: "GET",
+        url: "/api/health",
+        headers: { origin: "http://attacker.example" }
+      }),
+      app.inject({ method: "GET", url: "/api/snapshot?category=TENNIS" }),
+      app.inject({ method: "GET", url: "/api/not-found" }),
+      app.inject({ method: "GET", url: "/api/test-server-error" })
+    ]);
+
+    expect(responses.map((response) => response.statusCode)).toEqual([403, 400, 404, 500]);
+    expect(responses.map((response) => response.headers["cache-control"])).toEqual([
+      "no-store",
+      "no-store",
+      "no-store",
+      "no-store"
+    ]);
+  });
 });
 
 describe("Fastify realtime API", () => {
+  it("rejects an upgrade whose Origin only matches attacker-controlled host headers", async () => {
+    const adapter = new AdvancingFixtureAdapter();
+    const runtime = new Runtime({ adapters: [adapter], clock });
+    await runtime.start(new AbortController().signal);
+    const app = buildApp(runtime, { viteOrigin: "http://127.0.0.1:4311" });
+    apps.push(app);
+    const address = new URL(await app.listen({ host: "127.0.0.1", port: 0 }));
+    address.protocol = "ws:";
+    address.pathname = "/api/realtime";
+
+    const statusCode = await new Promise<number>((resolve, reject) => {
+      let settled = false;
+      const socket = new WebSocketClient(address, {
+        origin: "http://attacker.example",
+        headers: {
+          host: "attacker.example",
+          "x-forwarded-host": "127.0.0.1:4310",
+          "x-forwarded-proto": "http"
+        }
+      });
+      sockets.push(socket);
+      socket.once("unexpected-response", (_request, response) => {
+        settled = true;
+        resolve(response.statusCode ?? 0);
+      });
+      socket.once("open", () => {
+        if (settled) return;
+        settled = true;
+        socket.terminate();
+        reject(new Error("Attacker-controlled WebSocket origin was accepted"));
+      });
+      socket.once("error", (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      });
+    });
+
+    expect(statusCode).toBe(403);
+  });
+
   it("drops a slow client before queuing another revision", () => {
     let closedWith: number | undefined;
     const socket = {
