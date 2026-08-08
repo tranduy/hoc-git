@@ -55,7 +55,7 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
     : route === "/football" ? <CategoryPage key="FOOTBALL" category="FOOTBALL" snapshot={snapshot} />
     : route === "/lol" ? <CategoryPage key="LOL" category="LOL" snapshot={snapshot} />
     : route === "/opportunities" ? <OpportunitiesPage snapshot={snapshot} connectionState={connectionState} />
-    : <MappingsPage snapshot={snapshot} />;
+    : <MappingsPage snapshot={snapshot} connectionState={connectionState} />;
 
   return (
     <div className="app-shell">

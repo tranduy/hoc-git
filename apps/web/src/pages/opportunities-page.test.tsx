@@ -1,6 +1,7 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import type { AppSnapshot } from "@tool-chenh/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { OpportunityCard } from "../components/opportunity-card.js";
 import { OpportunitiesPage } from "./opportunities-page.js";
 
 const snapshot: AppSnapshot = {
@@ -22,7 +23,7 @@ const snapshot: AppSnapshot = {
 };
 
 describe("OpportunitiesPage", () => {
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
 
   it("renders each verified opportunity with exact leg, payout, constraint, and freshness evidence", () => {
     render(<OpportunitiesPage snapshot={snapshot} connectionState="LIVE" />);
@@ -37,12 +38,21 @@ describe("OpportunitiesPage", () => {
     expect(within(card).getByText("HIGH confidence")).toBeTruthy();
     expect(within(card).getByRole("heading", { name: /SABA.*Over 2\.5/u })).toBeTruthy();
     expect(within(card).getByRole("heading", { name: /IM.*Under 2\.5/u })).toBeTruthy();
+    expect(within(card).getByLabelText("Raw odds: 0.98")).toBeTruthy();
+    expect(within(card).getByLabelText("Raw odds: 1.02")).toBeTruthy();
+    expect(within(card).getByLabelText("Decimal odds: 1.98")).toBeTruthy();
+    expect(within(card).getByLabelText("Decimal odds: 2.02")).toBeTruthy();
     expect(within(card).getByLabelText("Effective decimal odds: 1.98")).toBeTruthy();
     expect(within(card).getByLabelText("Effective decimal odds: 2.02")).toBeTruthy();
     expect(within(card).getAllByText("100.00")).toHaveLength(2);
+    expect(within(card).getAllByLabelText("Outcome payout: 100")).toHaveLength(2);
     expect(within(card).getByText("1.00%")).toBeTruthy();
+    expect(within(card).getByLabelText("Worst-case profit: 1.00")).toBeTruthy();
+    expect(within(card).getByLabelText("ROI: 0.01")).toBeTruthy();
     expect(within(card).getAllByTitle("1250 ms from the server snapshot")).toHaveLength(2);
+    expect(within(card).getByTitle("980 ms from the server snapshot")).toBeTruthy();
     expect(within(card).getByLabelText("Source timestamp: 1,799,999,998,750 ms")).toBeTruthy();
+    expect(within(card).getByLabelText("Source timestamp: 1,799,999,999,020 ms")).toBeTruthy();
     expect(within(card).getByTitle("50.505050505050505")).toBeTruthy();
     expect(within(card).getByTitle("49.504950495049505")).toBeTruthy();
     expect(within(card).getByLabelText("Minimum stake: 10; maximum stake: 500")).toBeTruthy();
@@ -64,5 +74,60 @@ describe("OpportunitiesPage", () => {
 
     expect(screen.getByRole("heading", { name: "Stale market data" })).toBeTruthy();
     expect(screen.getByText(/Wait for a fresh server snapshot/i)).toBeTruthy();
+  });
+
+  it("fails closed for non-HIGH confidence", () => {
+    render(<OpportunitiesPage snapshot={{ ...snapshot, opportunities: [{ ...snapshot.opportunities[0]!, executionConfidence: "BLOCKED" }] }} connectionState="LIVE" />);
+
+    expect(screen.queryByRole("article")).toBeNull();
+    expect(screen.getByRole("heading", { name: "No verified opportunities" })).toBeTruthy();
+  });
+
+  it("fails closed for a suspended leg", () => {
+    const original = snapshot.opportunities[0]!;
+    const suspended = { ...original.legs[0]!, quoteStatus: "SUSPENDED" as const, eligible: false, ineligibleReasons: ["SUSPENDED" as const] };
+    render(<OpportunitiesPage snapshot={{ ...snapshot, opportunities: [{ ...original, legs: [suspended, original.legs[1]!] }] }} connectionState="LIVE" />);
+
+    expect(screen.queryByRole("article")).toBeNull();
+    expect(screen.getByRole("heading", { name: "No verified opportunities" })).toBeTruthy();
+  });
+
+  it("fails closed for a same-market or category-wide blocking diagnostic", () => {
+    const sameMarket = { code: "NEGATIVE_MARGIN", category: "FOOTBALL" as const, canonicalMarketId: "market-1", reason: "margin invalid", mappingEvidence: [] };
+    const categoryWide = { ...sameMarket, canonicalMarketId: null, reason: "feed guard" };
+    const { rerender } = render(<OpportunitiesPage snapshot={{ ...snapshot, blockedDiagnostics: [sameMarket] }} connectionState="LIVE" />);
+
+    expect(screen.queryByRole("article")).toBeNull();
+    rerender(<OpportunitiesPage snapshot={{ ...snapshot, blockedDiagnostics: [categoryWide] }} connectionState="LIVE" />);
+    expect(screen.queryByRole("article")).toBeNull();
+  });
+
+  it("hides a stale affected card while retaining an unrelated verified card and a scoped warning", () => {
+    const second = { ...snapshot.opportunities[0]!, opportunityId: "opportunity-2", canonicalEventId: "event-2", canonicalMarketId: "market-2", category: "LOL" as const };
+    const event2 = { ...snapshot.events[0]!, canonicalEventId: "event-2", category: "LOL" as const, participantA: "Comets", participantB: "Phoenix" };
+    render(<OpportunitiesPage snapshot={{ ...snapshot, events: [...snapshot.events, event2], opportunities: [snapshot.opportunities[0]!, second], blockedDiagnostics: [{ code: "STALE", category: "FOOTBALL", canonicalMarketId: "market-1", reason: "football quote expired", mappingEvidence: [] }] }} connectionState="LIVE" />);
+
+    expect(screen.queryByRole("article", { name: /Northbridge vs Riverside/i })).toBeNull();
+    expect(screen.getByRole("article", { name: /Comets vs Phoenix/i })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("football quote expired");
+  });
+
+  it("resets displayed quote age when a newer server revision arrives", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(0));
+    const { rerender } = render(<OpportunityCard opportunity={snapshot.opportunities[0]!} event={snapshot.events[0]} revision={8} />);
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(screen.getAllByLabelText("Quote age: 2,250 ms")).toHaveLength(2);
+
+    const fresh = { ...snapshot.opportunities[0]!, quoteAgeMs: 10, legs: snapshot.opportunities[0]!.legs.map((leg) => ({ ...leg, quoteAgeMs: 10 })) };
+    rerender(<OpportunityCard opportunity={fresh} event={snapshot.events[0]} revision={9} />);
+    expect(screen.getAllByLabelText("Quote age: 10 ms")).toHaveLength(3);
+  });
+
+  it("displays the supplied confidence value rather than a hardcoded label", () => {
+    render(<OpportunityCard opportunity={{ ...snapshot.opportunities[0]!, executionConfidence: "BLOCKED" }} event={snapshot.events[0]} revision={8} />);
+
+    expect(screen.getByText("BLOCKED confidence")).toBeTruthy();
+    expect(screen.queryByText("HIGH confidence")).toBeNull();
   });
 });

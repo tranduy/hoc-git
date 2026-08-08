@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CanonicalEvent, Opportunity, StakeLeg } from "@tool-chenh/contracts";
 
 const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
@@ -50,9 +50,9 @@ function LegDetails({ leg, renderedAtMs }: { readonly leg: StakeLeg; readonly re
   );
 }
 
-export function OpportunityCard({ opportunity, event }: { readonly opportunity: Opportunity; readonly event: CanonicalEvent | undefined }) {
-  const [renderedAtMs] = useState(() => Date.now());
+export function OpportunityCard({ opportunity, event, revision }: { readonly opportunity: Opportunity; readonly event: CanonicalEvent | undefined; readonly revision: number }) {
   const [, setTick] = useState(0);
+  const observedAtMs = useMemo(() => Date.now(), [revision]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setTick((value) => value + 1), 1_000);
@@ -72,12 +72,12 @@ export function OpportunityCard({ opportunity, event }: { readonly opportunity: 
         <dl className="opportunity-summary">
           <div><dt>Worst-case profit</dt><dd><ExactNumber label="Worst-case profit" value={opportunity.worstCaseProfit} /></dd></div>
           <div><dt>ROI</dt><dd title={opportunity.roi} aria-label={`ROI: ${opportunity.roi}`}>{formatPercent(opportunity.roi)}</dd></div>
-          <div><dt>Confidence</dt><dd className="confidence-high">HIGH confidence</dd></div>
-          <div><dt>Server quote age</dt><dd><QuoteAge ageMs={opportunity.quoteAgeMs} renderedAtMs={renderedAtMs} /></dd></div>
+          <div><dt>Confidence</dt><dd className={opportunity.executionConfidence === "HIGH" ? "confidence-high" : "confidence-blocked"}>{opportunity.executionConfidence} confidence</dd></div>
+          <div><dt>Server quote age</dt><dd><QuoteAge ageMs={opportunity.quoteAgeMs} renderedAtMs={observedAtMs} /></dd></div>
         </dl>
       </section>
       <ol className="opportunity-legs" aria-label="Exact stakes and outcome payouts">
-        {opportunity.legs.map((leg) => <LegDetails key={`${leg.provider}:${leg.providerSelectionId}`} leg={leg} renderedAtMs={renderedAtMs} />)}
+        {opportunity.legs.map((leg) => <LegDetails key={`${leg.provider}:${leg.providerSelectionId}`} leg={leg} renderedAtMs={observedAtMs} />)}
       </ol>
     </article>
   );

@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { AppSnapshot } from "@tool-chenh/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app.js";
 
 const snapshot: AppSnapshot = {
@@ -118,5 +118,17 @@ describe("App navigation", () => {
     window.history.forward();
     await waitFor(() => expect(screen.getByRole("heading", { name: "LoL" })).toBeTruthy());
     expect(screen.getByRole("status").textContent).toContain("LoL");
+  });
+
+  it("labels the mapping view while its first snapshot is loading", () => {
+    vi.stubGlobal("fetch", () => new Promise<Response>(() => {}));
+    window.history.pushState({}, "", "/mappings");
+    try {
+      render(<App />);
+      expect(screen.getByRole("heading", { name: "Loading Mapping Review" })).toBeTruthy();
+      expect(screen.getByText(/No opportunity or mapping decision is available yet/i)).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
