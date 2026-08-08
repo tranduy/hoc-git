@@ -142,6 +142,12 @@ describe("fixture pipeline", () => {
     expect(initial.counts.LOL).toEqual({ events: 2, markets: 2 });
     expect(initial.events.filter((event) => event.mappingStatus === "VERIFIED")).toHaveLength(2);
     expect(initial.events.filter((event) => event.mappingStatus !== "VERIFIED")).toHaveLength(2);
+    expect(initial.providerStatuses.map((status) => status.adapterId).sort()).toEqual([
+      "im-football",
+      "im-lol",
+      "saba-football",
+      "saba-lol"
+    ]);
     expect(initial.opportunities).toHaveLength(1);
     expect(initial.opportunities[0]?.category).toBe("FOOTBALL");
 

@@ -168,6 +168,7 @@ export type ProviderConnectionState =
   | "SCHEMA_ERROR";
 
 export interface ProviderConnectionStatus {
+  readonly adapterId: string;
   readonly provider: string;
   readonly category: Category;
   readonly status: ProviderConnectionState;

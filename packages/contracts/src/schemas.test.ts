@@ -3,6 +3,7 @@ import {
   AppSnapshotSchema,
   CanonicalMarketSchema,
   OpportunitySchema,
+  ProviderConnectionStatusSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema,
   StakeLegSchema
@@ -148,6 +149,27 @@ describe("ProviderMarketSchema", () => {
   });
 });
 
+describe("ProviderConnectionStatusSchema", () => {
+  const completeStatus = () => ({
+    adapterId: "saba-football",
+    provider: "SABA",
+    category: "FOOTBALL",
+    status: "LIVE",
+    detail: null,
+    updatedAtMs: 1
+  });
+
+  it("requires a nonblank adapter identity", () => {
+    expect(ProviderConnectionStatusSchema.safeParse(completeStatus()).success).toBe(true);
+    expect(ProviderConnectionStatusSchema.safeParse({
+      ...completeStatus(),
+      adapterId: "   "
+    }).success).toBe(false);
+    const { adapterId: _adapterId, ...missing } = completeStatus();
+    expect(ProviderConnectionStatusSchema.safeParse(missing).success).toBe(false);
+  });
+});
+
 describe("read-model category compatibility", () => {
   it("rejects a Football canonical market with a LoL market type", () => {
     expect(CanonicalMarketSchema.safeParse({
@@ -197,6 +219,21 @@ describe("StakeLegSchema", () => {
 });
 
 describe("AppSnapshotSchema", () => {
+  it("rejects duplicate adapter/category status identities", () => {
+    const status = {
+      adapterId: "saba-football",
+      provider: "SABA",
+      category: "FOOTBALL",
+      status: "LIVE",
+      detail: null,
+      updatedAtMs: 1
+    } as const;
+    expect(AppSnapshotSchema.safeParse({
+      ...completeSnapshot(),
+      providerStatuses: [status, { ...status, status: "SCHEMA_ERROR" }]
+    }).success).toBe(false);
+  });
+
   it("accepts a HIGH opportunity for a verified market with eligible open legs", () => {
     expect(AppSnapshotSchema.safeParse(completeSnapshot()).success).toBe(true);
   });

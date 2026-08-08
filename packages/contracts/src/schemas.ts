@@ -263,6 +263,7 @@ export const ProviderConnectionStateSchema = z.enum([
 ]) satisfies z.ZodType<ProviderConnectionState>;
 
 export const ProviderConnectionStatusSchema = z.strictObject({
+  adapterId: z.string().trim().min(1),
   provider: z.string(),
   category: CategorySchema,
   status: ProviderConnectionStateSchema,
@@ -299,6 +300,19 @@ export const AppSnapshotSchema = z.strictObject({
   opportunities: z.array(OpportunitySchema),
   blockedDiagnostics: z.array(BlockedDiagnosticSchema)
 }).superRefine((snapshot, context) => {
+  const statusIdentities = new Set<string>();
+  snapshot.providerStatuses.forEach((status, statusIndex) => {
+    const identity = `${status.adapterId}\u0000${status.category}`;
+    if (statusIdentities.has(identity)) {
+      context.addIssue({
+        code: "custom",
+        path: ["providerStatuses", statusIndex, "adapterId"],
+        message: "adapter/category status identities must be unique"
+      });
+    }
+    statusIdentities.add(identity);
+  });
+
   const marketsById = new Map(snapshot.markets.map((market) => [market.canonicalMarketId, market]));
 
   snapshot.opportunities.forEach((opportunity, opportunityIndex) => {

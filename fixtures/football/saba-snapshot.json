@@ -4,7 +4,7 @@
   "provider": "SABA",
   "category": "FOOTBALL",
   "records": [
-    { "offsetMs": 0, "kind": "STATUS", "payload": { "provider": "SABA", "category": "FOOTBALL", "status": "LIVE", "detail": "Synthetic fixture connected", "updatedAtMs": 0 } },
+    { "offsetMs": 0, "kind": "STATUS", "payload": { "adapterId": "saba-football", "provider": "SABA", "category": "FOOTBALL", "status": "LIVE", "detail": "Synthetic fixture connected", "updatedAtMs": 0 } },
     { "offsetMs": 10, "kind": "EVENT", "payload": { "provider": "SABA", "category": "FOOTBALL", "providerEventId": "saba-fb-verified", "competition": "Premier League", "seasonStage": "2026/27", "startAtUtcMs": 1786305600000, "participantA": "Northbridge FC", "participantB": "Riverside United", "eventScope": "REGULATION", "bestOf": null, "isLive": false } },
     { "offsetMs": 20, "kind": "EVENT", "payload": { "provider": "SABA", "category": "FOOTBALL", "providerEventId": "saba-fb-rejected", "competition": "Premier League", "seasonStage": "2026/27", "startAtUtcMs": 1786312800000, "participantA": "City Academy", "participantB": "United Academy", "eventScope": "REGULATION", "bestOf": null, "isLive": false } },
     { "offsetMs": 30, "kind": "MARKET", "payload": { "provider": "SABA", "category": "FOOTBALL", "providerEventId": "saba-fb-verified", "providerMarketId": "saba-fb-total-25", "marketType": "FT_TOTAL", "scope": "FULL_TIME", "line": "2.5", "settlementProfile": "football-regulation-including-added-time", "status": "OPEN" } },

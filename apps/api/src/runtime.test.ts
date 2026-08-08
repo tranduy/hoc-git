@@ -1,6 +1,19 @@
 import { readFileSync } from "node:fs";
-import { FixtureAdapter, type FixtureSnapshot, type ReplayScheduler } from "@tool-chenh/adapters";
-import { AppSnapshotSchema, type Category } from "@tool-chenh/contracts";
+import {
+  FixtureAdapter,
+  type FixtureSnapshot,
+  type ProviderAdapter,
+  type ProviderSink,
+  type ReplayScheduler
+} from "@tool-chenh/adapters";
+import {
+  AppSnapshotSchema,
+  type Category,
+  type ProviderConnectionStatus,
+  type ProviderEvent,
+  type ProviderMarket,
+  type ProviderQuote
+} from "@tool-chenh/contracts";
 import { describe, expect, it } from "vitest";
 import { Runtime, type RuntimeClock } from "./runtime.js";
 
@@ -73,7 +86,130 @@ function adapters(secret?: string) {
   });
 }
 
+function emitRecord(
+  sink: ProviderSink,
+  record: FixtureSnapshot["records"][number],
+  quoteIdPrefix = ""
+): void {
+  switch (record.kind) {
+    case "STATUS":
+      sink.onStatus(record.payload as ProviderConnectionStatus);
+      return;
+    case "EVENT":
+      sink.onEvent(record.payload as ProviderEvent);
+      return;
+    case "MARKET":
+      sink.onMarket(record.payload as ProviderMarket);
+      return;
+    case "QUOTE": {
+      const quote = record.payload as ProviderQuote;
+      sink.onQuote({
+        ...quote,
+        providerSelectionId: `${quoteIdPrefix}${quote.providerSelectionId}`
+      });
+    }
+  }
+}
+
 describe("Runtime", () => {
+  it("isolates subscriber failures without leaking or misclassifying them", async () => {
+    const secret = "subscriber-secret-must-not-escape";
+    const runtime = new Runtime({ adapters: adapters(), clock, mappingPolicy: mappingPolicy() });
+    const received: number[] = [];
+    runtime.subscribe(() => {
+      throw new Error(secret);
+    });
+    runtime.subscribe((snapshot) => received.push(snapshot.revision));
+
+    await expect(runtime.start(new AbortController().signal)).resolves.toBeUndefined();
+
+    expect(received.length).toBeGreaterThan(1);
+    expect(received.every((revision, index) => index === 0 || revision > received[index - 1]!)).toBe(true);
+    expect(runtime.getSnapshot().opportunities).toHaveLength(2);
+    const diagnostics = runtime.getDiagnostics();
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "SUBSCRIBER_FAILURE", reason: "snapshot subscriber failed" })
+    ]));
+    expect(diagnostics.some((item) => item.code === "ADAPTER_FAILURE")).toBe(false);
+    expect(JSON.stringify(diagnostics)).not.toContain(secret);
+  });
+
+  it("quarantines one adapter without suppressing a healthy sibling source", async () => {
+    const saba = loadFixture("football/saba-snapshot.json");
+    const hiddenEvent = {
+      ...(saba.records.find((record) => record.kind === "EVENT")!.payload as ProviderEvent),
+      providerEventId: "must-stay-quarantined"
+    };
+    const failing: ProviderAdapter = {
+      id: "failing-saba-football",
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        for (const record of saba.records.filter((item) => item.offsetMs <= 70)) {
+          if (record.kind === "MARKET") {
+            sink.onMarket({ ...(record.payload as ProviderMarket), status: "SUSPENDED" });
+          } else {
+            emitRecord(sink, record, "failing-");
+          }
+        }
+        sink.onSchemaError({
+          code: "SCHEMA_ERROR",
+          adapterId: this.id,
+          provider: "SABA",
+          category: "FOOTBALL",
+          recordKind: "EVENT",
+          offsetMs: 1,
+          issues: [{ code: "unrecognized_keys", path: ["authorization"] }]
+        });
+        sink.onEvent(hiddenEvent);
+      }
+    };
+    const healthySibling: ProviderAdapter = {
+      id: "healthy-saba-football",
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        for (const record of saba.records.filter((item) => item.offsetMs <= 90)) {
+          emitRecord(sink, record);
+        }
+      }
+    };
+    const im = loadFixture("football/im-snapshot.json");
+    const healthyIm: ProviderAdapter = {
+      id: "im-football",
+      categories: ["FOOTBALL"],
+      async start(sink): Promise<void> {
+        for (const record of im.records.filter((item) => item.offsetMs <= 90)) {
+          emitRecord(sink, record);
+        }
+      }
+    };
+    for (const siblings of [
+      [failing, healthySibling],
+      [healthySibling, failing]
+    ]) {
+      const runtime = new Runtime({
+        adapters: [healthyIm, ...siblings],
+        clock,
+        mappingPolicy: mappingPolicy()
+      });
+
+      await runtime.start(new AbortController().signal);
+
+      const snapshot = runtime.getSnapshot();
+      expect(snapshot.counts.FOOTBALL).toEqual({ events: 2, markets: 2 });
+      expect(snapshot.opportunities.map((opportunity) => opportunity.category)).toEqual(["FOOTBALL"]);
+      expect(snapshot.events.flatMap((event) => event.providerEventIds)).not.toContain("must-stay-quarantined");
+      expect(snapshot.providerStatuses.filter((status) =>
+        status.provider === "SABA" && status.category === "FOOTBALL"
+      ).map((status) => ({ adapterId: status.adapterId, status: status.status }))).toEqual([
+        { adapterId: "failing-saba-football", status: "SCHEMA_ERROR" },
+        { adapterId: "healthy-saba-football", status: "LIVE" }
+      ]);
+      expect(runtime.getDiagnostics()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "SCHEMA_ERROR", adapterId: "failing-saba-football" })
+      ]));
+    }
+  });
+
   it("maximizes verified event pairs instead of consuming the shortest edge greedily", async () => {
     const baseMs = 1_786_305_600_000;
     const times: Readonly<Record<string, number>> = {

@@ -237,11 +237,14 @@ export class Runtime {
   readonly #opportunityPolicy: RuntimeOpportunityPolicy;
   readonly #events = new Map<string, ProviderEvent>();
   readonly #markets = new Map<string, ProviderMarket>();
-  readonly #quotes = new Map<string, ProviderQuote>();
+  readonly #marketsByAdapter = new Map<string, Map<string, ProviderMarket>>();
+  readonly #quotesByAdapter = new Map<string, Map<string, ProviderQuote>>();
+  readonly #activeMarketAdapters = new Map<string, string>();
+  readonly #quoteBookOwners = new Map<string, string>();
   readonly #providerStatuses = new Map<string, ProviderConnectionStatus>();
   readonly #listeners = new Set<SnapshotListener>();
   readonly #diagnostics: RuntimeDiagnostic[] = [];
-  readonly #quarantinedSources = new Set<string>();
+  readonly #quarantinedAdapters = new Set<string>();
   readonly #controllers = new Map<string, AbortController>();
   readonly #quoteBook: QuoteBook;
   readonly #opportunityEngine = new OpportunityEngine();
@@ -327,16 +330,16 @@ export class Runtime {
 
   #sink(adapterId: string): ProviderSink {
     return {
-      onEvent: (event) => this.#onEvent(event),
-      onMarket: (market) => this.#onMarket(market),
-      onQuote: (quote) => this.#onQuote(quote),
-      onStatus: (status) => this.#onStatus(status),
+      onEvent: (event) => this.#onEvent(adapterId, event),
+      onMarket: (market) => this.#onMarket(adapterId, market),
+      onQuote: (quote) => this.#onQuote(adapterId, quote),
+      onStatus: (status) => this.#onStatus(adapterId, status),
       onSchemaError: (error) => this.#onSchemaError(error, adapterId)
     };
   }
 
-  #onEvent(event: ProviderEvent): void {
-    if (this.#isQuarantined(event.provider, event.category)) return;
+  #onEvent(adapterId: string, event: ProviderEvent): void {
+    if (this.#isQuarantined(adapterId, event.category)) return;
     this.#events.set(providerEventKey(event), event);
     this.#rebuildCategory(event.category);
     this.#evaluateMarkets(new Set(this.#marketCandidates
@@ -345,9 +348,14 @@ export class Runtime {
     this.#publish();
   }
 
-  #onMarket(market: ProviderMarket): void {
-    if (this.#isQuarantined(market.provider, market.category)) return;
-    this.#markets.set(providerMarketKey(market), market);
+  #onMarket(adapterId: string, market: ProviderMarket): void {
+    if (this.#isQuarantined(adapterId, market.category)) return;
+    const key = providerMarketKey(market);
+    const adapterMarkets = this.#marketsByAdapter.get(adapterId) ?? new Map<string, ProviderMarket>();
+    adapterMarkets.set(key, market);
+    this.#marketsByAdapter.set(adapterId, adapterMarkets);
+    const activeOwner = this.#activeMarketAdapters.get(key);
+    if (activeOwner === undefined || activeOwner === adapterId) this.#markets.set(key, market);
     this.#rebuildTouchedMarket(market);
     this.#evaluateMarkets(new Set(this.#marketCandidates
       .filter((candidate) =>
@@ -358,10 +366,14 @@ export class Runtime {
     this.#publish();
   }
 
-  #onQuote(quote: ProviderQuote): void {
-    if (this.#isQuarantined(quote.provider, quote.category)) return;
-    this.#quotes.set(quoteKey(quote), quote);
-    const marketQuotes = [...this.#quotes.values()].filter((item) =>
+  #onQuote(adapterId: string, quote: ProviderQuote): void {
+    if (this.#isQuarantined(adapterId, quote.category)) return;
+    const key = quoteKey(quote);
+    const adapterQuotes = this.#quotesByAdapter.get(adapterId) ?? new Map<string, ProviderQuote>();
+    adapterQuotes.set(key, quote);
+    this.#quotesByAdapter.set(adapterId, adapterQuotes);
+    const marketKey = providerMarketKey(quote);
+    const marketQuotes = [...adapterQuotes.values()].filter((item) =>
       item.provider === quote.provider &&
       item.providerEventId === quote.providerEventId &&
       item.providerMarketId === quote.providerMarketId
@@ -373,6 +385,15 @@ export class Runtime {
       clock: this.#clock.now(),
       quotes: marketQuotes.map((item) => ({ ...item, sequence: null }))
     });
+    if (result.accepted) {
+      this.#activeMarketAdapters.set(marketKey, adapterId);
+      const ownedMarket = this.#marketsByAdapter.get(adapterId)?.get(marketKey);
+      if (ownedMarket === undefined) this.#markets.delete(marketKey);
+      else this.#markets.set(marketKey, ownedMarket);
+      for (const entry of this.#quoteBook.snapshot(this.#clock.now()).quotes) {
+        if (entry.marketKey === marketKey) this.#quoteBookOwners.set(entry.key, adapterId);
+      }
+    }
     if (!result.accepted) {
       this.#recordDiagnostic({
         code: result.reason ?? "QUOTE_REJECTED",
@@ -393,10 +414,11 @@ export class Runtime {
     this.#publish();
   }
 
-  #onStatus(status: ProviderConnectionStatus): void {
-    if (this.#isQuarantined(status.provider, status.category)) return;
-    this.#providerStatuses.set(composite([status.provider, status.category]), {
+  #onStatus(adapterId: string, status: ProviderConnectionStatus): void {
+    if (this.#isQuarantined(adapterId, status.category)) return;
+    this.#providerStatuses.set(composite([adapterId, status.category]), {
       ...status,
+      adapterId,
       detail: status.detail === null ? null : "provider status update"
     });
     this.#publish();
@@ -404,21 +426,57 @@ export class Runtime {
 
   #onSchemaError(error: AdapterSchemaError, adapterId: string): void {
     const clock = this.#clock.now();
-    this.#quarantinedSources.add(composite([error.provider, error.category]));
-    this.#providerStatuses.set(composite([error.provider, error.category]), {
+    this.#quarantinedAdapters.add(composite([adapterId, error.category]));
+    this.#providerStatuses.set(composite([adapterId, error.category]), {
+      adapterId,
       provider: error.provider,
       category: error.category,
       status: "SCHEMA_ERROR",
       detail: "adapter/category quarantined after schema validation failure",
       updatedAtMs: clock.wallClockNowMs
     });
-    this.#quoteBook.apply({
-      source: { provider: error.provider, category: error.category },
-      kind: "FULL_SNAPSHOT",
-      transport: this.#transports[error.provider] ?? "WEBSOCKET",
-      clock,
-      quotes: [{}]
-    });
+    const ownedMarkets = new Map<string, Pick<ProviderQuote, "provider" | "providerEventId" | "providerMarketId">>();
+    for (const [key, market] of this.#marketsByAdapter.get(adapterId) ?? []) {
+      if (market.category === error.category) {
+        ownedMarkets.set(key, market);
+      }
+    }
+    for (const quote of this.#quotesByAdapter.get(adapterId)?.values() ?? []) {
+      if (quote.category === error.category) {
+        ownedMarkets.set(providerMarketKey(quote), quote);
+      }
+    }
+    const restoredMarkets: ProviderMarket[] = [];
+    for (const [marketKey, market] of ownedMarkets) {
+      if (this.#activeMarketAdapters.get(marketKey) !== adapterId) continue;
+      const replacement = [...this.#quotesByAdapter.entries()]
+        .filter(([owner]) => !this.#isQuarantined(owner, error.category))
+        .map(([owner, quotes]) => ({
+          owner,
+          market: this.#marketsByAdapter.get(owner)?.get(marketKey),
+          quotes: [...quotes.values()].filter((quote) => providerMarketKey(quote) === marketKey)
+        }))
+        .filter((candidate): candidate is typeof candidate & { market: ProviderMarket } =>
+          candidate.market !== undefined && candidate.quotes.length > 0)
+        .sort((left, right) => compareText(left.owner, right.owner))[0];
+      if (replacement === undefined) continue;
+      const replay = this.#quoteBook.apply({
+        source: { provider: market.provider, category: error.category },
+        kind: "FULL_SNAPSHOT",
+        transport: this.#transports[market.provider] ?? "WEBSOCKET",
+        clock,
+        quotes: replacement.quotes.map((quote) => ({ ...quote, sequence: null }))
+      });
+      if (replay.accepted) {
+        this.#activeMarketAdapters.set(marketKey, replacement.owner);
+        this.#markets.set(marketKey, replacement.market);
+        restoredMarkets.push(replacement.market);
+        for (const entry of this.#quoteBook.snapshot(clock).quotes) {
+          if (entry.marketKey === marketKey) this.#quoteBookOwners.set(entry.key, replacement.owner);
+        }
+      }
+    }
+    for (const market of restoredMarkets) this.#rebuildTouchedMarket(market);
     this.#recordDiagnostic({
       code: "SCHEMA_ERROR",
       adapterId,
@@ -428,10 +486,8 @@ export class Runtime {
       reason: `${error.recordKind.toLowerCase()} record failed strict schema validation`
     });
     this.#evaluateMarkets(new Set(this.#marketCandidates
-      .filter((candidate) =>
-        (candidate.left.provider === error.provider && candidate.left.category === error.category) ||
-        (candidate.right.provider === error.provider && candidate.right.category === error.category)
-      )
+      .filter((candidate) => ownedMarkets.has(providerMarketKey(candidate.left)) ||
+        ownedMarkets.has(providerMarketKey(candidate.right)))
       .map((candidate) => candidate.key)));
     this.#publish();
   }
@@ -589,7 +645,11 @@ export class Runtime {
   }
 
   #normalizedMarket(market: ProviderMarket, event: NormalizedEvent): NormalizedMarket {
-    const selections = [...this.#quotes.values()]
+    const owner = this.#activeMarketAdapters.get(providerMarketKey(market));
+    const sourceQuotes = owner !== undefined && !this.#isQuarantined(owner, market.category)
+      ? [...(this.#quotesByAdapter.get(owner)?.values() ?? [])]
+      : [];
+    const selections = sourceQuotes
       .filter((quote) =>
         quote.provider === market.provider &&
         quote.providerEventId === market.providerEventId &&
@@ -674,7 +734,20 @@ export class Runtime {
     const snapshot = safeCloneFreeze(prebuilt ?? this.#buildSnapshot(this.#revision + 1));
     this.#revision = snapshot.revision;
     this.#snapshot = snapshot;
-    for (const listener of this.#listeners) listener(snapshot);
+    for (const listener of this.#listeners) {
+      try {
+        listener(snapshot);
+      } catch {
+        this.#recordDiagnostic({
+          code: "SUBSCRIBER_FAILURE",
+          adapterId: null,
+          provider: null,
+          category: null,
+          canonicalMarketId: null,
+          reason: "snapshot subscriber failed"
+        });
+      }
+    }
   }
 
   #buildSnapshot(revision: number): AppSnapshot {
@@ -688,7 +761,10 @@ export class Runtime {
     const events = this.#eventCandidates.map((candidate) => candidate.canonical);
     const markets = this.#marketCandidates.map((candidate) => candidate.canonical);
     const statuses = [...this.#providerStatuses.values()].sort((left, right) =>
-      compareText(`${left.category}|${left.provider}`, `${right.category}|${right.provider}`)
+      compareText(
+        composite([left.category, left.provider, left.adapterId]),
+        composite([right.category, right.provider, right.adapterId])
+      )
     );
     const statusCounts = (items: readonly { readonly mappingStatus: MappingStatus }[]) => ({
       VERIFIED: items.filter((item) => item.mappingStatus === "VERIFIED").length,
@@ -751,16 +827,25 @@ export class Runtime {
     this.#diagnostics.push({ timestampMs: this.#clock.now().wallClockNowMs, ...diagnostic });
   }
 
-  #isQuarantined(provider: string, category: Category): boolean {
-    return this.#quarantinedSources.has(composite([provider, category]));
+  #isQuarantined(adapterId: string, category: Category): boolean {
+    return this.#quarantinedAdapters.has(composite([adapterId, category]));
   }
 
   #quoteSnapshot(clock: QuoteClockContext): QuoteSnapshot {
     const storedSnapshot = this.#quoteBook.snapshot(clock);
-    const quotes = storedSnapshot.quotes.map((entry) => ({
-      ...entry,
-      quote: this.#quotes.get(entry.key) ?? entry.quote
-    }));
+    const quotes = storedSnapshot.quotes.map((entry) => {
+      const owner = this.#quoteBookOwners.get(entry.key) ?? "";
+      const quote = this.#quotesByAdapter.get(owner)?.get(entry.key) ?? entry.quote;
+      const quarantined = this.#isQuarantined(owner, quote.category);
+      return {
+        ...entry,
+        quote,
+        eligible: entry.eligible && !quarantined,
+        ineligibilityReasons: quarantined
+          ? [...new Set([...entry.ineligibilityReasons, "SCHEMA_ERROR" as const])].sort(compareText)
+          : entry.ineligibilityReasons
+      };
+    });
     return {
       ...storedSnapshot,
       quotes,

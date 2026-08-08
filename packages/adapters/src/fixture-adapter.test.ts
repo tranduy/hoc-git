@@ -59,6 +59,7 @@ class ImmediateScheduler implements ReplayScheduler {
 }
 
 const status = {
+  adapterId: "saba-football",
   provider: "SABA",
   category: "FOOTBALL",
   status: "LIVE",

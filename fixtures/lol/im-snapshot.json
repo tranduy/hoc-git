@@ -4,7 +4,7 @@
   "provider": "IM",
   "category": "LOL",
   "records": [
-    { "offsetMs": 0, "kind": "STATUS", "payload": { "provider": "IM", "category": "LOL", "status": "LIVE", "detail": "Synthetic fixture connected", "updatedAtMs": 0 } },
+    { "offsetMs": 0, "kind": "STATUS", "payload": { "adapterId": "im-lol", "provider": "IM", "category": "LOL", "status": "LIVE", "detail": "Synthetic fixture connected", "updatedAtMs": 0 } },
     { "offsetMs": 10, "kind": "EVENT", "payload": { "provider": "IM", "category": "LOL", "providerEventId": "im-lol-verified", "competition": "LCK", "seasonStage": "2026 Summer Playoffs", "startAtUtcMs": 1786320000000, "participantA": "Blue Comets", "participantB": "Red Phoenix", "eventScope": "SERIES", "bestOf": 3, "isLive": false } },
     { "offsetMs": 20, "kind": "EVENT", "payload": { "provider": "IM", "category": "LOL", "providerEventId": "im-lol-rejected", "competition": "LCK Challengers", "seasonStage": "2026 Summer", "startAtUtcMs": 1786327200000, "participantA": "Alpha Academy", "participantB": "Gamma Academy", "eventScope": "SERIES", "bestOf": 3, "isLive": false } },
     { "offsetMs": 30, "kind": "MARKET", "payload": { "provider": "IM", "category": "LOL", "providerEventId": "im-lol-verified", "providerMarketId": "im-lol-series-winner", "marketType": "SERIES_WINNER", "scope": "SERIES", "line": null, "settlementProfile": "lol-series-winner-including-retirements", "status": "OPEN" } },
