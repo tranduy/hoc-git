@@ -41,7 +41,10 @@ const accountApi: AccountApiLike = {
 };
 const catalogApi: CatalogApiLike = { read: async () => catalog };
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.history.replaceState({}, "", "/live-catalog");
+});
 
 describe("LiveCatalogPage", () => {
   it("shows real CMD matches separately from verified cross-provider comparisons", async () => {
@@ -52,6 +55,9 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText("Premier Test")).toBeTruthy();
     expect(screen.getByText("HOME: 2.1 DECIMAL")).toBeTruthy();
     expect(screen.getByText("Awaiting second provider")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
+    expect(await screen.findByRole("heading", { name: "Alpha vs Beta" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Back to matches" })).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
     expect(screen.queryByRole("button", { name: /bet|wager|place/iu })).toBeNull();
   });
@@ -60,5 +66,13 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "LoL" }));
     expect(screen.getByText("No verified live LoL adapter is connected yet.")).toBeTruthy();
+  });
+
+  it("reopens a selected match detail from its safe URL identity", async () => {
+    window.history.replaceState({}, "", "/live-catalog?account=account-1&event=event-1");
+    render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
+
+    expect(await screen.findByRole("heading", { name: "Alpha vs Beta" })).toBeTruthy();
+    expect(screen.getByText("Single-provider observation — cross-book timing unavailable")).toBeTruthy();
   });
 });
