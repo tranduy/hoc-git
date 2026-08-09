@@ -8,13 +8,15 @@ The first live proof uses an event that is genuinely present in a connected prov
 
 ## Interaction
 
-The Live Catalog page adds a `Watch match` action to each event. One event can be watched at a time. The watch panel stays at the top of the event list and contains:
+The Live Catalog page adds a `View & watch` action to each event. One event can be watched at a time. Selecting it replaces the list with a dedicated match-detail view inspired by a compact bookmaker comparison card: match header at the top, one provider column per source, market rows below, and the movement timeline beside or below them. A `Back to matches` action returns to the list. The selected account and event ID are represented in the URL query so the same detail can be reopened without exposing credentials. The detail view contains:
 
 - provider, competition, participants, live/upcoming state, and last successful observation time;
 - watcher state: `STARTING`, `WATCHING`, `STALE`, `STOPPED`, or `ERROR`;
 - the current market table with line, selection, odds, and `OPEN`/`SUSPENDED` status;
 - an append-only, newest-first change log capped at 200 entries;
 - `Stop watching` and `Clear log` controls.
+
+Each market row aligns equivalent provider selections horizontally only after exact mapping. An unavailable second provider renders an explicit empty column rather than copying the first provider's values. On narrow screens the provider columns scroll horizontally and the change log moves below the current prices.
 
 The log persists in browser `localStorage` by account and provider-event ID so a refresh does not erase the observations. It contains provider sports data only; account IDs, tokens, cookies, launch URLs, authorization data, and credentials are never stored in watcher logs.
 
