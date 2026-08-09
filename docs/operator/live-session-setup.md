@@ -1,6 +1,6 @@
 # Live session setup
 
-This page configures authentication only. It does not place bets, and the current build does not yet ingest real odds from CMD, SABA, SBOBET, APSPORT, BTI, or IM.
+This page configures authentication only. It does not place bets. The current build can read a validated CMD Football catalog; SABA, SBOBET, APSPORT, BTI, IM, and live LoL still require separately verified adapters.
 
 ## Start the local application
 
@@ -48,3 +48,25 @@ Secrets are encrypted with Windows DPAPI for the current Windows user and stored
 ## Betting safety
 
 This milestone is read-only. No balance is used and no wager is submitted. Any future execution feature must require explicit confirmation for each bet before either leg is placed.
+
+## Watch one live match
+
+1. Open `http://127.0.0.1:4311/live-catalog`.
+2. Select an active catalog-capable account and load the live Football catalog.
+3. On a genuinely returned event, select **View & watch**.
+4. The detail view shows current provider markets, lines, selections, odds, and `OPEN`/`SUSPENDED` state. It polls sequentially: the next read starts one second after the previous read settles, so provider reads never overlap.
+5. The change log records odds movement, market/selection suspension, reopening, event disappearance, and safe poll failures. **Stop watching** pauses reads; **Clear log** removes the bounded local history for that provider event.
+
+Watcher logs contain sports metadata only and retain at most 200 rows in browser storage. They never contain an account ID, token, cookie, credential, authorization header, or launch URL.
+
+CMD currently exposes verified Football data only. G2 vs TH or another LoL match will not appear until a verified LoL adapter returns it; do not use fixture data as a substitute for a live proof.
+
+The displayed sample interval is the time between accepted observations from one provider. It is not cross-book delay. Cross-book timing becomes available only after two distinct providers are connected and the event, market, line, outcome domain, and settlement rules pass exact mapping. The watcher can measure an observed delay but cannot change a bookmaker's update latency.
+
+For a bounded terminal smoke observation against the local LIVE API:
+
+```powershell
+node scripts/smoke-watch-match.mjs --duration-ms 120000 --poll-ms 1000
+```
+
+The command chooses only an accepted event returned by the active provider account, prefers a live event, prints safe JSON lines for real transitions, and reports the true sample/change count even when no odds move during the observation window.
