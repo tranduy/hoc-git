@@ -18,7 +18,8 @@
     "@tool-chenh/adapters": "*",
     "@tool-chenh/contracts": "*",
     "@tool-chenh/core": "*",
-    "fastify": "^5.11.3"
+    "fastify": "^5.11.3",
+    "playwright": "^1.55.1"
   },
   "devDependencies": {
     "@types/ws": "^8.18.0",

@@ -189,4 +189,44 @@ describe("SessionManager", () => {
     expect((await manager.listStatuses()).sessions).toHaveLength(1);
     expect((await manager.listStatuses()).sessions[0]?.source).toBe("MANUAL_PROVIDER_SESSION");
   });
+
+  it("logs into Fabet and repeats the read-only bootstrap after 24 hours", async () => {
+    const vault = await createVault();
+    const clock = { wallClockNowMs: 40 };
+    let loginCalls = 0;
+    let captureCalls = 0;
+    let resetCalls = 0;
+    const manager = new SessionManager({
+      vault,
+      validators: new SessionValidatorRegistry([]),
+      clock: { nowMs: () => clock.wallClockNowMs },
+      idFactory: () => "unused",
+      fabetDriver: {
+        login: async () => { loginCalls += 1; },
+        captureLobbyLaunches: async () => { captureCalls += 1; return []; },
+        resetProfile: async () => { resetCalls += 1; }
+      }
+    });
+
+    const configured = await manager.configureFabet({
+      entryUrl: "https://fabet.party/",
+      username: "development-user",
+      password: "development-pass",
+      trustedHostname: "fabet.party"
+    });
+    expect(configured).toMatchObject({ state: "ACTIVE", reason: null });
+    expect(loginCalls).toBe(1);
+    expect(captureCalls).toBe(1);
+
+    clock.wallClockNowMs = 86_400_040;
+    await manager.tick();
+    expect(loginCalls).toBe(2);
+    expect(captureCalls).toBe(2);
+    expect((await manager.listStatuses()).sessions[0]).toMatchObject({
+      state: "ACTIVE", acquiredAtMs: 86_400_040, renewAfterMs: 172_800_040
+    });
+
+    await manager.resetFabet();
+    expect(resetCalls).toBe(1);
+  });
 });

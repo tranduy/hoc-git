@@ -50,6 +50,11 @@ export interface SessionManagerOptions {
   readonly validators: SessionValidatorRegistry;
   readonly clock: { nowMs(): number };
   readonly idFactory: () => string;
+  readonly fabetDriver?: {
+    login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void>;
+    captureLobbyLaunches(): Promise<readonly unknown[]>;
+    resetProfile(): Promise<void>;
+  };
   readonly resetFabetState?: () => Promise<void>;
 }
 
@@ -102,6 +107,7 @@ export class SessionManager {
   readonly #validators: SessionValidatorRegistry;
   readonly #clock: { nowMs(): number };
   readonly #idFactory: () => string;
+  readonly #fabetDriver: SessionManagerOptions["fabetDriver"];
   readonly #resetFabetState: () => Promise<void>;
   readonly #inflight = new Map<string, Promise<RedactedSessionStatus>>();
 
@@ -110,6 +116,7 @@ export class SessionManager {
     this.#validators = options.validators;
     this.#clock = options.clock;
     this.#idFactory = options.idFactory;
+    this.#fabetDriver = options.fabetDriver;
     this.#resetFabetState = options.resetFabetState ?? (async () => undefined);
   }
 
@@ -142,19 +149,33 @@ export class SessionManager {
       id: "fabet",
       provider: "FABET",
       source: "FABET_LOGIN",
-      state: "ACTION_REQUIRED",
+      state: "VALIDATING",
       trustedHostname: input.trustedHostname,
       acquiredAtMs: nowMs,
       lastValidatedAtMs: null,
       renewAfterMs: nowMs + renewalIntervalMs,
-      reason: "SCHEMA_CHANGED",
+      reason: null,
       secret: {
         kind: "FABET_CREDENTIALS",
         value: JSON.stringify({ entryUrl: input.entryUrl, username: input.username, password: input.password })
       }
     };
     await this.#save(record);
-    return publicStatus(record);
+    if (this.#fabetDriver === undefined) return this.#transition(record, "ACTION_REQUIRED", "SCHEMA_CHANGED");
+    try {
+      await this.#fabetDriver.login(input);
+      await this.#fabetDriver.captureLobbyLaunches();
+      const active: StoredSession = {
+        ...record,
+        state: "ACTIVE",
+        lastValidatedAtMs: this.#clock.nowMs(),
+        reason: null
+      };
+      await this.#save(active);
+      return publicStatus(active);
+    } catch (error) {
+      return this.#transition(record, "INVALID", this.#fabetFailureReason(error));
+    }
   }
 
   validate(id: string): Promise<RedactedSessionStatus> {
@@ -220,12 +241,45 @@ export class SessionManager {
     await Promise.all(records
       .filter((record) => record.source === "FABET_LOGIN")
       .map(async (record) => this.#vault.delete(`${recordPrefix}${record.id}`)));
+    await this.#fabetDriver?.resetProfile();
     await this.#resetFabetState();
   }
 
   async #renewRecord(record: StoredSession, failureReason: SessionHealthReason): Promise<RedactedSessionStatus> {
     const renewing = { ...record, state: "RENEWING" as const, reason: null };
     await this.#save(renewing);
+    if (record.source === "FABET_LOGIN" && record.secret.kind === "FABET_CREDENTIALS") {
+      if (this.#fabetDriver === undefined) return this.#transition(renewing, "ACTION_REQUIRED", failureReason);
+      let credentials: { entryUrl: string; username: string; password: string };
+      try {
+        const parsed: unknown = JSON.parse(record.secret.value);
+        if (typeof parsed !== "object" || parsed === null) throw new Error("invalid credentials");
+        const fields = parsed as Record<string, unknown>;
+        if (typeof fields.entryUrl !== "string" || typeof fields.username !== "string" || typeof fields.password !== "string") {
+          throw new Error("invalid credentials");
+        }
+        credentials = { entryUrl: fields.entryUrl, username: fields.username, password: fields.password };
+      } catch {
+        return this.#transition(renewing, "INVALID", "VAULT_UNAVAILABLE");
+      }
+      try {
+        await this.#fabetDriver.login(credentials);
+        await this.#fabetDriver.captureLobbyLaunches();
+      } catch (error) {
+        return this.#transition(renewing, "INVALID", this.#fabetFailureReason(error));
+      }
+      const nowMs = this.#clock.nowMs();
+      const active: StoredSession = {
+        ...renewing,
+        state: "ACTIVE",
+        acquiredAtMs: nowMs,
+        lastValidatedAtMs: nowMs,
+        renewAfterMs: nowMs + renewalIntervalMs,
+        reason: null
+      };
+      await this.#save(active);
+      return publicStatus(active);
+    }
     const validator = this.#validators.get(record.provider);
     if (validator?.renew === undefined) return this.#transition(renewing, "ACTION_REQUIRED", failureReason);
     let secret: ProviderSecret;
@@ -283,6 +337,15 @@ export class SessionManager {
     } catch {
       return null;
     }
+  }
+
+  #fabetFailureReason(error: unknown): SessionHealthReason {
+    if (typeof error === "object" && error !== null) {
+      const code = (error as Record<string, unknown>).code;
+      if (code === "DOMAIN_APPROVAL_REQUIRED") return "DOMAIN_APPROVAL_REQUIRED";
+      if (code === "UNAUTHORIZED") return "UNAUTHORIZED";
+    }
+    return "UNREACHABLE";
   }
 
   async #save(record: StoredSession): Promise<void> {
