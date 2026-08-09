@@ -1,5 +1,41 @@
 export type Category = "FOOTBALL" | "LOL";
 
+export type SessionSource = "FABET_LOGIN" | "MANUAL_PROVIDER_SESSION";
+
+export type SessionState =
+  | "UNCONFIGURED"
+  | "VALIDATING"
+  | "ACTIVE"
+  | "RENEWING"
+  | "ACTION_REQUIRED"
+  | "INVALID";
+
+export type SessionHealthReason =
+  | "UNREACHABLE"
+  | "DOMAIN_APPROVAL_REQUIRED"
+  | "UNAUTHORIZED"
+  | "EXPIRED"
+  | "SCHEMA_CHANGED"
+  | "VAULT_UNAVAILABLE"
+  | "RESET_FAILED";
+
+export interface RedactedSessionStatus {
+  readonly id: string;
+  readonly provider: string;
+  readonly source: SessionSource;
+  readonly state: SessionState;
+  readonly trustedHostname: string | null;
+  readonly acquiredAtMs: number | null;
+  readonly lastValidatedAtMs: number | null;
+  readonly renewAfterMs: number | null;
+  readonly secretConfigured: boolean;
+  readonly reason: SessionHealthReason | null;
+}
+
+export interface SessionStatusList {
+  readonly sessions: readonly RedactedSessionStatus[];
+}
+
 export type MappingStatus = "VERIFIED" | "REVIEW_REQUIRED" | "REJECTED";
 
 export type QuoteStatus = "OPEN" | "SUSPENDED" | "CLOSED";

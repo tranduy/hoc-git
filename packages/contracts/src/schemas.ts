@@ -15,13 +15,71 @@ import type {
   ProviderEvent,
   ProviderMarket,
   ProviderQuote,
+  RedactedSessionStatus,
   RealtimeMessage,
   QuoteIneligibilityReason,
   QuoteStatus,
   Scope,
   SnapshotCounts,
+  SessionHealthReason,
+  SessionSource,
+  SessionState,
+  SessionStatusList,
   StakeLeg
 } from "./domain.js";
+
+export const SessionSourceSchema = z.enum([
+  "FABET_LOGIN",
+  "MANUAL_PROVIDER_SESSION"
+]) satisfies z.ZodType<SessionSource>;
+
+export const SessionStateSchema = z.enum([
+  "UNCONFIGURED",
+  "VALIDATING",
+  "ACTIVE",
+  "RENEWING",
+  "ACTION_REQUIRED",
+  "INVALID"
+]) satisfies z.ZodType<SessionState>;
+
+export const SessionHealthReasonSchema = z.enum([
+  "UNREACHABLE",
+  "DOMAIN_APPROVAL_REQUIRED",
+  "UNAUTHORIZED",
+  "EXPIRED",
+  "SCHEMA_CHANGED",
+  "VAULT_UNAVAILABLE",
+  "RESET_FAILED"
+]) satisfies z.ZodType<SessionHealthReason>;
+
+export const RedactedSessionStatusSchema = z.strictObject({
+  id: z.string().trim().min(1),
+  provider: z.string().trim().min(1),
+  source: SessionSourceSchema,
+  state: SessionStateSchema,
+  trustedHostname: z.string().trim().min(1).nullable(),
+  acquiredAtMs: z.number().finite().nonnegative().nullable(),
+  lastValidatedAtMs: z.number().finite().nonnegative().nullable(),
+  renewAfterMs: z.number().finite().nonnegative().nullable(),
+  secretConfigured: z.boolean(),
+  reason: SessionHealthReasonSchema.nullable()
+}).superRefine((status, context) => {
+  if (
+    status.acquiredAtMs !== null &&
+    status.renewAfterMs !== null &&
+    status.renewAfterMs < status.acquiredAtMs
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["renewAfterMs"],
+      message: "renewal time cannot precede acquisition"
+    });
+  }
+}) satisfies z.ZodType<RedactedSessionStatus>;
+
+export const SessionStatusListSchema = z.strictObject({
+  sessions: z.array(RedactedSessionStatusSchema)
+}) satisfies z.ZodType<SessionStatusList>;
 
 export const CategorySchema = z.enum(["FOOTBALL", "LOL"]) satisfies z.ZodType<Category>;
 

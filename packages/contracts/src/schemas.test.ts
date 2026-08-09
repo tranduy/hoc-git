@@ -7,9 +7,46 @@ import {
   ProviderEventSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema,
+  RedactedSessionStatusSchema,
   RealtimeMessageSchema,
+  SessionStatusListSchema,
   StakeLegSchema
 } from "./schemas.js";
+
+describe("RedactedSessionStatusSchema", () => {
+  const completeStatus = () => ({
+    id: "session-1",
+    provider: "SABA",
+    source: "MANUAL_PROVIDER_SESSION",
+    state: "ACTIVE",
+    trustedHostname: "sports.example.test",
+    acquiredAtMs: 1_000,
+    lastValidatedAtMs: 2_000,
+    renewAfterMs: 86_401_000,
+    secretConfigured: true,
+    reason: null
+  });
+
+  it("accepts a redacted session status and list", () => {
+    expect(RedactedSessionStatusSchema.safeParse(completeStatus()).success).toBe(true);
+    expect(SessionStatusListSchema.safeParse({ sessions: [completeStatus()] }).success).toBe(true);
+  });
+
+  it.each(["token", "cookie", "authorization", "launchUrl", "password"])(
+    "rejects secret-shaped field %s",
+    (key) => expect(RedactedSessionStatusSchema.safeParse({
+      ...completeStatus(),
+      [key]: "secret-canary"
+    }).success).toBe(false)
+  );
+
+  it("rejects a renewal time before acquisition", () => {
+    expect(RedactedSessionStatusSchema.safeParse({
+      ...completeStatus(),
+      renewAfterMs: 999
+    }).success).toBe(false);
+  });
+});
 
 describe("ProviderEventSchema", () => {
   it("rejects an event that omits rematch and category-specific lifecycle evidence", () => {
