@@ -4,6 +4,7 @@ import { chromium, type BrowserContext, type Page } from "playwright";
 import type { Category } from "@tool-chenh/contracts";
 import { SecretVault } from "./secret-vault.js";
 import { TrustedDomainStore } from "./trusted-domain-store.js";
+import { observeProtocolMetadata } from "../providers/protocol-inspector.js";
 
 export interface CapturedNavigation {
   readonly url: string;
@@ -47,6 +48,21 @@ const forbiddenPattern = /(?:\bbet\b|wager|đặt\s*cược|xác\s*nhận\s*cư�
 export function launcherTextIsSafe(label: string): boolean {
   const normalized = label.trim().replace(/\s+/gu, " ");
   return normalized.length > 0 && !forbiddenPattern.test(normalized) && launcherPattern.test(normalized);
+}
+
+export function capturedTopLevelNavigation(lobbyOrigin: string, label: string, value: string): CapturedNavigation | null {
+  if (!launcherTextIsSafe(label)) return null;
+  const observation = observeProtocolMetadata({
+    url: value, method: "GET", transport: "NAVIGATION", status: null, contentType: null
+  });
+  if (observation === null) return null;
+  try {
+    const url = new URL(value);
+    if (url.origin === lobbyOrigin) return null;
+    return { url: value, label: label.trim().replace(/\s+/gu, " ") };
+  } catch {
+    return null;
+  }
 }
 
 function providerHint(label: string): string {
@@ -214,44 +230,35 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     const page = await this.#getPage();
     const lobbyOrigin = new URL(lobbyUrl).origin;
     const captured = new Map<string, CapturedNavigation>();
-    let currentLabel = "UNKNOWN";
-    const record = (url: string): void => {
-      try {
-        const parsed = new URL(url);
-        if (parsed.protocol === "https:" && parsed.origin !== lobbyOrigin) {
-          captured.set(url, { url, label: currentLabel });
-        }
-      } catch {
-        return;
-      }
+    const record = (url: string, label: string): void => {
+      const navigation = capturedTopLevelNavigation(lobbyOrigin, label, url);
+      if (navigation !== null) captured.set(navigation.url, navigation);
     };
-    const onPage = (popup: Page): void => {
-      popup.on("framenavigated", (frame) => { if (frame === popup.mainFrame()) record(frame.url()); });
-    };
-    const onRequest = (request: { isNavigationRequest(): boolean; url(): string }): void => {
-      if (request.isNavigationRequest()) record(request.url());
-    };
-    context.on("page", onPage);
-    context.on("request", onRequest);
-    try {
-      await page.goto(lobbyUrl, { waitUntil: "domcontentloaded" });
-      const controls = page.locator("a, button, [role='button'], [onclick]");
-      const count = Math.min(await controls.count(), 200);
-      for (let index = 0; index < count; index += 1) {
+    await page.goto(lobbyUrl, { waitUntil: "domcontentloaded" });
+    const controls = page.locator("a, button, [role='button'], [onclick]");
+    const count = Math.min(await controls.count(), 200);
+    for (let index = 0; index < count; index += 1) {
         const control = controls.nth(index);
         const label = (await control.innerText().catch(() => "")).trim();
         if (!launcherTextIsSafe(label) || !(await control.isVisible().catch(() => false))) continue;
-        currentLabel = label;
-        await control.click({ timeout: 2_000 }).catch(() => undefined);
-        await page.waitForTimeout(250);
+        const popups: Page[] = [];
+        const onPage = (popup: Page): void => { popups.push(popup); };
+        context.on("page", onPage);
+        try {
+          await control.click({ timeout: 2_000 }).catch(() => undefined);
+          await page.waitForTimeout(750);
+        } finally {
+          context.off("page", onPage);
+        }
+        for (const popup of popups) {
+          await popup.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
+          record(popup.url(), label);
+          await popup.close().catch(() => undefined);
+        }
         if (page.url() !== lobbyUrl && new URL(page.url()).origin !== lobbyOrigin) {
-          record(page.url());
+          record(page.url(), label);
           await page.goto(lobbyUrl, { waitUntil: "domcontentloaded" });
         }
-      }
-    } finally {
-      context.off("page", onPage);
-      context.off("request", onRequest);
     }
     return [...captured.values()];
   }

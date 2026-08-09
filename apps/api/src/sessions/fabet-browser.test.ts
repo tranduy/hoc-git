@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  capturedTopLevelNavigation,
   FabetBrowserDriver,
   launcherTextIsSafe,
   PlaywrightFabetAutomation,
@@ -60,6 +61,17 @@ afterEach(async () => {
 });
 
 describe("FabetBrowserDriver", () => {
+  it("binds only a safe launcher label to an external top-level provider URL", () => {
+    expect(capturedTopLevelNavigation(
+      "https://fabet.party", "SABA-SPORTS", "https://sports.vendor.test/launch?token=secret-canary"
+    )).toEqual({ url: "https://sports.vendor.test/launch?token=secret-canary", label: "SABA-SPORTS" });
+    expect(capturedTopLevelNavigation(
+      "https://fabet.party", "SABA-SPORTS", "https://secure.livechatinc.com/customer/action"
+    )).toBeNull();
+    expect(capturedTopLevelNavigation(
+      "https://fabet.party", "Deposit", "https://sports.vendor.test/launch"
+    )).toBeNull();
+  });
   it("blocks credential transmission until the exact hostname is trusted", async () => {
     const context = await setup();
     const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 20 }, idFactory: () => "1" });
