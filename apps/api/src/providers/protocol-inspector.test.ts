@@ -27,4 +27,11 @@ describe("protocol inspector", () => {
     expect(first).toMatch(/^[a-f0-9]{64}$/u);
     expect(first).not.toContain("secret");
   });
+
+  it("redacts ASP.NET session-routing path segments", () => {
+    expect(observeProtocolMetadata({
+      url: "https://sports.cmd.test/(S(Tesqedix87fa7fb3816a427abcd6196bc4d345f9))/LoginCheckin/Index",
+      method: "POST", transport: "XHR", status: 200, contentType: "application/json"
+    })?.pathTemplate).toBe("/:session/LoginCheckin/Index");
+  });
 });

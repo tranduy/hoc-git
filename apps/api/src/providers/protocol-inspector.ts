@@ -9,6 +9,7 @@ export interface ProtocolObservation {
   readonly pathTemplate: string;
   readonly status: number | null;
   readonly contentType: string | null;
+  readonly bodyShapeHash?: string;
 }
 
 const ignoredHostSuffixes = [
@@ -19,6 +20,7 @@ function pathTemplate(pathname: string): string {
   return pathname.split("/").map((segment) => {
     let decoded: string;
     try { decoded = decodeURIComponent(segment); } catch { decoded = segment; }
+    if (/^\(S\([^)]{8,}\)\)$/u.test(decoded)) return ":session";
     if (/^\d+$/u.test(decoded) || /^[a-f0-9-]{16,}$/iu.test(decoded) || /^[A-Za-z0-9_-]{24,}$/u.test(decoded)) return ":id";
     return encodeURIComponent(decoded).replace(/%2F/giu, "%252F");
   }).join("/") || "/";

@@ -4,12 +4,12 @@ import { proveCmdIdentity } from "./cmd-identity.js";
 describe("CMD identity proof", () => {
   const candidate = { providerHint: "CMD", hostname: "sports.cmd.test" };
   const observations = [
-    { hostname: "sports.cmd.test", method: "GET", transport: "NAVIGATION" as const, pathTemplate: "/launch", status: 200, contentType: "text/html" },
-    { hostname: "api.cmd.test", method: "GET", transport: "FETCH" as const, pathTemplate: "/api/events", status: 200, contentType: "application/json" },
-    { hostname: "stream.cmd.test", method: "GET", transport: "WEBSOCKET" as const, pathTemplate: "/feed", status: 101, contentType: null }
+    { hostname: "sports.cmd.test", method: "GET", transport: "NAVIGATION" as const, pathTemplate: "/:session/Newindex", status: 200, contentType: "text/html" },
+    { hostname: "sports.cmd.test", method: "GET", transport: "XHR" as const, pathTemplate: "/:session/NewIndex/GetAppConfig", status: 200, contentType: "application/json", bodyShapeHash: "6a471d81d8c6be58ec077a5f6672083c1be064b02c7bbb2e40932173d0c270db" },
+    { hostname: "api.cmd.test", method: "POST", transport: "XHR" as const, pathTemplate: "/api/menu/desktopMenu", status: 200, contentType: "application/json", bodyShapeHash: "3ddb067776b1837ef907a113b4efb4146b2cc443a2dded65dcd596183be709a8" }
   ];
 
-  it("requires launch provenance plus JSON API and websocket signals", () => {
+  it("requires launch provenance plus independently repeated structural fingerprints", () => {
     expect(proveCmdIdentity(candidate, observations)).toEqual({ verified: true, reason: null });
     expect(proveCmdIdentity(candidate, observations.slice(0, 2))).toEqual({ verified: false, reason: "INSUFFICIENT_PROTOCOL_EVIDENCE" });
   });
