@@ -98,4 +98,16 @@ describe("MatchWatchDetail", () => {
     fireEvent.click(screen.getByRole("button", { name: "Clear log" }));
     expect(screen.getByText("No changes detected yet.")).toBeTruthy();
   });
+
+  it("fails visibly stale when no accepted provider sample arrives in time", () => {
+    const read = vi.fn(() => new Promise<LiveCatalogResponse>(() => undefined));
+    render(<MatchWatchDetail accountId="private-account" catalogApi={{ read }} initialCatalog={catalog(1_000)}
+      onBack={() => undefined} providerEventId="event-1" staleAfterMs={3_000} />);
+
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(read).toHaveBeenCalledTimes(1);
+    act(() => { vi.advanceTimersByTime(2_000); });
+    expect(screen.getAllByText("STALE")).toHaveLength(2);
+    expect(screen.getByText("No accepted provider sample within 3000 ms")).toBeTruthy();
+  });
 });

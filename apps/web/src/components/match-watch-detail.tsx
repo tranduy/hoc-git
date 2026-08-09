@@ -9,7 +9,7 @@ import {
 } from "../watch/match-watch.js";
 import { clearWatchEntries, loadWatchEntries, saveWatchEntries } from "../watch/watch-storage.js";
 
-type WatcherState = "WATCHING" | "ERROR" | "STOPPED";
+type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
 
 function safeFailureEntry(sample: MatchSample, detectedAtMs: number): MatchWatchEntry {
@@ -25,8 +25,22 @@ function safeFailureEntry(sample: MatchSample, detectedAtMs: number): MatchWatch
   };
 }
 
+function safeStaleEntry(sample: MatchSample, detectedAtMs: number, staleAfterMs: number): MatchWatchEntry {
+  const event = sample.event;
+  return {
+    id: `${detectedAtMs}:STALE:event:all`, kind: "STALE", provider: sample.provider,
+    providerEventId: sample.providerEventId, providerMarketId: null, providerSelectionId: null,
+    competition: event?.competition ?? "Unknown competition",
+    matchLabel: event === null ? "Unknown event" : `${event.participantA} vs ${event.participantB}`,
+    marketType: null, scope: null, line: null, selection: null, previousValue: "FRESH",
+    currentValue: `No accepted provider sample within ${staleAfterMs} ms`, detectedAtMs,
+    providerObservedAtMs: sample.observedAtMs, sampleIntervalMs: staleAfterMs
+  };
+}
+
 function entryLabel(entry: MatchWatchEntry): string {
   if (entry.kind === "POLL_FAILED") return "Provider catalog read failed";
+  if (entry.kind === "STALE") return entry.currentValue ?? "Provider sample is stale";
   if (entry.kind === "EVENT_MISSING") return "Event disappeared from the accepted catalog";
   return `${entry.previousValue ?? "—"} → ${entry.currentValue ?? "—"}`;
 }
@@ -38,6 +52,7 @@ export function MatchWatchDetail({
   onBack,
   providerEventId,
   pollDelayMs = 1_000,
+  staleAfterMs = 10_000,
   storage = window.localStorage,
   clock = systemClock
 }: {
@@ -47,6 +62,7 @@ export function MatchWatchDetail({
   readonly onBack: () => void;
   readonly providerEventId: string;
   readonly pollDelayMs?: number;
+  readonly staleAfterMs?: number;
   readonly storage?: Storage;
   readonly clock?: () => number;
 }) {
@@ -75,6 +91,17 @@ export function MatchWatchDetail({
     }
     let active = true;
     let timer: number | undefined;
+    let staleTimer: number | undefined;
+    let staleReported = false;
+    const armStaleTimer = (): void => {
+      if (staleTimer !== undefined) window.clearTimeout(staleTimer);
+      staleTimer = window.setTimeout(() => {
+        if (!active || staleReported) return;
+        staleReported = true;
+        setWatcherState("STALE");
+        appendEntries([safeStaleEntry(sampleRef.current, clock(), staleAfterMs)]);
+      }, staleAfterMs);
+    };
     const schedule = (): void => {
       if (!active) return;
       timer = window.setTimeout(() => { void poll(); }, pollDelayMs);
@@ -88,7 +115,9 @@ export function MatchWatchDetail({
         sampleRef.current = nextSample;
         setCurrentSample(nextSample);
         setSuccessfulSamples((count) => count + 1);
+        staleReported = false;
         setWatcherState("WATCHING");
+        armStaleTimer();
       } catch {
         if (!active) return;
         appendEntries([safeFailureEntry(sampleRef.current, clock())]);
@@ -98,12 +127,14 @@ export function MatchWatchDetail({
       }
     };
     setWatcherState("WATCHING");
+    armStaleTimer();
     schedule();
     return () => {
       active = false;
       if (timer !== undefined) window.clearTimeout(timer);
+      if (staleTimer !== undefined) window.clearTimeout(staleTimer);
     };
-  }, [accountId, catalogApi, clock, initialCatalog.provider, pollDelayMs, providerEventId, storage, watching]);
+  }, [accountId, catalogApi, clock, initialCatalog.provider, pollDelayMs, providerEventId, staleAfterMs, storage, watching]);
 
   const event = currentSample.event ?? initialSample.event;
   const matchLabel = event === null ? "Selected event unavailable" : `${event.participantA} vs ${event.participantB}`;
