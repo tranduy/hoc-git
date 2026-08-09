@@ -335,10 +335,18 @@ export async function extractCmdCatalogRecords(
               .filter((row) => row.querySelector(".c-odds[data-moid]") !== null);
             const groupElements = marketRows.length > 0 ? marketRows : [container];
             return groupElements.map((group) => {
-            const labels = [...group.querySelectorAll("[data-bt], [data-in-play]")]
-              .filter((element) => !element.classList.contains("c-odds") && element.querySelector(".c-odds") === null)
+            const semanticElements = [
+              ...(group.matches("[data-bt], [data-in-play]") ? [group] : []),
+              ...group.querySelectorAll("[data-bt], [data-in-play]")
+            ];
+            const labels = semanticElements
+              .filter((element) => !element.classList.contains("c-odds"))
               .map(directText).filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
-            const betTypeIds = [...group.querySelectorAll("[data-bt]")]
+            const betTypeElements = [
+              ...(group.matches("[data-bt]") ? [group] : []),
+              ...group.querySelectorAll("[data-bt]")
+            ];
+            const betTypeIds = betTypeElements
               .map((element) => clean(element.getAttribute("data-bt"), 80))
               .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
             const odds = [...group.querySelectorAll(".c-odds[data-moid]")].map((element) => {

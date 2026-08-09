@@ -205,9 +205,10 @@ describe("browser protocol inspector", () => {
             <div class="c-match-time">08/17 02:30AM</div>
             <span class="c-team-name">Alpha FC</span><span class="c-team-name">Beta FC</span>
             <div class="c-match__odds-group">
-              <div data-bt="1">FT 1X2</div>
-              <div class="c-odds-button" data-odds-status="running" data-grey-out="false">
-                <span class="c-odds" data-moid="home-1">2.10</span>
+              <div data-bt="1">FT 1X2
+                <div class="c-odds-button" data-odds-status="running" data-grey-out="false">
+                  <span class="c-odds" data-moid="home-1">2.10</span>
+                </div>
               </div>
             </div>
           </div>
