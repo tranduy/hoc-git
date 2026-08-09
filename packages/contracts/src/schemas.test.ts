@@ -1,17 +1,81 @@
 import { describe, expect, it } from "vitest";
 import {
+  AccountStatusSchema,
   AppSnapshotSchema,
   CanonicalMarketSchema,
   OpportunitySchema,
+  PreflightRequestSchema,
+  PreflightTicketSchema,
   ProviderConnectionStatusSchema,
   ProviderEventSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema,
+  QuoteMovementSchema,
   RedactedSessionStatusSchema,
   RealtimeMessageSchema,
   SessionStatusListSchema,
   StakeLegSchema
 } from "./schemas.js";
+
+describe("live account and preflight schemas", () => {
+  const account = () => ({
+    id: "account-a",
+    alias: "Main CMD",
+    provider: "CMD",
+    sessionState: "ACTIVE",
+    profileState: "FRESH",
+    redactedLabel: "03******90",
+    currency: "VND",
+    balance: "100000",
+    balanceAsOfMs: 1_000,
+    capabilities: ["PROFILE", "CATALOG", "PREFLIGHT"],
+    reason: null
+  });
+
+  it("accepts a fully redacted fresh account", () => {
+    expect(AccountStatusSchema.safeParse(account()).success).toBe(true);
+  });
+
+  it.each(["token", "cookie", "authorization", "launchUrl", "password"])(
+    "rejects account secret field %s",
+    (field) => expect(AccountStatusSchema.safeParse({ ...account(), [field]: "secret-canary" }).success).toBe(false)
+  );
+
+  it("rejects unknown providers, exponent balances, and missing fresh timestamps", () => {
+    expect(AccountStatusSchema.safeParse({ ...account(), provider: "UNKNOWN" }).success).toBe(false);
+    expect(AccountStatusSchema.safeParse({ ...account(), balance: "1e5" }).success).toBe(false);
+    expect(AccountStatusSchema.safeParse({ ...account(), balanceAsOfMs: null }).success).toBe(false);
+  });
+
+  it("requires two distinct accounts for preflight", () => {
+    expect(PreflightRequestSchema.safeParse({
+      opportunityId: "opp-1", accountAId: "same", accountBId: "same", maxOddsDriftBps: 25
+    }).success).toBe(false);
+  });
+
+  it("accepts bounded quote movement", () => {
+    expect(QuoteMovementSchema.safeParse({
+      direction: "UP", previousDecimal: "1.9", currentDecimal: "2.01",
+      changedAtMs: 2_000, sampleCount: 4, range5m: "0.11"
+    }).success).toBe(true);
+  });
+
+  it("rejects preflight tickets lasting longer than three seconds", () => {
+    const leg = {
+      accountId: "account-a", provider: "CMD", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1",
+      selection: "HOME", decimalOdds: "2.1", stake: "50000", currency: "VND",
+      balance: "100000", balanceAsOfMs: 2_000, quoteAsOfMs: 2_000
+    };
+    expect(PreflightTicketSchema.safeParse({
+      ticketId: "ticket-1", opportunityId: "opp-1", canonicalEventId: "event-c",
+      canonicalMarketId: "market-c", baseCurrency: "VND", totalStakeBase: "100000",
+      worstCaseProfit: "2000", issuedAtMs: 2_000, expiresAtMs: 5_001,
+      nonce: "nonce-value-123456", signature: "signature-value-123456",
+      legs: [leg, { ...leg, accountId: "account-b", provider: "SABA" }]
+    }).success).toBe(false);
+  });
+});
 
 describe("RedactedSessionStatusSchema", () => {
   const completeStatus = () => ({

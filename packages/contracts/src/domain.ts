@@ -36,6 +36,71 @@ export interface SessionStatusList {
   readonly sessions: readonly RedactedSessionStatus[];
 }
 
+export type ProviderId = "FABET" | "CMD" | "SABA" | "SBOBET" | "APSPORT" | "BTI" | "IM";
+export type ProviderCapability = "PROFILE" | "CATALOG" | "PREFLIGHT" | "EXECUTION";
+export type ProfileState = "FRESH" | "STALE" | "UNAVAILABLE";
+export type DataMode = "LIVE" | "FIXTURE";
+
+export interface AccountStatus {
+  readonly id: string;
+  readonly alias: string;
+  readonly provider: ProviderId;
+  readonly sessionState: SessionState;
+  readonly profileState: ProfileState;
+  readonly redactedLabel: string | null;
+  readonly currency: string | null;
+  readonly balance: string | null;
+  readonly balanceAsOfMs: number | null;
+  readonly capabilities: readonly ProviderCapability[];
+  readonly reason: SessionHealthReason | null;
+}
+
+export interface QuoteMovement {
+  readonly direction: "UP" | "DOWN" | "UNCHANGED";
+  readonly previousDecimal: string;
+  readonly currentDecimal: string;
+  readonly changedAtMs: number;
+  readonly sampleCount: number;
+  readonly range5m: string;
+}
+
+export interface PreflightRequest {
+  readonly opportunityId: string;
+  readonly accountAId: string;
+  readonly accountBId: string;
+  readonly maxOddsDriftBps: number;
+}
+
+export interface PreflightLeg {
+  readonly accountId: string;
+  readonly provider: ProviderId;
+  readonly providerEventId: string;
+  readonly providerMarketId: string;
+  readonly providerSelectionId: string;
+  readonly selection: string;
+  readonly decimalOdds: string;
+  readonly stake: string;
+  readonly currency: string;
+  readonly balance: string;
+  readonly balanceAsOfMs: number;
+  readonly quoteAsOfMs: number;
+}
+
+export interface PreflightTicket {
+  readonly ticketId: string;
+  readonly opportunityId: string;
+  readonly canonicalEventId: string;
+  readonly canonicalMarketId: string;
+  readonly baseCurrency: string;
+  readonly totalStakeBase: string;
+  readonly worstCaseProfit: string;
+  readonly issuedAtMs: number;
+  readonly expiresAtMs: number;
+  readonly nonce: string;
+  readonly signature: string;
+  readonly legs: readonly [PreflightLeg, PreflightLeg];
+}
+
 export type MappingStatus = "VERIFIED" | "REVIEW_REQUIRED" | "REJECTED";
 
 export type QuoteStatus = "OPEN" | "SUSPENDED" | "CLOSED";

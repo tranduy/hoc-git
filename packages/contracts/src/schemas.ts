@@ -1,23 +1,32 @@
 import { z } from "zod";
 import type {
+  AccountStatus,
   AppSnapshot,
   BlockedDiagnostic,
   CanonicalEvent,
   CanonicalMarket,
   Category,
+  DataMode,
   MappingEvidence,
   MappingStatus,
   MarketType,
   OddsFormat,
   Opportunity,
+  PreflightLeg,
+  PreflightRequest,
+  PreflightTicket,
+  ProfileState,
+  ProviderCapability,
   ProviderConnectionState,
   ProviderConnectionStatus,
   ProviderEvent,
+  ProviderId,
   ProviderMarket,
   ProviderQuote,
   RedactedSessionStatus,
   RealtimeMessage,
   QuoteIneligibilityReason,
+  QuoteMovement,
   QuoteStatus,
   Scope,
   SnapshotCounts,
@@ -132,6 +141,110 @@ export const ScopeSchema = z.enum([
 export const DecimalStringSchema = z
   .string()
   .regex(/^[+-]?(?:0|[1-9]\d*)(?:\.\d+)?$/, "must be a plain decimal string");
+
+const NonnegativeDecimalStringSchema = z
+  .string()
+  .regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/, "must be a nonnegative plain decimal string");
+
+export const ProviderIdSchema = z.enum([
+  "FABET", "CMD", "SABA", "SBOBET", "APSPORT", "BTI", "IM"
+]) satisfies z.ZodType<ProviderId>;
+
+export const ProviderCapabilitySchema = z.enum([
+  "PROFILE", "CATALOG", "PREFLIGHT", "EXECUTION"
+]) satisfies z.ZodType<ProviderCapability>;
+
+export const ProfileStateSchema = z.enum([
+  "FRESH", "STALE", "UNAVAILABLE"
+]) satisfies z.ZodType<ProfileState>;
+
+export const DataModeSchema = z.enum(["LIVE", "FIXTURE"]) satisfies z.ZodType<DataMode>;
+
+export const AccountStatusSchema = z.strictObject({
+  id: z.string().trim().min(1).max(128),
+  alias: z.string().trim().min(1).max(80),
+  provider: ProviderIdSchema,
+  sessionState: SessionStateSchema,
+  profileState: ProfileStateSchema,
+  redactedLabel: z.string().trim().min(1).max(128).nullable(),
+  currency: z.string().regex(/^[A-Z]{3,8}$/u).nullable(),
+  balance: NonnegativeDecimalStringSchema.nullable(),
+  balanceAsOfMs: z.number().finite().nonnegative().nullable(),
+  capabilities: z.array(ProviderCapabilitySchema).max(4),
+  reason: SessionHealthReasonSchema.nullable()
+}).superRefine((account, context) => {
+  const hasCompleteProfile = account.redactedLabel !== null && account.currency !== null &&
+    account.balance !== null && account.balanceAsOfMs !== null;
+  if (account.profileState === "FRESH" && !hasCompleteProfile) {
+    context.addIssue({ code: "custom", path: ["profileState"], message: "fresh profile requires complete balance evidence" });
+  }
+  if (account.profileState === "UNAVAILABLE" && (
+    account.currency !== null || account.balance !== null || account.balanceAsOfMs !== null
+  )) {
+    context.addIssue({ code: "custom", path: ["profileState"], message: "unavailable profile cannot expose balance evidence" });
+  }
+  if (new Set(account.capabilities).size !== account.capabilities.length) {
+    context.addIssue({ code: "custom", path: ["capabilities"], message: "capabilities must be unique" });
+  }
+}) satisfies z.ZodType<AccountStatus>;
+
+export const QuoteMovementSchema = z.strictObject({
+  direction: z.enum(["UP", "DOWN", "UNCHANGED"]),
+  previousDecimal: NonnegativeDecimalStringSchema,
+  currentDecimal: NonnegativeDecimalStringSchema,
+  changedAtMs: z.number().finite().nonnegative(),
+  sampleCount: z.number().int().min(1).max(120),
+  range5m: NonnegativeDecimalStringSchema
+}) satisfies z.ZodType<QuoteMovement>;
+
+export const PreflightRequestSchema = z.strictObject({
+  opportunityId: z.string().trim().min(1).max(256),
+  accountAId: z.string().trim().min(1).max(128),
+  accountBId: z.string().trim().min(1).max(128),
+  maxOddsDriftBps: z.number().int().min(0).max(10_000)
+}).superRefine((request, context) => {
+  if (request.accountAId === request.accountBId) {
+    context.addIssue({ code: "custom", path: ["accountBId"], message: "preflight accounts must be distinct" });
+  }
+}) satisfies z.ZodType<PreflightRequest>;
+
+export const PreflightLegSchema = z.strictObject({
+  accountId: z.string().trim().min(1).max(128),
+  provider: ProviderIdSchema,
+  providerEventId: z.string().trim().min(1),
+  providerMarketId: z.string().trim().min(1),
+  providerSelectionId: z.string().trim().min(1),
+  selection: z.string().trim().min(1),
+  decimalOdds: NonnegativeDecimalStringSchema,
+  stake: NonnegativeDecimalStringSchema,
+  currency: z.string().regex(/^[A-Z]{3,8}$/u),
+  balance: NonnegativeDecimalStringSchema,
+  balanceAsOfMs: z.number().finite().nonnegative(),
+  quoteAsOfMs: z.number().finite().nonnegative()
+}) satisfies z.ZodType<PreflightLeg>;
+
+export const PreflightTicketSchema = z.strictObject({
+  ticketId: z.string().trim().min(1).max(256),
+  opportunityId: z.string().trim().min(1).max(256),
+  canonicalEventId: z.string().trim().min(1),
+  canonicalMarketId: z.string().trim().min(1),
+  baseCurrency: z.string().regex(/^[A-Z]{3,8}$/u),
+  totalStakeBase: NonnegativeDecimalStringSchema,
+  worstCaseProfit: DecimalStringSchema,
+  issuedAtMs: z.number().finite().nonnegative(),
+  expiresAtMs: z.number().finite().nonnegative(),
+  nonce: z.string().min(16).max(256),
+  signature: z.string().min(16).max(512),
+  legs: z.tuple([PreflightLegSchema, PreflightLegSchema])
+}).superRefine((ticket, context) => {
+  const lifetimeMs = ticket.expiresAtMs - ticket.issuedAtMs;
+  if (lifetimeMs <= 0 || lifetimeMs > 3_000) {
+    context.addIssue({ code: "custom", path: ["expiresAtMs"], message: "preflight lifetime must be within three seconds" });
+  }
+  if (ticket.legs[0].accountId === ticket.legs[1].accountId) {
+    context.addIssue({ code: "custom", path: ["legs", 1, "accountId"], message: "ticket accounts must be distinct" });
+  }
+}) satisfies z.ZodType<PreflightTicket>;
 
 const footballMarketTypes = new Set<MarketType>(["FT_1X2", "FT_AH", "FT_TOTAL", "FH_1X2", "FH_AH", "FH_TOTAL"]);
 const lolMarketTypes = new Set<MarketType>([
