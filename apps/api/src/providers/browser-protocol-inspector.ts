@@ -106,3 +106,109 @@ export async function findApiOriginFromPage(page: Page): Promise<string | null> 
   }
   return null;
 }
+
+export async function findProviderRuntimeFrame(page: Page): Promise<Frame | null> {
+  for (const frame of page.frames()) {
+    const ready = await frame.evaluate(() => {
+      const runtime = (globalThis as unknown as {
+        UtilPack?: {
+          siteInfoStore?: { attrs?: { ApiBackendUrl?: unknown } };
+          SyncServer?: { json?: unknown };
+        }
+      }).UtilPack;
+      let hasToken = false;
+      try { hasToken = Boolean(sessionStorage.getItem("at")); } catch { hasToken = false; }
+      return hasToken && typeof runtime?.siteInfoStore?.attrs?.ApiBackendUrl === "string" &&
+        typeof runtime?.SyncServer?.json === "function";
+    }).catch(() => false);
+    if (ready) return frame;
+  }
+  return null;
+}
+
+export async function readProviderAccountStore(frame: Frame): Promise<unknown> {
+  return frame.evaluate(() => {
+    const attrs = (globalThis as unknown as {
+      UtilPack?: { accountStore?: { attrs?: unknown } }
+    }).UtilPack?.accountStore?.attrs;
+    if (typeof attrs !== "object" || attrs === null) return null;
+    try { return JSON.parse(JSON.stringify(attrs)) as unknown; } catch { return null; }
+  }).catch(() => null);
+}
+
+export type ReadOnlyProfileProbeInput = (
+  | { readonly endpoint: "/Customer/Balance"; readonly method: "POST" }
+  | { readonly endpoint: "/CashMember/GetUserInfo"; readonly method: "GET" }
+) & { readonly timeoutMs: number };
+
+export async function probeReadOnlyProfileThroughRuntime(
+  frame: Frame,
+  input: ReadOnlyProfileProbeInput
+): Promise<{
+  readonly status: "OK" | "ERROR" | "UNAVAILABLE" | "TIMEOUT";
+  readonly httpStatus: number | null;
+  readonly body: unknown;
+}> {
+  return frame.evaluate(async (request) => {
+    const allowed = (request.endpoint === "/Customer/Balance" && request.method === "POST") ||
+      (request.endpoint === "/CashMember/GetUserInfo" && request.method === "GET");
+    if (!allowed) return { status: "UNAVAILABLE" as const, httpStatus: null, body: null };
+    const runtime = (globalThis as unknown as {
+      UtilPack?: {
+        siteInfoStore?: { attrs?: { ApiBackendUrl?: unknown } };
+        SyncServer?: {
+          json?: (...args: unknown[]) => unknown;
+        };
+      }
+    }).UtilPack;
+    const baseUrl = runtime?.siteInfoStore?.attrs?.ApiBackendUrl;
+    let token: string | null = null;
+    try { token = sessionStorage.getItem("at"); } catch { token = null; }
+    if (typeof baseUrl !== "string" || typeof runtime?.SyncServer?.json !== "function" || !token) {
+      return { status: "UNAVAILABLE" as const, httpStatus: null, body: null };
+    }
+    try {
+      const parsed = new URL(baseUrl);
+      const pathname = parsed.pathname.replace(/\/$/u, "") || "/";
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password ||
+        !["/", "/api"].includes(pathname) || parsed.search || parsed.hash) {
+        return { status: "UNAVAILABLE" as const, httpStatus: null, body: null };
+      }
+      const cleanBaseUrl = `${parsed.origin}${pathname === "/" ? "" : pathname}`;
+      return await new Promise<{
+        status: "OK" | "ERROR" | "TIMEOUT";
+        httpStatus: number | null;
+        body: unknown;
+      }>((resolve) => {
+        const timeout = window.setTimeout(() => resolve({ status: "TIMEOUT", httpStatus: null, body: null }), request.timeoutMs);
+        const finish = (status: "OK" | "ERROR", body: unknown): void => {
+          window.clearTimeout(timeout);
+          let httpStatus: number | null = null;
+          let normalizedBody = body;
+          if (status === "ERROR" && typeof body === "object" && body !== null) {
+            const error = body as { status?: unknown; responseText?: unknown };
+            if (typeof error.status === "number" && Number.isInteger(error.status)) httpStatus = error.status;
+            if (typeof error.responseText === "string") {
+              try { normalizedBody = JSON.parse(error.responseText) as unknown; } catch { normalizedBody = null; }
+            }
+          }
+          resolve({ status, httpStatus, body: normalizedBody });
+        };
+        const headers: Record<string, string> = { Authorization: `bearer ${token}` };
+        if (request.method === "POST") headers["Content-Type"] = "application/json";
+        try {
+          runtime.SyncServer!.json!(
+            `${cleanBaseUrl}${request.endpoint}`,
+            {},
+            (body: unknown) => finish("OK", body),
+            true,
+            (body: unknown) => finish("ERROR", body),
+            request.method,
+            "json",
+            headers
+          );
+        } catch { finish("ERROR", null); }
+      });
+    } catch { return { status: "UNAVAILABLE" as const, httpStatus: null, body: null }; }
+  }, input);
+}

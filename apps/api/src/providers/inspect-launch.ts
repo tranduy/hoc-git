@@ -5,8 +5,9 @@ import { SecretVault } from "../sessions/secret-vault.js";
 import {
   clickSafeStructuralCategories,
   collectSafeControlShapes,
-  findApiOriginFromPage,
-  findAccessTokenFrame
+  findProviderRuntimeFrame,
+  probeReadOnlyProfileThroughRuntime,
+  readProviderAccountStore
 } from "./browser-protocol-inspector.js";
 import {
   inspectionControlLabel,
@@ -15,10 +16,6 @@ import {
   observedTransportForResourceType,
   observeProtocolMetadata,
   protocolObservationSummary,
-  profileProbeIsSafe,
-  profileProbeAvailability,
-  extractTrustedApiOrigin,
-  selectProfileApiOrigin,
   structuralBodyHash,
   structuralBodyShape,
   structuralWebSocketFrameShape,
@@ -65,8 +62,6 @@ async function main(): Promise<void> {
   const webSocketShapes = new Set<string>();
   const controlShapes = new Set<string>();
   const profileShapes: unknown[] = [];
-  let apiBackendOrigin: string | null = null;
-  let observedSettingsOrigin: string | null = null;
   const pending = new Set<Promise<void>>();
   const recordResponse = async (response: Response): Promise<void> => {
     const resourceType = response.request().resourceType();
@@ -77,9 +72,6 @@ async function main(): Promise<void> {
       status: response.status(), contentType: response.headers()["content-type"] ?? null
     });
     if (observation === null) return;
-    if (observation.pathTemplate === "/api/Config/GetSettings") {
-      try { observedSettingsOrigin = `${new URL(response.url()).origin}/api`; } catch { observedSettingsOrigin = null; }
-    }
     if (scriptEndpointsOnly && observation.transport === "SCRIPT") {
       try {
         const source = (await response.text()).slice(0, 10_000_000);
@@ -91,9 +83,6 @@ async function main(): Promise<void> {
     if (observation.contentType === "application/json") {
       try {
         const body: unknown = await response.json();
-        if (observation.pathTemplate === "/api/Config/GetSettings") {
-          apiBackendOrigin = extractTrustedApiOrigin(body);
-        }
         bodyShapeHash = structuralBodyHash(body);
         bodyShape = structuralBodyShape(body);
       } catch { bodyShapeHash = undefined; }
@@ -123,50 +112,31 @@ async function main(): Promise<void> {
     if (profileShapesOnly) {
       await page.waitForTimeout(5_000);
       await Promise.allSettled([...pending]);
-      const tokenFrame = await findAccessTokenFrame(page);
-      const accessToken = tokenFrame === null
-        ? null
-        : await tokenFrame.evaluate(() => sessionStorage.getItem("at")).catch(() => null);
-      const hasAccessToken = typeof accessToken === "string" && accessToken.length > 0;
-      if (apiBackendOrigin === null && tokenFrame !== null) {
-        apiBackendOrigin = await findApiOriginFromPage(page);
-      }
-      const baseUrl = selectProfileApiOrigin({
-        declaredOrigin: apiBackendOrigin,
-        observedSettingsOrigin
-      });
-      const availability = profileProbeAvailability({ hasApiOrigin: baseUrl !== null, hasAccessToken });
-      if (availability !== "READY") profileShapes.push({ availability });
+      const runtimeFrame = await findProviderRuntimeFrame(page);
       const probes = [
-        { endpoint: "/Customer/Balance", method: "POST" },
-        { endpoint: "/CashMember/GetUserInfo", method: "GET" }
+        { endpoint: "/Customer/Balance", method: "POST", timeoutMs: 10_000 },
+        { endpoint: "/CashMember/GetUserInfo", method: "GET", timeoutMs: 10_000 }
       ] as const;
-      if (availability === "READY" && baseUrl !== null && accessToken !== null && probes.every((probe) => profileProbeIsSafe({
-        baseUrl, ...probe, seenOrigins: [baseUrl]
-      }))) {
-        const responses: Array<{ endpoint: string; method: string; status: number | null; body: unknown }> = [];
-        for (const request of probes) {
-          try {
-            const response = await context.request.fetch(`${baseUrl}${request.endpoint}`, {
-              method: request.method,
-              headers: { Accept: "application/json", Authorization: `bearer ${accessToken}` },
-              failOnStatusCode: false,
-              timeout: 10_000
-            });
-            let body: unknown = null;
-            try { body = await response.json(); } catch { body = null; }
-            responses.push({ endpoint: request.endpoint, method: request.method, status: response.status(), body });
-          } catch {
-            responses.push({ endpoint: request.endpoint, method: request.method, status: null, body: null });
-          }
-        }
-        for (const response of responses) profileShapes.push({
-          endpoint: response.endpoint,
-          method: response.method,
-          status: response.status,
-          bodyShapeHash: structuralBodyHash(response.body),
-          bodyShape: structuralBodyShape(response.body)
+      if (runtimeFrame === null) {
+        profileShapes.push({ availability: "NO_PROVIDER_RUNTIME" });
+      } else {
+        const accountStore = await readProviderAccountStore(runtimeFrame);
+        profileShapes.push({
+          source: "ACCOUNT_STORE",
+          bodyShapeHash: structuralBodyHash(accountStore),
+          bodyShape: structuralBodyShape(accountStore)
         });
+        for (const probe of probes) {
+          const response = await probeReadOnlyProfileThroughRuntime(runtimeFrame, probe);
+          profileShapes.push({
+            endpoint: probe.endpoint,
+            method: probe.method,
+            status: response.status,
+            httpStatus: response.httpStatus,
+            bodyShapeHash: structuralBodyHash(response.body),
+            bodyShape: structuralBodyShape(response.body)
+          });
+        }
       }
     }
     if (controlShapesOnly) {

@@ -1,18 +1,34 @@
 import { chromium } from "playwright";
+import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   clickSafeStructuralCategories,
   collectSafeControlShapes,
   discoverApiOriginFromFrame,
   findApiOriginFromPage,
-  findAccessTokenFrame
+  findAccessTokenFrame,
+  findProviderRuntimeFrame,
+  probeReadOnlyProfileThroughRuntime,
+  readProviderAccountStore
 } from "./browser-protocol-inspector.js";
 
 describe("browser protocol inspector", () => {
   let browser: Awaited<ReturnType<typeof chromium.launch>>;
+  let server: Server;
+  let testOrigin: string;
 
-  beforeAll(async () => { browser = await chromium.launch({ headless: true }); });
-  afterAll(async () => { await browser.close(); });
+  beforeAll(async () => {
+    server = createServer((_request, response) => { response.end("<!doctype html><main>provider shell</main>"); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    testOrigin = `http://127.0.0.1:${address.port}`;
+    browser = await chromium.launch({ headless: true });
+  });
+  afterAll(async () => {
+    await browser.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
 
   it("collects redacted read-only control shapes from top page and child frames", async () => {
     const page = await browser.newPage();
@@ -92,7 +108,7 @@ describe("browser protocol inspector", () => {
 
   it("discovers only a clean HTTPS API origin from the provider runtime store", async () => {
     const page = await browser.newPage();
-    await page.setContent("<main>provider shell</main>");
+    await page.goto(testOrigin);
     await page.evaluate(() => {
       (globalThis as unknown as { UtilPack: unknown }).UtilPack = {
         siteInfoStore: { attrs: { ApiBackendUrl: "https://api.cmd.test/api/" } }
@@ -106,6 +122,34 @@ describe("browser protocol inspector", () => {
       };
     });
     expect(await discoverApiOriginFromFrame(page.mainFrame())).toBeNull();
+    await page.close();
+  });
+
+  it("uses the provider runtime helper for an allowlisted read-only profile request", async () => {
+    const page = await browser.newPage();
+    await page.goto(testOrigin);
+    await page.evaluate(() => {
+      sessionStorage.setItem("at", "unit-test-credential");
+      (globalThis as unknown as { UtilPack: unknown }).UtilPack = {
+        siteInfoStore: { attrs: { ApiBackendUrl: "https://api.cmd.test/api" } },
+        accountStore: { attrs: { balanceContent: { cashBalance: "100000" }, Currency: "VND" } },
+        SyncServer: {
+          json: (url: string, _data: unknown, success: (body: unknown) => void, _async: boolean,
+            _failure: (body: unknown) => void, method: string) => {
+            if (url === "https://api.cmd.test/api/CashMember/GetUserInfo" && method === "GET") {
+              success({ balanceContent: { cashBalance: "100000" } });
+            }
+          }
+        }
+      };
+    });
+    expect(await findProviderRuntimeFrame(page)).toBe(page.mainFrame());
+    expect(await probeReadOnlyProfileThroughRuntime(page.mainFrame(), {
+      endpoint: "/CashMember/GetUserInfo", method: "GET", timeoutMs: 500
+    })).toEqual({ status: "OK", httpStatus: null, body: { balanceContent: { cashBalance: "100000" } } });
+    expect(await readProviderAccountStore(page.mainFrame())).toEqual({
+      balanceContent: { cashBalance: "100000" }, Currency: "VND"
+    });
     await page.close();
   });
 });
