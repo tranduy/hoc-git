@@ -50,4 +50,31 @@ describe("CmdObservedCatalogReader", () => {
 
     await expect(reader.read("account-1")).rejects.toThrow("CMD_CATALOG_SCHEMA_ERROR");
   });
+
+  it("quarantines one malformed market while retaining an exact sibling market", async () => {
+    const reader = new CmdObservedCatalogReader({
+      accounts: { withActiveHandle: async (_id, _provider, consume) => consume(handle) },
+      source: { readCatalog: async () => [{
+        sportId: "1", leagueId: "l", leagueName: "League", matchId: "m", timeText: "1H27'",
+        teamNames: ["A", "B"], groups: [
+          { betTypeIds: ["3"], labels: [], odds: [
+            { marketOddsId: "total", priceText: "0.8", status: null, greyedOut: null },
+            { marketOddsId: "total", priceText: "-0.9", status: null, greyedOut: null }
+          ] },
+          { betTypeIds: ["5"], labels: [], odds: [
+            { marketOddsId: "1x2", priceText: "2.1", status: null, greyedOut: null },
+            { marketOddsId: "1x2", priceText: "3.2", status: null, greyedOut: null },
+            { marketOddsId: "1x2", priceText: "3.4", status: null, greyedOut: null }
+          ] }
+        ]
+      }] },
+      clock: { now: () => ({ wallClockNowMs: 1_788_000_000_000, monotonicNowMs: 500 }) },
+      timezoneOffsetMinutes: 420
+    });
+
+    const result = await reader.read("account-1");
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_1X2" })]);
+    expect(result.quotes).toHaveLength(3);
+    expect(result.rejectedMarketCount).toBe(1);
+  });
 });

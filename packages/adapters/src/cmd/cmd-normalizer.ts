@@ -56,6 +56,15 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
   readonly clockMs: number | null;
 } | null {
   const normalized = timeText.trim().toUpperCase();
+  const stoppageClock = /^(\d)H(\d+)'\+\d+$/u.exec(normalized);
+  if (stoppageClock !== null) {
+    return {
+      startAtUtcMs: options.observedAtMs,
+      isLive: true,
+      period: `${stoppageClock[1]}H`,
+      clockMs: Number(stoppageClock[2]) * 60_000
+    };
+  }
   if (normalized === "TRỰC TIẾP" || /^\dH\d+'$/u.test(normalized)) {
     const clock = /^(\d)H(\d+)'$/u.exec(normalized);
     return {

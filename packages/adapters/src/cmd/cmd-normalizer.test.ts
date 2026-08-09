@@ -76,6 +76,17 @@ describe("normalizeCmdCatalog", () => {
     expect(result.quotes.every((quote) => quote.status === "SUSPENDED")).toBe(true);
   });
 
+  it("accepts the observed live clock format with stoppage time", () => {
+    const live = { ...record, timeText: "2H48'+6", groups: [record.groups[2]!] };
+    const result = normalizeCmdCatalog([live], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
+    });
+    expect(result.events[0]).toEqual(expect.objectContaining({
+      isLive: true,
+      liveState: expect.objectContaining({ period: "2H", clockMs: 2_880_000 })
+    }));
+  });
+
   it("fails closed on missing participants, invalid times, mismatched IDs, or malformed odds", () => {
     const cases = [
       { ...record, teamNames: ["Alpha FC"] },

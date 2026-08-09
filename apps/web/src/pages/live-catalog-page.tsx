@@ -74,6 +74,7 @@ export function LiveCatalogPage({
             <strong>LIVE · {catalog.provider}</strong>
             <span>Observed {new Date(catalog.observedAtMs).toLocaleString()}</span>
             <span className="mapping mapping--review_required">Awaiting second provider</span>
+            {catalog.rejectedMarketCount > 0 && <span>{catalog.rejectedMarketCount} market(s) rejected as incomplete</span>}
           </div>
           {events.length === 0 ? <p className="empty-state">CMD returned no accepted Football events in the current view.</p> : (
             <div className="catalog-event-list">{events.map((event) => {

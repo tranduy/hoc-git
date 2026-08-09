@@ -14,6 +14,7 @@ export interface LiveCatalogResponse {
   readonly category: "FOOTBALL";
   readonly comparisonState: "AWAITING_SECOND_PROVIDER";
   readonly observedAtMs: number;
+  readonly rejectedMarketCount: number;
   readonly events: readonly ProviderEvent[];
   readonly markets: readonly ProviderMarket[];
   readonly quotes: readonly ProviderQuote[];
@@ -52,11 +53,13 @@ export class CatalogApi implements CatalogApiLike {
       record.provider !== "CMD" || record.category !== "FOOTBALL" ||
       record.comparisonState !== "AWAITING_SECOND_PROVIDER" ||
       typeof record.observedAtMs !== "number" || !Number.isFinite(record.observedAtMs) ||
+      typeof record.rejectedMarketCount !== "number" || !Number.isSafeInteger(record.rejectedMarketCount) || record.rejectedMarketCount < 0 ||
       !events.success || !markets.success || !quotes.success
     ) throw new Error("Invalid live catalog response");
     return {
       dataMode: "LIVE", accountId, provider: "CMD", category: "FOOTBALL",
       comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: record.observedAtMs,
+      rejectedMarketCount: record.rejectedMarketCount,
       events: events.data, markets: markets.data, quotes: quotes.data
     };
   }

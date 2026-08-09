@@ -30,6 +30,7 @@ const quotes: ProviderQuote[] = ["HOME", "DRAW", "AWAY"].map((selection, index) 
 const catalog: LiveCatalogResponse = {
   dataMode: "LIVE", accountId: account.id, provider: "CMD", category: "FOOTBALL",
   comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100,
+  rejectedMarketCount: 0,
   events: [event], markets: [market], quotes
 };
 

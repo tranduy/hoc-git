@@ -16,6 +16,7 @@ describe("provider catalog route", () => {
         category: "FOOTBALL" as const,
         comparisonState: "AWAITING_SECOND_PROVIDER" as const,
         observedAtMs: 100,
+        rejectedMarketCount: 0,
         events: [], markets: [], quotes: []
       }) }
     });

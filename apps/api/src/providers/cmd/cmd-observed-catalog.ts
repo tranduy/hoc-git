@@ -16,6 +16,7 @@ export interface ObservedProviderCatalog {
   readonly category: "FOOTBALL";
   readonly comparisonState: "AWAITING_SECOND_PROVIDER";
   readonly observedAtMs: number;
+  readonly rejectedMarketCount: number;
   readonly events: readonly ProviderEvent[];
   readonly markets: readonly ProviderMarket[];
   readonly quotes: readonly ProviderQuote[];
@@ -65,13 +66,36 @@ export class CmdObservedCatalogReader {
     }
     const now = this.#clock.now();
     const sequence = (this.#sequences.get(accountId) ?? 0) + 1;
-    const normalized = normalizeCmdCatalog(records, {
+    const normalizationOptions = {
       observedAtMs: now.wallClockNowMs,
       receivedMonotonicMs: now.monotonicNowMs,
       timezoneOffsetMinutes: this.#timezoneOffsetMinutes,
       sequence
-    });
-    if (normalized.diagnostics.length > 0) throw new Error("CMD_CATALOG_SCHEMA_ERROR");
+    };
+    const events: ProviderEvent[] = [];
+    const markets: ProviderMarket[] = [];
+    const quotes: ProviderQuote[] = [];
+    let rejectedMarketCount = 0;
+    for (const record of records) {
+      const eventOnly = normalizeCmdCatalog([{ ...record, groups: [] }], normalizationOptions);
+      if (eventOnly.diagnostics.length > 0 || eventOnly.events.length !== 1) {
+        rejectedMarketCount += Math.max(1, record.groups.filter((group) =>
+          group.betTypeIds.length === 1 && ["3", "5"].includes(group.betTypeIds[0]!)).length);
+        continue;
+      }
+      events.push(eventOnly.events[0]!);
+      for (const group of record.groups) {
+        if (group.betTypeIds.length !== 1 || !["3", "5"].includes(group.betTypeIds[0]!)) continue;
+        const marketOnly = normalizeCmdCatalog([{ ...record, groups: [group] }], normalizationOptions);
+        if (marketOnly.diagnostics.length > 0) {
+          rejectedMarketCount += 1;
+          continue;
+        }
+        markets.push(...marketOnly.markets);
+        quotes.push(...marketOnly.quotes);
+      }
+    }
+    if (records.length > 0 && events.length === 0) throw new Error("CMD_CATALOG_SCHEMA_ERROR");
     this.#sequences.set(accountId, sequence);
     return {
       dataMode: "LIVE",
@@ -80,9 +104,10 @@ export class CmdObservedCatalogReader {
       category: "FOOTBALL",
       comparisonState: "AWAITING_SECOND_PROVIDER",
       observedAtMs: now.wallClockNowMs,
-      events: normalized.events,
-      markets: normalized.markets,
-      quotes: normalized.quotes
+      rejectedMarketCount,
+      events,
+      markets,
+      quotes
     };
   }
 }

@@ -8,6 +8,7 @@ const response = {
   category: "FOOTBALL",
   comparisonState: "AWAITING_SECOND_PROVIDER",
   observedAtMs: 100,
+  rejectedMarketCount: 0,
   events: [], markets: [], quotes: []
 };
 
