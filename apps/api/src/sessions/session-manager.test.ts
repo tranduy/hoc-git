@@ -203,7 +203,21 @@ describe("SessionManager", () => {
       idFactory: () => "unused",
       fabetDriver: {
         login: async () => { loginCalls += 1; },
-        captureLobbyLaunches: async () => { captureCalls += 1; return []; },
+        captureLobbyLaunches: async () => {
+          captureCalls += 1;
+          await vault.save("launch-1", {
+            kind: "LAUNCH_URL",
+            value: "https://sports.vendor.test/launch?token=provider-secret-canary",
+            capturedAtMs: clock.wallClockNowMs
+          });
+          return [{
+            category: "FOOTBALL" as const,
+            providerHint: "SABA",
+            hostname: "sports.vendor.test",
+            capturedAtMs: clock.wallClockNowMs,
+            vaultRecordId: "launch-1"
+          }];
+        },
         resetProfile: async () => { resetCalls += 1; }
       }
     });
@@ -217,12 +231,23 @@ describe("SessionManager", () => {
     expect(configured).toMatchObject({ state: "ACTIVE", reason: null });
     expect(loginCalls).toBe(1);
     expect(captureCalls).toBe(1);
+    expect(await vault.load("launch-1")).toBeNull();
+    expect(await manager.listStatuses()).toEqual({ sessions: [
+      expect.objectContaining({ provider: "FABET", state: "ACTIVE" }),
+      expect.objectContaining({
+        provider: "SABA",
+        source: "FABET_LOGIN",
+        state: "ACTION_REQUIRED",
+        trustedHostname: "sports.vendor.test",
+        reason: "SCHEMA_CHANGED"
+      })
+    ] });
 
     clock.wallClockNowMs = 86_400_040;
     await manager.tick();
     expect(loginCalls).toBe(2);
     expect(captureCalls).toBe(2);
-    expect((await manager.listStatuses()).sessions[0]).toMatchObject({
+    expect((await manager.listStatuses()).sessions.find((session) => session.provider === "FABET")).toMatchObject({
       state: "ACTIVE", acquiredAtMs: 86_400_040, renewAfterMs: 172_800_040
     });
 

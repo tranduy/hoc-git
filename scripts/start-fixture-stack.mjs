@@ -30,6 +30,7 @@ function fixtureEnvironment() {
     API_PORT: String(apiPort),
     WEB_PORT: String(webPort),
     VITE_ORIGIN: `http://${loopbackHost}:${webPort}`,
+    LOCALAPPDATA: join(repositoryRoot, ".auth", "fixture-localappdata"),
     FIXTURE_REPLAY_SPEED: "1",
     FIXTURE_MODE: "1"
   };

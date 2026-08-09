@@ -5,6 +5,8 @@ import type {
   SessionState,
   SessionStatusList
 } from "@tool-chenh/contracts";
+import { createHash } from "node:crypto";
+import type { LaunchCandidate } from "./fabet-browser.js";
 import { SecretVault } from "./secret-vault.js";
 import type {
   ActiveSecretHandle,
@@ -13,6 +15,7 @@ import type {
   SecretRecord,
   SessionValidationResult
 } from "./types.js";
+import { VaultError } from "./types.js";
 import { SessionValidatorRegistry } from "./validators.js";
 
 const renewalIntervalMs = 86_400_000;
@@ -52,7 +55,7 @@ export interface SessionManagerOptions {
   readonly idFactory: () => string;
   readonly fabetDriver?: {
     login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void>;
-    captureLobbyLaunches(): Promise<readonly unknown[]>;
+    captureLobbyLaunches(): Promise<readonly LaunchCandidate[]>;
     resetProfile(): Promise<void>;
   };
   readonly resetFabetState?: () => Promise<void>;
@@ -164,7 +167,7 @@ export class SessionManager {
     if (this.#fabetDriver === undefined) return this.#transition(record, "ACTION_REQUIRED", "SCHEMA_CHANGED");
     try {
       await this.#fabetDriver.login(input);
-      await this.#fabetDriver.captureLobbyLaunches();
+      await this.#ingestFabetLaunches(await this.#fabetDriver.captureLobbyLaunches());
       const active: StoredSession = {
         ...record,
         state: "ACTIVE",
@@ -264,7 +267,7 @@ export class SessionManager {
       }
       try {
         await this.#fabetDriver.login(credentials);
-        await this.#fabetDriver.captureLobbyLaunches();
+        await this.#ingestFabetLaunches(await this.#fabetDriver.captureLobbyLaunches());
       } catch (error) {
         return this.#transition(renewing, "INVALID", this.#fabetFailureReason(error));
       }
@@ -344,8 +347,41 @@ export class SessionManager {
       const code = (error as Record<string, unknown>).code;
       if (code === "DOMAIN_APPROVAL_REQUIRED") return "DOMAIN_APPROVAL_REQUIRED";
       if (code === "UNAUTHORIZED") return "UNAUTHORIZED";
+      if (code === "VAULT_UNAVAILABLE") return "VAULT_UNAVAILABLE";
     }
     return "UNREACHABLE";
+  }
+
+  async #ingestFabetLaunches(candidates: readonly LaunchCandidate[]): Promise<void> {
+    for (const candidate of candidates) {
+      const stored = await this.#vault.load(candidate.vaultRecordId);
+      if (
+        stored === null ||
+        stored.kind !== "LAUNCH_URL" ||
+        typeof stored.value !== "string" ||
+        typeof stored.capturedAtMs !== "number"
+      ) throw new VaultError("VAULT_UNAVAILABLE");
+      const provider = candidate.providerHint === "UNKNOWN"
+        ? `UNKNOWN (${candidate.hostname})`
+        : candidate.providerHint;
+      const slug = provider.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "") || "unknown";
+      const hostHash = createHash("sha256").update(candidate.hostname).digest("hex").slice(0, 12);
+      const record: StoredSession = {
+        version: 1,
+        id: `fabet-launch-${slug}-${hostHash}`,
+        provider,
+        source: "FABET_LOGIN",
+        state: "ACTION_REQUIRED",
+        trustedHostname: candidate.hostname,
+        acquiredAtMs: candidate.capturedAtMs,
+        lastValidatedAtMs: null,
+        renewAfterMs: candidate.capturedAtMs + renewalIntervalMs,
+        reason: "SCHEMA_CHANGED",
+        secret: { kind: "LAUNCH_URL", value: stored.value }
+      };
+      await this.#save(record);
+      await this.#vault.delete(candidate.vaultRecordId);
+    }
   }
 
   async #save(record: StoredSession): Promise<void> {

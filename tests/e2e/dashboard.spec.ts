@@ -102,6 +102,22 @@ test("responsive navigation remains usable", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "LoL" })).toBeVisible();
 });
 
+test("operator can configure sessions and cancel a Fabet reset", async ({ page }) => {
+  await page.goto("/sessions");
+  await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fabet login" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Direct provider session" })).toBeVisible();
+  await expect(page.getByLabel("Reachable Fabet URL")).toBeVisible();
+  await expect(page.getByLabel("Username")).toBeVisible();
+  await expect(page.getByLabel("Password")).toBeVisible();
+
+  await page.getByRole("button", { name: "Reset Fabet session" }).click();
+  const dialog = page.getByRole("dialog", { name: "Reset Fabet session?" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(dialog).toHaveCount(0);
+});
+
 test("disconnection fails closed and the local feed reconnects", async ({ page }) => {
   const connections: Array<{ readonly client: WebSocketRoute; readonly heldServerMessages: string[] }> = [];
   await page.routeWebSocket("**/api/realtime", (socket) => {
