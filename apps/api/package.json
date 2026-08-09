@@ -19,7 +19,8 @@
     "@tool-chenh/contracts": "*",
     "@tool-chenh/core": "*",
     "fastify": "^5.11.3",
-    "playwright": "^1.55.1"
+    "playwright": "^1.55.1",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/ws": "^8.18.0",

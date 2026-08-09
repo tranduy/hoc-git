@@ -4,6 +4,7 @@ import { FixtureAdapter, type FixtureSnapshot } from "@tool-chenh/adapters";
 import type { Category } from "@tool-chenh/contracts";
 import { buildApp, validateViteOrigin } from "./app.js";
 import { Runtime } from "./runtime.js";
+import { createSessionServices } from "./sessions/session-services.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -139,20 +140,32 @@ export function createFixtureRuntime(speed: number): Runtime {
 
 export async function startServer(env: Readonly<Record<string, string | undefined>> = process.env) {
   const config = resolveServerConfig(env);
+  const localAppData = env.LOCALAPPDATA;
+  if (localAppData === undefined || localAppData.trim().length === 0) {
+    throw new Error("LOCAL_APP_DATA_REQUIRED");
+  }
+  const sessionServices = createSessionServices({ localAppData });
   const runtime = createFixtureRuntime(config.fixtureReplaySpeed);
   const controller = new AbortController();
   await runtime.start(controller.signal);
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
-    heartbeatIntervalMs: fixtureReevaluationIntervalMs
+    heartbeatIntervalMs: fixtureReevaluationIntervalMs,
+    sessionServices
   });
   await app.listen({ host: config.host, port: config.port });
+  const sessionTimer = setInterval(() => {
+    void sessionServices.tick();
+  }, 60_000);
+  sessionTimer.unref();
   return {
     app,
     runtime,
     async stop(): Promise<void> {
+      clearInterval(sessionTimer);
       controller.abort();
       await app.close();
+      await sessionServices.close();
     }
   };
 }

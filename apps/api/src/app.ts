@@ -5,11 +5,13 @@ import { registerOpportunityWebsocket } from "./realtime/opportunity-ws.js";
 import type { Runtime } from "./runtime.js";
 import { registerHealthRoute } from "./routes/health.js";
 import { registerSnapshotRoute } from "./routes/snapshot.js";
+import { registerSessionRoutes, type SessionServices } from "./routes/sessions.js";
 
 export interface AppOptions {
   readonly viteOrigin?: string;
   readonly heartbeatIntervalMs?: number;
   readonly maxBufferedBytes?: number;
+  readonly sessionServices?: SessionServices;
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
@@ -63,6 +65,7 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
     throw new Error("maxBufferedBytes must be a positive safe integer");
   }
   const app = Fastify({
+    bodyLimit: 32 * 1024,
     logger: {
       level: process.env.NODE_ENV === "test" ? "silent" : "info",
       serializers: {
@@ -103,11 +106,12 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   });
   void app.register(cors, {
     origin: (origin, callback) => callback(null, origin === viteOrigin ? viteOrigin : false),
-    methods: ["GET"]
+    methods: ["GET", "POST"]
   });
 
   registerHealthRoute(app, runtime);
   registerSnapshotRoute(app, runtime);
+  if (options.sessionServices !== undefined) registerSessionRoutes(app, options.sessionServices);
   void app.register(async (instance) => {
     registerOpportunityWebsocket(instance, runtime, { heartbeatIntervalMs, maxBufferedBytes });
   });
