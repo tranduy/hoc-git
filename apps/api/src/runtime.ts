@@ -399,10 +399,7 @@ export class Runtime {
         canonicalMarketId: null,
         reason: "quote update was rejected"
       });
-      const first = update.quotes[0];
-      if (result.marketKey !== null && first !== undefined) {
-        this.#reconcileEvent(first, adapterId, result.marketKey);
-      }
+      this.#evaluateMarkets();
       this.#publish();
       return;
     }
@@ -957,21 +954,14 @@ export class Runtime {
       owner,
       snapshot: book.snapshot(clock)
     }));
-    const quotes = snapshots.flatMap(({ owner, snapshot }) => snapshot.quotes.map((entry) => {
+    const quotes = snapshots.flatMap(({ owner, snapshot }) => snapshot.quotes.flatMap((entry) => {
       const quote = this.#quotesByAdapter.get(owner)?.get(entry.key) ?? entry.quote;
       const ownerInactive = owner === "" ||
         this.#activeMarketAdapters.get(entry.marketKey) !== owner ||
         this.#activeEventAdapters.get(providerEventKey(quote)) !== owner;
       const quarantined = ownerInactive || this.#isQuarantined(owner, quote.category);
-      return {
-        ...entry,
-        quote,
-        eligible: entry.eligible && !quarantined,
-        ineligibilityReasons: quarantined
-          ? [...new Set([...entry.ineligibilityReasons, "SCHEMA_ERROR" as const])].sort(compareText)
-          : entry.ineligibilityReasons
-      };
-    })).filter((entry) => !entry.ineligibilityReasons.includes("SCHEMA_ERROR"));
+      return quarantined ? [] : [{ ...entry, quote }];
+    }));
     return {
       monotonicGeneratedAtMs: clock.monotonicNowMs,
       wallClockGeneratedAtMs: clock.wallClockNowMs,

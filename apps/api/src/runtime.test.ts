@@ -111,6 +111,25 @@ function adapters(secret?: string) {
   });
 }
 
+function mergedAdapter(
+  provider: "SABA" | "IM",
+  capture?: (sink: ProviderSink) => void
+): ProviderAdapter {
+  const sources = fixturePaths.filter(([, itemProvider]) => itemProvider === provider);
+  return {
+    id: `${provider.toLowerCase()}-merged`,
+    categories: ["FOOTBALL", "LOL"],
+    async start(sink): Promise<void> {
+      capture?.(sink);
+      for (const [path] of sources) {
+        for (const record of loadFixture(path).records.filter((item) => item.offsetMs <= 90)) {
+          emitRecord(sink, record);
+        }
+      }
+    }
+  };
+}
+
 function emitRecord(
   sink: ProviderSink,
   record: FixtureSnapshot["records"][number],
@@ -166,6 +185,146 @@ function emitQuoteUpdate(
 }
 
 describe("Runtime", () => {
+  it("removes every cached HIGH after a malformed source envelope globally quarantines its QuoteBook", async () => {
+    let sabaSink: ProviderSink | undefined;
+    const runtime = new Runtime({
+      adapters: [mergedAdapter("SABA", (sink) => { sabaSink = sink; }), mergedAdapter("IM")],
+      clock,
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
+    });
+    await runtime.start(new AbortController().signal);
+    expect(runtime.getSnapshot().opportunities.map((item) => item.category).sort()).toEqual([
+      "FOOTBALL",
+      "LOL"
+    ]);
+
+    const validQuote = fixtureQuotes(loadFixture("football/saba-snapshot.json"))[0]!;
+    sabaSink!.onQuoteUpdate({
+      source: { provider: "", category: "FOOTBALL" },
+      kind: "DELTA",
+      transport: "WEBSOCKET",
+      sequence: validQuote.sequence,
+      clock: { monotonicNowMs: 100, wallClockNowMs: 1_800_000_000_100 },
+      quotes: [validQuote]
+    });
+
+    const quarantined = runtime.getSnapshot();
+    expect(quarantined.opportunities).toEqual([]);
+    const schemaDiagnostics = quarantined.blockedDiagnostics
+      .filter((item) => item.code === "QUOTE_SCHEMA_ERROR");
+    expect(schemaDiagnostics.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(schemaDiagnostics.map((item) => item.category))).toEqual(
+      new Set(["FOOTBALL", "LOL"])
+    );
+  });
+
+  it("removes every affected HIGH after a malformed batch quarantines multiple markets", async () => {
+    const base = adapters();
+    const sabaFootball = base.find((adapter) => adapter.id === "saba-football")!;
+    const imFootball = base.find((adapter) => adapter.id === "im-football")!;
+    let sabaSink: ProviderSink | undefined;
+    const boostedSaba: ProviderAdapter = {
+      id: sabaFootball.id,
+      categories: sabaFootball.categories,
+      async start(sink, signal): Promise<void> {
+        sabaSink = sink;
+        await sabaFootball.start(sink, signal);
+        const home = fixtureQuotes(loadFixture("football/saba-snapshot.json"))
+          .find((quote) => quote.providerSelectionId === "saba-fb-home")!;
+        emitQuoteUpdate(sink, { ...home, rawOdds: "4", sequence: 2 });
+      }
+    };
+    const boostedIm: ProviderAdapter = {
+      id: imFootball.id,
+      categories: imFootball.categories,
+      async start(sink, signal): Promise<void> {
+        await imFootball.start(sink, signal);
+        const quotes = fixtureQuotes(loadFixture("football/im-snapshot.json"));
+        const draw = quotes.find((quote) => quote.providerSelectionId === "im-fb-draw")!;
+        const away = quotes.find((quote) => quote.providerSelectionId === "im-fb-away")!;
+        sink.onQuoteUpdate({
+          source: { provider: "IM", category: "FOOTBALL" },
+          kind: "DELTA",
+          transport: "POLLING",
+          sequence: 2,
+          clock: { monotonicNowMs: 100, wallClockNowMs: 1_800_000_000_100 },
+          quotes: [
+            { ...draw, rawOdds: "4", sequence: 2 },
+            { ...away, rawOdds: "4", sequence: 2 }
+          ]
+        });
+      }
+    };
+    const runtime = new Runtime({
+      adapters: [
+        boostedSaba,
+        boostedIm,
+        ...base.filter((adapter) => !["saba-football", "im-football"].includes(adapter.id))
+      ],
+      clock,
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
+    });
+    await runtime.start(new AbortController().signal);
+    expect(runtime.getSnapshot().opportunities.filter((item) => item.category === "FOOTBALL"))
+      .toHaveLength(2);
+
+    const sabaQuotes = fixtureQuotes(loadFixture("football/saba-snapshot.json"));
+    const over = sabaQuotes.find((quote) => quote.providerSelectionId === "saba-fb-over-25")!;
+    const home = sabaQuotes.find((quote) => quote.providerSelectionId === "saba-fb-home")!;
+    sabaSink!.onQuoteUpdate({
+      source: { provider: "SABA", category: "FOOTBALL" },
+      kind: "DELTA",
+      transport: "WEBSOCKET",
+      sequence: 5,
+      clock: { monotonicNowMs: 100, wallClockNowMs: 1_800_000_000_100 },
+      quotes: [
+        { ...over, sequence: 5 },
+        { ...home, sequence: 5 }
+      ]
+    });
+
+    const quarantined = runtime.getSnapshot();
+    expect(quarantined.opportunities.filter((item) => item.category === "FOOTBALL"))
+      .toEqual([]);
+    expect(quarantined.blockedDiagnostics.filter((item) => item.code === "QUOTE_SCHEMA_ERROR"))
+      .toHaveLength(2);
+  });
+
+  it.each(["EMPTY", "MALFORMED"] as const)(
+    "fails closed without throwing for a %s quote array",
+    async (shape) => {
+      let sabaSink: ProviderSink | undefined;
+      const runtime = new Runtime({
+        adapters: [mergedAdapter("SABA", (sink) => { sabaSink = sink; }), mergedAdapter("IM")],
+        clock,
+        mappingPolicy: mappingPolicy(),
+        opportunityPolicy: opportunityPolicy()
+      });
+      await runtime.start(new AbortController().signal);
+      expect(runtime.getSnapshot().opportunities.map((item) => item.category).sort()).toEqual([
+        "FOOTBALL",
+        "LOL"
+      ]);
+      const malformed = {
+        source: { provider: "SABA", category: "FOOTBALL" },
+        kind: "DELTA",
+        transport: "WEBSOCKET",
+        sequence: 3,
+        clock: { monotonicNowMs: 100, wallClockNowMs: 1_800_000_000_100 },
+        quotes: shape === "EMPTY" ? [] : undefined
+      } as unknown as ProviderQuoteUpdate;
+
+      expect(() => sabaSink!.onQuoteUpdate(malformed)).not.toThrow();
+
+      expect(runtime.getSnapshot().opportunities.map((item) => item.category)).toEqual(["LOL"]);
+      expect(runtime.getSnapshot().blockedDiagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ category: "FOOTBALL", code: "QUOTE_SCHEMA_ERROR" })
+      ]));
+    }
+  );
+
   it("does not let a duplicate lower sequence replace accepted quote state", async () => {
     const base = adapters();
     const sabaFootball = base.find((adapter) => adapter.id === "saba-football")!;
