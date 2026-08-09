@@ -77,5 +77,6 @@ export { OpportunityEngine } from "./opportunities/engine.js";
 export type {
   OpportunityCandidate,
   OpportunityEvaluationContext,
-  OpportunityLegCandidate
+  OpportunityLegCandidate,
+  FinancialFxPolicy
 } from "./opportunities/engine.js";

@@ -9,14 +9,14 @@ const snapshot: AppSnapshot = {
   generatedAtMs: 1_800_000_000_000,
   providerStatuses: [],
   counts: { FOOTBALL: { events: 1, markets: 1 }, LOL: { events: 0, markets: 0 }, mappings: { VERIFIED: 1, REVIEW_REQUIRED: 0, REJECTED: 0 }, opportunities: 1 },
-  events: [{ canonicalEventId: "event-1", category: "FOOTBALL", competition: "Premier League", seasonStage: null, startAtUtcMs: 1_800_000_100_000, participantA: "Northbridge", participantB: "Riverside", providerEventIds: ["saba-1", "im-1"], mappingStatus: "VERIFIED", mappingEvidence: [] }],
+  events: [{ canonicalEventId: "event-1", category: "FOOTBALL", competition: "Premier League", seasonStage: null, startAtUtcMs: 1_800_000_100_000, participantA: "Northbridge", participantB: "Riverside", providerEventIds: ["saba-1", "im-1"], isLive: false, mappingStatus: "VERIFIED", mappingEvidence: [] }],
   markets: [{ canonicalMarketId: "market-1", canonicalEventId: "event-1", category: "FOOTBALL", marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5", settlementProfile: "football-v1", providerMarketIds: ["saba-market", "im-market"], mappingStatus: "VERIFIED", mappingEvidence: [] }],
   opportunities: [{
     opportunityId: "opportunity-1", canonicalEventId: "event-1", canonicalMarketId: "market-1", category: "FOOTBALL", marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5", settlementProfile: "football-v1",
-    inverseSum: "0.990099009900990099", netMargin: "0.01", worstCaseProfit: "1.00", roi: "0.01", quoteAgeMs: 1_250, mappingEvidence: [], executionConfidence: "HIGH",
+    baseCurrency: "USD", totalStakeBase: "100.01000100010001", inverseSum: "0.990099009900990099", netMargin: "0.01", worstCaseProfit: "1.00", roi: "0.01", quoteAgeMs: 1_250, mappingEvidence: [], executionConfidence: "HIGH",
     legs: [
-      { provider: "SABA", providerEventId: "saba-1", providerMarketId: "saba-market", providerSelectionId: "over", selection: "Over 2.5", rawOdds: "0.98", rawFormat: "HK", decimalOdds: "1.98", effectiveDecimal: "1.98", stake: "50.505050505050505", minStake: "10", maxStake: "500", payout: "100", quoteAgeMs: 1_250, quoteStatus: "OPEN", sourceTimestampMs: 1_799_999_998_750, receivedMonotonicMs: 4, sequence: 9, eligible: true, ineligibleReasons: [] },
-      { provider: "IM", providerEventId: "im-1", providerMarketId: "im-market", providerSelectionId: "under", selection: "Under 2.5", rawOdds: "1.02", rawFormat: "HK", decimalOdds: "2.02", effectiveDecimal: "2.02", stake: "49.504950495049505", minStake: "5", maxStake: "250", payout: "100", quoteAgeMs: 980, quoteStatus: "OPEN", sourceTimestampMs: 1_799_999_999_020, receivedMonotonicMs: 5, sequence: 10, eligible: true, ineligibleReasons: [] }
+      { provider: "SABA", providerEventId: "saba-1", providerMarketId: "saba-market", providerSelectionId: "over", selection: "Over 2.5", rawOdds: "0.98", rawFormat: "HK", decimalOdds: "1.98", effectiveDecimal: "1.98", stake: "50.505050505050505", stakeCurrency: "USD", baseCurrency: "USD", stakeBase: "50.505050505050505", minStake: "10", maxStake: "500", payout: "100", feeType: "PROFIT", feeRate: "0.01", fxRate: "1", fxSpreadRate: "0", fxAsOfMs: 1_799_999_999_000, quoteAgeMs: 1_250, quoteStatus: "OPEN", sourceTimestampMs: 1_799_999_998_750, receivedMonotonicMs: 4, sequence: 9, eligible: true, ineligibleReasons: [] },
+      { provider: "IM", providerEventId: "im-1", providerMarketId: "im-market", providerSelectionId: "under", selection: "Under 2.5", rawOdds: "1.02", rawFormat: "HK", decimalOdds: "2.02", effectiveDecimal: "2.02", stake: "49.504950495049505", stakeCurrency: "USD", baseCurrency: "USD", stakeBase: "49.504950495049505", minStake: "5", maxStake: "250", payout: "100", feeType: "PAYOUT", feeRate: "0.005", fxRate: "1", fxSpreadRate: "0", fxAsOfMs: 1_799_999_999_000, quoteAgeMs: 980, quoteStatus: "OPEN", sourceTimestampMs: 1_799_999_999_020, receivedMonotonicMs: 5, sequence: 10, eligible: true, ineligibleReasons: [] }
     ]
   }],
   blockedDiagnostics: [{ code: "NEGATIVE_MARGIN", category: "FOOTBALL", canonicalMarketId: "blocked-market", reason: "negative margin", mappingEvidence: [] }]
@@ -45,16 +45,17 @@ describe("OpportunitiesPage", () => {
     expect(within(card).getByLabelText("Effective decimal odds: 1.98")).toBeTruthy();
     expect(within(card).getByLabelText("Effective decimal odds: 2.02")).toBeTruthy();
     expect(within(card).getAllByText("100.00")).toHaveLength(2);
-    expect(within(card).getAllByLabelText("Outcome payout: 100")).toHaveLength(2);
+    expect(within(card).getAllByLabelText("Outcome payout in USD: 100")).toHaveLength(2);
     expect(within(card).getByText("1.00%")).toBeTruthy();
     expect(within(card).getByLabelText("Worst-case profit: 1.00")).toBeTruthy();
     expect(within(card).getByLabelText("ROI: 0.01")).toBeTruthy();
+    expect(within(card).getByLabelText("Total stake in USD: 100.01000100010001")).toBeTruthy();
+    expect(within(card).getByLabelText("SABA financial policy: PROFIT fee 0.01; USD to USD FX rate 1; spread 0; as of 1799999999000 ms")).toBeTruthy();
+    expect(within(card).getByLabelText("IM financial policy: PAYOUT fee 0.005; USD to USD FX rate 1; spread 0; as of 1799999999000 ms")).toBeTruthy();
     expect(within(card).getAllByTitle("1250 ms from the server snapshot")).toHaveLength(2);
     expect(within(card).getByTitle("980 ms from the server snapshot")).toBeTruthy();
     expect(within(card).getByLabelText("Source timestamp: 1,799,999,998,750 ms")).toBeTruthy();
     expect(within(card).getByLabelText("Source timestamp: 1,799,999,999,020 ms")).toBeTruthy();
-    expect(within(card).getByTitle("50.505050505050505")).toBeTruthy();
-    expect(within(card).getByTitle("49.504950495049505")).toBeTruthy();
     expect(within(card).getByLabelText("Exact stake: 50.505050505050505")).toBeTruthy();
     expect(within(card).getByLabelText("Exact stake: 49.504950495049505")).toBeTruthy();
     expect(within(card).getByLabelText("Minimum stake: 10; maximum stake: 500")).toBeTruthy();
@@ -71,8 +72,15 @@ describe("OpportunitiesPage", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("uses only a server STALE diagnostic for the stale empty state", () => {
-    render(<OpportunitiesPage snapshot={{ ...snapshot, opportunities: [], blockedDiagnostics: [{ code: "STALE", category: "FOOTBALL", canonicalMarketId: "market-1", reason: "server quote expired", mappingEvidence: [] }] }} connectionState="LIVE" />);
+  it("keeps cached opportunities ineligible while a fresh snapshot handshake is connecting", () => {
+    render(<OpportunitiesPage snapshot={snapshot} connectionState="CONNECTING" />);
+
+    expect(screen.getByRole("alert").textContent).toContain("ineligible until a validated fresh snapshot returns");
+    expect(screen.queryByRole("article")).toBeNull();
+  });
+
+  it.each(["STALE", "QUOTE_STALE"])("uses a server %s diagnostic for the stale empty state", (code) => {
+    render(<OpportunitiesPage snapshot={{ ...snapshot, opportunities: [], blockedDiagnostics: [{ code, category: "FOOTBALL", canonicalMarketId: "market-1", reason: "server quote expired", mappingEvidence: [] }] }} connectionState="LIVE" />);
 
     expect(screen.getByRole("heading", { name: "Stale market data" })).toBeTruthy();
     expect(screen.getByText(/Wait for a fresh server snapshot/i)).toBeTruthy();

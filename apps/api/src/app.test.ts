@@ -7,7 +7,7 @@ import {
   type ReplayScheduler
 } from "@tool-chenh/adapters";
 import { AppSnapshotSchema, RealtimeMessageSchema, type Category } from "@tool-chenh/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient, type WebSocket } from "ws";
 import {
   buildApp,
@@ -100,6 +100,7 @@ const apps: Array<ReturnType<typeof buildApp>> = [];
 const sockets: WebSocket[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const socket of sockets.splice(0)) socket.terminate();
   await Promise.all(apps.splice(0).map((app) => app.close()));
 });
@@ -173,6 +174,20 @@ describe("Fastify snapshot API", () => {
       "FOOTBALL",
       "LOL"
     ]);
+  });
+
+  it("advances fixture quote age and removes opportunities after the documented inspection TTL", async () => {
+    let elapsedMs = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => elapsedMs);
+    const runtime = createFixtureRuntime(1_000);
+    await runtime.start(new AbortController().signal);
+
+    expect(runtime.getSnapshot().opportunities).toHaveLength(2);
+    elapsedMs = 300_001;
+
+    const stale = runtime.getSnapshot();
+    expect(stale.opportunities).toHaveLength(0);
+    expect(stale.blockedDiagnostics.some((diagnostic) => diagnostic.code === "QUOTE_STALE")).toBe(true);
   });
 
   it("defaults server binding to loopback and reads the established API env names", () => {

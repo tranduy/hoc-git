@@ -1,5 +1,11 @@
 import type { CanonicalEvent, CanonicalMarket } from "@tool-chenh/contracts";
 
+function lifecycleLabel(isLive: CanonicalEvent["isLive"]): string {
+  if (isLive === true) return "Live";
+  if (isLive === false) return "Pre-match";
+  return "Unknown";
+}
+
 export function EventTable({
   events,
   markets
@@ -28,7 +34,7 @@ export function EventTable({
               <tr key={event.canonicalEventId}>
                 <td><strong>{event.participantA}</strong><span className="versus">vs</span><strong>{event.participantB}</strong></td>
                 <td>{event.competition}</td>
-                <td>{eventMarkets.some((market) => market.scope.startsWith("MAP")) ? "Map / Series" : "Full time"}</td>
+                <td>{lifecycleLabel(event.isLive)}</td>
                 <td>{eventMarkets.map((market) => <span className="market-chip" key={market.canonicalMarketId}>{market.scope} · {market.marketType}</span>)}</td>
                 <td><span className={`mapping mapping--${event.mappingStatus.toLowerCase()}`}>{event.mappingStatus.replace("_", " ")}</span></td>
               </tr>

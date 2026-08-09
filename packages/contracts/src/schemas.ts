@@ -110,9 +110,8 @@ function validateCategoryCompatibility(
   }
 }
 
-export const ProviderEventSchema = z.strictObject({
+const ProviderEventBaseSchema = z.strictObject({
   provider: z.string(),
-  category: CategorySchema,
   providerEventId: z.string(),
   competition: z.string(),
   seasonStage: z.string().nullable(),
@@ -120,9 +119,36 @@ export const ProviderEventSchema = z.strictObject({
   participantA: z.string(),
   participantB: z.string(),
   eventScope: z.string(),
-  bestOf: z.number().nullable(),
-  isLive: z.boolean()
-}) satisfies z.ZodType<ProviderEvent>;
+  isLive: z.boolean(),
+  rematchCandidate: z.boolean().nullable(),
+  fixtureDiscriminator: z.string().nullable()
+});
+
+export const ProviderEventSchema = z.discriminatedUnion("category", [
+  ProviderEventBaseSchema.extend({
+    category: z.literal("FOOTBALL"),
+    bestOf: z.null(),
+    isVirtual: z.boolean().nullable(),
+    sportVariant: z.string().nullable(),
+    liveState: z.strictObject({
+      period: z.string().nullable(),
+      scoreHome: z.number().nullable(),
+      scoreAway: z.number().nullable(),
+      clockMs: z.number().nullable()
+    }).nullable()
+  }),
+  ProviderEventBaseSchema.extend({
+    category: z.literal("LOL"),
+    bestOf: z.number().nullable(),
+    gameVariant: z.string().nullable(),
+    liveState: z.strictObject({
+      seriesScoreA: z.number().nullable(),
+      seriesScoreB: z.number().nullable(),
+      currentMap: z.number().nullable(),
+      mapState: z.string().nullable()
+    }).nullable()
+  })
+]) satisfies z.ZodType<ProviderEvent>;
 
 export const ProviderMarketSchema = z.strictObject({
   provider: z.string(),
@@ -172,6 +198,7 @@ export const CanonicalEventSchema = z.strictObject({
   participantA: z.string(),
   participantB: z.string(),
   providerEventIds: z.array(z.string()),
+  isLive: z.boolean().nullable(),
   mappingStatus: MappingStatusSchema,
   mappingEvidence: z.array(MappingEvidenceSchema)
 }) satisfies z.ZodType<CanonicalEvent>;
@@ -200,9 +227,17 @@ export const StakeLegSchema = z.strictObject({
   decimalOdds: DecimalStringSchema,
   effectiveDecimal: DecimalStringSchema,
   stake: DecimalStringSchema,
+  stakeCurrency: z.string().trim().min(1),
+  baseCurrency: z.string().trim().min(1),
+  stakeBase: DecimalStringSchema,
   minStake: DecimalStringSchema,
   maxStake: DecimalStringSchema,
   payout: DecimalStringSchema,
+  feeType: z.enum(["NONE", "PROFIT", "PAYOUT"]),
+  feeRate: DecimalStringSchema.nullable(),
+  fxRate: DecimalStringSchema,
+  fxSpreadRate: DecimalStringSchema,
+  fxAsOfMs: z.number().int().nonnegative(),
   quoteAgeMs: z.number(),
   quoteStatus: QuoteStatusSchema,
   sourceTimestampMs: z.number().nullable(),
@@ -211,6 +246,13 @@ export const StakeLegSchema = z.strictObject({
   eligible: z.boolean(),
   ineligibleReasons: z.array(QuoteIneligibilityReasonSchema)
 }).superRefine((leg, context) => {
+  if ((leg.feeType === "NONE") !== (leg.feeRate === null)) {
+    context.addIssue({
+      code: "custom",
+      path: ["feeRate"],
+      message: "NONE fees require a null rate and charged fees require a rate"
+    });
+  }
   if (leg.eligible) {
     if (leg.quoteStatus !== "OPEN") {
       context.addIssue({
@@ -246,6 +288,8 @@ export const OpportunitySchema = z.strictObject({
   line: DecimalStringSchema.nullable(),
   settlementProfile: z.string(),
   legs: z.array(StakeLegSchema),
+  baseCurrency: z.string().trim().min(1),
+  totalStakeBase: DecimalStringSchema,
   inverseSum: DecimalStringSchema,
   netMargin: DecimalStringSchema,
   worstCaseProfit: DecimalStringSchema,
@@ -253,7 +297,15 @@ export const OpportunitySchema = z.strictObject({
   quoteAgeMs: z.number(),
   mappingEvidence: z.array(MappingEvidenceSchema),
   executionConfidence: z.enum(["HIGH", "BLOCKED"])
-}).superRefine(validateCategoryCompatibility) satisfies z.ZodType<Opportunity>;
+}).superRefine(validateCategoryCompatibility).superRefine((opportunity, context) => {
+  if (opportunity.legs.some((leg) => leg.baseCurrency !== opportunity.baseCurrency)) {
+    context.addIssue({
+      code: "custom",
+      path: ["legs"],
+      message: "every leg must use the opportunity base currency"
+    });
+  }
+}) satisfies z.ZodType<Opportunity>;
 
 export const ProviderConnectionStateSchema = z.enum([
   "CONNECTING",

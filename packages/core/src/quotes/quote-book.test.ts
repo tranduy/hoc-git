@@ -56,6 +56,9 @@ const update = (
   source: { provider: "SABA", category: "FOOTBALL" },
   kind: "DELTA",
   transport: "WEBSOCKET",
+  sequence: typeof quotes[0] === "object" && quotes[0] !== null && "sequence" in quotes[0]
+    ? (quotes[0] as { sequence: number | null }).sequence
+    : null,
   clock: clock(),
   quotes,
   ...overrides

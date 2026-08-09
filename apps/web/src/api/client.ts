@@ -71,12 +71,20 @@ export class SnapshotClient {
       const socket = this.#createWebSocket(realtimeUrl());
       this.#socket = socket;
       socket.onopen = () => {
+        if (this.#socket !== socket) return;
         this.#retryAttempt = 0;
-        this.#onConnectionState("LIVE");
       };
-      socket.onmessage = (event) => this.#handleMessage(event.data);
-      socket.onerror = () => this.#onConnectionState("DISCONNECTED");
-      socket.onclose = () => this.#scheduleReconnect();
+      socket.onmessage = (event) => {
+        if (this.#socket === socket) this.#handleMessage(event.data);
+      };
+      socket.onerror = () => {
+        if (this.#socket === socket) this.#onConnectionState("DISCONNECTED");
+      };
+      socket.onclose = () => {
+        if (this.#socket !== socket) return;
+        this.#socket = undefined;
+        this.#scheduleReconnect();
+      };
     } catch {
       this.#onConnectionState("DISCONNECTED");
       this.#scheduleReconnect();
@@ -92,7 +100,7 @@ export class SnapshotClient {
         return;
       }
       const message: RealtimeMessage = parsed.data;
-      if (message.type === "SNAPSHOT") this.#acceptSnapshot(message.data);
+      if (message.type === "SNAPSHOT") this.#acceptRealtimeSnapshot(message.data);
     } catch {
       this.#onDiagnostic("Ignored invalid realtime message.");
     }
@@ -102,6 +110,15 @@ export class SnapshotClient {
     if (snapshot.revision <= this.#revision) return;
     this.#revision = snapshot.revision;
     this.#onSnapshot(snapshot);
+  }
+
+  #acceptRealtimeSnapshot(snapshot: AppSnapshot): void {
+    if (snapshot.revision < this.#revision) return;
+    if (snapshot.revision > this.#revision) {
+      this.#revision = snapshot.revision;
+      this.#onSnapshot(snapshot);
+    }
+    this.#onConnectionState("LIVE");
   }
 
   #scheduleReconnect(): void {

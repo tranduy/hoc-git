@@ -33,6 +33,8 @@ function QuoteAge({ ageMs, renderedAtMs }: { readonly ageMs: number; readonly re
 function LegDetails({ leg, renderedAtMs }: { readonly leg: StakeLeg; readonly renderedAtMs: number }) {
   const sourceTimestamp = leg.sourceTimestampMs === null ? "Provider timestamp unavailable" : timestampFormat.format(leg.sourceTimestampMs);
   const sourceLabel = leg.sourceTimestampMs === null ? "Source timestamp unavailable" : `Source timestamp: ${ageFormat.format(leg.sourceTimestampMs)} ms`;
+  const feeLabel = leg.feeRate === null ? "no fee" : `${leg.feeType} fee ${leg.feeRate}`;
+  const financialPolicyLabel = `${leg.provider} financial policy: ${feeLabel}; ${leg.stakeCurrency} to ${leg.baseCurrency} FX rate ${leg.fxRate}; spread ${leg.fxSpreadRate}; as of ${leg.fxAsOfMs} ms`;
   return (
     <li className="opportunity-leg">
       <h3>{leg.provider} · {leg.selection}</h3>
@@ -41,7 +43,9 @@ function LegDetails({ leg, renderedAtMs }: { readonly leg: StakeLeg; readonly re
         <div><dt>Decimal odds</dt><dd><ExactNumber label="Decimal odds" value={leg.decimalOdds} /></dd></div>
         <div><dt>Effective decimal</dt><dd><ExactNumber label="Effective decimal odds" value={leg.effectiveDecimal} /></dd></div>
         <div><dt>Exact stake</dt><dd><ExactNumber label="Exact stake" value={leg.stake} /></dd></div>
-        <div><dt>Outcome payout</dt><dd><ExactNumber label="Outcome payout" value={leg.payout} /></dd></div>
+        <div><dt>Base stake ({leg.baseCurrency})</dt><dd><ExactNumber label={`Base stake in ${leg.baseCurrency}`} value={leg.stakeBase} /></dd></div>
+        <div><dt>Outcome payout ({leg.baseCurrency})</dt><dd><ExactNumber label={`Outcome payout in ${leg.baseCurrency}`} value={leg.payout} /></dd></div>
+        <div><dt>Financial policy</dt><dd><span aria-label={financialPolicyLabel} title={`FX as of ${leg.fxAsOfMs}`}>{leg.feeRate === null ? "No fee" : `${leg.feeType} ${formatPercent(leg.feeRate)}`} Â· {leg.stakeCurrency}â†’{leg.baseCurrency} @ {leg.fxRate} Â· spread {formatPercent(leg.fxSpreadRate)}</span></dd></div>
         <div><dt>Stake range</dt><dd><span title={`${leg.minStake}–${leg.maxStake}`} aria-label={`Minimum stake: ${leg.minStake}; maximum stake: ${leg.maxStake}`}>{formatDecimal(leg.minStake)}–{formatDecimal(leg.maxStake)}</span></dd></div>
         <div><dt>Quote age</dt><dd><QuoteAge ageMs={leg.quoteAgeMs} renderedAtMs={renderedAtMs} /></dd></div>
         <div><dt>Source time</dt><dd><span aria-label={sourceLabel} title={leg.sourceTimestampMs === null ? undefined : String(leg.sourceTimestampMs)}>{sourceTimestamp}</span></dd></div>
@@ -71,6 +75,7 @@ export function OpportunityCard({ opportunity, event, revision }: { readonly opp
       <section aria-label="Opportunity result">
         <dl className="opportunity-summary">
           <div><dt>Worst-case profit</dt><dd><ExactNumber label="Worst-case profit" value={opportunity.worstCaseProfit} /></dd></div>
+          <div><dt>Total stake ({opportunity.baseCurrency})</dt><dd><ExactNumber label={`Total stake in ${opportunity.baseCurrency}`} value={opportunity.totalStakeBase} /></dd></div>
           <div><dt>ROI</dt><dd title={opportunity.roi} aria-label={`ROI: ${opportunity.roi}`}>{formatPercent(opportunity.roi)}</dd></div>
           <div><dt>Confidence</dt><dd className={opportunity.executionConfidence === "HIGH" ? "confidence-high" : "confidence-blocked"}>{opportunity.executionConfidence} confidence</dd></div>
           <div><dt>Server quote age</dt><dd><QuoteAge ageMs={opportunity.quoteAgeMs} renderedAtMs={observedAtMs} /></dd></div>

@@ -14,7 +14,7 @@ import {
   type FixtureSnapshot,
   type ReplayScheduler
 } from "./fixture-adapter.js";
-import type { ProviderSink } from "./provider-adapter.js";
+import type { ProviderQuoteUpdate, ProviderSink } from "./provider-adapter.js";
 
 class RecordingSink implements ProviderSink {
   readonly emissions: string[] = [];
@@ -34,9 +34,11 @@ class RecordingSink implements ProviderSink {
     this.emissions.push(`MARKET:${market.providerMarketId}`);
   }
 
-  onQuote(quote: ProviderQuote): void {
-    this.quotes.push(quote);
-    this.emissions.push(`QUOTE:${quote.providerSelectionId}`);
+  onQuoteUpdate(update: ProviderQuoteUpdate): void {
+    for (const quote of update.quotes) {
+      this.quotes.push(quote);
+      this.emissions.push(`QUOTE:${quote.providerSelectionId}`);
+    }
   }
 
   onStatus(status: ProviderConnectionStatus): void {
@@ -78,7 +80,12 @@ const event = (providerEventId: string) => ({
   participantB: "Riverside United",
   eventScope: "REGULATION",
   bestOf: null,
-  isLive: false
+  isLive: false,
+  rematchCandidate: false,
+  fixtureDiscriminator: null,
+  isVirtual: false,
+  sportVariant: "FOOTBALL",
+  liveState: null
 } as const);
 
 const market = {
@@ -231,12 +238,15 @@ describe("FixtureAdapter", () => {
 
   it("rejects payload provenance that conflicts with trusted adapter configuration", async () => {
     const sink = new RecordingSink();
+    const { isVirtual: _isVirtual, sportVariant: _sportVariant, ...commonEvent } = event("wrong-source");
     const conflicting = {
-      ...event("wrong-source"),
+      ...commonEvent,
       provider: "IM",
       category: "LOL",
       eventScope: "SERIES",
-      bestOf: 3
+      bestOf: 3,
+      gameVariant: "LOL_PC",
+      liveState: null
     } as const;
     const adapter = new FixtureAdapter(fixture([
       { offsetMs: 0, kind: "EVENT", payload: conflicting }

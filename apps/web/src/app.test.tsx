@@ -19,9 +19,9 @@ const snapshot: AppSnapshot = {
     opportunities: 0
   },
   events: [
-    { canonicalEventId: "football-1", category: "FOOTBALL", competition: "Premier League", seasonStage: null, startAtUtcMs: 1_800_000_100_000, participantA: "Northbridge", participantB: "Riverside", providerEventIds: ["saba-f-1", "im-f-1"], mappingStatus: "VERIFIED", mappingEvidence: [] },
-    { canonicalEventId: "football-2", category: "FOOTBALL", competition: "Cup Final", seasonStage: null, startAtUtcMs: 1_799_999_900_000, participantA: "City Academy", participantB: "United Academy", providerEventIds: ["saba-f-2", "im-f-2"], mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [] },
-    { canonicalEventId: "lol-1", category: "LOL", competition: "Summer Split", seasonStage: null, startAtUtcMs: 1_800_000_200_000, participantA: "Blue Comets", participantB: "Red Phoenix", providerEventIds: ["saba-l-1", "im-l-1"], mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [] }
+    { canonicalEventId: "football-1", category: "FOOTBALL", competition: "Premier League", seasonStage: null, startAtUtcMs: 1_800_000_100_000, participantA: "Northbridge", participantB: "Riverside", providerEventIds: ["saba-f-1", "im-f-1"], isLive: false, mappingStatus: "VERIFIED", mappingEvidence: [] },
+    { canonicalEventId: "football-2", category: "FOOTBALL", competition: "Cup Final", seasonStage: null, startAtUtcMs: 1_799_999_900_000, participantA: "City Academy", participantB: "United Academy", providerEventIds: ["saba-f-2", "im-f-2"], isLive: true, mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [] },
+    { canonicalEventId: "lol-1", category: "LOL", competition: "Summer Split", seasonStage: null, startAtUtcMs: 1_800_000_200_000, participantA: "Blue Comets", participantB: "Red Phoenix", providerEventIds: ["saba-l-1", "im-l-1"], isLive: false, mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [] }
   ],
   markets: [
     { canonicalMarketId: "football-market", canonicalEventId: "football-1", category: "FOOTBALL", marketType: "FT_1X2", scope: "FULL_TIME", line: null, settlementProfile: "football", providerMarketIds: ["1"], mappingStatus: "VERIFIED", mappingEvidence: [] },
@@ -91,6 +91,50 @@ describe("App navigation", () => {
 
     fireEvent.change(screen.getByLabelText("Timing"), { target: { value: "LIVE" } });
     expect(screen.getByText("No events match these filters.")).toBeTruthy();
+  });
+
+  it("exposes a review-required market under a verified parent event", () => {
+    const market = {
+      ...snapshot.markets[0]!,
+      canonicalMarketId: "football-review-market",
+      marketType: "FT_AH" as const,
+      mappingStatus: "REVIEW_REQUIRED" as const
+    };
+    render(<App initialSnapshot={{ ...snapshot, markets: [...snapshot.markets, market] }} />);
+    fireEvent.click(screen.getByRole("link", { name: "Football" }));
+
+    fireEvent.change(screen.getByLabelText("Mapping"), { target: { value: "REVIEW_REQUIRED" } });
+
+    const northbridgeRow = screen.getByText("Northbridge").closest("tr")!;
+    expect(within(northbridgeRow).getByText(/FT_AH/u)).toBeTruthy();
+    expect(within(northbridgeRow).queryByText(/FT_1X2/u)).toBeNull();
+  });
+
+  it("uses authoritative lifecycle state and fails closed when lifecycle is unknown", () => {
+    const authoritative = {
+      ...snapshot,
+      events: [
+        { ...snapshot.events[0]!, startAtUtcMs: snapshot.generatedAtMs + 60_000, isLive: true },
+        { ...snapshot.events[1]!, startAtUtcMs: snapshot.generatedAtMs - 60_000, isLive: false },
+        { ...snapshot.events[0]!, canonicalEventId: "football-unknown", participantA: "Unknown State", providerEventIds: ["saba-unknown", "im-unknown"], isLive: null }
+      ]
+    };
+    render(<App initialSnapshot={authoritative} />);
+    fireEvent.click(screen.getByRole("link", { name: "Football" }));
+
+    expect(within(screen.getByText("Northbridge").closest("tr")!).getByText("Live")).toBeTruthy();
+    expect(within(screen.getByText("City Academy").closest("tr")!).getByText("Pre-match")).toBeTruthy();
+    expect(within(screen.getByText("Unknown State").closest("tr")!).getByText("Unknown")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Timing"), { target: { value: "LIVE" } });
+    expect(screen.getByText("Northbridge")).toBeTruthy();
+    expect(screen.queryByText("City Academy")).toBeNull();
+    expect(screen.queryByText("Unknown State")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Timing"), { target: { value: "PRE_MATCH" } });
+    expect(screen.getByText("City Academy")).toBeTruthy();
+    expect(screen.queryByText("Northbridge")).toBeNull();
+    expect(screen.queryByText("Unknown State")).toBeNull();
   });
 
   it("does not leak Football filter choices into the LoL category", () => {

@@ -13,6 +13,7 @@ export interface StakeConstraint {
 
 export interface OptimizeStakesInput {
   readonly odds: readonly string[];
+  readonly stakeToBaseRates?: readonly string[];
   readonly constraints: readonly StakeConstraint[];
   readonly bankroll: string;
   readonly minimumWorstCaseProfit?: string;
@@ -94,7 +95,8 @@ function comparePlans(left: CandidatePlan, right: CandidatePlan): number {
 }
 
 function constrainedContinuousCenter(
-  odds: readonly Decimal[],
+  payoutCoefficients: readonly Decimal[],
+  baseRates: readonly Decimal[],
   constraints: readonly ValidatedConstraint[],
   bankroll: Decimal
 ): Decimal[] | null {
@@ -104,11 +106,14 @@ function constrainedContinuousCenter(
   const upperStakes = constraints.map((constraint) =>
     constraint.upperIndex.times(constraint.stakeStep)
   );
-  const minimumTotal = lowerStakes.reduce((sum, stake) => sum.plus(stake), new Decimal(0));
+  const minimumTotal = lowerStakes.reduce(
+    (sum, stake, index) => sum.plus(stake.times(baseRates[index]!)),
+    new Decimal(0)
+  );
   if (minimumTotal.gt(bankroll)) return null;
 
-  const lowerPayouts = lowerStakes.map((stake, index) => stake.times(odds[index]!));
-  const upperPayouts = upperStakes.map((stake, index) => stake.times(odds[index]!));
+  const lowerPayouts = lowerStakes.map((stake, index) => stake.times(payoutCoefficients[index]!));
+  const upperPayouts = upperStakes.map((stake, index) => stake.times(payoutCoefficients[index]!));
   const payoutCap = Decimal.min(...upperPayouts);
   let currentPayout = Decimal.min(...lowerPayouts);
   let remaining = bankroll.minus(minimumTotal);
@@ -127,7 +132,7 @@ function constrainedContinuousCenter(
     const inverseOdds = lowerPayouts.reduce(
       (sum, lowerPayout, index) =>
         lowerPayout.lte(currentPayout)
-          ? sum.plus(new Decimal(1).div(odds[index]!))
+          ? sum.plus(baseRates[index]!.div(payoutCoefficients[index]!))
           : sum,
       new Decimal(0)
     );
@@ -143,21 +148,27 @@ function constrainedContinuousCenter(
   }
 
   return lowerStakes.map((lowerStake, index) =>
-    Decimal.max(lowerStake, currentPayout.div(odds[index]!))
+    Decimal.max(lowerStake, currentPayout.div(payoutCoefficients[index]!))
   );
 }
 
 function evaluateCandidate(
   stakes: readonly Decimal[],
   odds: readonly Decimal[],
+  baseRates: readonly Decimal[],
   bankroll: Decimal,
   minimumWorstCaseProfit: Decimal,
   minimumRoi: Decimal
 ): CandidatePlan | null {
-  const totalStake = stakes.reduce((sum, stake) => sum.plus(stake), new Decimal(0));
+  const totalStake = stakes.reduce(
+    (sum, stake, index) => sum.plus(stake.times(baseRates[index]!)),
+    new Decimal(0)
+  );
   if (totalStake.gt(bankroll)) return null;
 
-  const payouts = stakes.map((stake, index) => stake.times(odds[index]!));
+  const payouts = stakes.map((stake, index) =>
+    stake.times(odds[index]!).times(baseRates[index]!)
+  );
   const worstCasePayout = Decimal.min(...payouts);
   const worstCaseProfit = worstCasePayout.minus(totalStake);
   const roi = worstCaseProfit.div(totalStake);
@@ -176,6 +187,7 @@ function evaluateCandidate(
 function candidateStakes(
   index: number,
   odds: readonly Decimal[],
+  baseRates: readonly Decimal[],
   constraints: readonly ValidatedConstraint[],
   continuousTarget: Decimal,
   radius: number
@@ -215,7 +227,10 @@ function candidateStakes(
 
     for (const boundaryIndex of [other.lowerIndex, other.upperIndex]) {
       const boundaryStake = boundaryIndex.times(other.stakeStep);
-      const equalPayoutStake = boundaryStake.times(odds[otherIndex]!).div(odds[index]!);
+      const equalPayoutStake = boundaryStake
+        .times(odds[otherIndex]!)
+        .times(baseRates[otherIndex]!)
+        .div(odds[index]!.times(baseRates[index]!));
       addFloorCeiling(equalPayoutStake);
     }
   }
@@ -257,6 +272,15 @@ export function optimizeStakes(input: OptimizeStakesInput): StakePlan | null {
     }
     return value;
   });
+  const rawBaseRates = input.stakeToBaseRates ?? input.odds.map(() => "1");
+  if (rawBaseRates.length !== input.odds.length) {
+    throw new StakeOptimizationValidationError(
+      "stakeToBaseRates must have the same length as odds"
+    );
+  }
+  const baseRates = rawBaseRates.map((rate, index) =>
+    decimalInput(rate, `stakeToBaseRates[${index}]`, false)
+  );
 
   const constraints = input.constraints.map((raw, index): ValidatedConstraint => {
     const minStake = decimalInput(raw.minStake, `constraints[${index}].minStake`, false);
@@ -283,13 +307,20 @@ export function optimizeStakes(input: OptimizeStakesInput): StakePlan | null {
   const arbitrage = calculateArbitrage(input.odds);
   if (!arbitrage.isArbitrage) return null;
 
-  const continuousCenter = constrainedContinuousCenter(odds, constraints, bankroll);
+  const payoutCoefficients = odds.map((odd, index) => odd.times(baseRates[index]!));
+  const continuousCenter = constrainedContinuousCenter(
+    payoutCoefficients,
+    baseRates,
+    constraints,
+    bankroll
+  );
   if (continuousCenter === null) return null;
 
   const candidates = constraints.map((_, index) =>
     candidateStakes(
       index,
       odds,
+      baseRates,
       constraints,
       continuousCenter[index]!,
       radius
@@ -312,6 +343,7 @@ export function optimizeStakes(input: OptimizeStakesInput): StakePlan | null {
       const plan = evaluateCandidate(
         selected,
         odds,
+        baseRates,
         bankroll,
         minimumWorstCaseProfit,
         minimumRoi

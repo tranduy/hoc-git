@@ -122,6 +122,15 @@ const constraint = {
   balance: "100"
 };
 
+const fx = {
+  sourceCurrency: "USD",
+  baseCurrency: "USD",
+  rate: "1",
+  spreadRate: "0",
+  asOfMs: WALL_CLOCK_EPOCH_MS,
+  maxAgeMs: 60_000
+} as const;
+
 function snapshot(
   nowMs = 1_000,
   quotes: readonly ProviderQuote[] = [leftQuote, rightQuote]
@@ -140,6 +149,7 @@ function snapshot(
       },
       kind: "FULL_SNAPSHOT",
       transport: "WEBSOCKET",
+      sequence: marketQuotes[0]!.sequence,
       clock: clock(),
       quotes: marketQuotes
     });
@@ -155,22 +165,27 @@ function context(
     minimumWorstCaseProfit: "0",
     minimumRoi: "0",
     minimumRemainingTtlMs: 0,
+    baseCurrency: "USD",
+    evaluatedAtMs: WALL_CLOCK_EPOCH_MS,
     bankroll: "200",
     candidates: [{
       market: canonicalMarket(),
       mapping: mapping(),
+      eventIsLive: true,
       legs: [
         {
           canonicalOutcomeId: "OVER",
           quoteKey: quoteKey(leftQuote),
           fee: { type: "NONE" },
-          constraint
+          constraint,
+          fx
         },
         {
           canonicalOutcomeId: "UNDER",
           quoteKey: quoteKey(rightQuote),
           fee: { type: "NONE" },
-          constraint
+          constraint,
+          fx
         }
       ]
     }],
@@ -278,6 +293,18 @@ describe("OpportunityEngine fail-closed policy", () => {
     expect(engine.blockedDiagnostics[0]?.code).toBe("QUOTE_SUSPENDED");
   });
 
+  it("blocks quotes whose live state contradicts the authoritative mapped event", () => {
+    const engine = new OpportunityEngine();
+    const base = context();
+    const mismatched = {
+      ...base,
+      candidates: [{ ...base.candidates[0]!, eventIsLive: false }]
+    } as OpportunityEvaluationContext;
+
+    expect(engine.evaluate(snapshot(), mismatched)).toEqual([]);
+    expect(engine.blockedDiagnostics[0]?.code).toBe("QUOTE_LIVE_STATE_MISMATCH");
+  });
+
   it("blocks an effective margin below policy", () => {
     const engine = new OpportunityEngine();
 
@@ -302,6 +329,114 @@ describe("OpportunityEngine fail-closed policy", () => {
 
     expect(engine.evaluate(snapshot(), invalidEffectiveOdds)).toEqual([]);
     expect(engine.blockedDiagnostics[0]?.code).toBe("INVALID_ODDS_OR_FEE");
+  });
+
+  it("fails closed when a provider financial policy is missing", () => {
+    const engine = new OpportunityEngine();
+    const base = context();
+    const candidate = base.candidates[0]!;
+    const missing = {
+      ...base,
+      candidates: [{
+        ...candidate,
+        legs: [{ ...candidate.legs[0]!, fx: null }, candidate.legs[1]!]
+      }]
+    };
+
+    expect(engine.evaluate(snapshot(), missing)).toEqual([]);
+    expect(engine.blockedDiagnostics[0]?.code).toBe("FINANCIAL_POLICY_MISSING");
+  });
+
+  it("fails closed when an FX quote is stale", () => {
+    const engine = new OpportunityEngine();
+
+    expect(engine.evaluate(snapshot(), context({
+      evaluatedAtMs: WALL_CLOCK_EPOCH_MS + 60_001
+    }))).toEqual([]);
+    expect(engine.blockedDiagnostics[0]?.code).toBe("FX_STALE");
+  });
+
+  it("fails closed with an FX-specific diagnostic for an invalid rate", () => {
+    const engine = new OpportunityEngine();
+    const base = context();
+    const candidate = base.candidates[0]!;
+    const invalid = {
+      ...base,
+      candidates: [{
+        ...candidate,
+        legs: [{ ...candidate.legs[0]!, fx: { ...fx, rate: "0" } }, candidate.legs[1]!]
+      }]
+    };
+
+    expect(engine.evaluate(snapshot(), invalid)).toEqual([]);
+    expect(engine.blockedDiagnostics[0]?.code).toBe("INVALID_FX");
+  });
+
+  it("exposes exact mixed-currency fee and FX assumptions in base-currency cash flows", () => {
+    const engine = new OpportunityEngine();
+    const base = context({
+      bankroll: "200",
+      minimumNetMargin: "0"
+    });
+    const candidate = base.candidates[0]!;
+    const result = engine.evaluate(snapshot(), {
+      ...base,
+      candidates: [{
+        ...candidate,
+        legs: [
+          {
+            ...candidate.legs[0]!,
+            constraint: { minStake: "50", maxStake: "50", stakeStep: "1", balance: "50" },
+            fx: { ...fx, sourceCurrency: "EUR", rate: "2" }
+          },
+          {
+            ...candidate.legs[1]!,
+            constraint: { minStake: "100", maxStake: "100", stakeStep: "1", balance: "100" }
+          }
+        ]
+      }]
+    });
+
+    expect(result[0]).toMatchObject({
+      baseCurrency: "USD",
+      totalStakeBase: "200",
+      netMargin: "0.1",
+      legs: [
+        { stake: "50", stakeCurrency: "EUR", stakeBase: "100", payout: "220", fxRate: "2" },
+        { stake: "100", stakeCurrency: "USD", stakeBase: "100", payout: "220", fxRate: "1" }
+      ]
+    });
+  });
+
+  it("applies the margin threshold to realized post-rounding ROI", () => {
+    const engine = new OpportunityEngine();
+    const highOdds = [
+      { ...leftQuote, rawOdds: "2.4" },
+      { ...rightQuote, rawOdds: "2.4" }
+    ];
+    const base = context({ minimumNetMargin: "0.15", bankroll: "21" });
+    const candidate = base.candidates[0]!;
+    const rounded = {
+      ...base,
+      candidates: [{
+        ...candidate,
+        legs: [
+          {
+            ...candidate.legs[0]!,
+            quoteKey: quoteKey(highOdds[0]!),
+            constraint: { minStake: "10", maxStake: "10", stakeStep: "10", balance: "10" }
+          },
+          {
+            ...candidate.legs[1]!,
+            quoteKey: quoteKey(highOdds[1]!),
+            constraint: { minStake: "11", maxStake: "11", stakeStep: "11", balance: "11" }
+          }
+        ]
+      }]
+    };
+
+    expect(engine.evaluate(snapshot(1_000, highOdds), rounded)).toEqual([]);
+    expect(engine.blockedDiagnostics[0]?.code).toBe("MARGIN_BELOW_THRESHOLD");
   });
 
   it("blocks unavailable balance without passing invalid inputs to the optimizer", () => {
@@ -415,7 +550,8 @@ describe("OpportunityEngine fail-closed policy", () => {
         canonicalOutcomeId: index === 0 ? "OVER" : "UNDER",
         quoteKey: quoteKey(item),
         fee: { type: "NONE" } as const,
-        constraint: legConstraint
+        constraint: legConstraint,
+        fx
       }))
     });
     const evaluation = context({

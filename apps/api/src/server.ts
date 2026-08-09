@@ -43,6 +43,8 @@ const fixtureMappingPolicy = {
 } as const;
 
 const inspectableFixtureEndMs = 90;
+const fixtureInspectionTtlMs = 300_000;
+const fixtureReevaluationIntervalMs = 250;
 
 function positiveNumber(value: string | undefined, fallback: number, name: string): number {
   if (value === undefined) return fallback;
@@ -77,6 +79,8 @@ export function resolveServerConfig(env: Readonly<Record<string, string | undefi
 }
 
 export function createFixtureRuntime(speed: number): Runtime {
+  const monotonicEpochMs = performance.now();
+  const wallClockEpochMs = Date.now();
   const adapters = fixtureSources.map(([path, provider, category]) => {
     const sourceFixture = JSON.parse(
       readFileSync(new URL(`../../../fixtures/${path}`, import.meta.url), "utf8")
@@ -95,8 +99,40 @@ export function createFixtureRuntime(speed: number): Runtime {
   return new Runtime({
     adapters,
     mappingPolicy: fixtureMappingPolicy,
+    opportunityPolicy: {
+      baseCurrency: "USD",
+      bankroll: "1000",
+      minimumNetMargin: "0",
+      minimumWorstCaseProfit: "0",
+      minimumRoi: "0",
+      minimumRemainingTtlMs: 0,
+      providers: Object.fromEntries(["SABA", "IM"].map((provider) => [provider, {
+        fee: { type: "PROFIT" as const, rate: "0.01" },
+        constraint: { minStake: "1", maxStake: "1000", stakeStep: "1", balance: "1000" },
+        fx: {
+          sourceCurrency: "USD",
+          baseCurrency: "USD",
+          rate: "1",
+          spreadRate: "0",
+          asOfMs: wallClockEpochMs,
+          maxAgeMs: fixtureInspectionTtlMs
+        }
+      }]))
+    },
+    freshnessPolicies: Object.fromEntries(["SABA", "IM"].map((provider) => [provider, {
+      websocketTtlMs: fixtureInspectionTtlMs,
+      pollingTtlMs: fixtureInspectionTtlMs,
+      maxFutureClockSkewMs: 100,
+      missingSourceTimestamp: "USE_RECEIVED_TIME" as const
+    }])),
     clock: {
-      now: () => ({ monotonicNowMs: 100, wallClockNowMs: Date.now() })
+      now: () => {
+        const elapsedMs = Math.max(0, performance.now() - monotonicEpochMs);
+        return {
+          monotonicNowMs: 100 + elapsedMs,
+          wallClockNowMs: wallClockEpochMs + elapsedMs
+        };
+      }
     }
   });
 }
@@ -106,7 +142,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const runtime = createFixtureRuntime(config.fixtureReplaySpeed);
   const controller = new AbortController();
   await runtime.start(controller.signal);
-  const app = buildApp(runtime, { viteOrigin: config.viteOrigin });
+  const app = buildApp(runtime, {
+    viteOrigin: config.viteOrigin,
+    heartbeatIntervalMs: fixtureReevaluationIntervalMs
+  });
   await app.listen({ host: config.host, port: config.port });
   return {
     app,

@@ -139,6 +139,7 @@ export class FixtureAdapter implements ProviderAdapter {
   readonly #snapshotIssues: readonly AdapterSchemaIssue[];
   readonly #speed: number;
   readonly #scheduler: ReplayScheduler;
+  readonly #seenQuoteMarkets = new Set<string>();
 
   constructor(snapshot: unknown, config: FixtureAdapterConfig) {
     const identity = FixtureAdapterIdentitySchema.safeParse(config === undefined
@@ -256,7 +257,28 @@ export class FixtureAdapter implements ProviderAdapter {
       case "QUOTE": {
         const result = ProviderQuoteSchema.safeParse(record.payload);
         if (!result.success) sink.onSchemaError(this.#schemaError(record, safeIssues(result.error)));
-        else if (this.#matchesProvenance(result.data)) sink.onQuote(result.data);
+        else if (this.#matchesProvenance(result.data)) {
+          const quote = result.data;
+          const marketKey = [
+            quote.provider,
+            quote.category,
+            quote.providerEventId,
+            quote.providerMarketId
+          ].map(encodeURIComponent).join("|");
+          const kind = this.#seenQuoteMarkets.has(marketKey) ? "DELTA" : "FULL_SNAPSHOT";
+          this.#seenQuoteMarkets.add(marketKey);
+          sink.onQuoteUpdate({
+            source: { provider: quote.provider, category: quote.category },
+            kind,
+            transport: "WEBSOCKET",
+            sequence: quote.sequence,
+            clock: {
+              monotonicNowMs: quote.receivedMonotonicMs,
+              wallClockNowMs: quote.sourceTimestampMs ?? 0
+            },
+            quotes: [quote]
+          });
+        }
         else sink.onSchemaError(this.#provenanceError(record, result.data));
         return;
       }

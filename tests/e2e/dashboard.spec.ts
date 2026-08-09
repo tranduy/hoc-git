@@ -103,22 +103,32 @@ test("responsive navigation remains usable", async ({ page }) => {
 });
 
 test("disconnection fails closed and the local feed reconnects", async ({ page }) => {
-  const connections: WebSocketRoute[] = [];
+  const connections: Array<{ readonly client: WebSocketRoute; readonly heldServerMessages: string[] }> = [];
   await page.routeWebSocket("**/api/realtime", (socket) => {
-    connections.push(socket);
-    socket.connectToServer();
+    const server = socket.connectToServer();
+    const heldServerMessages: string[] = [];
+    if (connections.length > 0) {
+      server.onMessage((message) => heldServerMessages.push(message.toString()));
+    }
+    connections.push({ client: socket, heldServerMessages });
   });
   await page.goto("/opportunities");
   await expect(page.getByText("READ ONLY").first()).toBeVisible();
 
-  const firstConnection = connections[0];
+  const firstConnection = connections[0]?.client;
   expect(firstConnection).toBeDefined();
   await firstConnection!.close({ code: 1012, reason: "fixture reconnect test" });
   await expect(page.getByRole("alert").getByRole("heading", { name: "Connection disconnected" })).toBeVisible();
   await expect(page.getByText("READ ONLY")).toHaveCount(0);
   await expectNoExecutionControls(page);
 
-  await expect(page.getByRole("alert")).toHaveCount(0, { timeout: 15_000 });
-  expect(connections.length).toBeGreaterThan(1);
+  await expect.poll(() => connections.length, { timeout: 15_000 }).toBeGreaterThan(1);
+  await expect(page.getByRole("alert").getByRole("heading", { name: "Validating live connection" })).toBeVisible();
+  await expect(page.getByText("READ ONLY")).toHaveCount(0);
+
+  const reconnected = connections[1]!;
+  await expect.poll(() => reconnected.heldServerMessages.length).toBeGreaterThan(0);
+  for (const message of reconnected.heldServerMessages) reconnected.client.send(message);
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByText("READ ONLY").first()).toBeVisible();
 });

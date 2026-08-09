@@ -1,6 +1,7 @@
 import type {
   AdapterSchemaError,
   ProviderAdapter,
+  ProviderQuoteUpdate,
   ProviderSink
 } from "@tool-chenh/adapters";
 import type {
@@ -19,6 +20,7 @@ import type {
 import {
   OpportunityEngine,
   QuoteBook,
+  Decimal,
   effectiveDecimal,
   mapEvents,
   mapMarkets,
@@ -27,6 +29,7 @@ import {
   resolveAliasForCategory,
   toDecimal,
   type FeeModel,
+  type FinancialFxPolicy,
   type MappingPolicy,
   type MarketMappingResult,
   type NormalizedEvent,
@@ -34,7 +37,6 @@ import {
   type OpportunityCandidate,
   type QuoteClockContext,
   type QuoteSnapshot,
-  type QuoteTransport,
   type SourceFreshnessPolicy,
   type StakeConstraint
 } from "@tool-chenh/core";
@@ -46,9 +48,11 @@ export interface RuntimeClock {
 export interface ProviderOpportunityPolicy {
   readonly fee: FeeModel;
   readonly constraint: StakeConstraint;
+  readonly fx: FinancialFxPolicy;
 }
 
 export interface RuntimeOpportunityPolicy {
+  readonly baseCurrency: string;
   readonly bankroll: string;
   readonly minimumNetMargin: string;
   readonly minimumWorstCaseProfit: string;
@@ -62,7 +66,6 @@ export interface RuntimeOptions {
   readonly clock?: RuntimeClock;
   readonly mappingPolicy?: MappingPolicy;
   readonly freshnessPolicies?: Readonly<Record<string, SourceFreshnessPolicy>>;
-  readonly transports?: Readonly<Record<string, QuoteTransport>>;
   readonly opportunityPolicy?: RuntimeOpportunityPolicy;
 }
 
@@ -118,12 +121,8 @@ const defaultFreshnessPolicy: SourceFreshnessPolicy = {
   missingSourceTimestamp: "USE_RECEIVED_TIME"
 };
 
-const defaultProviderPolicy: ProviderOpportunityPolicy = {
-  fee: { type: "NONE" },
-  constraint: { minStake: "1", maxStake: "1000", stakeStep: "1", balance: "1000" }
-};
-
 const defaultOpportunityPolicy: Omit<RuntimeOpportunityPolicy, "providers"> = {
+  baseCurrency: "",
   bankroll: "1000",
   minimumNetMargin: "0",
   minimumWorstCaseProfit: "0",
@@ -198,9 +197,8 @@ function normalizedEvent(event: ProviderEvent, policy: MappingPolicy): Normalize
     canonicalParticipantA: participantA,
     canonicalParticipantB: participantB,
     isLive: event.isLive,
-    rematchCandidate: false,
-    fixtureDiscriminator: null,
-    liveState: null
+    rematchCandidate: event.rematchCandidate,
+    fixtureDiscriminator: event.fixtureDiscriminator
   } as const;
 
   return event.category === "FOOTBALL"
@@ -209,15 +207,17 @@ function normalizedEvent(event: ProviderEvent, policy: MappingPolicy): Normalize
         category: "FOOTBALL",
         eventScope: event.eventScope === "REGULATION" ? "REGULAR_TIME" : null,
         bestOf: null,
-        isVirtual: false,
-        sportVariant: "FOOTBALL"
+        liveState: event.liveState,
+        isVirtual: event.isVirtual,
+        sportVariant: event.sportVariant
       }
     : {
         ...common,
         category: "LOL",
         eventScope: event.eventScope === "SERIES" ? "SERIES" : null,
         bestOf: event.bestOf,
-        gameVariant: "LOL_PC"
+        liveState: event.liveState,
+        gameVariant: event.gameVariant
       };
 }
 
@@ -242,6 +242,7 @@ function canonicalEvent(candidate: Omit<EventCandidate, "canonical">): Canonical
     participantA: left.canonicalParticipantA ?? normalizeName(left.participantA),
     participantB: left.canonicalParticipantB ?? normalizeName(left.participantB),
     providerEventIds: [left.providerEventId, right.providerEventId],
+    isLive: left.isLive === right.isLive ? left.isLive : null,
     mappingStatus: result.status,
     mappingEvidence: result.evidence
   };
@@ -261,7 +262,6 @@ export class Runtime {
   readonly #clock: RuntimeClock;
   readonly #mappingPolicy: MappingPolicy;
   readonly #freshnessPolicies: Readonly<Record<string, SourceFreshnessPolicy>>;
-  readonly #transports: Readonly<Record<string, QuoteTransport>>;
   readonly #opportunityPolicy: RuntimeOpportunityPolicy;
   readonly #events = new Map<string, ProviderEvent>();
   readonly #eventsByAdapter = new Map<string, Map<string, ProviderEvent>>();
@@ -270,13 +270,12 @@ export class Runtime {
   readonly #marketsByAdapter = new Map<string, Map<string, ProviderMarket>>();
   readonly #quotesByAdapter = new Map<string, Map<string, ProviderQuote>>();
   readonly #activeMarketAdapters = new Map<string, string>();
-  readonly #quoteBookOwners = new Map<string, string>();
   readonly #providerStatuses = new Map<string, ProviderConnectionStatus>();
   readonly #listeners = new Set<SnapshotListener>();
   readonly #diagnostics: RuntimeDiagnostic[] = [];
   readonly #quarantinedAdapters = new Set<string>();
   readonly #controllers = new Map<string, AbortController>();
-  readonly #quoteBook: QuoteBook;
+  readonly #quoteBooks = new Map<string, QuoteBook>();
   readonly #opportunityEngine = new OpportunityEngine();
   readonly #opportunitiesByMarket = new Map<string, Opportunity>();
   readonly #blockedByMarket = new Map<string, BlockedDiagnostic>();
@@ -300,12 +299,10 @@ export class Runtime {
     this.#freshnessPolicies = options.freshnessPolicies ?? Object.fromEntries(
       [...providers].map((provider) => [provider, defaultFreshnessPolicy])
     );
-    this.#transports = options.transports ?? {};
     this.#opportunityPolicy = options.opportunityPolicy ?? {
       ...defaultOpportunityPolicy,
-      providers: Object.fromEntries([...providers].map((provider) => [provider, defaultProviderPolicy]))
+      providers: {}
     };
-    this.#quoteBook = new QuoteBook(this.#freshnessPolicies);
     this.#snapshot = safeCloneFreeze(this.#emptySnapshot());
   }
 
@@ -363,7 +360,7 @@ export class Runtime {
     return {
       onEvent: (event) => this.#onEvent(adapterId, event),
       onMarket: (market) => this.#onMarket(adapterId, market),
-      onQuote: (quote) => this.#onQuote(adapterId, quote),
+      onQuoteUpdate: (update) => this.#onQuoteUpdate(adapterId, update),
       onStatus: (status) => this.#onStatus(adapterId, status),
       onSchemaError: (error) => this.#onSchemaError(error, adapterId)
     };
@@ -388,14 +385,37 @@ export class Runtime {
     this.#publish();
   }
 
-  #onQuote(adapterId: string, quote: ProviderQuote): void {
-    if (this.#isQuarantined(adapterId, quote.category)) return;
-    const key = quoteKey(quote);
+  #onQuoteUpdate(adapterId: string, update: ProviderQuoteUpdate): void {
+    if (this.#isQuarantined(adapterId, update.source.category)) return;
+    const quoteBook = this.#quoteBooks.get(adapterId) ?? new QuoteBook(this.#freshnessPolicies);
+    this.#quoteBooks.set(adapterId, quoteBook);
+    const result = quoteBook.apply(update);
+    if (!result.accepted) {
+      this.#recordDiagnostic({
+        code: result.reason ?? "QUOTE_REJECTED",
+        adapterId,
+        provider: update.source.provider,
+        category: update.source.category,
+        canonicalMarketId: null,
+        reason: "quote update was rejected"
+      });
+      this.#publish();
+      return;
+    }
+    const first = update.quotes[0]!;
+    const marketKey = providerMarketKey(first);
     const adapterQuotes = this.#quotesByAdapter.get(adapterId) ?? new Map<string, ProviderQuote>();
-    adapterQuotes.set(key, quote);
+    if (update.kind === "FULL_SNAPSHOT") {
+      for (const [key, quote] of adapterQuotes) {
+        if (providerMarketKey(quote) === marketKey) adapterQuotes.delete(key);
+      }
+    }
+    for (const quote of update.quotes) {
+      const key = quoteKey(quote);
+      adapterQuotes.set(key, quote);
+    }
     this.#quotesByAdapter.set(adapterId, adapterQuotes);
-    const marketKey = providerMarketKey(quote);
-    this.#reconcileEvent(quote, adapterId, marketKey);
+    this.#reconcileEvent(first, adapterId, marketKey);
     this.#publish();
   }
 
@@ -533,10 +553,6 @@ export class Runtime {
     for (const candidate of selectedMarkets) {
       this.#markets.set(candidate.key, candidate.market);
       this.#activeMarketAdapters.set(candidate.key, selected.owner);
-      if (candidate.quotes.length > 0 && (previousOwner !== selected.owner ||
-        (changedAdapterId === selected.owner && touchedMarketKey === candidate.key))) {
-        this.#replayMarket(selected.owner, candidate.market, candidate.quotes);
-      }
     }
 
     const eventChanged = previousEvent === undefined ||
@@ -557,31 +573,6 @@ export class Runtime {
           providerMarketKey(candidate.right) === touchedMarketKey)
         .map((candidate) => candidate.key)));
     }
-  }
-
-  #replayMarket(adapterId: string, market: ProviderMarket, quotes: readonly ProviderQuote[]): void {
-    const clock = this.#clock.now();
-    const result = this.#quoteBook.apply({
-      source: { provider: market.provider, category: market.category },
-      kind: "FULL_SNAPSHOT",
-      transport: this.#transports[market.provider] ?? "WEBSOCKET",
-      clock,
-      quotes: quotes.map((quote) => ({ ...quote, sequence: null }))
-    });
-    if (result.accepted) {
-      for (const entry of this.#quoteBook.snapshot(clock).quotes) {
-        if (entry.marketKey === providerMarketKey(market)) this.#quoteBookOwners.set(entry.key, adapterId);
-      }
-      return;
-    }
-    this.#recordDiagnostic({
-      code: result.reason ?? "QUOTE_REJECTED",
-      adapterId,
-      provider: market.provider,
-      category: market.category,
-      canonicalMarketId: null,
-      reason: "quote update was rejected"
-    });
   }
 
   #rebuildCategory(categoryToRebuild: Category): void {
@@ -751,7 +742,8 @@ export class Runtime {
         quote.category === market.category &&
         quote.provider === market.provider &&
         quote.providerEventId === market.providerEventId &&
-        quote.providerMarketId === market.providerMarketId
+        quote.providerMarketId === market.providerMarketId &&
+        quote.isLive === event.isLive
       )
       .map((quote) => ({
         providerSelectionId: quote.providerSelectionId,
@@ -787,6 +779,7 @@ export class Runtime {
         const best = entries.reduce((winner, current) => {
           const winnerPolicy = this.#providerPolicy(winner.quote.provider);
           const currentPolicy = this.#providerPolicy(current.quote.provider);
+          if (winnerPolicy === null || currentPolicy === null) return winner;
           try {
             const winnerOdds = effectiveDecimal(toDecimal(winner.quote.rawOdds, winner.quote.rawFormat), winnerPolicy.fee);
             const currentOdds = effectiveDecimal(toDecimal(current.quote.rawOdds, current.quote.rawFormat), currentPolicy.fee);
@@ -799,16 +792,22 @@ export class Runtime {
         return [{
           canonicalOutcomeId: mapping.canonicalOutcomeId,
           quoteKey: best.key,
-          fee: policy.fee,
-          constraint: policy.constraint
+          fee: policy?.fee ?? null,
+          constraint: policy?.constraint ?? null,
+          fx: policy?.fx ?? null
         }];
       });
-      return { market: candidate.canonical, mapping: candidate.result, legs };
+      return {
+        market: candidate.canonical,
+        mapping: candidate.result,
+        eventIsLive: candidate.event.canonical.isLive,
+        legs
+      };
     });
   }
 
-  #providerPolicy(provider: string): ProviderOpportunityPolicy {
-    return this.#opportunityPolicy.providers[provider] ?? defaultProviderPolicy;
+  #providerPolicy(provider: string): ProviderOpportunityPolicy | null {
+    return this.#opportunityPolicy.providers[provider] ?? null;
   }
 
   #refreshForClock(): void {
@@ -852,8 +851,8 @@ export class Runtime {
   #buildSnapshot(revision: number): AppSnapshot {
     const clock = this.#clock.now();
     const opportunities = [...this.#opportunitiesByMarket.values()].sort((left, right) =>
-      Number(right.netMargin) - Number(left.netMargin) ||
-      Number(right.worstCaseProfit) - Number(left.worstCaseProfit) ||
+      new Decimal(right.netMargin).comparedTo(left.netMargin) ||
+      new Decimal(right.worstCaseProfit).comparedTo(left.worstCaseProfit) ||
       left.quoteAgeMs - right.quoteAgeMs ||
       compareText(left.canonicalMarketId, right.canonicalMarketId)
     );
@@ -950,9 +949,11 @@ export class Runtime {
   }
 
   #quoteSnapshot(clock: QuoteClockContext): QuoteSnapshot {
-    const storedSnapshot = this.#quoteBook.snapshot(clock);
-    const quotes = storedSnapshot.quotes.map((entry) => {
-      const owner = this.#quoteBookOwners.get(entry.key) ?? "";
+    const snapshots = [...this.#quoteBooks.entries()].map(([owner, book]) => ({
+      owner,
+      snapshot: book.snapshot(clock)
+    }));
+    const quotes = snapshots.flatMap(({ owner, snapshot }) => snapshot.quotes.map((entry) => {
       const quote = this.#quotesByAdapter.get(owner)?.get(entry.key) ?? entry.quote;
       const ownerInactive = owner === "" ||
         this.#activeMarketAdapters.get(entry.marketKey) !== owner ||
@@ -966,11 +967,13 @@ export class Runtime {
           ? [...new Set([...entry.ineligibilityReasons, "SCHEMA_ERROR" as const])].sort(compareText)
           : entry.ineligibilityReasons
       };
-    });
+    })).filter((entry) => !entry.ineligibilityReasons.includes("SCHEMA_ERROR"));
     return {
-      ...storedSnapshot,
+      monotonicGeneratedAtMs: clock.monotonicNowMs,
+      wallClockGeneratedAtMs: clock.wallClockNowMs,
       quotes,
-      byKey: Object.fromEntries(quotes.map((entry) => [entry.key, entry]))
+      byKey: Object.fromEntries(quotes.map((entry) => [entry.key, entry])),
+      diagnostics: snapshots.flatMap(({ snapshot }) => snapshot.diagnostics)
     };
   }
 
@@ -997,7 +1000,9 @@ export class Runtime {
         minimumNetMargin: this.#opportunityPolicy.minimumNetMargin,
         minimumWorstCaseProfit: this.#opportunityPolicy.minimumWorstCaseProfit,
         minimumRoi: this.#opportunityPolicy.minimumRoi,
-        minimumRemainingTtlMs: this.#opportunityPolicy.minimumRemainingTtlMs
+        minimumRemainingTtlMs: this.#opportunityPolicy.minimumRemainingTtlMs,
+        baseCurrency: this.#opportunityPolicy.baseCurrency,
+        evaluatedAtMs: clock.wallClockNowMs
       });
       const opportunity = opportunities[0];
       const blocked = this.#opportunityEngine.blockedDiagnostics[0];

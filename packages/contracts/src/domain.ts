@@ -39,7 +39,7 @@ export type Scope =
   | "MAP_4"
   | "MAP_5";
 
-export interface ProviderEvent {
+interface ProviderEventBase {
   readonly provider: string;
   readonly category: Category;
   readonly providerEventId: string;
@@ -51,7 +51,40 @@ export interface ProviderEvent {
   readonly eventScope: string;
   readonly bestOf: number | null;
   readonly isLive: boolean;
+  readonly rematchCandidate: boolean | null;
+  readonly fixtureDiscriminator: string | null;
 }
+
+export interface ProviderFootballLiveState {
+  readonly period: string | null;
+  readonly scoreHome: number | null;
+  readonly scoreAway: number | null;
+  readonly clockMs: number | null;
+}
+
+export interface ProviderLolLiveState {
+  readonly seriesScoreA: number | null;
+  readonly seriesScoreB: number | null;
+  readonly currentMap: number | null;
+  readonly mapState: string | null;
+}
+
+export interface ProviderFootballEvent extends ProviderEventBase {
+  readonly category: "FOOTBALL";
+  readonly bestOf: null;
+  readonly isVirtual: boolean | null;
+  readonly sportVariant: string | null;
+  readonly liveState: ProviderFootballLiveState | null;
+}
+
+export interface ProviderLolEvent extends ProviderEventBase {
+  readonly category: "LOL";
+  readonly bestOf: number | null;
+  readonly gameVariant: string | null;
+  readonly liveState: ProviderLolLiveState | null;
+}
+
+export type ProviderEvent = ProviderFootballEvent | ProviderLolEvent;
 
 export interface ProviderMarket {
   readonly provider: string;
@@ -101,6 +134,7 @@ export interface CanonicalEvent {
   readonly participantA: string;
   readonly participantB: string;
   readonly providerEventIds: readonly string[];
+  readonly isLive: boolean | null;
   readonly mappingStatus: MappingStatus;
   readonly mappingEvidence: readonly MappingEvidence[];
 }
@@ -129,9 +163,17 @@ export interface StakeLeg {
   readonly decimalOdds: string;
   readonly effectiveDecimal: string;
   readonly stake: string;
+  readonly stakeCurrency: string;
+  readonly baseCurrency: string;
+  readonly stakeBase: string;
   readonly minStake: string;
   readonly maxStake: string;
   readonly payout: string;
+  readonly feeType: "NONE" | "PROFIT" | "PAYOUT";
+  readonly feeRate: string | null;
+  readonly fxRate: string;
+  readonly fxSpreadRate: string;
+  readonly fxAsOfMs: number;
   readonly quoteAgeMs: number;
   readonly quoteStatus: QuoteStatus;
   readonly sourceTimestampMs: number | null;
@@ -151,6 +193,8 @@ export interface Opportunity {
   readonly line: string | null;
   readonly settlementProfile: string;
   readonly legs: readonly StakeLeg[];
+  readonly baseCurrency: string;
+  readonly totalStakeBase: string;
   readonly inverseSum: string;
   readonly netMargin: string;
   readonly worstCaseProfit: string;

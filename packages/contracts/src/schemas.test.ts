@@ -4,11 +4,30 @@ import {
   CanonicalMarketSchema,
   OpportunitySchema,
   ProviderConnectionStatusSchema,
+  ProviderEventSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema,
   RealtimeMessageSchema,
   StakeLegSchema
 } from "./schemas.js";
+
+describe("ProviderEventSchema", () => {
+  it("rejects an event that omits rematch and category-specific lifecycle evidence", () => {
+    expect(ProviderEventSchema.safeParse({
+      provider: "SABA",
+      category: "FOOTBALL",
+      providerEventId: "event-1",
+      competition: "Premier League",
+      seasonStage: "2026/27",
+      startAtUtcMs: 1,
+      participantA: "A",
+      participantB: "B",
+      eventScope: "REGULATION",
+      bestOf: null,
+      isLive: false
+    }).success).toBe(false);
+  });
+});
 
 const completeQuote = () => ({
   provider: "SABA",
@@ -52,9 +71,17 @@ const completeStakeLeg = () => ({
   decimalOdds: "2.26",
   effectiveDecimal: "2.20",
   stake: "100.00",
+  stakeCurrency: "USD",
+  baseCurrency: "USD",
+  stakeBase: "100.00",
   minStake: "10.00",
   maxStake: "1000.00",
   payout: "220.00",
+  feeType: "PROFIT",
+  feeRate: "0.01",
+  fxRate: "1",
+  fxSpreadRate: "0",
+  fxAsOfMs: 1000,
   quoteAgeMs: 10,
   quoteStatus: "OPEN",
   sourceTimestampMs: 1000,
@@ -74,6 +101,8 @@ const completeOpportunity = () => ({
   line: null,
   settlementProfile: "regular-time",
   legs: [completeStakeLeg()],
+  baseCurrency: "USD",
+  totalStakeBase: "100.00",
   inverseSum: "0.95",
   netMargin: "0.0526315789",
   worstCaseProfit: "5.00",

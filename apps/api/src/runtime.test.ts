@@ -63,6 +63,30 @@ function mappingPolicy() {
   } as const;
 }
 
+function opportunityPolicy(nowMs = 1_800_000_000_100) {
+  const provider = {
+    fee: { type: "PROFIT" as const, rate: "0.01" },
+    constraint: { minStake: "1", maxStake: "1000", stakeStep: "1", balance: "1000" },
+    fx: {
+      sourceCurrency: "USD",
+      baseCurrency: "USD",
+      rate: "1",
+      spreadRate: "0",
+      asOfMs: nowMs,
+      maxAgeMs: 10_000
+    }
+  };
+  return {
+    baseCurrency: "USD",
+    bankroll: "1000",
+    minimumNetMargin: "0",
+    minimumWorstCaseProfit: "0",
+    minimumRoi: "0",
+    minimumRemainingTtlMs: 0,
+    providers: { SABA: provider, IM: provider }
+  };
+}
+
 function adapters(secret?: string) {
   return fixturePaths.map(([path, provider, category]) => {
     const original = loadFixture(path);
@@ -103,7 +127,7 @@ function emitRecord(
       return;
     case "QUOTE": {
       const quote = record.payload as ProviderQuote;
-      sink.onQuote({
+      emitQuoteUpdate(sink, {
         ...quote,
         providerSelectionId: `${quoteIdPrefix}${quote.providerSelectionId}`
       });
@@ -111,10 +135,160 @@ function emitRecord(
   }
 }
 
+function emitQuoteUpdate(
+  sink: ProviderSink,
+  quote: ProviderQuote,
+  kind: "FULL_SNAPSHOT" | "DELTA" = "DELTA"
+): void {
+  sink.onQuoteUpdate({
+    source: { provider: quote.provider, category: quote.category },
+    kind,
+    transport: "WEBSOCKET",
+    sequence: quote.sequence,
+    clock: {
+      monotonicNowMs: quote.receivedMonotonicMs,
+      wallClockNowMs: quote.sourceTimestampMs ?? 0
+    },
+    quotes: [quote]
+  });
+}
+
 describe("Runtime", () => {
+  it("does not let a duplicate lower sequence replace accepted quote state", async () => {
+    const base = adapters();
+    const sabaFootball = base.find((adapter) => adapter.id === "saba-football")!;
+    const guarded: ProviderAdapter = {
+      id: sabaFootball.id,
+      categories: sabaFootball.categories,
+      async start(sink, signal): Promise<void> {
+        await sabaFootball.start(sink, signal);
+        const source = loadFixture("football/saba-snapshot.json");
+        const accepted = source.records
+          .filter((record) => record.kind === "QUOTE")
+          .map((record) => record.payload as ProviderQuote)
+          .find((quote) => quote.providerSelectionId === "saba-fb-over-25" && quote.sequence === 3)!;
+        emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 3 });
+        emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 2 });
+      }
+    };
+    const runtime = new Runtime({
+      adapters: [guarded, ...base.filter((adapter) => adapter.id !== "saba-football")],
+      clock,
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
+    });
+
+    await runtime.start(new AbortController().signal);
+
+    const football = runtime.getSnapshot().opportunities.find((item) => item.category === "FOOTBALL");
+    expect(football?.legs.find((leg) => leg.provider === "SABA")?.rawOdds).toBe("2.10");
+    expect(runtime.getDiagnostics()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "OUT_OF_ORDER" })
+    ]));
+    expect(runtime.getDiagnostics().filter((item) => item.code === "OUT_OF_ORDER")).toHaveLength(2);
+  });
+
+  it("quarantines a sequence gap until an explicit full snapshot recovers the market", async () => {
+    const base = adapters();
+    const sabaFootball = base.find((adapter) => adapter.id === "saba-football")!;
+    const recovering: ProviderAdapter = {
+      id: sabaFootball.id,
+      categories: sabaFootball.categories,
+      async start(sink, signal): Promise<void> {
+        await sabaFootball.start(sink, signal);
+        const source = loadFixture("football/saba-snapshot.json");
+        const accepted = source.records
+          .filter((record) => record.kind === "QUOTE")
+          .map((record) => record.payload as ProviderQuote)
+          .find((quote) => quote.providerSelectionId === "saba-fb-over-25" && quote.sequence === 3)!;
+        const under = source.records
+          .filter((record) => record.kind === "QUOTE")
+          .map((record) => record.payload as ProviderQuote)
+          .find((quote) => quote.providerSelectionId === "saba-fb-under-25")!;
+        emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 5 });
+        emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 4 });
+        sink.onQuoteUpdate({
+          source: { provider: accepted.provider, category: accepted.category },
+          kind: "FULL_SNAPSHOT",
+          transport: "WEBSOCKET",
+          sequence: 10,
+          clock: { monotonicNowMs: 100, wallClockNowMs: 0 },
+          quotes: [
+            { ...accepted, rawOdds: "2.20", sequence: 10 },
+            { ...under, sequence: 10 }
+          ]
+        });
+      }
+    };
+    const runtime = new Runtime({
+      adapters: [recovering, ...base.filter((adapter) => adapter.id !== "saba-football")],
+      clock,
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
+    });
+
+    await runtime.start(new AbortController().signal);
+
+    const football = runtime.getSnapshot().opportunities.find((item) => item.category === "FOOTBALL");
+    expect(football?.legs.find((leg) => leg.provider === "SABA")?.rawOdds).toBe("2.20");
+    expect(runtime.getDiagnostics()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "SEQUENCE_GAP" }),
+      expect.objectContaining({ code: "NEEDS_SNAPSHOT" })
+    ]));
+  });
+
+  it("preserves contradictory rematch evidence and fails the event mapping closed", async () => {
+    const rematchAdapters = fixturePaths.map(([path, provider, category]) => {
+      const original = loadFixture(path);
+      const snapshot: FixtureSnapshot = {
+        ...original,
+        records: original.records.filter((record) => record.offsetMs <= 90).map((record) => {
+          if (
+            category !== "FOOTBALL" || record.kind !== "EVENT" ||
+            !(record.payload as ProviderEvent).providerEventId.endsWith("-verified")
+          ) return record;
+          return {
+            ...record,
+            payload: {
+              ...(record.payload as ProviderEvent),
+              rematchCandidate: true,
+              fixtureDiscriminator: provider === "SABA" ? "round-2-leg-1" : "round-2-leg-2"
+            }
+          };
+        })
+      };
+      return new FixtureAdapter(snapshot, {
+        id: snapshot.adapterId,
+        provider,
+        category,
+        scheduler: immediateScheduler
+      });
+    });
+    const runtime = new Runtime({
+      adapters: rematchAdapters,
+      clock,
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
+    });
+
+    await runtime.start(new AbortController().signal);
+
+    const snapshot = runtime.getSnapshot();
+    const football = snapshot.events.find((event) =>
+      event.providerEventIds.some((id) => id.endsWith("-verified")) && event.category === "FOOTBALL"
+    );
+    expect(football).toMatchObject({ mappingStatus: "REJECTED", isLive: false });
+    expect(football?.mappingEvidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ gate: "compatibleRematchEvidence", passed: false })
+    ]));
+    expect(snapshot.opportunities.some((item) => item.category === "FOOTBALL")).toBe(false);
+  });
+
+
+
   it("isolates subscriber failures without leaking or misclassifying them", async () => {
     const secret = "subscriber-secret-must-not-escape";
-    const runtime = new Runtime({ adapters: adapters(), clock, mappingPolicy: mappingPolicy() });
+    const runtime = new Runtime({ adapters: adapters(), clock, mappingPolicy: mappingPolicy(), opportunityPolicy: opportunityPolicy() });
     const received: number[] = [];
     runtime.subscribe(() => {
       throw new Error(secret);
@@ -192,7 +366,7 @@ describe("Runtime", () => {
         for (const record of saba.records.filter((item) => item.offsetMs <= 70)) {
           if (record.kind === "QUOTE") {
             const quote = record.payload as ProviderQuote;
-            sink.onQuote({
+            emitQuoteUpdate(sink, {
               ...quote,
               selection: quote.marketType === "FT_TOTAL" ? "UNKNOWN_OUTCOME" : "HOME"
             });
@@ -220,7 +394,8 @@ describe("Runtime", () => {
       const runtime = new Runtime({
         adapters: [healthyIm, ...siblings],
         clock,
-        mappingPolicy: mappingPolicy()
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
       });
 
       await runtime.start(new AbortController().signal);
@@ -302,7 +477,8 @@ describe("Runtime", () => {
         merged(["IM", "football/im-snapshot.json", "lol/im-snapshot.json"])
       ],
       clock,
-      mappingPolicy: mappingPolicy()
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
     });
 
     await runtime.start(new AbortController().signal);
@@ -339,11 +515,18 @@ describe("Runtime", () => {
       selection: "TEAM_A" | "TEAM_B",
       rawOdds: string
     ): ProviderQuote => ({
-      ...market,
+      provider: market.provider,
+      category: market.category,
+      providerEventId: market.providerEventId,
+      providerMarketId: market.providerMarketId,
+      marketType: market.marketType,
+      scope: market.scope,
+      line: market.line,
       providerSelectionId: `${market.providerMarketId}-${selection.toLowerCase()}`,
       selection,
       rawOdds,
       rawFormat: "DECIMAL",
+      status: market.status,
       isLive: false,
       sourceTimestampMs: null,
       receivedMonotonicMs: 50,
@@ -362,7 +545,20 @@ describe("Runtime", () => {
       async start(sink): Promise<void> {
         sink.onEvent(event);
         sink.onMarket(market);
-        for (const quote of quotes) sink.onQuote(quote);
+        const first = quotes[0];
+        if (first !== undefined) {
+          sink.onQuoteUpdate({
+            source: { provider: first.provider, category: first.category },
+            kind: "FULL_SNAPSHOT",
+            transport: "WEBSOCKET",
+            sequence: first.sequence,
+            clock: {
+              monotonicNowMs: first.receivedMonotonicMs,
+              wallClockNowMs: first.sourceTimestampMs ?? 0
+            },
+            quotes
+          });
+        }
       }
     });
     const runtime = new Runtime({
@@ -380,7 +576,8 @@ describe("Runtime", () => {
         ])
       ],
       clock,
-      mappingPolicy: mappingPolicy()
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
     });
 
     await runtime.start(new AbortController().signal);
@@ -442,7 +639,8 @@ describe("Runtime", () => {
     const runtime = new Runtime({
       adapters: [healthyIm, fullFailing, partialSibling],
       clock,
-      mappingPolicy: mappingPolicy()
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
     });
     const opportunityCounts: number[] = [];
     runtime.subscribe((snapshot) => opportunityCounts.push(snapshot.opportunities.length));
@@ -489,7 +687,7 @@ describe("Runtime", () => {
         scheduler: immediateScheduler
       });
     });
-    const runtime = new Runtime({ adapters: repeated, clock, mappingPolicy: mappingPolicy() });
+    const runtime = new Runtime({ adapters: repeated, clock, mappingPolicy: mappingPolicy(), opportunityPolicy: opportunityPolicy() });
 
     await runtime.start(new AbortController().signal);
 
@@ -498,7 +696,7 @@ describe("Runtime", () => {
 
   it("quarantines only the adapter category that emits a schema error", async () => {
     const secret = "Bearer never-expose-runtime-secret";
-    const runtime = new Runtime({ adapters: adapters(secret), clock, mappingPolicy: mappingPolicy() });
+    const runtime = new Runtime({ adapters: adapters(secret), clock, mappingPolicy: mappingPolicy(), opportunityPolicy: opportunityPolicy() });
 
     await runtime.start(new AbortController().signal);
 
@@ -548,7 +746,7 @@ describe("Runtime", () => {
     ];
     const diagnosticsByOrder: string[] = [];
     for (const ordered of [sources, [...sources].reverse()]) {
-      const runtime = new Runtime({ adapters: ordered, clock, mappingPolicy: mappingPolicy() });
+      const runtime = new Runtime({ adapters: ordered, clock, mappingPolicy: mappingPolicy(), opportunityPolicy: opportunityPolicy() });
 
       await runtime.start(new AbortController().signal);
 
@@ -571,7 +769,7 @@ describe("Runtime", () => {
   });
 
   it("publishes frozen snapshots with strictly increasing revisions", async () => {
-    const runtime = new Runtime({ adapters: adapters(), clock, mappingPolicy: mappingPolicy() });
+    const runtime = new Runtime({ adapters: adapters(), clock, mappingPolicy: mappingPolicy(), opportunityPolicy: opportunityPolicy() });
     const revisions: number[] = [];
     const unsubscribe = runtime.subscribe((snapshot) => revisions.push(snapshot.revision));
 

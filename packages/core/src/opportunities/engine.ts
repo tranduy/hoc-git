@@ -12,19 +12,30 @@ import {
 } from "../arbitrage/optimize-stakes.js";
 import type { MarketMappingResult } from "../mapping/market-mapper.js";
 import { Decimal, toDecimal } from "../odds/convert.js";
-import { effectiveDecimal, type FeeModel } from "../odds/effective.js";
+import { convertStake, effectiveDecimal, type FeeModel } from "../odds/effective.js";
 import type { QuoteSnapshot, QuoteSnapshotEntry } from "../quotes/quote-book.js";
 
 export interface OpportunityLegCandidate {
   readonly canonicalOutcomeId: string;
   readonly quoteKey: string;
-  readonly fee: FeeModel;
-  readonly constraint: StakeConstraint;
+  readonly fee: FeeModel | null;
+  readonly constraint: StakeConstraint | null;
+  readonly fx: FinancialFxPolicy | null;
+}
+
+export interface FinancialFxPolicy {
+  readonly sourceCurrency: string;
+  readonly baseCurrency: string;
+  readonly rate: string;
+  readonly spreadRate: string;
+  readonly asOfMs: number;
+  readonly maxAgeMs: number;
 }
 
 export interface OpportunityCandidate {
   readonly market: CanonicalMarket;
   readonly mapping: MarketMappingResult;
+  readonly eventIsLive: boolean | null;
   readonly legs: readonly OpportunityLegCandidate[];
 }
 
@@ -35,6 +46,8 @@ export interface OpportunityEvaluationContext {
   readonly minimumWorstCaseProfit: string;
   readonly minimumRoi: string;
   readonly minimumRemainingTtlMs: number;
+  readonly baseCurrency: string;
+  readonly evaluatedAtMs: number;
 }
 
 interface EvaluatedLeg {
@@ -42,6 +55,7 @@ interface EvaluatedLeg {
   readonly snapshot: QuoteSnapshotEntry;
   readonly decimalOdds: Decimal;
   readonly effectiveOdds: Decimal;
+  readonly baseRate: Decimal;
 }
 
 const PLAIN_DECIMAL = /^[+-]?(?:0|[1-9]\d*)(?:\.\d+)?$/;
@@ -208,6 +222,11 @@ export class OpportunityEngine {
         diagnostic: diagnostic(candidate, "OBSERVE_ONLY", "observe-only markets cannot be executed")
       };
     }
+    if (candidate.eventIsLive === null) {
+      return {
+        diagnostic: diagnostic(candidate, "EVENT_LIVE_STATE_AMBIGUOUS", "mapped event live state is not authoritative")
+      };
+    }
     if (
       !Number.isFinite(context.minimumRemainingTtlMs) ||
       context.minimumRemainingTtlMs < 0
@@ -260,6 +279,11 @@ export class OpportunityEngine {
           diagnostic: diagnostic(candidate, "QUOTE_MARKET_MISMATCH", "quote metadata differs from the canonical market")
         };
       }
+      if (entry.quote.isLive !== candidate.eventIsLive) {
+        return {
+          diagnostic: diagnostic(candidate, "QUOTE_LIVE_STATE_MISMATCH", "quote live state differs from the mapped event")
+        };
+      }
       if (!entry.eligible) {
         return {
           diagnostic: diagnostic(candidate, quoteReasonCode(entry), "quote is not eligible")
@@ -274,23 +298,62 @@ export class OpportunityEngine {
         };
       }
 
+      const fx = leg.fx;
+      if (fx === null || leg.fee === null || leg.constraint === null) {
+        return {
+          diagnostic: diagnostic(candidate, "FINANCIAL_POLICY_MISSING", "provider financial policy is missing")
+        };
+      }
+      if (
+        fx.sourceCurrency.trim() === "" ||
+        fx.baseCurrency.trim() === "" ||
+        context.baseCurrency.trim() === "" ||
+        fx.baseCurrency !== context.baseCurrency
+      ) {
+        return {
+          diagnostic: diagnostic(candidate, "FX_CURRENCY_MISMATCH", "FX policy does not convert into the declared base currency")
+        };
+      }
+      if (
+        !Number.isFinite(fx.asOfMs) || fx.asOfMs < 0 ||
+        !Number.isFinite(fx.maxAgeMs) || fx.maxAgeMs < 0 ||
+        !Number.isFinite(context.evaluatedAtMs) || context.evaluatedAtMs < 0 ||
+        fx.asOfMs > context.evaluatedAtMs ||
+        context.evaluatedAtMs - fx.asOfMs > fx.maxAgeMs
+      ) {
+        return {
+          diagnostic: diagnostic(candidate, "FX_STALE", "FX policy is stale or has an invalid timestamp")
+        };
+      }
+
+      let decimalOdds: Decimal;
+      let effectiveOdds: Decimal;
       try {
-        const decimalOdds = toDecimal(entry.quote.rawOdds, entry.quote.rawFormat);
-        const effectiveOdds = effectiveDecimal(decimalOdds, leg.fee);
+        decimalOdds = toDecimal(entry.quote.rawOdds, entry.quote.rawFormat);
+        effectiveOdds = effectiveDecimal(decimalOdds, leg.fee);
         if (!effectiveOdds.isFinite() || effectiveOdds.lte(1)) {
           throw new Error("effective odds must be finite and greater than one");
         }
-        evaluatedLegs.push({
-          candidate: leg,
-          snapshot: entry,
-          decimalOdds,
-          effectiveOdds
-        });
       } catch {
         return {
           diagnostic: diagnostic(candidate, "INVALID_ODDS_OR_FEE", "odds or fee model is invalid")
         };
       }
+      let baseRate: Decimal;
+      try {
+        baseRate = convertStake(new Decimal(1), fx);
+      } catch {
+        return {
+          diagnostic: diagnostic(candidate, "INVALID_FX", "FX rate or spread is invalid")
+        };
+      }
+      evaluatedLegs.push({
+        candidate: leg,
+        snapshot: entry,
+        decimalOdds,
+        effectiveOdds,
+        baseRate
+      });
     }
 
     if (usedSides.size < 2) {
@@ -307,17 +370,18 @@ export class OpportunityEngine {
         diagnostic: diagnostic(candidate, "INVALID_POLICY", "minimum net margin must be non-negative")
       };
     }
-    if (!arbitrage.isArbitrage || arbitrage.theoreticalMargin.lt(minimumNetMargin)) {
+    if (!arbitrage.isArbitrage) {
       return {
         diagnostic: diagnostic(candidate, "MARGIN_BELOW_THRESHOLD", "effective net margin is below policy")
       };
     }
 
     for (const leg of evaluatedLegs) {
-      const minStake = parseNonNegative(leg.candidate.constraint.minStake);
-      const maxStake = parseNonNegative(leg.candidate.constraint.maxStake);
-      const stakeStep = parseNonNegative(leg.candidate.constraint.stakeStep);
-      const balance = parseNonNegative(leg.candidate.constraint.balance);
+      const constraint = leg.candidate.constraint!;
+      const minStake = parseNonNegative(constraint.minStake);
+      const maxStake = parseNonNegative(constraint.maxStake);
+      const stakeStep = parseNonNegative(constraint.stakeStep);
+      const balance = parseNonNegative(constraint.balance);
       if (
         minStake === null || maxStake === null || stakeStep === null || balance === null ||
         minStake.lte(0) || stakeStep.lte(0)
@@ -342,7 +406,8 @@ export class OpportunityEngine {
     try {
       plan = optimizeStakes({
         odds,
-        constraints: evaluatedLegs.map((leg) => leg.candidate.constraint),
+        stakeToBaseRates: evaluatedLegs.map((leg) => plainDecimal(leg.baseRate)),
+        constraints: evaluatedLegs.map((leg) => leg.candidate.constraint!),
         bankroll: context.bankroll,
         minimumWorstCaseProfit: context.minimumWorstCaseProfit,
         minimumRoi: context.minimumRoi
@@ -357,6 +422,11 @@ export class OpportunityEngine {
         diagnostic: diagnostic(candidate, "STAKE_CONSTRAINTS", "no exact profitable stake plan exists")
       };
     }
+    if (new Decimal(plan.roi).lt(minimumNetMargin)) {
+      return {
+        diagnostic: diagnostic(candidate, "MARGIN_BELOW_THRESHOLD", "realized post-rounding margin is below policy")
+      };
+    }
 
     const legs: StakeLeg[] = evaluatedLegs.map((leg, index) => ({
       provider: leg.snapshot.quote.provider,
@@ -369,9 +439,17 @@ export class OpportunityEngine {
       decimalOdds: plainDecimal(leg.decimalOdds),
       effectiveDecimal: plainDecimal(leg.effectiveOdds),
       stake: plan.stakes[index]!,
-      minStake: leg.candidate.constraint.minStake,
-      maxStake: leg.candidate.constraint.maxStake,
+      stakeCurrency: leg.candidate.fx!.sourceCurrency,
+      baseCurrency: leg.candidate.fx!.baseCurrency,
+      stakeBase: plainDecimal(new Decimal(plan.stakes[index]!).times(leg.baseRate)),
+      minStake: leg.candidate.constraint!.minStake,
+      maxStake: leg.candidate.constraint!.maxStake,
       payout: plan.payouts[index]!,
+      feeType: leg.candidate.fee!.type,
+      feeRate: leg.candidate.fee!.type === "NONE" ? null : String(leg.candidate.fee!.rate),
+      fxRate: leg.candidate.fx!.rate,
+      fxSpreadRate: leg.candidate.fx!.spreadRate,
+      fxAsOfMs: leg.candidate.fx!.asOfMs,
       quoteAgeMs: leg.snapshot.quoteAgeMs,
       quoteStatus: leg.snapshot.quote.status,
       sourceTimestampMs: leg.snapshot.quote.sourceTimestampMs,
@@ -395,8 +473,10 @@ export class OpportunityEngine {
         line: market.line,
         settlementProfile: market.settlementProfile,
         legs,
+        baseCurrency: context.baseCurrency,
+        totalStakeBase: plan.totalStake,
         inverseSum: plainDecimal(arbitrage.inverseSum),
-        netMargin: plainDecimal(arbitrage.theoreticalMargin),
+        netMargin: plan.roi,
         worstCaseProfit: plan.worstCaseProfit,
         roi: plan.roi,
         quoteAgeMs,

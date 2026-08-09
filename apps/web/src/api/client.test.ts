@@ -38,6 +38,43 @@ describe("SnapshotClient", () => {
     expect(received.map((item) => item.revision)).toEqual([4, 5]);
   });
 
+  it("does not report LIVE until a reconnect receives a validated full snapshot", async () => {
+    vi.useFakeTimers();
+    const states: string[] = [];
+    const sockets: FakeSocket[] = [];
+    const client = new SnapshotClient({
+      initialSnapshot: snapshot(4),
+      onSnapshot: () => {},
+      onConnectionState: (state) => states.push(state),
+      fetchSnapshot: async () => new Response(JSON.stringify(snapshot(4)), { status: 200 }),
+      createWebSocket: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      }
+    });
+
+    await client.start();
+    sockets[0]!.onopen?.();
+    expect(states.at(-1)).toBe("CONNECTING");
+
+    sockets[0]!.onmessage?.({ data: JSON.stringify({ type: "SNAPSHOT", revision: 4, data: snapshot(4) }) } as MessageEvent);
+    expect(states.at(-1)).toBe("LIVE");
+
+    sockets[0]!.onclose?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+    sockets[1]!.onopen?.();
+    expect(states.at(-1)).toBe("CONNECTING");
+
+    sockets[1]!.onmessage?.({ data: JSON.stringify({ type: "SNAPSHOT", revision: 4, data: { revision: "bad" } }) } as MessageEvent);
+    sockets[1]!.onmessage?.({ data: JSON.stringify({ type: "SNAPSHOT", revision: 3, data: snapshot(3) }) } as MessageEvent);
+    expect(states.at(-1)).toBe("CONNECTING");
+
+    sockets[1]!.onmessage?.({ data: JSON.stringify({ type: "SNAPSHOT", revision: 4, data: snapshot(4) }) } as MessageEvent);
+    expect(states.at(-1)).toBe("LIVE");
+    client.stop();
+  });
+
   it("diagnoses malformed fetch and realtime payloads without replacing the snapshot", async () => {
     const received: AppSnapshot[] = [];
     const diagnostics: string[] = [];

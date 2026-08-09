@@ -1,6 +1,7 @@
 import type { AppSnapshot, BlockedDiagnostic, Opportunity } from "@tool-chenh/contracts";
 import type { ConnectionState } from "../api/client.js";
 import { OpportunityCard } from "../components/opportunity-card.js";
+import { isStaleDiagnostic } from "./diagnostics.js";
 
 function isEligibleOpportunity(opportunity: Opportunity): boolean {
   return opportunity.executionConfidence === "HIGH" && opportunity.legs.every((leg) => leg.quoteStatus === "OPEN" && leg.eligible && leg.ineligibleReasons.length === 0);
@@ -12,13 +13,18 @@ function blocksOpportunity(diagnostic: BlockedDiagnostic, opportunity: Opportuni
 
 export function OpportunitiesPage({ snapshot, connectionState }: { readonly snapshot: AppSnapshot; readonly connectionState: ConnectionState }) {
   const events = new Map(snapshot.events.map((event) => [event.canonicalEventId, event]));
-  const staleDiagnostics = snapshot.blockedDiagnostics.filter((diagnostic) => diagnostic.code === "STALE");
+  const staleDiagnostics = snapshot.blockedDiagnostics.filter(isStaleDiagnostic);
   const visibleOpportunities = snapshot.opportunities.filter((opportunity) => isEligibleOpportunity(opportunity) && !snapshot.blockedDiagnostics.some((diagnostic) => blocksOpportunity(diagnostic, opportunity)));
   return (
     <>
       <header className="page-header"><p className="eyebrow">Read-only inspection</p><h1>Opportunities</h1><p>Calculated by the server from verified mappings. Values here never place or prepare a wager.</p></header>
-      {connectionState === "DISCONNECTED" ? (
-        <section className="empty-state connection-warning" role="alert"><h2>Connection disconnected</h2><p>All opportunities are ineligible until fresh snapshots return. Reconnect to the local feed and wait for a new server snapshot.</p></section>
+      {connectionState !== "LIVE" ? (
+        <section className="empty-state connection-warning" role="alert">
+          <h2>{connectionState === "DISCONNECTED" ? "Connection disconnected" : "Validating live connection"}</h2>
+          <p>{connectionState === "DISCONNECTED"
+            ? "All opportunities are ineligible until fresh snapshots return. Reconnect to the local feed and wait for a validated fresh snapshot."
+            : "Cached opportunities remain ineligible until a validated fresh snapshot returns."}</p>
+        </section>
       ) : visibleOpportunities.length > 0 ? (
         <>
           {staleDiagnostics.length > 0 ? <p className="stale-warning" role="status">Stale server diagnostics: {staleDiagnostics.map((diagnostic) => diagnostic.reason).join("; ")}. Affected markets are hidden; wait for a fresh server snapshot.</p> : null}

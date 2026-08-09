@@ -15,13 +15,14 @@ export function CategoryPage({ category, snapshot }: { readonly category: Catego
   const competitions = [...new Set(categoryEvents.map((event) => event.competition))];
   const marketTypes = [...new Set(categoryMarkets.map((market) => market.marketType))];
   const visibleEvents = useMemo(() => categoryEvents.filter((event) => {
-    const isLive = event.startAtUtcMs <= snapshot.generatedAtMs;
     const relevantMarkets = categoryMarkets.filter((market) => market.canonicalEventId === event.canonicalEventId);
-    return (timing === all || (timing === "LIVE" ? isLive : !isLive))
+    const matchesMapping = mappingStatus === all || event.mappingStatus === mappingStatus ||
+      relevantMarkets.some((market) => market.mappingStatus === mappingStatus);
+    return (timing === all || (timing === "LIVE" ? event.isLive === true : event.isLive === false))
       && (competition === all || event.competition === competition)
       && (marketType === all || relevantMarkets.some((market) => market.marketType === marketType))
-      && (mappingStatus === all || event.mappingStatus === mappingStatus);
-  }), [categoryEvents, categoryMarkets, competition, mappingStatus, marketType, snapshot.generatedAtMs, timing]);
+      && matchesMapping;
+  }), [categoryEvents, categoryMarkets, competition, mappingStatus, marketType, timing]);
   const visibleMarketIds = new Set(visibleEvents.map((event) => event.canonicalEventId));
   const visibleMarkets = categoryMarkets.filter((market) =>
     visibleMarketIds.has(market.canonicalEventId)

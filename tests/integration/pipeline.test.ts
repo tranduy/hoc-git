@@ -115,6 +115,26 @@ describe("fixture pipeline", () => {
     const runtime = new Runtime({
       adapters,
       clock,
+      opportunityPolicy: {
+        baseCurrency: "USD",
+        bankroll: "1000",
+        minimumNetMargin: "0",
+        minimumWorstCaseProfit: "0",
+        minimumRoi: "0",
+        minimumRemainingTtlMs: 0,
+        providers: Object.fromEntries(["SABA", "IM"].map((provider) => [provider, {
+          fee: { type: "PROFIT" as const, rate: "0.01" },
+          constraint: { minStake: "1", maxStake: "1000", stakeStep: "1", balance: "1000" },
+          fx: {
+            sourceCurrency: "USD",
+            baseCurrency: "USD",
+            rate: "1",
+            spreadRate: "0",
+            asOfMs: 1_800_000_000_000,
+            maxAgeMs: 10_000
+          }
+        }]))
+      },
       mappingPolicy: {
         prematchToleranceMs: 120_000,
         liveClockToleranceMs: 20_000,

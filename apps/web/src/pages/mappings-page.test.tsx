@@ -11,9 +11,9 @@ const snapshot: AppSnapshot = {
   providerStatuses: [],
   counts: { FOOTBALL: { events: 2, markets: 1 }, LOL: { events: 1, markets: 1 }, mappings: { VERIFIED: 2, REVIEW_REQUIRED: 2, REJECTED: 2 }, opportunities: 0 },
   events: [
-    { canonicalEventId: "event-verified", category: "FOOTBALL", competition: "Premier League", seasonStage: null, startAtUtcMs: 1, participantA: "Northbridge", participantB: "Riverside", providerEventIds: ["a", "b"], mappingStatus: "VERIFIED", mappingEvidence: [evidence("same participants", true), evidence("distinct sources", true)] },
-    { canonicalEventId: "event-review", category: "LOL", competition: "Summer Split", seasonStage: "Playoffs", startAtUtcMs: 2, participantA: "Blue", participantB: "Red", providerEventIds: ["c", "d"], mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [evidence("same tournament", true), evidence("same stage", false)] },
-    { canonicalEventId: "event-rejected", category: "FOOTBALL", competition: "Cup", seasonStage: null, startAtUtcMs: 3, participantA: "Alpha", participantB: "Beta", providerEventIds: ["e", "f"], mappingStatus: "REJECTED", mappingEvidence: [evidence("same category", false), evidence("same participants", false)] }
+    { canonicalEventId: "event-verified", category: "FOOTBALL", competition: "Premier League", seasonStage: null, startAtUtcMs: 1, participantA: "Northbridge", participantB: "Riverside", providerEventIds: ["a", "b"], isLive: false, mappingStatus: "VERIFIED", mappingEvidence: [evidence("same participants", true), evidence("distinct sources", true)] },
+    { canonicalEventId: "event-review", category: "LOL", competition: "Summer Split", seasonStage: "Playoffs", startAtUtcMs: 2, participantA: "Blue", participantB: "Red", providerEventIds: ["c", "d"], isLive: true, mappingStatus: "REVIEW_REQUIRED", mappingEvidence: [evidence("same tournament", true), evidence("same stage", false)] },
+    { canonicalEventId: "event-rejected", category: "FOOTBALL", competition: "Cup", seasonStage: null, startAtUtcMs: 3, participantA: "Alpha", participantB: "Beta", providerEventIds: ["e", "f"], isLive: null, mappingStatus: "REJECTED", mappingEvidence: [evidence("same category", false), evidence("same participants", false)] }
   ],
   markets: [
     { canonicalMarketId: "market-verified", canonicalEventId: "event-verified", category: "FOOTBALL", marketType: "FT_1X2", scope: "FULL_TIME", line: null, settlementProfile: "football", providerMarketIds: ["m1", "m2"], mappingStatus: "VERIFIED", mappingEvidence: [evidence("same market", true), evidence("same settlement", true)] },
@@ -91,12 +91,18 @@ describe("MappingsPage", () => {
     });
   });
 
-  it("labels disconnected evidence as last-known and gives stale diagnostics a safe next action", () => {
-    const diagnostics = [{ code: "STALE", category: "LOL" as const, canonicalMarketId: "market-review", reason: "provider timestamp expired", mappingEvidence: [] }];
+  it.each(["STALE", "QUOTE_STALE"])("labels disconnected evidence as last-known and gives %s diagnostics a safe next action", (code) => {
+    const diagnostics = [{ code, category: "LOL" as const, canonicalMarketId: "market-review", reason: "provider timestamp expired", mappingEvidence: [] }];
     render(<MappingsPage snapshot={{ ...snapshot, blockedDiagnostics: diagnostics }} connectionState="DISCONNECTED" />);
 
     expect(screen.getByRole("alert").textContent).toContain("last-known and non-actionable");
     expect(screen.getByRole("status").textContent).toContain("provider timestamp expired");
     expect(screen.getAllByText(/wait for a fresh server snapshot/i)).toHaveLength(2);
+  });
+
+  it("keeps cached mapping evidence last-known while reconnect validation is in progress", () => {
+    render(<MappingsPage snapshot={snapshot} connectionState="CONNECTING" />);
+
+    expect(screen.getByRole("alert").textContent).toContain("last-known and non-actionable");
   });
 });

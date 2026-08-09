@@ -29,6 +29,7 @@ export interface QuoteUpdate {
   readonly source: QuoteUpdateSource;
   readonly kind: QuoteUpdateKind;
   readonly transport: QuoteTransport;
+  readonly sequence: number | null;
   readonly clock: QuoteClockContext;
   readonly quotes: readonly unknown[];
 }
@@ -216,6 +217,8 @@ export class QuoteBook {
       (update.kind !== "DELTA" && update.kind !== "FULL_SNAPSHOT") ||
       (update.transport !== "WEBSOCKET" && update.transport !== "POLLING") ||
       !validClock(update.clock) ||
+      (update.sequence !== null &&
+        (!Number.isSafeInteger(update.sequence) || update.sequence < 0)) ||
       !Array.isArray(update.quotes) ||
       update.quotes.length === 0
     ) {
@@ -269,6 +272,7 @@ export class QuoteBook {
       parsed.some(
         (item) => quoteMarketKey(item) !== marketKey || item.sequence !== sequence
       ) ||
+      sequence !== update.sequence ||
       new Set(parsed.map(quoteKey)).size !== parsed.length
     ) {
       for (const item of parsed) {

@@ -18,6 +18,26 @@ const baseInput: OptimizeStakesInput = {
 };
 
 describe("optimizeStakes", () => {
+  it("evaluates mixed-currency stakes and payouts in declared base currency", () => {
+    const plan = optimizeStakes({
+      odds: ["2.2", "2.2"],
+      stakeToBaseRates: ["2", "1"],
+      constraints: [
+        { minStake: "50", maxStake: "50", stakeStep: "1", balance: "50" },
+        { minStake: "100", maxStake: "100", stakeStep: "1", balance: "100" }
+      ],
+      bankroll: "200"
+    });
+
+    expect(plan).toMatchObject({
+      stakes: ["50", "100"],
+      payouts: ["220", "220"],
+      totalStake: "200",
+      worstCaseProfit: "20",
+      roi: "0.1"
+    });
+  });
+
   it("returns a profitable rounded plan that honors every constraint", () => {
     const plan = optimizeStakes(baseInput);
 

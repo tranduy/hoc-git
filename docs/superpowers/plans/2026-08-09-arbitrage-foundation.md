@@ -1076,6 +1076,16 @@ git commit -m "test: verify fixture arbitrage dashboard"
 
 ## Plan self-review
 
+## Corrective addendum: mandatory financial-policy wiring
+
+This cross-cutting requirement corrects the original plan's incomplete connection between the implemented fee/FX primitives and the runtime opportunity path. Preserve the historical task steps above, but treat the following checklist as binding acceptance criteria:
+
+- [x] **Task 5:** Optimize native-currency stake increments while converting every stake cost and outcome payout to one declared base currency with Decimal arithmetic; return realized post-rounding worst-case profit and ROI.
+- [x] **Task 6:** Require a complete provider policy containing fee model, native constraint currency, FX rate/spread, quote timestamp, and maximum FX age. Missing, invalid, future, stale, or wrong-target FX fails closed; fee-free and 1:1 FX are allowed only when explicitly declared.
+- [x] **Task 8:** Wire the provider policies and base currency through Runtime. Rank and threshold opportunities by realized post-fee/FX/rounding ROI, never by theoretical pre-rounding margin. Fixture mode declares its same-base 1:1 assumptions explicitly.
+- [x] **Task 11:** Expose base currency, base stake/cost, base payout, fee type/rate, FX rate/spread, and FX timestamp in the snapshot contract so the read-only UI can show the assumptions behind every leg.
+- [x] Add exact regressions for mixed currencies, missing policy, stale FX, fees, native stake rounding, and the case where theoretical margin passes but realized post-rounding margin fails.
+
 ### Spec coverage delivered by this plan
 
 - Category separation: Tasks 1, 8, 10 and 12.
