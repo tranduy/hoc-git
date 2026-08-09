@@ -28,6 +28,13 @@ describe("normalizeCmdAccountStore", () => {
     }));
   });
 
+  it("skips empty primary account labels and falls back to the first usable label", () => {
+    expect(normalizeCmdAccountStore({
+      DisplayUserName: "", LicUserName: "", Name: "account-7788", Nick: "longer-private-label",
+      Curr: "VND", Bal: { BCredit: "100.0" }
+    }, 10)).toEqual(expect.objectContaining({ redactedLabel: "••••7788", balance: "100" }));
+  });
+
   it.each([
     [{ DisplayUserName: "user-1234", Curr: "VND", Bal: { BCredit: "1e5" } }],
     [{ DisplayUserName: "user-1234", Curr: "VND", Bal: { BCredit: "10,00" } }],

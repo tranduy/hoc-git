@@ -41,7 +41,8 @@ export function normalizeCmdAccountStore(raw: unknown, observedAtMs: number): No
   const balance = plainNonnegativeDecimal(balanceState.BCredit);
   const rawCurrency = balanceState.Curr ?? root.Curr;
   const currency = typeof rawCurrency === "string" ? rawCurrency.trim().toUpperCase() : "";
-  const label = maskLabel(root.DisplayUserName ?? root.LicUserName ?? root.Name ?? root.Nick);
+  const label = [root.DisplayUserName, root.LicUserName, root.Name, root.Nick]
+    .map(maskLabel).find((candidate): candidate is string => candidate !== null) ?? null;
   if (balance === null || !/^[A-Z]{3,8}$/u.test(currency) || label === null) return null;
 
   return {

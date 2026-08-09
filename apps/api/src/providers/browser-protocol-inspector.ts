@@ -421,3 +421,61 @@ export async function findCmdCatalogPage(pages: readonly Page[]): Promise<Page |
   }
   return null;
 }
+
+export interface CmdIdentitySignals {
+  readonly runtime: boolean;
+  readonly football: boolean;
+  readonly esports: boolean;
+  readonly cmdBundle: boolean;
+}
+
+export async function collectCmdIdentitySignals(page: Page): Promise<CmdIdentitySignals> {
+  const result = { runtime: false, football: false, esports: false, cmdBundle: false };
+  for (const frame of page.frames()) {
+    const signals = await frame.evaluate(() => {
+      const runtime = (globalThis as unknown as {
+        UtilPack?: {
+          accountStore?: { attrs?: unknown };
+          siteInfoStore?: { attrs?: { ApiBackendUrl?: unknown } };
+          SyncServer?: { json?: unknown };
+        }
+      }).UtilPack;
+      let hasToken = false;
+      try { hasToken = Boolean(sessionStorage.getItem("at")); } catch { hasToken = false; }
+      const account = runtime?.accountStore?.attrs;
+      return {
+        runtime: hasToken && typeof account === "object" && account !== null &&
+          typeof (account as Record<string, unknown>).Bal === "object" &&
+          typeof runtime?.siteInfoStore?.attrs?.ApiBackendUrl === "string" &&
+          typeof runtime?.SyncServer?.json === "function",
+        football: document.querySelector(".c-iconcolor-sport1") !== null,
+        esports: document.querySelector(".c-iconcolor-sport43") !== null,
+        cmdBundle: [...document.scripts].some((script) => {
+          try { return new URL(script.src).pathname === "/MS2L/Js/dt/main.js"; } catch { return false; }
+        })
+      };
+    }).catch(() => ({ runtime: false, football: false, esports: false, cmdBundle: false }));
+    result.runtime ||= signals.runtime;
+    result.football ||= signals.football;
+    result.esports ||= signals.esports;
+    result.cmdBundle ||= signals.cmdBundle;
+  }
+  return result;
+}
+
+export async function waitForCmdIdentitySignals(
+  page: Page,
+  timeoutMs: number,
+  pollingIntervalMs = 100
+): Promise<CmdIdentitySignals> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(pollingIntervalMs) || pollingIntervalMs <= 0) {
+    throw new Error("invalid CMD identity wait options");
+  }
+  const deadline = Date.now() + timeoutMs;
+  let signals = await collectCmdIdentitySignals(page);
+  while (!(signals.runtime && signals.football && signals.esports && signals.cmdBundle) && Date.now() < deadline) {
+    await page.waitForTimeout(Math.min(pollingIntervalMs, Math.max(1, deadline - Date.now())));
+    signals = await collectCmdIdentitySignals(page);
+  }
+  return signals;
+}

@@ -8,6 +8,8 @@ import {
   extractCmdCatalogRecords,
   collectCmdCatalogNavigation,
   findCmdCatalogPage,
+  collectCmdIdentitySignals,
+  waitForCmdIdentitySignals,
   collectSafeControlShapes,
   discoverApiOriginFromFrame,
   findApiOriginFromPage,
@@ -250,5 +252,38 @@ describe("browser protocol inspector", () => {
     expect(await findCmdCatalogPage([launcher, sports])).toBe(sports);
     await launcher.close();
     await sports.close();
+  });
+
+  it("collects CMD identity signals from the child sports frame", async () => {
+    const page = await browser.newPage();
+    await page.goto(testOrigin);
+    await page.setContent(`<iframe srcdoc="
+      <i class='c-iconcolor-sport1'>Football</i><i class='c-iconcolor-sport43'>Esports</i>
+      <script src='https://cdn.test/MS2L/Js/dt/main.js'></script>
+      <script>sessionStorage.setItem('at','unit-test'); UtilPack={accountStore:{attrs:{Bal:{}}},siteInfoStore:{attrs:{ApiBackendUrl:'https://api.test/api'}},SyncServer:{json(){}}}</script>
+    "></iframe>`);
+    await page.waitForTimeout(50);
+    expect(await collectCmdIdentitySignals(page)).toEqual({
+      runtime: true, football: true, esports: true, cmdBundle: true
+    });
+    await page.close();
+  });
+
+  it("waits for a navigating sports frame to expose all CMD identity signals", async () => {
+    const page = await browser.newPage();
+    await page.goto(testOrigin);
+    await page.setContent("<main>loading</main>");
+    await page.evaluate(() => setTimeout(() => {
+      document.body.innerHTML = `<i class='c-iconcolor-sport1'>Football</i><i class='c-iconcolor-sport43'>Esports</i><script src='https://cdn.test/MS2L/Js/dt/main.js'></script>`;
+      sessionStorage.setItem("at", "unit-test");
+      (globalThis as unknown as { UtilPack: unknown }).UtilPack = {
+        accountStore: { attrs: { Bal: {} } }, siteInfoStore: { attrs: { ApiBackendUrl: "https://api.test/api" } },
+        SyncServer: { json() { return undefined; } }
+      };
+    }, 100));
+    expect(await waitForCmdIdentitySignals(page, 1_000, 25)).toEqual({
+      runtime: true, football: true, esports: true, cmdBundle: true
+    });
+    await page.close();
   });
 });

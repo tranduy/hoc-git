@@ -14,6 +14,9 @@ import { TrustedDomainStore } from "./trusted-domain-store.js";
 import type { SecretProtector, SessionValidator } from "./types.js";
 import { AccountRegistry } from "../accounts/account-registry.js";
 import type { ProviderProfileReader } from "../providers/provider-capabilities.js";
+import { PlaywrightCmdBrowserManager } from "../providers/cmd/cmd-browser-manager.js";
+import { CmdProfileReader } from "../providers/cmd/cmd-profile-reader.js";
+import { CmdSessionValidator } from "../providers/cmd/cmd-session-validator.js";
 import { SessionValidatorRegistry } from "./validators.js";
 
 export interface CreateSessionServicesOptions {
@@ -43,6 +46,10 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const trustStore = new TrustedDomainStore({ vault, clock });
   const profilesRoot = join(root, "browser-profiles");
+  const cmdBrowser = new PlaywrightCmdBrowserManager({
+    profilesRoot: join(profilesRoot, "providers"),
+    headless: false
+  });
   const automation = options.automation ?? new PlaywrightFabetAutomation({
     profilePath: join(profilesRoot, "fabet"),
     headless: false
@@ -58,7 +65,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const manager = new SessionManager({
     vault,
-    validators: new SessionValidatorRegistry(options.validators ?? []),
+    validators: new SessionValidatorRegistry(options.validators ?? [new CmdSessionValidator(cmdBrowser)]),
     clock,
     idFactory,
     fabetDriver,
@@ -71,7 +78,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const accounts = new AccountRegistry({
     vault,
     sessions: manager,
-    readers: options.profileReaders ?? [],
+    readers: options.profileReaders ?? [new CmdProfileReader({ source: cmdBrowser, clock })],
     clock,
     idFactory
   });
@@ -84,7 +91,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       await manager.tick();
     },
     async close(): Promise<void> {
-      await automation.close();
+      await Promise.all([automation.close(), cmdBrowser.close()]);
     }
   };
 }
