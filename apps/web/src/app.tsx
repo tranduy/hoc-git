@@ -5,15 +5,17 @@ import { DashboardPage } from "./pages/dashboard-page.js";
 import { CategoryPage } from "./pages/category-page.js";
 import { OpportunitiesPage } from "./pages/opportunities-page.js";
 import { MappingsPage } from "./pages/mappings-page.js";
+import { SessionsPage } from "./pages/sessions-page.js";
 
-type Route = "/" | "/football" | "/lol" | "/opportunities" | "/mappings";
+type Route = "/" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions";
 
 const routes: ReadonlyArray<{ readonly path: Route; readonly label: string }> = [
   { path: "/", label: "Dashboard" },
   { path: "/football", label: "Football" },
   { path: "/lol", label: "LoL" },
   { path: "/opportunities", label: "Opportunities" },
-  { path: "/mappings", label: "Mapping Review" }
+  { path: "/mappings", label: "Mapping Review" },
+  { path: "/sessions", label: "Sessions" }
 ];
 
 function routeFor(pathname: string): Route {
@@ -49,7 +51,8 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
     window.history.pushState({}, "", path);
     setRoute(path);
   };
-  const content = snapshot === undefined
+  const content = route === "/sessions" ? <SessionsPage />
+    : snapshot === undefined
     ? <header className="page-header"><h1>Loading {routeLabel}</h1><p>Waiting for a fresh local snapshot. No opportunity or mapping decision is available yet.</p></header>
     : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} />
     : route === "/football" ? <CategoryPage key="FOOTBALL" category="FOOTBALL" snapshot={snapshot} />

@@ -40,7 +40,7 @@ describe("App navigation", () => {
   it("shows every primary view and filters Football and LoL event rows", () => {
     render(<App initialSnapshot={snapshot} />);
 
-    for (const label of ["Dashboard", "Football", "LoL", "Opportunities", "Mapping Review"]) {
+    for (const label of ["Dashboard", "Football", "LoL", "Opportunities", "Mapping Review", "Sessions"]) {
       expect(screen.getByRole("link", { name: label })).toBeTruthy();
     }
 
@@ -53,6 +53,9 @@ describe("App navigation", () => {
     expect(screen.getByRole("heading", { name: "LoL" })).toBeTruthy();
     expect(screen.getByText("Blue Comets")).toBeTruthy();
     expect(screen.queryByText("Northbridge")).toBeNull();
+
+    fireEvent.click(screen.getByRole("link", { name: "Sessions" }));
+    expect(screen.getByRole("heading", { name: "Sessions" })).toBeTruthy();
   });
 
   it("names provider state with an icon label and text", () => {
