@@ -130,6 +130,18 @@ export class AccountRegistry {
     )));
   }
 
+  async withActiveHandle<T>(
+    id: string,
+    expectedProvider: ProviderId,
+    consume: (handle: ActiveSecretHandle) => Promise<T>
+  ): Promise<T> {
+    const record = await this.#loadRequired(id);
+    if (record.provider !== expectedProvider) throw new Error("ACCOUNT_PROVIDER_MISMATCH");
+    const handle = await this.#sessions.getActiveSecretHandle(record.sessionId);
+    if (handle === null || handle.provider !== record.provider) throw new Error("ACCOUNT_SESSION_UNAVAILABLE");
+    return consume(handle);
+  }
+
   #public(record: StoredAccount, session: RedactedSessionStatus | null, capabilities: readonly ProviderCapability[] = []): AccountStatus {
     const profileState = record.profile === null ? "UNAVAILABLE" as const
       : this.#clock.nowMs() - record.profile.asOfMs <= profileFreshnessMs ? "FRESH" as const : "STALE" as const;

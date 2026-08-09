@@ -7,6 +7,7 @@ import { registerHealthRoute } from "./routes/health.js";
 import { registerAccountRoutes, type AccountRegistryLike } from "./routes/accounts.js";
 import { registerSnapshotRoute } from "./routes/snapshot.js";
 import { registerSessionRoutes, type SessionServices } from "./routes/sessions.js";
+import { registerCatalogRoutes, type CatalogReaderLike } from "./routes/catalog.js";
 
 export interface AppOptions {
   readonly viteOrigin?: string;
@@ -14,6 +15,7 @@ export interface AppOptions {
   readonly maxBufferedBytes?: number;
   readonly sessionServices?: SessionServices;
   readonly accountRegistry?: AccountRegistryLike;
+  readonly catalogReader?: CatalogReaderLike;
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
@@ -115,6 +117,7 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   registerSnapshotRoute(app, runtime);
   if (options.sessionServices !== undefined) registerSessionRoutes(app, options.sessionServices);
   if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
+  if (options.catalogReader !== undefined) registerCatalogRoutes(app, options.catalogReader);
   void app.register(async (instance) => {
     registerOpportunityWebsocket(instance, runtime, { heartbeatIntervalMs, maxBufferedBytes });
   });

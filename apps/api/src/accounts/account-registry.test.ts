@@ -103,4 +103,14 @@ describe("AccountRegistry", () => {
     });
     expect(await unavailable.refresh(account.id)).toMatchObject({ profileState: "UNAVAILABLE", reason: "EXPIRED" });
   });
+
+  it("opens the active secret only for the account's verified provider", async () => {
+    const context = await setup();
+    const account = await context.registry.register({ sessionId: "session-a", alias: "Main", provider: "CMD" });
+
+    await expect(context.registry.withActiveHandle(account.id, "SABA", async () => "wrong"))
+      .rejects.toThrow("ACCOUNT_PROVIDER_MISMATCH");
+    await expect(context.registry.withActiveHandle(account.id, "CMD", async (handle) => handle.sessionId))
+      .resolves.toBe("session-a");
+  });
 });

@@ -6,11 +6,13 @@ import { CategoryPage } from "./pages/category-page.js";
 import { OpportunitiesPage } from "./pages/opportunities-page.js";
 import { MappingsPage } from "./pages/mappings-page.js";
 import { SessionsPage } from "./pages/sessions-page.js";
+import { LiveCatalogPage } from "./pages/live-catalog-page.js";
 
-type Route = "/" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions";
+type Route = "/" | "/live-catalog" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions";
 
 const routes: ReadonlyArray<{ readonly path: Route; readonly label: string }> = [
   { path: "/", label: "Dashboard" },
+  { path: "/live-catalog", label: "Live Catalog" },
   { path: "/football", label: "Football" },
   { path: "/lol", label: "LoL" },
   { path: "/opportunities", label: "Opportunities" },
@@ -52,6 +54,7 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
     setRoute(path);
   };
   const content = route === "/sessions" ? <SessionsPage />
+    : route === "/live-catalog" ? <LiveCatalogPage />
     : snapshot === undefined
     ? <header className="page-header"><h1>Loading {routeLabel}</h1><p>Waiting for a fresh local snapshot. No opportunity or mapping decision is available yet.</p></header>
     : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} />

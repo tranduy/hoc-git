@@ -17,6 +17,7 @@ import type { ProviderProfileReader } from "../providers/provider-capabilities.j
 import { PlaywrightCmdBrowserManager } from "../providers/cmd/cmd-browser-manager.js";
 import { CmdProfileReader } from "../providers/cmd/cmd-profile-reader.js";
 import { CmdSessionValidator } from "../providers/cmd/cmd-session-validator.js";
+import { CmdObservedCatalogReader } from "../providers/cmd/cmd-observed-catalog.js";
 import { SessionValidatorRegistry } from "./validators.js";
 
 export interface CreateSessionServicesOptions {
@@ -32,6 +33,7 @@ export interface CreateSessionServicesOptions {
 
 export interface ManagedSessionServices extends SessionServices {
   readonly accounts: AccountRegistry;
+  readonly catalogReader: CmdObservedCatalogReader;
   tick(): Promise<void>;
   close(): Promise<void>;
 }
@@ -82,11 +84,18 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock,
     idFactory
   });
+  const catalogReader = new CmdObservedCatalogReader({
+    accounts,
+    source: cmdBrowser,
+    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
+    timezoneOffsetMinutes: 420
+  });
   return {
     manager,
     discovery,
     trustStore,
     accounts,
+    catalogReader,
     async tick(): Promise<void> {
       await manager.tick();
     },
