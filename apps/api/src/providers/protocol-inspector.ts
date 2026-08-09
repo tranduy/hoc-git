@@ -16,6 +16,15 @@ const ignoredHostSuffixes = [
   "livechatinc.com", "googletagmanager.com", "google-analytics.com", "cloudflareinsights.com"
 ];
 
+const inspectionControlLabels = new Set([
+  "show balance", "hiển thị số dư", "football", "bóng đá", "esports",
+  "upcoming", "sắp diễn ra", "live", "trực tiếp"
+]);
+
+export function inspectionControlIsSafe(label: string): boolean {
+  return inspectionControlLabels.has(label.trim().replace(/\s+/gu, " ").toLocaleLowerCase("vi"));
+}
+
 function pathTemplate(pathname: string): string {
   return pathname.split("/").map((segment) => {
     let decoded: string;

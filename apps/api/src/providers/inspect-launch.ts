@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 import { chromium, type Response } from "playwright";
 import { DpapiProtector } from "../sessions/dpapi-protector.js";
 import { SecretVault } from "../sessions/secret-vault.js";
-import { observeProtocolMetadata, structuralBodyHash, structuralBodyShape, type ProtocolObservation } from "./protocol-inspector.js";
+import { inspectionControlIsSafe, observeProtocolMetadata, structuralBodyHash, structuralBodyShape, type ProtocolObservation } from "./protocol-inspector.js";
 
 interface InspectableSessionRecord {
   readonly secret: { readonly kind: "LAUNCH_URL"; readonly value: string };
@@ -70,6 +70,16 @@ async function main(): Promise<void> {
   try {
     const page = context.pages()[0] ?? await context.newPage();
     await page.goto(record.secret.value, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    const controls = page.locator("a, button, [role='button'], [onclick]");
+    const controlCount = Math.min(await controls.count(), 250);
+    for (let index = 0, clicked = 0; index < controlCount && clicked < 12; index += 1) {
+      const control = controls.nth(index);
+      const label = await control.innerText().catch(() => "");
+      if (!inspectionControlIsSafe(label) || !(await control.isVisible().catch(() => false))) continue;
+      await control.click({ timeout: 2_000 }).catch(() => undefined);
+      clicked += 1;
+      await page.waitForTimeout(1_000);
+    }
     await page.waitForTimeout(15_000);
     await Promise.allSettled([...pending]);
     process.stdout.write(`${JSON.stringify([...observations.values()], null, 2)}\n`);

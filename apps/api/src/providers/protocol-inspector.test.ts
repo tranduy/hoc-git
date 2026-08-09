@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { observeProtocolMetadata, structuralBodyHash, structuralBodyShape } from "./protocol-inspector.js";
+import { inspectionControlIsSafe, observeProtocolMetadata, structuralBodyHash, structuralBodyShape } from "./protocol-inspector.js";
 
 describe("protocol inspector", () => {
   it("removes query, fragment, credentials, and identifier-shaped path values", () => {
@@ -36,5 +36,13 @@ describe("protocol inspector", () => {
       url: "https://sports.cmd.test/(S(Tesqedix87fa7fb3816a427abcd6196bc4d345f9))/LoginCheckin/Index",
       method: "POST", transport: "XHR", status: 200, contentType: "application/json"
     })?.pathTemplate).toBe("/:session/LoginCheckin/Index");
+  });
+
+  it.each([
+    ["Show Balance", true], ["Hiển thị số dư", true], ["Football", true], ["Esports", true],
+    ["Upcoming", true], ["Live", true], ["Place Bet", false], ["Đặt cược", false],
+    ["Deposit", false], ["1.95", false]
+  ])("classifies read-only inspection control %s", (label, expected) => {
+    expect(inspectionControlIsSafe(label)).toBe(expected);
   });
 });
