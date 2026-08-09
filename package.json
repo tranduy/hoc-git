@@ -11,10 +11,11 @@
     "dev:web": "npm run dev --workspace @tool-chenh/web",
     "dev:fixture": "npm run build && node scripts/start-fixture-stack.mjs",
     "test": "npm run test --workspaces --if-present",
+    "test:fixture-stack": "node --test scripts/fixture-stack-readiness.test.mjs",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "playwright test",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "verify": "npm run typecheck && npm test && npm run test:integration"
+    "verify": "npm run typecheck && npm test && npm run test:integration && npm run test:fixture-stack"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.1",

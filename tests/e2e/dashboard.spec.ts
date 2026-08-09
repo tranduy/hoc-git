@@ -1,9 +1,34 @@
 import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
 
 async function expectNoExecutionControls(page: Page): Promise<void> {
-  await expect(page.getByRole("button", { name: /arm|bet|place|submit|wager/i })).toHaveCount(0);
-  await expect(page.getByRole("link", { name: /arm|bet|place|submit|wager/i })).toHaveCount(0);
-  await expect(page.locator('input[type="password"], input[name*="credential" i], input[name*="token" i]')).toHaveCount(0);
+  const forbiddenName = /\b(?:arm|submit|execute|confirm|place(?:\s+a)?\s+bet|bet|wager|buy|log[\s-]?in|credential|account|member|session|cookie|authorization|token|password)\b/i;
+  for (const role of ["button", "link", "textbox", "checkbox", "radio", "combobox", "spinbutton"] as const) {
+    await expect(page.getByRole(role, { name: forbiddenName })).toHaveCount(0);
+  }
+  await expect(page.getByRole("button")).toHaveCount(0);
+  await expect(page.locator("form")).toHaveCount(0);
+  await expect(page.locator("label").filter({ hasText: forbiddenName })).toHaveCount(0);
+  await expect(page.locator([
+    'input[type="password" i]',
+    'input[name*="credential" i]',
+    'input[id*="credential" i]',
+    'input[name*="account" i]',
+    'input[id*="account" i]',
+    'input[name*="member" i]',
+    'input[id*="member" i]',
+    'input[name*="session" i]',
+    'input[id*="session" i]',
+    'input[name*="cookie" i]',
+    'input[id*="cookie" i]',
+    'input[name*="authorization" i]',
+    'input[id*="authorization" i]',
+    'input[name*="token" i]',
+    'input[id*="token" i]',
+    'input[name*="password" i]',
+    'input[id*="password" i]',
+    'input[autocomplete="username" i]',
+    'input[autocomplete="current-password" i]'
+  ].join(", "))).toHaveCount(0);
 }
 
 test("operator can inspect separate Football and LoL opportunities", async ({ page }) => {
@@ -22,7 +47,18 @@ test("operator can inspect separate Football and LoL opportunities", async ({ pa
 
   await page.getByRole("link", { name: "Opportunities" }).click();
   await expect(page.getByRole("heading", { name: "Opportunities" })).toBeVisible();
-  await expect(page.getByText("READ ONLY").first()).toBeVisible();
+  const cards = page.locator("article.opportunity-card");
+  const footballCard = cards.filter({ has: page.getByText("FOOTBALL", { exact: true }) });
+  const lolCard = cards.filter({ has: page.getByText("LOL", { exact: true }) });
+  await expect(footballCard).toHaveCount(1);
+  await expect(footballCard.getByText("READ ONLY", { exact: true })).toBeVisible();
+  await expect(footballCard.getByText("FT_TOTAL", { exact: true })).toBeVisible();
+  await expect(footballCard.getByText("Full time", { exact: true })).toBeVisible();
+  await expect(lolCard).toHaveCount(1);
+  await expect(lolCard.getByText("READ ONLY", { exact: true })).toBeVisible();
+  await expect(lolCard.getByText("SERIES_WINNER", { exact: true })).toBeVisible();
+  await expect(lolCard.getByText("Series", { exact: true })).toBeVisible();
+  expect(await footballCard.getAttribute("aria-label")).not.toBe(await lolCard.getAttribute("aria-label"));
   await expect(page.getByText("Worst-case profit").first()).toBeVisible();
   await expect(page.getByText("Raw odds (DECIMAL)").first()).toBeVisible();
   await expect(page.getByText("Effective decimal").first()).toBeVisible();
@@ -36,11 +72,22 @@ test("operator can inspect separate Football and LoL opportunities", async ({ pa
 test("operator can inspect mapping evidence without approval controls", async ({ page }) => {
   await page.goto("/mappings");
   await expect(page.getByRole("heading", { name: "Mapping Review" })).toBeVisible();
-  const mapping = page.locator("details.mapping-row").first();
-  await mapping.locator("summary").click();
-  await expect(mapping.getByRole("table", { name: /mapping evidence/i })).toBeVisible();
-  await expect(mapping.getByRole("columnheader", { name: "Gate" })).toBeVisible();
-  await expect(mapping.getByText(/PASS|FAIL/).first()).toBeVisible();
+  const mappings = page.locator("details.mapping-row");
+  expect(await mappings.count()).toBeGreaterThan(1);
+  for (let index = 0; index < 2; index += 1) {
+    const mapping = mappings.nth(index);
+    await mapping.locator("summary").click();
+    const table = mapping.getByRole("table", { name: /mapping evidence/i });
+    await expect(table).toBeVisible();
+    for (const heading of ["Gate", "Expected", "Actual", "Result", "Reason"]) {
+      await expect(table.getByRole("columnheader", { name: heading, exact: true })).toBeVisible();
+    }
+    const evidence = table.locator("tbody tr").first().locator("td");
+    await expect(evidence.nth(1)).not.toHaveText("");
+    await expect(evidence.nth(2)).not.toHaveText("");
+    await expect(evidence.nth(3)).toHaveText(/^(?:PASS|FAIL)$/u);
+    await expect(evidence.nth(4)).not.toHaveText("");
+  }
   await expectNoExecutionControls(page);
 });
 

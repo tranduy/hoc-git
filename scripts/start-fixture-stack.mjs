@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
+import { waitForFixtureStack } from "./fixture-stack-readiness.mjs";
 
 const loopbackHost = "127.0.0.1";
 const apiPort = 4310;
 const webPort = 4311;
-const healthUrl = `http://${loopbackHost}:${apiPort}/api/health`;
+const apiHealthUrl = `http://${loopbackHost}:${apiPort}/api/health`;
+const webUrl = `http://${loopbackHost}:${webPort}/`;
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const apiEntry = join(repositoryRoot, "apps", "api", "dist", "server.js");
 const viteEntry = join(repositoryRoot, "node_modules", "vite", "bin", "vite.js");
@@ -50,26 +52,6 @@ function startChild(name, entry, args, cwd, environment) {
   });
   child.fixtureName = name;
   return child;
-}
-
-async function waitForHealth(children, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (children.some((child) => child.exitCode !== null || child.signalCode !== null)) {
-      throw new Error("A fixture-stack child exited before API health became ready.");
-    }
-    try {
-      const response = await fetch(healthUrl, { signal: AbortSignal.timeout(1_000) });
-      if (response.ok) {
-        const body = await response.json();
-        if (body?.status === "ok" && body?.mode === "OBSERVE" && body?.executionReady === false) return;
-      }
-    } catch {
-      // Startup races are expected; the bounded loop retries them.
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
-  }
-  throw new Error(`Fixture API did not become healthy at ${healthUrl} within ${timeoutMs} ms.`);
 }
 
 async function stopChildren(children, signal) {
@@ -129,8 +111,8 @@ async function main() {
   }
 
   try {
-    await waitForHealth(children);
-    process.stdout.write(`[fixture-stack] ready: API ${healthUrl}; web http://${loopbackHost}:${webPort}\n`);
+    await waitForFixtureStack({ children, apiHealthUrl, webUrl });
+    process.stdout.write(`[fixture-stack] ready: API ${apiHealthUrl}; web ${webUrl}\n`);
   } catch (error) {
     process.stderr.write(`[fixture-stack] ${error instanceof Error ? error.message : String(error)}\n`);
     await shutdown(1);

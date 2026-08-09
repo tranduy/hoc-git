@@ -12,7 +12,7 @@ npm.cmd run verify
 npm.cmd run dev:fixture
 ```
 
-Wait for `[fixture-stack] ready`, then open `http://127.0.0.1:4311`. Stop the complete stack with `Ctrl+C`. The supervisor forwards the termination signal to both child processes; an API or web child failure makes the command exit nonzero.
+Wait for `[fixture-stack] ready`, which is printed only after both observe-only API health and the web root return successfully, then open `http://127.0.0.1:4311`. Stop the complete stack with `Ctrl+C`. The supervisor forwards the termination signal to both child processes; a readiness timeout or API/web child failure makes the command exit nonzero.
 
 For browser-level verification, install the pinned browser once with `npm.cmd exec playwright install chromium`, then run `npm.cmd run test:e2e`.
 
