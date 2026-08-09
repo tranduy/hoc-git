@@ -52,7 +52,15 @@ class FakeAccountApi implements AccountApiLike {
   }];
 
   async list(): Promise<readonly AccountStatus[]> { return [...this.accounts]; }
-  async register(): Promise<AccountStatus> { return this.accounts[0]!; }
+  async register(input: { sessionId: string; alias: string; provider: AccountStatus["provider"] }): Promise<AccountStatus> {
+    const created: AccountStatus = {
+      id: `account-${this.accounts.length + 1}`, alias: input.alias, provider: input.provider,
+      sessionState: "ACTIVE", profileState: "UNAVAILABLE", redactedLabel: null, currency: null,
+      balance: null, balanceAsOfMs: null, capabilities: input.provider === "CMD" ? ["PROFILE", "CATALOG"] : [], reason: "SCHEMA_CHANGED"
+    };
+    this.accounts = [...this.accounts, created];
+    return created;
+  }
   async refresh(id: string): Promise<AccountStatus> {
     const account = this.accounts.find((candidate) => candidate.id === id);
     if (account === undefined) throw new Error("ACCOUNT_NOT_FOUND");
@@ -63,6 +71,26 @@ class FakeAccountApi implements AccountApiLike {
 afterEach(() => cleanup());
 
 describe("SessionsPage", () => {
+  it("registers a second verified session as a distinct provider account", async () => {
+    const sessionApi = new FakeSessionApi();
+    sessionApi.sessions = [
+      { ...active, id: "cmd-session-1", provider: "CMD" },
+      { ...active, id: "cmd-session-2", provider: "CMD" }
+    ];
+    const accountApi = new FakeAccountApi();
+    accountApi.accounts = [];
+    render(<SessionsPage api={sessionApi} accountApi={accountApi} />);
+
+    expect(await screen.findAllByRole("option", { name: "CMD · Direct · ACTIVE" })).toHaveLength(2);
+    fireEvent.change(screen.getByLabelText("Account session"), { target: { value: "cmd-session-2" } });
+    fireEvent.change(screen.getByLabelText("Account alias"), { target: { value: "CMD second" } });
+    fireEvent.click(screen.getByRole("button", { name: "Register provider account" }));
+
+    expect(await screen.findByText("CMD second")).toBeTruthy();
+    expect(accountApi.accounts).toHaveLength(1);
+    expect(accountApi.accounts[0]).toMatchObject({ alias: "CMD second", provider: "CMD" });
+  });
+
   it("shows redacted provider profiles and refreshes balances without exposing session material", async () => {
     const accountApi = new FakeAccountApi();
     render(<SessionsPage api={new FakeSessionApi()} accountApi={accountApi} />);

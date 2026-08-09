@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { AccountStatus, RedactedSessionStatus, SessionStatusList } from "@tool-chenh/contracts";
+import { ProviderIdSchema, type AccountStatus, type ProviderId, type RedactedSessionStatus, type SessionStatusList } from "@tool-chenh/contracts";
 import {
   SessionApi,
   type FabetDiscoveryResult,
@@ -50,6 +50,8 @@ export function SessionsPage({
 }) {
   const [sessions, setSessions] = useState<readonly RedactedSessionStatus[]>([]);
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
+  const [accountAlias, setAccountAlias] = useState("");
+  const [accountSessionId, setAccountSessionId] = useState("");
   const [entryUrl, setEntryUrl] = useState("https://fabet.com/");
   const [discovery, setDiscovery] = useState<FabetDiscoveryResult | null>(null);
   const [username, setUsername] = useState("");
@@ -83,6 +85,15 @@ export function SessionsPage({
   useEffect(() => {
     if (resetOpen) cancelRef.current?.focus();
   }, [resetOpen]);
+
+  const eligibleAccountSessions = sessions.filter((session) =>
+    session.state === "ACTIVE" && session.provider !== "FABET" && ProviderIdSchema.safeParse(session.provider).success);
+
+  useEffect(() => {
+    if (!eligibleAccountSessions.some((session) => session.id === accountSessionId)) {
+      setAccountSessionId(eligibleAccountSessions[0]?.id ?? "");
+    }
+  }, [sessions, accountSessionId]);
 
   const run = async (operation: () => Promise<void>, fallback: string): Promise<void> => {
     setBusy(true);
@@ -157,6 +168,24 @@ export function SessionsPage({
     void accountApi.refresh(id).then(refreshAccounts).catch(() => {
       setAccountMessage("Provider profile refresh failed. No balance was assumed.");
     }).finally(() => setBusy(false));
+  };
+
+  const registerAccount = (event: FormEvent): void => {
+    event.preventDefault();
+    const session = eligibleAccountSessions.find((candidate) => candidate.id === accountSessionId);
+    const parsedProvider = ProviderIdSchema.safeParse(session?.provider);
+    if (session === undefined || !parsedProvider.success || accountAlias.trim().length === 0) return;
+    setBusy(true);
+    setAccountMessage(null);
+    void accountApi.register({
+      sessionId: session.id,
+      alias: accountAlias.trim(),
+      provider: parsedProvider.data as ProviderId
+    }).then(async () => {
+      setAccountAlias("");
+      await refreshAccounts();
+    }).catch(() => setAccountMessage("Provider account registration failed."))
+      .finally(() => setBusy(false));
   };
 
   const reset = (): void => {
@@ -250,6 +279,16 @@ export function SessionsPage({
           }} type="button">Reload accounts</button>
         </div>
         {accountMessage !== null && <p className="session-message" role="status">{accountMessage}</p>}
+        <form className="account-register-form" onSubmit={registerAccount}>
+          <label>Account session<select aria-label="Account session" value={accountSessionId} onChange={(event) => setAccountSessionId(event.target.value)}>
+            {eligibleAccountSessions.length === 0 && <option value="">No active verified provider session</option>}
+            {eligibleAccountSessions.map((session) => <option key={session.id} value={session.id}>
+              {session.provider} · {session.source === "FABET_LOGIN" ? "Fabet login" : "Direct"} · {session.state}
+            </option>)}
+          </select></label>
+          <label>Account alias<input aria-label="Account alias" maxLength={80} value={accountAlias} onChange={(event) => setAccountAlias(event.target.value)} /></label>
+          <button disabled={busy || accountSessionId.length === 0 || accountAlias.trim().length === 0} type="submit">Register provider account</button>
+        </form>
         {accounts.length === 0
           ? <p className="empty-state">No provider account is registered yet.</p>
           : <div className="account-grid">{accounts.map((account) => (
