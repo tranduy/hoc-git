@@ -29,7 +29,7 @@ export function LiveCatalogPage({
     accountId: new URLSearchParams(window.location.search).get("account"),
     eventId: new URLSearchParams(window.location.search).get("event")
   });
-  const autoLoadAttempted = useRef(false);
+  const lastAutoLoadedAccount = useRef<string | null>(null);
 
   useEffect(() => {
     void accountApi.list().then((items) => {
@@ -41,13 +41,13 @@ export function LiveCatalogPage({
 
   useEffect(() => {
     const requested = requestedSelection.current;
-    if (autoLoadAttempted.current || requested.eventId === null || accountId.length === 0) return;
-    if (requested.accountId !== null && requested.accountId !== accountId) return;
-    autoLoadAttempted.current = true;
+    if (accountId.length === 0 || lastAutoLoadedAccount.current === accountId) return;
+    lastAutoLoadedAccount.current = accountId;
     setBusy(true);
     setMessage(null);
     void catalogApi.read(accountId).then((response) => {
       setCatalog(response);
+      if (requested.eventId === null || (requested.accountId !== null && requested.accountId !== accountId)) return;
       if (response.events.some((event) => event.providerEventId === requested.eventId)) {
         setSelectedEventId(requested.eventId);
       } else {

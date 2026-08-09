@@ -47,6 +47,13 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
+  it("automatically loads real matches when a catalog-capable account becomes available", async () => {
+    render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
+
+    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("HOME: 2.1 DECIMAL")).toBeTruthy();
+  });
+
   it("shows real CMD matches separately from verified cross-provider comparisons", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "Load live catalog" }));
