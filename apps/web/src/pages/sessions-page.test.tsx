@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { RedactedSessionStatus, SessionStatusList } from "@tool-chenh/contracts";
+import type { AccountStatus, RedactedSessionStatus, SessionStatusList } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionsPage, type SessionApiLike } from "./sessions-page.js";
+import type { AccountApiLike } from "../api/accounts.js";
 
 const active: RedactedSessionStatus = {
   id: "manual-1",
@@ -35,9 +36,50 @@ class FakeSessionApi implements SessionApiLike {
   async resetFabet(): Promise<void> { this.resetCount += 1; this.sessions = this.sessions.filter((session) => session.source !== "FABET_LOGIN"); }
 }
 
+class FakeAccountApi implements AccountApiLike {
+  accounts: AccountStatus[] = [{
+    id: "account-1",
+    alias: "CMD account 1",
+    provider: "CMD",
+    sessionState: "ACTIVE",
+    profileState: "FRESH",
+    redactedLabel: "••••1445",
+    currency: "UUS",
+    balance: "0",
+    balanceAsOfMs: 1_800_000_000_000,
+    capabilities: ["PROFILE", "CATALOG"],
+    reason: null
+  }];
+
+  async list(): Promise<readonly AccountStatus[]> { return [...this.accounts]; }
+  async register(): Promise<AccountStatus> { return this.accounts[0]!; }
+  async refresh(id: string): Promise<AccountStatus> {
+    const account = this.accounts.find((candidate) => candidate.id === id);
+    if (account === undefined) throw new Error("ACCOUNT_NOT_FOUND");
+    return account;
+  }
+}
+
 afterEach(() => cleanup());
 
 describe("SessionsPage", () => {
+  it("shows redacted provider profiles and refreshes balances without exposing session material", async () => {
+    const accountApi = new FakeAccountApi();
+    render(<SessionsPage api={new FakeSessionApi()} accountApi={accountApi} />);
+
+    expect(await screen.findByRole("heading", { name: "Provider accounts" })).toBeTruthy();
+    expect(screen.getByText("CMD account 1")).toBeTruthy();
+    expect(screen.getByText("••••1445")).toBeTruthy();
+    expect(screen.getByText("0 UUS")).toBeTruthy();
+    expect(screen.getByText("FRESH")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("launchUrl");
+
+    accountApi.accounts = [{ ...accountApi.accounts[0]!, balance: "25000", profileState: "STALE" }];
+    fireEvent.click(screen.getByRole("button", { name: "Refresh CMD account 1" }));
+    expect(await screen.findByText("25000 UUS")).toBeTruthy();
+    expect(screen.getByText("STALE")).toBeTruthy();
+  });
+
   it("clears manual secret input and renders fail-closed validation state", async () => {
     render(<SessionsPage api={new FakeSessionApi()} />);
     await screen.findByText("SABA");

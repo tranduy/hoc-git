@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { RedactedSessionStatus, SessionStatusList } from "@tool-chenh/contracts";
+import type { AccountStatus, RedactedSessionStatus, SessionStatusList } from "@tool-chenh/contracts";
 import {
   SessionApi,
   type FabetDiscoveryResult,
   type ManualSessionInput
 } from "../api/sessions.js";
+import { AccountApi, type AccountApiLike } from "../api/accounts.js";
+import { AccountCard } from "../components/account-card.js";
 
 export interface SessionApiLike {
   list(): Promise<SessionStatusList>;
@@ -18,6 +20,7 @@ export interface SessionApiLike {
 }
 
 const defaultApi = new SessionApi();
+const defaultAccountApi = new AccountApi();
 
 function healthExplanation(session: RedactedSessionStatus): string {
   if (session.reason === "SCHEMA_CHANGED") return "Provider protocol is not validated yet.";
@@ -38,8 +41,15 @@ function displayTime(value: number | null): string {
   return value === null ? "—" : new Date(value).toLocaleString();
 }
 
-export function SessionsPage({ api = defaultApi }: { readonly api?: SessionApiLike }) {
+export function SessionsPage({
+  api = defaultApi,
+  accountApi = defaultAccountApi
+}: {
+  readonly api?: SessionApiLike;
+  readonly accountApi?: AccountApiLike;
+}) {
   const [sessions, setSessions] = useState<readonly RedactedSessionStatus[]>([]);
+  const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
   const [entryUrl, setEntryUrl] = useState("https://fabet.com/");
   const [discovery, setDiscovery] = useState<FabetDiscoveryResult | null>(null);
   const [username, setUsername] = useState("");
@@ -49,6 +59,7 @@ export function SessionsPage({ api = defaultApi }: { readonly api?: SessionApiLi
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [accountMessage, setAccountMessage] = useState<string | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
 
@@ -57,9 +68,17 @@ export function SessionsPage({ api = defaultApi }: { readonly api?: SessionApiLi
     setSessions(result.sessions);
   };
 
+  const refreshAccounts = async (): Promise<void> => {
+    setAccounts(await accountApi.list());
+  };
+
   useEffect(() => {
     void refresh().catch(() => setMessage("Session status is unavailable."));
   }, [api]);
+
+  useEffect(() => {
+    void refreshAccounts().catch(() => setAccountMessage("Account profile status is unavailable."));
+  }, [accountApi]);
 
   useEffect(() => {
     if (resetOpen) cancelRef.current?.focus();
@@ -130,6 +149,14 @@ export function SessionsPage({ api = defaultApi }: { readonly api?: SessionApiLi
       await api[action](id);
       await refresh();
     }, `Session ${action} failed.`);
+  };
+
+  const refreshAccount = (id: string): void => {
+    setBusy(true);
+    setAccountMessage(null);
+    void accountApi.refresh(id).then(refreshAccounts).catch(() => {
+      setAccountMessage("Provider profile refresh failed. No balance was assumed.");
+    }).finally(() => setBusy(false));
   };
 
   const reset = (): void => {
@@ -211,6 +238,23 @@ export function SessionsPage({ api = defaultApi }: { readonly api?: SessionApiLi
             </tr>
           ))}</tbody></table></div>
         )}
+      </section>
+
+      <section className="session-panel account-status-panel" aria-labelledby="account-status-heading">
+        <div className="session-heading-row">
+          <div><h2 id="account-status-heading">Provider accounts</h2><p>Balances are read from the provider and never inferred from local state.</p></div>
+          <button disabled={busy} onClick={() => {
+            setBusy(true);
+            setAccountMessage(null);
+            void refreshAccounts().catch(() => setAccountMessage("Account profile status is unavailable.")).finally(() => setBusy(false));
+          }} type="button">Reload accounts</button>
+        </div>
+        {accountMessage !== null && <p className="session-message" role="status">{accountMessage}</p>}
+        {accounts.length === 0
+          ? <p className="empty-state">No provider account is registered yet.</p>
+          : <div className="account-grid">{accounts.map((account) => (
+            <AccountCard account={account} busy={busy} key={account.id} onRefresh={refreshAccount} />
+          ))}</div>}
       </section>
 
       {resetOpen && (
