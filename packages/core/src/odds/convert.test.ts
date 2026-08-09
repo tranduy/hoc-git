@@ -7,7 +7,9 @@ describe("toDecimal", () => {
     ["1.26", "HK", "2.26"],
     ["2.054", "DECIMAL", "2.054"],
     ["+126", "AMERICAN", "2.26"],
-    ["-150", "AMERICAN", "1.6666666666666666667"]
+    ["-150", "AMERICAN", "1.6666666666666666667"],
+    ["0.84", "MALAY", "1.84"],
+    ["-0.8", "MALAY", "2.25"]
   ] as const)("converts %s %s", (raw, format, expected) => {
     expect(toDecimal(raw, format).toSignificantDigits(20).toString()).toBe(expected);
   });
@@ -19,7 +21,11 @@ describe("toDecimal", () => {
   });
 
   it("rejects unrecognized runtime formats instead of treating them as American", () => {
-    expect(() => toDecimal("100", "MALAY" as OddsFormat)).toThrow("unsupported odds format");
+    expect(() => toDecimal("100", "UNKNOWN" as OddsFormat)).toThrow("unsupported odds format");
+  });
+
+  it.each(["0", "1.01", "-1.01"])("rejects out-of-range Malay odds %s", (raw) => {
+    expect(() => toDecimal(raw, "MALAY")).toThrow("Malay odds must be between -1 and 1 excluding 0");
   });
 
   it.each([

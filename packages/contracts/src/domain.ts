@@ -114,7 +114,7 @@ export type QuoteIneligibilityReason =
   | "NEEDS_SNAPSHOT"
   | "SCHEMA_ERROR";
 
-export type OddsFormat = "DECIMAL" | "HK" | "AMERICAN";
+export type OddsFormat = "DECIMAL" | "HK" | "AMERICAN" | "MALAY";
 
 export type MarketType =
   | "FT_1X2"

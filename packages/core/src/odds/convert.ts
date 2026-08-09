@@ -32,6 +32,13 @@ export function toDecimal(raw: string, format: OddsFormat): Decimal {
     return value.plus(1);
   }
 
+  if (format === "MALAY") {
+    if (value.eq(0) || value.abs().gt(1)) {
+      throw new Error("Malay odds must be between -1 and 1 excluding 0");
+    }
+    return value.gt(0) ? value.plus(1) : new Decimal(1).div(value.abs()).plus(1);
+  }
+
   if (format === "AMERICAN") {
     if (value.gte(100)) {
       return value.div(100).plus(1);

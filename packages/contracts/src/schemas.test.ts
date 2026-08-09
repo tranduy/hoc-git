@@ -4,6 +4,7 @@ import {
   AppSnapshotSchema,
   CanonicalMarketSchema,
   OpportunitySchema,
+  OddsFormatSchema,
   PreflightRequestSchema,
   PreflightTicketSchema,
   ProviderConnectionStatusSchema,
@@ -18,6 +19,9 @@ import {
 } from "./schemas.js";
 
 describe("live account and preflight schemas", () => {
+  it("accepts Malay odds format for providers that publish signed Asian prices", () => {
+    expect(OddsFormatSchema.parse("MALAY")).toBe("MALAY");
+  });
   const account = () => ({
     id: "account-a",
     alias: "Main CMD",

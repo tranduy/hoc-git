@@ -110,7 +110,7 @@ export const QuoteIneligibilityReasonSchema = z.enum([
   "SCHEMA_ERROR"
 ]) satisfies z.ZodType<QuoteIneligibilityReason>;
 
-export const OddsFormatSchema = z.enum(["DECIMAL", "HK", "AMERICAN"]) satisfies z.ZodType<OddsFormat>;
+export const OddsFormatSchema = z.enum(["DECIMAL", "HK", "AMERICAN", "MALAY"]) satisfies z.ZodType<OddsFormat>;
 
 export const MarketTypeSchema = z.enum([
   "FT_1X2",
