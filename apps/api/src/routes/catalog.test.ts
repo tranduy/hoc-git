@@ -38,4 +38,15 @@ describe("provider catalog route", () => {
     expect(response.body).toBe('{"error":"CATALOG_UNAVAILABLE"}');
     expect(response.body).not.toContain("private-token-canary");
   });
+
+  it("distinguishes normalized schema drift without returning provider payloads", async () => {
+    const app = buildApp(createFixtureRuntime(1_000), {
+      catalogReader: { read: async () => { throw new Error("CMD_CATALOG_SCHEMA_ERROR"); } }
+    });
+    apps.push(app);
+
+    const response = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
+    expect(response.statusCode).toBe(422);
+    expect(response.json()).toEqual({ error: "CATALOG_SCHEMA_ERROR" });
+  });
 });

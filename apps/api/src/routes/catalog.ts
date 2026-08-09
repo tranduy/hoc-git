@@ -14,7 +14,10 @@ export function registerCatalogRoutes(app: FastifyInstance, reader: CatalogReade
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     try {
       return await reader.read(parsed.data.accountId);
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === "CMD_CATALOG_SCHEMA_ERROR") {
+        return reply.code(422).send({ error: "CATALOG_SCHEMA_ERROR" });
+      }
       return reply.code(503).send({ error: "CATALOG_UNAVAILABLE" });
     }
   });
