@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { FixtureAdapter, type FixtureSnapshot } from "@tool-chenh/adapters";
-import type { Category } from "@tool-chenh/contracts";
+import type { Category, DataMode } from "@tool-chenh/contracts";
 import { buildApp, validateViteOrigin } from "./app.js";
 import { Runtime } from "./runtime.js";
 import { createSessionServices } from "./sessions/session-services.js";
@@ -10,6 +10,7 @@ export interface ServerConfig {
   readonly host: string;
   readonly port: number;
   readonly viteOrigin: string;
+  readonly dataMode: DataMode;
   readonly fixtureReplaySpeed: number;
 }
 
@@ -70,13 +71,24 @@ function loopbackHost(value: string | undefined): string {
   return host;
 }
 
+function dataMode(value: string | undefined): DataMode {
+  if (value === undefined) return "LIVE";
+  if (value === "1") return "FIXTURE";
+  throw new Error("FIXTURE_MODE must be 1 or unset");
+}
+
 export function resolveServerConfig(env: Readonly<Record<string, string | undefined>>): ServerConfig {
   return {
     host: loopbackHost(env.API_HOST),
     port: portNumber(env.API_PORT),
     viteOrigin: validateViteOrigin(env.VITE_ORIGIN ?? "http://127.0.0.1:4311"),
+    dataMode: dataMode(env.FIXTURE_MODE),
     fixtureReplaySpeed: positiveNumber(env.FIXTURE_REPLAY_SPEED, 1, "FIXTURE_REPLAY_SPEED")
   };
+}
+
+export function createLiveRuntime(): Runtime {
+  return new Runtime({ adapters: [] });
 }
 
 export function createFixtureRuntime(speed: number): Runtime {
@@ -145,7 +157,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     throw new Error("LOCAL_APP_DATA_REQUIRED");
   }
   const sessionServices = createSessionServices({ localAppData });
-  const runtime = createFixtureRuntime(config.fixtureReplaySpeed);
+  const runtime = config.dataMode === "FIXTURE"
+    ? createFixtureRuntime(config.fixtureReplaySpeed)
+    : createLiveRuntime();
   const controller = new AbortController();
   await runtime.start(controller.signal);
   const app = buildApp(runtime, {

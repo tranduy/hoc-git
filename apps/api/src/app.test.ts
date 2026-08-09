@@ -17,7 +17,7 @@ import {
 } from "./app.js";
 import { sendBoundedMessage } from "./realtime/opportunity-ws.js";
 import { Runtime, type RuntimeClock } from "./runtime.js";
-import { createFixtureRuntime, resolveServerConfig } from "./server.js";
+import { createFixtureRuntime, createLiveRuntime, resolveServerConfig } from "./server.js";
 
 const immediateScheduler: ReplayScheduler = {
   async wait(): Promise<void> {}
@@ -195,23 +195,35 @@ describe("Fastify snapshot API", () => {
       host: "127.0.0.1",
       port: 4310,
       viteOrigin: "http://127.0.0.1:4311",
+      dataMode: "LIVE",
       fixtureReplaySpeed: 1
     });
     expect(resolveServerConfig({
       API_HOST: "localhost",
       API_PORT: "5310",
       VITE_ORIGIN: "http://localhost:5311",
+      FIXTURE_MODE: "1",
       FIXTURE_REPLAY_SPEED: "2"
     })).toEqual({
       host: "localhost",
       port: 5310,
       viteOrigin: "http://localhost:5311",
+      dataMode: "FIXTURE",
       fixtureReplaySpeed: 2
     });
     expect(() => resolveServerConfig({ API_HOST: "0.0.0.0" })).toThrow(/loopback/u);
     expect(() => resolveServerConfig({ VITE_ORIGIN: "https://attacker.example" })).toThrow(
       /local HTTP origin/u
     );
+    expect(() => resolveServerConfig({ FIXTURE_MODE: "true" })).toThrow("FIXTURE_MODE must be 1 or unset");
+  });
+
+  it("starts live mode empty instead of publishing fixture opportunities", async () => {
+    const runtime = createLiveRuntime();
+    await runtime.start(new AbortController().signal);
+    expect(runtime.getSnapshot()).toMatchObject({
+      events: [], markets: [], opportunities: [], providerStatuses: []
+    });
   });
 
   it("rejects a non-local Vite origin at the application boundary", () => {
