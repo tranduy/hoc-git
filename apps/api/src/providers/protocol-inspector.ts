@@ -1,6 +1,28 @@
 import { createHash } from "node:crypto";
 
-export type ObservedTransport = "FETCH" | "XHR" | "WEBSOCKET" | "NAVIGATION";
+export type ObservedTransport = "FETCH" | "XHR" | "WEBSOCKET" | "NAVIGATION" | "SCRIPT" | "EVENTSOURCE" | "OTHER";
+
+export function observedTransportForResourceType(resourceType: string): ObservedTransport | null {
+  if (resourceType === "xhr") return "XHR";
+  if (resourceType === "fetch") return "FETCH";
+  if (resourceType === "document") return "NAVIGATION";
+  if (resourceType === "script") return "SCRIPT";
+  if (resourceType === "eventsource") return "EVENTSOURCE";
+  if (resourceType === "other") return "OTHER";
+  return null;
+}
+
+export function attachWebSocketProtocolObserver(
+  page: { on(event: "websocket", listener: (socket: { url(): string }) => void): unknown },
+  record: (observation: ProtocolObservation) => void
+): void {
+  page.on("websocket", (socket) => {
+    const observation = observeProtocolMetadata({
+      url: socket.url(), method: "GET", transport: "WEBSOCKET", status: 101, contentType: null
+    });
+    if (observation !== null) record(observation);
+  });
+}
 
 export interface ProtocolObservation {
   readonly hostname: string;
@@ -12,8 +34,17 @@ export interface ProtocolObservation {
   readonly bodyShapeHash?: string;
 }
 
+export function protocolObservationSummary(
+  input: ProtocolObservation & { readonly bodyShape?: unknown }
+): ProtocolObservation {
+  const { hostname, method, transport, pathTemplate, status, contentType, bodyShapeHash } = input;
+  return bodyShapeHash === undefined
+    ? { hostname, method, transport, pathTemplate, status, contentType }
+    : { hostname, method, transport, pathTemplate, status, contentType, bodyShapeHash };
+}
+
 const ignoredHostSuffixes = [
-  "livechatinc.com", "googletagmanager.com", "google-analytics.com", "cloudflareinsights.com"
+  "livechatinc.com", "googletagmanager.com", "google-analytics.com", "cloudflareinsights.com", "mlytics.com"
 ];
 
 const inspectionControlLabels = new Set([
@@ -21,8 +52,140 @@ const inspectionControlLabels = new Set([
   "upcoming", "sắp diễn ra", "live", "trực tiếp"
 ]);
 
+export const inspectionStructuralSelectors = [".c-iconcolor-sport1", ".c-iconcolor-sport43", "#refreshBtn"] as const;
+
+export function inspectionStructuralSelectorIsSafe(selector: string): boolean {
+  return inspectionStructuralSelectors.some((allowed) => selector === allowed);
+}
+
+const allowedProfileProbes = new Map<string, string>([
+  ["/Customer/Balance", "POST"],
+  ["/CashMember/GetUserInfo", "GET"]
+]);
+
+export function profileProbeAvailability(input: {
+  readonly hasApiOrigin: boolean;
+  readonly hasAccessToken: boolean;
+}): "READY" | "NO_API_ORIGIN" | "NO_ACCESS_TOKEN" {
+  if (!input.hasApiOrigin) return "NO_API_ORIGIN";
+  return input.hasAccessToken ? "READY" : "NO_ACCESS_TOKEN";
+}
+
+export function extractTrustedApiOrigin(settings: unknown): string | null {
+  const seen = new WeakSet<object>();
+  const visit = (value: unknown, depth: number): string | null => {
+    if (depth > 8 || typeof value !== "object" || value === null || seen.has(value)) return null;
+    seen.add(value);
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = visit(item, depth + 1);
+        if (found !== null) return found;
+      }
+      return null;
+    }
+    const record = value as Record<string, unknown>;
+    const candidate = record.ApiBackendUrl;
+    if (typeof candidate === "string") {
+      try {
+        const parsed = new URL(candidate);
+        const pathname = parsed.pathname.replace(/\/$/u, "") || "/";
+        if (parsed.protocol === "https:" && !parsed.username && !parsed.password &&
+          ["/", "/api"].includes(pathname) && !parsed.search && !parsed.hash) {
+          return `${parsed.origin}${pathname === "/" ? "" : pathname}`;
+        }
+      } catch { return null; }
+    }
+    for (const child of Object.values(record)) {
+      const found = visit(child, depth + 1);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  return visit(settings, 0);
+}
+
+export function selectProfileApiOrigin(input: {
+  readonly declaredOrigin: string | null;
+  readonly observedSettingsOrigin: string | null;
+}): string | null {
+  return input.declaredOrigin ?? input.observedSettingsOrigin;
+}
+
+export function profileProbeIsSafe(input: {
+  readonly baseUrl: string;
+  readonly endpoint: string;
+  readonly method: string;
+  readonly seenOrigins: readonly string[];
+}): boolean {
+  let origin: string;
+  try {
+    const parsed = new URL(input.baseUrl);
+    const pathname = parsed.pathname.replace(/\/$/u, "") || "/";
+    if (parsed.protocol !== "https:" || !["/", "/api"].includes(pathname) || parsed.search || parsed.hash ||
+      parsed.username || parsed.password) return false;
+    origin = `${parsed.origin}${pathname === "/" ? "" : pathname}`;
+  } catch { return false; }
+  return input.seenOrigins.includes(origin) && allowedProfileProbes.get(input.endpoint) === input.method;
+}
+
 export function inspectionControlIsSafe(label: string): boolean {
   return inspectionControlLabels.has(label.trim().replace(/\s+/gu, " ").toLocaleLowerCase("vi"));
+}
+
+export function inspectionControlLabel(values: readonly string[]): string | null {
+  for (const value of values) {
+    const lines = value.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
+    if (lines.length === 0) continue;
+    const textualLines = lines.filter((line) => !/^\d+$/u.test(line));
+    if (textualLines.length !== 1 || !inspectionControlIsSafe(textualLines[0] ?? "")) continue;
+    return textualLines[0]!.replace(/\s+/gu, " ").toLocaleLowerCase("vi");
+  }
+  return null;
+}
+
+export interface SafeControlShape {
+  readonly tagName: string;
+  readonly classTokens: readonly string[];
+  readonly role?: "button" | "link" | "tab" | "menuitem";
+  readonly label?: string;
+}
+
+export function safeControlShape(input: {
+  readonly tagName: string;
+  readonly className: string;
+  readonly role: string | null;
+  readonly labels: readonly string[];
+}): SafeControlShape {
+  const normalizedTag = input.tagName.trim().toLowerCase();
+  const tagName = /^[a-z][a-z0-9-]{0,15}$/u.test(normalizedTag) ? normalizedTag : "unknown";
+  const classTokens = input.className.split(/\s+/gu)
+    .filter((token) => /(?:sport|live|upcoming|account|balance|event|market|nav|menu|item|link|btn|tab)/iu.test(token))
+    .filter((token) => /^[A-Za-z0-9_-]{1,64}$/u.test(token))
+    .sort();
+  const role = /^(?:button|link|tab|menuitem)$/u.test(input.role ?? "")
+    ? input.role as SafeControlShape["role"]
+    : undefined;
+  const label = inspectionControlLabel(input.labels) ?? undefined;
+  return {
+    tagName,
+    classTokens,
+    ...(role === undefined ? {} : { role }),
+    ...(label === undefined ? {} : { label })
+  };
+}
+
+const readOnlyEndpointWords = /(?:account|balance|profile|userinfo|cashmember|event|market|odds|match|sport|league|tournament)/iu;
+const prohibitedEndpointWords = /(?:bet|place|submit|wager|ticket)/iu;
+
+export function extractReadOnlyApiPathTemplates(source: string): readonly string[] {
+  const results = new Set<string>();
+  const endpointPattern = /["'`]((?:\/?api\/[A-Za-z0-9_.{}:-]+(?:\/[A-Za-z0-9_.{}:-]+){1,8}|\/[A-Za-z0-9_.{}:-]+(?:\/[A-Za-z0-9_.{}:-]+){1,8}))(?:\?[^"'`]*)?["'`]/giu;
+  for (const match of source.matchAll(endpointPattern)) {
+    const rawPath = match[1];
+    if (rawPath === undefined || !readOnlyEndpointWords.test(rawPath) || prohibitedEndpointWords.test(rawPath)) continue;
+    results.add(pathTemplate(rawPath.startsWith("/") ? rawPath : `/${rawPath}`));
+  }
+  return [...results].sort();
 }
 
 function pathTemplate(pathname: string): string {
@@ -44,7 +207,8 @@ export function observeProtocolMetadata(input: {
 }): ProtocolObservation | null {
   let url: URL;
   try { url = new URL(input.url); } catch { return null; }
-  if (url.protocol !== "https:") return null;
+  const expectedProtocol = input.transport === "WEBSOCKET" ? "wss:" : "https:";
+  if (url.protocol !== expectedProtocol) return null;
   const hostname = url.hostname.toLowerCase();
   if (ignoredHostSuffixes.some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`))) return null;
   return {
@@ -71,6 +235,43 @@ function structuralShape(value: unknown, depth = 0): unknown {
 
 export function structuralBodyShape(value: unknown): unknown {
   return structuralShape(value);
+}
+
+function redactedStringShape(value: string): { readonly encoding: "base64" | "hex" | "text"; readonly lengthBucket: string } {
+  const lengthBucket = value.length < 16 ? "0-15" : value.length < 64 ? "16-63" :
+    value.length < 256 ? "64-255" : value.length < 1_024 ? "256-1023" : "1024+";
+  const encoding = value.length >= 16 && value.length % 2 === 0 && /^[a-f0-9]+$/iu.test(value)
+    ? "hex"
+    : value.length >= 16 && value.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/u.test(value)
+      ? "base64"
+      : "text";
+  return { encoding, lengthBucket };
+}
+
+export function structuralWebSocketFrameShape(payload: unknown): unknown {
+  if (typeof payload !== "string") return "binary";
+  const objectStart = payload.indexOf("{");
+  const arrayStart = payload.indexOf("[");
+  const starts = [objectStart, arrayStart].filter((index) => index >= 0);
+  if (starts.length === 0) return "text";
+  try {
+    const parsed: unknown = JSON.parse(payload.slice(Math.min(...starts)));
+    if (Array.isArray(parsed) && typeof parsed[0] === "string" && parsed.length >= 2) {
+      const eventPayload = parsed[1];
+      if (typeof eventPayload === "string" && /^[\[{]/u.test(eventPayload.trim())) {
+        try {
+          return { event: "string", payload: structuralBodyShape(JSON.parse(eventPayload) as unknown) };
+        } catch { /* An opaque event payload remains a redacted string. */ }
+      }
+      if (typeof eventPayload === "string") {
+        return { event: "string", payload: redactedStringShape(eventPayload) };
+      }
+      return { event: "string", payload: structuralBodyShape(eventPayload) };
+    }
+    return structuralBodyShape(parsed);
+  } catch {
+    return "text";
+  }
 }
 
 export function structuralBodyHash(value: unknown): string {
