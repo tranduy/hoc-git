@@ -3,6 +3,11 @@ import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   clickSafeStructuralCategories,
+  clickSafeStructuralCategory,
+  collectCmdCatalogShapes,
+  extractCmdCatalogRecords,
+  collectCmdCatalogNavigation,
+  findCmdCatalogPage,
   collectSafeControlShapes,
   discoverApiOriginFromFrame,
   findApiOriginFromPage,
@@ -56,6 +61,18 @@ describe("browser protocol inspector", () => {
       safe: (window as unknown as { safeClicks: number }).safeClicks,
       unsafe: (window as unknown as { unsafeClicks: number }).unsafeClicks
     }))).toEqual({ safe: 1, unsafe: 0 });
+    await page.close();
+  });
+
+  it("can select one exact sport without clicking the other category", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <button id="football"><i class="c-iconcolor-sport1">Football</i></button>
+      <button id="esports"><i class="c-iconcolor-sport43">Esports</i></button>
+      <script>window.clicked = []; football.onclick = () => clicked.push('1'); esports.onclick = () => clicked.push('43')</script>
+    `);
+    expect(await clickSafeStructuralCategory(page, "43", 0)).toBe(true);
+    expect(await page.evaluate(() => (globalThis as unknown as { clicked: string[] }).clicked)).toEqual(["43"]);
     await page.close();
   });
 
@@ -151,5 +168,86 @@ describe("browser protocol inspector", () => {
       balanceContent: { cashBalance: "100000" }, Currency: "VND"
     });
     await page.close();
+  });
+
+  it("collects only public catalog structure inside football and esports odds tables", async () => {
+    const page = await browser.newPage();
+    await page.goto(testOrigin);
+    await page.setContent(`
+      <section class="c-odds-table--sport1">
+        <div class="c-league" data-league-id="league-1">Premier Test</div>
+        <div class="c-match" data-event-id="event-1">
+          <span class="c-team">Alpha FC</span><button class="c-odds" data-selection-id="home">2.10</button>
+        </div>
+      </section>
+      <section class="c-odds-table--sport43"><div class="c-event">Blue vs Red</div></section>
+      <aside class="c-side-account">private account text</aside>
+    `);
+    const shapes = await collectCmdCatalogShapes(page);
+    expect(shapes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sportId: "1", classTokens: ["c-league"], text: "Premier Test", dataKeys: ["data-league-id"] }),
+      expect.objectContaining({ sportId: "1", classTokens: ["c-team"], text: "Alpha FC" }),
+      expect.objectContaining({ sportId: "1", classTokens: ["c-odds"], text: "2.10", dataKeys: ["data-selection-id"] }),
+      expect.objectContaining({ sportId: "43", classTokens: ["c-event"], text: "Blue vs Red" })
+    ]));
+    expect(JSON.stringify(shapes)).not.toContain("private account text");
+    await page.close();
+  });
+
+  it("extracts compact read-only CMD match and odds records", async () => {
+    const page = await browser.newPage();
+    await page.goto(testOrigin);
+    await page.setContent(`
+      <section class="c-odds-table--sport1">
+        <div class="c-league" data-leagueid="league-1">
+          <div class="c-league__name">Premier Test</div>
+          <div class="c-match" data-matchid="event-1">
+            <div class="c-match-time">08/17 02:30AM</div>
+            <span class="c-team-name">Alpha FC</span><span class="c-team-name">Beta FC</span>
+            <div class="c-match__odds-group">
+              <div data-bt="1">FT 1X2</div>
+              <div class="c-odds-button" data-odds-status="running" data-grey-out="false">
+                <span class="c-odds" data-moid="home-1">2.10</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    `);
+    expect(await extractCmdCatalogRecords(page, 100)).toEqual([{
+      sportId: "1",
+      leagueId: "league-1",
+      leagueName: "Premier Test",
+      matchId: "event-1",
+      timeText: "08/17 02:30AM",
+      teamNames: ["Alpha FC", "Beta FC"],
+      groups: [{
+        betTypeIds: ["1"], labels: ["FT 1X2"],
+        odds: [{ marketOddsId: "home-1", priceText: "2.10", status: "running", greyedOut: "false" }]
+      }]
+    }]);
+    await page.close();
+  });
+
+  it("collects catalog navigation labels only from the event side navigation", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <nav class="c-side-nav--event"><div class="c-side-nav__btn" data-view="upcoming">Sắp diễn ra</div></nav>
+      <div class="c-side-account">private account</div>
+    `);
+    expect(await collectCmdCatalogNavigation(page)).toEqual([{
+      tagName: "div", classTokens: ["c-side-nav__btn"], dataKeys: ["data-view"], text: "Sắp diễn ra"
+    }]);
+    await page.close();
+  });
+
+  it("selects the provider sports popup instead of the launcher shell", async () => {
+    const launcher = await browser.newPage();
+    const sports = await browser.newPage();
+    await launcher.setContent("<main>launcher shell</main>");
+    await sports.setContent("<button><i class='c-iconcolor-sport1'>Football</i></button>");
+    expect(await findCmdCatalogPage([launcher, sports])).toBe(sports);
+    await launcher.close();
+    await sports.close();
   });
 });

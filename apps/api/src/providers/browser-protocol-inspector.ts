@@ -73,6 +73,28 @@ export async function clickSafeStructuralCategories(page: Page, delayMs = 2_000)
   return clicked;
 }
 
+export async function clickSafeStructuralCategory(
+  page: Page,
+  sportId: "1" | "43",
+  delayMs = 2_000
+): Promise<boolean> {
+  const selector = sportId === "1" ? ".c-iconcolor-sport1" : ".c-iconcolor-sport43";
+  for (const frame of page.frames()) {
+    const icons = frame.locator(selector);
+    const count = Math.min(await icons.count(), 20);
+    for (let index = 0; index < count; index += 1) {
+      const icon = icons.nth(index);
+      if (!(await icon.isVisible().catch(() => false))) continue;
+      const control = icon.locator("xpath=ancestor-or-self::*[self::a or self::button or @role='button' or @onclick or contains(concat(' ', normalize-space(@class), ' '), ' c-side-nav__btn ')][1]");
+      if (await control.count() === 0 || !(await control.isVisible().catch(() => false))) continue;
+      await control.click({ timeout: 2_000 });
+      if (delayMs > 0) await page.waitForTimeout(delayMs);
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function findAccessTokenFrame<T extends {
   evaluate(pageFunction: () => boolean): Promise<boolean>;
 }>(page: { frames(): readonly T[] }): Promise<T | null> {
@@ -211,4 +233,177 @@ export async function probeReadOnlyProfileThroughRuntime(
       });
     } catch { return { status: "UNAVAILABLE" as const, httpStatus: null, body: null }; }
   }, input);
+}
+
+export interface CmdCatalogDomShape {
+  readonly sportId: "1" | "43";
+  readonly tagName: string;
+  readonly classTokens: readonly string[];
+  readonly dataKeys: readonly string[];
+  readonly text: string | null;
+}
+
+export async function collectCmdCatalogShapes(page: Page): Promise<readonly CmdCatalogDomShape[]> {
+  const output: CmdCatalogDomShape[] = [];
+  for (const frame of page.frames()) {
+    const shapes = await frame.evaluate(() => {
+      const collected: Array<{
+        sportId: "1" | "43";
+        tagName: string;
+        classTokens: string[];
+        dataKeys: string[];
+        text: string | null;
+      }> = [];
+      for (const sportId of ["1", "43"] as const) {
+        const roots = document.querySelectorAll(`.c-odds-table--sport${sportId}`);
+        for (const root of roots) {
+          const candidates = [root, ...root.querySelectorAll("*")];
+          for (const element of candidates) {
+            const classTokens = [...element.classList]
+              .filter((token) => /(?:league|event|match|team|odds|market|time|score|name|selection)/iu.test(token))
+              .sort();
+            const dataKeys = [...element.attributes]
+              .map((attribute) => attribute.name)
+              .filter((name) => name.startsWith("data-"))
+              .sort();
+            if (classTokens.length === 0 && dataKeys.length === 0) continue;
+            const rawText = element.children.length === 0 ? element.textContent?.replace(/\s+/gu, " ").trim() ?? "" : "";
+            collected.push({
+              sportId,
+              tagName: element.tagName.toLowerCase(),
+              classTokens,
+              dataKeys,
+              text: rawText.length > 0 && rawText.length <= 160 ? rawText : null
+            });
+            if (collected.length >= 500) return collected;
+          }
+        }
+      }
+      return collected;
+    }).catch(() => [] as CmdCatalogDomShape[]);
+    output.push(...shapes);
+  }
+  return output.slice(0, 500);
+}
+
+export interface CmdCatalogRecord {
+  readonly sportId: "1" | "43";
+  readonly leagueId: string;
+  readonly leagueName: string;
+  readonly matchId: string;
+  readonly timeText: string;
+  readonly teamNames: readonly string[];
+  readonly groups: readonly {
+    readonly betTypeIds: readonly string[];
+    readonly labels: readonly string[];
+    readonly odds: readonly {
+      readonly marketOddsId: string;
+      readonly priceText: string;
+      readonly status: string | null;
+      readonly greyedOut: string | null;
+    }[];
+  }[];
+}
+
+export async function extractCmdCatalogRecords(
+  page: Page,
+  limit = 200,
+  sportFilter?: "1" | "43"
+): Promise<readonly CmdCatalogRecord[]> {
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1_000) throw new Error("invalid CMD catalog limit");
+  const output: CmdCatalogRecord[] = [];
+  for (const frame of page.frames()) {
+    const remaining = limit - output.length;
+    if (remaining <= 0) break;
+    const records = await frame.evaluate(({ frameLimit, requestedSport }) => {
+      const clean = (value: string | null | undefined, max = 160): string => {
+        const normalized = value?.replace(/\s+/gu, " ").trim() ?? "";
+        return normalized.length <= max ? normalized : "";
+      };
+      const directText = (element: Element): string => clean([...element.childNodes]
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent ?? "").join(" "), 80);
+      const result: CmdCatalogRecord[] = [];
+      const sportIds: readonly ("1" | "43")[] = requestedSport === undefined ? ["1", "43"] : [requestedSport];
+      for (const sportId of sportIds) {
+        for (const match of document.querySelectorAll(`.c-odds-table--sport${sportId} .c-match[data-matchid]`)) {
+          const matchId = clean(match.getAttribute("data-matchid"), 128);
+          const league = match.closest(".c-league");
+          if (matchId.length === 0 || league === null) continue;
+          const groups = [...match.querySelectorAll(".c-match__odds-group")].flatMap((container) => {
+            const marketRows = [...container.querySelectorAll("[data-bt]")]
+              .filter((row) => row.querySelector(".c-odds[data-moid]") !== null);
+            const groupElements = marketRows.length > 0 ? marketRows : [container];
+            return groupElements.map((group) => {
+            const labels = [...group.querySelectorAll("[data-bt], [data-in-play]")]
+              .filter((element) => !element.classList.contains("c-odds") && element.querySelector(".c-odds") === null)
+              .map(directText).filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+            const betTypeIds = [...group.querySelectorAll("[data-bt]")]
+              .map((element) => clean(element.getAttribute("data-bt"), 80))
+              .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+            const odds = [...group.querySelectorAll(".c-odds[data-moid]")].map((element) => {
+              const button = element.closest(".c-odds-button");
+              return {
+                marketOddsId: clean(element.getAttribute("data-moid"), 128),
+                priceText: clean(element.textContent, 32),
+                status: button === null ? null : clean(button.getAttribute("data-odds-status"), 32) || null,
+                greyedOut: button === null ? null : clean(button.getAttribute("data-grey-out"), 16) || null
+              };
+            }).filter((odd) => odd.marketOddsId.length > 0 && odd.priceText.length > 0);
+              return { betTypeIds, labels, odds };
+            });
+          }).filter((group) => group.odds.length > 0);
+          const teamNames = [...match.querySelectorAll(".c-team-name")]
+            .map((element) => clean(element.textContent, 160)).filter((value) => value.length > 0)
+            .filter((value, index, values) => values.indexOf(value) === index).slice(0, 4);
+          result.push({
+            sportId,
+            leagueId: clean(league.getAttribute("data-leagueid"), 128),
+            leagueName: clean(league.querySelector(".c-league__name")?.textContent, 160),
+            matchId,
+            timeText: clean(match.querySelector(".c-match-time")?.textContent, 80),
+            teamNames,
+            groups
+          });
+          if (result.length >= frameLimit) return result;
+        }
+      }
+      return result;
+    }, { frameLimit: remaining, requestedSport: sportFilter }).catch(() => [] as CmdCatalogRecord[]);
+    output.push(...records);
+  }
+  return output;
+}
+
+export interface CmdCatalogNavigationShape {
+  readonly tagName: string;
+  readonly classTokens: readonly string[];
+  readonly dataKeys: readonly string[];
+  readonly text: string;
+}
+
+export async function collectCmdCatalogNavigation(page: Page): Promise<readonly CmdCatalogNavigationShape[]> {
+  const output: CmdCatalogNavigationShape[] = [];
+  for (const frame of page.frames()) {
+    const shapes = await frame.evaluate(() => [...document.querySelectorAll(".c-side-nav--event .c-side-nav__btn")]
+      .map((element) => ({
+        tagName: element.tagName.toLowerCase(),
+        classTokens: [...element.classList].sort(),
+        dataKeys: [...element.attributes].map((attribute) => attribute.name)
+          .filter((name) => name.startsWith("data-")).sort(),
+        text: element.textContent?.replace(/\s+/gu, " ").trim().slice(0, 120) ?? ""
+      })).filter((shape) => shape.text.length > 0).slice(0, 100)).catch(() => [] as CmdCatalogNavigationShape[]);
+    output.push(...shapes);
+  }
+  return output.slice(0, 100);
+}
+
+export async function findCmdCatalogPage(pages: readonly Page[]): Promise<Page | null> {
+  for (const page of pages) {
+    for (const frame of page.frames()) {
+      const icon = frame.locator(".c-iconcolor-sport1").first();
+      if (await icon.isVisible().catch(() => false)) return page;
+    }
+  }
+  return null;
 }

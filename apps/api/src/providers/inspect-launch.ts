@@ -4,6 +4,11 @@ import { DpapiProtector } from "../sessions/dpapi-protector.js";
 import { SecretVault } from "../sessions/secret-vault.js";
 import {
   clickSafeStructuralCategories,
+  clickSafeStructuralCategory,
+  collectCmdCatalogShapes,
+  collectCmdCatalogNavigation,
+  extractCmdCatalogRecords,
+  findCmdCatalogPage,
   collectSafeControlShapes,
   findProviderRuntimeFrame,
   probeReadOnlyProfileThroughRuntime,
@@ -46,6 +51,9 @@ async function main(): Promise<void> {
   const webSocketShapesOnly = argumentsList.includes("--websocket-shapes");
   const controlShapesOnly = argumentsList.includes("--control-shapes");
   const profileShapesOnly = argumentsList.includes("--profile-shapes");
+  const catalogShapesOnly = argumentsList.includes("--catalog-shapes");
+  const catalogRecordsOnly = argumentsList.includes("--catalog-records");
+  const catalogNavigationOnly = argumentsList.includes("--catalog-navigation");
   const localAppData = process.env.LOCALAPPDATA;
   if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || !localAppData) {
     throw new Error("Usage: npm run inspect:launch -- <redacted-session-id>");
@@ -62,6 +70,8 @@ async function main(): Promise<void> {
   const webSocketShapes = new Set<string>();
   const controlShapes = new Set<string>();
   const profileShapes: unknown[] = [];
+  const catalogRecords: unknown[] = [];
+  let catalogNavigation: unknown[] = [];
   const pending = new Set<Promise<void>>();
   const recordResponse = async (response: Response): Promise<void> => {
     const resourceType = response.request().resourceType();
@@ -107,8 +117,12 @@ async function main(): Promise<void> {
   for (const page of context.pages()) attachPage(page);
   context.on("page", attachPage);
   try {
-    const page = context.pages()[0] ?? await context.newPage();
+    let page = context.pages()[0] ?? await context.newPage();
     await page.goto(record.secret.value, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    if (catalogRecordsOnly || catalogShapesOnly || catalogNavigationOnly || controlShapesOnly) {
+      await page.waitForTimeout(5_000);
+      page = await findCmdCatalogPage(context.pages()) ?? page;
+    }
     if (profileShapesOnly) {
       await page.waitForTimeout(5_000);
       await Promise.allSettled([...pending]);
@@ -143,25 +157,45 @@ async function main(): Promise<void> {
       await page.waitForTimeout(5_000);
       for (const shape of await collectSafeControlShapes(page)) controlShapes.add(JSON.stringify(shape));
     }
-    const controls = page.locator("a, button, [role='button'], [onclick], [aria-label], [title]");
-    const controlCount = Math.min(await controls.count(), 250);
-    for (let index = 0, clicked = 0; index < controlCount && clicked < 12; index += 1) {
-      const control = controls.nth(index);
-      const label = inspectionControlLabel([
-        await control.innerText().catch(() => ""),
-        await control.getAttribute("aria-label").catch(() => null) ?? "",
-        await control.getAttribute("title").catch(() => null) ?? ""
-      ]);
-      if (label === null || !(await control.isVisible().catch(() => false))) continue;
-      await control.click({ timeout: 2_000 }).catch(() => undefined);
-      clicked += 1;
-      await page.waitForTimeout(1_000);
+    if (catalogNavigationOnly) {
+      await clickSafeStructuralCategory(page, "1", 2_000).catch(() => false);
+      catalogNavigation = [...await collectCmdCatalogNavigation(page)];
     }
-    await clickSafeStructuralCategories(page).catch(() => undefined);
+    if (!catalogRecordsOnly && !catalogNavigationOnly) {
+      const controls = page.locator("a, button, [role='button'], [onclick], [aria-label], [title]");
+      const controlCount = Math.min(await controls.count(), 250);
+      for (let index = 0, clicked = 0; index < controlCount && clicked < 12; index += 1) {
+        const control = controls.nth(index);
+        const label = inspectionControlLabel([
+          await control.innerText().catch(() => ""),
+          await control.getAttribute("aria-label").catch(() => null) ?? "",
+          await control.getAttribute("title").catch(() => null) ?? ""
+        ]);
+        if (label === null || !(await control.isVisible().catch(() => false))) continue;
+        await control.click({ timeout: 2_000 }).catch(() => undefined);
+        clicked += 1;
+        await page.waitForTimeout(1_000);
+      }
+    }
+    if (catalogRecordsOnly) {
+      for (const sportId of ["1", "43"] as const) {
+        if (await clickSafeStructuralCategory(page, sportId, 15_000).catch(() => false)) {
+          catalogRecords.push(...await extractCmdCatalogRecords(page, 3, sportId));
+        }
+      }
+    } else {
+      await clickSafeStructuralCategories(page).catch(() => undefined);
+    }
     await page.waitForTimeout(15_000);
     await Promise.allSettled([...pending]);
     const output = profileShapesOnly
       ? profileShapes
+      : catalogNavigationOnly
+        ? catalogNavigation
+      : catalogRecordsOnly
+        ? catalogRecords
+      : catalogShapesOnly
+        ? await collectCmdCatalogShapes(page)
       : controlShapesOnly
         ? [...controlShapes].sort().map((value) => JSON.parse(value) as unknown)
         : webSocketShapesOnly
