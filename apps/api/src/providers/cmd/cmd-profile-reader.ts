@@ -16,7 +16,7 @@ export interface CmdProfileReaderOptions {
 
 export class CmdProfileReader implements ProviderProfileReader {
   readonly provider = "CMD" as const;
-  readonly capabilities = ["PROFILE"] as const;
+  readonly capabilities = ["PROFILE", "CATALOG"] as const;
   readonly #source: CmdAccountStoreSource;
   readonly #clock: { nowMs(): number };
 

@@ -11,6 +11,11 @@ function handle(secret: ProviderSecret, provider = "CMD"): ActiveSecretHandle {
 }
 
 describe("CmdProfileReader", () => {
+  it("advertises both implemented read-only capabilities", () => {
+    const reader = new CmdProfileReader({ source: { readAccountStore: async () => null }, clock: { nowMs: () => 1 } });
+    expect(reader.capabilities).toEqual(["PROFILE", "CATALOG"]);
+  });
+
   it("returns only normalized redacted profile fields from a CMD launch session", async () => {
     const readAccountStore = vi.fn(async () => ({
       DisplayUserName: "account-canary-9012",
@@ -30,7 +35,7 @@ describe("CmdProfileReader", () => {
       balance: "100000",
       asOfMs: 2_000
     });
-    expect(reader.capabilities).toEqual(["PROFILE"]);
+    expect(reader.capabilities).toEqual(["PROFILE", "CATALOG"]);
     expect(readAccountStore).toHaveBeenCalledWith({
       sessionId: "cmd-session-test",
       launchUrl: "https://provider.test/launch?credential=unit-test"
