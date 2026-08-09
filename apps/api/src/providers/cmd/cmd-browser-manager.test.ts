@@ -1,8 +1,61 @@
 import { chromium } from "playwright";
 import { describe, expect, it } from "vitest";
-import { cmdProfileDirectoryName, readCmdFootballCatalog, validateCmdLaunchUrl } from "./cmd-browser-manager.js";
+import { cmdProfileDirectoryName, readCmdFootballCatalog, readWithOneSessionRecovery, validateCmdLaunchUrl } from "./cmd-browser-manager.js";
 
 describe("CMD browser manager safety", () => {
+  it("invalidates a stale provider session and retries once with a fresh session", async () => {
+    const stale = { id: "stale" };
+    const fresh = { id: "fresh" };
+    const acquired = [stale, fresh];
+    const invalidated: string[] = [];
+
+    const result = await readWithOneSessionRecovery({
+      acquire: async () => acquired.shift()!,
+      invalidate: async (session) => { invalidated.push(session.id); },
+      recover: async () => { throw new Error("in-place recovery failed"); },
+      read: async (session) => {
+        if (session.id === "stale") throw new Error("CMD_CATALOG_UNAVAILABLE");
+        return "catalog-ready";
+      }
+    });
+
+    expect(result).toBe("catalog-ready");
+    expect(invalidated).toEqual(["stale"]);
+  });
+
+  it("recovers the current provider page before consuming the launch URL again", async () => {
+    const session = { recovered: false };
+    const invalidated: typeof session[] = [];
+
+    const result = await readWithOneSessionRecovery({
+      acquire: async () => session,
+      invalidate: async (failed) => { invalidated.push(failed); },
+      recover: async (current) => { current.recovered = true; },
+      read: async (current) => {
+        if (!current.recovered) throw new Error("stale provider page");
+        return "catalog-ready";
+      }
+    });
+
+    expect(result).toBe("catalog-ready");
+    expect(invalidated).toEqual([]);
+  });
+
+  it("invalidates both failed sessions and stops after one retry", async () => {
+    const acquired = [{ id: "first" }, { id: "second" }];
+    const invalidated: string[] = [];
+
+    await expect(readWithOneSessionRecovery({
+      acquire: async () => acquired.shift()!,
+      invalidate: async (session) => { invalidated.push(session.id); },
+      recover: async () => { throw new Error("in-place recovery failed"); },
+      read: async () => { throw new Error("CMD_CATALOG_UNAVAILABLE"); }
+    })).rejects.toThrow("CMD_CATALOG_UNAVAILABLE");
+
+    expect(invalidated).toEqual(["first", "second"]);
+    expect(acquired).toHaveLength(0);
+  });
+
   it("accepts opaque HTTPS launch URLs without rewriting credential-bearing query data", () => {
     const input = "https://provider.test/launch?opaque=unit-test-value#route";
     expect(validateCmdLaunchUrl(input)).toBe(input);

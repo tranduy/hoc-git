@@ -41,6 +41,32 @@ export async function readCmdFootballCatalog(page: Page): Promise<readonly CmdCa
   return extractCmdCatalogRecords(page, 500, "1");
 }
 
+export async function readWithOneSessionRecovery<TSession, TResult>(input: {
+  readonly acquire: () => Promise<TSession>;
+  readonly invalidate: (session: TSession) => Promise<void>;
+  readonly recover: (session: TSession) => Promise<void>;
+  readonly read: (session: TSession) => Promise<TResult>;
+}): Promise<TResult> {
+  const first = await input.acquire();
+  try {
+    return await input.read(first);
+  } catch {
+    try {
+      await input.recover(first);
+      return await input.read(first);
+    } catch {
+      await input.invalidate(first);
+    }
+  }
+  const replacement = await input.acquire();
+  try {
+    return await input.read(replacement);
+  } catch {
+    await input.invalidate(replacement);
+    throw new Error("CMD_CATALOG_UNAVAILABLE");
+  }
+}
+
 interface OpenCmdSession {
   readonly context: BrowserContext;
   readonly page: Page;
@@ -100,10 +126,18 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
     readonly sessionId: string;
     readonly launchUrl: string;
   }): Promise<readonly CmdCatalogInputRecord[]> {
-    const session = await this.#get(input);
-    const records = await readCmdFootballCatalog(session.page);
-    session.footballSelected = true;
-    return records;
+    return readWithOneSessionRecovery({
+      acquire: async () => this.#get(input),
+      invalidate: async (session) => this.#invalidate(input.sessionId, session),
+      recover: async (session) => {
+        await session.page.reload({ waitUntil: "domcontentloaded", timeout: this.#startupTimeoutMs });
+      },
+      read: async (session) => {
+        const records = await readCmdFootballCatalog(session.page);
+        session.footballSelected = true;
+        return records;
+      }
+    });
   }
 
   async close(): Promise<void> {
@@ -120,6 +154,12 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
     const operation = this.#open(input).finally(() => this.#opening.delete(input.sessionId));
     this.#opening.set(input.sessionId, operation);
     return operation;
+  }
+
+  async #invalidate(sessionId: string, expected: OpenCmdSession): Promise<void> {
+    if (this.#sessions.get(sessionId) !== expected) return;
+    this.#sessions.delete(sessionId);
+    await expected.context.close().catch(() => undefined);
   }
 
   async #open(input: { readonly sessionId: string; readonly launchUrl: string }): Promise<OpenCmdSession> {

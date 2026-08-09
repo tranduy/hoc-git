@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { AccountStatus, ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountApiLike } from "../api/accounts.js";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
 import { LiveCatalogPage } from "./live-catalog-page.js";
@@ -73,6 +73,31 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "LoL" }));
     expect(screen.getByText("No verified live LoL adapter is connected yet.")).toBeTruthy();
+  });
+
+  it("clears a Football catalog error when switching to LoL", async () => {
+    const unavailableCatalogApi: CatalogApiLike = { read: async () => { throw new Error("unavailable"); } };
+    render(<LiveCatalogPage accountApi={accountApi} catalogApi={unavailableCatalogApi} />);
+
+    expect(await screen.findByText(/Live catalog is unavailable/u)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "LoL" }));
+
+    expect(screen.getByText("No verified live LoL adapter is connected yet.")).toBeTruthy();
+    expect(screen.queryByText(/Live catalog is unavailable/u)).toBeNull();
+  });
+
+  it("retries the same Football account after leaving and returning to the category", async () => {
+    const read = vi.fn<CatalogApiLike["read"]>()
+      .mockRejectedValueOnce(new Error("stale provider page"))
+      .mockResolvedValueOnce(catalog);
+    render(<LiveCatalogPage accountApi={accountApi} catalogApi={{ read }} />);
+    expect(await screen.findByText(/Live catalog is unavailable/u)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "LoL" }));
+    fireEvent.click(screen.getByRole("button", { name: "Football" }));
+
+    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it("reopens a selected match detail from its safe URL identity", async () => {

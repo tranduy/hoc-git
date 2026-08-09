@@ -41,11 +41,13 @@ export function LiveCatalogPage({
 
   useEffect(() => {
     const requested = requestedSelection.current;
-    if (accountId.length === 0 || lastAutoLoadedAccount.current === accountId) return;
+    if (category !== "FOOTBALL" || accountId.length === 0 || lastAutoLoadedAccount.current === accountId) return;
+    let cancelled = false;
     lastAutoLoadedAccount.current = accountId;
     setBusy(true);
     setMessage(null);
     void catalogApi.read(accountId).then((response) => {
+      if (cancelled) return;
       setCatalog(response);
       if (requested.eventId === null || (requested.accountId !== null && requested.accountId !== accountId)) return;
       if (response.events.some((event) => event.providerEventId === requested.eventId)) {
@@ -54,9 +56,11 @@ export function LiveCatalogPage({
         setMessage("The selected event is no longer present in the accepted live catalog.");
       }
     }).catch(() => {
+      if (cancelled) return;
       setMessage("Live catalog is unavailable. Session, provider identity, and schema must all validate first.");
-    }).finally(() => setBusy(false));
-  }, [accountId, catalogApi]);
+    }).finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [accountId, catalogApi, category]);
 
   const events = useMemo(() => catalog === null ? [] : [...catalog.events].sort((left, right) => {
     if (left.isLive !== right.isLive) return left.isLive ? -1 : 1;
@@ -84,6 +88,13 @@ export function LiveCatalogPage({
     window.history.replaceState({}, "", window.location.pathname);
     setSelectedEventId(null);
   };
+  const changeCategory = (next: "FOOTBALL" | "LOL"): void => {
+    lastAutoLoadedAccount.current = null;
+    setCategory(next);
+    setCatalog(null);
+    setMessage(null);
+    setSelectedEventId(null);
+  };
 
   if (catalog !== null && selectedEventId !== null) {
     return <MatchWatchDetail accountId={accountId} catalogApi={catalogApi} initialCatalog={catalog}
@@ -99,8 +110,8 @@ export function LiveCatalogPage({
       </header>
       <section className="catalog-toolbar" aria-label="Catalog controls">
         <div className="category-switch" role="group" aria-label="Category">
-          <button aria-pressed={category === "FOOTBALL"} onClick={() => { setCategory("FOOTBALL"); setCatalog(null); }} type="button">Football</button>
-          <button aria-pressed={category === "LOL"} onClick={() => { setCategory("LOL"); setCatalog(null); }} type="button">LoL</button>
+          <button aria-pressed={category === "FOOTBALL"} onClick={() => changeCategory("FOOTBALL")} type="button">Football</button>
+          <button aria-pressed={category === "LOL"} onClick={() => changeCategory("LOL")} type="button">LoL</button>
         </div>
         <label>Provider account<select value={accountId} onChange={(event) => { setAccountId(event.target.value); setCatalog(null); }}>
           {accounts.length === 0 && <option value="">No catalog-capable account</option>}
