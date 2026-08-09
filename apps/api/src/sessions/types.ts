@@ -1,5 +1,30 @@
 export type SecretRecord = Readonly<Record<string, unknown>>;
 
+import type { SessionHealthReason } from "@tool-chenh/contracts";
+
+export type ProviderSecretKind = "TOKEN" | "COOKIE_BUNDLE" | "LAUNCH_URL" | "FABET_CREDENTIALS";
+
+export interface ProviderSecret {
+  readonly kind: ProviderSecretKind;
+  readonly value: string;
+}
+
+export type SessionValidationResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: SessionHealthReason };
+
+export interface SessionValidator {
+  readonly provider: string;
+  validate(secret: ProviderSecret): Promise<SessionValidationResult>;
+  renew?(secret: ProviderSecret): Promise<ProviderSecret>;
+}
+
+export interface ActiveSecretHandle {
+  readonly sessionId: string;
+  readonly provider: string;
+  withSecret<T>(consume: (secret: ProviderSecret) => Promise<T>): Promise<T>;
+}
+
 export interface SecretProtector {
   protect(cleartext: Uint8Array): Promise<Uint8Array>;
   unprotect(ciphertext: Uint8Array): Promise<Uint8Array>;
