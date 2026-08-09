@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { observeProtocolMetadata, structuralBodyHash } from "./protocol-inspector.js";
+import { observeProtocolMetadata, structuralBodyHash, structuralBodyShape } from "./protocol-inspector.js";
 
 describe("protocol inspector", () => {
   it("removes query, fragment, credentials, and identifier-shaped path values", () => {
@@ -26,6 +26,9 @@ describe("protocol inspector", () => {
     expect(first).toBe(second);
     expect(first).toMatch(/^[a-f0-9]{64}$/u);
     expect(first).not.toContain("secret");
+    expect(structuralBodyShape({ account: { balance: 100_000, name: "secret-name" }, events: [{ id: 1 }] }))
+      .toEqual({ account: { balance: "number", name: "string" }, events: [{ id: "number" }] });
+    expect(JSON.stringify(structuralBodyShape({ token: "secret-canary" }))).not.toContain("secret-canary");
   });
 
   it("redacts ASP.NET session-routing path segments", () => {

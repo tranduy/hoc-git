@@ -60,6 +60,10 @@ function structuralShape(value: unknown, depth = 0): unknown {
   return typeof value;
 }
 
+export function structuralBodyShape(value: unknown): unknown {
+  return structuralShape(value);
+}
+
 export function structuralBodyHash(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(structuralShape(value))).digest("hex");
+  return createHash("sha256").update(JSON.stringify(structuralBodyShape(value))).digest("hex");
 }

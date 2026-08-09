@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 import { chromium, type Response } from "playwright";
 import { DpapiProtector } from "../sessions/dpapi-protector.js";
 import { SecretVault } from "../sessions/secret-vault.js";
-import { observeProtocolMetadata, structuralBodyHash, type ProtocolObservation } from "./protocol-inspector.js";
+import { observeProtocolMetadata, structuralBodyHash, structuralBodyShape, type ProtocolObservation } from "./protocol-inspector.js";
 
 interface InspectableSessionRecord {
   readonly secret: { readonly kind: "LAUNCH_URL"; readonly value: string };
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
   const context = await chromium.launchPersistentContext(join(root, "browser-profiles", "fabet-inspector"), {
     headless: false, acceptDownloads: false
   });
-  const observations = new Map<string, ProtocolObservation & { readonly bodyShapeHash?: string }>();
+  const observations = new Map<string, ProtocolObservation & { readonly bodyShape?: unknown }>();
   const pending = new Set<Promise<void>>();
   const recordResponse = async (response: Response): Promise<void> => {
     const resourceType = response.request().resourceType();
@@ -46,10 +46,15 @@ async function main(): Promise<void> {
     });
     if (observation === null) return;
     let bodyShapeHash: string | undefined;
+    let bodyShape: unknown;
     if (observation.contentType === "application/json") {
-      try { bodyShapeHash = structuralBodyHash(await response.json()); } catch { bodyShapeHash = undefined; }
+      try {
+        const body: unknown = await response.json();
+        bodyShapeHash = structuralBodyHash(body);
+        bodyShape = structuralBodyShape(body);
+      } catch { bodyShapeHash = undefined; }
     }
-    const safe = bodyShapeHash === undefined ? observation : { ...observation, bodyShapeHash };
+    const safe = bodyShapeHash === undefined ? observation : { ...observation, bodyShapeHash, bodyShape };
     observations.set(key(safe), safe);
   };
   context.on("response", (response) => {
