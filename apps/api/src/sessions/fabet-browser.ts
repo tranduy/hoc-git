@@ -67,8 +67,8 @@ export function capturedTopLevelNavigation(lobbyOrigin: string, label: string, v
 
 function providerHint(label: string): string {
   const upper = label.trim().toUpperCase();
-  if (upper.includes("SABA")) return "SABA";
-  if (upper === "CMD" || upper === "C-SPORTS") return "CMD";
+  if (upper.includes("SABA") || upper === "C-SPORTS") return "SABA";
+  if (upper === "CMD" || upper === "T-SPORTS") return "CMD";
   if (upper.includes("SBOBET")) return "SBOBET";
   if (/^APS?PORT$/u.test(upper)) return "APSPORT";
   if (upper === "BTI") return "BTI";
@@ -200,17 +200,26 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     const page = await this.#getPage();
     await page.goto(input.entryUrl, { waitUntil: "domcontentloaded" });
     const username = page.locator([
+      "input[placeholder*='Tên đăng nhập' i]",
+      "input[placeholder*='username' i]",
       "input[autocomplete='username']",
       "input[name*='user' i]",
-      "input[type='text']",
       "input[type='tel']"
     ].join(", ")).first();
     const password = page.locator("input[type='password']").first();
     const loginButtons = page.getByRole("button", { name: /đăng\s*nhập|login/iu });
+    const authenticatedControls = page.getByRole("button", { name: /nạp\s*tiền|deposit/iu });
+    await Promise.race([
+      password.waitFor({ state: "visible", timeout: 10_000 }),
+      loginButtons.first().waitFor({ state: "visible", timeout: 10_000 }),
+      authenticatedControls.first().waitFor({ state: "visible", timeout: 10_000 })
+    ]).catch(() => undefined);
+    if (await authenticatedControls.first().isVisible().catch(() => false)) return;
+    await this.#dismissBlockingPromotions(page);
     if (await password.count() === 0 || !(await password.isVisible().catch(() => false))) {
       const opener = loginButtons.first();
       if (await opener.count() === 0 || !(await opener.isVisible().catch(() => false))) return;
-      await opener.click();
+      await this.#clickLoginOpener(page, opener);
       await password.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
     }
     if (
@@ -235,7 +244,11 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       if (navigation !== null) captured.set(navigation.url, navigation);
     };
     await page.goto(lobbyUrl, { waitUntil: "domcontentloaded" });
-    const controls = page.locator("a, button, [role='button'], [onclick]");
+    const lobbyCards = page.locator(".game-item.lobby");
+    await lobbyCards.first().waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined);
+    const controls = await lobbyCards.count() > 0
+      ? lobbyCards
+      : page.locator("a, button, [role='button'], [onclick]");
     const count = Math.min(await controls.count(), 200);
     for (let index = 0; index < count; index += 1) {
         const control = controls.nth(index);
@@ -265,19 +278,51 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
 
   async isAuthenticated(): Promise<boolean> {
     const page = await this.#getPage();
-    const password = page.locator("input[type='password']");
-    if (await password.count() > 0 && await password.first().isVisible().catch(() => false)) return false;
-    const loginButtons = page.getByRole("button", { name: /đăng\s*nhập|login/iu });
-    for (let index = 0; index < await loginButtons.count(); index += 1) {
-      if (await loginButtons.nth(index).isVisible().catch(() => false)) return false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const password = page.locator("input[type='password']");
+      if (await password.count() > 0 && await password.first().isVisible().catch(() => false)) return false;
+      const loginButtons = page.getByRole("button", { name: /đăng\s*nhập|login/iu });
+      for (let index = 0; index < await loginButtons.count(); index += 1) {
+        if (await loginButtons.nth(index).isVisible().catch(() => false)) return false;
+      }
+      const authenticatedControls = page.getByRole("button", { name: /nạp\s*tiền|deposit/iu });
+      for (let index = 0; index < await authenticatedControls.count(); index += 1) {
+        if (await authenticatedControls.nth(index).isVisible().catch(() => false)) return true;
+      }
+      await page.waitForTimeout(250);
     }
-    return true;
+    return false;
   }
 
   async close(): Promise<void> {
     await this.#context?.close();
     this.#context = null;
     this.#page = null;
+  }
+
+  async #dismissBlockingPromotions(page: Page): Promise<void> {
+    const dialogs = page.getByRole("dialog", { name: /khuyến\s*mãi|promotion/iu });
+    for (let index = 0; index < Math.min(await dialogs.count(), 5); index += 1) {
+      const dialog = dialogs.nth(index);
+      if (!(await dialog.isVisible().catch(() => false))) continue;
+      const close = dialog.getByRole("button", { name: /close|đóng/iu }).first();
+      if (await close.isVisible().catch(() => false)) await close.click({ timeout: 2_000 });
+    }
+  }
+
+  async #clickLoginOpener(page: Page, opener: ReturnType<Page["locator"]>): Promise<void> {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await page.locator(".swal2-container:visible").first()
+        .waitFor({ state: "hidden", timeout: 2_000 }).catch(() => undefined);
+      await this.#dismissBlockingPromotions(page);
+      try {
+        await opener.click({ timeout: 2_000 });
+        return;
+      } catch {
+        // A promotion can be mounted after the SPA renders the login button. Recheck boundedly.
+      }
+    }
+    throw new Error("FABET_LOGIN_UNREACHABLE");
   }
 
   async #getContext(): Promise<BrowserContext> {

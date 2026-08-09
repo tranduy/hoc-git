@@ -93,7 +93,7 @@ describe("FabetBrowserDriver", () => {
       }],
       "https://fabet.party/lobby-the-thao?type=esports": [{
         url: "https://esports.vendor.test/start?session=esports-secret-canary",
-        label: "ESPORTS"
+        label: "T-SPORTS"
       }]
     };
     let id = 0;
@@ -108,7 +108,7 @@ describe("FabetBrowserDriver", () => {
 
     expect(launches).toEqual([
       expect.objectContaining({ category: "FOOTBALL", providerHint: "SABA", hostname: "sports.vendor.test" }),
-      expect.objectContaining({ category: "LOL", providerHint: "UNKNOWN", hostname: "esports.vendor.test" })
+      expect.objectContaining({ category: "LOL", providerHint: "CMD", hostname: "esports.vendor.test" })
     ]);
     expect(JSON.stringify(launches)).not.toMatch(/launch-secret-canary|esports-secret-canary/u);
     expect(await context.vault.load(launches[0]!.vaultRecordId)).toEqual({
@@ -152,6 +152,91 @@ describe("FabetBrowserDriver", () => {
 });
 
 describe("PlaywrightFabetAutomation", () => {
+  it("captures a provider launch from the real lobby card container", async () => {
+    const lobby = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<script>setTimeout(() => { const card=document.createElement('div');card.className='game-item lobby';card.textContent='C-SPORTS';card.onclick=()=>window.open('https://example.com/launch');document.body.append(card); }, 300)</script>`);
+    });
+    await new Promise<void>((resolve) => lobby.listen(0, "127.0.0.1", resolve));
+    const lobbyAddress = lobby.address();
+    if (lobbyAddress === null || typeof lobbyAddress === "string") throw new Error("lobby server did not bind");
+    const profilePath = join(await setup().then((value) => value.directory), "card-profile");
+    const automation = new PlaywrightFabetAutomation({ profilePath, headless: true });
+    try {
+      await expect(automation.captureNavigations(`http://127.0.0.1:${lobbyAddress.port}/`)).resolves.toEqual([
+        { label: "C-SPORTS", url: "https://example.com/launch" }
+      ]);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) =>
+        lobby.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
+  it("waits for a delayed SPA login form before submitting credentials", async () => {
+    let submitted = 0;
+    const server = createServer((request, response) => {
+      if (request.url === "/submitted") {
+        submitted += 1;
+        response.writeHead(204).end();
+        return;
+      }
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><html><body><main>Loading</main><script>
+        setTimeout(() => {
+          document.body.innerHTML = '<button id="open">Đăng Nhập</button><section id="modal" hidden><input autocomplete="username"><input type="password"><button id="submit">Đăng Nhập</button></section>';
+          document.querySelector('#open').onclick = () => { document.querySelector('#modal').hidden = false; };
+          document.querySelector('#submit').onclick = () => fetch('/submitted').then(() => {
+            document.body.innerHTML = '<button>Nạp Tiền</button>';
+          });
+        }, 300);
+      </script></body></html>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const profilePath = join(await setup().then((value) => value.directory), "delayed-login-profile");
+    const automation = new PlaywrightFabetAutomation({ profilePath, headless: true });
+    try {
+      await automation.login({
+        entryUrl: `http://127.0.0.1:${address.port}/`, username: "development-user", password: "development-pass"
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(submitted).toBe(1);
+      expect(await automation.isAuthenticated()).toBe(true);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
+  it("does not report authenticated before the SPA renders its delayed login control", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><html><body><main>Loading</main><script>
+        setTimeout(() => {
+          const button = document.createElement('button');
+          button.textContent = 'Đăng Nhập';
+          document.body.append(button);
+        }, 300);
+      </script></body></html>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const profilePath = join(await setup().then((value) => value.directory), "delayed-profile");
+    const automation = new PlaywrightFabetAutomation({ profilePath, headless: true });
+    try {
+      await automation.login({
+        entryUrl: `http://127.0.0.1:${address.port}/`, username: "development-user", password: "development-pass"
+      });
+      expect(await automation.isAuthenticated()).toBe(false);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
   it("opens the login modal and submits the visible form", async () => {
     let submitted = 0;
     const server = createServer((request, response) => {
@@ -162,11 +247,17 @@ describe("PlaywrightFabetAutomation", () => {
       }
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end(`<!doctype html><html><body>
+        <div class="swal2-container" style="position:fixed;inset:0;z-index:11;background:white">Notice</div>
+        <script>
+          setTimeout(() => document.querySelector('.swal2-container').remove(), 300);
+          setTimeout(() => { const popup=document.createElement('div');popup.setAttribute('role','dialog');popup.setAttribute('aria-label','Thông báo khuyến mãi');popup.style='position:fixed;inset:0;z-index:10;background:white';popup.innerHTML='<button aria-label="Close" onclick="this.parentElement.remove()">Close</button>';document.body.append(popup); }, 100);
+        </script>
+        <input id="search" type="text" placeholder="Tìm kiếm">
         <button id="open" onclick="document.querySelector('#modal').hidden=false">Đăng nhập</button>
         <section id="modal" hidden>
-          <input autocomplete="username">
-          <input type="password">
-          <button onclick="fetch('/submitted').then(()=>{document.querySelector('#open').remove();document.querySelector('#modal').remove()})">Đăng nhập</button>
+          <input id="username" type="text" placeholder="Tên đăng nhập">
+          <input id="password" type="password">
+          <button onclick="{const valid=document.querySelector('#username').value==='development-user'&&document.querySelector('#password').value==='development-pass'&&document.querySelector('#search').value==='';if(valid)fetch('/submitted').then(()=>{document.querySelector('#open').remove();document.querySelector('#modal').remove();const deposit=document.createElement('button');deposit.textContent='Nạp Tiền';document.body.append(deposit)})}">Đăng nhập</button>
         </section>
       </body></html>`);
     });
