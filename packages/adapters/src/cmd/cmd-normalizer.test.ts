@@ -1,0 +1,96 @@
+import { ProviderEventSchema, ProviderMarketSchema, ProviderQuoteSchema } from "@tool-chenh/contracts";
+import { describe, expect, it } from "vitest";
+import { normalizeCmdCatalog } from "./cmd-normalizer.js";
+
+describe("normalizeCmdCatalog", () => {
+  const record = {
+    sportId: "1" as const,
+    leagueId: "league-1",
+    leagueName: "Premier Test",
+    matchId: "event-1",
+    timeText: "08/17 02:30AM",
+    teamNames: ["Alpha FC", "Beta FC"],
+    groups: [
+      {
+        betTypeIds: ["1"], labels: ["0/0.5"],
+        odds: [
+          { marketOddsId: "ah-1", priceText: "0.90", status: null, greyedOut: "false" },
+          { marketOddsId: "ah-1", priceText: "0.92", status: null, greyedOut: "false" }
+        ]
+      },
+      {
+        betTypeIds: ["3"], labels: ["2.5", "u"],
+        odds: [
+          { marketOddsId: "total-1", priceText: "0.84", status: "change-up", greyedOut: "false" },
+          { marketOddsId: "total-1", priceText: "-0.92", status: "change-down", greyedOut: "false" }
+        ]
+      },
+      {
+        betTypeIds: ["5"], labels: [],
+        odds: [
+          { marketOddsId: "1x2-1", priceText: "2.10", status: null, greyedOut: "false" },
+          { marketOddsId: "1x2-1", priceText: "3.20", status: null, greyedOut: "false" },
+          { marketOddsId: "1x2-1", priceText: "3.40", status: null, greyedOut: "false" }
+        ]
+      }
+    ]
+  };
+
+  it("normalizes only exact full-time total and 1X2 markets", () => {
+    const result = normalizeCmdCatalog([record], {
+      observedAtMs: Date.UTC(2026, 7, 9),
+      receivedMonotonicMs: 500,
+      timezoneOffsetMinutes: 420,
+      sequence: 7
+    });
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]).toEqual(expect.objectContaining({
+      provider: "CMD", category: "FOOTBALL", providerEventId: "event-1",
+      participantA: "Alpha FC", participantB: "Beta FC", isLive: false,
+      startAtUtcMs: Date.UTC(2026, 7, 16, 19, 30)
+    }));
+    expect(result.markets.map((market) => [market.marketType, market.line])).toEqual([
+      ["FT_TOTAL", "2.5"], ["FT_1X2", null]
+    ]);
+    expect(result.quotes.map((quote) => [quote.marketType, quote.selection, quote.rawOdds, quote.rawFormat])).toEqual([
+      ["FT_TOTAL", "OVER", "0.84", "MALAY"],
+      ["FT_TOTAL", "UNDER", "-0.92", "MALAY"],
+      ["FT_1X2", "HOME", "2.10", "DECIMAL"],
+      ["FT_1X2", "DRAW", "3.20", "DECIMAL"],
+      ["FT_1X2", "AWAY", "3.40", "DECIMAL"]
+    ]);
+    expect(result.events.every((event) => ProviderEventSchema.safeParse(event).success)).toBe(true);
+    expect(result.markets.every((market) => ProviderMarketSchema.safeParse(market).success)).toBe(true);
+    expect(result.quotes.every((quote) => ProviderQuoteSchema.safeParse(quote).success)).toBe(true);
+  });
+
+  it("converts split totals to a canonical quarter line and suspends greyed markets", () => {
+    const changed = structuredClone(record);
+    changed.groups = [structuredClone(record.groups[1]!)];
+    changed.groups[0]!.labels = ["3.5/4", "u"];
+    changed.groups[0]!.odds[0]!.greyedOut = "true";
+    const result = normalizeCmdCatalog([changed], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
+    });
+    expect(result.markets[0]).toEqual(expect.objectContaining({ line: "3.75", status: "SUSPENDED" }));
+    expect(result.quotes.every((quote) => quote.status === "SUSPENDED")).toBe(true);
+  });
+
+  it("fails closed on missing participants, invalid times, mismatched IDs, or malformed odds", () => {
+    const cases = [
+      { ...record, teamNames: ["Alpha FC"] },
+      { ...record, timeText: "unknown" },
+      { ...record, groups: [{ ...record.groups[1]!, odds: [
+        record.groups[1]!.odds[0]!, { ...record.groups[1]!.odds[1]!, marketOddsId: "different" }
+      ] }] },
+      { ...record, groups: [{ ...record.groups[1]!, odds: [
+        { ...record.groups[1]!.odds[0]!, priceText: "1e3" }, record.groups[1]!.odds[1]!
+      ] }] }
+    ];
+    for (const malformed of cases) {
+      expect(normalizeCmdCatalog([malformed], {
+        observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
+      })).toEqual({ events: [], markets: [], quotes: [], diagnostics: [expect.any(String)] });
+    }
+  });
+});

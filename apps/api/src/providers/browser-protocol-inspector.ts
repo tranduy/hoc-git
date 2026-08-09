@@ -339,9 +339,15 @@ export async function extractCmdCatalogRecords(
               ...(group.matches("[data-bt], [data-in-play]") ? [group] : []),
               ...group.querySelectorAll("[data-bt], [data-in-play]")
             ];
-            const labels = semanticElements
+            const directLabels = semanticElements
               .filter((element) => !element.classList.contains("c-odds"))
-              .map(directText).filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+              .map(directText);
+            const leafLabels = [...group.querySelectorAll("*")]
+              .filter((element) => element.children.length === 0 && !element.classList.contains("c-odds") &&
+                !element.matches("i, svg, path"))
+              .map((element) => clean(element.textContent, 80));
+            const labels = [...directLabels, ...leafLabels]
+              .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
             const betTypeElements = [
               ...(group.matches("[data-bt]") ? [group] : []),
               ...group.querySelectorAll("[data-bt]")
