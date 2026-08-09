@@ -47,11 +47,14 @@ describe("OpportunitiesPage", () => {
     expect(within(card).getAllByText("100.00")).toHaveLength(2);
     expect(within(card).getAllByLabelText("Outcome payout in USD: 100")).toHaveLength(2);
     expect(within(card).getByText("1.00%")).toBeTruthy();
-    expect(within(card).getByLabelText("Worst-case profit: 1.00")).toBeTruthy();
+    expect(within(card).getByText("Worst-case profit (USD)")).toBeTruthy();
+    expect(within(card).getByLabelText("Worst-case profit in USD: 1.00")).toBeTruthy();
     expect(within(card).getByLabelText("ROI: 0.01")).toBeTruthy();
     expect(within(card).getByLabelText("Total stake in USD: 100.01000100010001")).toBeTruthy();
     expect(within(card).getByLabelText("SABA financial policy: PROFIT fee 0.01; USD to USD FX rate 1; spread 0; as of 1799999999000 ms")).toBeTruthy();
     expect(within(card).getByLabelText("IM financial policy: PAYOUT fee 0.005; USD to USD FX rate 1; spread 0; as of 1799999999000 ms")).toBeTruthy();
+    expect(within(card).getByText("PROFIT 1.00% · USD→USD @ 1 · spread 0.00%")).toBeTruthy();
+    expect(within(card).getByText("PAYOUT 0.50% · USD→USD @ 1 · spread 0.00%")).toBeTruthy();
     expect(within(card).getAllByTitle("1250 ms from the server snapshot")).toHaveLength(2);
     expect(within(card).getByTitle("980 ms from the server snapshot")).toBeTruthy();
     expect(within(card).getByLabelText("Source timestamp: 1,799,999,998,750 ms")).toBeTruthy();
@@ -77,6 +80,21 @@ describe("OpportunitiesPage", () => {
 
     expect(screen.getByRole("alert").textContent).toContain("ineligible until a validated fresh snapshot returns");
     expect(screen.queryByRole("article")).toBeNull();
+  });
+
+  it("renders the received same-revision full payload only after the reconnect handshake is live", () => {
+    const freshSameRevision = {
+      ...snapshot,
+      generatedAtMs: snapshot.generatedAtMs + 1_000,
+      events: [{ ...snapshot.events[0]!, participantA: "Fresh Northbridge", participantB: "Fresh Riverside" }]
+    };
+    const { rerender } = render(<OpportunitiesPage snapshot={snapshot} connectionState="CONNECTING" />);
+
+    expect(screen.queryByRole("article", { name: /Northbridge vs Riverside/i })).toBeNull();
+
+    rerender(<OpportunitiesPage snapshot={freshSameRevision} connectionState="LIVE" />);
+    expect(screen.getByRole("article", { name: /Fresh Northbridge vs Fresh Riverside/i })).toBeTruthy();
+    expect(screen.queryByRole("article", { name: /^Northbridge vs Riverside$/i })).toBeNull();
   });
 
   it.each(["STALE", "QUOTE_STALE"])("uses a server %s diagnostic for the stale empty state", (code) => {

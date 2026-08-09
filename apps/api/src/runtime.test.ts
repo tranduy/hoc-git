@@ -3,6 +3,7 @@ import {
   FixtureAdapter,
   type FixtureSnapshot,
   type ProviderAdapter,
+  type ProviderQuoteUpdate,
   type ProviderSink,
   type ReplayScheduler
 } from "@tool-chenh/adapters";
@@ -126,13 +127,24 @@ function emitRecord(
       sink.onMarket(record.payload as ProviderMarket);
       return;
     case "QUOTE": {
-      const quote = record.payload as ProviderQuote;
-      emitQuoteUpdate(sink, {
-        ...quote,
-        providerSelectionId: `${quoteIdPrefix}${quote.providerSelectionId}`
+      const update = record.payload as ProviderQuoteUpdate;
+      sink.onQuoteUpdate({
+        ...update,
+        quotes: update.quotes.map((quote) => ({
+          ...quote,
+          providerSelectionId: `${quoteIdPrefix}${quote.providerSelectionId}`
+        }))
       });
     }
   }
+}
+
+function fixtureQuotes(snapshot: FixtureSnapshot): ProviderQuote[] {
+  return snapshot.records.flatMap((record) =>
+    record.kind === "QUOTE"
+      ? [...(record.payload as ProviderQuoteUpdate).quotes]
+      : []
+  );
 }
 
 function emitQuoteUpdate(
@@ -163,12 +175,10 @@ describe("Runtime", () => {
       async start(sink, signal): Promise<void> {
         await sabaFootball.start(sink, signal);
         const source = loadFixture("football/saba-snapshot.json");
-        const accepted = source.records
-          .filter((record) => record.kind === "QUOTE")
-          .map((record) => record.payload as ProviderQuote)
-          .find((quote) => quote.providerSelectionId === "saba-fb-over-25" && quote.sequence === 3)!;
-        emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 3 });
+        const accepted = fixtureQuotes(source)
+          .find((quote) => quote.providerSelectionId === "saba-fb-over-25" && quote.sequence === 2)!;
         emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 2 });
+        emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 1 });
       }
     };
     const runtime = new Runtime({
@@ -188,6 +198,61 @@ describe("Runtime", () => {
     expect(runtime.getDiagnostics().filter((item) => item.code === "OUT_OF_ORDER")).toHaveLength(2);
   });
 
+  it("removes a HIGH opportunity while a sequence gap awaits a complete snapshot", async () => {
+    const base = adapters();
+    const sabaFootball = base.find((adapter) => adapter.id === "saba-football")!;
+    let liveSink: ProviderSink | undefined;
+    const controlled: ProviderAdapter = {
+      id: sabaFootball.id,
+      categories: sabaFootball.categories,
+      async start(sink, signal): Promise<void> {
+        liveSink = sink;
+        await sabaFootball.start(sink, signal);
+      }
+    };
+    const runtime = new Runtime({
+      adapters: [controlled, ...base.filter((adapter) => adapter.id !== "saba-football")],
+      clock,
+      mappingPolicy: mappingPolicy(),
+      opportunityPolicy: opportunityPolicy()
+    });
+
+    await runtime.start(new AbortController().signal);
+
+    const source = loadFixture("football/saba-snapshot.json");
+    const quotes = fixtureQuotes(source)
+      .filter((quote) => quote.providerMarketId === "saba-fb-total-25");
+    const over = quotes.find((quote) => quote.providerSelectionId === "saba-fb-over-25" && quote.sequence === 2)!;
+    const under = quotes.find((quote) => quote.providerSelectionId === "saba-fb-under-25")!;
+    expect(runtime.getSnapshot().opportunities.some((item) => item.category === "FOOTBALL")).toBe(true);
+
+    emitQuoteUpdate(liveSink!, { ...over, rawOdds: "1.01", sequence: 5 });
+
+    const quarantined = runtime.getSnapshot();
+    expect(quarantined.opportunities.some((item) => item.category === "FOOTBALL")).toBe(false);
+    expect(quarantined.blockedDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "FOOTBALL", code: "QUOTE_NEEDS_SNAPSHOT" })
+    ]));
+    expect(runtime.getDiagnostics()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "SEQUENCE_GAP" })
+    ]));
+
+    liveSink!.onQuoteUpdate({
+      source: { provider: over.provider, category: over.category },
+      kind: "FULL_SNAPSHOT",
+      transport: "WEBSOCKET",
+      sequence: 10,
+      clock: { monotonicNowMs: 100, wallClockNowMs: 0 },
+      quotes: [
+        { ...over, rawOdds: "2.20", sequence: 10 },
+        { ...under, sequence: 10 }
+      ]
+    });
+
+    const recovered = runtime.getSnapshot().opportunities.find((item) => item.category === "FOOTBALL");
+    expect(recovered?.legs.find((leg) => leg.provider === "SABA")?.rawOdds).toBe("2.20");
+  });
+
   it("quarantines a sequence gap until an explicit full snapshot recovers the market", async () => {
     const base = adapters();
     const sabaFootball = base.find((adapter) => adapter.id === "saba-football")!;
@@ -197,13 +262,9 @@ describe("Runtime", () => {
       async start(sink, signal): Promise<void> {
         await sabaFootball.start(sink, signal);
         const source = loadFixture("football/saba-snapshot.json");
-        const accepted = source.records
-          .filter((record) => record.kind === "QUOTE")
-          .map((record) => record.payload as ProviderQuote)
-          .find((quote) => quote.providerSelectionId === "saba-fb-over-25" && quote.sequence === 3)!;
-        const under = source.records
-          .filter((record) => record.kind === "QUOTE")
-          .map((record) => record.payload as ProviderQuote)
+        const accepted = fixtureQuotes(source)
+          .find((quote) => quote.providerSelectionId === "saba-fb-over-25" && quote.sequence === 2)!;
+        const under = fixtureQuotes(source)
           .find((quote) => quote.providerSelectionId === "saba-fb-under-25")!;
         emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 5 });
         emitQuoteUpdate(sink, { ...accepted, rawOdds: "1.01", sequence: 4 });
@@ -365,10 +426,13 @@ describe("Runtime", () => {
       async start(sink): Promise<void> {
         for (const record of saba.records.filter((item) => item.offsetMs <= 70)) {
           if (record.kind === "QUOTE") {
-            const quote = record.payload as ProviderQuote;
-            emitQuoteUpdate(sink, {
-              ...quote,
-              selection: quote.marketType === "FT_TOTAL" ? "UNKNOWN_OUTCOME" : "HOME"
+            const update = record.payload as ProviderQuoteUpdate;
+            sink.onQuoteUpdate({
+              ...update,
+              quotes: update.quotes.map((quote) => ({
+                ...quote,
+                selection: quote.marketType === "FT_TOTAL" ? "UNKNOWN_OUTCOME" : "HOME"
+              }))
             });
           } else {
             emitRecord(sink, record);
@@ -439,18 +503,38 @@ describe("Runtime", () => {
           ? ["saba-fb-over-25", "saba-fb-under-25"]
           : ["im-fb-over-25", "im-fb-under-25"];
         for (const record of football.records.filter((item) => {
-          const payload = item.payload as { providerEventId?: string; providerMarketId?: string };
+          const payload = item.kind === "QUOTE"
+            ? (item.payload as ProviderQuoteUpdate).quotes[0]!
+            : item.payload as { providerEventId?: string; providerMarketId?: string };
           return item.offsetMs <= 70 && (item.kind === "STATUS" ||
             (payload.providerEventId?.endsWith("-fb-verified") === true &&
               (payload.providerMarketId === undefined || payload.providerMarketId === footballMarketId)));
         })) emitRecord(sink, record);
         let selectionIndex = 0;
         for (const record of lol.records.filter((item) => {
-          const payload = item.payload as { providerEventId?: string; marketType?: string };
+          const payload = item.kind === "QUOTE"
+            ? (item.payload as ProviderQuoteUpdate).quotes[0]!
+            : item.payload as { providerEventId?: string; marketType?: string };
           return item.offsetMs <= 70 && (item.kind === "STATUS" ||
             (payload.providerEventId?.endsWith("-lol-verified") === true &&
               (item.kind === "EVENT" || payload.marketType === "SERIES_WINNER")));
         })) {
+          if (record.kind === "QUOTE") {
+            const update = record.payload as ProviderQuoteUpdate;
+            emitRecord(sink, {
+              ...record,
+              payload: {
+                ...update,
+                quotes: update.quotes.map((quote) => ({
+                  ...quote,
+                  providerEventId: quote.providerEventId.replace("-lol-", "-fb-"),
+                  providerMarketId: footballMarketId,
+                  providerSelectionId: footballSelectionIds[selectionIndex++]!
+                }))
+              }
+            });
+            continue;
+          }
           const payload = record.payload as Record<string, unknown>;
           const transformed = {
             ...record,
@@ -461,9 +545,6 @@ describe("Runtime", () => {
                 : {}),
               ...(typeof payload.providerMarketId === "string"
                 ? { providerMarketId: footballMarketId }
-                : {}),
-              ...(record.kind === "QUOTE"
-                ? { providerSelectionId: footballSelectionIds[selectionIndex++] }
                 : {})
             }
           } as FixtureSnapshot["records"][number];

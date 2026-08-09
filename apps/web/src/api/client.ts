@@ -27,6 +27,7 @@ export class SnapshotClient {
   #stopped = false;
   #socket: WebSocket | undefined;
   #retryTimer: number | undefined;
+  #awaitingRealtimeBaseline = false;
   readonly #onSnapshot: (snapshot: AppSnapshot) => void;
   readonly #onConnectionState: (state: ConnectionState) => void;
   readonly #onDiagnostic: (message: string) => void;
@@ -61,8 +62,13 @@ export class SnapshotClient {
 
   stop(): void {
     this.#stopped = true;
-    if (this.#retryTimer !== undefined) window.clearTimeout(this.#retryTimer);
-    this.#socket?.close();
+    if (this.#retryTimer !== undefined) {
+      window.clearTimeout(this.#retryTimer);
+      this.#retryTimer = undefined;
+    }
+    const socket = this.#socket;
+    this.#socket = undefined;
+    socket?.close();
   }
 
   #connect(): void {
@@ -70,6 +76,7 @@ export class SnapshotClient {
     try {
       const socket = this.#createWebSocket(realtimeUrl());
       this.#socket = socket;
+      this.#awaitingRealtimeBaseline = true;
       socket.onopen = () => {
         if (this.#socket !== socket) return;
         this.#retryAttempt = 0;
@@ -113,11 +120,10 @@ export class SnapshotClient {
   }
 
   #acceptRealtimeSnapshot(snapshot: AppSnapshot): void {
-    if (snapshot.revision < this.#revision) return;
-    if (snapshot.revision > this.#revision) {
-      this.#revision = snapshot.revision;
-      this.#onSnapshot(snapshot);
-    }
+    if (!this.#awaitingRealtimeBaseline && snapshot.revision <= this.#revision) return;
+    this.#awaitingRealtimeBaseline = false;
+    this.#revision = snapshot.revision;
+    this.#onSnapshot(snapshot);
     this.#onConnectionState("LIVE");
   }
 
@@ -126,6 +132,9 @@ export class SnapshotClient {
     this.#onConnectionState("DISCONNECTED");
     const delay = Math.min(1_000 * 2 ** this.#retryAttempt, 10_000);
     this.#retryAttempt += 1;
-    this.#retryTimer = window.setTimeout(() => this.#connect(), delay);
+    this.#retryTimer = window.setTimeout(() => {
+      this.#retryTimer = undefined;
+      this.#connect();
+    }, delay);
   }
 }

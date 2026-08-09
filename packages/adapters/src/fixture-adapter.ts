@@ -82,6 +82,21 @@ const FixtureRecordSchema = z.strictObject({
   payload: z.unknown()
 });
 
+const ProviderQuoteUpdateSchema = z.strictObject({
+  source: z.strictObject({
+    provider: z.string().min(1),
+    category: CategorySchema
+  }),
+  kind: z.enum(["FULL_SNAPSHOT", "DELTA"]),
+  transport: z.enum(["WEBSOCKET", "POLLING"]),
+  sequence: z.number().int().nonnegative().nullable(),
+  clock: z.strictObject({
+    monotonicNowMs: z.number().finite().nonnegative(),
+    wallClockNowMs: z.number().finite().nonnegative()
+  }),
+  quotes: z.array(ProviderQuoteSchema).min(1)
+});
+
 const fixtureRecordKinds = new Set<FixtureRecordKind>(["EVENT", "MARKET", "QUOTE", "STATUS"]);
 
 const defaultScheduler: ReplayScheduler = {
@@ -139,7 +154,6 @@ export class FixtureAdapter implements ProviderAdapter {
   readonly #snapshotIssues: readonly AdapterSchemaIssue[];
   readonly #speed: number;
   readonly #scheduler: ReplayScheduler;
-  readonly #seenQuoteMarkets = new Set<string>();
 
   constructor(snapshot: unknown, config: FixtureAdapterConfig) {
     const identity = FixtureAdapterIdentitySchema.safeParse(config === undefined
@@ -255,31 +269,33 @@ export class FixtureAdapter implements ProviderAdapter {
         return;
       }
       case "QUOTE": {
-        const result = ProviderQuoteSchema.safeParse(record.payload);
+        const result = ProviderQuoteUpdateSchema.safeParse(record.payload);
         if (!result.success) sink.onSchemaError(this.#schemaError(record, safeIssues(result.error)));
-        else if (this.#matchesProvenance(result.data)) {
-          const quote = result.data;
-          const marketKey = [
-            quote.provider,
-            quote.category,
-            quote.providerEventId,
-            quote.providerMarketId
-          ].map(encodeURIComponent).join("|");
-          const kind = this.#seenQuoteMarkets.has(marketKey) ? "DELTA" : "FULL_SNAPSHOT";
-          this.#seenQuoteMarkets.add(marketKey);
-          sink.onQuoteUpdate({
-            source: { provider: quote.provider, category: quote.category },
-            kind,
-            transport: "WEBSOCKET",
-            sequence: quote.sequence,
-            clock: {
-              monotonicNowMs: quote.receivedMonotonicMs,
-              wallClockNowMs: quote.sourceTimestampMs ?? 0
-            },
-            quotes: [quote]
+        else if (this.#matchesProvenance(result.data.source)) {
+          const issues = result.data.quotes.flatMap((quote, index): AdapterSchemaIssue[] => {
+            const quoteIssues: AdapterSchemaIssue[] = [];
+            if (quote.provider !== result.data.source.provider ||
+              quote.category !== result.data.source.category) {
+              quoteIssues.push({ code: "custom", path: ["quotes", String(index), "source"] });
+            }
+            if (quote.sequence !== result.data.sequence) {
+              quoteIssues.push({ code: "custom", path: ["quotes", String(index), "sequence"] });
+            }
+            return quoteIssues;
           });
+          if (issues.length === 0) sink.onQuoteUpdate(result.data);
+          else sink.onSchemaError(this.#schemaError(record, issues));
         }
-        else sink.onSchemaError(this.#provenanceError(record, result.data));
+        else {
+          const issues: AdapterSchemaIssue[] = [];
+          if (result.data.source.provider !== this.#provider) {
+            issues.push({ code: "custom", path: ["source", "provider"] });
+          }
+          if (result.data.source.category !== this.#category) {
+            issues.push({ code: "custom", path: ["source", "category"] });
+          }
+          sink.onSchemaError(this.#schemaError(record, issues));
+        }
         return;
       }
       case "STATUS": {

@@ -21,6 +21,7 @@ class RecordingSink implements ProviderSink {
   readonly events: ProviderEvent[] = [];
   readonly markets: ProviderMarket[] = [];
   readonly quotes: ProviderQuote[] = [];
+  readonly quoteUpdates: ProviderQuoteUpdate[] = [];
   readonly statuses: ProviderConnectionStatus[] = [];
   readonly schemaErrors: AdapterSchemaError[] = [];
 
@@ -35,6 +36,7 @@ class RecordingSink implements ProviderSink {
   }
 
   onQuoteUpdate(update: ProviderQuoteUpdate): void {
+    this.quoteUpdates.push(update);
     for (const quote of update.quotes) {
       this.quotes.push(quote);
       this.emissions.push(`QUOTE:${quote.providerSelectionId}`);
@@ -100,6 +102,25 @@ const market = {
   status: "OPEN"
 } as const;
 
+const overQuote = {
+  provider: "SABA",
+  category: "FOOTBALL",
+  providerEventId: "event-a",
+  providerMarketId: "market-total",
+  providerSelectionId: "selection-over",
+  marketType: "FT_TOTAL",
+  scope: "FULL_TIME",
+  selection: "OVER",
+  line: "2.5",
+  rawOdds: "2.1",
+  rawFormat: "DECIMAL",
+  status: "OPEN",
+  isLive: false,
+  sourceTimestampMs: 1_800_000_000_000,
+  receivedMonotonicMs: 50,
+  sequence: 7
+} as const;
+
 const fixture = (records: FixtureSnapshot["records"]): FixtureSnapshot => ({
   version: 1,
   adapterId: "saba-football",
@@ -117,6 +138,106 @@ const trustedConfig = (overrides: Partial<FixtureAdapterConfig> = {}): FixtureAd
 });
 
 describe("FixtureAdapter", () => {
+  it("preserves an explicit quote batch envelope without inferring transport or boundaries", async () => {
+    const update: ProviderQuoteUpdate = {
+      source: { provider: "SABA", category: "FOOTBALL" },
+      kind: "FULL_SNAPSHOT",
+      transport: "POLLING",
+      sequence: 7,
+      clock: {
+        monotonicNowMs: 55,
+        wallClockNowMs: 1_800_000_000_005
+      },
+      quotes: [
+        overQuote,
+        {
+          ...overQuote,
+          providerSelectionId: "selection-under",
+          selection: "UNDER",
+          rawOdds: "1.9"
+        }
+      ]
+    };
+    const sink = new RecordingSink();
+    const adapter = new FixtureAdapter(fixture([
+      { offsetMs: 50, kind: "QUOTE", payload: update }
+    ]), trustedConfig());
+
+    await adapter.start(sink, new AbortController().signal);
+
+    expect(sink.schemaErrors).toEqual([]);
+    expect(sink.quoteUpdates).toEqual([update]);
+  });
+
+  it("rejects a quote batch whose source conflicts with trusted adapter identity", async () => {
+    const sink = new RecordingSink();
+    const adapter = new FixtureAdapter(fixture([{
+      offsetMs: 50,
+      kind: "QUOTE",
+      payload: {
+        source: { provider: "IM", category: "FOOTBALL" },
+        kind: "FULL_SNAPSHOT",
+        transport: "WEBSOCKET",
+        sequence: 7,
+        clock: { monotonicNowMs: 50, wallClockNowMs: 1_800_000_000_000 },
+        quotes: [{ ...overQuote, provider: "IM" }]
+      }
+    }]), trustedConfig());
+
+    await adapter.start(sink, new AbortController().signal);
+
+    expect(sink.quoteUpdates).toEqual([]);
+    expect(sink.schemaErrors[0]?.issues).toEqual([
+      { code: "custom", path: ["source", "provider"] }
+    ]);
+  });
+
+  it("rejects a quote batch whose envelope sequence conflicts with a quote", async () => {
+    const sink = new RecordingSink();
+    const adapter = new FixtureAdapter(fixture([{
+      offsetMs: 50,
+      kind: "QUOTE",
+      payload: {
+        source: { provider: "SABA", category: "FOOTBALL" },
+        kind: "DELTA",
+        transport: "WEBSOCKET",
+        sequence: 8,
+        clock: { monotonicNowMs: 50, wallClockNowMs: 1_800_000_000_000 },
+        quotes: [overQuote]
+      }
+    }]), trustedConfig());
+
+    await adapter.start(sink, new AbortController().signal);
+
+    expect(sink.quoteUpdates).toEqual([]);
+    expect(sink.schemaErrors[0]?.issues).toEqual([
+      { code: "custom", path: ["quotes", "0", "sequence"] }
+    ]);
+  });
+
+  it("rejects a quote that spoofs the trusted quote-envelope source", async () => {
+    const sink = new RecordingSink();
+    const adapter = new FixtureAdapter(fixture([{
+      offsetMs: 50,
+      kind: "QUOTE",
+      payload: {
+        source: { provider: "SABA", category: "FOOTBALL" },
+        kind: "FULL_SNAPSHOT",
+        transport: "WEBSOCKET",
+        sequence: 7,
+        clock: { monotonicNowMs: 50, wallClockNowMs: 1_800_000_000_000 },
+        quotes: [{ ...overQuote, provider: "IM" }]
+      }
+    }]), trustedConfig());
+
+    await adapter.start(sink, new AbortController().signal);
+
+    expect(sink.quoteUpdates).toEqual([]);
+    expect(sink.schemaErrors[0]?.issues).toEqual([
+      { code: "custom", path: ["quotes", "0", "source"] }
+    ]);
+  });
+
   it("replays records by stable offset order and applies replay speed", async () => {
     const scheduler = new ImmediateScheduler();
     const adapter = new FixtureAdapter(fixture([
@@ -329,6 +450,10 @@ describe("redacted fixture snapshots", () => {
     expect(sink.markets.length).toBeGreaterThanOrEqual(2);
     expect(sink.quotes.map((item) => item.status)).toContain("OPEN");
     expect(sink.quotes.map((item) => item.status)).toContain("SUSPENDED");
+    expect(new Set(sink.quoteUpdates.map((update) => update.transport))).toEqual(
+      new Set([snapshot.provider === "SABA" ? "WEBSOCKET" : "POLLING"])
+    );
+    expect(sink.quoteUpdates.some((update) => update.quotes.length > 1)).toBe(true);
 
     const offsets = snapshot.records.map((record) => record.offsetMs);
     expect(offsets).toEqual([...offsets].sort((left, right) => left - right));
@@ -417,9 +542,10 @@ describe("redacted fixture snapshots", () => {
       for (const snapshot of snapshots) {
         for (const record of snapshot.records) {
           if (record.offsetMs > cutoffMs || record.kind !== "QUOTE") continue;
-          const quote = record.payload as ProviderQuote;
-          if (marketIds.has(quote.providerMarketId)) {
-            latestBySelectionId.set(quote.providerSelectionId, quote);
+          for (const quote of (record.payload as ProviderQuoteUpdate).quotes) {
+            if (marketIds.has(quote.providerMarketId)) {
+              latestBySelectionId.set(quote.providerSelectionId, quote);
+            }
           }
         }
       }

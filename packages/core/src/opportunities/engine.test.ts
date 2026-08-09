@@ -1,4 +1,8 @@
-import type { CanonicalMarket, ProviderQuote } from "@tool-chenh/contracts";
+import {
+  OpportunitySchema,
+  type CanonicalMarket,
+  type ProviderQuote
+} from "@tool-chenh/contracts";
 import { describe, expect, it } from "vitest";
 import type { MarketMappingResult } from "../mapping/market-mapper.js";
 import { OpportunityEngine, type OpportunityEvaluationContext } from "./engine.js";
@@ -212,6 +216,54 @@ describe("OpportunityEngine fail-closed policy", () => {
       ["IM", "100"]
     ]);
     expect(engine.blockedDiagnostics).toEqual([]);
+  });
+
+  it("emits every financial assumption as a schema-safe plain decimal", () => {
+    const engine = new OpportunityEngine();
+    const base = context();
+    const candidate = base.candidates[0]!;
+    const exponentPolicy = {
+      fee: { type: "PROFIT" as const, rate: "1e-7" },
+      fx: { ...fx, rate: "1e-7", spreadRate: "1e-7" }
+    };
+
+    const [opportunity] = engine.evaluate(snapshot(), {
+      ...base,
+      candidates: [{
+        ...candidate,
+        legs: candidate.legs.map((leg) => ({ ...leg, ...exponentPolicy }))
+      }]
+    });
+
+    expect(() => OpportunitySchema.parse(opportunity)).not.toThrow();
+    expect(opportunity?.legs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        feeRate: "0.0000001",
+        fxRate: "0.0000001",
+        fxSpreadRate: "0.0000001"
+      })
+    ]));
+    for (const value of [
+      opportunity?.totalStakeBase,
+      opportunity?.inverseSum,
+      opportunity?.netMargin,
+      opportunity?.worstCaseProfit,
+      opportunity?.roi,
+      ...opportunity?.legs.flatMap((leg) => [
+        leg.decimalOdds,
+        leg.effectiveDecimal,
+        leg.stake,
+        leg.stakeBase,
+        leg.minStake,
+        leg.maxStake,
+        leg.payout,
+        leg.feeRate,
+        leg.fxRate,
+        leg.fxSpreadRate
+      ]) ?? []
+    ].filter((value): value is string => value !== null && value !== undefined)) {
+      expect(value).not.toMatch(/[eE]/);
+    }
   });
 
   it("blocks a mapping that requires review and exposes the reason only in diagnostics", () => {

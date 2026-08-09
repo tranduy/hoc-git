@@ -446,9 +446,11 @@ export class OpportunityEngine {
       maxStake: leg.candidate.constraint!.maxStake,
       payout: plan.payouts[index]!,
       feeType: leg.candidate.fee!.type,
-      feeRate: leg.candidate.fee!.type === "NONE" ? null : String(leg.candidate.fee!.rate),
-      fxRate: leg.candidate.fx!.rate,
-      fxSpreadRate: leg.candidate.fx!.spreadRate,
+      feeRate: leg.candidate.fee!.type === "NONE"
+        ? null
+        : plainDecimal(new Decimal(leg.candidate.fee!.rate)),
+      fxRate: plainDecimal(new Decimal(leg.candidate.fx!.rate)),
+      fxSpreadRate: plainDecimal(new Decimal(leg.candidate.fx!.spreadRate)),
       fxAsOfMs: leg.candidate.fx!.asOfMs,
       quoteAgeMs: leg.snapshot.quoteAgeMs,
       quoteStatus: leg.snapshot.quote.status,

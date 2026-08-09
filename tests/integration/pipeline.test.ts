@@ -1,5 +1,10 @@
 import { readFileSync } from "node:fs";
-import { FixtureAdapter, type FixtureSnapshot, type ReplayScheduler } from "@tool-chenh/adapters";
+import {
+  FixtureAdapter,
+  type FixtureSnapshot,
+  type ProviderQuoteUpdate,
+  type ReplayScheduler
+} from "@tool-chenh/adapters";
 import type { Category } from "@tool-chenh/contracts";
 import { describe, expect, it } from "vitest";
 import { Runtime, type RuntimeClock } from "../../apps/api/src/runtime.js";
@@ -61,10 +66,43 @@ function fixture(path: string, category: Category): FixtureSnapshot {
     .filter((record) =>
       category === "FOOTBALL" ||
       record.kind !== "QUOTE" ||
-      (record.payload as { marketType?: string }).marketType === "MAP_WINNER"
+      (record.payload as ProviderQuoteUpdate).quotes[0]?.marketType === "MAP_WINNER"
     )
     .map((record) => {
       const offsetMs = record.offsetMs === 90 ? 1_200 : record.offsetMs === 100 ? 1_300 : record.offsetMs;
+      if (record.kind === "QUOTE") {
+        const update = record.payload as ProviderQuoteUpdate;
+        const replacementSnapshot = category === "FOOTBALL" &&
+          update.source.provider === "SABA" &&
+          record.offsetMs === 90;
+        return {
+          ...record,
+          offsetMs,
+          payload: {
+            ...update,
+            kind: replacementSnapshot ? "FULL_SNAPSHOT" as const : update.kind,
+            clock: offsetMs === record.offsetMs
+              ? update.clock
+              : { ...update.clock, monotonicNowMs: offsetMs },
+            quotes: update.quotes.map((quote) => {
+              const providerMarketId = quote.marketType === "MAP_WINNER"
+                ? quote.provider === "SABA" ? "saba-fb-total-25" : "im-fb-total-25"
+                : quote.providerMarketId;
+              const providerEventId = category === "LOL"
+                ? quote.providerEventId.replace("-lol-", "-fb-")
+                : quote.providerEventId;
+              return {
+                ...quote,
+                providerEventId,
+                providerMarketId,
+                receivedMonotonicMs: offsetMs === record.offsetMs
+                  ? quote.receivedMonotonicMs
+                  : offsetMs
+              };
+            })
+          }
+        };
+      }
       const payload = record.payload as {
         provider?: string;
         providerEventId?: string;
@@ -88,20 +126,13 @@ function fixture(path: string, category: Category): FixtureSnapshot {
       const adjustedPayload = collisionEventId === "im-fb-rejected" && category === "FOOTBALL"
         ? { ...identityAdjustedPayload, startAtUtcMs: 1_786_305_610_000 }
         : identityAdjustedPayload;
-      if (record.kind !== "QUOTE" || offsetMs === record.offsetMs) {
-        return { ...record, payload: adjustedPayload };
-      }
-      return {
-        ...record,
-        offsetMs,
-        payload: { ...adjustedPayload, receivedMonotonicMs: offsetMs }
-      };
+      return { ...record, payload: adjustedPayload };
     });
   return { ...snapshot, records };
 }
 
 describe("fixture pipeline", () => {
-  it("keeps categories separate and gates opportunities by mapping, TTL, and suspension", async () => {
+  it("keeps categories separate and removes omitted selections from a replacement snapshot", async () => {
     const clock = new ManualClock();
     const adapters = fixturePaths.map(([path, provider, category]) => {
       const snapshot = fixture(path, category);
@@ -184,7 +215,7 @@ describe("fixture pipeline", () => {
     expect(runtime.getSnapshot().opportunities).toEqual([]);
 
     await clock.advanceTo(1_200);
-    expect(runtime.getSnapshot().opportunities).toHaveLength(1);
+    expect(runtime.getSnapshot().opportunities).toEqual([]);
 
     await clock.advanceTo(1_300);
     expect(runtime.getSnapshot().opportunities).toEqual([]);

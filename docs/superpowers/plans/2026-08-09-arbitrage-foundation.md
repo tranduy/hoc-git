@@ -682,7 +682,7 @@ git commit -m "feat: gate fresh verified opportunities"
 
 **Interfaces:**
 - Consumes: strict ProviderEventSchema, ProviderMarketSchema and ProviderQuoteSchema.
-- Produces: ProviderAdapter.start(sink, signal): Promise<void>; ProviderSink methods onEvent, onMarket, onQuote, onStatus, onSchemaError; redactCapture(value): unknown.
+- Produces: ProviderAdapter.start(sink, signal): Promise<void>; ProviderSink methods onEvent, onMarket, onQuoteUpdate, onStatus, onSchemaError; redactCapture(value): unknown.
 
 - [ ] **Step 1: Write failing redaction tests**
 
@@ -708,6 +708,7 @@ Each file contains:
 - one deliberately ambiguous/rejected event;
 - at least two supported markets;
 - open, changed and suspended quote updates;
+- explicit quote-update batches preserving snapshot/delta kind, transport, sequence, and source/receive clock (SABA fixtures use WebSocket metadata; IM fixtures use polling metadata);
 - monotonic fixture offsets instead of real account timestamps;
 - no session, member, IP, account or bet data.
 
@@ -720,10 +721,22 @@ Use a fake scheduler. Assert FixtureAdapter emits records in offset order, valid
 - [ ] **Step 6: Implement fixture adapter**
 
 ~~~ts
+export interface ProviderQuoteUpdate {
+  readonly source: { readonly provider: string; readonly category: Category };
+  readonly kind: "FULL_SNAPSHOT" | "DELTA";
+  readonly transport: "WEBSOCKET" | "POLLING";
+  readonly sequence: number | null;
+  readonly clock: {
+    readonly monotonicNowMs: number;
+    readonly wallClockNowMs: number;
+  };
+  readonly quotes: readonly ProviderQuote[];
+}
+
 export interface ProviderSink {
   onEvent(event: ProviderEvent): void;
   onMarket(market: ProviderMarket): void;
-  onQuote(quote: ProviderQuote): void;
+  onQuoteUpdate(update: ProviderQuoteUpdate): void;
   onStatus(status: ProviderConnectionStatus): void;
   onSchemaError(error: AdapterSchemaError): void;
 }
@@ -734,6 +747,8 @@ export interface ProviderAdapter {
   start(sink: ProviderSink, signal: AbortSignal): Promise<void>;
 }
 ~~~
+
+Corrective clarification: quote callbacks are atomic update envelopes, never scalar quote callbacks. FixtureAdapter validates and forwards the envelope unchanged; Runtime applies it to QuoteBook before mutating accepted state. A FULL_SNAPSHOT replaces the complete selection set for its market, while a DELTA preserves untouched selections. Replay tests must cover metadata preservation, spoof rejection, and omitted-selection deletion.
 
 - [ ] **Step 7: Run tests and commit**
 
@@ -898,7 +913,7 @@ Expected: FAIL because the web workspace does not exist.
 
 - [ ] **Step 3: Implement local API client**
 
-Fetch /api/snapshot once, connect /api/realtime, replace state only with a greater revision, reconnect with exponential delays capped at 10 seconds, and expose connection state CONNECTING, LIVE or DISCONNECTED. Do not persist snapshots or session data in localStorage.
+Fetch /api/snapshot once, then connect /api/realtime. Treat the first schema-valid full snapshot on every new socket generation as the authoritative baseline and replace cached state before reporting LIVE, even when its revision is equal or lower after a server restart. After that baseline, accept only greater revisions within the same socket generation. Keep cached opportunities ineligible while CONNECTING, reconnect with exponential delays capped at 10 seconds, and expose connection state CONNECTING, LIVE or DISCONNECTED. Do not persist snapshots or session data in localStorage.
 
 - [ ] **Step 4: Implement responsive visual system**
 

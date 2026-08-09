@@ -399,6 +399,10 @@ export class Runtime {
         canonicalMarketId: null,
         reason: "quote update was rejected"
       });
+      const first = update.quotes[0];
+      if (result.marketKey !== null && first !== undefined) {
+        this.#reconcileEvent(first, adapterId, result.marketKey);
+      }
       this.#publish();
       return;
     }
