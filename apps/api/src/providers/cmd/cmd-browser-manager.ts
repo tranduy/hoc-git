@@ -32,6 +32,15 @@ export function cmdProfileDirectoryName(sessionId: string): string {
   return `cmd-${digest}`;
 }
 
+export async function readCmdFootballCatalog(page: Page): Promise<readonly CmdCatalogInputRecord[]> {
+  const visible = await extractCmdCatalogRecords(page, 500, "1");
+  if (visible.length > 0) return visible;
+  if (!(await clickSafeStructuralCategory(page, "1", 5_000))) {
+    throw new Error("CMD_CATALOG_UNAVAILABLE");
+  }
+  return extractCmdCatalogRecords(page, 500, "1");
+}
+
 interface OpenCmdSession {
   readonly context: BrowserContext;
   readonly page: Page;
@@ -92,13 +101,9 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
     readonly launchUrl: string;
   }): Promise<readonly CmdCatalogInputRecord[]> {
     const session = await this.#get(input);
-    if (!session.footballSelected) {
-      if (!(await clickSafeStructuralCategory(session.page, "1", 5_000))) {
-        throw new Error("CMD_CATALOG_UNAVAILABLE");
-      }
-      session.footballSelected = true;
-    }
-    return extractCmdCatalogRecords(session.page, 500, "1");
+    const records = await readCmdFootballCatalog(session.page);
+    session.footballSelected = true;
+    return records;
   }
 
   async close(): Promise<void> {
