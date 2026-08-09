@@ -12,6 +12,8 @@ import { SecretVault } from "./secret-vault.js";
 import { SessionManager } from "./session-manager.js";
 import { TrustedDomainStore } from "./trusted-domain-store.js";
 import type { SecretProtector, SessionValidator } from "./types.js";
+import { AccountRegistry } from "../accounts/account-registry.js";
+import type { ProviderProfileReader } from "../providers/provider-capabilities.js";
 import { SessionValidatorRegistry } from "./validators.js";
 
 export interface CreateSessionServicesOptions {
@@ -22,9 +24,11 @@ export interface CreateSessionServicesOptions {
   readonly clock?: { nowMs(): number };
   readonly idFactory?: () => string;
   readonly validators?: readonly SessionValidator[];
+  readonly profileReaders?: readonly ProviderProfileReader[];
 }
 
 export interface ManagedSessionServices extends SessionServices {
+  readonly accounts: AccountRegistry;
   tick(): Promise<void>;
   close(): Promise<void>;
 }
@@ -64,10 +68,18 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     trustStore,
     fetch: options.fetch ?? globalThis.fetch
   });
+  const accounts = new AccountRegistry({
+    vault,
+    sessions: manager,
+    readers: options.profileReaders ?? [],
+    clock,
+    idFactory
+  });
   return {
     manager,
     discovery,
     trustStore,
+    accounts,
     async tick(): Promise<void> {
       await manager.tick();
     },

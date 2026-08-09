@@ -151,7 +151,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
-    sessionServices
+    sessionServices,
+    accountRegistry: sessionServices.accounts
   });
   await app.listen({ host: config.host, port: config.port });
   const sessionTimer = setInterval(() => {

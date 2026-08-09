@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { registerOpportunityWebsocket } from "./realtime/opportunity-ws.js";
 import type { Runtime } from "./runtime.js";
 import { registerHealthRoute } from "./routes/health.js";
+import { registerAccountRoutes, type AccountRegistryLike } from "./routes/accounts.js";
 import { registerSnapshotRoute } from "./routes/snapshot.js";
 import { registerSessionRoutes, type SessionServices } from "./routes/sessions.js";
 
@@ -12,6 +13,7 @@ export interface AppOptions {
   readonly heartbeatIntervalMs?: number;
   readonly maxBufferedBytes?: number;
   readonly sessionServices?: SessionServices;
+  readonly accountRegistry?: AccountRegistryLike;
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
@@ -112,6 +114,7 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   registerHealthRoute(app, runtime);
   registerSnapshotRoute(app, runtime);
   if (options.sessionServices !== undefined) registerSessionRoutes(app, options.sessionServices);
+  if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
   void app.register(async (instance) => {
     registerOpportunityWebsocket(instance, runtime, { heartbeatIntervalMs, maxBufferedBytes });
   });
