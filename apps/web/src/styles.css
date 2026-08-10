@@ -54,3 +54,42 @@ main { max-width: 1440px; margin-left: 224px; padding: calc(var(--space) * 5); }
 .edge-badge { display: block; width: max-content; margin-top: 7px; padding: 3px 6px; border-radius: 4px; background: #2b2520; color: var(--warning); font-size: .72rem; text-transform: none; }
 .edge-badge--positive, .event-edge { background: #123121; color: var(--positive); }
 .event-edge { display: inline-block; margin-top: 8px; padding: 5px 8px; border: 1px solid var(--positive); border-radius: 5px; }
+.arbitrage-toast {
+  position: fixed;
+  z-index: 1000;
+  top: 20px;
+  right: 20px;
+  width: min(520px, calc(100vw - 40px));
+  padding: 18px;
+  border: 2px solid #31e981;
+  border-radius: 10px;
+  background: #10251d;
+  box-shadow: 0 16px 50px rgb(0 0 0 / 55%);
+  color: #f4fff8;
+}
+
+.arbitrage-toast header,
+.arbitrage-toast header strong {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #31e981;
+}
+
+.arbitrage-toast h2 {
+  margin: 10px 0 4px;
+  font-size: 1.25rem;
+}
+
+.arbitrage-toast p,
+.arbitrage-toast ol {
+  margin: 8px 0;
+}
+
+.arbitrage-toast ol {
+  padding-left: 22px;
+}
+
+.arbitrage-toast small {
+  color: #ffd66b;
+}
