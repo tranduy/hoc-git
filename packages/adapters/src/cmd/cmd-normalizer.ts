@@ -1,4 +1,4 @@
-import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 
 export interface CmdCatalogOdd {
   readonly marketOddsId: string;
@@ -113,7 +113,8 @@ function validDecimal(value: string): boolean {
   return decimalPattern.test(value) && Number(value) > 1;
 }
 
-export function normalizeCmdCatalog(
+export function normalizeObservedFootballCatalog(
+  provider: ProviderId,
   records: readonly CmdCatalogInputRecord[],
   options: CmdCatalogOptions
 ): NormalizedCmdCatalog {
@@ -151,12 +152,12 @@ export function normalizeCmdCatalog(
       const marketType = betType === "3" ? "FT_TOTAL" as const : "FT_1X2" as const;
       const status = commonMarketStatus(group);
       recordMarkets.push({
-        provider: "CMD", category: "FOOTBALL", providerEventId: record.matchId,
+        provider, category: "FOOTBALL", providerEventId: record.matchId,
         providerMarketId: marketId, marketType, scope: "FULL_TIME", line: marketLine,
         settlementProfile: "football-regulation-including-added-time", status
       });
       recordQuotes.push(...group.odds.map((odd, index): ProviderQuote => ({
-        provider: "CMD", category: "FOOTBALL", providerEventId: record.matchId,
+        provider, category: "FOOTBALL", providerEventId: record.matchId,
         providerMarketId: marketId, providerSelectionId: `${marketId}:${selections[index]!.toLowerCase()}`,
         marketType, scope: "FULL_TIME", selection: selections[index]!, line: marketLine,
         rawOdds: odd.priceText, rawFormat: betType === "3" ? "MALAY" : "DECIMAL",
@@ -169,7 +170,7 @@ export function normalizeCmdCatalog(
       continue;
     }
     events.push({
-      provider: "CMD", category: "FOOTBALL", providerEventId: record.matchId,
+      provider, category: "FOOTBALL", providerEventId: record.matchId,
       competition: record.leagueName.trim(), seasonStage: null, startAtUtcMs: timing!.startAtUtcMs,
       participantA: teams[0]!, participantB: teams[1]!, eventScope: "REGULATION", bestOf: null,
       isLive: timing!.isLive, rematchCandidate: timing!.isLive, fixtureDiscriminator: null,
@@ -180,4 +181,11 @@ export function normalizeCmdCatalog(
     quotes.push(...recordQuotes);
   }
   return { events, markets, quotes, diagnostics };
+}
+
+export function normalizeCmdCatalog(
+  records: readonly CmdCatalogInputRecord[],
+  options: CmdCatalogOptions
+): NormalizedCmdCatalog {
+  return normalizeObservedFootballCatalog("CMD", records, options);
 }

@@ -94,6 +94,9 @@ describe("FabetBrowserDriver", () => {
       "https://fabet.party/lobby-the-thao?type=esports": [{
         url: "https://esports.vendor.test/start?session=esports-secret-canary",
         label: "T-SPORTS"
+      }, {
+        url: "https://sbobet.vendor.test/start?session=sbobet-secret-canary",
+        label: "K-SPORTS"
       }]
     };
     let id = 0;
@@ -108,7 +111,8 @@ describe("FabetBrowserDriver", () => {
 
     expect(launches).toEqual([
       expect.objectContaining({ category: "FOOTBALL", providerHint: "SABA", hostname: "sports.vendor.test" }),
-      expect.objectContaining({ category: "LOL", providerHint: "CMD", hostname: "esports.vendor.test" })
+      expect.objectContaining({ category: "LOL", providerHint: "CMD", hostname: "esports.vendor.test" }),
+      expect.objectContaining({ category: "LOL", providerHint: "SBOBET", hostname: "sbobet.vendor.test" })
     ]);
     expect(JSON.stringify(launches)).not.toMatch(/launch-secret-canary|esports-secret-canary/u);
     expect(await context.vault.load(launches[0]!.vaultRecordId)).toEqual({

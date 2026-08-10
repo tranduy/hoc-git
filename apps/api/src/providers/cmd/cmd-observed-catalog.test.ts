@@ -9,6 +9,28 @@ const handle: ActiveSecretHandle = {
 };
 
 describe("CmdObservedCatalogReader", () => {
+  it("binds account access and normalized output to the configured provider", async () => {
+    let requestedProvider = "";
+    const sabaHandle: ActiveSecretHandle = { ...handle, provider: "SABA" };
+    const reader = new CmdObservedCatalogReader({
+      provider: "SABA",
+      accounts: { withActiveHandle: async (_id, provider, consume) => {
+        requestedProvider = provider;
+        return consume(sabaHandle);
+      } },
+      source: { readCatalog: async () => [{
+        sportId: "1", leagueId: "l", leagueName: "League", matchId: "m", timeText: "1H27'",
+        teamNames: ["A", "B"], groups: []
+      }] },
+      clock: { now: () => ({ wallClockNowMs: 1_788_000_000_000, monotonicNowMs: 500 }) },
+      timezoneOffsetMinutes: 420
+    });
+    const result = await reader.read("account-1");
+    expect(requestedProvider).toBe("SABA");
+    expect(result.provider).toBe("SABA");
+    expect(result.events[0]?.provider).toBe("SABA");
+  });
+
   it("returns only normalized live catalog evidence and marks one-provider rows non-comparable", async () => {
     const reader = new CmdObservedCatalogReader({
       accounts: { withActiveHandle: async (_id, _provider, consume) => consume(handle) },

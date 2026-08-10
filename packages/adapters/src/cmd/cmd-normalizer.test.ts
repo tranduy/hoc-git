@@ -1,6 +1,6 @@
 import { ProviderEventSchema, ProviderMarketSchema, ProviderQuoteSchema } from "@tool-chenh/contracts";
 import { describe, expect, it } from "vitest";
-import { normalizeCmdCatalog } from "./cmd-normalizer.js";
+import { normalizeCmdCatalog, normalizeObservedFootballCatalog } from "./cmd-normalizer.js";
 
 describe("normalizeCmdCatalog", () => {
   const record = {
@@ -62,6 +62,16 @@ describe("normalizeCmdCatalog", () => {
     expect(result.events.every((event) => ProviderEventSchema.safeParse(event).success)).toBe(true);
     expect(result.markets.every((market) => ProviderMarketSchema.safeParse(market).success)).toBe(true);
     expect(result.quotes.every((quote) => ProviderQuoteSchema.safeParse(quote).success)).toBe(true);
+  });
+
+  it("binds every normalized identity to the verified provider", () => {
+    const result = normalizeObservedFootballCatalog("SABA", [record], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 500,
+      timezoneOffsetMinutes: 420, sequence: 7
+    });
+    expect(new Set(result.events.map((event) => event.provider))).toEqual(new Set(["SABA"]));
+    expect(new Set(result.markets.map((market) => market.provider))).toEqual(new Set(["SABA"]));
+    expect(new Set(result.quotes.map((quote) => quote.provider))).toEqual(new Set(["SABA"]));
   });
 
   it("converts split totals to a canonical quarter line and suspends greyed markets", () => {

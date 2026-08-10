@@ -69,6 +69,7 @@ function providerHint(label: string): string {
   const upper = label.trim().toUpperCase();
   if (upper.includes("SABA") || upper === "C-SPORTS") return "SABA";
   if (upper === "CMD" || upper === "T-SPORTS") return "CMD";
+  if (upper === "K-SPORTS") return "SBOBET";
   if (upper.includes("SBOBET")) return "SBOBET";
   if (/^APS?PORT$/u.test(upper)) return "APSPORT";
   if (upper === "BTI") return "BTI";

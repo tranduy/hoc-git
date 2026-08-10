@@ -2,6 +2,8 @@ import {
   ProviderEventSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema,
+  ProviderIdSchema,
+  type ProviderId,
   type ProviderEvent,
   type ProviderMarket,
   type ProviderQuote
@@ -10,7 +12,7 @@ import {
 export interface LiveCatalogResponse {
   readonly dataMode: "LIVE";
   readonly accountId: string;
-  readonly provider: "CMD";
+  readonly provider: ProviderId;
   readonly category: "FOOTBALL";
   readonly comparisonState: "AWAITING_SECOND_PROVIDER";
   readonly observedAtMs: number;
@@ -50,14 +52,14 @@ export class CatalogApi implements CatalogApiLike {
     const quotes = ProviderQuoteSchema.array().safeParse(record.quotes);
     if (
       record.dataMode !== "LIVE" || typeof record.accountId !== "string" || record.accountId !== accountId ||
-      record.provider !== "CMD" || record.category !== "FOOTBALL" ||
+      !ProviderIdSchema.safeParse(record.provider).success || record.provider === "FABET" || record.category !== "FOOTBALL" ||
       record.comparisonState !== "AWAITING_SECOND_PROVIDER" ||
       typeof record.observedAtMs !== "number" || !Number.isFinite(record.observedAtMs) ||
       typeof record.rejectedMarketCount !== "number" || !Number.isSafeInteger(record.rejectedMarketCount) || record.rejectedMarketCount < 0 ||
       !events.success || !markets.success || !quotes.success
     ) throw new Error("Invalid live catalog response");
     return {
-      dataMode: "LIVE", accountId, provider: "CMD", category: "FOOTBALL",
+      dataMode: "LIVE", accountId, provider: record.provider as ProviderId, category: "FOOTBALL",
       comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: record.observedAtMs,
       rejectedMarketCount: record.rejectedMarketCount,
       events: events.data, markets: markets.data, quotes: quotes.data

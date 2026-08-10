@@ -28,4 +28,10 @@ describe("CatalogApi", () => {
     const api = new CatalogApi(async () => new Response(JSON.stringify({ ...response, dataMode: "FIXTURE" }), { status: 200 }));
     await expect(api.read("account-1")).rejects.toThrow("Invalid live catalog response");
   });
+
+  it("accepts a verified supported provider instead of hard-coding CMD", async () => {
+    const saba = { ...response, provider: "SABA" };
+    const api = new CatalogApi(async () => new Response(JSON.stringify(saba), { status: 200 }));
+    await expect(api.read("account-1")).resolves.toEqual(saba);
+  });
 });
