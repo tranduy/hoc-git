@@ -31,11 +31,12 @@ export function ArbitrageAlertToast({
 
   if (visibleAlert === null) return null;
   return <aside className="arbitrage-toast" role="alert">
-    <header><strong>READY TO PREFLIGHT</strong><span>Auto closes in 10s</span></header>
+    <header><strong>GROSS TWO-WAY PREFLIGHT</strong><span>Auto closes in 10s</span></header>
     <h2>{matchLabel}</h2>
     <p>{visibleAlert.marketType} · {visibleAlert.scope}{visibleAlert.line === null ? "" : ` · Line ${visibleAlert.line}`}</p>
     <ol>{visibleAlert.legs.map((leg) => <li key={`${leg.provider}-${leg.selection}`}>
-      <b>#{leg.provider}</b> · {leg.selection} · odds {leg.decimalOdds} · stake {money(leg.stake, visibleAlert.currency)}
+      <b>{leg.role}</b> · <b>#{leg.provider}</b> · {leg.selection} · odds {leg.decimalOdds} · stake {money(leg.stake, visibleAlert.currency)}
+      <span> · Profit {money(leg.profit, visibleAlert.currency)}</span>
     </li>)}</ol>
     <p><b>Total stake {money(visibleAlert.totalStake, visibleAlert.currency)}</b> · Worst-case profit {money(visibleAlert.worstCaseProfit, visibleAlert.currency)} · ROI {(Number(visibleAlert.roi) * 100).toFixed(2)}%</p>
     <small>Provider preflight is required before placement.</small>

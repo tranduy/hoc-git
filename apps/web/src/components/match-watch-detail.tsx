@@ -18,6 +18,7 @@ import {
 import type { ProviderId } from "@tool-chenh/contracts";
 import { buildArbitrageAlert } from "../watch/arbitrage-alert.js";
 import { ArbitrageAlertToast } from "./arbitrage-alert-toast.js";
+import { buildFixedBaseStakePlan, type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
@@ -73,6 +74,7 @@ export function MatchWatchDetail({
   providerEventId,
   pollDelayMs = 1_000,
   staleAfterMs = 10_000,
+  baseStake = "100000",
   storage = window.localStorage,
   clock = systemClock
 }: {
@@ -86,6 +88,7 @@ export function MatchWatchDetail({
   readonly providerEventId: string;
   readonly pollDelayMs?: number;
   readonly staleAfterMs?: number;
+  readonly baseStake?: string;
   readonly storage?: Storage;
   readonly clock?: () => number;
 }) {
@@ -198,16 +201,18 @@ export function MatchWatchDetail({
   const estimatedStartAtMs = event?.isLive
     ? estimatedLiveStartAtMs(currentSample.observedAtMs, event.liveState)
     : null;
+  const stakePolicy: FixedBaseStakePolicy = { currency: "VND", baseStake, minStake: "30000",
+    maxStake: baseStake, stakeStep: "1000", balance: baseStake };
   const currentAlert = useMemo(() => {
     const observationAgeMs = clock() - currentSample.observedAtMs;
     if (!watching || watcherState !== "WATCHING" || currentComparison === undefined ||
       observationAgeMs < 0 || observationAgeMs > staleAfterMs) return null;
     return currentComparison.rows
-      .map((row) => buildArbitrageAlert(row, selectedProviders))
+      .map((row) => buildArbitrageAlert(row, selectedProviders, stakePolicy))
       .filter((alert) => alert !== null)
       .sort((left, right) => Number(right.roi) - Number(left.roi) ||
         Number(right.worstCaseProfit) - Number(left.worstCaseProfit))[0] ?? null;
-  }, [clock, currentComparison, currentSample.observedAtMs, selectedProviders, staleAfterMs, watcherState, watching]);
+  }, [baseStake, clock, currentComparison, currentSample.observedAtMs, selectedProviders, staleAfterMs, watcherState, watching]);
   const newestEntries = [...entries].reverse();
   const clearLog = (): void => {
     clearWatchEntries(storage, initialCatalog.provider, providerEventId);
@@ -257,8 +262,11 @@ export function MatchWatchDetail({
         <section className="watch-prices" aria-labelledby="current-prices-heading">
           <h2 id="current-prices-heading">Current markets</h2>
           {currentComparison !== undefined && effectiveBooks.some((book) => book.connected && selectedProviders.has(book.provider)) ? <div className="table-wrap comparison-table"><table>
-            <thead><tr><th>Market / line</th>{effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => <th key={book.provider}>{book.provider}<small>{book.hasExactEvent ? "exact match" : "event not found"}</small></th>)}</tr></thead>
-            <tbody>{currentComparison.rows.map((row) => <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
+            <thead><tr><th>Market / line</th>{effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => <th key={book.provider}>{book.provider}<small>{book.hasExactEvent ? "exact match" : "event not found"}</small></th>)}<th>Gross preflight</th></tr></thead>
+            <tbody>{currentComparison.rows.map((row) => {
+              const plan = buildFixedBaseStakePlan(row, selectedProviders, stakePolicy);
+              const money = (value: string): string => `${Number(value).toLocaleString("en-US")} VND`;
+              return <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
               {row.margin !== null && <b className={row.margin > 0 ? "edge-badge edge-badge--positive" : "edge-badge"}>
                 {row.margin > 0 ? `Edge +${(row.margin * 100).toFixed(2)}%` : `No edge ${(row.margin * 100).toFixed(2)}%`}</b>}</th>
               {effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => {
@@ -266,7 +274,13 @@ export function MatchWatchDetail({
                 return <td key={book.provider}>{cell === undefined ? <span className="rate-missing">{book.hasExactEvent ? "Market unavailable" : "No exact event match"}</span> : <div className="rate-cell">{cell.quotes.map((quote) => <span
                   className={row.bestBySelection[quote.selection] === book.provider ? "rate-quote rate-quote--best" : "rate-quote"}
                   key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds}</span>)}</div>}</td>;
-              })}</tr>)}</tbody></table></div> : <div className="provider-columns">
+              })}<td aria-label={`Gross preflight ${row.marketType}${row.line === null ? "" : ` line ${row.line}`}`}>
+                {plan === null ? <span className="rate-missing">No profitable two-book balance</span> : <div className="balanced-plan">
+                  <strong>PROFITABLE</strong>{plan.legs.map((leg) => <span key={leg.selection}><small>#{leg.provider} · {leg.selection} @ {leg.decimalOdds}</small>
+                    <b>{money(leg.stake)} {leg.role.toLowerCase()}</b><b>Profit {money(leg.profit)}</b></span>)}
+                  <span>Total {money(plan.totalStake)}</span><b>Worst {money(plan.worstCaseProfit)} · ROI {(Number(plan.roi) * 100).toFixed(2)}%</b>
+                </div>}</td></tr>;
+            })}</tbody></table></div> : <div className="provider-columns">
             <article className="provider-column">
               <header><strong>{initialCatalog.provider} live feed</strong><span>Read-only</span></header>
               {currentSample.markets.length === 0 ? <p>No accepted markets for this event.</p> : currentSample.markets.map((market) => {

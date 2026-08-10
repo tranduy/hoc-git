@@ -10,6 +10,9 @@ export interface WatchArbitrageLeg {
   readonly selection: string;
   readonly decimalOdds: string;
   readonly stake: string;
+  readonly payout: string;
+  readonly profit: string;
+  readonly role: "BASE" | "HEDGE";
 }
 
 export interface WatchArbitrageAlert {
@@ -42,8 +45,8 @@ export function buildArbitrageAlert(
   try {
     const plan = buildFixedBaseStakePlan(row, selectedProviders, policy);
     if (plan === null) return null;
-    const legs = plan.legs.map(({ provider, selection, decimalOdds, stake }): WatchArbitrageLeg =>
-      ({ provider, selection, decimalOdds, stake }));
+    const legs = plan.legs.map(({ provider, selection, decimalOdds, stake, payout, profit, role }): WatchArbitrageLeg =>
+      ({ provider, selection, decimalOdds, stake, payout, profit, role }));
     const worstCasePayout = Decimal.min(...plan.legs.map((leg) => new Decimal(leg.payout)));
     return {
       fingerprint: plan.fingerprint, marketType: row.marketType, scope: row.scope, line: row.line,

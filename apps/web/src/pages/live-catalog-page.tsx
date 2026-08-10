@@ -132,7 +132,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         hasExactEvent: selectedEvent.providers.includes(provider) };
     });
     return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
-      books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent}
+      baseStake={baseStake} books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent}
       onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); }}
       providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
   }

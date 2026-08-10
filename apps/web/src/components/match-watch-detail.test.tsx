@@ -145,12 +145,13 @@ describe("MatchWatchDetail", () => {
     const comparison = buildComparisonEvents([saba, sbobet])[0]!;
     render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read: vi.fn() }} comparisonCatalogs={[saba, sbobet]}
       comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined} pollDelayMs={60_000}
-      providerEventId="SABA-total-event" />);
+      providerEventId="SABA-total-event" baseStake="150000" />);
 
-    expect(screen.getByRole("alert").textContent).toMatch(/READY TO PREFLIGHT.*Alpha vs Beta/u);
-    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*100,000 VND/u);
-    expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*UNDER.*100,000 VND/u);
-    expect(screen.getByRole("alert").textContent).toMatch(/Worst-case profit 20,000 VND.*ROI 10.00%/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/GROSS TWO-WAY PREFLIGHT.*Alpha vs Beta/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*150,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*UNDER.*150,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/Worst-case profit 30,000 VND.*ROI 10.00%/u);
+    expect(screen.getByLabelText("Gross preflight FT_TOTAL line 2.5").textContent).toMatch(/150,000 VND base.*150,000 VND hedge/u);
 
     act(() => { vi.advanceTimersByTime(10_000); });
     expect(screen.queryByRole("alert")).toBeNull();

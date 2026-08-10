@@ -8,8 +8,8 @@ const alert: WatchArbitrageAlert = {
   marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5", currency: "VND",
   totalStake: "100000", worstCasePayout: "110000", worstCaseProfit: "10000", roi: "0.1",
   legs: [
-    { provider: "SABA", selection: "OVER", decimalOdds: "2.2", stake: "50000" },
-    { provider: "SBOBET", selection: "UNDER", decimalOdds: "2.2", stake: "50000" }
+    { provider: "SABA", selection: "OVER", decimalOdds: "2.2", stake: "50000", payout: "110000", profit: "10000", role: "BASE" },
+    { provider: "SBOBET", selection: "UNDER", decimalOdds: "2.2", stake: "50000", payout: "110000", profit: "10000", role: "HEDGE" }
   ]
 };
 
@@ -21,11 +21,13 @@ describe("ArbitrageAlertToast", () => {
     render(<ArbitrageAlertToast alert={alert} matchLabel="Alpha vs Beta" />);
 
     expect(screen.getByRole("alert")).toBeTruthy();
-    expect(screen.getByText("READY TO PREFLIGHT")).toBeTruthy();
+    expect(screen.getByText("GROSS TWO-WAY PREFLIGHT")).toBeTruthy();
     expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
     expect(screen.getByText(/FT_TOTAL.*Line 2.5/u)).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*2.2.*50,000 VND/u);
     expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*UNDER.*2.2.*50,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/BASE.*HEDGE/u);
+    expect(screen.getAllByText(/Profit 10,000 VND/u)).toHaveLength(2);
     expect(screen.getByRole("alert").textContent).toMatch(/Worst-case profit.*10,000 VND.*ROI 10.00%/u);
     expect(screen.getByText("Provider preflight is required before placement.")).toBeTruthy();
 
