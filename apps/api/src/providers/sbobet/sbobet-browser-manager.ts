@@ -20,10 +20,13 @@ export async function extractSbobetRecords(page: Page): Promise<readonly SbobetC
     const teams = [...node.querySelectorAll(".row-team-name")].slice(0, 2).map(text);
     const timeText = text(node.querySelector(".game-time"));
     const scoreText = text(node.querySelector(".game-score")) || null;
-    const columns = [...node.querySelectorAll(".match-item .un-promotion")];
-    const market = (column: Element | undefined, marketType: "FT_AH" | "FT_TOTAL" | "FT_1X2") => {
+    const columns = [...node.querySelectorAll(".match-item .promotion-market, .match-item .un-promotion")];
+    const market = (column: Element | undefined) => {
       if (column === undefined) return null;
       const odds = [...column.querySelectorAll(".odd-item")];
+      const rateLabels = [...column.querySelectorAll(".odd-row .rate-asian")].map(text);
+      const marketType: "FT_AH" | "FT_TOTAL" | "FT_1X2" = odds.length >= 3 ? "FT_1X2"
+        : rateLabels.some((label) => /^[ou]$/iu.test(label)) ? "FT_TOTAL" : "FT_AH";
       const expected = marketType === "FT_TOTAL" ? ["OVER", "UNDER"] : marketType === "FT_AH"
         ? ["HOME", "AWAY"] : ["HOME", "DRAW", "AWAY"];
       const selections = odds.slice(0, expected.length).map((odd, index) => {
@@ -31,25 +34,23 @@ export async function extractSbobetRecords(page: Page): Promise<readonly SbobetC
         const suffix = selectionId.slice(-1).toLowerCase();
         const selection = marketType === "FT_TOTAL" ? (suffix === "h" ? "OVER" : suffix === "a" ? "UNDER" : expected[index]!)
           : suffix === "h" ? "HOME" : suffix === "d" ? "DRAW" : suffix === "a" ? "AWAY" : expected[index]!;
-        const clone = odd.cloneNode(true) as Element;
-        clone.querySelectorAll(".odd-val,.odd-lock").forEach((element) => element.remove());
+        const row = odd.closest(".odd-row");
         const lineText = marketType === "FT_AH"
-          ? text(clone).match(/[+-]?\d+(?:\.\d+)?(?:\s*[\/-]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null : undefined;
+          ? text(row?.querySelector(".rate-asian") ?? null).match(/[+-]?\d+(?:\.\d+)?(?:\s*[\/-]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null : undefined;
         return { selectionId, selection, priceText: text(odd.querySelector(".odd-val")),
         ...(marketType === "FT_AH" ? { lineText } : {}),
         locked: odd.querySelector(".odd-lock") !== null || text(odd.querySelector(".odd-val")) === ""
       }; });
       let lineText: string | null = null;
-      if (marketType === "FT_TOTAL" && odds[0] !== undefined) {
-        const clone = odds[0].cloneNode(true) as Element;
-        clone.querySelectorAll(".odd-val,.odd-lock").forEach((element) => element.remove());
-        lineText = text(clone).match(/\d+(?:\.\d+)?(?:\s*[-/]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null;
+      if (marketType === "FT_TOTAL") {
+        lineText = rateLabels.map((label) => label.match(/\d+(?:\.\d+)?(?:\s*[-/]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null)
+          .find((value) => value !== null) ?? null;
       } else if (marketType === "FT_AH") {
         lineText = selections.find((selection) => "lineText" in selection && selection.lineText !== null)?.lineText ?? null;
       }
       return { marketId: `${id}:${marketType}:${lineText ?? ""}`, marketType, lineText, selections };
     };
-    const markets = [market(columns[0], "FT_AH"), market(columns[1], "FT_TOTAL"), market(columns[2], "FT_1X2")]
+    const markets = columns.map((column) => market(column))
       .filter((value) => value !== null && value.selections.length > 0);
     return { eventId: id, leagueName: league, timeText, scoreText, teamNames: teams, markets };
   })) as Promise<readonly SbobetCatalogInputRecord[]>;

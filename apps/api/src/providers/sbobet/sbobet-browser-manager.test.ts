@@ -15,11 +15,17 @@ describe("extractSbobetRecords", () => {
           <span class="row-team-name">IK Sirius</span><span class="row-team-name">Brommapojkarna</span>
           <span class="game-time">1H 41'</span><span class="game-score">2 - 2</span>
           <div class="match-item">
-            <div class="un-promotion">
-              <div class="odd-item" id="odd-item-5388803h"><span>0.5</span><span class="odd-val">0.79</span></div>
-              <div class="odd-item" id="odd-item-5388803a"><span class="odd-val">-0.87</span></div>
+            <div class="promotion-market">
+              <div class="odd-row"><span class="rate-asian">0.5</span><div class="odd-item" id="odd-item-5388803005000050h"><span class="odd-val">0.79</span></div></div>
+              <div class="odd-row"><span class="rate-asian"></span><div class="odd-item" id="odd-item-5388803005000050a"><span class="odd-val">-0.87</span></div></div>
             </div>
-            <div class="un-promotion"></div><div class="un-promotion"></div>
+            <div class="promotion-market">
+              <div class="odd-row"><span class="rate-asian">2.5</span><div class="odd-item" id="odd-item-total-h"><span class="odd-val">0.80</span></div></div>
+              <div class="odd-row"><span class="rate-asian">u</span><div class="odd-item" id="odd-item-total-a"><span class="odd-val">-0.90</span></div></div>
+            </div>
+            <div class="un-promotion"><div class="odd-item" id="odd-item-result-h"><span class="odd-val">2.1</span></div>
+              <div class="odd-item" id="odd-item-result-d"><span class="odd-val">3.2</span></div>
+              <div class="odd-item" id="odd-item-result-a"><span class="odd-val">3.4</span></div></div>
           </div>
         </div>
       </section>`);
@@ -29,6 +35,9 @@ describe("extractSbobetRecords", () => {
     expect(result[0]?.markets[0]?.selections).toEqual([
       expect.objectContaining({ selection: "HOME", priceText: "0.79", lineText: "0.5" }),
       expect.objectContaining({ selection: "AWAY", priceText: "-0.87", lineText: null })
+    ]);
+    expect(result[0]?.markets.map((market) => [market.marketType, market.lineText])).toEqual([
+      ["FT_AH", "0.5"], ["FT_TOTAL", "2.5"], ["FT_1X2", null]
     ]);
     await page.close();
   });
