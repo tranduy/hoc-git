@@ -59,6 +59,8 @@ export class LagSignalTracker {
   #previous = new Map<string, QuoteSample>();
   #active = new Map<string, LagSignal>();
 
+  constructor(private readonly maxQuoteAgeMs = 5_000) {}
+
   update(events: readonly ComparisonEvent[], selectedProviders: ReadonlySet<ProviderId>, policy: FixedBaseStakePolicy,
     observedAtMs: number): readonly LagSignal[] {
     const current = new Map<string, QuoteSample>();
@@ -89,13 +91,17 @@ export class LagSignalTracker {
           this.#active.delete(signalKey);
           continue;
         }
+        const ageMs = planQuoteAge(event, row, plan, observedAtMs);
+        if (!Number.isFinite(ageMs) || ageMs > this.maxQuoteAgeMs) {
+          this.#active.delete(signalKey);
+          continue;
+        }
         const existing = this.#active.get(signalKey);
         if (movements.length > 0) {
           this.#active.set(signalKey, { key: signalKey, event, row, plan, movements,
-            triggeredAtMs: observedAtMs, quoteAgeMs: planQuoteAge(event, row, plan, observedAtMs) });
+            triggeredAtMs: observedAtMs, quoteAgeMs: ageMs });
         } else if (existing !== undefined) {
-          this.#active.set(signalKey, { ...existing, event, row, plan,
-            quoteAgeMs: planQuoteAge(event, row, plan, observedAtMs) });
+          this.#active.set(signalKey, { ...existing, event, row, plan, quoteAgeMs: ageMs });
         }
       }
     }

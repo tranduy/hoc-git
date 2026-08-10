@@ -82,3 +82,13 @@ For each exact two-provider row, the lower decimal odds receives the configured 
 The list and watched-match detail show both providers, selections, decimal odds, `BASE`/`HEDGE` stakes, both outcome profits, worst-case profit, and ROI. A ten-second `GROSS TWO-WAY PREFLIGHT` toast appears only when both rounded profits are positive.
 
 No plan or toast is shown if the outcome count is not two, both best outcomes come from one provider, a selected provider/event/market is missing, a quote or market is not `OPEN`, odds are invalid, stake constraints fail, polling is stale, or either rounded profit is non-positive. These are gross calculations because this catalog path does not yet contain verified bookmaker fees or account-specific placement limits. No wager is submitted.
+
+## Immediate cross-book lag monitor
+
+The catalog comparison is event-driven; it does not wait for a five-minute window. Selected catalog-capable accounts are read sequentially every second, with no overlapping reads. The first accepted snapshot establishes a baseline. Every later accepted price change immediately rebuilds the exact two-outcome row across the selected providers.
+
+For example, if one provider moves from `2.20 / 1.70` to `1.70 / 2.20` while another provider still exposes the opposing `2.20 / 1.70`, the monitor immediately evaluates the two opposing `2.20` selections. It publishes a signal only when the event identity, market type, line, scope, outcome domain, and open state match exactly; both chosen legs come from different providers; and the rounded stake plan remains profitable for either outcome.
+
+The five-second maximum quote age is a fail-closed freshness limit, not an observation window. A signal disappears immediately when either chosen leg becomes stale, suspended, unavailable, or no longer profitable. The screen keeps at most five signals, ranks them by realized ROI and worst-case profit, and marks the strongest one as **Best live lag signal**. A new signal also raises a ten-second **PRICE GAP DETECTED** toast. The list is intentionally limited to events that already have an exact two-provider, two-outcome comparison.
+
+This monitor is still read-only. It calculates and displays the candidate legs and stakes but never submits a wager.

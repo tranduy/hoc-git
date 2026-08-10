@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { AccountStatus, ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountApiLike } from "../api/accounts.js";
@@ -50,7 +50,47 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
-  it("persists one global base stake and shows the balanced two-way plan", async () => {
+  it("shows the immediate best lag signal after one provider flips its two prices", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
+    const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
+    const providerCatalog = (providerAccount: AccountStatus, over: string, under: string,
+      observedAtMs: number): LiveCatalogResponse => ({
+      ...catalog, observedAtMs, accountId: providerAccount.id, provider: providerAccount.provider,
+      events: [{ ...event, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event` }],
+      markets: [{ ...market, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event`,
+        providerMarketId: `${providerAccount.provider}-market` }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: providerAccount.provider,
+        providerEventId: `${providerAccount.provider}-event`, providerMarketId: `${providerAccount.provider}-market`,
+        providerSelectionId: `${providerAccount.provider}-${quote.selection}`, sourceTimestampMs: observedAtMs,
+        rawOdds: quote.selection === "OVER" ? over : under }))
+    });
+    let sabaReads = 0;
+    const api: CatalogApiLike = { read: async (id) => {
+      if (id === sabaAccount.id) {
+        sabaReads += 1;
+        return sabaReads === 1 ? providerCatalog(sabaAccount, "2.20", "1.70", 1_000)
+          : providerCatalog(sabaAccount, "1.70", "2.20", 1_100);
+      }
+      return providerCatalog(sbobetAccount, "2.20", "1.70", sabaReads === 1 ? 1_000 : 1_100);
+    } };
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
+
+    expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
+    expect(await screen.findByText(/Waiting for a provider price change/u)).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+
+    expect(screen.getByText("Best live lag signal")).toBeTruthy();
+    expect(screen.getByLabelText("Movement #SABA UNDER 1.7 to 2.2")).toBeTruthy();
+    expect(screen.getByLabelText("Leg #SBOBET OVER at 2.2")).toBeTruthy();
+    expect(screen.getAllByText(/Worst profit 20,000 VND/u)).toHaveLength(2);
+    expect(screen.getByText("READ-ONLY")).toBeTruthy();
+    expect(screen.getByText("PRICE GAP DETECTED")).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
+  });
+
+  it("persists one global base stake while waiting for a real price change", async () => {
     const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
     const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
     const providerCatalog = (providerAccount: AccountStatus, over: string, under: string): LiveCatalogResponse => ({
@@ -70,9 +110,7 @@ describe("LiveCatalogPage", () => {
 
     const input = await screen.findByLabelText("Base stake for every match (VND)") as HTMLInputElement;
     expect(input.value).toBe("100000");
-    expect(screen.getByText("100,000 VND base")).toBeTruthy();
-    expect(screen.getByText("72,000 VND hedge")).toBeTruthy();
-    expect(screen.getAllByText("Profit 8,000 VND")).toHaveLength(2);
+    expect(await screen.findByText(/Waiting for a provider price change/u)).toBeTruthy();
     fireEvent.change(input, { target: { value: "150000" } });
     expect(window.localStorage.getItem(WATCH_BASE_STAKE_STORAGE_KEY)).toBe("150000");
   });
@@ -83,6 +121,7 @@ describe("LiveCatalogPage", () => {
       liveState: { period: "1H", scoreHome: 0, scoreAway: 0, clockMs: 660_000 } };
     const liveCatalog: LiveCatalogResponse = { ...catalog, observedAtMs,
       events: [liveEvent], quotes: quotes.map((quote) => ({ ...quote, isLive: true })) };
+    window.history.replaceState({}, "", "/live-catalog?account=account-1&event=event-1");
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={{ read: async () => liveCatalog }} />);
 
     expect(await screen.findByText("LIVE · 1H · 11:00 elapsed")).toBeTruthy();
@@ -120,24 +159,21 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
   });
 
-  it("automatically loads real matches when a catalog-capable account becomes available", async () => {
+  it("hides single-book matches from the priority catalog", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
-    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("OVER 1.8")).toBeTruthy();
+    expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+    expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
   });
 
-  it("shows real CMD matches separately from verified cross-provider comparisons", async () => {
+  it("does not expose a single CMD price row as a comparison", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "Load live catalog" }));
 
-    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("Premier Test")).toBeTruthy();
-    expect(screen.getByText("OVER 1.8")).toBeTruthy();
+    expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
     expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
-    expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Back to matches" })).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
     expect(screen.queryByRole("button", { name: /bet|wager|place/iu })).toBeNull();
   });
@@ -155,16 +191,17 @@ describe("LiveCatalogPage", () => {
     const sbobet = { ...catalog, accountId: sbobetAccount.id, provider: "SBOBET" as const,
       events: [otherEvent], markets: [], quotes: [] };
     const api: CatalogApiLike = { read: async (id) => id === sabaAccount.id ? saba : sbobet };
+    window.history.replaceState({}, "", "/live-catalog?account=saba-account&event=saba-event");
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "View & watch Alpha vs Beta" }));
+    expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
 
     expect(screen.getByLabelText("SABA available for this match")).toBeTruthy();
     expect(screen.getByLabelText("SBOBET no exact event match")).toBeTruthy();
     expect((screen.getByLabelText("CMD not connected") as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText("APSPORT not connected") as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText("BTI not connected") as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByText("No exact event match", { selector: "td *" })).toBeTruthy();
+    expect(screen.getByText(/Cross-book comparison unavailable.*SBOBET/u)).toBeTruthy();
   });
 
   it("states honestly that LoL is not connected yet", async () => {
@@ -187,15 +224,16 @@ describe("LiveCatalogPage", () => {
   it("retries the same Football account after leaving and returning to the category", async () => {
     const read = vi.fn<CatalogApiLike["read"]>()
       .mockRejectedValueOnce(new Error("stale provider page"))
-      .mockResolvedValueOnce(catalog);
+      .mockResolvedValue(catalog);
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={{ read }} />);
     expect(await screen.findByText(/Live catalog is unavailable/u)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "LoL" }));
     fireEvent.click(screen.getByRole("button", { name: "Football" }));
 
-    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+    expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("reopens a selected match detail from its safe URL identity", async () => {

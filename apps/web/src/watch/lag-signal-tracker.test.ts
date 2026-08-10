@@ -11,7 +11,8 @@ const policy: FixedBaseStakePolicy = {
 const providers = new Set<ProviderId>(["SABA", "SBOBET"]);
 
 function catalog(provider: "SABA" | "SBOBET", odds: readonly [string, string], observedAtMs: number,
-  statuses: readonly ["OPEN" | "SUSPENDED", "OPEN" | "SUSPENDED"] = ["OPEN", "OPEN"]): LiveCatalogResponse {
+  statuses: readonly ["OPEN" | "SUSPENDED", "OPEN" | "SUSPENDED"] = ["OPEN", "OPEN"],
+  sourceTimestampMs = observedAtMs): LiveCatalogResponse {
   const id = `${provider.toLowerCase()}-event`;
   const event: ProviderEvent = { provider, category: "FOOTBALL", providerEventId: id, competition: "Eliteserien",
     seasonStage: null, startAtUtcMs: 2_000_000, participantA: "Alpha", participantB: "Beta", eventScope: "REGULATION",
@@ -24,7 +25,7 @@ function catalog(provider: "SABA" | "SBOBET", odds: readonly [string, string], o
     provider, category: "FOOTBALL", providerEventId: id, providerMarketId: market.providerMarketId,
     providerSelectionId: `${id}-${selection}`, marketType: "FT_TOTAL", scope: "FULL_TIME", selection, line: "2.5",
     rawOdds: odds[index]!, rawFormat: "DECIMAL", status: statuses[index]!, isLive: false,
-    sourceTimestampMs: observedAtMs, receivedMonotonicMs: observedAtMs, sequence: observedAtMs
+    sourceTimestampMs, receivedMonotonicMs: observedAtMs, sequence: observedAtMs
   }));
   return { dataMode: "LIVE", accountId: `${provider}-account`, provider, category: "FOOTBALL",
     comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs, rejectedMarketCount: 0, events: [event], markets: [market], quotes };
@@ -72,5 +73,14 @@ describe("LagSignalTracker", () => {
     const tracker = new LagSignalTracker();
     expect(tracker.update(snapshot(["1.80", "1.80"], ["1.80", "1.80"], 1_000), providers, policy, 1_000)).toEqual([]);
     expect(tracker.update(snapshot(["1.70", "1.90"], ["1.90", "1.70"], 1_100), providers, policy, 1_100)).toEqual([]);
+  });
+
+  it("rejects an otherwise profitable flip when either selected quote is stale", () => {
+    const tracker = new LagSignalTracker(5_000);
+    tracker.update(snapshot(["2.20", "1.70"], ["2.20", "1.70"], 10_000), providers, policy, 10_000);
+    const staleSaba = catalog("SABA", ["1.70", "2.20"], 20_000, ["OPEN", "OPEN"], 10_000);
+    const freshSbobet = catalog("SBOBET", ["2.20", "1.70"], 20_000);
+
+    expect(tracker.update(buildComparisonEvents([staleSaba, freshSbobet]), providers, policy, 20_000)).toEqual([]);
   });
 });

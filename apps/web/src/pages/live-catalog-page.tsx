@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
@@ -6,6 +6,7 @@ import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatM
   type ComparisonEvent } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
 import { buildFixedBaseStakePlan, type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
+import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
 import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
 
 const defaultAccountApi = new AccountApi();
@@ -60,6 +61,54 @@ function ComparisonTable({ item, baseStake }: { readonly item: ComparisonEvent; 
   </tbody></table></div>;
 }
 
+function SignalCard({ signal, strongest = false }: { readonly signal: LagSignal; readonly strongest?: boolean }) {
+  const label = `${signal.event.event.participantA} vs ${signal.event.event.participantB}`;
+  return <article className={strongest ? "lag-signal lag-signal--strongest" : "lag-signal"}>
+    <header><div>{strongest && <p className="eyebrow">Best live lag signal</p>}<h2>{label}</h2>
+      <p>{signal.row.marketType}{signal.row.line === null ? "" : ` · Line ${signal.row.line}`}</p></div>
+      <div className="lag-signal__score"><b>ROI {(Number(signal.plan.roi) * 100).toFixed(2)}%</b>
+        <span>Worst profit {money(signal.plan.worstCaseProfit)}</span><small>Quote age {signal.quoteAgeMs} ms</small></div></header>
+    <div className="lag-signal__movement">{signal.movements.map((movement) => <span
+      aria-label={`Movement #${movement.provider} ${movement.selection} ${movement.previousDecimal} to ${movement.currentDecimal}`}
+      key={`${movement.provider}-${movement.selection}`}><b>#{movement.provider} · {movement.selection}</b>
+      {movement.previousDecimal} → {movement.currentDecimal}</span>)}</div>
+    <div className="lag-signal__legs">{signal.plan.legs.map((leg) => <div
+      aria-label={`Leg #${leg.provider} ${leg.selection} at ${leg.decimalOdds}`} key={`${leg.provider}-${leg.selection}`}>
+      <small>{leg.role}</small><b>#{leg.provider} · {leg.selection} @ {leg.decimalOdds}</b>
+      <strong>Stake {money(leg.stake)}</strong><span>Profit if wins {money(leg.profit)}</span></div>)}</div>
+    <footer><b>Total stake {money(signal.plan.totalStake)}</b><span>Both prices OPEN · exact two-outcome match</span>
+      <strong>READ-ONLY</strong></footer>
+  </article>;
+}
+
+function LagSignalPanel({ signals }: { readonly signals: readonly LagSignal[] }) {
+  if (signals.length === 0) return <section className="lag-monitor lag-monitor--waiting" aria-live="polite">
+    <h2>Monitoring exact two-book prices</h2><p>Waiting for a provider price change that creates profit on both outcomes.</p>
+  </section>;
+  return <section className="lag-monitor" aria-label="Live lag signals" aria-live="polite">
+    <SignalCard signal={signals[0]!} strongest />
+    {signals.length > 1 && <div className="lag-signal-list"><h2>Other live signals</h2>
+      {signals.slice(1, 5).map((signal) => <SignalCard key={signal.key} signal={signal} />)}</div>}
+  </section>;
+}
+
+function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
+  const [visible, setVisible] = useState<LagSignal | null>(null);
+  useEffect(() => {
+    if (signal === null) { setVisible(null); return; }
+    setVisible(signal);
+    const timer = window.setTimeout(() => setVisible(null), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [signal?.key, signal?.triggeredAtMs]);
+  if (visible === null) return null;
+  return <aside className="arbitrage-toast lag-alert-toast" aria-live="assertive">
+    <header><strong>PRICE GAP DETECTED</strong><span>10-second alert</span></header>
+    <h2>{visible.event.event.participantA} vs {visible.event.event.participantB}</h2>
+    <p>{visible.row.marketType}{visible.row.line === null ? "" : ` · Line ${visible.row.line}`} · ROI {(Number(visible.plan.roi) * 100).toFixed(2)}%</p>
+    <p>Worst profit {money(visible.plan.worstCaseProfit)} · verify both legs before execution</p>
+  </aside>;
+}
+
 export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
@@ -68,6 +117,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [category, setCategory] = useState<"FOOTBALL" | "LOL">("FOOTBALL");
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
+  const [signals, setSignals] = useState<readonly LagSignal[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -75,21 +125,35 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [baseStake, setBaseStake] = useState(() => loadBaseStake(window.localStorage));
   const [baseStakeInput, setBaseStakeInput] = useState(baseStake);
   const [stakeError, setStakeError] = useState<string | null>(null);
+  const baseStakeRef = useRef(baseStake);
+  baseStakeRef.current = baseStake;
+  const signalTracker = useRef(new LagSignalTracker());
+  const refreshInFlight = useRef(false);
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event") });
   const autoLoaded = useRef(false);
 
-  const loadIds = async (ids: readonly string[]): Promise<void> => {
-    if (ids.length === 0) return;
-    setBusy(true); setMessage(null);
-    const results = await Promise.allSettled(ids.map(async (id) => catalogApi.read(id)));
-    const accepted = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-    setCatalogs(accepted);
-    const failed = results.length - accepted.length;
-    if (accepted.length === 0) setMessage("Live catalog is unavailable. No selected provider returned a verified catalog.");
-    else if (failed > 0) setMessage(`${failed} selected provider(s) unavailable; available books are still shown.`);
-    setBusy(false);
-  };
+  const loadIds = useCallback(async (ids: readonly string[], foreground = false): Promise<void> => {
+    if (ids.length === 0 || refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    if (foreground) setBusy(true);
+    try {
+      const results = await Promise.allSettled(ids.map(async (id) => catalogApi.read(id)));
+      const accepted = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      setCatalogs(accepted);
+      const nextEvents = buildComparisonEvents(accepted);
+      const providers = new Set<ProviderId>(accepted.map((catalog) => catalog.provider));
+      const observedAtMs = accepted.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
+      setSignals(signalTracker.current.update(nextEvents, providers, stakePolicy(baseStakeRef.current), observedAtMs));
+      const failed = results.length - accepted.length;
+      if (accepted.length === 0) setMessage("Live catalog is unavailable. No selected provider returned a verified catalog.");
+      else if (failed > 0) setMessage(`${failed} selected provider(s) unavailable; available books are still shown.`);
+      else setMessage(null);
+    } finally {
+      refreshInFlight.current = false;
+      if (foreground) setBusy(false);
+    }
+  }, [catalogApi]);
 
   useEffect(() => {
     void accountApi.list().then((items) => {
@@ -98,10 +162,16 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       setAccounts(available); setSelectedIds(initial);
       if (!autoLoaded.current && available.length > 0) {
         autoLoaded.current = true;
-        void loadIds([...initial]);
+        void loadIds([...initial], true);
       }
     }).catch(() => setMessage("Provider accounts are unavailable."));
-  }, [accountApi]);
+  }, [accountApi, loadIds]);
+
+  useEffect(() => {
+    if (category !== "FOOTBALL" || selectedIds.size === 0) return;
+    const timer = window.setInterval(() => void loadIds([...selectedIds]), 1_000);
+    return () => window.clearInterval(timer);
+  }, [category, loadIds, selectedIds]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
@@ -109,12 +179,12 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, []);
 
   const events = useMemo(() => buildComparisonEvents(catalogs), [catalogs]);
-  const displayEvents = useMemo(() => [...events].sort((left, right) => {
+  const displayEvents = useMemo(() => events.filter((item) => item.providers.length >= 2 && item.rows.length > 0).sort((left, right) => {
     const edge = (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY);
     if (edge !== 0) return edge;
     if (left.event.isLive !== right.event.isLive) return left.event.isLive ? 1 : -1;
     return left.event.startAtUtcMs - right.event.startAtUtcMs;
-  }), [events]);
+  }).slice(0, 10), [events]);
   useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
     const match = events.find((item) => Object.values(item.providerEventIds).includes(requested.current.event!));
@@ -141,8 +211,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
   });
   const changeCategory = (next: "FOOTBALL" | "LOL"): void => {
-    setCategory(next); setCatalogs([]); setMessage(null); setSelectedKey(null);
-    if (next === "FOOTBALL") void loadIds([...selectedIds]);
+    setCategory(next); setCatalogs([]); setSignals([]); setMessage(null); setSelectedKey(null);
+    signalTracker.current = new LagSignalTracker();
+    if (next === "FOOTBALL") void loadIds([...selectedIds], true);
   };
   const watch = (item: ComparisonEvent): void => {
     const primary = item.catalogs[0]!;
@@ -152,8 +223,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   };
 
   return <>
-    <header className="page-header"><p className="eyebrow">Verified provider comparison</p><h1>Live Catalog</h1>
-      <p>Select the books to compare. Every row is the same mapped market and line.</p></header>
+    <header className="page-header"><p className="eyebrow">Immediate two-book lag monitor</p><h1>Live Price Gaps</h1>
+      <p>Only exact two-outcome markets shared by at least two selected books can produce a signal.</p></header>
     <section className="catalog-toolbar" aria-label="Catalog controls">
       <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
         onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
@@ -165,13 +236,15 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           if (saveBaseStake(window.localStorage, value)) { setBaseStake(value); setStakeError(null); }
           else setStakeError("Use a whole VND amount of at least 30,000 in 1,000 VND steps.");
         }} />{stakeError === null ? <small>Applied to the lower-odds leg.</small> : <small role="alert">{stakeError}</small>}</label>
-      <button aria-label="Load live catalog" disabled={busy || selectedIds.size === 0 || category !== "FOOTBALL"} onClick={() => void loadIds([...selectedIds])} type="button">
+      <button aria-label="Load live catalog" disabled={busy || selectedIds.size === 0 || category !== "FOOTBALL"} onClick={() => void loadIds([...selectedIds], true)} type="button">
         {busy ? "Loading…" : "Compare selected books"}</button>
     </section>
     {category === "LOL" && <p className="stale-warning">No verified live LoL adapter is connected yet.</p>}
     {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}
     {category === "FOOTBALL" && catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
       <span>{catalogs.length} connected provider(s)</span><span>{events.filter((item) => item.providers.length > 1).length} cross-book match(es)</span></div>}
+    {category === "FOOTBALL" && catalogs.length > 0 && <LagSignalPanel signals={signals} />}
+    <LagSignalToast signal={category === "FOOTBALL" ? signals[0] ?? null : null} />
     <div className="catalog-event-list">{displayEvents.map((item) => {
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
       const observedAtMs = item.catalogs.find((catalog) => catalog.provider === item.event.provider)?.observedAtMs ??
@@ -180,13 +253,14 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       return <article className="catalog-event" key={item.key}><header><div><span>{item.event.competition}</span><h2>{label}</h2>
         <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
           {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
-        {item.bestMargin !== null && item.bestMargin > 0 && <strong className="event-edge">Best edge +{(item.bestMargin * 100).toFixed(2)}%</strong>}</div>
+        <small>{item.rows.length} exact two-book market(s) monitored</small></div>
         <div className="catalog-event-actions"><strong>{item.event.isLive ? formatMatchClock(item.event.liveState) : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
           {item.event.isLive ? <><small>Observed {new Date(observedAtMs).toLocaleString()}</small>
             {estimatedStartAtMs !== null && <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}</>
             : <small>Scheduled {new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
           <button aria-label={`View & watch ${label}`} onClick={() => watch(item)} type="button">View & compare</button></div></header>
-        {item.rows.length === 0 ? <p>No supported two-way market in this provider row.</p> : <ComparisonTable item={item} baseStake={baseStake} />}</article>;
+        <details className="catalog-market-details"><summary>Show exact market rates</summary>
+          <ComparisonTable item={item} baseStake={baseStake} /></details></article>;
     })}</div>
   </>;
 }
