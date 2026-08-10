@@ -70,3 +70,15 @@ node scripts/smoke-watch-match.mjs --duration-ms 120000 --poll-ms 1000
 ```
 
 The command chooses only an accepted event returned by the active provider account, prefers a live event, prints safe JSON lines for real transitions, and reports the true sample/change count even when no odds move during the observation window.
+
+## Two-way gross stake preflight
+
+The Football catalog intentionally excludes `FT_1X2` and every market that does not have exactly two canonical outcomes. The current verified two-way feed is `FT_TOTAL` (`OVER`/`UNDER`) at one exact line and settlement profile.
+
+Set **Base stake for every match (VND)** once in the catalog toolbar. The default is `100000`; valid values are at least `30000` and use `1000` VND steps. This non-secret preference is retained in browser storage across reloads.
+
+For each exact two-provider row, the lower decimal odds receives the configured base stake. The other stake is calculated as `base stake × lower odds ÷ higher odds`, then the adjacent valid `1000` VND steps are evaluated. For example, odds `1.8` and `2.5` with a `100000` base produce a `72000` hedge, `172000` total, and `8000` gross profit for either outcome.
+
+The list and watched-match detail show both providers, selections, decimal odds, `BASE`/`HEDGE` stakes, both outcome profits, worst-case profit, and ROI. A ten-second `GROSS TWO-WAY PREFLIGHT` toast appears only when both rounded profits are positive.
+
+No plan or toast is shown if the outcome count is not two, both best outcomes come from one provider, a selected provider/event/market is missing, a quote or market is not `OPEN`, odds are invalid, stake constraints fail, polling is stale, or either rounded profit is non-positive. These are gross calculations because this catalog path does not yet contain verified bookmaker fees or account-specific placement limits. No wager is submitted.
