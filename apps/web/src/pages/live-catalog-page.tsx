@@ -179,12 +179,15 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, []);
 
   const events = useMemo(() => buildComparisonEvents(catalogs), [catalogs]);
-  const displayEvents = useMemo(() => events.filter((item) => item.providers.length >= 2 && item.rows.length > 0).sort((left, right) => {
+  const displayEvents = useMemo(() => [...events].sort((left, right) => {
+    const comparisonPriority = Number(right.providers.length >= 2 && right.rows.length > 0) -
+      Number(left.providers.length >= 2 && left.rows.length > 0);
+    if (comparisonPriority !== 0) return comparisonPriority;
     const edge = (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY);
     if (edge !== 0) return edge;
     if (left.event.isLive !== right.event.isLive) return left.event.isLive ? 1 : -1;
     return left.event.startAtUtcMs - right.event.startAtUtcMs;
-  }).slice(0, 10), [events]);
+  }), [events]);
   useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
     const match = events.find((item) => Object.values(item.providerEventIds).includes(requested.current.event!));
@@ -250,17 +253,18 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const observedAtMs = item.catalogs.find((catalog) => catalog.provider === item.event.provider)?.observedAtMs ??
         item.catalogs[0]!.observedAtMs;
       const estimatedStartAtMs = estimatedLiveStartAtMs(observedAtMs, item.event.liveState);
+      const comparisonCount = item.rows.length;
       return <article className="catalog-event" key={item.key}><header><div><span>{item.event.competition}</span><h2>{label}</h2>
         <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
           {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
-        <small>{item.rows.length} exact two-book market(s) monitored</small></div>
+        <small>{comparisonCount > 0 ? `${comparisonCount} exact two-book market(s) monitored` : "No exact second-book match yet"}</small></div>
         <div className="catalog-event-actions"><strong>{item.event.isLive ? formatMatchClock(item.event.liveState) : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
           {item.event.isLive ? <><small>Observed {new Date(observedAtMs).toLocaleString()}</small>
             {estimatedStartAtMs !== null && <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}</>
             : <small>Scheduled {new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
           <button aria-label={`View & watch ${label}`} onClick={() => watch(item)} type="button">View & compare</button></div></header>
-        <details className="catalog-market-details"><summary>Show exact market rates</summary>
-          <ComparisonTable item={item} baseStake={baseStake} /></details></article>;
+        {comparisonCount > 0 && <details className="catalog-market-details"><summary>Show exact market rates</summary>
+          <ComparisonTable item={item} baseStake={baseStake} /></details>}</article>;
     })}</div>
   </>;
 }

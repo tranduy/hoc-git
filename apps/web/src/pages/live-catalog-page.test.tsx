@@ -159,11 +159,13 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
   });
 
-  it("hides single-book matches from the priority catalog", async () => {
+  it("keeps single-book matches visible while clearly withholding comparison signals", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getAllByText("#CMD").length).toBeGreaterThan(1);
+    expect(screen.getByText("No exact second-book match yet")).toBeTruthy();
     expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
   });
 
@@ -172,10 +174,11 @@ describe("LiveCatalogPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Load live catalog" }));
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("No exact second-book match yet")).toBeTruthy();
     expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
-    expect(screen.queryByRole("button", { name: /bet|wager|place/iu })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^(bet|wager|place bet)$/iu })).toBeNull();
   });
 
   it("keeps every book visible in match detail and explains missing comparisons", async () => {
@@ -232,7 +235,8 @@ describe("LiveCatalogPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Football" }));
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("No exact second-book match yet")).toBeTruthy();
     expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
