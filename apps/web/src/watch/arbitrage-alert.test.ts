@@ -43,33 +43,30 @@ const selected = new Set<ProviderId>(providers);
 describe("watched arbitrage alert planning", () => {
   it("builds an exact rounded two-outcome plan from two open books", () => {
     const alert = buildArbitrageAlert(row("FT_TOTAL", [
-      cell("SABA", "FT_TOTAL", { OVER: "2.20", UNDER: "1.70" }),
-      cell("SBOBET", "FT_TOTAL", { OVER: "1.75", UNDER: "2.20" })
+      cell("SABA", "FT_TOTAL", { OVER: "1.80", UNDER: "1.50" }),
+      cell("SBOBET", "FT_TOTAL", { OVER: "1.70", UNDER: "2.50" })
     ]), selected, DEFAULT_WATCH_STAKE_POLICY);
 
     expect(alert).toMatchObject({
       marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5", currency: "VND",
-      totalStake: "100000", worstCasePayout: "110000", worstCaseProfit: "10000", roi: "0.1",
+      totalStake: "172000", worstCasePayout: "180000", worstCaseProfit: "8000",
+      roi: "0.04651162790697674418604651162790697674419",
       legs: [
-        { provider: "SABA", selection: "OVER", decimalOdds: "2.2", stake: "50000" },
-        { provider: "SBOBET", selection: "UNDER", decimalOdds: "2.2", stake: "50000" }
+        { provider: "SABA", selection: "OVER", decimalOdds: "1.8", stake: "100000" },
+        { provider: "SBOBET", selection: "UNDER", decimalOdds: "2.5", stake: "72000" }
       ]
     });
-    expect(alert?.fingerprint).toContain("SABA|OVER|2.2|50000");
-    expect(alert?.fingerprint).toContain("SBOBET|UNDER|2.2|50000");
+    expect(alert?.fingerprint).toContain("SABA|OVER|1.8|100000");
+    expect(alert?.fingerprint).toContain("SBOBET|UNDER|2.5|72000");
   });
 
-  it("supports a complete three-outcome plan while requiring two providers", () => {
+  it("rejects a complete three-outcome plan", () => {
     const alert = buildArbitrageAlert(row("FT_1X2", [
       cell("SABA", "FT_1X2", { HOME: "4.00", DRAW: "4.00", AWAY: "2.00" }),
       cell("SBOBET", "FT_1X2", { HOME: "3.00", DRAW: "3.00", AWAY: "4.00" })
     ]), selected, DEFAULT_WATCH_STAKE_POLICY);
 
-    expect(alert?.legs.map((leg) => [leg.provider, leg.selection, leg.stake])).toEqual([
-      ["SABA", "HOME", "33000"], ["SABA", "DRAW", "33000"], ["SBOBET", "AWAY", "33000"]
-    ]);
-    expect(alert).toMatchObject({ totalStake: "99000", worstCaseProfit: "33000",
-      roi: "0.3333333333333333333333333333333333333333" });
+    expect(alert).toBeNull();
   });
 
   it("converts Malay odds with exact decimal arithmetic before stake optimization", () => {
