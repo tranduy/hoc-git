@@ -18,6 +18,10 @@ import { PlaywrightCmdBrowserManager } from "../providers/cmd/cmd-browser-manage
 import { CmdProfileReader } from "../providers/cmd/cmd-profile-reader.js";
 import { CmdSessionValidator } from "../providers/cmd/cmd-session-validator.js";
 import { CmdObservedCatalogReader } from "../providers/cmd/cmd-observed-catalog.js";
+import { PlaywrightSabaBrowserManager } from "../providers/saba/saba-browser-manager.js";
+import { SabaObservedCatalogReader } from "../providers/saba/saba-observed-catalog.js";
+import { SabaProfileReader } from "../providers/saba/saba-profile-reader.js";
+import { SabaSessionValidator } from "../providers/saba/saba-session-validator.js";
 import { SessionValidatorRegistry } from "./validators.js";
 
 export interface CreateSessionServicesOptions {
@@ -34,6 +38,7 @@ export interface CreateSessionServicesOptions {
 export interface ManagedSessionServices extends SessionServices {
   readonly accounts: AccountRegistry;
   readonly catalogReader: CmdObservedCatalogReader;
+  readonly sabaCatalogReader: SabaObservedCatalogReader;
   tick(): Promise<void>;
   close(): Promise<void>;
 }
@@ -52,6 +57,10 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     profilesRoot: join(profilesRoot, "providers"),
     headless: false
   });
+  const sabaBrowser = new PlaywrightSabaBrowserManager({
+    profilesRoot: join(profilesRoot, "providers-saba"),
+    headless: false
+  });
   const automation = options.automation ?? new PlaywrightFabetAutomation({
     profilePath: join(profilesRoot, "fabet"),
     headless: false
@@ -67,7 +76,10 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const manager = new SessionManager({
     vault,
-    validators: new SessionValidatorRegistry(options.validators ?? [new CmdSessionValidator(cmdBrowser)]),
+    validators: new SessionValidatorRegistry(options.validators ?? [
+      new CmdSessionValidator(cmdBrowser),
+      new SabaSessionValidator(sabaBrowser)
+    ]),
     clock,
     idFactory,
     fabetDriver,
@@ -80,7 +92,10 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const accounts = new AccountRegistry({
     vault,
     sessions: manager,
-    readers: options.profileReaders ?? [new CmdProfileReader({ source: cmdBrowser, clock })],
+    readers: options.profileReaders ?? [
+      new CmdProfileReader({ source: cmdBrowser, clock }),
+      new SabaProfileReader({ source: sabaBrowser, clock })
+    ],
     clock,
     idFactory
   });
@@ -90,17 +105,24 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
     timezoneOffsetMinutes: 420
   });
+  const sabaCatalogReader = new SabaObservedCatalogReader({
+    accounts,
+    source: sabaBrowser,
+    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
+    timezoneOffsetMinutes: 420
+  });
   return {
     manager,
     discovery,
     trustStore,
     accounts,
     catalogReader,
+    sabaCatalogReader,
     async tick(): Promise<void> {
       await manager.tick();
     },
     async close(): Promise<void> {
-      await Promise.all([automation.close(), cmdBrowser.close()]);
+      await Promise.all([automation.close(), cmdBrowser.close(), sabaBrowser.close()]);
     }
   };
 }
