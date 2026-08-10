@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountApiLike } from "../api/accounts.js";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
 import { LiveCatalogPage } from "./live-catalog-page.js";
+import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
 
 const account: AccountStatus = {
   id: "account-1", alias: "CMD main", provider: "CMD", sessionState: "ACTIVE", profileState: "FRESH",
@@ -44,10 +45,38 @@ const catalogApi: CatalogApiLike = { read: async () => catalog };
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  window.localStorage.clear();
   window.history.replaceState({}, "", "/live-catalog");
 });
 
 describe("LiveCatalogPage", () => {
+  it("persists one global base stake and shows the balanced two-way plan", async () => {
+    const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
+    const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
+    const providerCatalog = (providerAccount: AccountStatus, over: string, under: string): LiveCatalogResponse => ({
+      ...catalog, accountId: providerAccount.id, provider: providerAccount.provider,
+      events: [{ ...event, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event` }],
+      markets: [{ ...market, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event`,
+        providerMarketId: `${providerAccount.provider}-market` }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: providerAccount.provider,
+        providerEventId: `${providerAccount.provider}-event`, providerMarketId: `${providerAccount.provider}-market`,
+        providerSelectionId: `${providerAccount.provider}-${quote.selection}`,
+        rawOdds: quote.selection === "OVER" ? over : under }))
+    });
+    const saba = providerCatalog(sabaAccount, "1.8", "1.5");
+    const sbobet = providerCatalog(sbobetAccount, "1.7", "2.5");
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }}
+      catalogApi={{ read: async (id) => id === sabaAccount.id ? saba : sbobet }} />);
+
+    const input = await screen.findByLabelText("Base stake for every match (VND)") as HTMLInputElement;
+    expect(input.value).toBe("100000");
+    expect(screen.getByText("100,000 VND base")).toBeTruthy();
+    expect(screen.getByText("72,000 VND hedge")).toBeTruthy();
+    expect(screen.getAllByText("Profit 8,000 VND")).toHaveLength(2);
+    fireEvent.change(input, { target: { value: "150000" } });
+    expect(window.localStorage.getItem(WATCH_BASE_STAKE_STORAGE_KEY)).toBe("150000");
+  });
+
   it("shows feed elapsed time, observed time, and approximate start for live events", async () => {
     const observedAtMs = Date.now();
     const liveEvent: ProviderEvent = { ...event, isLive: true, startAtUtcMs: observedAtMs,

@@ -5,6 +5,8 @@ import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../ap
 import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   type ComparisonEvent } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
+import { buildFixedBaseStakePlan, type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
+import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
 
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
@@ -24,10 +26,22 @@ function ProviderSelector({ accounts, selected, toggle }: {
   })}</fieldset>;
 }
 
-function ComparisonTable({ item }: { readonly item: ComparisonEvent }) {
+function stakePolicy(baseStake: string): FixedBaseStakePolicy {
+  return { currency: "VND", baseStake, minStake: "30000", maxStake: baseStake,
+    stakeStep: "1000", balance: baseStake };
+}
+
+function money(value: string): string {
+  return `${Number(value).toLocaleString("en-US")} VND`;
+}
+
+function ComparisonTable({ item, baseStake }: { readonly item: ComparisonEvent; readonly baseStake: string }) {
+  const selectedProviders = new Set<ProviderId>(item.providers);
   return <div className="table-wrap comparison-table"><table><thead><tr><th>Market / line</th>
-    {item.providers.map((provider) => <th key={provider}>{provider}</th>)}</tr></thead><tbody>
-    {item.rows.map((row) => <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
+    {item.providers.map((provider) => <th key={provider}>{provider}</th>)}<th>Gross preflight</th></tr></thead><tbody>
+    {item.rows.map((row) => {
+      const plan = buildFixedBaseStakePlan(row, selectedProviders, stakePolicy(baseStake));
+      return <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
       {row.margin !== null && <b className={row.margin > 0 ? "edge-badge edge-badge--positive" : "edge-badge"}>
         {row.margin > 0 ? `Edge +${(row.margin * 100).toFixed(2)}%` : `No edge ${(row.margin * 100).toFixed(2)}%`}</b>}</th>
       {item.providers.map((provider) => {
@@ -36,7 +50,13 @@ function ComparisonTable({ item }: { readonly item: ComparisonEvent }) {
           <div className="rate-cell">{cell.quotes.map((quote) => <span
             className={row.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
             key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds}</span>)}</div>}</td>;
-      })}</tr>)}
+      })}<td>{plan === null ? <span className="rate-missing">No profitable two-book balance</span>
+        : <div className="balanced-plan"><strong>PROFITABLE</strong>{plan.legs.map((leg) => <span key={leg.selection}>
+          <small>#{leg.provider} · {leg.selection} @ {leg.decimalOdds}</small><b>{money(leg.stake)} {leg.role.toLowerCase()}</b>
+        </span>)}<span>Total {money(plan.totalStake)}</span>{plan.legs.map((leg) => <span key={`${leg.selection}-profit`}>
+          <small>{leg.selection}</small><b>Profit {money(leg.profit)}</b></span>)}
+          <b>Worst {money(plan.worstCaseProfit)} · ROI {(Number(plan.roi) * 100).toFixed(2)}%</b></div>}</td></tr>;
+    })}
   </tbody></table></div>;
 }
 
@@ -52,6 +72,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [message, setMessage] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
+  const [baseStake, setBaseStake] = useState(() => loadBaseStake(window.localStorage));
+  const [baseStakeInput, setBaseStakeInput] = useState(baseStake);
+  const [stakeError, setStakeError] = useState<string | null>(null);
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event") });
   const autoLoaded = useRef(false);
@@ -136,6 +159,12 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
         onClick={() => changeCategory("LOL")} type="button">LoL</button></div>
       <ProviderSelector accounts={accounts} selected={selectedIds} toggle={toggle} />
+      <label className="stake-config">Base stake for every match (VND)<input aria-label="Base stake for every match (VND)"
+        inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
+          const value = event.currentTarget.value; setBaseStakeInput(value);
+          if (saveBaseStake(window.localStorage, value)) { setBaseStake(value); setStakeError(null); }
+          else setStakeError("Use a whole VND amount of at least 30,000 in 1,000 VND steps.");
+        }} />{stakeError === null ? <small>Applied to the lower-odds leg.</small> : <small role="alert">{stakeError}</small>}</label>
       <button aria-label="Load live catalog" disabled={busy || selectedIds.size === 0 || category !== "FOOTBALL"} onClick={() => void loadIds([...selectedIds])} type="button">
         {busy ? "Loading…" : "Compare selected books"}</button>
     </section>
@@ -157,7 +186,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
             {estimatedStartAtMs !== null && <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}</>
             : <small>Scheduled {new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
           <button aria-label={`View & watch ${label}`} onClick={() => watch(item)} type="button">View & compare</button></div></header>
-        {item.rows.length === 0 ? <p>No supported market in this provider row.</p> : <ComparisonTable item={item} />}</article>;
+        {item.rows.length === 0 ? <p>No supported two-way market in this provider row.</p> : <ComparisonTable item={item} baseStake={baseStake} />}</article>;
     })}</div>
   </>;
 }
