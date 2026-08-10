@@ -18,12 +18,23 @@ export interface ComparisonRow {
   readonly crossBook: boolean;
 }
 
+export interface ObservedTicketRow {
+  readonly key: string;
+  readonly marketType: string;
+  readonly scope: string;
+  readonly line: string | null;
+  readonly settlementProfile: string;
+  readonly outcomeDomain: readonly string[];
+  readonly cells: readonly ComparisonCell[];
+}
+
 export interface ComparisonEvent {
   readonly key: string;
   readonly event: ProviderEvent;
   readonly providers: readonly ProviderId[];
   readonly catalogs: readonly LiveCatalogResponse[];
   readonly providerEventIds: Readonly<Partial<Record<ProviderId, string>>>;
+  readonly observedRows: readonly ObservedTicketRow[];
   readonly rows: readonly ComparisonRow[];
   readonly bestMargin: number | null;
 }
@@ -62,6 +73,27 @@ function eligibleTwoWayCells(cells: readonly ComparisonCell[]): readonly Compari
     .sort((left, right) => right.length - left.length)[0] ?? [];
 }
 
+function isHalfGoalLine(line: string | null): boolean {
+  if (line === null) return false;
+  const value = Math.abs(Number(line));
+  return Number.isFinite(value) && Math.abs(value % 1 - 0.5) < 1e-9;
+}
+
+export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
+  const domain = [...new Set(cell.quotes.map((quote) => quote.selection))].sort();
+  if (cell.market.status !== "OPEN" || cell.quotes.some((quote) => quote.status !== "OPEN")) return false;
+  if (cell.market.category === "FOOTBALL") {
+    return cell.market.marketType === "FT_AH" && cell.market.scope === "FULL_TIME" &&
+      isHalfGoalLine(cell.market.line) && domain.join("|") === "AWAY|HOME";
+  }
+  return cell.market.category === "LOL" && cell.market.marketType === "SERIES_WINNER" &&
+    cell.market.scope === "SERIES" && cell.market.line === null && domain.length === 2;
+}
+
+export function isVisibleEvent(event: ProviderEvent, nowMs: number, horizonMs = 7_200_000): boolean {
+  return event.isLive || (event.startAtUtcMs >= nowMs && event.startAtUtcMs <= nowMs + horizonMs);
+}
+
 export function decimalOdds(quote: ProviderQuote): number | null {
   const value = Number(quote.rawOdds);
   if (!Number.isFinite(value)) return null;
@@ -96,6 +128,14 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
         rowGroups.set(rowKey, cells);
       }
     }
+    const observedRows = [...rowGroups.entries()].flatMap(([rowKey, rawCells]) => {
+      const cells = rawCells.filter(isFocusedTwoWayTicket);
+      if (cells.length === 0) return [];
+      const outcomeDomain = [...new Set(cells[0]!.quotes.map((quote) => quote.selection))].sort();
+      return [{ key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
+        line: cells[0]!.market.line, settlementProfile: cells[0]!.market.settlementProfile,
+        outcomeDomain, cells } satisfies ObservedTicketRow];
+    }).sort((left, right) => left.key.localeCompare(right.key));
     const rows = [...rowGroups.entries()].map(([rowKey, rawCells]) => [rowKey, eligibleTwoWayCells(rawCells)] as const)
       .filter(([, cells]) => cells.length >= 2).map(([rowKey, cells]): ComparisonRow => {
       const bestBySelection: Record<string, ProviderId> = {};
@@ -122,7 +162,7 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
     }).sort((left, right) => (right.margin ?? Number.NEGATIVE_INFINITY) - (left.margin ?? Number.NEGATIVE_INFINITY) || left.key.localeCompare(right.key));
     const bestMargin = rows.reduce<number | null>((best, row) => row.margin === null ? best : Math.max(best ?? row.margin, row.margin), null);
     return { key, event: group.event, providers: group.catalogs.map((catalog) => catalog.provider),
-      catalogs: group.catalogs, providerEventIds: group.ids, rows, bestMargin };
+      catalogs: group.catalogs, providerEventIds: group.ids, observedRows, rows, bestMargin };
   }).sort((left, right) => (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY) ||
     left.event.startAtUtcMs - right.event.startAtUtcMs);
 }

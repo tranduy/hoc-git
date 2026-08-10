@@ -3,7 +3,7 @@ import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
 import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
-  type ComparisonEvent } from "../catalog/comparison.js";
+  isVisibleEvent, type ComparisonEvent } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
 import { buildFixedBaseStakePlan, type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
@@ -36,23 +36,27 @@ function money(value: string): string {
   return `${Number(value).toLocaleString("en-US")} VND`;
 }
 
-function ComparisonTable({ item, baseStake }: { readonly item: ComparisonEvent; readonly baseStake: string }) {
+function ComparisonTable({ item, baseStake, signals }: { readonly item: ComparisonEvent; readonly baseStake: string;
+  readonly signals: readonly LagSignal[] }) {
   const selectedProviders = new Set<ProviderId>(item.providers);
-  return <div className="table-wrap comparison-table"><table><thead><tr><th>Market / line</th>
-    {item.providers.map((provider) => <th key={provider}>{provider}</th>)}<th>Gross preflight</th></tr></thead><tbody>
-    {item.rows.map((row) => {
-      const plan = buildFixedBaseStakePlan(row, selectedProviders, stakePolicy(baseStake));
-      return <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
-      {row.margin !== null && <b className={row.margin > 0 ? "edge-badge edge-badge--positive" : "edge-badge"}>
-        {row.margin > 0 ? `Edge +${(row.margin * 100).toFixed(2)}%` : `No edge ${(row.margin * 100).toFixed(2)}%`}</b>}</th>
+  return <div className="table-wrap comparison-table"><table><thead><tr><th>Loại vé / kèo</th>
+    {item.providers.map((provider) => <th key={provider}>{provider}</th>)}<th>Cân tiền / lợi nhuận</th></tr></thead><tbody>
+    {item.observedRows.map((observedRow) => {
+      const row = item.rows.find((candidate) => candidate.key === observedRow.key);
+      const plan = row === undefined ? null : buildFixedBaseStakePlan(row, selectedProviders, stakePolicy(baseStake));
+      const signal = signals.find((candidate) => candidate.event.key === item.key && candidate.row.key === observedRow.key);
+      return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
+      <th>Chấp toàn trận<small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>
+        <b className={signal === undefined ? "edge-badge" : "edge-badge edge-badge--positive"}>
+          {signal === undefined ? "ĐANG THEO DÕI" : "ĐỦ ĐIỀU KIỆN · LÃI ≥ 20.000 VND"}</b></th>
       {item.providers.map((provider) => {
-        const cell = row.cells.find((candidate) => candidate.provider === provider);
+        const cell = observedRow.cells.find((candidate) => candidate.provider === provider);
         return <td key={provider}>{cell === undefined ? <span className="rate-missing">Unavailable</span> :
           <div className="rate-cell">{cell.quotes.map((quote) => <span
-            className={row.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
-            key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds}</span>)}</div>}</td>;
-      })}<td>{plan === null ? <span className="rate-missing">No profitable two-book balance</span>
-        : <div className="balanced-plan"><strong>PROFITABLE</strong>{plan.legs.map((leg) => <span key={leg.selection}>
+            className={row?.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
+            key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds} {quote.rawFormat} · {quote.status}</span>)}</div>}</td>;
+      })}<td>{plan === null ? <span className="rate-missing">Chưa có cặp 2 sàn cân được</span>
+        : <div className="balanced-plan"><strong>{signal === undefined ? "GIÁ HIỆN TẠI" : "SẴN SÀNG (READ-ONLY)"}</strong>{plan.legs.map((leg) => <span key={leg.selection}>
           <small>#{leg.provider} · {leg.selection} @ {leg.decimalOdds}</small><b>{money(leg.stake)} {leg.role.toLowerCase()}</b>
         </span>)}<span>Total {money(plan.totalStake)}</span>{plan.legs.map((leg) => <span key={`${leg.selection}-profit`}>
           <small>{leg.selection}</small><b>Profit {money(leg.profit)}</b></span>)}
@@ -179,15 +183,15 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, []);
 
   const events = useMemo(() => buildComparisonEvents(catalogs), [catalogs]);
-  const displayEvents = useMemo(() => [...events].sort((left, right) => {
-    const comparisonPriority = Number(right.providers.length >= 2 && right.rows.length > 0) -
-      Number(left.providers.length >= 2 && left.rows.length > 0);
+  const displayEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)).sort((left, right) => {
+    const comparisonPriority = Number(right.providers.length >= 2 && right.observedRows.length > 0) -
+      Number(left.providers.length >= 2 && left.observedRows.length > 0);
     if (comparisonPriority !== 0) return comparisonPriority;
     const edge = (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY);
     if (edge !== 0) return edge;
     if (left.event.isLive !== right.event.isLive) return left.event.isLive ? 1 : -1;
     return left.event.startAtUtcMs - right.event.startAtUtcMs;
-  }), [events]);
+  }), [events, nowMs]);
   useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
     const match = events.find((item) => Object.values(item.providerEventIds).includes(requested.current.event!));
@@ -206,6 +210,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     });
     return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
       baseStake={baseStake} books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent}
+      lagSignals={signals.filter((signal) => signal.event.key === selectedEvent.key)}
       onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); }}
       providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
   }
@@ -253,18 +258,18 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const observedAtMs = item.catalogs.find((catalog) => catalog.provider === item.event.provider)?.observedAtMs ??
         item.catalogs[0]!.observedAtMs;
       const estimatedStartAtMs = estimatedLiveStartAtMs(observedAtMs, item.event.liveState);
-      const comparisonCount = item.rows.length;
+      const comparisonCount = item.observedRows.length;
       return <article className="catalog-event" key={item.key}><header><div><span>{item.event.competition}</span><h2>{label}</h2>
         <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
           {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
-        <small>{comparisonCount > 0 ? `${comparisonCount} exact two-book market(s) monitored` : "No exact second-book match yet"}</small></div>
+        <small>{comparisonCount > 0 ? `${comparisonCount} vé chấp 2 cửa đang hiển thị` : "Chưa có vé chấp 0.5 phù hợp"}</small></div>
         <div className="catalog-event-actions"><strong>{item.event.isLive ? formatMatchClock(item.event.liveState) : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
           {item.event.isLive ? <><small>Observed {new Date(observedAtMs).toLocaleString()}</small>
             {estimatedStartAtMs !== null && <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}</>
             : <small>Scheduled {new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
           <button aria-label={`View & watch ${label}`} onClick={() => watch(item)} type="button">View & compare</button></div></header>
-        {comparisonCount > 0 && <details className="catalog-market-details"><summary>Show exact market rates</summary>
-          <ComparisonTable item={item} baseStake={baseStake} /></details>}</article>;
+        {comparisonCount > 0 && <details className="catalog-market-details" open><summary>Vé chấp 2 cửa đang theo dõi</summary>
+          <ComparisonTable item={item} baseStake={baseStake} signals={signals} /></details>}</article>;
     })}</div>
   </>;
 }

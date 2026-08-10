@@ -59,7 +59,7 @@ export class LagSignalTracker {
   #previous = new Map<string, QuoteSample>();
   #active = new Map<string, LagSignal>();
 
-  constructor(private readonly maxQuoteAgeMs = 5_000) {}
+  constructor(private readonly maxQuoteAgeMs = 5_000, private readonly minimumWorstCaseProfit = "20000") {}
 
   update(events: readonly ComparisonEvent[], selectedProviders: ReadonlySet<ProviderId>, policy: FixedBaseStakePolicy,
     observedAtMs: number): readonly LagSignal[] {
@@ -67,7 +67,9 @@ export class LagSignalTracker {
     const currentRows = new Set<string>();
 
     for (const event of events) {
+      const focusedRowKeys = new Set(event.observedRows.map((row) => row.key));
       for (const row of event.rows) {
+        if (!focusedRowKeys.has(row.key)) continue;
         const signalKey = rowKey(event, row);
         currentRows.add(signalKey);
         const movements: LagMovement[] = [];
@@ -87,7 +89,7 @@ export class LagSignalTracker {
         }
 
         const plan = buildFixedBaseStakePlan(row, selectedProviders, policy);
-        if (plan === null) {
+        if (plan === null || new Decimal(plan.worstCaseProfit).lt(this.minimumWorstCaseProfit)) {
           this.#active.delete(signalKey);
           continue;
         }

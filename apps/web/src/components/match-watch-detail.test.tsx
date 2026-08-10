@@ -1,9 +1,11 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
 import { MatchWatchDetail } from "./match-watch-detail.js";
 import { buildComparisonEvents } from "../catalog/comparison.js";
+import { buildFixedBaseStakePlan } from "../watch/fixed-base-stake.js";
+import type { LagSignal } from "../watch/lag-signal-tracker.js";
 
 const event: ProviderEvent = {
   provider: "CMD", category: "FOOTBALL", providerEventId: "event-1", competition: "Premier Test",
@@ -37,15 +39,26 @@ function totalCatalog(provider: "SABA" | "SBOBET", accountId: string, over: stri
   const providerEventId = `${provider}-total-event`;
   const providerMarketId = `${provider}-total-market`;
   const totalMarket: ProviderMarket = { ...market, provider, providerEventId, providerMarketId,
-    marketType: "FT_TOTAL", line: "2.5", status };
+    marketType: "FT_AH", line: "-0.5", status };
   const totalEvent: ProviderEvent = { ...event, provider, providerEventId };
-  const makeQuote = (selection: "OVER" | "UNDER", rawOdds: string): ProviderQuote => ({
+  const makeQuote = (selection: "HOME" | "AWAY", rawOdds: string): ProviderQuote => ({
     ...quote(selection, rawOdds, status), provider, providerEventId, providerMarketId,
-    providerSelectionId: `${provider}-${selection}`, marketType: "FT_TOTAL", line: "2.5"
+    providerSelectionId: `${provider}-${selection}`, marketType: "FT_AH", line: "-0.5"
   });
   return { dataMode: "LIVE", accountId, provider, category: "FOOTBALL",
     comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs, rejectedMarketCount: 0,
-    events: [totalEvent], markets: [totalMarket], quotes: [makeQuote("OVER", over), makeQuote("UNDER", under)] };
+    events: [totalEvent], markets: [totalMarket], quotes: [makeQuote("HOME", over), makeQuote("AWAY", under)] };
+}
+
+function activeSignal(comparison: ReturnType<typeof buildComparisonEvents>[number], baseStake = "100000"): LagSignal {
+  const row = comparison.rows[0]!;
+  const plan = buildFixedBaseStakePlan(row, new Set<ProviderId>(["SABA", "SBOBET"]), {
+    currency: "VND", baseStake, minStake: "30000", maxStake: baseStake, stakeStep: "1000", balance: baseStake
+  })!;
+  return { key: `${comparison.key}::${row.key}`, event: comparison, row, plan, movements: [{
+    provider: "SABA", selection: "HOME", previousDecimal: "1.7", currentDecimal: "2.2",
+    changedAtMs: 10_000, quoteAgeMs: 0
+  }], triggeredAtMs: 10_000, quoteAgeMs: 0 };
 }
 
 beforeEach(() => {
@@ -145,13 +158,13 @@ describe("MatchWatchDetail", () => {
     const comparison = buildComparisonEvents([saba, sbobet])[0]!;
     render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read: vi.fn() }} comparisonCatalogs={[saba, sbobet]}
       comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined} pollDelayMs={60_000}
-      providerEventId="SABA-total-event" baseStake="150000" />);
+      providerEventId="SABA-total-event" baseStake="150000" lagSignals={[activeSignal(comparison, "150000")]} />);
 
     expect(screen.getByRole("alert").textContent).toMatch(/GROSS TWO-WAY PREFLIGHT.*Alpha vs Beta/u);
-    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*150,000 VND/u);
-    expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*UNDER.*150,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*HOME.*150,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*AWAY.*150,000 VND/u);
     expect(screen.getByRole("alert").textContent).toMatch(/Worst-case profit 30,000 VND.*ROI 10.00%/u);
-    expect(screen.getByLabelText("Gross preflight FT_TOTAL line 2.5").textContent).toMatch(/150,000 VND base.*150,000 VND hedge/u);
+    expect(screen.getByLabelText("Gross preflight FT_AH line -0.5").textContent).toMatch(/150,000 VND base.*150,000 VND hedge/u);
 
     act(() => { vi.advanceTimersByTime(10_000); });
     expect(screen.queryByRole("alert")).toBeNull();
@@ -163,9 +176,10 @@ describe("MatchWatchDetail", () => {
   it("removes an active candidate immediately when monitoring stops", () => {
     const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
     const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
+    const comparison = buildComparisonEvents([saba, sbobet])[0]!;
     render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read: vi.fn() }} comparisonCatalogs={[saba, sbobet]}
-      comparisonEvent={buildComparisonEvents([saba, sbobet])[0]!} initialCatalog={saba} onBack={() => undefined}
-      providerEventId="SABA-total-event" />);
+      comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined}
+      providerEventId="SABA-total-event" lagSignals={[activeSignal(comparison)]} />);
 
     expect(screen.getByRole("alert")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Stop watching" }));
@@ -182,7 +196,7 @@ describe("MatchWatchDetail", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("alerts again only after a polled price change creates a new plan", async () => {
+  it("does not invent an alert from a polled price without a movement-qualified signal", async () => {
     const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
     const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
     const read = vi.fn(async (accountId: string) => accountId === "saba-account"
@@ -196,7 +210,7 @@ describe("MatchWatchDetail", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
     expect(read).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*2.3/u);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("polls every connected comparison book and refreshes the side-by-side rates", async () => {
@@ -211,11 +225,11 @@ describe("MatchWatchDetail", () => {
     render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read }} comparisonCatalogs={[saba, sbobet]}
       comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined} providerEventId="SABA-total-event" />);
 
-    expect(screen.getByText("OVER 2.2")).toBeTruthy();
+    expect(screen.getByText(/HOME 2.2/u)).toBeTruthy();
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
 
     expect(read).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("OVER 2.45")).toBeTruthy();
+    expect(screen.getByText(/HOME 2.45/u)).toBeTruthy();
     expect(screen.getAllByText("#SBOBET · ODDS CHANGED").length).toBeGreaterThan(0);
   });
 });

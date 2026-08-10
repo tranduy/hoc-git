@@ -19,11 +19,11 @@ function catalog(provider: "SABA" | "SBOBET", odds: readonly [string, string], o
     bestOf: null, isLive: false, rematchCandidate: false, fixtureDiscriminator: null, isVirtual: false,
     sportVariant: "FOOTBALL", liveState: null };
   const market: ProviderMarket = { provider, category: "FOOTBALL", providerEventId: id,
-    providerMarketId: `${id}-total`, marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5",
+    providerMarketId: `${id}-ah`, marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5",
     settlementProfile: "football-regulation", status: "OPEN" };
-  const quotes: ProviderQuote[] = (["OVER", "UNDER"] as const).map((selection, index) => ({
+  const quotes: ProviderQuote[] = (["HOME", "AWAY"] as const).map((selection, index) => ({
     provider, category: "FOOTBALL", providerEventId: id, providerMarketId: market.providerMarketId,
-    providerSelectionId: `${id}-${selection}`, marketType: "FT_TOTAL", scope: "FULL_TIME", selection, line: "2.5",
+    providerSelectionId: `${id}-${selection}`, marketType: "FT_AH", scope: "FULL_TIME", selection, line: "-0.5",
     rawOdds: odds[index]!, rawFormat: "DECIMAL", status: statuses[index]!, isLive: false,
     sourceTimestampMs, receivedMonotonicMs: observedAtMs, sequence: observedAtMs
   }));
@@ -45,11 +45,11 @@ describe("LagSignalTracker", () => {
 
     expect(signals).toHaveLength(1);
     expect(signals[0]?.plan.legs.map((leg) => [leg.provider, leg.selection, leg.decimalOdds])).toEqual([
-      ["SBOBET", "OVER", "2.2"], ["SABA", "UNDER", "2.2"]
+      ["SABA", "AWAY", "2.2"], ["SBOBET", "HOME", "2.2"]
     ]);
     expect(signals[0]?.movements.map((movement) =>
       [movement.provider, movement.selection, movement.previousDecimal, movement.currentDecimal])).toEqual([
-      ["SABA", "OVER", "2.2", "1.7"], ["SABA", "UNDER", "1.7", "2.2"]
+      ["SABA", "HOME", "2.2", "1.7"], ["SABA", "AWAY", "1.7", "2.2"]
     ]);
     expect(signals[0]?.triggeredAtMs).toBe(1_100);
   });
@@ -82,5 +82,12 @@ describe("LagSignalTracker", () => {
     const freshSbobet = catalog("SBOBET", ["2.20", "1.70"], 20_000);
 
     expect(tracker.update(buildComparisonEvents([staleSaba, freshSbobet]), providers, policy, 20_000)).toEqual([]);
+  });
+
+  it("does not publish a changed edge below the 20,000 VND worst-case threshold", () => {
+    const tracker = new LagSignalTracker();
+    tracker.update(snapshot(["2.05", "1.75"], ["2.05", "1.75"], 1_000), providers, policy, 1_000);
+
+    expect(tracker.update(snapshot(["1.75", "2.05"], ["2.05", "1.75"], 1_100), providers, policy, 1_100)).toEqual([]);
   });
 });

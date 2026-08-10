@@ -13,19 +13,19 @@ const account: AccountStatus = {
 };
 const event: ProviderEvent = {
   provider: "CMD", category: "FOOTBALL", providerEventId: "event-1", competition: "Premier Test",
-  seasonStage: null, startAtUtcMs: 1_800_000_000_000, participantA: "Alpha", participantB: "Beta",
+  seasonStage: null, startAtUtcMs: Date.now() + 3_600_000, participantA: "Alpha", participantB: "Beta",
   eventScope: "REGULATION", bestOf: null, isLive: false, rematchCandidate: false,
   fixtureDiscriminator: null, isVirtual: false, sportVariant: "FOOTBALL", liveState: null
 };
 const market: ProviderMarket = {
   provider: "CMD", category: "FOOTBALL", providerEventId: "event-1", providerMarketId: "market-1",
-  marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5",
+  marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5",
   settlementProfile: "football-regulation-including-added-time", status: "OPEN"
 };
-const quotes: ProviderQuote[] = ["OVER", "UNDER"].map((selection, index) => ({
+const quotes: ProviderQuote[] = ["HOME", "AWAY"].map((selection, index) => ({
   provider: "CMD", category: "FOOTBALL", providerEventId: "event-1", providerMarketId: "market-1",
-  providerSelectionId: `selection-${index}`, marketType: "FT_TOTAL", scope: "FULL_TIME", selection,
-  line: "2.5", rawOdds: ["1.8", "2.5"][index]!, rawFormat: "DECIMAL", status: "OPEN",
+  providerSelectionId: `selection-${index}`, marketType: "FT_AH", scope: "FULL_TIME", selection,
+  line: "-0.5", rawOdds: ["1.8", "2.5"][index]!, rawFormat: "DECIMAL", status: "OPEN",
   isLive: false, sourceTimestampMs: null, receivedMonotonicMs: 100, sequence: 1
 }));
 const catalog: LiveCatalogResponse = {
@@ -63,7 +63,7 @@ describe("LiveCatalogPage", () => {
       quotes: quotes.map((quote) => ({ ...quote, provider: providerAccount.provider,
         providerEventId: `${providerAccount.provider}-event`, providerMarketId: `${providerAccount.provider}-market`,
         providerSelectionId: `${providerAccount.provider}-${quote.selection}`, sourceTimestampMs: observedAtMs,
-        rawOdds: quote.selection === "OVER" ? over : under }))
+        rawOdds: quote.selection === "HOME" ? over : under }))
     });
     let sabaReads = 0;
     const api: CatalogApiLike = { read: async (id) => {
@@ -81,8 +81,8 @@ describe("LiveCatalogPage", () => {
     await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     expect(screen.getByText("Best live lag signal")).toBeTruthy();
-    expect(screen.getByLabelText("Movement #SABA UNDER 1.7 to 2.2")).toBeTruthy();
-    expect(screen.getByLabelText("Leg #SBOBET OVER at 2.2")).toBeTruthy();
+    expect(screen.getByLabelText("Movement #SABA AWAY 1.7 to 2.2")).toBeTruthy();
+    expect(screen.getByLabelText("Leg #SBOBET HOME at 2.2")).toBeTruthy();
     expect(screen.getAllByText(/Worst profit 20,000 VND/u)).toHaveLength(2);
     expect(screen.getByText("READ-ONLY")).toBeTruthy();
     expect(screen.getByText("PRICE GAP DETECTED")).toBeTruthy();
@@ -101,7 +101,7 @@ describe("LiveCatalogPage", () => {
       quotes: quotes.map((quote) => ({ ...quote, provider: providerAccount.provider,
         providerEventId: `${providerAccount.provider}-event`, providerMarketId: `${providerAccount.provider}-market`,
         providerSelectionId: `${providerAccount.provider}-${quote.selection}`,
-        rawOdds: quote.selection === "OVER" ? over : under }))
+        rawOdds: quote.selection === "HOME" ? over : under }))
     });
     const saba = providerCatalog(sabaAccount, "1.8", "1.5");
     const sbobet = providerCatalog(sbobetAccount, "1.7", "2.5");
@@ -142,7 +142,7 @@ describe("LiveCatalogPage", () => {
       markets: [{ ...market, provider: "SBOBET" as const, providerEventId: "sbo-event", providerMarketId: "sbo-market" }],
       quotes: quotes.map((quote) => ({ ...quote, provider: "SBOBET" as const, providerEventId: "sbo-event",
         providerMarketId: "sbo-market", providerSelectionId: `sbo-${quote.selection}`,
-        rawOdds: quote.selection === "OVER" ? "2.25" : quote.rawOdds })) };
+        rawOdds: quote.selection === "HOME" ? "2.25" : quote.rawOdds })) };
     const api: CatalogApiLike = { read: async (id) => id === sabaAccount.id ? saba : sbobet };
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
 
@@ -153,7 +153,7 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText(/Starts in/u)).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SABA" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
-    expect(screen.getByText("OVER 2.25").className).toContain("best");
+    expect(screen.getByText(/HOME 2.25/u).className).toContain("best");
     fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
     expect(await screen.findByText("Books shown in this comparison")).toBeTruthy();
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
@@ -165,7 +165,7 @@ describe("LiveCatalogPage", () => {
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
     expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
     expect(screen.getAllByText("#CMD").length).toBeGreaterThan(1);
-    expect(screen.getByText("No exact second-book match yet")).toBeTruthy();
+    expect(screen.getByText("Chưa có cặp 2 sàn cân được")).toBeTruthy();
     expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
   });
 
@@ -175,7 +175,7 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
     expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("No exact second-book match yet")).toBeTruthy();
+    expect(screen.getByText("Chưa có cặp 2 sàn cân được")).toBeTruthy();
     expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
     expect(screen.queryByRole("button", { name: /^(bet|wager|place bet)$/iu })).toBeNull();
@@ -236,7 +236,7 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
     expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("No exact second-book match yet")).toBeTruthy();
+    expect(screen.getByText("Chưa có cặp 2 sàn cân được")).toBeTruthy();
     expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 

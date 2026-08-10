@@ -49,6 +49,9 @@ main { max-width: 1440px; margin-left: 224px; padding: calc(var(--space) * 5); }
 .comparison-table { margin-top: calc(var(--space) * 1.5); }
 .comparison-table th:first-child { min-width: 145px; }
 .comparison-table th small { display: block; margin-top: 4px; color: var(--muted); font-weight: 500; text-transform: none; }
+.ticket-row { background: rgb(19 28 36 / 55%); }
+.ticket-row--profitable { background: rgb(20 83 51 / 42%); outline: 2px solid var(--positive); outline-offset: -2px; }
+.ticket-row--profitable td, .ticket-row--profitable th { border-color: #39d981; }
 .rate-cell { display: grid; gap: 6px; min-width: 145px; }
 .rate-quote { display: block; padding: 7px 9px; border: 1px solid transparent; border-radius: 5px; background: var(--panel-raised); font-weight: 750; }
 .rate-quote--best { border-color: var(--positive); background: #123121; color: var(--positive); }
