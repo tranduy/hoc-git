@@ -148,9 +148,9 @@ describe("MatchWatchDetail", () => {
       providerEventId="SABA-total-event" />);
 
     expect(screen.getByRole("alert").textContent).toMatch(/READY TO PREFLIGHT.*Alpha vs Beta/u);
-    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*50,000 VND/u);
-    expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*UNDER.*50,000 VND/u);
-    expect(screen.getByRole("alert").textContent).toMatch(/Worst-case profit 10,000 VND.*ROI 10.00%/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*100,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*UNDER.*100,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/Worst-case profit 20,000 VND.*ROI 10.00%/u);
 
     act(() => { vi.advanceTimersByTime(10_000); });
     expect(screen.queryByRole("alert")).toBeNull();
@@ -199,15 +199,8 @@ describe("MatchWatchDetail", () => {
   });
 
   it("polls every connected comparison book and refreshes the side-by-side rates", async () => {
-    const forProvider = (provider: "SABA" | "SBOBET", accountId: string, home: string): LiveCatalogResponse => ({
-      ...catalog(1_000, home), accountId, provider,
-      events: [{ ...event, provider, providerEventId: `${provider}-event` }],
-      markets: [{ ...market, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market` }],
-      quotes: [quote("HOME", home), quote("DRAW", "3.2"), quote("AWAY", "3.4")].map((item) => ({
-        ...item, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market`,
-        providerSelectionId: `${provider}-${item.selection}`
-      }))
-    });
+    const forProvider = (provider: "SABA" | "SBOBET", accountId: string, over: string): LiveCatalogResponse =>
+      totalCatalog(provider, accountId, over, "2.2");
     const saba = forProvider("SABA", "saba-account", "2.1");
     const sbobet = forProvider("SBOBET", "sbo-account", "2.2");
     const comparison = buildComparisonEvents([saba, sbobet])[0]!;
@@ -215,13 +208,13 @@ describe("MatchWatchDetail", () => {
       ? forProvider("SABA", "saba-account", "2.35")
       : forProvider("SBOBET", "sbo-account", "2.45"));
     render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read }} comparisonCatalogs={[saba, sbobet]}
-      comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined} providerEventId="SABA-event" />);
+      comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined} providerEventId="SABA-total-event" />);
 
-    expect(screen.getByText("HOME 2.2")).toBeTruthy();
+    expect(screen.getByText("OVER 2.2")).toBeTruthy();
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
 
     expect(read).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("HOME 2.45")).toBeTruthy();
+    expect(screen.getByText("OVER 2.45")).toBeTruthy();
     expect(screen.getAllByText("#SBOBET · ODDS CHANGED").length).toBeGreaterThan(0);
   });
 });

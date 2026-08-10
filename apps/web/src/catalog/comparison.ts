@@ -46,6 +46,12 @@ function marketKey(market: ProviderMarket): string {
   return [market.marketType, market.scope, market.line ?? "", market.settlementProfile].join("|");
 }
 
+function isSupportedTwoWayRow(cells: readonly ComparisonCell[]): boolean {
+  if (cells.length === 0 || cells[0]!.market.marketType === "FT_1X2") return false;
+  const selections = new Set(cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)));
+  return selections.size === 2 && cells.some((cell) => new Set(cell.quotes.map((quote) => quote.selection)).size === 2);
+}
+
 export function decimalOdds(quote: ProviderQuote): number | null {
   const value = Number(quote.rawOdds);
   if (!Number.isFinite(value)) return null;
@@ -80,7 +86,7 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
         rowGroups.set(rowKey, cells);
       }
     }
-    const rows = [...rowGroups.entries()].map(([rowKey, cells]): ComparisonRow => {
+    const rows = [...rowGroups.entries()].filter(([, cells]) => isSupportedTwoWayRow(cells)).map(([rowKey, cells]): ComparisonRow => {
       const bestBySelection: Record<string, ProviderId> = {};
       const selections = new Set(cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)));
       for (const selection of selections) {
