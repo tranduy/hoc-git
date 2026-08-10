@@ -143,17 +143,18 @@ export class AccountRegistry {
   }
 
   #public(record: StoredAccount, session: RedactedSessionStatus | null, capabilities: readonly ProviderCapability[] = []): AccountStatus {
+    const boundSession = session?.provider === record.provider ? session : null;
     const profileState = record.profile === null ? "UNAVAILABLE" as const
       : this.#clock.nowMs() - record.profile.asOfMs <= profileFreshnessMs ? "FRESH" as const : "STALE" as const;
     return AccountStatusSchema.parse({
       id: record.id, alias: record.alias, provider: record.provider,
-      sessionState: session?.state ?? "INVALID", profileState,
+      sessionState: boundSession?.state ?? "INVALID", profileState,
       redactedLabel: record.profile?.redactedLabel ?? null,
       currency: record.profile?.currency ?? null,
       balance: record.profile?.balance ?? null,
       balanceAsOfMs: record.profile?.asOfMs ?? null,
       capabilities: [...new Set(capabilities)],
-      reason: session?.reason ?? record.profileReason
+      reason: boundSession?.reason ?? (session === null ? record.profileReason : "SCHEMA_CHANGED")
     });
   }
 

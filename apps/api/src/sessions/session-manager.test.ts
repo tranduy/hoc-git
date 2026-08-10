@@ -50,6 +50,20 @@ afterEach(async () => {
 });
 
 describe("SessionManager", () => {
+  it("reclassifies a stored launch only after the target provider validates it", async () => {
+    const vault = await createVault();
+    const cmd: SessionValidator = { provider: "CMD", validate: async () => ({ ok: false, reason: "SCHEMA_CHANGED" }) };
+    const sbobet: SessionValidator = { provider: "SBOBET", validate: async (secret) =>
+      secret.kind === "LAUNCH_URL" ? { ok: true } : { ok: false, reason: "SCHEMA_CHANGED" } };
+    const manager = new SessionManager({ vault, validators: new SessionValidatorRegistry([cmd, sbobet]),
+      clock: { nowMs: () => 10 }, idFactory: () => "launch-1" });
+    await manager.configureManual({ provider: "CMD", kind: "LAUNCH_URL", secret: "https://zenandfe.test/start" });
+
+    await expect(manager.reclassify("launch-1", "SBOBET")).resolves.toMatchObject({ provider: "SBOBET", state: "ACTIVE" });
+    const handle = await manager.getActiveSecretHandle("launch-1");
+    expect(handle?.provider).toBe("SBOBET");
+  });
+
   it("forces exactly one renewal at the 24-hour boundary", async () => {
     const vault = await createVault();
     const validator = new FakeValidator();

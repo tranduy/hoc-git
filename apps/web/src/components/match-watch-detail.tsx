@@ -8,6 +8,7 @@ import {
   type MatchWatchEntry
 } from "../watch/match-watch.js";
 import { clearWatchEntries, loadWatchEntries, saveWatchEntries } from "../watch/watch-storage.js";
+import type { ComparisonEvent } from "../catalog/comparison.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
@@ -49,6 +50,7 @@ export function MatchWatchDetail({
   accountId,
   catalogApi,
   initialCatalog,
+  comparisonEvent,
   onBack,
   providerEventId,
   pollDelayMs = 1_000,
@@ -59,6 +61,7 @@ export function MatchWatchDetail({
   readonly accountId: string;
   readonly catalogApi: CatalogApiLike;
   readonly initialCatalog: LiveCatalogResponse;
+  readonly comparisonEvent?: ComparisonEvent;
   readonly onBack: () => void;
   readonly providerEventId: string;
   readonly pollDelayMs?: number;
@@ -74,6 +77,8 @@ export function MatchWatchDetail({
   const [watching, setWatching] = useState(true);
   const [watcherState, setWatcherState] = useState<WatcherState>("WATCHING");
   const [successfulSamples, setSuccessfulSamples] = useState(1);
+  const [selectedProviders, setSelectedProviders] = useState<ReadonlySet<string>>(() =>
+    new Set(comparisonEvent?.providers ?? [initialCatalog.provider]));
 
   const appendEntries = (newEntries: readonly MatchWatchEntry[]): void => {
     if (newEntries.length === 0) return;
@@ -154,7 +159,18 @@ export function MatchWatchDetail({
           <span>{successfulSamples} accepted sample(s)</span><span>Observed {new Date(currentSample.observedAtMs).toLocaleTimeString()}</span></div>
       </header>
 
-      <p className="watch-latency-note">Single-provider observation — cross-book timing unavailable</p>
+      <fieldset className="provider-selector provider-selector--detail"><legend>Books shown in this comparison</legend>
+        {(comparisonEvent?.providers ?? [initialCatalog.provider]).map((provider) => <label key={provider}>
+          <input checked={selectedProviders.has(provider)} onChange={() => setSelectedProviders((current) => {
+            const next = new Set(current);
+            if (next.has(provider)) next.delete(provider); else next.add(provider);
+            return next;
+          })} type="checkbox" /><b>#{provider}</b>
+        </label>)}
+      </fieldset>
+      <p className="watch-latency-note">{comparisonEvent !== undefined && comparisonEvent.providers.length > 1
+        ? `Comparing ${comparisonEvent.providers.filter((provider) => selectedProviders.has(provider)).join(" vs ")}`
+        : "Single-provider observation — cross-book timing unavailable"}</p>
       <div className="watch-controls">
         {watching ? <button onClick={() => setWatching(false)} type="button">Stop watching</button>
           : <button onClick={() => setWatching(true)} type="button">Resume watching</button>}
@@ -164,7 +180,17 @@ export function MatchWatchDetail({
       <div className="match-watch__layout">
         <section className="watch-prices" aria-labelledby="current-prices-heading">
           <h2 id="current-prices-heading">Current markets</h2>
-          <div className="provider-columns">
+          {comparisonEvent !== undefined && comparisonEvent.providers.length > 1 ? <div className="table-wrap comparison-table"><table>
+            <thead><tr><th>Market / line</th>{comparisonEvent.providers.filter((provider) => selectedProviders.has(provider)).map((provider) => <th key={provider}>{provider}</th>)}</tr></thead>
+            <tbody>{comparisonEvent.rows.map((row) => <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
+              {row.margin !== null && <b className={row.margin > 0 ? "edge-badge edge-badge--positive" : "edge-badge"}>
+                {row.margin > 0 ? `Edge +${(row.margin * 100).toFixed(2)}%` : `No edge ${(row.margin * 100).toFixed(2)}%`}</b>}</th>
+              {comparisonEvent.providers.filter((provider) => selectedProviders.has(provider)).map((provider) => {
+                const cell = row.cells.find((candidate) => candidate.provider === provider);
+                return <td key={provider}>{cell === undefined ? <span className="rate-missing">Unavailable</span> : <div className="rate-cell">{cell.quotes.map((quote) => <span
+                  className={row.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
+                  key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds}</span>)}</div>}</td>;
+              })}</tr>)}</tbody></table></div> : <div className="provider-columns">
             <article className="provider-column">
               <header><strong>{initialCatalog.provider} live feed</strong><span>Read-only</span></header>
               {currentSample.markets.length === 0 ? <p>No accepted markets for this event.</p> : currentSample.markets.map((market) => {
@@ -179,7 +205,7 @@ export function MatchWatchDetail({
             </article>
             <article className="provider-column provider-column--empty"><strong>Awaiting verified second provider</strong>
               <p>No values are copied or estimated. Exact event and market mapping is required.</p></article>
-          </div>
+          </div>}
         </section>
 
         <section className="watch-timeline" aria-labelledby="change-log-heading">

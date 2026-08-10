@@ -4,3 +4,4 @@ export * from "./redaction.js";
 export * from "./cmd/cmd-profile.js";
 export * from "./cmd/cmd-normalizer.js";
 export * from "./cmd/cmd-adapter.js";
+export * from "./sbobet/sbobet-normalizer.js";

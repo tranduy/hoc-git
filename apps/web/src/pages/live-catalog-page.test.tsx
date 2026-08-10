@@ -47,11 +47,41 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
+  it("shows provider checkboxes, countdown, provider badges, and side-by-side market rates", async () => {
+    const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
+    const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
+    const saba = { ...catalog, accountId: sabaAccount.id, provider: "SABA" as const,
+      events: [{ ...event, provider: "SABA" as const, providerEventId: "saba-event" }],
+      markets: [{ ...market, provider: "SABA" as const, providerEventId: "saba-event", providerMarketId: "saba-market" }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" as const, providerEventId: "saba-event",
+        providerMarketId: "saba-market", providerSelectionId: `saba-${quote.selection}` })) };
+    const sbobet = { ...catalog, accountId: sbobetAccount.id, provider: "SBOBET" as const,
+      events: [{ ...event, provider: "SBOBET" as const, providerEventId: "sbo-event" }],
+      markets: [{ ...market, provider: "SBOBET" as const, providerEventId: "sbo-event", providerMarketId: "sbo-market" }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: "SBOBET" as const, providerEventId: "sbo-event",
+        providerMarketId: "sbo-market", providerSelectionId: `sbo-${quote.selection}`,
+        rawOdds: quote.selection === "HOME" ? "2.25" : quote.rawOdds })) };
+    const api: CatalogApiLike = { read: async (id) => id === sabaAccount.id ? saba : sbobet };
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
+
+    expect((await screen.findByRole("checkbox", { name: /SABA main/u }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: /SBOBET main/u }) as HTMLInputElement).checked).toBe(true);
+    expect((await screen.findAllByText("#SABA")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("#SBOBET").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Starts in/u)).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "SABA" })).toBeTruthy();
+    expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
+    expect(screen.getByText("HOME 2.25").className).toContain("best");
+    fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
+    expect(await screen.findByText("Books shown in this comparison")).toBeTruthy();
+    expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
+  });
+
   it("automatically loads real matches when a catalog-capable account becomes available", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
     expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("HOME: 2.1 DECIMAL")).toBeTruthy();
+    expect(screen.getByText("HOME 2.1")).toBeTruthy();
   });
 
   it("shows real CMD matches separately from verified cross-provider comparisons", async () => {
@@ -60,10 +90,10 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
     expect(screen.getByText("Premier Test")).toBeTruthy();
-    expect(screen.getByText("HOME: 2.1 DECIMAL")).toBeTruthy();
-    expect(screen.getByText("Awaiting second provider")).toBeTruthy();
+    expect(screen.getByText("HOME 2.1")).toBeTruthy();
+    expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
-    expect(await screen.findByRole("heading", { name: "Alpha vs Beta" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Back to matches" })).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
     expect(screen.queryByRole("button", { name: /bet|wager|place/iu })).toBeNull();
@@ -104,7 +134,7 @@ describe("LiveCatalogPage", () => {
     window.history.replaceState({}, "", "/live-catalog?account=account-1&event=event-1");
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
-    expect(await screen.findByRole("heading", { name: "Alpha vs Beta" })).toBeTruthy();
-    expect(screen.getByText("Single-provider observation — cross-book timing unavailable")).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
+    expect(screen.getByText(/Single-provider observation/u)).toBeTruthy();
   });
 });

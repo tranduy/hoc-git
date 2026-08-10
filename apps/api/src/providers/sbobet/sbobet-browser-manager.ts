@@ -1,0 +1,87 @@
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
+import { chromium, type BrowserContext, type Page } from "playwright";
+
+interface OpenSession { readonly context: BrowserContext; readonly page: Page }
+
+function safeLaunchUrl(value: string): string {
+  if (value.length === 0 || value.length > 24_000) throw new Error("SBOBET_LAUNCH_URL_INVALID");
+  const parsed = new URL(value);
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hostname.length === 0) throw new Error("SBOBET_LAUNCH_URL_INVALID");
+  return value;
+}
+
+export async function extractSbobetRecords(page: Page): Promise<readonly SbobetCatalogInputRecord[]> {
+  return page.locator(".wrapper-match-component").evaluateAll((nodes) => nodes.map((node) => {
+    const text = (element: Element | null): string => element?.textContent?.trim().replace(/\s+/gu, " ") ?? "";
+    const id = node.getAttribute("id")?.match(/wrapper-match-component-([^\s-]+)/u)?.[1] ?? "";
+    const league = text(node.closest(".league-component")?.querySelector(".league-name") ?? null);
+    const teams = [...node.querySelectorAll(".row-team-name")].slice(0, 2).map(text);
+    const timeText = text(node.querySelector(".game-time"));
+    const scoreText = text(node.querySelector(".game-score")) || null;
+    const columns = [...node.querySelectorAll(".match-item .un-promotion")];
+    const market = (column: Element | undefined, marketType: "FT_TOTAL" | "FT_1X2") => {
+      if (column === undefined) return null;
+      const odds = [...column.querySelectorAll(".odd-item")];
+      const expected = marketType === "FT_TOTAL" ? ["OVER", "UNDER"] : ["HOME", "DRAW", "AWAY"];
+      const selections = odds.slice(0, expected.length).map((odd, index) => {
+        const selectionId = odd.getAttribute("id")?.replace(/^odd-item-/u, "") ?? "";
+        const suffix = selectionId.slice(-1).toLowerCase();
+        const selection = marketType === "FT_TOTAL" ? (suffix === "h" ? "OVER" : suffix === "a" ? "UNDER" : expected[index]!)
+          : suffix === "h" ? "HOME" : suffix === "d" ? "DRAW" : suffix === "a" ? "AWAY" : expected[index]!;
+        return { selectionId, selection, priceText: text(odd.querySelector(".odd-val")),
+        locked: odd.querySelector(".odd-lock") !== null || text(odd.querySelector(".odd-val")) === ""
+      }; });
+      let lineText: string | null = null;
+      if (marketType === "FT_TOTAL" && odds[0] !== undefined) {
+        const clone = odds[0].cloneNode(true) as Element;
+        clone.querySelectorAll(".odd-val,.odd-lock").forEach((element) => element.remove());
+        lineText = text(clone).match(/\d+(?:\.\d+)?(?:\s*[-/]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null;
+      }
+      return { marketId: `${id}:${marketType}:${lineText ?? ""}`, marketType, lineText, selections };
+    };
+    const markets = [market(columns[1], "FT_TOTAL"), market(columns[2], "FT_1X2")].filter((value) => value !== null);
+    return { eventId: id, leagueName: league, timeText, scoreText, teamNames: teams, markets };
+  })) as Promise<readonly SbobetCatalogInputRecord[]>;
+}
+
+export class PlaywrightSbobetBrowserManager {
+  readonly #profilesRoot: string; readonly #headless: boolean; readonly #timeout: number;
+  readonly #sessions = new Map<string, OpenSession>(); readonly #opening = new Map<string, Promise<OpenSession>>();
+  constructor(options: { profilesRoot: string; headless?: boolean; startupTimeoutMs?: number }) {
+    this.#profilesRoot = options.profilesRoot; this.#headless = options.headless ?? false; this.#timeout = options.startupTimeoutMs ?? 30_000;
+  }
+  async verifyLaunch(launchUrl: string): Promise<boolean> {
+    const id = `verify-${createHash("sha256").update(launchUrl).digest("hex").slice(0, 20)}`;
+    try { const session = await this.#open({ sessionId: id, launchUrl });
+      return await session.page.locator(".wrapper-match-component .odd-item").first().isVisible({ timeout: this.#timeout });
+    } catch { return false; } finally { const session = this.#sessions.get(id); this.#sessions.delete(id); await session?.context.close().catch(() => undefined); }
+  }
+  async readCatalog(input: { sessionId: string; launchUrl: string }): Promise<readonly SbobetCatalogInputRecord[]> {
+    let session = await this.#get(input);
+    try { return await extractSbobetRecords(session.page); }
+    catch { await session.context.close().catch(() => undefined); this.#sessions.delete(input.sessionId); session = await this.#get(input); return extractSbobetRecords(session.page); }
+  }
+  async close(): Promise<void> { const all = [...this.#sessions.values()]; this.#sessions.clear(); await Promise.allSettled(all.map((item) => item.context.close())); }
+  async #get(input: { sessionId: string; launchUrl: string }): Promise<OpenSession> {
+    const existing = this.#sessions.get(input.sessionId); if (existing !== undefined && !existing.page.isClosed()) return existing;
+    const opening = this.#opening.get(input.sessionId); if (opening !== undefined) return opening;
+    const next = this.#open(input).finally(() => this.#opening.delete(input.sessionId)); this.#opening.set(input.sessionId, next); return next;
+  }
+  async #open(input: { sessionId: string; launchUrl: string }): Promise<OpenSession> {
+    const context = await chromium.launchPersistentContext(join(this.#profilesRoot,
+      `sbobet-${createHash("sha256").update(input.sessionId).digest("hex").slice(0, 24)}`),
+    { headless: this.#headless, acceptDownloads: false });
+    try { const launcher = context.pages()[0] ?? await context.newPage();
+      await launcher.goto(safeLaunchUrl(input.launchUrl), { waitUntil: "domcontentloaded", timeout: this.#timeout });
+      const deadline = Date.now() + this.#timeout; let found: Page | null = null;
+      while (found === null && Date.now() < deadline) {
+        for (const page of context.pages()) if (await page.locator(".wrapper-match-component").count() > 0) { found = page; break; }
+        if (found === null) await launcher.waitForTimeout(250);
+      }
+      if (found === null) throw new Error("SBOBET_CATALOG_UNAVAILABLE");
+      const session = { context, page: found }; this.#sessions.set(input.sessionId, session); return session;
+    } catch { await context.close().catch(() => undefined); throw new Error("SBOBET_BROWSER_UNAVAILABLE"); }
+  }
+}

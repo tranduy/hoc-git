@@ -55,6 +55,7 @@ const manualBody = z.strictObject({
 });
 const sessionParams = z.strictObject({ id: z.string().trim().min(1).max(128) });
 const resetBody = z.strictObject({ confirmation: z.literal("RESET_FABET") });
+const reclassifyBody = z.strictObject({ provider: z.enum(["CMD", "SABA", "SBOBET", "APSPORT", "BTI", "IM"]) });
 
 function invalid(reply: FastifyReply) {
   return reply.code(400).send({ error: "INVALID_REQUEST" });
@@ -150,6 +151,15 @@ export function registerSessionRoutes(
     } catch (error) {
       return safeFailure(reply, error);
     }
+  });
+
+  app.post("/api/sessions/:id/reclassify", async (request, reply) => {
+    if (!consume(request.ip, reply)) return;
+    const parsedParams = sessionParams.safeParse(request.params);
+    const parsedBody = reclassifyBody.safeParse(request.body);
+    if (!parsedParams.success || !parsedBody.success) return invalid(reply);
+    try { return await services.manager.reclassify(parsedParams.data.id, parsedBody.data.provider); }
+    catch (error) { return safeFailure(reply, error); }
   });
 
   app.post("/api/sessions/fabet/reset", async (request, reply) => {

@@ -1,154 +1,150 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AccountStatus } from "@tool-chenh/contracts";
+import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
+import { buildComparisonEvents, formatCountdown, type ComparisonEvent } from "../catalog/comparison.js";
 import { MatchWatchDetail } from "../components/match-watch-detail.js";
 
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
 
-function displayTime(timestamp: number, live: boolean): string {
-  return live ? "Live now" : new Date(timestamp).toLocaleString();
+function ProviderSelector({ accounts, selected, toggle }: {
+  readonly accounts: readonly AccountStatus[];
+  readonly selected: ReadonlySet<string>;
+  readonly toggle: (id: string) => void;
+}) {
+  const books: readonly ProviderId[] = ["SABA", "SBOBET", "CMD", "APSPORT", "BTI"];
+  return <fieldset className="provider-selector"><legend>Books to compare</legend>{books.flatMap((provider) => {
+    const providerAccounts = accounts.filter((account) => account.provider === provider);
+    if (providerAccounts.length === 0) return [<label className="provider-selector__unavailable" key={provider}>
+      <input aria-label={`${provider} unavailable`} disabled type="checkbox" /><b>#{provider}</b><small>not connected</small></label>];
+    return providerAccounts.map((account) => <label key={account.id}><input checked={selected.has(account.id)}
+      onChange={() => toggle(account.id)} type="checkbox" /><span>{account.alias}</span><b>#{account.provider}</b></label>);
+  })}</fieldset>;
 }
 
-export function LiveCatalogPage({
-  accountApi = defaultAccountApi,
-  catalogApi = defaultCatalogApi
-}: {
+function ComparisonTable({ item }: { readonly item: ComparisonEvent }) {
+  return <div className="table-wrap comparison-table"><table><thead><tr><th>Market / line</th>
+    {item.providers.map((provider) => <th key={provider}>{provider}</th>)}</tr></thead><tbody>
+    {item.rows.map((row) => <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
+      {row.margin !== null && <b className={row.margin > 0 ? "edge-badge edge-badge--positive" : "edge-badge"}>
+        {row.margin > 0 ? `Edge +${(row.margin * 100).toFixed(2)}%` : `No edge ${(row.margin * 100).toFixed(2)}%`}</b>}</th>
+      {item.providers.map((provider) => {
+        const cell = row.cells.find((candidate) => candidate.provider === provider);
+        return <td key={provider}>{cell === undefined ? <span className="rate-missing">Unavailable</span> :
+          <div className="rate-cell">{cell.quotes.map((quote) => <span
+            className={row.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
+            key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds}</span>)}</div>}</td>;
+      })}</tr>)}
+  </tbody></table></div>;
+}
+
+export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
 }) {
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
-  const [accountId, setAccountId] = useState("");
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [category, setCategory] = useState<"FOOTBALL" | "LOL">("FOOTBALL");
-  const [catalog, setCatalog] = useState<LiveCatalogResponse | null>(null);
+  const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  const requestedSelection = useRef({
-    accountId: new URLSearchParams(window.location.search).get("account"),
-    eventId: new URLSearchParams(window.location.search).get("event")
-  });
-  const lastAutoLoadedAccount = useRef<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(Date.now());
+  const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
+    event: new URLSearchParams(window.location.search).get("event") });
+  const autoLoaded = useRef(false);
+
+  const loadIds = async (ids: readonly string[]): Promise<void> => {
+    if (ids.length === 0) return;
+    setBusy(true); setMessage(null);
+    const results = await Promise.allSettled(ids.map(async (id) => catalogApi.read(id)));
+    const accepted = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    setCatalogs(accepted);
+    const failed = results.length - accepted.length;
+    if (accepted.length === 0) setMessage("Live catalog is unavailable. No selected provider returned a verified catalog.");
+    else if (failed > 0) setMessage(`${failed} selected provider(s) unavailable; available books are still shown.`);
+    setBusy(false);
+  };
 
   useEffect(() => {
     void accountApi.list().then((items) => {
-      const available = items.filter((account) => account.capabilities.includes("CATALOG"));
-      setAccounts(available);
-      setAccountId((current) => current || available.find((account) => account.id === requestedSelection.current.accountId)?.id || available[0]?.id || "");
+      const available = items.filter((account) => account.capabilities.includes("CATALOG") && account.sessionState === "ACTIVE");
+      const initial = new Set(available.map((account) => account.id));
+      setAccounts(available); setSelectedIds(initial);
+      if (!autoLoaded.current && available.length > 0) {
+        autoLoaded.current = true;
+        void loadIds([...initial]);
+      }
     }).catch(() => setMessage("Provider accounts are unavailable."));
   }, [accountApi]);
 
   useEffect(() => {
-    const requested = requestedSelection.current;
-    if (category !== "FOOTBALL" || accountId.length === 0 || lastAutoLoadedAccount.current === accountId) return;
-    let cancelled = false;
-    lastAutoLoadedAccount.current = accountId;
-    setBusy(true);
-    setMessage(null);
-    void catalogApi.read(accountId).then((response) => {
-      if (cancelled) return;
-      setCatalog(response);
-      if (requested.eventId === null || (requested.accountId !== null && requested.accountId !== accountId)) return;
-      if (response.events.some((event) => event.providerEventId === requested.eventId)) {
-        setSelectedEventId(requested.eventId);
-      } else {
-        setMessage("The selected event is no longer present in the accepted live catalog.");
-      }
-    }).catch(() => {
-      if (cancelled) return;
-      setMessage("Live catalog is unavailable. Session, provider identity, and schema must all validate first.");
-    }).finally(() => { if (!cancelled) setBusy(false); });
-    return () => { cancelled = true; };
-  }, [accountId, catalogApi, category]);
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-  const events = useMemo(() => catalog === null ? [] : [...catalog.events].sort((left, right) => {
-    if (left.isLive !== right.isLive) return left.isLive ? -1 : 1;
-    return left.startAtUtcMs - right.startAtUtcMs;
-  }), [catalog]);
+  const events = useMemo(() => buildComparisonEvents(catalogs), [catalogs]);
+  const displayEvents = useMemo(() => [...events].sort((left, right) => {
+    const edge = (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY);
+    if (edge !== 0) return edge;
+    if (left.event.isLive !== right.event.isLive) return left.event.isLive ? 1 : -1;
+    return left.event.startAtUtcMs - right.event.startAtUtcMs;
+  }), [events]);
+  useEffect(() => {
+    if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
+    const match = events.find((item) => Object.values(item.providerEventIds).includes(requested.current.event!));
+    if (match !== undefined) setSelectedKey(match.key);
+    else setMessage("The selected event is no longer present in the accepted live catalog.");
+  }, [events, selectedKey]);
 
-  const load = (): void => {
-    if (accountId.length === 0 || category !== "FOOTBALL") return;
-    setBusy(true);
-    setMessage(null);
-    setCatalog(null);
-    void catalogApi.read(accountId).then(setCatalog).catch(() => {
-      setMessage("Live catalog is unavailable. Session, provider identity, and schema must all validate first.");
-    }).finally(() => setBusy(false));
-  };
-
-  const watch = (providerEventId: string): void => {
-    const query = new URLSearchParams(window.location.search);
-    query.set("event", providerEventId);
-    query.set("account", accountId);
-    window.history.replaceState({}, "", `${window.location.pathname}?${query.toString()}`);
-    setSelectedEventId(providerEventId);
-  };
-  const backToMatches = (): void => {
-    window.history.replaceState({}, "", window.location.pathname);
-    setSelectedEventId(null);
-  };
-  const changeCategory = (next: "FOOTBALL" | "LOL"): void => {
-    lastAutoLoadedAccount.current = null;
-    setCategory(next);
-    setCatalog(null);
-    setMessage(null);
-    setSelectedEventId(null);
-  };
-
-  if (catalog !== null && selectedEventId !== null) {
-    return <MatchWatchDetail accountId={accountId} catalogApi={catalogApi} initialCatalog={catalog}
-      onBack={backToMatches} providerEventId={selectedEventId} />;
+  const selectedEvent = events.find((item) => item.key === selectedKey);
+  if (selectedEvent !== undefined) {
+    const primary = selectedEvent.catalogs[0]!;
+    return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
+      comparisonEvent={selectedEvent}
+      onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); }}
+      providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
   }
 
-  return (
-    <>
-      <header className="page-header">
-        <p className="eyebrow">Read-only provider feed</p>
-        <h1>Live Catalog</h1>
-        <p>Real provider rows are shown here before cross-provider matching. They are not arbitrage opportunities.</p>
-      </header>
-      <section className="catalog-toolbar" aria-label="Catalog controls">
-        <div className="category-switch" role="group" aria-label="Category">
-          <button aria-pressed={category === "FOOTBALL"} onClick={() => changeCategory("FOOTBALL")} type="button">Football</button>
-          <button aria-pressed={category === "LOL"} onClick={() => changeCategory("LOL")} type="button">LoL</button>
-        </div>
-        <label>Provider account<select value={accountId} onChange={(event) => { setAccountId(event.target.value); setCatalog(null); }}>
-          {accounts.length === 0 && <option value="">No catalog-capable account</option>}
-          {accounts.map((account) => <option key={account.id} value={account.id}>{account.alias} · {account.provider}</option>)}
-        </select></label>
-        <button disabled={busy || accountId.length === 0 || category !== "FOOTBALL"} onClick={load} type="button">{busy ? "Loading…" : "Load live catalog"}</button>
-      </section>
+  const toggle = (id: string): void => setSelectedIds((current) => {
+    const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
+  });
+  const changeCategory = (next: "FOOTBALL" | "LOL"): void => {
+    setCategory(next); setCatalogs([]); setMessage(null); setSelectedKey(null);
+    if (next === "FOOTBALL") void loadIds([...selectedIds]);
+  };
+  const watch = (item: ComparisonEvent): void => {
+    const primary = item.catalogs[0]!;
+    const eventId = item.providerEventIds[primary.provider]!;
+    const query = new URLSearchParams(); query.set("event", eventId); query.set("account", primary.accountId);
+    window.history.replaceState({}, "", `${window.location.pathname}?${query.toString()}`); setSelectedKey(item.key);
+  };
 
-      {category === "LOL" && <p className="stale-warning">No verified live LoL adapter is connected yet.</p>}
-      {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}
-      {catalog !== null && (
-        <>
-          <div className="catalog-evidence-bar">
-            <strong>LIVE · {catalog.provider}</strong>
-            <span>Observed {new Date(catalog.observedAtMs).toLocaleString()}</span>
-            <span className="mapping mapping--review_required">Awaiting second provider</span>
-            {catalog.rejectedMarketCount > 0 && <span>{catalog.rejectedMarketCount} market(s) rejected as incomplete</span>}
-          </div>
-          {events.length === 0 ? <p className="empty-state">CMD returned no accepted Football events in the current view.</p> : (
-            <div className="catalog-event-list">{events.map((event) => {
-              const markets = catalog.markets.filter((market) => market.providerEventId === event.providerEventId);
-              const matchLabel = `${event.participantA} vs ${event.participantB}`;
-              return <article className="catalog-event" key={event.providerEventId}>
-                <header><div><span>{event.competition}</span><h2>{matchLabel}</h2></div><div className="catalog-event-actions"><strong>{displayTime(event.startAtUtcMs, event.isLive)}</strong><button aria-label={`View & watch ${matchLabel}`} onClick={() => watch(event.providerEventId)} type="button">View & watch</button></div></header>
-                {markets.length === 0 ? <p>No supported market in this provider row.</p> : <div className="table-wrap"><table><thead><tr><th>Market</th><th>Line</th><th>Status</th><th>Selections / provider odds</th></tr></thead><tbody>
-                  {markets.map((market) => {
-                    const quotes = catalog.quotes.filter((quote) => quote.providerMarketId === market.providerMarketId);
-                    return <tr key={market.providerMarketId}><td>{market.marketType}</td><td>{market.line ?? "—"}</td><td>{market.status}</td><td>{quotes.map((quote) => (
-                      <span className="catalog-quote" key={quote.providerSelectionId}>{quote.selection}: {quote.rawOdds} {quote.rawFormat}</span>
-                    ))}</td></tr>;
-                  })}
-                </tbody></table></div>}
-              </article>;
-            })}</div>
-          )}
-        </>
-      )}
-    </>
-  );
+  return <>
+    <header className="page-header"><p className="eyebrow">Verified provider comparison</p><h1>Live Catalog</h1>
+      <p>Select the books to compare. Every row is the same mapped market and line.</p></header>
+    <section className="catalog-toolbar" aria-label="Catalog controls">
+      <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
+        onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
+        onClick={() => changeCategory("LOL")} type="button">LoL</button></div>
+      <ProviderSelector accounts={accounts} selected={selectedIds} toggle={toggle} />
+      <button aria-label="Load live catalog" disabled={busy || selectedIds.size === 0 || category !== "FOOTBALL"} onClick={() => void loadIds([...selectedIds])} type="button">
+        {busy ? "Loading…" : "Compare selected books"}</button>
+    </section>
+    {category === "LOL" && <p className="stale-warning">No verified live LoL adapter is connected yet.</p>}
+    {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}
+    {category === "FOOTBALL" && catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
+      <span>{catalogs.length} connected provider(s)</span><span>{events.filter((item) => item.providers.length > 1).length} cross-book match(es)</span></div>}
+    <div className="catalog-event-list">{displayEvents.map((item) => {
+      const label = `${item.event.participantA} vs ${item.event.participantB}`;
+      return <article className="catalog-event" key={item.key}><header><div><span>{item.event.competition}</span><h2>{label}</h2>
+        <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}</div>
+        {item.bestMargin !== null && item.bestMargin > 0 && <strong className="event-edge">Best edge +{(item.bestMargin * 100).toFixed(2)}%</strong>}</div>
+        <div className="catalog-event-actions"><strong>{item.event.isLive ? "Live now" : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
+          {!item.event.isLive && <small>{new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
+          <button aria-label={`View & watch ${label}`} onClick={() => watch(item)} type="button">View & compare</button></div></header>
+        {item.rows.length === 0 ? <p>No supported market in this provider row.</p> : <ComparisonTable item={item} />}</article>;
+    })}</div>
+  </>;
 }

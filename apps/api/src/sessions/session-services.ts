@@ -23,6 +23,11 @@ import { SabaObservedCatalogReader } from "../providers/saba/saba-observed-catal
 import { SabaProfileReader } from "../providers/saba/saba-profile-reader.js";
 import { SabaSessionValidator } from "../providers/saba/saba-session-validator.js";
 import { SessionValidatorRegistry } from "./validators.js";
+import { MultiProviderCatalogReader } from "../providers/multi-provider-catalog.js";
+import { PlaywrightSbobetBrowserManager } from "../providers/sbobet/sbobet-browser-manager.js";
+import { SbobetObservedCatalogReader } from "../providers/sbobet/sbobet-observed-catalog.js";
+import { SbobetProfileReader } from "../providers/sbobet/sbobet-profile-reader.js";
+import { SbobetSessionValidator } from "../providers/sbobet/sbobet-session-validator.js";
 
 export interface CreateSessionServicesOptions {
   readonly localAppData: string;
@@ -37,7 +42,7 @@ export interface CreateSessionServicesOptions {
 
 export interface ManagedSessionServices extends SessionServices {
   readonly accounts: AccountRegistry;
-  readonly catalogReader: CmdObservedCatalogReader;
+  readonly catalogReader: MultiProviderCatalogReader;
   readonly sabaCatalogReader: SabaObservedCatalogReader;
   tick(): Promise<void>;
   close(): Promise<void>;
@@ -61,6 +66,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     profilesRoot: join(profilesRoot, "providers-saba"),
     headless: false
   });
+  const sbobetBrowser = new PlaywrightSbobetBrowserManager({
+    profilesRoot: join(profilesRoot, "providers-sbobet"), headless: false
+  });
   const automation = options.automation ?? new PlaywrightFabetAutomation({
     profilePath: join(profilesRoot, "fabet"),
     headless: false
@@ -78,7 +86,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     vault,
     validators: new SessionValidatorRegistry(options.validators ?? [
       new CmdSessionValidator(cmdBrowser),
-      new SabaSessionValidator(sabaBrowser)
+      new SabaSessionValidator(sabaBrowser),
+      new SbobetSessionValidator(sbobetBrowser)
     ]),
     clock,
     idFactory,
@@ -94,7 +103,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     sessions: manager,
     readers: options.profileReaders ?? [
       new CmdProfileReader({ source: cmdBrowser, clock }),
-      new SabaProfileReader({ source: sabaBrowser, clock })
+      new SabaProfileReader({ source: sabaBrowser, clock }),
+      new SbobetProfileReader()
     ],
     clock,
     idFactory
@@ -111,18 +121,22 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
     timezoneOffsetMinutes: 420
   });
+  const sbobetCatalogReader = new SbobetObservedCatalogReader({
+    accounts, source: sbobetBrowser,
+    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
+  });
   return {
     manager,
     discovery,
     trustStore,
     accounts,
-    catalogReader,
+    catalogReader: new MultiProviderCatalogReader([catalogReader, sabaCatalogReader, sbobetCatalogReader]),
     sabaCatalogReader,
     async tick(): Promise<void> {
       await manager.tick();
     },
     async close(): Promise<void> {
-      await Promise.all([automation.close(), cmdBrowser.close(), sabaBrowser.close()]);
+      await Promise.all([automation.close(), cmdBrowser.close(), sabaBrowser.close(), sbobetBrowser.close()]);
     }
   };
 }

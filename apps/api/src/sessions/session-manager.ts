@@ -213,6 +213,24 @@ export class SessionManager {
     return this.#exclusive(id, async () => this.#renewRecord(await this.#loadRequired(id), "EXPIRED"));
   }
 
+  reclassify(id: string, targetProvider: string): Promise<RedactedSessionStatus> {
+    return this.#exclusive(id, async () => {
+      const current = await this.#loadRequired(id);
+      const provider = targetProvider.trim().toUpperCase();
+      const validator = this.#validators.get(provider);
+      if (validator === null || current.secret.kind !== "LAUNCH_URL") throw new Error("PROVIDER_RECLASSIFICATION_REJECTED");
+      let result: SessionValidationResult;
+      try { result = await validator.validate(current.secret); }
+      catch { throw new Error("PROVIDER_RECLASSIFICATION_REJECTED"); }
+      if (!result.ok) throw new Error("PROVIDER_RECLASSIFICATION_REJECTED");
+      const nowMs = this.#clock.nowMs();
+      const reclassified: StoredSession = { ...current, provider, state: "ACTIVE", reason: null,
+        lastValidatedAtMs: nowMs, renewAfterMs: nowMs + renewalIntervalMs };
+      await this.#save(reclassified);
+      return publicStatus(reclassified);
+    });
+  }
+
   async tick(): Promise<void> {
     const records = await this.#listRecords();
     const nowMs = this.#clock.nowMs();

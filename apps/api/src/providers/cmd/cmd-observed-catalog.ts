@@ -42,6 +42,7 @@ export interface CmdObservedCatalogReaderOptions {
 }
 
 export class CmdObservedCatalogReader {
+  readonly provider: ProviderId;
   readonly #accounts: ActiveAccountAccess;
   readonly #source: CmdObservedCatalogReaderOptions["source"];
   readonly #clock: CmdObservedCatalogReaderOptions["clock"];
@@ -56,6 +57,7 @@ export class CmdObservedCatalogReader {
     this.#clock = options.clock;
     this.#timezoneOffsetMinutes = options.timezoneOffsetMinutes;
     this.#provider = options.provider ?? "CMD";
+    this.provider = this.#provider;
   }
 
   async read(accountId: string): Promise<ObservedProviderCatalog> {
