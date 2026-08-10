@@ -21,16 +21,22 @@ export async function extractSbobetRecords(page: Page): Promise<readonly SbobetC
     const timeText = text(node.querySelector(".game-time"));
     const scoreText = text(node.querySelector(".game-score")) || null;
     const columns = [...node.querySelectorAll(".match-item .un-promotion")];
-    const market = (column: Element | undefined, marketType: "FT_TOTAL" | "FT_1X2") => {
+    const market = (column: Element | undefined, marketType: "FT_AH" | "FT_TOTAL" | "FT_1X2") => {
       if (column === undefined) return null;
       const odds = [...column.querySelectorAll(".odd-item")];
-      const expected = marketType === "FT_TOTAL" ? ["OVER", "UNDER"] : ["HOME", "DRAW", "AWAY"];
+      const expected = marketType === "FT_TOTAL" ? ["OVER", "UNDER"] : marketType === "FT_AH"
+        ? ["HOME", "AWAY"] : ["HOME", "DRAW", "AWAY"];
       const selections = odds.slice(0, expected.length).map((odd, index) => {
         const selectionId = odd.getAttribute("id")?.replace(/^odd-item-/u, "") ?? "";
         const suffix = selectionId.slice(-1).toLowerCase();
         const selection = marketType === "FT_TOTAL" ? (suffix === "h" ? "OVER" : suffix === "a" ? "UNDER" : expected[index]!)
           : suffix === "h" ? "HOME" : suffix === "d" ? "DRAW" : suffix === "a" ? "AWAY" : expected[index]!;
+        const clone = odd.cloneNode(true) as Element;
+        clone.querySelectorAll(".odd-val,.odd-lock").forEach((element) => element.remove());
+        const lineText = marketType === "FT_AH"
+          ? text(clone).match(/[+-]?\d+(?:\.\d+)?(?:\s*[\/-]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null : undefined;
         return { selectionId, selection, priceText: text(odd.querySelector(".odd-val")),
+        ...(marketType === "FT_AH" ? { lineText } : {}),
         locked: odd.querySelector(".odd-lock") !== null || text(odd.querySelector(".odd-val")) === ""
       }; });
       let lineText: string | null = null;
@@ -38,10 +44,13 @@ export async function extractSbobetRecords(page: Page): Promise<readonly SbobetC
         const clone = odds[0].cloneNode(true) as Element;
         clone.querySelectorAll(".odd-val,.odd-lock").forEach((element) => element.remove());
         lineText = text(clone).match(/\d+(?:\.\d+)?(?:\s*[-/]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null;
+      } else if (marketType === "FT_AH") {
+        lineText = selections.find((selection) => "lineText" in selection && selection.lineText !== null)?.lineText ?? null;
       }
       return { marketId: `${id}:${marketType}:${lineText ?? ""}`, marketType, lineText, selections };
     };
-    const markets = [market(columns[1], "FT_TOTAL"), market(columns[2], "FT_1X2")].filter((value) => value !== null);
+    const markets = [market(columns[0], "FT_AH"), market(columns[1], "FT_TOTAL"), market(columns[2], "FT_1X2")]
+      .filter((value) => value !== null && value.selections.length > 0);
     return { eventId: id, leagueName: league, timeText, scoreText, teamNames: teams, markets };
   })) as Promise<readonly SbobetCatalogInputRecord[]>;
 }

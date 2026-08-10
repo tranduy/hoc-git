@@ -357,12 +357,18 @@ export async function extractCmdCatalogRecords(
               .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
             const odds = [...group.querySelectorAll(".c-odds[data-moid]")].map((element) => {
               const button = element.closest(".c-odds-button");
-              return {
+              const base = {
                 marketOddsId: clean(element.getAttribute("data-moid"), 128),
                 priceText: clean(element.textContent, 32),
                 status: button === null ? null : clean(button.getAttribute("data-odds-status"), 32) || null,
                 greyedOut: button === null ? null : clean(button.getAttribute("data-grey-out"), 16) || null
               };
+              if (!betTypeIds.includes("1")) return base;
+              const clone = button?.cloneNode(true) as Element | undefined;
+              clone?.querySelectorAll(".c-odds").forEach((price) => price.remove());
+              const evidence = clone === undefined ? "" : clean(clone.textContent, 32);
+              const lineText = evidence.match(/[+-]?\d+(?:\.\d+)?(?:\s*[\/-]\s*\d+(?:\.\d+)?)?/u)?.[0] ?? null;
+              return { ...base, lineText };
             }).filter((odd) => odd.marketOddsId.length > 0 && odd.priceText.length > 0);
               return { betTypeIds, labels, odds };
             });

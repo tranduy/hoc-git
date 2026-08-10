@@ -86,12 +86,12 @@ export class CmdObservedCatalogReader {
       const eventOnly = normalizeObservedFootballCatalog(this.#provider, [{ ...record, groups: [] }], normalizationOptions);
       if (eventOnly.diagnostics.length > 0 || eventOnly.events.length !== 1) {
         rejectedMarketCount += Math.max(1, record.groups.filter((group) =>
-          group.betTypeIds.length === 1 && ["3", "5"].includes(group.betTypeIds[0]!)).length);
+          group.betTypeIds.length === 1 && ["1", "3", "5"].includes(group.betTypeIds[0]!)).length);
         continue;
       }
       events.push(eventOnly.events[0]!);
       for (const group of record.groups) {
-        if (group.betTypeIds.length !== 1 || !["3", "5"].includes(group.betTypeIds[0]!)) continue;
+        if (group.betTypeIds.length !== 1 || !["1", "3", "5"].includes(group.betTypeIds[0]!)) continue;
         const marketOnly = normalizeObservedFootballCatalog(this.#provider, [{ ...record, groups: [group] }], normalizationOptions);
         if (marketOnly.diagnostics.length > 0) {
           rejectedMarketCount += 1;

@@ -207,7 +207,7 @@ describe("browser protocol inspector", () => {
             <div class="c-match-time">08/17 02:30AM</div>
             <span class="c-team-name">Alpha FC</span><span class="c-team-name">Beta FC</span>
             <div class="c-match__odds-group">
-              <div data-bt="1">FT 1X2
+              <div data-bt="1">FT AH
                 <div class="c-odds-button" data-odds-status="running" data-grey-out="false">
                   <span class="c-odds" data-moid="home-1">2.10</span>
                 </div>
@@ -225,10 +225,30 @@ describe("browser protocol inspector", () => {
       timeText: "08/17 02:30AM",
       teamNames: ["Alpha FC", "Beta FC"],
       groups: [{
-        betTypeIds: ["1"], labels: ["FT 1X2"],
-        odds: [{ marketOddsId: "home-1", priceText: "2.10", status: "running", greyedOut: "false" }]
+        betTypeIds: ["1"], labels: ["FT AH"],
+        odds: [{ marketOddsId: "home-1", priceText: "2.10", status: "running", greyedOut: "false", lineText: null }]
       }]
     }]);
+    await page.close();
+  });
+
+  it("keeps half-goal handicap text attached to the exact CMD team row", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <section class="c-odds-table--sport1"><div class="c-league" data-leagueid="league-1">
+        <div class="c-league__name">Allsvenskan</div><div class="c-match" data-matchid="event-ah">
+          <div class="c-match-time">1H41'</div><span class="c-team-name">IK Sirius</span><span class="c-team-name">Brommapojkarna</span>
+          <div class="c-match__odds-group"><div data-bt="1">
+            <div class="c-odds-button" data-grey-out="false"><span>0.5</span><span class="c-odds" data-moid="ah-1">0.79</span></div>
+            <div class="c-odds-button" data-grey-out="false"><span class="c-odds" data-moid="ah-1">-0.87</span></div>
+          </div></div>
+        </div></div></section>`);
+
+    const group = (await extractCmdCatalogRecords(page, 10))[0]?.groups[0];
+    expect(group?.odds).toEqual([
+      expect.objectContaining({ priceText: "0.79", lineText: "0.5" }),
+      expect.objectContaining({ priceText: "-0.87", lineText: null })
+    ]);
     await page.close();
   });
 

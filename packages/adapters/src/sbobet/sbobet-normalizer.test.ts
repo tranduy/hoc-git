@@ -53,4 +53,20 @@ describe("normalizeSbobetCatalog", () => {
       teamNames: ["England (la_morocha)", "Brazil (lemickey)"] }], { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 20, sequence: 3 });
     expect(result.events[0]).toMatchObject({ isVirtual: true, sportVariant: "VIRTUAL_FOOTBALL" });
   });
+
+  it("normalizes a full-time half-goal handicap to the home-oriented line", () => {
+    const handicap = {
+      ...record,
+      markets: [{ marketId: "5388803:FT_AH:-0.5", marketType: "FT_AH", lineText: "0.5", selections: [
+        { selectionId: "5388803-ah-h", selection: "HOME", priceText: "0.79", locked: false, lineText: "0.5" },
+        { selectionId: "5388803-ah-a", selection: "AWAY", priceText: "-0.87", locked: false, lineText: null }
+      ] }]
+    } as unknown as SbobetCatalogInputRecord;
+
+    const result = normalizeSbobetCatalog([handicap], { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 20, sequence: 3 });
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_AH", line: "-0.5" })]);
+    expect(result.quotes.map((quote) => [quote.selection, quote.rawFormat])).toEqual([
+      ["HOME", "MALAY"], ["AWAY", "MALAY"]
+    ]);
+  });
 });

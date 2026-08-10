@@ -99,4 +99,24 @@ describe("CmdObservedCatalogReader", () => {
     expect(result.quotes).toHaveLength(3);
     expect(result.rejectedMarketCount).toBe(1);
   });
+
+  it("retains an exact full-time half-goal handicap market", async () => {
+    const reader = new CmdObservedCatalogReader({
+      provider: "SABA",
+      accounts: { withActiveHandle: async (_id, _provider, consume) => consume({ ...handle, provider: "SABA" }) },
+      source: { readCatalog: async () => [{
+        sportId: "1", leagueId: "l", leagueName: "Allsvenskan", matchId: "m", timeText: "1H41'",
+        teamNames: ["IK Sirius", "Brommapojkarna"], groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
+          { marketOddsId: "ah", priceText: "0.79", status: null, greyedOut: null, lineText: "0.5" },
+          { marketOddsId: "ah", priceText: "-0.87", status: null, greyedOut: null, lineText: null }
+        ] }]
+      }] },
+      clock: { now: () => ({ wallClockNowMs: 1_788_000_000_000, monotonicNowMs: 500 }) },
+      timezoneOffsetMinutes: 420
+    });
+
+    const result = await reader.read("saba-account");
+    expect(result.markets).toEqual([expect.objectContaining({ provider: "SABA", marketType: "FT_AH", line: "-0.5" })]);
+    expect(result.quotes.map((quote) => quote.selection)).toEqual(["HOME", "AWAY"]);
+  });
 });

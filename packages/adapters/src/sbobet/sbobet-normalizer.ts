@@ -5,11 +5,12 @@ export interface SbobetCatalogSelection {
   readonly selection: "OVER" | "UNDER" | "HOME" | "DRAW" | "AWAY";
   readonly priceText: string;
   readonly locked: boolean;
+  readonly lineText?: string | null;
 }
 
 export interface SbobetCatalogMarket {
   readonly marketId: string;
-  readonly marketType: "FT_TOTAL" | "FT_1X2";
+  readonly marketType: "FT_TOTAL" | "FT_1X2" | "FT_AH";
   readonly lineText: string | null;
   readonly selections: readonly SbobetCatalogSelection[];
 }
@@ -51,6 +52,31 @@ function canonicalLine(value: string | null): string | null {
   const parts = value.trim().split(/[\/-]/u).map(Number);
   if (parts.length < 1 || parts.length > 2 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 100)) return null;
   return String(parts.reduce((sum, part) => sum + part, 0) / parts.length);
+}
+
+function handicapValue(value: string): number | null {
+  const match = /^([+-])?(\d+(?:\.\d+)?)(?:\s*[\/-]\s*(\d+(?:\.\d+)?))?$/u.exec(value.trim());
+  if (match === null) return null;
+  const first = Number(match[2]);
+  const second = match[3] === undefined ? first : Number(match[3]);
+  if (![first, second].every((part) => Number.isFinite(part) && part >= 0 && part <= 100)) return null;
+  const magnitude = (first + second) / 2;
+  return match[1] === "-" ? -magnitude : magnitude;
+}
+
+function canonicalHomeHandicap(selections: readonly SbobetCatalogSelection[]): string | null {
+  if (selections.length !== 2) return null;
+  const evidence = selections.flatMap((selection) => {
+    const raw = selection.lineText?.trim();
+    if (raw === undefined || raw === null || raw.length === 0) return [];
+    const parsed = handicapValue(raw);
+    if (parsed === null || parsed === 0) return [Number.NaN];
+    const selectionLine = /^[+-]/u.test(raw) ? parsed : -Math.abs(parsed);
+    return [selection.selection === "HOME" ? selectionLine : -selectionLine];
+  });
+  if (evidence.length === 0 || evidence.some((value) => !Number.isFinite(value)) ||
+    evidence.some((value) => value !== evidence[0])) return null;
+  return String(evidence[0]);
 }
 
 function liveTiming(record: SbobetCatalogInputRecord, observedAtMs: number) {
@@ -97,15 +123,18 @@ export function normalizeSbobetCatalog(
     }
     let invalid = false;
     for (const market of record.markets) {
-      const outcomes = market.marketType === "FT_TOTAL" ? ["OVER", "UNDER"] : ["HOME", "DRAW", "AWAY"];
+      const outcomes = market.marketType === "FT_TOTAL" ? ["OVER", "UNDER"] : market.marketType === "FT_AH"
+        ? ["HOME", "AWAY"] : ["HOME", "DRAW", "AWAY"];
       const actual = market.selections.map((selection) => selection.selection);
       const ids = new Set(market.selections.map((selection) => selection.selectionId));
-      const line = market.marketType === "FT_TOTAL" ? canonicalLine(market.lineText) : null;
-      const pricesValid = market.selections.every((selection) => market.marketType === "FT_TOTAL"
+      const line = market.marketType === "FT_TOTAL" ? canonicalLine(market.lineText) : market.marketType === "FT_AH"
+        ? canonicalHomeHandicap(market.selections) : null;
+      const pricesValid = market.selections.every((selection) => market.marketType !== "FT_1X2"
         ? signedDecimal.test(selection.priceText) && Number(selection.priceText) !== 0 && Math.abs(Number(selection.priceText)) <= 1
         : decimal.test(selection.priceText) && Number(selection.priceText) > 1);
       if (market.marketId.trim() === "" || ids.size !== outcomes.length || actual.length !== outcomes.length ||
-        outcomes.some((outcome) => !actual.includes(outcome as never)) || (market.marketType === "FT_TOTAL" && line === null) || !pricesValid) {
+        outcomes.some((outcome) => !actual.includes(outcome as never)) ||
+        ((market.marketType === "FT_TOTAL" || market.marketType === "FT_AH") && line === null) || !pricesValid) {
         invalid = true;
         break;
       }
@@ -119,7 +148,7 @@ export function normalizeSbobetCatalog(
         provider: "SBOBET", category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, providerSelectionId: selection.selectionId,
         marketType: market.marketType, scope: "FULL_TIME", selection: selection.selection, line,
-        rawOdds: selection.priceText, rawFormat: market.marketType === "FT_TOTAL" ? "MALAY" : "DECIMAL",
+        rawOdds: selection.priceText, rawFormat: market.marketType === "FT_1X2" ? "DECIMAL" : "MALAY",
         status, isLive: timing.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
       })));

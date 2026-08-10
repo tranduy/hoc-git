@@ -5,6 +5,7 @@ export interface CmdCatalogOdd {
   readonly priceText: string;
   readonly status: string | null;
   readonly greyedOut: string | null;
+  readonly lineText?: string | null;
 }
 
 export interface CmdCatalogGroup {
@@ -53,6 +54,32 @@ function line(labels: readonly string[]): string | null {
   if (parts.some((part) => !Number.isFinite(part) || part < 0 || part > 100)) return null;
   const value = parts.reduce((sum, part) => sum + part, 0) / parts.length;
   return Number.isFinite(value) ? String(value) : null;
+}
+
+function handicapValue(value: string): number | null {
+  const match = /^([+-])?(\d+(?:\.\d+)?)(?:\s*[\/-]\s*(\d+(?:\.\d+)?))?$/u.exec(value.trim());
+  if (match === null) return null;
+  const first = Number(match[2]);
+  const second = match[3] === undefined ? first : Number(match[3]);
+  if (![first, second].every((part) => Number.isFinite(part) && part >= 0 && part <= 100)) return null;
+  const magnitude = (first + second) / 2;
+  return match[1] === "-" ? -magnitude : magnitude;
+}
+
+function canonicalHomeHandicap(odds: readonly CmdCatalogOdd[]): string | null {
+  if (odds.length !== 2) return null;
+  const evidence = odds.flatMap((odd, index) => {
+    const raw = odd.lineText?.trim();
+    if (raw === undefined || raw === null || raw.length === 0) return [];
+    const parsed = handicapValue(raw);
+    if (parsed === null || parsed === 0) return [Number.NaN];
+    const explicitSign = /^[+-]/u.test(raw);
+    const selectionLine = explicitSign ? parsed : -Math.abs(parsed);
+    return [index === 0 ? selectionLine : -selectionLine];
+  });
+  if (evidence.length === 0 || evidence.some((value) => !Number.isFinite(value)) ||
+    evidence.some((value) => value !== evidence[0])) return null;
+  return String(evidence[0]);
 }
 
 function eventTime(timeText: string, options: CmdCatalogOptions): {
@@ -136,7 +163,8 @@ export function normalizeObservedFootballCatalog(
   for (const record of records) {
     const timing = eventTime(record.timeText, options);
     const teams = record.teamNames.map((team) => team.trim()).filter((team) => team.length > 0);
-    const supported = record.groups.filter((group) => group.betTypeIds.length === 1 && ["3", "5"].includes(group.betTypeIds[0]!));
+    const supported = record.groups.filter((group) => group.betTypeIds.length === 1 && ["1", "3", "5"].includes(group.betTypeIds[0]!) &&
+      (group.betTypeIds[0] !== "1" || group.odds.some((odd) => odd.lineText !== undefined)));
     let invalid = record.sportId !== "1" || record.matchId.trim().length === 0 || record.leagueName.trim().length === 0 ||
       teams.length !== 2 || teams[0] === teams[1] || timing === null;
     const recordMarkets: ProviderMarket[] = [];
@@ -147,15 +175,16 @@ export function normalizeObservedFootballCatalog(
     }
     for (const group of supported) {
       const betType = group.betTypeIds[0]!;
-      const selections = betType === "3" ? ["OVER", "UNDER"] as const : ["HOME", "DRAW", "AWAY"] as const;
+      const selections = betType === "3" ? ["OVER", "UNDER"] as const : betType === "1"
+        ? ["HOME", "AWAY"] as const : ["HOME", "DRAW", "AWAY"] as const;
       const marketId = exactMarketId(group, selections.length);
-      const marketLine = betType === "3" ? line(group.labels) : null;
-      const pricesValid = group.odds.every((odd) => betType === "3" ? validMalay(odd.priceText) : validDecimal(odd.priceText));
-      if (marketId === null || (betType === "3" && marketLine === null) || !pricesValid) {
+      const marketLine = betType === "3" ? line(group.labels) : betType === "1" ? canonicalHomeHandicap(group.odds) : null;
+      const pricesValid = group.odds.every((odd) => betType === "5" ? validDecimal(odd.priceText) : validMalay(odd.priceText));
+      if (marketId === null || ((betType === "3" || betType === "1") && marketLine === null) || !pricesValid) {
         invalid = true;
         break;
       }
-      const marketType = betType === "3" ? "FT_TOTAL" as const : "FT_1X2" as const;
+      const marketType = betType === "3" ? "FT_TOTAL" as const : betType === "1" ? "FT_AH" as const : "FT_1X2" as const;
       const status = commonMarketStatus(group);
       recordMarkets.push({
         provider, category: "FOOTBALL", providerEventId: record.matchId,
@@ -166,7 +195,7 @@ export function normalizeObservedFootballCatalog(
         provider, category: "FOOTBALL", providerEventId: record.matchId,
         providerMarketId: marketId, providerSelectionId: `${marketId}:${selections[index]!.toLowerCase()}`,
         marketType, scope: "FULL_TIME", selection: selections[index]!, line: marketLine,
-        rawOdds: odd.priceText, rawFormat: betType === "3" ? "MALAY" : "DECIMAL",
+        rawOdds: odd.priceText, rawFormat: betType === "5" ? "DECIMAL" : "MALAY",
         status, isLive: timing!.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
       })));

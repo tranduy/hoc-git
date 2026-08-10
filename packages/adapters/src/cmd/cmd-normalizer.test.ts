@@ -1,6 +1,6 @@
 import { ProviderEventSchema, ProviderMarketSchema, ProviderQuoteSchema } from "@tool-chenh/contracts";
 import { describe, expect, it } from "vitest";
-import { normalizeCmdCatalog, normalizeObservedFootballCatalog } from "./cmd-normalizer.js";
+import { normalizeCmdCatalog, normalizeObservedFootballCatalog, type CmdCatalogInputRecord } from "./cmd-normalizer.js";
 
 describe("normalizeCmdCatalog", () => {
   const record = {
@@ -92,6 +92,31 @@ describe("normalizeCmdCatalog", () => {
     });
     expect(result.markets[0]).toEqual(expect.objectContaining({ line: "3.75", status: "SUSPENDED" }));
     expect(result.quotes.every((quote) => quote.status === "SUSPENDED")).toBe(true);
+  });
+
+  it("normalizes a full-time half-goal handicap from the team row that displays the line", () => {
+    const handicap: CmdCatalogInputRecord = { ...structuredClone(record), groups: [{
+      betTypeIds: ["1"], labels: ["0.5"], odds: [
+        { marketOddsId: "ah-half", priceText: "0.79", status: null, greyedOut: "false", lineText: "0.5" },
+        { marketOddsId: "ah-half", priceText: "-0.87", status: null, greyedOut: "false", lineText: null }
+      ]
+    }] };
+
+    const homeGives = normalizeObservedFootballCatalog("SABA", [handicap], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
+    });
+    expect(homeGives.markets).toEqual([expect.objectContaining({ marketType: "FT_AH", line: "-0.5" })]);
+    expect(homeGives.quotes.map((quote) => [quote.selection, quote.line, quote.rawFormat])).toEqual([
+      ["HOME", "-0.5", "MALAY"], ["AWAY", "-0.5", "MALAY"]
+    ]);
+
+    const awayHandicap: CmdCatalogInputRecord = { ...handicap, groups: [{ ...handicap.groups[0]!, odds: [
+      { ...handicap.groups[0]!.odds[0]!, lineText: null }, { ...handicap.groups[0]!.odds[1]!, lineText: "0.5" }
+    ] }] };
+    const awayGives = normalizeObservedFootballCatalog("SABA", [awayHandicap], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 2
+    });
+    expect(awayGives.markets[0]?.line).toBe("0.5");
   });
 
   it("accepts the observed live clock format with stoppage time", () => {
