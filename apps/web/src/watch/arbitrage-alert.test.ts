@@ -72,6 +72,21 @@ describe("watched arbitrage alert planning", () => {
       roi: "0.3333333333333333333333333333333333333333" });
   });
 
+  it("converts Malay odds with exact decimal arithmetic before stake optimization", () => {
+    const saba = cell("SABA", "FT_TOTAL", { OVER: "-0.93", UNDER: "0.70" });
+    const sbobet = cell("SBOBET", "FT_TOTAL", { OVER: "0.70", UNDER: "-0.93" });
+    const asMalay = (value: ComparisonCell): ComparisonCell => ({ ...value,
+      quotes: value.quotes.map((quote) => ({ ...quote, rawFormat: "MALAY" as const })) });
+
+    const alert = buildArbitrageAlert(row("FT_TOTAL", [asMalay(saba), asMalay(sbobet)]),
+      selected, DEFAULT_WATCH_STAKE_POLICY);
+
+    expect(alert?.legs.map((leg) => leg.decimalOdds)).toEqual([
+      "2.075268817204301075268817204301075268817",
+      "2.075268817204301075268817204301075268817"
+    ]);
+  });
+
   it.each([
     ["single provider", [cell("SABA", "FT_TOTAL", { OVER: "2.20", UNDER: "2.20" })], selected],
     ["missing outcome", [cell("SABA", "FT_TOTAL", { OVER: "2.20" }), cell("SBOBET", "FT_TOTAL", { OVER: "2.10" })], selected],

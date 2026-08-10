@@ -10,6 +10,8 @@ import {
 import { clearWatchEntries, loadWatchEntries, saveWatchEntries } from "../watch/watch-storage.js";
 import { buildComparisonEvents, type ComparisonEvent } from "../catalog/comparison.js";
 import type { ProviderId } from "@tool-chenh/contracts";
+import { buildArbitrageAlert } from "../watch/arbitrage-alert.js";
+import { ArbitrageAlertToast } from "./arbitrage-alert-toast.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
@@ -105,8 +107,8 @@ export function MatchWatchDetail({
       return eventId === undefined ? [] : [[catalog.provider, sampleMatch(catalog, eventId)] as const];
     }));
   }
-  const [selectedProviders, setSelectedProviders] = useState<ReadonlySet<string>>(() =>
-    new Set(visibleBooks.filter((book) => book.connected && book.selected).map((book) => book.provider)));
+  const [selectedProviders, setSelectedProviders] = useState<ReadonlySet<ProviderId>>(() =>
+    new Set<ProviderId>(visibleBooks.filter((book) => book.connected && book.selected).map((book) => book.provider)));
 
   const appendEntries = (newEntries: readonly MatchWatchEntry[]): void => {
     if (newEntries.length === 0) return;
@@ -187,6 +189,16 @@ export function MatchWatchDetail({
 
   const event = currentSample.event ?? initialSample.event;
   const matchLabel = event === null ? "Selected event unavailable" : `${event.participantA} vs ${event.participantB}`;
+  const currentAlert = useMemo(() => {
+    const observationAgeMs = clock() - currentSample.observedAtMs;
+    if (!watching || watcherState !== "WATCHING" || currentComparison === undefined ||
+      observationAgeMs < 0 || observationAgeMs > staleAfterMs) return null;
+    return currentComparison.rows
+      .map((row) => buildArbitrageAlert(row, selectedProviders))
+      .filter((alert) => alert !== null)
+      .sort((left, right) => Number(right.roi) - Number(left.roi) ||
+        Number(right.worstCaseProfit) - Number(left.worstCaseProfit))[0] ?? null;
+  }, [clock, currentComparison, currentSample.observedAtMs, selectedProviders, staleAfterMs, watcherState, watching]);
   const newestEntries = [...entries].reverse();
   const clearLog = (): void => {
     clearWatchEntries(storage, initialCatalog.provider, providerEventId);
@@ -195,6 +207,7 @@ export function MatchWatchDetail({
 
   return (
     <section className="match-watch" aria-label={`Watching ${matchLabel}`}>
+      <ArbitrageAlertToast alert={currentAlert} matchLabel={matchLabel} />
       <button className="watch-back" onClick={onBack} type="button">Back to matches</button>
       <header className="match-watch__header">
         <div><p className="eyebrow">{event?.competition ?? "Provider event"}</p><h1>{matchLabel}</h1>

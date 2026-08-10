@@ -1,7 +1,6 @@
-import type { ProviderId } from "@tool-chenh/contracts";
+import type { ProviderId, ProviderQuote } from "@tool-chenh/contracts";
 import { Decimal, optimizeStakes } from "@tool-chenh/core";
 import type { ComparisonRow } from "../catalog/comparison.js";
-import { decimalOdds } from "../catalog/comparison.js";
 
 export interface WatchStakePolicy {
   readonly currency: string;
@@ -46,9 +45,21 @@ const OUTCOME_DOMAINS: Readonly<Record<string, readonly string[]>> = {
   FT_TOTAL: ["OVER", "UNDER"]
 };
 
-function plainDecimal(value: number): string {
-  const decimal = new Decimal(value);
-  return decimal.toFixed(decimal.decimalPlaces());
+function plainDecimal(value: Decimal): string {
+  return value.toFixed(value.decimalPlaces());
+}
+
+function exactDecimalOdds(quote: ProviderQuote): Decimal | null {
+  try {
+    const raw = new Decimal(quote.rawOdds);
+    if (!raw.isFinite()) return null;
+    if (quote.rawFormat === "DECIMAL") return raw.gt(1) ? raw : null;
+    if (quote.rawFormat !== "MALAY" || raw.isZero() || raw.abs().gt(1)) return null;
+    const decimal = raw.gt(0) ? raw.plus(1) : new Decimal(1).plus(new Decimal(1).div(raw.abs()));
+    return decimal.gt(1) ? decimal : null;
+  } catch {
+    return null;
+  }
 }
 
 export function buildArbitrageAlert(
@@ -65,10 +76,10 @@ export function buildArbitrageAlert(
       if (!selectedProviders.has(cell.provider) || cell.market.status !== "OPEN") return [];
       return cell.quotes.flatMap((quote) => {
         if (quote.selection !== selection || quote.status !== "OPEN") return [];
-        const odds = decimalOdds(quote);
+        const odds = exactDecimalOdds(quote);
         return odds === null ? [] : [{ provider: cell.provider, selection, odds }];
       });
-    }).sort((left, right) => right.odds - left.odds || left.provider.localeCompare(right.provider));
+    }).sort((left, right) => right.odds.comparedTo(left.odds) || left.provider.localeCompare(right.provider));
     const best = candidates[0];
     if (best === undefined) return null;
     bestLegs.push({ provider: best.provider, selection, decimalOdds: plainDecimal(best.odds) });

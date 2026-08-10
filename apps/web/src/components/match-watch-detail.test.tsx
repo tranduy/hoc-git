@@ -32,6 +32,22 @@ function catalog(observedAtMs: number, home = "2.1", status: "OPEN" | "SUSPENDED
   };
 }
 
+function totalCatalog(provider: "SABA" | "SBOBET", accountId: string, over: string, under: string,
+  status: "OPEN" | "SUSPENDED" = "OPEN", observedAtMs = 1_000): LiveCatalogResponse {
+  const providerEventId = `${provider}-total-event`;
+  const providerMarketId = `${provider}-total-market`;
+  const totalMarket: ProviderMarket = { ...market, provider, providerEventId, providerMarketId,
+    marketType: "FT_TOTAL", line: "2.5", status };
+  const totalEvent: ProviderEvent = { ...event, provider, providerEventId };
+  const makeQuote = (selection: "OVER" | "UNDER", rawOdds: string): ProviderQuote => ({
+    ...quote(selection, rawOdds, status), provider, providerEventId, providerMarketId,
+    providerSelectionId: `${provider}-${selection}`, marketType: "FT_TOTAL", line: "2.5"
+  });
+  return { dataMode: "LIVE", accountId, provider, category: "FOOTBALL",
+    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs, rejectedMarketCount: 0,
+    events: [totalEvent], markets: [totalMarket], quotes: [makeQuote("OVER", over), makeQuote("UNDER", under)] };
+}
+
 beforeEach(() => {
   window.localStorage.clear();
   vi.useFakeTimers();
@@ -111,6 +127,65 @@ describe("MatchWatchDetail", () => {
     expect(screen.getByText("STALE")).toBeTruthy();
     expect(screen.getByText("#CMD · STALE")).toBeTruthy();
     expect(screen.getByText("No accepted provider sample within 3000 ms")).toBeTruthy();
+  });
+
+  it("shows one calculated ten-second preflight alert and does not repeat the same fingerprint", () => {
+    const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
+    const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
+    const comparison = buildComparisonEvents([saba, sbobet])[0]!;
+    render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read: vi.fn() }} comparisonCatalogs={[saba, sbobet]}
+      comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined} pollDelayMs={60_000}
+      providerEventId="SABA-total-event" />);
+
+    expect(screen.getByRole("alert").textContent).toMatch(/READY TO PREFLIGHT.*Alpha vs Beta/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*50,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*UNDER.*50,000 VND/u);
+    expect(screen.getByRole("alert").textContent).toMatch(/Worst-case profit 10,000 VND.*ROI 10.00%/u);
+
+    act(() => { vi.advanceTimersByTime(10_000); });
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: "SBOBET available for this match" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "SBOBET available for this match" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("removes an active candidate immediately when monitoring stops", () => {
+    const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
+    const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
+    render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read: vi.fn() }} comparisonCatalogs={[saba, sbobet]}
+      comparisonEvent={buildComparisonEvents([saba, sbobet])[0]!} initialCatalog={saba} onBack={() => undefined}
+      providerEventId="SABA-total-event" />);
+
+    expect(screen.getByRole("alert")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop watching" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("does not alert from an impossible future-dated catalog observation", () => {
+    const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70", "OPEN", 20_000);
+    const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20", "OPEN", 20_000);
+    render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read: vi.fn() }} comparisonCatalogs={[saba, sbobet]}
+      comparisonEvent={buildComparisonEvents([saba, sbobet])[0]!} initialCatalog={saba} onBack={() => undefined}
+      providerEventId="SABA-total-event" />);
+
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("alerts again only after a polled price change creates a new plan", async () => {
+    const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
+    const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
+    const read = vi.fn(async (accountId: string) => accountId === "saba-account"
+      ? totalCatalog("SABA", "saba-account", "2.30", "1.70", "OPEN", 21_000)
+      : totalCatalog("SBOBET", "sbo-account", "1.75", "2.20", "OPEN", 21_000));
+    render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read }} comparisonCatalogs={[saba, sbobet]}
+      comparisonEvent={buildComparisonEvents([saba, sbobet])[0]!} initialCatalog={saba} onBack={() => undefined}
+      pollDelayMs={11_000} providerEventId="SABA-total-event" />);
+
+    act(() => { vi.advanceTimersByTime(10_000); });
+    expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("alert").textContent).toMatch(/SABA.*OVER.*2.3/u);
   });
 
   it("polls every connected comparison book and refreshes the side-by-side rates", async () => {

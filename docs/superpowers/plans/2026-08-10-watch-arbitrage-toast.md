@@ -29,27 +29,27 @@
 - Consumes: `ComparisonRow`, selected provider IDs, and `optimizeStakes` from `@tool-chenh/core`.
 - Produces: `buildArbitrageAlert(row, selectedProviders, policy): WatchArbitrageAlert | null` and `DEFAULT_WATCH_STAKE_POLICY`.
 
-- [ ] **Step 1: Write failing planner tests**
+- [x] **Step 1: Write failing planner tests**
 
 Cover a profitable `FT_TOTAL` row, a three-way `FT_1X2` row, and rejection of incomplete, suspended, single-provider, filtered-provider, invalid-price, and rounded-unprofitable inputs. Assert exact provider/selection/odds/stake legs and exact worst-case profit/ROI strings.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/watch/arbitrage-alert.test.ts`
 
 Expected: FAIL because `arbitrage-alert.ts` and `buildArbitrageAlert` do not exist.
 
-- [ ] **Step 3: Implement the minimal planner**
+- [x] **Step 3: Implement the minimal planner**
 
 Select the best valid open quote for each expected outcome, require at least two providers, call `optimizeStakes` with the exact policy constraints, reject null/non-positive plans, and return a stable fingerprint containing market identity, providers, odds, and stakes.
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
+- [x] **Step 4: Run the focused test and verify GREEN**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/watch/arbitrage-alert.test.ts`
 
 Expected: all planner cases PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit message: `feat: calculate watched arbitrage plans`
 
@@ -64,27 +64,27 @@ Commit message: `feat: calculate watched arbitrage plans`
 - Consumes: `WatchArbitrageAlert | null`.
 - Produces: `ArbitrageAlertToast({ alert, durationMs?: 10000 })` with `role="alert"`.
 
-- [ ] **Step 1: Write failing toast lifecycle tests**
+- [x] **Step 1: Write failing toast lifecycle tests**
 
 Assert the rendered plan fields, exact ten-second removal, no timer restart for the same fingerprint, restart for a changed fingerprint, and immediate removal when `alert` becomes null.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/components/arbitrage-alert-toast.test.tsx`
 
 Expected: FAIL because the toast component does not exist.
 
-- [ ] **Step 3: Implement the minimal toast and styling**
+- [x] **Step 3: Implement the minimal toast and styling**
 
 Use one effect keyed by the alert fingerprint, clear its timeout on change/unmount, render all legs and financial results, and include `Provider preflight is required before placement.`
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
+- [x] **Step 4: Run the focused test and verify GREEN**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/components/arbitrage-alert-toast.test.tsx`
 
 Expected: all lifecycle cases PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Commit message: `feat: show watched arbitrage toast`
 
@@ -98,21 +98,21 @@ Commit message: `feat: show watched arbitrage toast`
 - Consumes: current comparison rows, selected providers, `watcherState`, and the pure planner.
 - Produces: one highest-ROI visible alert and no alert outside fresh `WATCHING` state.
 
-- [ ] **Step 1: Write failing integration tests**
+- [x] **Step 1: Write failing integration tests**
 
 Create two-provider catalogs with a profitable exact row. Assert one toast appears, contains both providers and calculated stakes, expires after 10 seconds, does not repeat while unchanged, reappears after an odds change, and is removed when one leg suspends or the watcher becomes stale/stopped.
 
-- [ ] **Step 2: Run the integration test and verify RED**
+- [x] **Step 2: Run the integration test and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/components/match-watch-detail.test.tsx`
 
 Expected: FAIL because watch detail does not derive or render alerts.
 
-- [ ] **Step 3: Implement minimal integration**
+- [x] **Step 3: Implement minimal integration**
 
 Filter each row to selected providers, derive eligible alerts only while `WATCHING`, sort by realized ROI then profit, and render only the best alert above current markets.
 
-- [ ] **Step 4: Run focused and full web verification**
+- [x] **Step 4: Run focused and full web verification**
 
 Run:
 
@@ -124,7 +124,7 @@ npm.cmd run build --workspace @tool-chenh/web
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Run workspace verification and commit**
+- [x] **Step 5: Run workspace verification and commit**
 
 Run: `npm.cmd run verify`
 
