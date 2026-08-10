@@ -36,6 +36,9 @@ The UI must not copy, estimate, or silently substitute values. An unverified pro
 ## Table behavior
 
 - Provider columns remain in a stable order matching the checkbox list.
+- Show the same provider checkbox selector on the catalog and event-detail views; both surfaces share one persisted selection.
+- Each event card shows provider hashtag badges only for verified providers that currently expose that event.
+- Upcoming events show a live `Starts in DD:HH:MM:SS` countdown derived from the canonical start time. At zero, the client requests a fresh snapshot instead of assuming that the event is live.
 - Each cell shows raw odds, normalized decimal odds, quote status, and quote age.
 - Highlight the best eligible price for each selection in green.
 - Render suspended/stale/missing cells in gray with a short reason.
@@ -81,6 +84,7 @@ Provider selection is sent to the API so filtering and opportunity calculation u
 - Core/API tests prove different lines never merge, reversed outcomes map correctly, stale/suspended quotes cannot rank, and selected-provider filtering changes opportunities.
 - Integration tests use two independent adapters and timestamps; fixtures remain visibly marked fixture-only.
 - Browser tests verify checkbox behavior, provider column labels, opportunity ordering, reload persistence, and hiding cached opportunities during reconnect.
+- Browser tests verify identical provider selection on list/detail pages, exact provider hashtags, deterministic countdown display, and refresh at the countdown boundary.
 - Real acceptance requires two independently validated live providers showing the same event and at least one exact common market. Until then, the screen must state that comparison is unavailable.
 
 ## Explicit non-goals

@@ -320,8 +320,12 @@ git commit -m "feat: expose selected-provider comparison snapshots"
 - Create: `apps/web/src/components/provider-selector.test.tsx`
 - Create: `apps/web/src/components/comparison-matrix.tsx`
 - Create: `apps/web/src/components/comparison-matrix.test.tsx`
+- Create: `apps/web/src/components/event-countdown.tsx`
+- Create: `apps/web/src/components/event-countdown.test.tsx`
 - Modify: `apps/web/src/pages/live-catalog-page.tsx`
 - Modify: `apps/web/src/pages/live-catalog-page.test.tsx`
+- Modify: `apps/web/src/components/match-watch-detail.tsx`
+- Modify: `apps/web/src/components/match-watch-detail.test.tsx`
 - Modify: `apps/web/src/styles.css`
 
 **Interfaces:**
@@ -332,6 +336,7 @@ git commit -m "feat: expose selected-provider comparison snapshots"
 - [ ] **Step 1: Write failing selection-state tests**
 
 Assert all connected providers are selected by default, disabled providers cannot be selected, at least two are required, and the selected list persists under a versioned local-storage key without storing secrets.
+Assert the catalog and detail views read and update the same provider selection.
 
 - [ ] **Step 2: Write failing matrix rendering tests**
 
@@ -342,6 +347,8 @@ Use a hand-built strict snapshot to assert:
 - Best eligible cells receive `comparison-cell--best`.
 - Stale/suspended/missing cells show reasons and are never highlighted.
 - A `2.75` market renders as a separate row.
+- Event cards show hashtags only for providers with verified cells for that event.
+- An upcoming event renders `Starts in DD:HH:MM:SS`; reaching zero invokes the supplied refresh callback once and never labels the event live locally.
 
 - [ ] **Step 3: Run RED web tests**
 
@@ -351,7 +358,7 @@ npm.cmd test --workspace @tool-chenh/web -- --run src/comparison src/components/
 
 - [ ] **Step 4: Implement selector, API client, and matrix**
 
-Render provider checkboxes above the category controls. Replace single-account catalog cards with event sections containing the provider matrix. Use accessible table markup, sticky provider headers, compact mobile horizontal scrolling, and clear English/Vietnamese-neutral market identifiers already used by the app.
+Render provider checkboxes above the category controls and repeat the same controlled selector in event detail. Replace single-account catalog cards with event sections containing verified-provider hashtag badges and the provider matrix. Use accessible table markup, sticky provider headers, compact mobile horizontal scrolling, and clear English/Vietnamese-neutral market identifiers already used by the app. Implement `EventCountdown` with an injected clock/timer boundary for deterministic tests; countdown expiry requests a fresh server snapshot.
 
 - [ ] **Step 5: Implement deterministic sorting and empty states**
 
@@ -360,9 +367,9 @@ Sort opportunity events first, then live events, then prematch start time. Withi
 - [ ] **Step 6: Run GREEN tests, typecheck, and commit**
 
 ```powershell
-npm.cmd test --workspace @tool-chenh/web -- --run src/comparison src/components/provider-selector.test.tsx src/components/comparison-matrix.test.tsx src/pages/live-catalog-page.test.tsx
+npm.cmd test --workspace @tool-chenh/web -- --run src/comparison src/components/provider-selector.test.tsx src/components/comparison-matrix.test.tsx src/components/event-countdown.test.tsx src/components/match-watch-detail.test.tsx src/pages/live-catalog-page.test.tsx
 npm.cmd run typecheck --workspace @tool-chenh/web
-git add apps/web/src/api/catalog.ts apps/web/src/comparison apps/web/src/components/provider-selector.tsx apps/web/src/components/provider-selector.test.tsx apps/web/src/components/comparison-matrix.tsx apps/web/src/components/comparison-matrix.test.tsx apps/web/src/pages/live-catalog-page.tsx apps/web/src/pages/live-catalog-page.test.tsx apps/web/src/styles.css
+git add apps/web/src/api/catalog.ts apps/web/src/comparison apps/web/src/components/provider-selector.tsx apps/web/src/components/provider-selector.test.tsx apps/web/src/components/comparison-matrix.tsx apps/web/src/components/comparison-matrix.test.tsx apps/web/src/components/event-countdown.tsx apps/web/src/components/event-countdown.test.tsx apps/web/src/components/match-watch-detail.tsx apps/web/src/components/match-watch-detail.test.tsx apps/web/src/pages/live-catalog-page.tsx apps/web/src/pages/live-catalog-page.test.tsx apps/web/src/styles.css
 git commit -m "feat: add selectable multi-provider comparison matrix"
 ```
 
