@@ -8,7 +8,13 @@ import {
   type MatchWatchEntry
 } from "../watch/match-watch.js";
 import { clearWatchEntries, loadWatchEntries, saveWatchEntries } from "../watch/watch-storage.js";
-import { buildComparisonEvents, type ComparisonEvent } from "../catalog/comparison.js";
+import {
+  buildComparisonEvents,
+  estimatedLiveStartAtMs,
+  formatCountdown,
+  formatMatchClock,
+  type ComparisonEvent
+} from "../catalog/comparison.js";
 import type { ProviderId } from "@tool-chenh/contracts";
 import { buildArbitrageAlert } from "../watch/arbitrage-alert.js";
 import { ArbitrageAlertToast } from "./arbitrage-alert-toast.js";
@@ -189,6 +195,9 @@ export function MatchWatchDetail({
 
   const event = currentSample.event ?? initialSample.event;
   const matchLabel = event === null ? "Selected event unavailable" : `${event.participantA} vs ${event.participantB}`;
+  const estimatedStartAtMs = event?.isLive
+    ? estimatedLiveStartAtMs(currentSample.observedAtMs, event.liveState)
+    : null;
   const currentAlert = useMemo(() => {
     const observationAgeMs = clock() - currentSample.observedAtMs;
     if (!watching || watcherState !== "WATCHING" || currentComparison === undefined ||
@@ -211,7 +220,15 @@ export function MatchWatchDetail({
       <button className="watch-back" onClick={onBack} type="button">Back to matches</button>
       <header className="match-watch__header">
         <div><p className="eyebrow">{event?.competition ?? "Provider event"}</p><h1>{matchLabel}</h1>
-          <p>{event?.isLive ? "Live now" : event === null ? "Event unavailable" : new Date(event.startAtUtcMs).toLocaleString()}</p></div>
+          {event === null ? <p>Event unavailable</p> : event.isLive ? <div className="match-timing">
+            <p>{formatMatchClock(event.liveState)}</p>
+            <small>Observed {new Date(currentSample.observedAtMs).toLocaleString()}</small>
+            {estimatedStartAtMs === null ? null
+              : <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}
+          </div> : <div className="match-timing">
+            <p>{formatCountdown(event.startAtUtcMs, clock())}</p>
+            <small>Scheduled {new Date(event.startAtUtcMs).toLocaleString()}</small>
+          </div>}</div>
         <div className="watch-health"><span className={`watch-state watch-state--${watcherState.toLowerCase()}`}>{watcherState}</span>
           <span>{successfulSamples} accepted sample(s)</span><span>Observed {new Date(currentSample.observedAtMs).toLocaleTimeString()}</span></div>
       </header>

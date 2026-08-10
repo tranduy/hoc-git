@@ -43,10 +43,24 @@ const catalogApi: CatalogApiLike = { read: async () => catalog };
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.history.replaceState({}, "", "/live-catalog");
 });
 
 describe("LiveCatalogPage", () => {
+  it("shows feed elapsed time, observed time, and approximate start for live events", async () => {
+    const observedAtMs = Date.now();
+    const liveEvent: ProviderEvent = { ...event, isLive: true, startAtUtcMs: observedAtMs,
+      liveState: { period: "1H", scoreHome: 0, scoreAway: 0, clockMs: 660_000 } };
+    const liveCatalog: LiveCatalogResponse = { ...catalog, observedAtMs,
+      events: [liveEvent], quotes: quotes.map((quote) => ({ ...quote, isLive: true })) };
+    render(<LiveCatalogPage accountApi={accountApi} catalogApi={{ read: async () => liveCatalog }} />);
+
+    expect(await screen.findByText("LIVE · 1H · 11:00 elapsed")).toBeTruthy();
+    expect(screen.getByText(`Observed ${new Date(liveCatalog.observedAtMs).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`Approx. started ${new Date(liveCatalog.observedAtMs - 660_000).toLocaleString()}`)).toBeTruthy();
+  });
+
   it("shows provider checkboxes, countdown, provider badges, and side-by-side market rates", async () => {
     const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
     const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };

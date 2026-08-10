@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import { buildComparisonEvents, formatCountdown } from "./comparison.js";
+import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock } from "./comparison.js";
 
 const event = (provider: "SABA" | "SBOBET", id: string): ProviderEvent => ({
   provider, category: "FOOTBALL", providerEventId: id, competition: "Eliteserien",
@@ -41,6 +41,14 @@ describe("catalog comparison", () => {
     expect(buildComparisonEvents([catalog("SABA", "one", ["2", "3", "4"]), changed])).toHaveLength(2);
     expect(formatCountdown(2_000_000, 1_900_000)).toBe("Starts in 00:00:01:40");
     expect(formatCountdown(2_000_000, 2_000_000)).toBe("Starting / refresh pending");
+  });
+
+  it("formats provider elapsed time and derives the approximate live start from the observation", () => {
+    expect(formatMatchClock({ period: "1H", scoreHome: 0, scoreAway: 0, clockMs: 660_000 })).toBe("LIVE · 1H · 11:00 elapsed");
+    expect(formatMatchClock({ period: "2H", scoreHome: 1, scoreAway: 0, clockMs: 2_880_000 })).toBe("LIVE · 2H · 48:00 elapsed");
+    expect(formatMatchClock({ period: null, scoreHome: null, scoreAway: null, clockMs: null })).toBe("LIVE · clock unavailable");
+    expect(estimatedLiveStartAtMs(1_800_000, { period: "1H", scoreHome: 0, scoreAway: 0, clockMs: 660_000 })).toBe(1_140_000);
+    expect(estimatedLiveStartAtMs(1_800_000, { period: "1H", scoreHome: 0, scoreAway: 0, clockMs: null })).toBeNull();
   });
 
   it("matches a live event across localized league names and independently observed clocks", () => {

@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
-import { buildComparisonEvents, formatCountdown, type ComparisonEvent } from "../catalog/comparison.js";
+import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
+  type ComparisonEvent } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
 
 const defaultAccountApi = new AccountApi();
@@ -144,12 +145,17 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <span>{catalogs.length} connected provider(s)</span><span>{events.filter((item) => item.providers.length > 1).length} cross-book match(es)</span></div>}
     <div className="catalog-event-list">{displayEvents.map((item) => {
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
+      const observedAtMs = item.catalogs.find((catalog) => catalog.provider === item.event.provider)?.observedAtMs ??
+        item.catalogs[0]!.observedAtMs;
+      const estimatedStartAtMs = estimatedLiveStartAtMs(observedAtMs, item.event.liveState);
       return <article className="catalog-event" key={item.key}><header><div><span>{item.event.competition}</span><h2>{label}</h2>
         <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
           {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
         {item.bestMargin !== null && item.bestMargin > 0 && <strong className="event-edge">Best edge +{(item.bestMargin * 100).toFixed(2)}%</strong>}</div>
-        <div className="catalog-event-actions"><strong>{item.event.isLive ? "Live now" : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
-          {!item.event.isLive && <small>{new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
+        <div className="catalog-event-actions"><strong>{item.event.isLive ? formatMatchClock(item.event.liveState) : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
+          {item.event.isLive ? <><small>Observed {new Date(observedAtMs).toLocaleString()}</small>
+            {estimatedStartAtMs !== null && <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}</>
+            : <small>Scheduled {new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
           <button aria-label={`View & watch ${label}`} onClick={() => watch(item)} type="button">View & compare</button></div></header>
         {item.rows.length === 0 ? <p>No supported market in this provider row.</p> : <ComparisonTable item={item} />}</article>;
     })}</div>

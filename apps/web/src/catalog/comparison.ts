@@ -121,3 +121,24 @@ export function formatCountdown(startAtUtcMs: number, nowMs: number): string {
   const two = (value: number): string => String(value).padStart(2, "0");
   return `Starts in ${two(days)}:${two(hours)}:${two(minutes)}:${two(seconds)}`;
 }
+
+type DisplayLiveState = ProviderEvent["liveState"];
+
+export function formatMatchClock(liveState: DisplayLiveState | null): string {
+  if (liveState === null || !("clockMs" in liveState) || liveState.clockMs === null ||
+    !Number.isFinite(liveState.clockMs) || liveState.clockMs < 0) {
+    return "LIVE · clock unavailable";
+  }
+  const totalSeconds = Math.floor(liveState.clockMs / 1_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const clock = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `LIVE${liveState.period === null ? "" : ` · ${liveState.period}`} · ${clock} elapsed`;
+}
+
+export function estimatedLiveStartAtMs(observedAtMs: number, liveState: DisplayLiveState | null): number | null {
+  if (!Number.isFinite(observedAtMs) || liveState === null || !("clockMs" in liveState) || liveState.clockMs === null ||
+    !Number.isFinite(liveState.clockMs) || liveState.clockMs < 0) return null;
+  const estimated = observedAtMs - liveState.clockMs;
+  return Number.isFinite(estimated) && estimated >= 0 ? estimated : null;
+}

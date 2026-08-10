@@ -59,6 +59,16 @@ afterEach(() => {
 });
 
 describe("MatchWatchDetail", () => {
+  it("shows the provider match clock and approximate live start in detail", () => {
+    const liveCatalog = catalog(200_000);
+    render(<MatchWatchDetail accountId="private-account" catalogApi={{ read: vi.fn() }} initialCatalog={liveCatalog}
+      onBack={() => undefined} providerEventId="event-1" />);
+
+    expect(screen.getByText("LIVE · 1H · 02:00 elapsed")).toBeTruthy();
+    expect(screen.getByText(`Observed ${new Date(200_000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getByText(`Approx. started ${new Date(80_000).toLocaleString()}`)).toBeTruthy();
+  });
+
   it("shows one honest provider column and a readable current-market detail", () => {
     const api: CatalogApiLike = { read: vi.fn(async () => catalog(2_000)) };
     render(<MatchWatchDetail accountId="private-account" catalogApi={api} initialCatalog={catalog(1_000)} onBack={() => undefined} providerEventId="event-1" />);
