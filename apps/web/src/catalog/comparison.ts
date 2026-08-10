@@ -38,7 +38,7 @@ function eventKey(event: ProviderEvent): string {
   const variantEvidence = event.category === "FOOTBALL"
     ? [event.isVirtual === true ? "VIRTUAL" : event.isVirtual === false ? "REAL" : "UNKNOWN", event.sportVariant ?? "UNKNOWN"]
     : [event.gameVariant ?? "UNKNOWN"];
-  return [event.category, ...variantEvidence, identityText(event.participantA), identityText(event.participantB),
+  return [event.category, event.eventScope, ...variantEvidence, identityText(event.participantA), identityText(event.participantB),
     event.isLive ? liveEvidence : String(event.startAtUtcMs)].join("|");
 }
 
@@ -46,10 +46,20 @@ function marketKey(market: ProviderMarket): string {
   return [market.marketType, market.scope, market.line ?? "", market.settlementProfile].join("|");
 }
 
-function isSupportedTwoWayRow(cells: readonly ComparisonCell[]): boolean {
-  if (cells.length === 0 || cells[0]!.market.marketType === "FT_1X2") return false;
-  const selections = new Set(cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)));
-  return selections.size === 2 && cells.some((cell) => new Set(cell.quotes.map((quote) => quote.selection)).size === 2);
+function eligibleTwoWayCells(cells: readonly ComparisonCell[]): readonly ComparisonCell[] {
+  const marketType = cells[0]?.market.marketType;
+  if (marketType === undefined || marketType === "FT_1X2" || marketType === "FH_1X2") return [];
+  const domains = new Map<string, ComparisonCell[]>();
+  for (const cell of cells) {
+    const selections = [...new Set(cell.quotes.map((quote) => quote.selection))].sort();
+    if (selections.length !== 2) continue;
+    const signature = selections.join("|");
+    const matching = domains.get(signature) ?? [];
+    matching.push(cell);
+    domains.set(signature, matching);
+  }
+  return [...domains.values()].filter((matching) => new Set(matching.map((cell) => cell.provider)).size >= 2)
+    .sort((left, right) => right.length - left.length)[0] ?? [];
 }
 
 export function decimalOdds(quote: ProviderQuote): number | null {
@@ -86,7 +96,8 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
         rowGroups.set(rowKey, cells);
       }
     }
-    const rows = [...rowGroups.entries()].filter(([, cells]) => isSupportedTwoWayRow(cells)).map(([rowKey, cells]): ComparisonRow => {
+    const rows = [...rowGroups.entries()].map(([rowKey, rawCells]) => [rowKey, eligibleTwoWayCells(rawCells)] as const)
+      .filter(([, cells]) => cells.length >= 2).map(([rowKey, cells]): ComparisonRow => {
       const bestBySelection: Record<string, ProviderId> = {};
       const selections = new Set(cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)));
       for (const selection of selections) {
@@ -97,13 +108,12 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
         if (best !== undefined) bestBySelection[selection] = best.provider;
       }
       const selectedProviders = new Set(Object.values(bestBySelection));
-      const expectedOutcomes = cells[0]!.market.marketType === "FT_1X2" ? 3 : 2;
       const bestOdds = [...selections].map((selection) => {
         const provider = bestBySelection[selection];
         const quote = cells.find((cell) => cell.provider === provider)?.quotes.find((item) => item.selection === selection);
         return quote === undefined ? null : decimalOdds(quote);
       });
-      const inverseSum = bestOdds.length === expectedOutcomes && bestOdds.every((value): value is number => value !== null)
+      const inverseSum = bestOdds.length === 2 && bestOdds.every((value): value is number => value !== null)
         ? bestOdds.reduce((sum, value) => sum + 1 / value, 0) : null;
       const crossBook = selectedProviders.size >= 2;
       const margin = crossBook && inverseSum !== null ? (1 / inverseSum) - 1 : null;

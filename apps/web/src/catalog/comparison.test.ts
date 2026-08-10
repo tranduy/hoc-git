@@ -33,6 +33,15 @@ const threeWayCatalog = (provider: "SABA" | "SBOBET", id: string, odds: readonly
   return { ...base, markets: [market], quotes };
 };
 
+const withQuotes = (source: LiveCatalogResponse, selections: readonly string[],
+  marketType: "FT_TOTAL" | "FH_1X2" = "FT_TOTAL"): LiveCatalogResponse => {
+  const market = { ...source.markets[0]!, marketType };
+  return { ...source, markets: [market], quotes: selections.map((selection, index) => ({
+    ...source.quotes[0]!, providerSelectionId: `${source.accountId}-${selection}`, marketType,
+    selection, rawOdds: String(2 + index / 10)
+  })) };
+};
+
 describe("catalog comparison", () => {
   it("excludes three-way football markets from comparison", () => {
     const result = buildComparisonEvents([threeWayCatalog("SABA", "saba-event", ["2.10", "3.20", "3.40"]),
@@ -40,6 +49,28 @@ describe("catalog comparison", () => {
 
     expect(result[0]?.rows).toEqual([]);
     expect(result[0]?.bestMargin).toBeNull();
+  });
+
+  it("requires two providers to expose the same complete two-outcome domain", () => {
+    const complete = catalog("SABA", "saba-event", ["2.20", "1.70"]);
+    const incomplete = withQuotes(catalog("SBOBET", "sbo-event", ["2.10", "1.80"]), ["OVER"]);
+
+    expect(buildComparisonEvents([complete, incomplete])[0]?.rows).toEqual([]);
+  });
+
+  it("rejects a two-selection fragment of a three-way market", () => {
+    const saba = withQuotes(catalog("SABA", "saba-event", ["2.20", "1.70"]), ["HOME", "AWAY"], "FH_1X2");
+    const sbobet = withQuotes(catalog("SBOBET", "sbo-event", ["2.10", "1.80"]), ["HOME", "AWAY"], "FH_1X2");
+
+    expect(buildComparisonEvents([saba, sbobet])[0]?.rows).toEqual([]);
+  });
+
+  it("does not merge identical participants with contradictory event scopes", () => {
+    const saba = catalog("SABA", "saba-event", ["2.20", "1.70"]);
+    const sbobet = catalog("SBOBET", "sbo-event", ["2.10", "1.80"]);
+    const changed = { ...sbobet, events: [{ ...sbobet.events[0]!, eventScope: "EXTRA_TIME" }] };
+
+    expect(buildComparisonEvents([saba, changed])).toHaveLength(2);
   });
 
   it("groups the same event and makes providers columns for the same exact market", () => {
