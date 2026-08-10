@@ -47,4 +47,10 @@ describe("normalizeSbobetCatalog", () => {
     expect(normalizeSbobetCatalog([incomplete], { observedAtMs: 1, receivedMonotonicMs: 1, sequence: 1 }))
       .toEqual({ events: [], markets: [], quotes: [], diagnostics: ["SBOBET_CATALOG_RECORD_REJECTED"] });
   });
+
+  it("marks explicit E Soccer competitions as virtual", () => {
+    const result = normalizeSbobetCatalog([{ ...record, leagueName: "Giải đấu Bóng đá Điện tử 8 phút",
+      teamNames: ["England (la_morocha)", "Brazil (lemickey)"] }], { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 20, sequence: 3 });
+    expect(result.events[0]).toMatchObject({ isVirtual: true, sportVariant: "VIRTUAL_FOOTBALL" });
+  });
 });

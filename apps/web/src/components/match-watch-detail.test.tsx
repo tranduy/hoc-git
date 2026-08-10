@@ -3,6 +3,7 @@ import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/c
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
 import { MatchWatchDetail } from "./match-watch-detail.js";
+import { buildComparisonEvents } from "../catalog/comparison.js";
 
 const event: ProviderEvent = {
   provider: "CMD", category: "FOOTBALL", providerEventId: "event-1", competition: "Premier Test",
@@ -51,7 +52,7 @@ describe("MatchWatchDetail", () => {
     expect(screen.getByText("HOME")).toBeTruthy();
     expect(screen.getByText("2.1")).toBeTruthy();
     expect(screen.getByText("Awaiting verified second provider")).toBeTruthy();
-    expect(screen.getByText("Single-provider observation — cross-book timing unavailable")).toBeTruthy();
+    expect(screen.getByText(/Cross-book comparison unavailable/u)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /bet|wager|place/iu })).toBeNull();
   });
 
@@ -107,7 +108,35 @@ describe("MatchWatchDetail", () => {
     act(() => { vi.advanceTimersByTime(1_000); });
     expect(read).toHaveBeenCalledTimes(1);
     act(() => { vi.advanceTimersByTime(2_000); });
-    expect(screen.getAllByText("STALE")).toHaveLength(2);
+    expect(screen.getByText("STALE")).toBeTruthy();
+    expect(screen.getByText("#CMD · STALE")).toBeTruthy();
     expect(screen.getByText("No accepted provider sample within 3000 ms")).toBeTruthy();
+  });
+
+  it("polls every connected comparison book and refreshes the side-by-side rates", async () => {
+    const forProvider = (provider: "SABA" | "SBOBET", accountId: string, home: string): LiveCatalogResponse => ({
+      ...catalog(1_000, home), accountId, provider,
+      events: [{ ...event, provider, providerEventId: `${provider}-event` }],
+      markets: [{ ...market, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market` }],
+      quotes: [quote("HOME", home), quote("DRAW", "3.2"), quote("AWAY", "3.4")].map((item) => ({
+        ...item, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market`,
+        providerSelectionId: `${provider}-${item.selection}`
+      }))
+    });
+    const saba = forProvider("SABA", "saba-account", "2.1");
+    const sbobet = forProvider("SBOBET", "sbo-account", "2.2");
+    const comparison = buildComparisonEvents([saba, sbobet])[0]!;
+    const read = vi.fn(async (id: string) => id === "saba-account"
+      ? forProvider("SABA", "saba-account", "2.35")
+      : forProvider("SBOBET", "sbo-account", "2.45"));
+    render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read }} comparisonCatalogs={[saba, sbobet]}
+      comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined} providerEventId="SABA-event" />);
+
+    expect(screen.getByText("HOME 2.2")).toBeTruthy();
+    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("HOME 2.45")).toBeTruthy();
+    expect(screen.getAllByText("#SBOBET · ODDS CHANGED").length).toBeGreaterThan(0);
   });
 });

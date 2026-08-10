@@ -3,18 +3,18 @@ import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
 import { buildComparisonEvents, formatCountdown, type ComparisonEvent } from "../catalog/comparison.js";
-import { MatchWatchDetail } from "../components/match-watch-detail.js";
+import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
 
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
+const comparisonProviders: readonly ProviderId[] = ["SABA", "SBOBET", "CMD", "APSPORT", "BTI"];
 
 function ProviderSelector({ accounts, selected, toggle }: {
   readonly accounts: readonly AccountStatus[];
   readonly selected: ReadonlySet<string>;
   readonly toggle: (id: string) => void;
 }) {
-  const books: readonly ProviderId[] = ["SABA", "SBOBET", "CMD", "APSPORT", "BTI"];
-  return <fieldset className="provider-selector"><legend>Books to compare</legend>{books.flatMap((provider) => {
+  return <fieldset className="provider-selector"><legend>Books to compare</legend>{comparisonProviders.flatMap((provider) => {
     const providerAccounts = accounts.filter((account) => account.provider === provider);
     if (providerAccounts.length === 0) return [<label className="provider-selector__unavailable" key={provider}>
       <input aria-label={`${provider} unavailable`} disabled type="checkbox" /><b>#{provider}</b><small>not connected</small></label>];
@@ -101,8 +101,14 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const selectedEvent = events.find((item) => item.key === selectedKey);
   if (selectedEvent !== undefined) {
     const primary = selectedEvent.catalogs[0]!;
+    const detailBooks: readonly ComparisonBook[] = comparisonProviders.map((provider) => {
+      const providerAccounts = accounts.filter((account) => account.provider === provider);
+      return { provider, connected: providerAccounts.length > 0,
+        selected: providerAccounts.some((account) => selectedIds.has(account.id)),
+        hasExactEvent: selectedEvent.providers.includes(provider) };
+    });
     return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
-      comparisonEvent={selectedEvent}
+      books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent}
       onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); }}
       providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
   }
@@ -139,7 +145,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     <div className="catalog-event-list">{displayEvents.map((item) => {
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
       return <article className="catalog-event" key={item.key}><header><div><span>{item.event.competition}</span><h2>{label}</h2>
-        <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}</div>
+        <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
+          {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
         {item.bestMargin !== null && item.bestMargin > 0 && <strong className="event-edge">Best edge +{(item.bestMargin * 100).toFixed(2)}%</strong>}</div>
         <div className="catalog-event-actions"><strong>{item.event.isLive ? "Live now" : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
           {!item.event.isLive && <small>{new Date(item.event.startAtUtcMs).toLocaleString()}</small>}

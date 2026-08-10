@@ -33,12 +33,12 @@ export function cmdProfileDirectoryName(sessionId: string): string {
 }
 
 export async function readCmdFootballCatalog(page: Page): Promise<readonly CmdCatalogInputRecord[]> {
-  const visible = await extractCmdCatalogRecords(page, 500, "1");
-  if (visible.length > 0) return visible;
-  if (!(await clickSafeStructuralCategory(page, "1", 5_000))) {
+  const selectedFootball = await clickSafeStructuralCategory(page, "1", 1_500);
+  const records = await extractCmdCatalogRecords(page, 500, "1");
+  if (!selectedFootball && records.length === 0) {
     throw new Error("CMD_CATALOG_UNAVAILABLE");
   }
-  return extractCmdCatalogRecords(page, 500, "1");
+  return records;
 }
 
 export async function readWithOneSessionRecovery<TSession, TResult>(input: {

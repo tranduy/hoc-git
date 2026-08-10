@@ -99,6 +99,31 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByRole("button", { name: /bet|wager|place/iu })).toBeNull();
   });
 
+  it("keeps every book visible in match detail and explains missing comparisons", async () => {
+    const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
+    const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
+    const saba = { ...catalog, accountId: sabaAccount.id, provider: "SABA" as const,
+      events: [{ ...event, provider: "SABA" as const, providerEventId: "saba-event" }],
+      markets: [{ ...market, provider: "SABA" as const, providerEventId: "saba-event", providerMarketId: "saba-market" }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" as const, providerEventId: "saba-event",
+        providerMarketId: "saba-market", providerSelectionId: `saba-${quote.selection}` })) };
+    const otherEvent = { ...event, provider: "SBOBET" as const, providerEventId: "other-event",
+      participantA: "Gamma", participantB: "Delta" };
+    const sbobet = { ...catalog, accountId: sbobetAccount.id, provider: "SBOBET" as const,
+      events: [otherEvent], markets: [], quotes: [] };
+    const api: CatalogApiLike = { read: async (id) => id === sabaAccount.id ? saba : sbobet };
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "View & watch Alpha vs Beta" }));
+
+    expect(screen.getByLabelText("SABA available for this match")).toBeTruthy();
+    expect(screen.getByLabelText("SBOBET no exact event match")).toBeTruthy();
+    expect((screen.getByLabelText("CMD not connected") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("APSPORT not connected") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("BTI not connected") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText("No exact event match", { selector: "td *" })).toBeTruthy();
+  });
+
   it("states honestly that LoL is not connected yet", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "LoL" }));
@@ -135,6 +160,6 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
     expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
-    expect(screen.getByText(/Single-provider observation/u)).toBeTruthy();
+    expect(screen.getByText(/Cross-book comparison unavailable/u)).toBeTruthy();
   });
 });

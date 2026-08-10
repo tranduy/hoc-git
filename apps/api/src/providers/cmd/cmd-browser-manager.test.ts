@@ -101,4 +101,31 @@ describe("CMD browser manager safety", () => {
       await browser.close();
     }
   });
+
+  it("selects the football category before accepting a stale visible table", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`
+        <button id="football"><i class="c-iconcolor-sport1" style="display:inline-block;width:10px;height:10px">Football</i></button>
+        <section class="c-odds-table--sport1"><div class="c-league" data-leagueid="virtual">
+          <span class="c-league__name">Soccer Marble</span><div class="c-match" data-matchid="virtual-match">
+            <span class="c-match-time">08/17 02:30AM</span><span class="c-team-name">Virtual A</span><span class="c-team-name">Virtual B</span>
+          </div></div></section>
+        <script>document.querySelector('#football').onclick = () => {
+          document.querySelector('.c-league').setAttribute('data-leagueid', 'real');
+          document.querySelector('.c-league__name').textContent = 'Premier League';
+          document.querySelector('.c-match').setAttribute('data-matchid', 'real-match');
+          document.querySelectorAll('.c-team-name')[0].textContent = 'Arsenal';
+          document.querySelectorAll('.c-team-name')[1].textContent = 'Chelsea';
+        };</script>
+      `);
+
+      await expect(readCmdFootballCatalog(page)).resolves.toEqual([
+        expect.objectContaining({ matchId: "real-match", leagueName: "Premier League", teamNames: ["Arsenal", "Chelsea"] })
+      ]);
+    } finally {
+      await browser.close();
+    }
+  });
 });

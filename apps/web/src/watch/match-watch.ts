@@ -74,7 +74,7 @@ function baseEntry(
   const providerSelectionId = quote?.providerSelectionId ?? null;
   const suffix = [kind, providerMarketId ?? "event", providerSelectionId ?? "all"].join(":");
   return {
-    id: `${detectedAtMs}:${suffix}`,
+    id: `${detectedAtMs}:${current.provider}:${suffix}`,
     kind,
     provider: current.provider,
     providerEventId: current.providerEventId,

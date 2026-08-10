@@ -8,10 +8,18 @@ import {
   type MatchWatchEntry
 } from "../watch/match-watch.js";
 import { clearWatchEntries, loadWatchEntries, saveWatchEntries } from "../watch/watch-storage.js";
-import type { ComparisonEvent } from "../catalog/comparison.js";
+import { buildComparisonEvents, type ComparisonEvent } from "../catalog/comparison.js";
+import type { ProviderId } from "@tool-chenh/contracts";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
+
+export interface ComparisonBook {
+  readonly provider: ProviderId;
+  readonly connected: boolean;
+  readonly selected: boolean;
+  readonly hasExactEvent: boolean;
+}
 
 function safeFailureEntry(sample: MatchSample, detectedAtMs: number): MatchWatchEntry {
   const event = sample.event;
@@ -51,6 +59,8 @@ export function MatchWatchDetail({
   catalogApi,
   initialCatalog,
   comparisonEvent,
+  comparisonCatalogs,
+  books,
   onBack,
   providerEventId,
   pollDelayMs = 1_000,
@@ -62,6 +72,8 @@ export function MatchWatchDetail({
   readonly catalogApi: CatalogApiLike;
   readonly initialCatalog: LiveCatalogResponse;
   readonly comparisonEvent?: ComparisonEvent;
+  readonly comparisonCatalogs?: readonly LiveCatalogResponse[];
+  readonly books?: readonly ComparisonBook[];
   readonly onBack: () => void;
   readonly providerEventId: string;
   readonly pollDelayMs?: number;
@@ -71,14 +83,30 @@ export function MatchWatchDetail({
 }) {
   const initialSample = useMemo(() => sampleMatch(initialCatalog, providerEventId), [initialCatalog, providerEventId]);
   const [currentSample, setCurrentSample] = useState(initialSample);
+  const [currentComparison, setCurrentComparison] = useState(comparisonEvent);
   const sampleRef = useRef(initialSample);
   const [entries, setEntries] = useState<readonly MatchWatchEntry[]>(() =>
     loadWatchEntries(storage, initialCatalog.provider, providerEventId));
   const [watching, setWatching] = useState(true);
   const [watcherState, setWatcherState] = useState<WatcherState>("WATCHING");
   const [successfulSamples, setSuccessfulSamples] = useState(1);
+  const visibleBooks = books ?? (comparisonEvent?.providers ?? [initialCatalog.provider]).map((provider) => ({
+    provider, connected: true, selected: true, hasExactEvent: true
+  }));
+  const effectiveBooks = visibleBooks.map((book) => ({ ...book,
+    hasExactEvent: currentComparison?.providers.includes(book.provider) ?? book.hasExactEvent }));
+  const catalogSources = useMemo(() => comparisonCatalogs ?? comparisonEvent?.catalogs ?? [initialCatalog],
+    [comparisonCatalogs, comparisonEvent, initialCatalog]);
+  const providerSamplesRef = useRef<Map<string, MatchSample> | null>(null);
+  if (providerSamplesRef.current === null) {
+    providerSamplesRef.current = new Map(catalogSources.flatMap((catalog) => {
+      const eventId = comparisonEvent?.providerEventIds[catalog.provider] ??
+        (catalog.accountId === accountId ? providerEventId : undefined);
+      return eventId === undefined ? [] : [[catalog.provider, sampleMatch(catalog, eventId)] as const];
+    }));
+  }
   const [selectedProviders, setSelectedProviders] = useState<ReadonlySet<string>>(() =>
-    new Set(comparisonEvent?.providers ?? [initialCatalog.provider]));
+    new Set(visibleBooks.filter((book) => book.connected && book.selected).map((book) => book.provider)));
 
   const appendEntries = (newEntries: readonly MatchWatchEntry[]): void => {
     if (newEntries.length === 0) return;
@@ -113,10 +141,26 @@ export function MatchWatchDetail({
     };
     const poll = async (): Promise<void> => {
       try {
-        const catalog = await catalogApi.read(accountId);
+        const results = await Promise.allSettled(catalogSources.map(async (catalog) => catalogApi.read(catalog.accountId)));
+        const catalogs = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        const catalog = catalogs.find((candidate) => candidate.accountId === accountId);
+        if (catalog === undefined) throw new Error("PRIMARY_PROVIDER_CATALOG_UNAVAILABLE");
         if (!active) return;
+        const nextComparison = buildComparisonEvents(catalogs).find((candidate) =>
+          candidate.providerEventIds[initialCatalog.provider] === providerEventId);
+        setCurrentComparison(nextComparison);
         const nextSample = sampleMatch(catalog, providerEventId);
-        appendEntries(diffMatchSamples(sampleRef.current, nextSample, clock()));
+        const detectedAtMs = clock();
+        const comparisonEntries: MatchWatchEntry[] = [];
+        for (const refreshed of catalogs) {
+          const previous = providerSamplesRef.current?.get(refreshed.provider);
+          const mappedEventId = nextComparison?.providerEventIds[refreshed.provider] ?? previous?.providerEventId;
+          if (mappedEventId === undefined) continue;
+          const refreshedSample = sampleMatch(refreshed, mappedEventId);
+          if (previous !== undefined) comparisonEntries.push(...diffMatchSamples(previous, refreshedSample, detectedAtMs));
+          providerSamplesRef.current?.set(refreshed.provider, refreshedSample);
+        }
+        appendEntries(comparisonEntries);
         sampleRef.current = nextSample;
         setCurrentSample(nextSample);
         setSuccessfulSamples((count) => count + 1);
@@ -139,7 +183,7 @@ export function MatchWatchDetail({
       if (timer !== undefined) window.clearTimeout(timer);
       if (staleTimer !== undefined) window.clearTimeout(staleTimer);
     };
-  }, [accountId, catalogApi, clock, initialCatalog.provider, pollDelayMs, providerEventId, staleAfterMs, storage, watching]);
+  }, [accountId, catalogApi, catalogSources, clock, initialCatalog.provider, pollDelayMs, providerEventId, staleAfterMs, storage, watching]);
 
   const event = currentSample.event ?? initialSample.event;
   const matchLabel = event === null ? "Selected event unavailable" : `${event.participantA} vs ${event.participantB}`;
@@ -160,17 +204,19 @@ export function MatchWatchDetail({
       </header>
 
       <fieldset className="provider-selector provider-selector--detail"><legend>Books shown in this comparison</legend>
-        {(comparisonEvent?.providers ?? [initialCatalog.provider]).map((provider) => <label key={provider}>
-          <input checked={selectedProviders.has(provider)} onChange={() => setSelectedProviders((current) => {
+        {effectiveBooks.map((book) => <label className={book.connected ? undefined : "provider-selector__unavailable"} key={book.provider}>
+          <input aria-label={`${book.provider} ${!book.connected ? "not connected" : book.hasExactEvent ? "available for this match" : "no exact event match"}`}
+            checked={book.connected && selectedProviders.has(book.provider)} disabled={!book.connected} onChange={() => setSelectedProviders((current) => {
             const next = new Set(current);
-            if (next.has(provider)) next.delete(provider); else next.add(provider);
+            if (next.has(book.provider)) next.delete(book.provider); else next.add(book.provider);
             return next;
-          })} type="checkbox" /><b>#{provider}</b>
+          })} type="checkbox" /><b>#{book.provider}</b><small>{!book.connected ? "not connected" : book.hasExactEvent ? "matched" : "event not found"}</small>
         </label>)}
       </fieldset>
-      <p className="watch-latency-note">{comparisonEvent !== undefined && comparisonEvent.providers.length > 1
-        ? `Comparing ${comparisonEvent.providers.filter((provider) => selectedProviders.has(provider)).join(" vs ")}`
-        : "Single-provider observation — cross-book timing unavailable"}</p>
+      <p className="watch-latency-note">{currentComparison !== undefined && currentComparison.providers.filter((provider) => selectedProviders.has(provider)).length > 1
+        ? `Comparing ${currentComparison.providers.filter((provider) => selectedProviders.has(provider)).join(" vs ")}`
+        : `Cross-book comparison unavailable — ${effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider) && !book.hasExactEvent)
+          .map((book) => `${book.provider}: no exact event match`).join("; ") || "only one selected provider has this exact event"}`}</p>
       <div className="watch-controls">
         {watching ? <button onClick={() => setWatching(false)} type="button">Stop watching</button>
           : <button onClick={() => setWatching(true)} type="button">Resume watching</button>}
@@ -180,15 +226,15 @@ export function MatchWatchDetail({
       <div className="match-watch__layout">
         <section className="watch-prices" aria-labelledby="current-prices-heading">
           <h2 id="current-prices-heading">Current markets</h2>
-          {comparisonEvent !== undefined && comparisonEvent.providers.length > 1 ? <div className="table-wrap comparison-table"><table>
-            <thead><tr><th>Market / line</th>{comparisonEvent.providers.filter((provider) => selectedProviders.has(provider)).map((provider) => <th key={provider}>{provider}</th>)}</tr></thead>
-            <tbody>{comparisonEvent.rows.map((row) => <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
+          {currentComparison !== undefined && effectiveBooks.some((book) => book.connected && selectedProviders.has(book.provider)) ? <div className="table-wrap comparison-table"><table>
+            <thead><tr><th>Market / line</th>{effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => <th key={book.provider}>{book.provider}<small>{book.hasExactEvent ? "exact match" : "event not found"}</small></th>)}</tr></thead>
+            <tbody>{currentComparison.rows.map((row) => <tr key={row.key}><th>{row.marketType}<small>{row.line === null ? "" : `Line ${row.line}`}</small>
               {row.margin !== null && <b className={row.margin > 0 ? "edge-badge edge-badge--positive" : "edge-badge"}>
                 {row.margin > 0 ? `Edge +${(row.margin * 100).toFixed(2)}%` : `No edge ${(row.margin * 100).toFixed(2)}%`}</b>}</th>
-              {comparisonEvent.providers.filter((provider) => selectedProviders.has(provider)).map((provider) => {
-                const cell = row.cells.find((candidate) => candidate.provider === provider);
-                return <td key={provider}>{cell === undefined ? <span className="rate-missing">Unavailable</span> : <div className="rate-cell">{cell.quotes.map((quote) => <span
-                  className={row.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
+              {effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => {
+                const cell = row.cells.find((candidate) => candidate.provider === book.provider);
+                return <td key={book.provider}>{cell === undefined ? <span className="rate-missing">{book.hasExactEvent ? "Market unavailable" : "No exact event match"}</span> : <div className="rate-cell">{cell.quotes.map((quote) => <span
+                  className={row.bestBySelection[quote.selection] === book.provider ? "rate-quote rate-quote--best" : "rate-quote"}
                   key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds}</span>)}</div>}</td>;
               })}</tr>)}</tbody></table></div> : <div className="provider-columns">
             <article className="provider-column">
@@ -212,7 +258,7 @@ export function MatchWatchDetail({
           <header><div><h2 id="change-log-heading">Change log</h2><p>Newest first · maximum 200 rows</p></div></header>
           <div aria-live="polite">{newestEntries.length === 0 ? <p className="empty-state">No changes detected yet.</p> : <ol>
             {newestEntries.map((entry) => <li className={`watch-entry watch-entry--${entry.kind.toLowerCase()}`} key={entry.id}>
-              <div><strong>{entry.kind.replaceAll("_", " ")}</strong><time dateTime={new Date(entry.detectedAtMs).toISOString()}>{new Date(entry.detectedAtMs).toLocaleTimeString()}</time></div>
+              <div><strong>#{entry.provider} · {entry.kind.replaceAll("_", " ")}</strong><time dateTime={new Date(entry.detectedAtMs).toISOString()}>{new Date(entry.detectedAtMs).toLocaleTimeString()}</time></div>
               <p>{entry.marketType ?? "Event"}{entry.line === null ? "" : ` · line ${entry.line}`}{entry.selection === null ? "" : ` · ${entry.selection}`}</p>
               <b>{entryLabel(entry)}</b><small>Provider sample interval: {entry.sampleIntervalMs} ms</small>
             </li>)}

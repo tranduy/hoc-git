@@ -35,7 +35,10 @@ function identityText(value: string): string {
 function eventKey(event: ProviderEvent): string {
   const liveEvidence = event.category === "FOOTBALL" && event.liveState !== null
     ? `${event.liveState.period}|${event.liveState.scoreHome}|${event.liveState.scoreAway}` : "LIVE";
-  return [event.category, identityText(event.participantA), identityText(event.participantB),
+  const variantEvidence = event.category === "FOOTBALL"
+    ? [event.isVirtual === true ? "VIRTUAL" : event.isVirtual === false ? "REAL" : "UNKNOWN", event.sportVariant ?? "UNKNOWN"]
+    : [event.gameVariant ?? "UNKNOWN"];
+  return [event.category, ...variantEvidence, identityText(event.participantA), identityText(event.participantB),
     event.isLive ? liveEvidence : String(event.startAtUtcMs)].join("|");
 }
 

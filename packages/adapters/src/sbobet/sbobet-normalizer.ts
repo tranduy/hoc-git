@@ -37,6 +37,12 @@ export interface NormalizedSbobetCatalog {
   readonly diagnostics: readonly string[];
 }
 
+function virtualFootballEvidence(competition: string, teams: readonly string[]): boolean {
+  const label = competition.normalize("NFKC").toLocaleLowerCase("en");
+  if (/(?:e[\s-]?soccer|\bvirtual\b|simulated reality|soccer marble|\bpes\b|ảo|điện tử)/u.test(label)) return true;
+  return teams.length === 2 && teams.every((team) => /(?:\((?:pg|e|pes|v|s)\)(?:\s*\([^)]*\))*|\([a-z0-9_]{4,}\))\s*$/iu.test(team));
+}
+
 const signedDecimal = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 const decimal = /^(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 
@@ -123,12 +129,13 @@ export function normalizeSbobetCatalog(
       continue;
     }
     const currentScore = score(record.scoreText);
+    const isVirtual = virtualFootballEvidence(record.leagueName, teams);
     events.push({
       provider: "SBOBET", category: "FOOTBALL", providerEventId: record.eventId,
       competition: record.leagueName.trim(), seasonStage: null, startAtUtcMs: timing.startAtUtcMs,
       participantA: teams[0]!, participantB: teams[1]!, eventScope: "REGULATION", bestOf: null,
       isLive: timing.isLive, rematchCandidate: timing.isLive, fixtureDiscriminator: null,
-      isVirtual: false, sportVariant: "FOOTBALL",
+      isVirtual, sportVariant: isVirtual ? "VIRTUAL_FOOTBALL" : "FOOTBALL",
       liveState: timing.isLive ? { period: timing.period, ...currentScore, clockMs: timing.clockMs } : null
     });
     markets.push(...recordMarkets);

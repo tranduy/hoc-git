@@ -74,6 +74,14 @@ describe("normalizeCmdCatalog", () => {
     expect(new Set(result.quotes.map((quote) => quote.provider))).toEqual(new Set(["SABA"]));
   });
 
+  it("marks obvious Soccer Marble/PG feeds as virtual instead of real football", () => {
+    const result = normalizeCmdCatalog([{ ...record, leagueName: "SABA INTERNATIONAL FRIENDLY Virtual PES 23 - PENALTY SHOOTOUTS",
+      teamNames: ["Hy Lạp (V) (Luân Lưu)", "Trung Quốc (V) (Luân Lưu)"] }], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 500, timezoneOffsetMinutes: 420, sequence: 7
+    });
+    expect(result.events[0]).toMatchObject({ isVirtual: true, sportVariant: "VIRTUAL_FOOTBALL" });
+  });
+
   it("converts split totals to a canonical quarter line and suspends greyed markets", () => {
     const changed = structuredClone(record);
     changed.groups = [structuredClone(record.groups[1]!)];
