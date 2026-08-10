@@ -52,6 +52,7 @@ describe("LagSignalTracker", () => {
       ["SABA", "HOME", "2.2", "1.7"], ["SABA", "AWAY", "1.7", "2.2"]
     ]);
     expect(signals[0]?.triggeredAtMs).toBe(1_100);
+    expect(signals[0]?.movementMagnitude).toBe("0.5");
   });
 
   it("keeps a live signal while prices remain unchanged and removes it as soon as the edge disappears", () => {

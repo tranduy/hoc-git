@@ -71,7 +71,7 @@ function SignalCard({ signal, strongest = false }: { readonly signal: LagSignal;
     <header><div>{strongest && <p className="eyebrow">Best live lag signal</p>}<h2>{label}</h2>
       <p>{signal.row.marketType}{signal.row.line === null ? "" : ` · Line ${signal.row.line}`}</p></div>
       <div className="lag-signal__score"><b>ROI {(Number(signal.plan.roi) * 100).toFixed(2)}%</b>
-        <span>Worst profit {money(signal.plan.worstCaseProfit)}</span><small>Quote age {signal.quoteAgeMs} ms</small></div></header>
+        <span>Worst profit {money(signal.plan.worstCaseProfit)}</span><small>Immediate move {signal.movementMagnitude} · Quote age {signal.quoteAgeMs} ms</small></div></header>
     <div className="lag-signal__movement">{signal.movements.map((movement) => <span
       aria-label={`Movement #${movement.provider} ${movement.selection} ${movement.previousDecimal} to ${movement.currentDecimal}`}
       key={`${movement.provider}-${movement.selection}`}><b>#{movement.provider} · {movement.selection}</b>
@@ -183,15 +183,21 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, []);
 
   const events = useMemo(() => buildComparisonEvents(catalogs), [catalogs]);
-  const displayEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)).sort((left, right) => {
-    const comparisonPriority = Number(right.providers.length >= 2 && right.observedRows.length > 0) -
-      Number(left.providers.length >= 2 && left.observedRows.length > 0);
-    if (comparisonPriority !== 0) return comparisonPriority;
+  const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)), [events, nowMs]);
+  const displayEvents = useMemo(() => visibleEvents.filter((item) => item.observedRows.length > 0).sort((left, right) => {
+    const leftSignalRank = signals.findIndex((signal) => signal.event.key === left.key);
+    const rightSignalRank = signals.findIndex((signal) => signal.event.key === right.key);
+    if (leftSignalRank >= 0 || rightSignalRank >= 0) {
+      if (leftSignalRank < 0) return 1;
+      if (rightSignalRank < 0) return -1;
+      if (leftSignalRank !== rightSignalRank) return leftSignalRank - rightSignalRank;
+    }
     const edge = (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY);
     if (edge !== 0) return edge;
     if (left.event.isLive !== right.event.isLive) return left.event.isLive ? 1 : -1;
     return left.event.startAtUtcMs - right.event.startAtUtcMs;
-  }), [events, nowMs]);
+  }), [signals, visibleEvents]);
+  const hiddenNonComparableCount = visibleEvents.length - displayEvents.length;
   useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
     const match = events.find((item) => Object.values(item.providerEventIds).includes(requested.current.event!));
@@ -250,7 +256,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     {category === "LOL" && <p className="stale-warning">No verified live LoL adapter is connected yet.</p>}
     {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}
     {category === "FOOTBALL" && catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
-      <span>{catalogs.length} connected provider(s)</span><span>{events.filter((item) => item.providers.length > 1).length} cross-book match(es)</span></div>}
+      <span>{catalogs.length} connected provider(s)</span><span>{displayEvents.length} cross-book match(es)</span>
+      <span>{hiddenNonComparableCount} event{hiddenNonComparableCount === 1 ? "" : "s"} without an exact two-book ticket hidden · review mappings</span></div>}
     {category === "FOOTBALL" && catalogs.length > 0 && <LagSignalPanel signals={signals} />}
     <LagSignalToast signal={category === "FOOTBALL" ? signals[0] ?? null : null} />
     <div className="catalog-event-list">{displayEvents.map((item) => {

@@ -53,6 +53,22 @@ function eventKey(event: ProviderEvent): string {
     event.isLive ? liveEvidence : String(event.startAtUtcMs)].join("|");
 }
 
+function eventSemanticKey(event: ProviderEvent): string {
+  const liveEvidence = event.category === "FOOTBALL" && event.liveState !== null
+    ? `${event.liveState.period}|${event.liveState.scoreHome}|${event.liveState.scoreAway}` : "LIVE";
+  const variantEvidence = event.category === "FOOTBALL"
+    ? [event.isVirtual === true ? "VIRTUAL" : event.isVirtual === false ? "REAL" : "UNKNOWN", event.sportVariant ?? "UNKNOWN"]
+    : [event.gameVariant ?? "UNKNOWN"];
+  return [event.category, event.eventScope, ...variantEvidence, identityText(event.participantA), identityText(event.participantB),
+    event.rematchCandidate ? event.fixtureDiscriminator ?? "AMBIGUOUS_REMATCH" : "ORDINARY",
+    event.isLive ? liveEvidence : "PREMATCH"].join("|");
+}
+
+function compatibleEvent(left: ProviderEvent, right: ProviderEvent): boolean {
+  if (eventSemanticKey(left) !== eventSemanticKey(right) || left.isLive !== right.isLive) return false;
+  return left.isLive || Math.abs(left.startAtUtcMs - right.startAtUtcMs) <= 120_000;
+}
+
 function marketKey(market: ProviderMarket): string {
   return [market.marketType, market.scope, market.line ?? "", market.settlementProfile].join("|");
 }
@@ -61,7 +77,11 @@ function eligibleTwoWayCells(cells: readonly ComparisonCell[]): readonly Compari
   const marketType = cells[0]?.market.marketType;
   if (marketType === undefined || marketType === "FT_1X2" || marketType === "FH_1X2") return [];
   const domains = new Map<string, ComparisonCell[]>();
-  for (const cell of cells) {
+  const byProvider = new Map<ProviderId, ComparisonCell[]>();
+  for (const cell of cells) byProvider.set(cell.provider, [...(byProvider.get(cell.provider) ?? []), cell]);
+  for (const candidates of byProvider.values()) {
+    if (candidates.length !== 1) continue;
+    const cell = candidates[0]!;
     const selections = [...new Set(cell.quotes.map((quote) => quote.selection))].sort();
     if (selections.length !== 2) continue;
     const signature = selections.join("|");
@@ -106,17 +126,21 @@ export function decimalOdds(quote: ProviderQuote): number | null {
 }
 
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]): readonly ComparisonEvent[] {
-  const groups = new Map<string, { event: ProviderEvent; catalogs: LiveCatalogResponse[]; ids: Partial<Record<ProviderId, string>> }>();
+  const groups: Array<{ key: string; event: ProviderEvent; catalogs: LiveCatalogResponse[];
+    ids: Partial<Record<ProviderId, string>> }> = [];
   for (const catalog of catalogs) {
     for (const event of catalog.events) {
-      const key = eventKey(event);
-      const group = groups.get(key) ?? { event, catalogs: [], ids: {} };
+      let group = groups.find((candidate) => candidate.ids[catalog.provider] === undefined && compatibleEvent(candidate.event, event));
+      if (group === undefined) {
+        group = { key: eventKey(event), event, catalogs: [], ids: {} };
+        groups.push(group);
+      }
       if (!group.catalogs.some((candidate) => candidate.provider === catalog.provider)) group.catalogs.push(catalog);
       group.ids[catalog.provider] = event.providerEventId;
-      groups.set(key, group);
     }
   }
-  return [...groups.entries()].map(([key, group]) => {
+  return groups.map((group) => {
+    const key = group.key;
     const rowGroups = new Map<string, ComparisonCell[]>();
     for (const catalog of group.catalogs) {
       const providerEventId = group.ids[catalog.provider];
@@ -129,8 +153,8 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
       }
     }
     const observedRows = [...rowGroups.entries()].flatMap(([rowKey, rawCells]) => {
-      const cells = rawCells.filter(isFocusedTwoWayTicket);
-      if (cells.length === 0) return [];
+      const cells = eligibleTwoWayCells(rawCells.filter(isFocusedTwoWayTicket));
+      if (new Set(cells.map((cell) => cell.provider)).size < 2) return [];
       const outcomeDomain = [...new Set(cells[0]!.quotes.map((quote) => quote.selection))].sort();
       return [{ key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
         line: cells[0]!.market.line, settlementProfile: cells[0]!.market.settlementProfile,

@@ -58,7 +58,7 @@ function activeSignal(comparison: ReturnType<typeof buildComparisonEvents>[numbe
   return { key: `${comparison.key}::${row.key}`, event: comparison, row, plan, movements: [{
     provider: "SABA", selection: "HOME", previousDecimal: "1.7", currentDecimal: "2.2",
     changedAtMs: 10_000, quoteAgeMs: 0
-  }], triggeredAtMs: 10_000, quoteAgeMs: 0 };
+  }], movementMagnitude: "0.5", triggeredAtMs: 10_000, quoteAgeMs: 0 };
 }
 
 beforeEach(() => {

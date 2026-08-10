@@ -18,8 +18,18 @@ export interface LagSignal {
   readonly row: ComparisonRow;
   readonly plan: FixedBaseStakePlan;
   readonly movements: readonly LagMovement[];
+  readonly movementMagnitude: string;
   readonly triggeredAtMs: number;
   readonly quoteAgeMs: number;
+}
+
+function plain(value: Decimal): string {
+  return value.toFixed(value.decimalPlaces());
+}
+
+function largestMovement(movements: readonly LagMovement[]): string {
+  return plain(movements.reduce((largest, movement) => Decimal.max(largest,
+    new Decimal(movement.currentDecimal).minus(movement.previousDecimal).abs()), new Decimal(0)));
 }
 
 interface QuoteSample {
@@ -101,7 +111,7 @@ export class LagSignalTracker {
         const existing = this.#active.get(signalKey);
         if (movements.length > 0) {
           this.#active.set(signalKey, { key: signalKey, event, row, plan, movements,
-            triggeredAtMs: observedAtMs, quoteAgeMs: ageMs });
+            movementMagnitude: largestMovement(movements), triggeredAtMs: observedAtMs, quoteAgeMs: ageMs });
         } else if (existing !== undefined) {
           this.#active.set(signalKey, { ...existing, event, row, plan, quoteAgeMs: ageMs });
         }
@@ -111,8 +121,9 @@ export class LagSignalTracker {
     for (const key of this.#active.keys()) if (!currentRows.has(key)) this.#active.delete(key);
     this.#previous = current;
     return [...this.#active.values()].sort((left, right) =>
-      new Decimal(right.plan.roi).comparedTo(left.plan.roi) ||
       new Decimal(right.plan.worstCaseProfit).comparedTo(left.plan.worstCaseProfit) ||
+      new Decimal(right.movementMagnitude).comparedTo(left.movementMagnitude) ||
+      new Decimal(right.plan.roi).comparedTo(left.plan.roi) ||
       right.triggeredAtMs - left.triggeredAtMs || left.key.localeCompare(right.key)).slice(0, 5);
   }
 }

@@ -55,14 +55,11 @@ const handicapCatalog = (provider: "SABA" | "SBOBET", id: string, line: string,
 };
 
 describe("catalog comparison", () => {
-  it("always exposes an exact full-time half-goal handicap ticket even from one provider", () => {
+  it("hides an exact ticket until a second provider exposes the same semantic market", () => {
     const result = buildComparisonEvents([handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"])]);
 
-    expect(result[0]?.observedRows).toHaveLength(1);
-    expect(result[0]?.observedRows[0]).toMatchObject({
-      marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5", outcomeDomain: ["AWAY", "HOME"]
-    });
-    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA"]);
+    expect(result[0]?.observedRows).toEqual([]);
+    expect(result[0]?.rows).toEqual([]);
   });
 
   it("excludes quarter-goal and three-way tickets from the observational list", () => {
@@ -80,6 +77,22 @@ describe("catalog comparison", () => {
 
     expect(result[0]?.observedRows).toHaveLength(1);
     expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SBOBET"]);
+  });
+
+  it("rejects an ambiguous provider contribution instead of merging duplicate semantic markets", () => {
+    const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
+    const duplicateMarket = { ...saba.markets[0]!, providerMarketId: "saba-duplicate" };
+    const duplicateQuotes = saba.quotes.map((quote) => ({ ...quote,
+      providerMarketId: duplicateMarket.providerMarketId,
+      providerSelectionId: `${quote.providerSelectionId}-duplicate`
+    }));
+    const ambiguous = { ...saba, markets: [...saba.markets, duplicateMarket], quotes: [...saba.quotes, ...duplicateQuotes] };
+    const sbobet = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+
+    const result = buildComparisonEvents([ambiguous, sbobet]);
+
+    expect(result[0]?.observedRows).toEqual([]);
+    expect(result[0]?.rows).toEqual([]);
   });
 
   it("shows only live events and pre-match events in the next two hours", () => {
@@ -118,6 +131,16 @@ describe("catalog comparison", () => {
     const changed = { ...sbobet, events: [{ ...sbobet.events[0]!, eventScope: "EXTRA_TIME" }] };
 
     expect(buildComparisonEvents([saba, changed])).toHaveLength(2);
+  });
+
+  it("matches the same prematch teams when provider kickoff clocks differ by at most two minutes", () => {
+    const saba = catalog("SABA", "saba-event", ["2.20", "1.70"]);
+    const sbobet = catalog("SBOBET", "sbo-event", ["2.10", "1.80"]);
+    const shifted = { ...sbobet, events: [{ ...sbobet.events[0]!, startAtUtcMs: 2_060_000 }] };
+
+    expect(buildComparisonEvents([saba, shifted])).toHaveLength(1);
+    expect(buildComparisonEvents([saba, { ...shifted,
+      events: [{ ...shifted.events[0]!, startAtUtcMs: 2_120_001 }] }])).toHaveLength(2);
   });
 
   it("groups the same event and makes providers columns for the same exact market", () => {

@@ -159,14 +159,13 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
   });
 
-  it("keeps single-book matches visible while clearly withholding comparison signals", async () => {
+  it("hides single-book matches from the cross-book monitor", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getAllByText("#CMD").length).toBeGreaterThan(1);
-    expect(screen.getByText("Chưa có cặp 2 sàn cân được")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
     expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
+    expect(screen.getByText(/1 event without an exact two-book ticket hidden/u)).toBeTruthy();
   });
 
   it("does not expose a single CMD price row as a comparison", async () => {
@@ -174,8 +173,7 @@ describe("LiveCatalogPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Load live catalog" }));
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("Chưa có cặp 2 sàn cân được")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
     expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
     expect(screen.queryByRole("button", { name: /^(bet|wager|place bet)$/iu })).toBeNull();
@@ -235,8 +233,7 @@ describe("LiveCatalogPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Football" }));
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("Chưa có cặp 2 sàn cân được")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
     expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 

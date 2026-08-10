@@ -73,7 +73,7 @@ The command chooses only an accepted event returned by the active provider accou
 
 ## Two-way gross stake preflight
 
-The Football catalog intentionally excludes `FT_1X2` and every market that does not have exactly two canonical outcomes. The current verified two-way feed is `FT_TOTAL` (`OVER`/`UNDER`) at one exact line and settlement profile.
+The focused Football comparison excludes `FT_1X2` and every market that does not have exactly two terminal outcomes. It currently uses full-time Asian handicap on half-goal lines with the complete `HOME`/`AWAY` domain. Quarter lines, integer push lines, incomplete outcomes, and ambiguous duplicate provider markets fail closed.
 
 Set **Base stake for every match (VND)** once in the catalog toolbar. The default is `100000`; valid values are at least `30000` and use `1000` VND steps. This non-secret preference is retained in browser storage across reloads.
 
@@ -89,6 +89,8 @@ The catalog comparison is event-driven; it does not wait for a five-minute windo
 
 For example, if one provider moves from `2.20 / 1.70` to `1.70 / 2.20` while another provider still exposes the opposing `2.20 / 1.70`, the monitor immediately evaluates the two opposing `2.20` selections. It publishes a signal only when the event identity, market type, line, scope, outcome domain, and open state match exactly; both chosen legs come from different providers; and the rounded stake plan remains profitable for either outcome.
 
-The five-second maximum quote age is a fail-closed freshness limit, not an observation window. A signal disappears immediately when either chosen leg becomes stale, suspended, unavailable, or no longer profitable. The screen keeps at most five signals, ranks them by realized ROI and worst-case profit, and marks the strongest one as **Best live lag signal**. A new signal also raises a ten-second **PRICE GAP DETECTED** toast. The list is intentionally limited to events that already have an exact two-provider, two-outcome comparison.
+The five-second maximum quote age is a fail-closed freshness limit, not an observation window. A signal disappears immediately when either chosen leg becomes stale, suspended, unavailable, or no longer profitable. The screen keeps at most five signals, ranks them by rounded worst-case profit, then immediate decimal-odds movement and ROI, and marks the strongest one as **Best live lag signal**. A new signal also raises a ten-second **PRICE GAP DETECTED** toast. The list is intentionally limited to events that already have an exact two-provider, two-outcome comparison.
+
+The main list is a cross-book intersection. Single-provider events are hidden and counted in the evidence bar for Mapping Review. A provider checkbox only includes that feed in the intersection; it does not imply that provider offers every event. A visible row requires at least two unique providers with the same verified event, market type, full-time scope, canonical line, settlement profile, and complete outcome domain. Prematch kickoff times may differ by at most 120 seconds, but participant names and all other identity evidence remain exact; no fuzzy name guess becomes a comparison.
 
 This monitor is still read-only. It calculates and displays the candidate legs and stakes but never submits a wager.
