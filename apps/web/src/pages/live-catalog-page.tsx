@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
+import { loadCatalogCache, saveCatalogCache } from "../catalog/catalog-cache.js";
 import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, type ComparisonEvent } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
@@ -121,6 +122,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [category, setCategory] = useState<"FOOTBALL" | "LOL">("FOOTBALL");
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
+  const [staleAccountIds, setStaleAccountIds] = useState<ReadonlySet<string>>(new Set());
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -132,6 +134,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const baseStakeRef = useRef(baseStake);
   baseStakeRef.current = baseStake;
   const signalTracker = useRef(new LagSignalTracker());
+  const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
   const refreshInFlight = useRef(false);
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event") });
@@ -144,13 +147,22 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     try {
       const results = await Promise.allSettled(ids.map(async (id) => catalogApi.read(id)));
       const accepted = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-      setCatalogs(accepted);
-      const nextEvents = buildComparisonEvents(accepted);
+      const failedIds = new Set(ids.filter((_id, index) => results[index]?.status === "rejected"));
+      const preserved = catalogsRef.current.filter((catalog) => failedIds.has(catalog.accountId) &&
+        !accepted.some((candidate) => candidate.accountId === catalog.accountId));
+      const nextCatalogs = [...accepted, ...preserved];
+      catalogsRef.current = nextCatalogs;
+      saveCatalogCache(window.localStorage, nextCatalogs);
+      setCatalogs(nextCatalogs);
+      setStaleAccountIds(new Set(preserved.map((catalog) => catalog.accountId)));
+      const nextEvents = buildComparisonEvents(nextCatalogs);
       const providers = new Set<ProviderId>(accepted.map((catalog) => catalog.provider));
       const observedAtMs = accepted.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
       setSignals(signalTracker.current.update(nextEvents, providers, stakePolicy(baseStakeRef.current), observedAtMs));
       const failed = results.length - accepted.length;
-      if (accepted.length === 0) setMessage("Live catalog is unavailable. No selected provider returned a verified catalog.");
+      if (accepted.length === 0 && preserved.length > 0) setMessage(`${failed} selected provider(s) unavailable; last verified snapshots are retained as stale. Signals are disabled until a fresh read succeeds.`);
+      else if (accepted.length === 0) setMessage("Live catalog is unavailable. No selected provider returned a verified catalog.");
+      else if (failed > 0 && preserved.length > 0) setMessage(`${failed} selected provider(s) unavailable; last verified snapshot is retained as stale.`);
       else if (failed > 0) setMessage(`${failed} selected provider(s) unavailable; available books are still shown.`);
       else setMessage(null);
     } finally {
@@ -163,6 +175,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     void accountApi.list().then((items) => {
       const available = items.filter((account) => account.capabilities.includes("CATALOG") && account.sessionState === "ACTIVE");
       const initial = new Set(available.map((account) => account.id));
+      const cached = loadCatalogCache(window.localStorage).filter((catalog) => initial.has(catalog.accountId));
+      catalogsRef.current = cached;
+      setCatalogs(cached);
+      setStaleAccountIds(new Set(cached.map((catalog) => catalog.accountId)));
       setAccounts(available); setSelectedIds(initial);
       if (!autoLoaded.current && available.length > 0) {
         autoLoaded.current = true;
@@ -225,7 +241,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
   });
   const changeCategory = (next: "FOOTBALL" | "LOL"): void => {
-    setCategory(next); setCatalogs([]); setSignals([]); setMessage(null); setSelectedKey(null);
+    setCategory(next); setCatalogs([]); catalogsRef.current = []; setStaleAccountIds(new Set());
+    setSignals([]); setMessage(null); setSelectedKey(null);
     signalTracker.current = new LagSignalTracker();
     if (next === "FOOTBALL") void loadIds([...selectedIds], true);
   };
@@ -256,7 +273,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     {category === "LOL" && <p className="stale-warning">No verified live LoL adapter is connected yet.</p>}
     {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}
     {category === "FOOTBALL" && catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
-      <span>{catalogs.length} connected provider(s)</span><span>{displayEvents.length} cross-book match(es)</span>
+      <span>{catalogs.length - staleAccountIds.size} fresh provider(s)</span>
+      {staleAccountIds.size > 0 && <span>{staleAccountIds.size} stale snapshot{staleAccountIds.size === 1 ? "" : "s"} retained</span>}
+      <span>{displayEvents.length} cross-book match(es)</span>
       <span>{hiddenNonComparableCount} event{hiddenNonComparableCount === 1 ? "" : "s"} without an exact two-book ticket hidden · review mappings</span></div>}
     {category === "FOOTBALL" && catalogs.length > 0 && <LagSignalPanel signals={signals} />}
     <LagSignalToast signal={category === "FOOTBALL" ? signals[0] ?? null : null} />

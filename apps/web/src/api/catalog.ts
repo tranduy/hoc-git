@@ -26,6 +26,28 @@ export interface CatalogApiLike {
   read(accountId: string): Promise<LiveCatalogResponse>;
 }
 
+export function parseLiveCatalogResponse(value: unknown, expectedAccountId: string): LiveCatalogResponse {
+  if (typeof value !== "object" || value === null) throw new Error("Invalid live catalog response");
+  const record = value as Record<string, unknown>;
+  const events = ProviderEventSchema.array().safeParse(record.events);
+  const markets = ProviderMarketSchema.array().safeParse(record.markets);
+  const quotes = ProviderQuoteSchema.array().safeParse(record.quotes);
+  if (
+    record.dataMode !== "LIVE" || typeof record.accountId !== "string" || record.accountId !== expectedAccountId ||
+    !ProviderIdSchema.safeParse(record.provider).success || record.provider === "FABET" || record.category !== "FOOTBALL" ||
+    record.comparisonState !== "AWAITING_SECOND_PROVIDER" ||
+    typeof record.observedAtMs !== "number" || !Number.isFinite(record.observedAtMs) ||
+    typeof record.rejectedMarketCount !== "number" || !Number.isSafeInteger(record.rejectedMarketCount) || record.rejectedMarketCount < 0 ||
+    !events.success || !markets.success || !quotes.success
+  ) throw new Error("Invalid live catalog response");
+  return {
+    dataMode: "LIVE", accountId: expectedAccountId, provider: record.provider as ProviderId, category: "FOOTBALL",
+    comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: record.observedAtMs,
+    rejectedMarketCount: record.rejectedMarketCount,
+    events: events.data, markets: markets.data, quotes: quotes.data
+  };
+}
+
 export class CatalogApi implements CatalogApiLike {
   readonly #fetch: typeof fetch;
 
@@ -45,24 +67,6 @@ export class CatalogApi implements CatalogApiLike {
     } catch {
       throw new Error("Invalid live catalog response");
     }
-    if (typeof value !== "object" || value === null) throw new Error("Invalid live catalog response");
-    const record = value as Record<string, unknown>;
-    const events = ProviderEventSchema.array().safeParse(record.events);
-    const markets = ProviderMarketSchema.array().safeParse(record.markets);
-    const quotes = ProviderQuoteSchema.array().safeParse(record.quotes);
-    if (
-      record.dataMode !== "LIVE" || typeof record.accountId !== "string" || record.accountId !== accountId ||
-      !ProviderIdSchema.safeParse(record.provider).success || record.provider === "FABET" || record.category !== "FOOTBALL" ||
-      record.comparisonState !== "AWAITING_SECOND_PROVIDER" ||
-      typeof record.observedAtMs !== "number" || !Number.isFinite(record.observedAtMs) ||
-      typeof record.rejectedMarketCount !== "number" || !Number.isSafeInteger(record.rejectedMarketCount) || record.rejectedMarketCount < 0 ||
-      !events.success || !markets.success || !quotes.success
-    ) throw new Error("Invalid live catalog response");
-    return {
-      dataMode: "LIVE", accountId, provider: record.provider as ProviderId, category: "FOOTBALL",
-      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: record.observedAtMs,
-      rejectedMarketCount: record.rejectedMarketCount,
-      events: events.data, markets: markets.data, quotes: quotes.data
-    };
+    return parseLiveCatalogResponse(value, accountId);
   }
 }

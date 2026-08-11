@@ -3,6 +3,21 @@ import type { ActiveSecretHandle } from "../../sessions/types.js";
 import { SabaObservedCatalogReader } from "./saba-observed-catalog.js";
 
 describe("SabaObservedCatalogReader", () => {
+  it("rejects an empty transient browser snapshot instead of publishing zero events", async () => {
+    const handle: ActiveSecretHandle = {
+      sessionId: "saba-session", provider: "SABA",
+      withSecret: async (consume) => consume({ kind: "LAUNCH_URL", value: "https://saba.test/launch" })
+    };
+    const reader = new SabaObservedCatalogReader({
+      accounts: { withActiveHandle: async (_id, _provider, consume) => consume(handle) },
+      source: { readCatalog: async () => [] },
+      clock: { now: () => ({ wallClockNowMs: 1_788_000_000_000, monotonicNowMs: 500 }) },
+      timezoneOffsetMinutes: 420
+    });
+
+    await expect(reader.read("saba-account")).rejects.toThrow("CMD_CATALOG_UNAVAILABLE");
+  });
+
   it("reads and labels a live SABA catalog without exposing the launch secret", async () => {
     const handle: ActiveSecretHandle = {
       sessionId: "saba-session", provider: "SABA",

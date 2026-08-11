@@ -70,6 +70,7 @@ export class CmdObservedCatalogReader {
     } catch {
       throw new Error("CMD_CATALOG_UNAVAILABLE");
     }
+    if (records.length === 0) throw new Error("CMD_CATALOG_UNAVAILABLE");
     const now = this.#clock.now();
     const sequence = (this.#sequences.get(accountId) ?? 0) + 1;
     const normalizationOptions = {
