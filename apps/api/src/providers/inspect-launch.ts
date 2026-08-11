@@ -23,9 +23,11 @@ import {
   protocolObservationSummary,
   structuralBodyHash,
   structuralBodyShape,
+  structuralBodyShapeAtDepth,
   structuralWebSocketFrameShape,
   type ProtocolObservation
 } from "./protocol-inspector.js";
+import { extractImCatalogRecords } from "./im/im-catalog-source.js";
 
 interface InspectableSessionRecord {
   readonly secret: { readonly kind: "LAUNCH_URL"; readonly value: string };
@@ -54,6 +56,8 @@ async function main(): Promise<void> {
   const catalogShapesOnly = argumentsList.includes("--catalog-shapes");
   const catalogRecordsOnly = argumentsList.includes("--catalog-records");
   const catalogNavigationOnly = argumentsList.includes("--catalog-navigation");
+  const imCatalogShapeOnly = argumentsList.includes("--im-catalog-shape");
+  const imCatalogRecordsOnly = argumentsList.includes("--im-catalog-records");
   const localAppData = process.env.LOCALAPPDATA;
   if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || !localAppData) {
     throw new Error("Usage: npm run inspect:launch -- <redacted-session-id>");
@@ -71,6 +75,7 @@ async function main(): Promise<void> {
   const controlShapes = new Set<string>();
   const profileShapes: unknown[] = [];
   const catalogRecords: unknown[] = [];
+  const imCatalogRecords: unknown[] = [];
   let catalogNavigation: unknown[] = [];
   const pending = new Set<Promise<void>>();
   const recordResponse = async (response: Response): Promise<void> => {
@@ -82,6 +87,7 @@ async function main(): Promise<void> {
       status: response.status(), contentType: response.headers()["content-type"] ?? null
     });
     if (observation === null) return;
+    if ((imCatalogShapeOnly || imCatalogRecordsOnly) && observation.pathTemplate !== "/api/GetIndexMatchV2") return;
     if (scriptEndpointsOnly && observation.transport === "SCRIPT") {
       try {
         const source = (await response.text()).slice(0, 10_000_000);
@@ -93,8 +99,9 @@ async function main(): Promise<void> {
     if (observation.contentType === "application/json") {
       try {
         const body: unknown = await response.json();
+        if (imCatalogRecordsOnly) imCatalogRecords.push(...extractImCatalogRecords(body).slice(0, 40));
         bodyShapeHash = structuralBodyHash(body);
-        bodyShape = structuralBodyShape(body);
+        bodyShape = imCatalogShapeOnly ? structuralBodyShapeAtDepth(body, 16) : structuralBodyShape(body);
       } catch { bodyShapeHash = undefined; }
     }
     const safe = bodyShapeHash === undefined ? observation : { ...observation, bodyShapeHash, bodyShape };
@@ -188,7 +195,9 @@ async function main(): Promise<void> {
     }
     await page.waitForTimeout(15_000);
     await Promise.allSettled([...pending]);
-    const output = profileShapesOnly
+    const output = imCatalogRecordsOnly
+      ? imCatalogRecords
+      : profileShapesOnly
       ? profileShapes
       : catalogNavigationOnly
         ? catalogNavigation

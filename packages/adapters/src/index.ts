@@ -6,3 +6,4 @@ export * from "./cmd/cmd-normalizer.js";
 export * from "./cmd/cmd-adapter.js";
 export * from "./sbobet/sbobet-normalizer.js";
 export * from "./saba/saba-esports-normalizer.js";
+export * from "./im/im-esports-normalizer.js";

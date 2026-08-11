@@ -15,6 +15,7 @@ import {
   extractTrustedApiOrigin,
   selectProfileApiOrigin,
   structuralBodyHash,
+  structuralBodyShapeAtDepth,
   structuralBodyShape
 } from "./protocol-inspector.js";
 
@@ -81,6 +82,12 @@ describe("protocol inspector", () => {
     expect(structuralBodyShape({ account: { balance: 100_000, name: "secret-name" }, events: [{ id: 1 }] }))
       .toEqual({ account: { balance: "number", name: "string" }, events: [{ id: "number" }] });
     expect(JSON.stringify(structuralBodyShape({ token: "secret-canary" }))).not.toContain("secret-canary");
+  });
+
+  it("can inspect a deeper provider catalog shape without retaining values", () => {
+    const shape = structuralBodyShapeAtDepth({ levels: [{ match: [{ odds: [{ secret: "canary" }] }] }] }, 12);
+    expect(shape).toEqual({ levels: [{ match: [{ odds: [{ secret: "string" }] }] }] });
+    expect(JSON.stringify(shape)).not.toContain("canary");
   });
 
   it("redacts ASP.NET session-routing path segments", () => {

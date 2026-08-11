@@ -221,13 +221,13 @@ export function observeProtocolMetadata(input: {
   };
 }
 
-function structuralShape(value: unknown, depth = 0): unknown {
-  if (depth >= 8) return "depth-limit";
+function structuralShape(value: unknown, depth = 0, maxDepth = 8): unknown {
+  if (depth >= maxDepth) return "depth-limit";
   if (value === null) return "null";
-  if (Array.isArray(value)) return [value.length === 0 ? "empty" : structuralShape(value[0], depth + 1)];
+  if (Array.isArray(value)) return [value.length === 0 ? "empty" : structuralShape(value[0], depth + 1, maxDepth)];
   if (typeof value === "object") {
     return Object.fromEntries(Object.keys(value as Record<string, unknown>).sort().map((key) => [
-      key, structuralShape((value as Record<string, unknown>)[key], depth + 1)
+      key, structuralShape((value as Record<string, unknown>)[key], depth + 1, maxDepth)
     ]));
   }
   return typeof value;
@@ -235,6 +235,11 @@ function structuralShape(value: unknown, depth = 0): unknown {
 
 export function structuralBodyShape(value: unknown): unknown {
   return structuralShape(value);
+}
+
+export function structuralBodyShapeAtDepth(value: unknown, maxDepth: number): unknown {
+  if (!Number.isSafeInteger(maxDepth) || maxDepth < 1 || maxDepth > 20) throw new Error("invalid structural depth");
+  return structuralShape(value, 0, maxDepth);
 }
 
 function redactedStringShape(value: string): { readonly encoding: "base64" | "hex" | "text"; readonly lengthBucket: string } {
