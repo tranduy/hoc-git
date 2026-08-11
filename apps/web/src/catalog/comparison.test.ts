@@ -54,6 +54,23 @@ const handicapCatalog = (provider: "SABA" | "SBOBET", id: string, line: string,
   })) };
 };
 
+const lolCatalog = (provider: "SABA" | "IM", id: string, participantA: string, participantB: string,
+  odds: readonly [string, string], settlementProfile = "lol-series-winner"): LiveCatalogResponse => {
+  const lolEvent: ProviderEvent = { provider, category: "LOL", providerEventId: id, competition: "LCK CL",
+    seasonStage: null, startAtUtcMs: 2_000_000, participantA, participantB, eventScope: "SERIES", bestOf: 3,
+    isLive: false, rematchCandidate: false, fixtureDiscriminator: null, gameVariant: "LOL", liveState: null };
+  const market: ProviderMarket = { provider, category: "LOL", providerEventId: id,
+    providerMarketId: `${id}-series`, marketType: "SERIES_WINNER", scope: "SERIES", line: null,
+    settlementProfile, status: "OPEN" };
+  const quotes: ProviderQuote[] = (["TEAM_A", "TEAM_B"] as const).map((selection, index) => ({ provider,
+    category: "LOL", providerEventId: id, providerMarketId: market.providerMarketId,
+    providerSelectionId: `${id}-${selection}`, marketType: "SERIES_WINNER", scope: "SERIES", selection, line: null,
+    rawOdds: odds[index]!, rawFormat: "DECIMAL", status: "OPEN", isLive: false, sourceTimestampMs: null,
+    receivedMonotonicMs: 1, sequence: 1 }));
+  return { dataMode: "LIVE", accountId: id, provider, category: "LOL", comparisonState: "AWAITING_SECOND_PROVIDER",
+    observedAtMs: 1, rejectedMarketCount: 0, events: [lolEvent], markets: [market], quotes };
+};
+
 describe("catalog comparison", () => {
   it("hides an exact ticket until a second provider exposes the same semantic market", () => {
     const result = buildComparisonEvents([handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"])]);
@@ -77,6 +94,32 @@ describe("catalog comparison", () => {
 
     expect(result[0]?.observedRows).toHaveLength(1);
     expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SBOBET"]);
+  });
+
+  it("matches a reversed LoL participant order and reorients TEAM_A/TEAM_B to the anchor event", () => {
+    const saba = lolCatalog("SABA", "saba-lol", "Nongshim Esports Academy", "Dplus KIA Challengers", ["2.20", "1.65"],
+      "saba-esports-two-way-moneyline");
+    const im = lolCatalog("IM", "im-lol", "Dplus KIA Challengers", "Nongshim Esports Academy", ["1.70", "2.10"],
+      "im-esports-series-winner");
+
+    const result = buildComparisonEvents([saba, im]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.providers).toEqual(["SABA", "IM"]);
+    const imCell = result[0]?.observedRows[0]?.cells.find((cell) => cell.provider === "IM");
+    expect(imCell?.quotes.map((quote) => [quote.selection, quote.rawOdds])).toEqual([
+      ["TEAM_B", "1.70"], ["TEAM_A", "2.10"]
+    ]);
+    expect(result[0]?.rows).toEqual([]);
+    expect(result[0]?.bestMargin).toBeNull();
+  });
+
+  it("does not reverse-match football because HOME/AWAY handicap orientation is not proven safe", () => {
+    const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+    const reversed = { ...sbobet, events: [{ ...sbobet.events[0]!, participantA: "Molde", participantB: "Kristiansund BK" }] };
+
+    expect(buildComparisonEvents([saba, reversed])).toHaveLength(2);
   });
 
   it("shows same-ticket prices but blocks profit when settlement profiles differ", () => {

@@ -39,6 +39,8 @@ export interface ComparisonEvent {
   readonly bestMargin: number | null;
 }
 
+type EventOrientation = "SAME" | "SWAPPED";
+
 function identityText(value: string): string {
   return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("en");
 }
@@ -64,9 +66,31 @@ function eventSemanticKey(event: ProviderEvent): string {
     event.isLive ? liveEvidence : "PREMATCH"].join("|");
 }
 
-function compatibleEvent(left: ProviderEvent, right: ProviderEvent): boolean {
-  if (eventSemanticKey(left) !== eventSemanticKey(right) || left.isLive !== right.isLive) return false;
-  return left.isLive || Math.abs(left.startAtUtcMs - right.startAtUtcMs) <= 120_000;
+function swapLolEvent(event: ProviderEvent): ProviderEvent {
+  if (event.category !== "LOL") return event;
+  return { ...event, participantA: event.participantB, participantB: event.participantA,
+    liveState: event.liveState === null ? null : { ...event.liveState,
+      seriesScoreA: event.liveState.seriesScoreB, seriesScoreB: event.liveState.seriesScoreA } };
+}
+
+function compatibleEventOrientation(left: ProviderEvent, right: ProviderEvent): EventOrientation | null {
+  if (left.category !== right.category || left.isLive !== right.isLive) return null;
+  const withinKickoffTolerance = left.isLive || Math.abs(left.startAtUtcMs - right.startAtUtcMs) <= 120_000;
+  if (!withinKickoffTolerance) return null;
+  if (eventSemanticKey(left) === eventSemanticKey(right)) return "SAME";
+  if (left.category === "LOL" && right.category === "LOL" &&
+    eventSemanticKey(left) === eventSemanticKey(swapLolEvent(right))) return "SWAPPED";
+  return null;
+}
+
+function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrientation): readonly ProviderQuote[] {
+  if (orientation !== "SWAPPED") return quotes;
+  return quotes.map((quote) => {
+    if (quote.category !== "LOL") return quote;
+    if (quote.selection === "TEAM_A") return { ...quote, selection: "TEAM_B" };
+    if (quote.selection === "TEAM_B") return { ...quote, selection: "TEAM_A" };
+    return quote;
+  });
 }
 
 function marketKey(market: ProviderMarket): string {
@@ -127,16 +151,23 @@ export function decimalOdds(quote: ProviderQuote): number | null {
 
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]): readonly ComparisonEvent[] {
   const groups: Array<{ key: string; event: ProviderEvent; catalogs: LiveCatalogResponse[];
-    ids: Partial<Record<ProviderId, string>> }> = [];
+    ids: Partial<Record<ProviderId, string>>; orientations: Partial<Record<ProviderId, EventOrientation>> }> = [];
   for (const catalog of catalogs) {
     for (const event of catalog.events) {
-      let group = groups.find((candidate) => candidate.ids[catalog.provider] === undefined && compatibleEvent(candidate.event, event));
+      let orientation: EventOrientation | null = null;
+      let group = groups.find((candidate) => {
+        if (candidate.ids[catalog.provider] !== undefined) return false;
+        orientation = compatibleEventOrientation(candidate.event, event);
+        return orientation !== null;
+      });
       if (group === undefined) {
-        group = { key: eventKey(event), event, catalogs: [], ids: {} };
+        orientation = "SAME";
+        group = { key: eventKey(event), event, catalogs: [], ids: {}, orientations: {} };
         groups.push(group);
       }
       if (!group.catalogs.some((candidate) => candidate.provider === catalog.provider)) group.catalogs.push(catalog);
       group.ids[catalog.provider] = event.providerEventId;
+      group.orientations[catalog.provider] = orientation ?? "SAME";
     }
   }
   return groups.map((group) => {
@@ -148,7 +179,8 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
         const rowKey = marketKey(market);
         const cells = rowGroups.get(rowKey) ?? [];
         cells.push({ provider: catalog.provider, market,
-          quotes: catalog.quotes.filter((quote) => quote.providerMarketId === market.providerMarketId) });
+          quotes: orientQuotes(catalog.quotes.filter((quote) => quote.providerMarketId === market.providerMarketId),
+            group.orientations[catalog.provider] ?? "SAME") });
         rowGroups.set(rowKey, cells);
       }
     }
