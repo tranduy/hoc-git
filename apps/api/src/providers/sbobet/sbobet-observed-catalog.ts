@@ -1,6 +1,16 @@
 import { normalizeSbobetCatalog, type SbobetCatalogInputRecord } from "@tool-chenh/adapters";
 import type { ActiveAccountAccess, ObservedProviderCatalog } from "../cmd/cmd-observed-catalog.js";
 
+interface SbobetSourceSnapshot {
+  readonly records: readonly SbobetCatalogInputRecord[];
+  readonly observedAtMs: number;
+  readonly receivedMonotonicMs: number;
+}
+
+function isSourceSnapshot(value: readonly SbobetCatalogInputRecord[] | SbobetSourceSnapshot): value is SbobetSourceSnapshot {
+  return !Array.isArray(value) && "records" in value;
+}
+
 export class SbobetObservedCatalogReader {
   readonly provider = "SBOBET" as const;
   readonly #accounts: ActiveAccountAccess;
@@ -11,12 +21,19 @@ export class SbobetObservedCatalogReader {
     this.#accounts = options.accounts; this.#source = options.source; this.#clock = options.clock;
   }
   async read(accountId: string): Promise<ObservedProviderCatalog> {
-    const records = await this.#accounts.withActiveHandle(accountId, "SBOBET", async (handle) => handle.withSecret(async (secret) => {
+    const sourceResult = await this.#accounts.withActiveHandle(accountId, "SBOBET", async (handle) => handle.withSecret(async (secret) => {
       if (secret.kind !== "LAUNCH_URL") throw new Error("SBOBET_CATALOG_UNAVAILABLE");
       return this.#source.readCatalog({ sessionId: handle.sessionId, launchUrl: secret.value });
     }), "FOOTBALL");
-    const now = this.#clock.now(); const sequence = (this.#sequences.get(accountId) ?? 0) + 1;
-    const options = { observedAtMs: now.wallClockNowMs, receivedMonotonicMs: now.monotonicNowMs, sequence };
+    const now = this.#clock.now();
+    const snapshot = isSourceSnapshot(sourceResult) ? sourceResult : null;
+    const records = snapshot === null ? sourceResult as readonly SbobetCatalogInputRecord[] : snapshot.records;
+    const sequence = (this.#sequences.get(accountId) ?? 0) + 1;
+    const options = {
+      observedAtMs: snapshot?.observedAtMs ?? now.wallClockNowMs,
+      receivedMonotonicMs: snapshot?.receivedMonotonicMs ?? now.monotonicNowMs,
+      sequence
+    };
     const events: ObservedProviderCatalog["events"][number][] = [];
     const markets: ObservedProviderCatalog["markets"][number][] = [];
     const quotes: ObservedProviderCatalog["quotes"][number][] = [];
@@ -34,12 +51,12 @@ export class SbobetObservedCatalogReader {
     if (records.length > 0 && events.length === 0) throw new Error("SBOBET_CATALOG_SCHEMA_ERROR");
     this.#sequences.set(accountId, sequence);
     return { dataMode: "LIVE", accountId, provider: "SBOBET", category: "FOOTBALL",
-      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: now.wallClockNowMs,
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: options.observedAtMs,
       rejectedMarketCount, events, markets, quotes };
   }
 }
 
 interface SbobetCatalogSource {
-  readCatalog(input: { sessionId: string; launchUrl: string }): Promise<readonly SbobetCatalogInputRecord[]>;
+  readCatalog(input: { sessionId: string; launchUrl: string }): Promise<readonly SbobetCatalogInputRecord[] | SbobetSourceSnapshot>;
 }
 interface SbobetCatalogClock { now(): { wallClockNowMs: number; monotonicNowMs: number } }

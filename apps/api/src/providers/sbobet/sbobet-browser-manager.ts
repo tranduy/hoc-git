@@ -6,6 +6,7 @@ import {
   appendBoundedSbobetSocketPayload, correlateSbobetPublicIds, decodeSbobetJsonBody,
   decodeSbobetStompBodies, isSbobetResponseCandidate
 } from "./sbobet-stomp.js";
+import { extractSbobetDirectCatalogRecords } from "./sbobet-direct-catalog.js";
 
 interface OpenSession {
   readonly context: BrowserContext;
@@ -13,6 +14,15 @@ interface OpenSession {
   readonly socketPayloads: string[];
   readonly httpPayloads: string[];
   readonly responseTasks: Set<Promise<void>>;
+  readonly eventPayloads: string[];
+  readonly eventClock: { value: { readonly observedAtMs: number; readonly receivedMonotonicMs: number } | null };
+  readonly eventRequest: { value: { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null };
+}
+
+export interface SbobetCatalogSnapshot {
+  readonly records: readonly SbobetCatalogInputRecord[];
+  readonly observedAtMs: number;
+  readonly receivedMonotonicMs: number;
 }
 
 function safeLaunchUrl(value: string): string {
@@ -84,6 +94,7 @@ export async function isSbobetCatalogReady(page: Page): Promise<boolean> {
 export class PlaywrightSbobetBrowserManager {
   readonly #profilesRoot: string; readonly #headless: boolean; readonly #timeout: number;
   readonly #sessions = new Map<string, OpenSession>(); readonly #opening = new Map<string, Promise<OpenSession>>();
+  readonly #reads = new Map<string, Promise<SbobetCatalogSnapshot>>();
   readonly #correlationReported = new Set<string>();
   readonly #correlationSummaryReported = new Set<string>();
   constructor(options: { profilesRoot: string; headless?: boolean; startupTimeoutMs?: number }) {
@@ -95,14 +106,25 @@ export class PlaywrightSbobetBrowserManager {
       return await session.page.locator(".wrapper-match-component .odd-item").first().isVisible({ timeout: this.#timeout });
     } catch { return false; } finally { const session = this.#sessions.get(id); this.#sessions.delete(id); await session?.context.close().catch(() => undefined); }
   }
-  async readCatalog(input: { sessionId: string; launchUrl: string }): Promise<readonly SbobetCatalogInputRecord[]> {
+  async readCatalog(input: { sessionId: string; launchUrl: string }): Promise<SbobetCatalogSnapshot> {
+    const active = this.#reads.get(input.sessionId);
+    if (active !== undefined) return active;
+    const next = this.#readCatalog(input).finally(() => {
+      if (this.#reads.get(input.sessionId) === next) this.#reads.delete(input.sessionId);
+    });
+    this.#reads.set(input.sessionId, next);
+    return next;
+  }
+  async #readCatalog(input: { sessionId: string; launchUrl: string }): Promise<SbobetCatalogSnapshot> {
     let session = await this.#get(input);
     try {
-      const records = await extractSbobetRecords(session.page);
-      await this.#reportSafeCorrelation(input.sessionId, session, records);
-      return records;
+      return await this.#readDirectCatalog(input.sessionId, session);
     }
-    catch { await session.context.close().catch(() => undefined); this.#sessions.delete(input.sessionId); session = await this.#get(input); return extractSbobetRecords(session.page); }
+    catch {
+      await session.context.close().catch(() => undefined); this.#sessions.delete(input.sessionId);
+      session = await this.#get(input);
+      return this.#readDirectCatalog(input.sessionId, session);
+    }
   }
   async close(): Promise<void> { const all = [...this.#sessions.values()]; this.#sessions.clear(); await Promise.allSettled(all.map((item) => item.context.close())); }
   async #get(input: { sessionId: string; launchUrl: string }): Promise<OpenSession> {
@@ -117,6 +139,11 @@ export class PlaywrightSbobetBrowserManager {
     const socketPayloads: string[] = [];
     const httpPayloads: string[] = [];
     const responseTasks = new Set<Promise<void>>();
+    const eventPayloads: string[] = [];
+    const eventClock = { value: null as { readonly observedAtMs: number; readonly receivedMonotonicMs: number } | null };
+    const eventRequest = {
+      value: null as { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null
+    };
     const attachSocket = (socket: WebSocket): void => {
       socket.on("framereceived", (event) => {
         if (typeof event.payload !== "string") return;
@@ -126,7 +153,18 @@ export class PlaywrightSbobetBrowserManager {
     const captureResponse = async (response: Response): Promise<void> => {
       if (response.status() !== 200 ||
         !isSbobetResponseCandidate(response.url(), response.request().resourceType())) return;
-      try { appendBoundedSbobetSocketPayload(httpPayloads, await response.text()); } catch { /* fail closed */ }
+      try {
+        const payload = await response.text();
+        appendBoundedSbobetSocketPayload(httpPayloads, payload);
+        const url = new URL(response.url());
+        if (url.pathname === "/api/v2/getEvent") {
+          appendBoundedSbobetSocketPayload(eventPayloads, payload, {
+            maxFrameChars: 4_000_000, maxTotalChars: 8_000_000, maxFrames: 2
+          });
+          eventClock.value = { observedAtMs: Date.now(), receivedMonotonicMs: performance.now() };
+          eventRequest.value = { url: response.url(), headers: await response.request().allHeaders() };
+        }
+      } catch { /* fail closed */ }
     };
     context.on("response", (response) => {
       const task = captureResponse(response).finally(() => responseTasks.delete(task));
@@ -143,9 +181,52 @@ export class PlaywrightSbobetBrowserManager {
         if (found === null) await launcher.waitForTimeout(250);
       }
       if (found === null) throw new Error("SBOBET_CATALOG_UNAVAILABLE");
-      const session = { context, page: found, socketPayloads, httpPayloads, responseTasks };
+      const session = {
+        context, page: found, socketPayloads, httpPayloads, responseTasks, eventPayloads, eventClock,
+        eventRequest
+      };
       this.#sessions.set(input.sessionId, session); return session;
     } catch { await context.close().catch(() => undefined); throw new Error("SBOBET_BROWSER_UNAVAILABLE"); }
+  }
+
+  async #refreshDirectEvent(session: OpenSession): Promise<void> {
+    const request = session.eventRequest.value;
+    const clock = session.eventClock.value;
+    if (request === null || clock === null || Date.now() - clock.observedAtMs < 500) return;
+    try {
+      const headers = Object.fromEntries(Object.entries(request.headers).filter(([name]) =>
+        !/^(?:cookie|host|content-length|accept-encoding|connection|origin|referer|user-agent|sec-|:)/iu.test(name)));
+      const response = await session.page.evaluate(async (input) => {
+        const result = await fetch(input.url, {
+          method: "GET", headers: input.headers, credentials: "include", cache: "no-store"
+        });
+        return { status: result.status, url: result.url, payload: await result.text() };
+      }, { url: request.url, headers });
+      if (response.status !== 200 || new URL(response.url).pathname !== "/api/v2/getEvent") {
+        throw new Error("SBOBET_DIRECT_REFRESH_UNAVAILABLE");
+      }
+      const payload = response.payload;
+      if (decodeSbobetJsonBody(payload).length !== 1) throw new Error("SBOBET_DIRECT_REFRESH_SCHEMA_ERROR");
+      appendBoundedSbobetSocketPayload(session.eventPayloads, payload, {
+        maxFrameChars: 4_000_000, maxTotalChars: 8_000_000, maxFrames: 2
+      });
+      session.eventClock.value = { observedAtMs: Date.now(), receivedMonotonicMs: performance.now() };
+    } catch { throw new Error("SBOBET_DIRECT_REFRESH_UNAVAILABLE"); }
+  }
+
+  async #readDirectCatalog(sessionId: string, session: OpenSession): Promise<SbobetCatalogSnapshot> {
+    await Promise.allSettled([...session.responseTasks]);
+    await this.#refreshDirectEvent(session);
+    const fallbackRecords = await extractSbobetRecords(session.page);
+    await this.#reportSafeCorrelation(sessionId, session, fallbackRecords);
+    const latest = session.eventPayloads.at(-1);
+    const clock = session.eventClock.value;
+    if (latest === undefined || clock === null) throw new Error("SBOBET_DIRECT_CATALOG_UNAVAILABLE");
+    const body = decodeSbobetJsonBody(latest)[0];
+    if (body === undefined) throw new Error("SBOBET_DIRECT_CATALOG_SCHEMA_ERROR");
+    const records = extractSbobetDirectCatalogRecords(body, fallbackRecords);
+    if (records.length === 0) throw new Error("SBOBET_DIRECT_CATALOG_EMPTY");
+    return { records, ...clock };
   }
 
   async #reportSafeCorrelation(
