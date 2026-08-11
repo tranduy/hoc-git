@@ -1,9 +1,19 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Page, type Response, type WebSocket } from "playwright";
+import {
+  appendBoundedSbobetSocketPayload, correlateSbobetPublicIds, decodeSbobetJsonBody,
+  decodeSbobetStompBodies, isSbobetResponseCandidate
+} from "./sbobet-stomp.js";
 
-interface OpenSession { readonly context: BrowserContext; readonly page: Page }
+interface OpenSession {
+  readonly context: BrowserContext;
+  readonly page: Page;
+  readonly socketPayloads: string[];
+  readonly httpPayloads: string[];
+  readonly responseTasks: Set<Promise<void>>;
+}
 
 function safeLaunchUrl(value: string): string {
   if (value.length === 0 || value.length > 24_000) throw new Error("SBOBET_LAUNCH_URL_INVALID");
@@ -74,6 +84,8 @@ export async function isSbobetCatalogReady(page: Page): Promise<boolean> {
 export class PlaywrightSbobetBrowserManager {
   readonly #profilesRoot: string; readonly #headless: boolean; readonly #timeout: number;
   readonly #sessions = new Map<string, OpenSession>(); readonly #opening = new Map<string, Promise<OpenSession>>();
+  readonly #correlationReported = new Set<string>();
+  readonly #correlationSummaryReported = new Set<string>();
   constructor(options: { profilesRoot: string; headless?: boolean; startupTimeoutMs?: number }) {
     this.#profilesRoot = options.profilesRoot; this.#headless = options.headless ?? false; this.#timeout = options.startupTimeoutMs ?? 30_000;
   }
@@ -85,7 +97,11 @@ export class PlaywrightSbobetBrowserManager {
   }
   async readCatalog(input: { sessionId: string; launchUrl: string }): Promise<readonly SbobetCatalogInputRecord[]> {
     let session = await this.#get(input);
-    try { return await extractSbobetRecords(session.page); }
+    try {
+      const records = await extractSbobetRecords(session.page);
+      await this.#reportSafeCorrelation(input.sessionId, session, records);
+      return records;
+    }
     catch { await session.context.close().catch(() => undefined); this.#sessions.delete(input.sessionId); session = await this.#get(input); return extractSbobetRecords(session.page); }
   }
   async close(): Promise<void> { const all = [...this.#sessions.values()]; this.#sessions.clear(); await Promise.allSettled(all.map((item) => item.context.close())); }
@@ -98,6 +114,27 @@ export class PlaywrightSbobetBrowserManager {
     const context = await chromium.launchPersistentContext(join(this.#profilesRoot,
       `sbobet-${createHash("sha256").update(input.sessionId).digest("hex").slice(0, 24)}`),
     { headless: this.#headless, acceptDownloads: false });
+    const socketPayloads: string[] = [];
+    const httpPayloads: string[] = [];
+    const responseTasks = new Set<Promise<void>>();
+    const attachSocket = (socket: WebSocket): void => {
+      socket.on("framereceived", (event) => {
+        if (typeof event.payload !== "string") return;
+        appendBoundedSbobetSocketPayload(socketPayloads, event.payload);
+      });
+    };
+    const captureResponse = async (response: Response): Promise<void> => {
+      if (response.status() !== 200 ||
+        !isSbobetResponseCandidate(response.url(), response.request().resourceType())) return;
+      try { appendBoundedSbobetSocketPayload(httpPayloads, await response.text()); } catch { /* fail closed */ }
+    };
+    context.on("response", (response) => {
+      const task = captureResponse(response).finally(() => responseTasks.delete(task));
+      responseTasks.add(task);
+    });
+    const attachPage = (page: Page): void => { page.on("websocket", attachSocket); };
+    context.pages().forEach(attachPage);
+    context.on("page", attachPage);
     try { const launcher = context.pages()[0] ?? await context.newPage();
       await launcher.goto(safeLaunchUrl(input.launchUrl), { waitUntil: "domcontentloaded", timeout: this.#timeout });
       const deadline = Date.now() + this.#timeout; let found: Page | null = null;
@@ -106,7 +143,43 @@ export class PlaywrightSbobetBrowserManager {
         if (found === null) await launcher.waitForTimeout(250);
       }
       if (found === null) throw new Error("SBOBET_CATALOG_UNAVAILABLE");
-      const session = { context, page: found }; this.#sessions.set(input.sessionId, session); return session;
+      const session = { context, page: found, socketPayloads, httpPayloads, responseTasks };
+      this.#sessions.set(input.sessionId, session); return session;
     } catch { await context.close().catch(() => undefined); throw new Error("SBOBET_BROWSER_UNAVAILABLE"); }
+  }
+
+  async #reportSafeCorrelation(
+    sessionId: string, session: OpenSession, records: readonly SbobetCatalogInputRecord[]
+  ): Promise<void> {
+    if (this.#correlationReported.has(sessionId)) return;
+    await Promise.allSettled([...session.responseTasks]);
+    if (session.socketPayloads.length === 0 && session.httpPayloads.length === 0) return;
+    const socketBodies = session.socketPayloads.flatMap((payload) => decodeSbobetStompBodies(payload));
+    const httpBodies = session.httpPayloads.flatMap((payload) => decodeSbobetJsonBody(payload));
+    const bodies = [...socketBodies, ...httpBodies];
+    const eventIds = new Set(records.map((record) => record.eventId));
+    const selectionIds = new Set(records.flatMap((record) => record.markets.flatMap((market) =>
+      market.selections.map((selection) => selection.selectionId.replace(/[had]$/iu, "")))));
+    const publicIds = [...eventIds, ...selectionIds];
+    const evidence = correlateSbobetPublicIds(bodies, publicIds);
+    const eventEvidence = evidence.filter((item) => eventIds.has(item.target));
+    const selectionEvidence = evidence.filter((item) => selectionIds.has(item.target));
+    if (bodies.length > 0 && !this.#correlationSummaryReported.has(sessionId)) {
+      this.#correlationSummaryReported.add(sessionId);
+      process.stderr.write(`SBOBET direct-feed correlation summary: ${JSON.stringify({
+        capturedFrames: session.socketPayloads.length,
+        decodedSocketBodies: socketBodies.length,
+        capturedHttpBodies: httpBodies.length,
+        publicEventTargets: eventIds.size,
+        publicSelectionTargets: selectionIds.size,
+        correlatedEvents: eventEvidence.length,
+        correlatedSelections: selectionEvidence.length
+      })}\n`);
+    }
+    if (evidence.length === 0) return;
+    this.#correlationReported.add(sessionId);
+    process.stderr.write(`SBOBET direct-feed public ID correlation: ${JSON.stringify({
+      events: eventEvidence.slice(0, 10), selections: selectionEvidence.slice(0, 10)
+    })}\n`);
   }
 }
