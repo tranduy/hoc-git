@@ -119,6 +119,45 @@ describe("catalog comparison", () => {
     expect(buildComparisonEvents([namedSaba, namedSbobet])).toHaveLength(1);
   });
 
+  it.each([
+    ["Kairat Almaty", "Levski Sofia", "Kairat Almaty (N)", "Levski Sofia"],
+    ["Bodo Glimt", "Union Saint-Gilloise", "Bodo Glimt", "St Gilloise"],
+    ["Sabah Baku", "AGF Aarhus", "Sabah", "AGF Aarhus"],
+    ["JJK Jyvaskyla", "Tampere United", "JJK Jyvaskyla", "Tampere Utd"],
+    ["PK Keski Uusimaa", "Inter Turku 2", "PK Keski Uusimaa", "Inter Turku II"],
+    ["Trikala FC", "AE Larissa", "Trikala", "AE Larissa"]
+  ])("matches verified provider naming variants for %s vs %s", (sabaA, sabaB, sbobetA, sbobetB) => {
+    const saba = handicapCatalog("SABA", "saba-alias", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-alias", "-0.5", ["0.78", "-0.86"]);
+    const namedSaba = { ...saba, events: [{ ...saba.events[0]!, participantA: sabaA, participantB: sabaB }] };
+    const namedSbobet = { ...sbobet, events: [{ ...sbobet.events[0]!, participantA: sbobetA, participantB: sbobetB }] };
+
+    const result = buildComparisonEvents([namedSaba, namedSbobet]);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.rows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SBOBET"]);
+  });
+
+  it("does not fuzzy-match similar but different teams", () => {
+    const saba = handicapCatalog("SABA", "saba-near", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-near", "-0.5", ["0.78", "-0.86"]);
+    const namedSaba = { ...saba, events: [{ ...saba.events[0]!, participantA: "Hapoel Kfar Saba",
+      participantB: "Kiryat Yam SC" }] };
+    const namedSbobet = { ...sbobet, events: [{ ...sbobet.events[0]!, participantA: "Hapoel Kfar Shalem",
+      participantB: "Kiryat Gat" }] };
+
+    expect(buildComparisonEvents([namedSaba, namedSbobet])).toHaveLength(2);
+  });
+
+  it("fails closed when one provider has duplicate same-team fixtures at the same kickoff", () => {
+    const saba = handicapCatalog("SABA", "saba-one", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-one", "-0.5", ["0.78", "-0.86"]);
+    const ambiguousSaba = { ...saba, events: [...saba.events,
+      { ...saba.events[0]!, providerEventId: "saba-rematch" }] };
+
+    const result = buildComparisonEvents([ambiguousSaba, sbobet]);
+    expect(result.some((item) => item.providers.length > 1)).toBe(false);
+  });
+
   it("matches a reversed LoL participant order and reorients TEAM_A/TEAM_B to the anchor event", () => {
     const saba = lolCatalog("SABA", "saba-lol", "Nongshim Esports Academy", "Dplus KIA Challengers", ["2.20", "1.65"],
       "saba-esports-two-way-moneyline");

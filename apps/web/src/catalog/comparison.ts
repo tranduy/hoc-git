@@ -41,10 +41,26 @@ export interface ComparisonEvent {
 
 type EventOrientation = "SAME" | "SWAPPED";
 
+const footballTeamAliases = new Map<string, string>([
+  ["st gilloise", "union saint gilloise"],
+  ["union st gilloise", "union saint gilloise"],
+  ["sabah", "sabah baku"],
+  ["al hussein jor", "al hussein irbid"],
+  ["maccabi kiryat gat", "kiryat gat"]
+]);
+
 function identityText(value: string): string {
-  return value.normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
-    .replace(/đ/gu, "d").replace(/[^\p{L}\p{N}]+/gu, " ").trim()
-    .replace(/^(?:(?:clb|fc|sc|scu|afc|cf)\s+)+/u, "").replace(/\s+/gu, " ");
+  const normalized = value.normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
+    .replace(/đ/gu, "d").replace(/\s*\((?:n|neutral)\)\s*$/u, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+    .replace(/^(?:(?:clb|fc|sc|scu|afc|cf|jk|fa)\s+)+/u, "")
+    .replace(/\s+(?:fc|sc|scu|afc|cf)$/u, "")
+    .replace(/\butd\b/gu, "united").replace(/\bii\b/gu, "2").replace(/\s+/gu, " ");
+  return footballTeamAliases.get(normalized) ?? normalized;
+}
+
+function unorderedParticipantKey(event: ProviderEvent): string {
+  return [identityText(event.participantA), identityText(event.participantB)].sort().join("|");
 }
 
 function eventKey(event: ProviderEvent): string {
@@ -256,13 +272,25 @@ export function observedTicketAsComparisonRow(ticket: ObservedTicketRow): Compar
 }
 
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]): readonly ComparisonEvent[] {
+  const identityCounts = new Map<string, number>();
+  for (const catalog of catalogs) for (const event of catalog.events) {
+    const key = [catalog.provider, event.category, event.isLive ? "LIVE" : String(event.startAtUtcMs),
+      unorderedParticipantKey(event)].join("|");
+    identityCounts.set(key, (identityCounts.get(key) ?? 0) + 1);
+  }
+  const ambiguous = (catalog: LiveCatalogResponse, event: ProviderEvent): boolean => {
+    const key = [catalog.provider, event.category, event.isLive ? "LIVE" : String(event.startAtUtcMs),
+      unorderedParticipantKey(event)].join("|");
+    return (identityCounts.get(key) ?? 0) > 1;
+  };
   const groups: Array<{ key: string; event: ProviderEvent; catalogs: LiveCatalogResponse[];
     ids: Partial<Record<ProviderId, string>>; orientations: Partial<Record<ProviderId, EventOrientation>> }> = [];
   for (const catalog of catalogs) {
     for (const event of catalog.events) {
       let orientation: EventOrientation | null = null;
       let group = groups.find((candidate) => {
-        if (candidate.ids[catalog.provider] !== undefined) return false;
+        if (candidate.ids[catalog.provider] !== undefined || ambiguous(catalog, event) ||
+          candidate.catalogs.some((source) => ambiguous(source, candidate.event))) return false;
         orientation = compatibleEventOrientation(candidate.event, event);
         return orientation !== null;
       });
