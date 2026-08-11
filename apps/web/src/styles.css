@@ -36,6 +36,9 @@ main { max-width: 1440px; margin-left: 224px; padding: calc(var(--space) * 5); }
 @media (max-width: 1000px) { .match-watch__layout { grid-template-columns: 1fr; }.match-watch__header { flex-direction: column; }.watch-health { justify-items: start; } }
 .stake-config { display: grid; gap: 4px; min-width: 230px; font-weight: 800; }.stake-config input { min-height: 42px; padding: 0 var(--space); border: 1px solid var(--line); border-radius: 5px; background: #0d1319; color: var(--text); font: inherit; }.stake-config small { max-width: 300px; color: var(--muted); font-weight: 400; }.stake-config small[role="alert"] { color: var(--blocked); }
 .balanced-plan { display: grid; min-width: 240px; gap: 6px; }.balanced-plan > strong { color: var(--positive); }.balanced-plan > span { display: grid; gap: 2px; padding: 6px; border-radius: 4px; background: #11171d; }.balanced-plan small { color: var(--muted); }
+.balanced-plan--estimate > strong { color: var(--warning); }
+.rate-gap-summary { display: grid; gap: 4px; margin-bottom: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #11171d; }
+.rate-gap-summary small { color: var(--muted); }.rate-gap-summary b { color: var(--text); }
 .provider-selector { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space); min-width: min(100%, 420px); margin: 0; padding: var(--space); border: 1px solid var(--line); border-radius: 6px; }
 .provider-selector legend { padding: 0 4px; color: var(--muted); font-size: .8rem; }
 .provider-selector label { display: flex; grid-auto-flow: column; align-items: center; gap: 6px; min-height: 34px; padding: 3px 8px; border-radius: 999px; background: #11171d; color: var(--text); cursor: pointer; }

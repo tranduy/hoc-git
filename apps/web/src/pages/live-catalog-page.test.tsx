@@ -153,7 +153,10 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText(/Starts in/u)).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SABA" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
-    expect(screen.getByText(/HOME 2.25/u).className).toContain("best");
+    expect(screen.getAllByText(/Alpha.*2\.25/u).some((element) => String(element.className).includes("best"))).toBe(true);
+    expect(screen.getByText(/Alpha: lệch 0\.450 \(25\.00%\)/u)).toBeTruthy();
+    expect(screen.getByText("Biên cân hiện tại: 18.42%")).toBeTruthy();
+    expect(screen.getAllByText("Lãi/lỗ 35,000 VND")).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
     expect(await screen.findByText("Books shown in this comparison")).toBeTruthy();
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();

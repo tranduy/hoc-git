@@ -3,10 +3,12 @@ import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
 import { loadCatalogCache, saveCatalogCache } from "../catalog/catalog-cache.js";
-import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
-  isVisibleEvent, type ComparisonEvent } from "../catalog/comparison.js";
+import { buildComparisonEvents, decimalOdds, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
+  isVisibleEvent, observedTicketAsComparisonRow, selectionLabel, type ComparisonEvent,
+  type ComparisonRow } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
-import { buildFixedBaseStakePlan, type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
+import { buildFixedBaseStakePlan, buildObservedFixedBaseStakeEstimate,
+  type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
 import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
 
@@ -38,14 +40,29 @@ function money(value: string): string {
   return `${Number(value).toLocaleString("en-US")} VND`;
 }
 
+function RateGapSummary({ event, row }: { readonly event: ComparisonEvent["event"]; readonly row: ComparisonRow }) {
+  const selections = [...new Set(row.cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)))].sort();
+  return <div className="rate-gap-summary">{selections.map((selection) => {
+    const odds = row.cells.flatMap((cell) => cell.quotes.filter((quote) => quote.selection === selection)
+      .flatMap((quote) => { const value = decimalOdds(quote); return value === null ? [] : [value]; }));
+    const low = Math.min(...odds);
+    const high = Math.max(...odds);
+    const gap = Number.isFinite(low) && Number.isFinite(high) ? high - low : null;
+    return <small key={selection}>{selectionLabel(event, selection)}: {gap === null ? "chưa đủ giá" :
+      `lệch ${gap.toFixed(3)} (${((gap / low) * 100).toFixed(2)}%)`}</small>;
+  })}<b>Biên cân hiện tại: {row.margin === null ? "không có cặp chéo" : `${(row.margin * 100).toFixed(2)}%`}</b></div>;
+}
+
 function ComparisonTable({ item, baseStake, signals }: { readonly item: ComparisonEvent; readonly baseStake: string;
   readonly signals: readonly LagSignal[] }) {
   const selectedProviders = new Set<ProviderId>(item.providers);
   return <div className="table-wrap comparison-table"><table><thead><tr><th>Loại vé / kèo</th>
     {item.providers.map((provider) => <th key={provider}>{provider}</th>)}<th>Cân tiền / lợi nhuận</th></tr></thead><tbody>
     {item.observedRows.map((observedRow) => {
-      const row = item.rows.find((candidate) => candidate.key === observedRow.key);
-      const plan = row === undefined ? null : buildFixedBaseStakePlan(row, selectedProviders, stakePolicy(baseStake));
+      const verifiedRow = item.rows.find((candidate) => candidate.key === observedRow.key);
+      const displayRow = verifiedRow ?? observedTicketAsComparisonRow(observedRow);
+      const verifiedPlan = verifiedRow === undefined ? null : buildFixedBaseStakePlan(verifiedRow, selectedProviders, stakePolicy(baseStake));
+      const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy(baseStake));
       const signal = signals.find((candidate) => candidate.event.key === item.key && candidate.row.key === observedRow.key);
       return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
       <th>{observedRow.marketType === "SERIES_WINNER" ? "Thắng series" : "Chấp toàn trận"}
@@ -56,13 +73,15 @@ function ComparisonTable({ item, baseStake, signals }: { readonly item: Comparis
         const cell = observedRow.cells.find((candidate) => candidate.provider === provider);
         return <td key={provider}>{cell === undefined ? <span className="rate-missing">Unavailable</span> :
           <div className="rate-cell">{cell.quotes.map((quote) => <span
-            className={row?.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
-            key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds} {quote.rawFormat} · {quote.status}</span>)}</div>}</td>;
-      })}<td>{plan === null ? <span className="rate-missing">Đang hiển thị giá · chưa đủ bằng chứng settlement để cân</span>
-        : <div className="balanced-plan"><strong>{signal === undefined ? "GIÁ HIỆN TẠI" : "SẴN SÀNG (READ-ONLY)"}</strong>{plan.legs.map((leg) => <span key={leg.selection}>
-          <small>#{leg.provider} · {leg.selection} @ {leg.decimalOdds}</small><b>{money(leg.stake)} {leg.role.toLowerCase()}</b>
+            className={displayRow.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
+            key={quote.providerSelectionId}>{selectionLabel(item.event, quote.selection)} · {quote.rawOdds} {quote.rawFormat}
+              {decimalOdds(quote) === null ? "" : ` · decimal ${decimalOdds(quote)!.toFixed(3)}`} · {quote.status}</span>)}</div>}</td>;
+      })}<td><RateGapSummary event={item.event} row={displayRow} />{plan === null ? <span className="rate-missing">Chưa đủ hai giá đối nghịch từ hai sàn để tính tiền</span>
+        : <div className={verifiedPlan === null ? "balanced-plan balanced-plan--estimate" : "balanced-plan"}><strong>{verifiedPlan === null ? "ƯỚC TÍNH QUAN SÁT · SETTLEMENT CHƯA XÁC MINH" :
+          signal === undefined ? "GIÁ HIỆN TẠI" : "SẴN SÀNG (READ-ONLY)"}</strong>{plan.legs.map((leg) => <span key={leg.selection}>
+          <small>#{leg.provider} · {selectionLabel(item.event, leg.selection)} @ {leg.decimalOdds}</small><b>{money(leg.stake)} {leg.role.toLowerCase()}</b>
         </span>)}<span>Total {money(plan.totalStake)}</span>{plan.legs.map((leg) => <span key={`${leg.selection}-profit`}>
-          <small>{leg.selection}</small><b>Profit {money(leg.profit)}</b></span>)}
+          <small>Nếu {selectionLabel(item.event, leg.selection)} thắng</small><b>Lãi/lỗ {money(leg.profit)}</b></span>)}
           <b>Worst {money(plan.worstCaseProfit)} · ROI {(Number(plan.roi) * 100).toFixed(2)}%</b></div>}</td></tr>;
     })}
   </tbody></table></div>;
@@ -77,11 +96,11 @@ function SignalCard({ signal, strongest = false }: { readonly signal: LagSignal;
         <span>Worst profit {money(signal.plan.worstCaseProfit)}</span><small>Immediate move {signal.movementMagnitude} · Quote age {signal.quoteAgeMs} ms</small></div></header>
     <div className="lag-signal__movement">{signal.movements.map((movement) => <span
       aria-label={`Movement #${movement.provider} ${movement.selection} ${movement.previousDecimal} to ${movement.currentDecimal}`}
-      key={`${movement.provider}-${movement.selection}`}><b>#{movement.provider} · {movement.selection}</b>
+      key={`${movement.provider}-${movement.selection}`}><b>#{movement.provider} · {selectionLabel(signal.event.event, movement.selection)}</b>
       {movement.previousDecimal} → {movement.currentDecimal}</span>)}</div>
     <div className="lag-signal__legs">{signal.plan.legs.map((leg) => <div
       aria-label={`Leg #${leg.provider} ${leg.selection} at ${leg.decimalOdds}`} key={`${leg.provider}-${leg.selection}`}>
-      <small>{leg.role}</small><b>#{leg.provider} · {leg.selection} @ {leg.decimalOdds}</b>
+      <small>{leg.role}</small><b>#{leg.provider} · {selectionLabel(signal.event.event, leg.selection)} @ {leg.decimalOdds}</b>
       <strong>Stake {money(leg.stake)}</strong><span>Profit if wins {money(leg.profit)}</span></div>)}</div>
     <footer><b>Total stake {money(signal.plan.totalStake)}</b><span>Both prices OPEN · exact two-outcome match</span>
       <strong>READ-ONLY</strong></footer>

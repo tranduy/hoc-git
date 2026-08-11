@@ -1,7 +1,8 @@
 import type { ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import { describe, expect, it } from "vitest";
 import type { ComparisonCell, ComparisonRow } from "../catalog/comparison.js";
-import { buildFixedBaseStakePlan, type FixedBaseStakePolicy } from "./fixed-base-stake.js";
+import { buildFixedBaseStakePlan, buildObservedFixedBaseStakeEstimate,
+  type FixedBaseStakePolicy } from "./fixed-base-stake.js";
 
 const selected = new Set<ProviderId>(["SABA", "SBOBET"]);
 const policy: FixedBaseStakePolicy = {
@@ -52,6 +53,22 @@ describe("fixed-base two-way stake planning", () => {
       cell("SABA", "FT_1X2", { HOME: "4", DRAW: "4", AWAY: "2" }),
       cell("SBOBET", "FT_1X2", { HOME: "3", DRAW: "3", AWAY: "4" })
     ]), selected, policy)).toBeNull();
+  });
+
+  it("shows a balanced observational estimate even when the current cross-book prices lose money", () => {
+    const candidate = row("FT_TOTAL", [
+      cell("SABA", "FT_TOTAL", { OVER: "1.8", UNDER: "1.7" }),
+      cell("SBOBET", "FT_TOTAL", { OVER: "1.75", UNDER: "1.982" })
+    ]);
+
+    expect(buildFixedBaseStakePlan(candidate, selected, policy)).toBeNull();
+    expect(buildObservedFixedBaseStakeEstimate(candidate, selected, policy)).toMatchObject({
+      legs: [
+        { provider: "SABA", selection: "OVER", stake: "100000" },
+        { provider: "SBOBET", selection: "UNDER", stake: "91000" }
+      ],
+      totalStake: "191000", worstCaseProfit: "-11000"
+    });
   });
 
   it.each([

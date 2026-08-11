@@ -225,11 +225,11 @@ describe("MatchWatchDetail", () => {
     render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read }} comparisonCatalogs={[saba, sbobet]}
       comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined} providerEventId="SABA-total-event" />);
 
-    expect(screen.getByText(/HOME 2.2/u)).toBeTruthy();
+    expect(screen.getAllByText(/Alpha.*2\.2/u).length).toBeGreaterThan(0);
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
 
     expect(read).toHaveBeenCalledTimes(2);
-    expect(screen.getByText(/HOME 2.45/u)).toBeTruthy();
+    expect(screen.getAllByText(/Alpha.*2\.45/u).length).toBeGreaterThan(0);
     expect(screen.getAllByText("#SBOBET · ODDS CHANGED").length).toBeGreaterThan(0);
   });
 });

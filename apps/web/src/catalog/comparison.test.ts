@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
-  isVisibleEvent } from "./comparison.js";
+  isVisibleEvent, selectionLabel } from "./comparison.js";
 
 const event = (provider: "SABA" | "SBOBET", id: string): ProviderEvent => ({
   provider, category: "FOOTBALL", providerEventId: id, competition: "Eliteserien",
@@ -108,10 +108,12 @@ describe("catalog comparison", () => {
     expect(result[0]?.providers).toEqual(["SABA", "IM"]);
     const imCell = result[0]?.observedRows[0]?.cells.find((cell) => cell.provider === "IM");
     expect(imCell?.quotes.map((quote) => [quote.selection, quote.rawOdds])).toEqual([
-      ["TEAM_B", "1.70"], ["TEAM_A", "2.10"]
+      ["TEAM_A", "2.10"], ["TEAM_B", "1.70"]
     ]);
     expect(result[0]?.rows).toEqual([]);
     expect(result[0]?.bestMargin).toBeNull();
+    expect(selectionLabel(result[0]!.event, "TEAM_A")).toBe("Nongshim Esports Academy");
+    expect(selectionLabel(result[0]!.event, "TEAM_B")).toBe("Dplus KIA Challengers");
   });
 
   it("does not reverse-match football because HOME/AWAY handicap orientation is not proven safe", () => {

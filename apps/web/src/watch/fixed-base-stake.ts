@@ -31,6 +31,8 @@ export interface FixedBaseStakePlan {
   readonly roi: string;
 }
 
+type StakeComparableRow = Pick<ComparisonRow, "key" | "marketType" | "cells">;
+
 function plain(value: Decimal): string {
   return value.toFixed(value.decimalPlaces());
 }
@@ -63,8 +65,8 @@ function policyDecimal(value: string): Decimal | null {
   }
 }
 
-export function buildFixedBaseStakePlan(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId>,
-  policy: FixedBaseStakePolicy): FixedBaseStakePlan | null {
+function buildPlan(row: StakeComparableRow, selectedProviders: ReadonlySet<ProviderId>,
+  policy: FixedBaseStakePolicy, requireProfit: boolean): FixedBaseStakePlan | null {
   if (row.marketType === "FT_1X2") return null;
   const selections = [...new Set(row.cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)))].sort();
   if (selections.length !== 2) return null;
@@ -109,7 +111,7 @@ export function buildFixedBaseStakePlan(row: ComparisonRow, selectedProviders: R
     const highPayout = hedgeStake.times(high.odds);
     const lowProfit = lowPayout.minus(totalStake);
     const highProfit = highPayout.minus(totalStake);
-    if (!lowProfit.gt(0) || !highProfit.gt(0)) return [];
+    if (requireProfit && (!lowProfit.gt(0) || !highProfit.gt(0))) return [];
     return [{ hedgeStake, totalStake, lowPayout, highPayout, lowProfit, highProfit,
       worstCaseProfit: Decimal.min(lowProfit, highProfit) }];
   }).sort((left, right) => right.worstCaseProfit.comparedTo(left.worstCaseProfit) ||
@@ -130,4 +132,14 @@ export function buildFixedBaseStakePlan(row: ComparisonRow, selectedProviders: R
     profitsBySelection: { [low.selection]: plain(plan.lowProfit), [high.selection]: plain(plan.highProfit) },
     worstCaseProfit: plain(plan.worstCaseProfit), roi: plain(plan.worstCaseProfit.div(plan.totalStake))
   };
+}
+
+export function buildFixedBaseStakePlan(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId>,
+  policy: FixedBaseStakePolicy): FixedBaseStakePlan | null {
+  return buildPlan(row, selectedProviders, policy, true);
+}
+
+export function buildObservedFixedBaseStakeEstimate(row: StakeComparableRow, selectedProviders: ReadonlySet<ProviderId>,
+  policy: FixedBaseStakePolicy): FixedBaseStakePlan | null {
+  return buildPlan(row, selectedProviders, policy, false);
 }

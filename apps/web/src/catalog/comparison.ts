@@ -90,7 +90,7 @@ function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrient
     if (quote.selection === "TEAM_A") return { ...quote, selection: "TEAM_B" };
     if (quote.selection === "TEAM_B") return { ...quote, selection: "TEAM_A" };
     return quote;
-  });
+  }).sort((left, right) => left.selection.localeCompare(right.selection));
 }
 
 function marketKey(market: ProviderMarket): string {
@@ -149,6 +149,37 @@ export function decimalOdds(quote: ProviderQuote): number | null {
   return null;
 }
 
+export function selectionLabel(event: ProviderEvent, selection: string): string {
+  if (selection === "TEAM_A" || selection === "HOME") return event.participantA;
+  if (selection === "TEAM_B" || selection === "AWAY") return event.participantB;
+  if (selection === "OVER") return "Tài";
+  if (selection === "UNDER") return "Xỉu";
+  return selection;
+}
+
+export function observedTicketAsComparisonRow(ticket: ObservedTicketRow): ComparisonRow {
+  const bestBySelection: Record<string, ProviderId> = {};
+  for (const selection of ticket.outcomeDomain) {
+    const best = ticket.cells.flatMap((cell) => cell.quotes.filter((quote) => quote.selection === selection &&
+      quote.status === "OPEN" && cell.market.status === "OPEN").flatMap((quote) => {
+      const odds = decimalOdds(quote);
+      return odds === null ? [] : [{ provider: cell.provider, odds }];
+    })).sort((left, right) => right.odds - left.odds || left.provider.localeCompare(right.provider))[0];
+    if (best !== undefined) bestBySelection[selection] = best.provider;
+  }
+  const bestOdds = ticket.outcomeDomain.map((selection) => {
+    const provider = bestBySelection[selection];
+    const quote = ticket.cells.find((cell) => cell.provider === provider)?.quotes.find((item) => item.selection === selection);
+    return quote === undefined ? null : decimalOdds(quote);
+  });
+  const inverseSum = bestOdds.length === 2 && bestOdds.every((value): value is number => value !== null)
+    ? bestOdds.reduce((sum, value) => sum + 1 / value, 0) : null;
+  const crossBook = new Set(Object.values(bestBySelection)).size >= 2;
+  return { key: ticket.key, marketType: ticket.marketType, scope: ticket.scope, line: ticket.line,
+    cells: ticket.cells, bestBySelection, crossBook,
+    margin: crossBook && inverseSum !== null ? (1 / inverseSum) - 1 : null };
+}
+
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]): readonly ComparisonEvent[] {
   const groups: Array<{ key: string; event: ProviderEvent; catalogs: LiveCatalogResponse[];
     ids: Partial<Record<ProviderId, string>>; orientations: Partial<Record<ProviderId, EventOrientation>> }> = [];
@@ -193,29 +224,11 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
         outcomeDomain, cells } satisfies ObservedTicketRow];
     }).sort((left, right) => left.key.localeCompare(right.key));
     const rows = [...rowGroups.entries()].map(([rowKey, rawCells]) => [rowKey, eligibleTwoWayCells(rawCells)] as const)
-      .filter(([, cells]) => cells.length >= 2).map(([rowKey, cells]): ComparisonRow => {
-      const bestBySelection: Record<string, ProviderId> = {};
-      const selections = new Set(cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)));
-      for (const selection of selections) {
-        const eligible = cells.flatMap((cell) => cell.quotes.filter((quote) => quote.selection === selection &&
-          quote.status === "OPEN" && cell.market.status === "OPEN").map((quote) => ({ provider: cell.provider, odds: decimalOdds(quote) })));
-        const best = eligible.filter((item): item is { provider: ProviderId; odds: number } => item.odds !== null)
-          .sort((left, right) => right.odds - left.odds)[0];
-        if (best !== undefined) bestBySelection[selection] = best.provider;
-      }
-      const selectedProviders = new Set(Object.values(bestBySelection));
-      const bestOdds = [...selections].map((selection) => {
-        const provider = bestBySelection[selection];
-        const quote = cells.find((cell) => cell.provider === provider)?.quotes.find((item) => item.selection === selection);
-        return quote === undefined ? null : decimalOdds(quote);
-      });
-      const inverseSum = bestOdds.length === 2 && bestOdds.every((value): value is number => value !== null)
-        ? bestOdds.reduce((sum, value) => sum + 1 / value, 0) : null;
-      const crossBook = selectedProviders.size >= 2;
-      const margin = crossBook && inverseSum !== null ? (1 / inverseSum) - 1 : null;
-      return { key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
-        line: cells[0]!.market.line, cells, bestBySelection, margin, crossBook };
-    }).sort((left, right) => (right.margin ?? Number.NEGATIVE_INFINITY) - (left.margin ?? Number.NEGATIVE_INFINITY) || left.key.localeCompare(right.key));
+      .filter(([, cells]) => cells.length >= 2).map(([rowKey, cells]): ComparisonRow => observedTicketAsComparisonRow({
+        key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
+        line: cells[0]!.market.line, settlementProfile: cells[0]!.market.settlementProfile,
+        outcomeDomain: [...new Set(cells[0]!.quotes.map((quote) => quote.selection))].sort(), cells
+      })).sort((left, right) => (right.margin ?? Number.NEGATIVE_INFINITY) - (left.margin ?? Number.NEGATIVE_INFINITY) || left.key.localeCompare(right.key));
     const bestMargin = rows.reduce<number | null>((best, row) => row.margin === null ? best : Math.max(best ?? row.margin, row.margin), null);
     return { key, event: group.event, providers: group.catalogs.map((catalog) => catalog.provider),
       catalogs: group.catalogs, providerEventIds: group.ids, observedRows, rows, bestMargin };

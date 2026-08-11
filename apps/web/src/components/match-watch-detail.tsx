@@ -10,14 +10,18 @@ import {
 import { clearWatchEntries, loadWatchEntries, saveWatchEntries } from "../watch/watch-storage.js";
 import {
   buildComparisonEvents,
+  decimalOdds,
   estimatedLiveStartAtMs,
   formatCountdown,
   formatMatchClock,
+  observedTicketAsComparisonRow,
+  selectionLabel,
   type ComparisonEvent
 } from "../catalog/comparison.js";
 import type { ProviderId } from "@tool-chenh/contracts";
 import { ArbitrageAlertToast } from "./arbitrage-alert-toast.js";
-import { buildFixedBaseStakePlan, type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
+import { buildFixedBaseStakePlan, buildObservedFixedBaseStakeEstimate,
+  type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
@@ -267,8 +271,10 @@ export function MatchWatchDetail({
           {currentComparison !== undefined && effectiveBooks.some((book) => book.connected && selectedProviders.has(book.provider)) ? <div className="table-wrap comparison-table"><table>
             <thead><tr><th>Loại vé / kèo</th>{effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => <th key={book.provider}>{book.provider}<small>{book.hasExactEvent ? "đúng trận" : "không tìm thấy trận"}</small></th>)}<th>Cân tiền / lợi nhuận</th></tr></thead>
             <tbody>{currentComparison.observedRows.map((observedRow) => {
-              const row = currentComparison.rows.find((candidate) => candidate.key === observedRow.key);
-              const plan = row === undefined ? null : buildFixedBaseStakePlan(row, selectedProviders, stakePolicy);
+              const verifiedRow = currentComparison.rows.find((candidate) => candidate.key === observedRow.key);
+              const displayRow = verifiedRow ?? observedTicketAsComparisonRow(observedRow);
+              const verifiedPlan = verifiedRow === undefined ? null : buildFixedBaseStakePlan(verifiedRow, selectedProviders, stakePolicy);
+              const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy);
               const signal = lagSignals.find((candidate) => candidate.row.key === observedRow.key);
               const money = (value: string): string => `${Number(value).toLocaleString("en-US")} VND`;
               return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
@@ -278,11 +284,14 @@ export function MatchWatchDetail({
               {effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => {
                 const cell = observedRow.cells.find((candidate) => candidate.provider === book.provider);
                 return <td key={book.provider}>{cell === undefined ? <span className="rate-missing">{book.hasExactEvent ? "Market unavailable" : "No exact event match"}</span> : <div className="rate-cell">{cell.quotes.map((quote) => <span
-                  className={row?.bestBySelection[quote.selection] === book.provider ? "rate-quote rate-quote--best" : "rate-quote"}
-                  key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds} {quote.rawFormat} · {quote.status}</span>)}</div>}</td>;
+                  className={displayRow.bestBySelection[quote.selection] === book.provider ? "rate-quote rate-quote--best" : "rate-quote"}
+                  key={quote.providerSelectionId}>{selectionLabel(currentComparison.event, quote.selection)} · {quote.rawOdds} {quote.rawFormat}
+                    {decimalOdds(quote) === null ? "" : ` · decimal ${decimalOdds(quote)!.toFixed(3)}`} · {quote.status}</span>)}</div>}</td>;
               })}<td aria-label={`Gross preflight ${observedRow.marketType}${observedRow.line === null ? "" : ` line ${observedRow.line}`}`}>
-                {plan === null ? <span className="rate-missing">No profitable two-book balance</span> : <div className="balanced-plan">
-                  <strong>{signal === undefined ? "GIÁ HIỆN TẠI" : "SẴN SÀNG (READ-ONLY)"}</strong>{plan.legs.map((leg) => <span key={leg.selection}><small>#{leg.provider} · {leg.selection} @ {leg.decimalOdds}</small>
+                <div className="rate-gap-summary"><b>Biên cân hiện tại: {displayRow.margin === null ? "không có cặp chéo" : `${(displayRow.margin * 100).toFixed(2)}%`}</b></div>
+                {plan === null ? <span className="rate-missing">Chưa đủ hai giá đối nghịch từ hai sàn để tính tiền</span> : <div className={verifiedPlan === null ? "balanced-plan balanced-plan--estimate" : "balanced-plan"}>
+                  <strong>{verifiedPlan === null ? "ƯỚC TÍNH QUAN SÁT · SETTLEMENT CHƯA XÁC MINH" :
+                    signal === undefined ? "GIÁ HIỆN TẠI" : "SẴN SÀNG (READ-ONLY)"}</strong>{plan.legs.map((leg) => <span key={leg.selection}><small>#{leg.provider} · {selectionLabel(currentComparison.event, leg.selection)} @ {leg.decimalOdds}</small>
                     <b>{money(leg.stake)} {leg.role.toLowerCase()}</b><b>Profit {money(leg.profit)}</b></span>)}
                   <span>Total {money(plan.totalStake)}</span><b>Worst {money(plan.worstCaseProfit)} · ROI {(Number(plan.roi) * 100).toFixed(2)}%</b>
                 </div>}</td></tr>;
