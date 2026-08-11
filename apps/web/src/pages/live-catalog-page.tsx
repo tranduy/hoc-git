@@ -212,29 +212,36 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const movementTracker = useRef(new PriceMovementTracker());
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
   const refreshInFlight = useRef(false);
+  const retryAfterMs = useRef(new Map<string, number>());
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event") });
   const autoLoaded = useRef(false);
   const categoryAccounts = useMemo(() => accounts.filter((account) =>
-    account.category === null || account.category === category), [accounts, category]);
+    account.category === category), [accounts, category]);
   const categorySelectedIds = useMemo(() => categoryAccounts.filter((account) => selectedIds.has(account.id))
     .map((account) => account.id), [categoryAccounts, selectedIds]);
 
   const loadIds = useCallback(async (
     ids: readonly string[], foreground: boolean, expectedCategory: CatalogCategory
   ): Promise<void> => {
-    if (ids.length === 0 || refreshInFlight.current) return;
+    const requestedIds = foreground ? ids : ids.filter((id) => (retryAfterMs.current.get(id) ?? 0) <= Date.now());
+    if (requestedIds.length === 0 || refreshInFlight.current) return;
     refreshInFlight.current = true;
     if (foreground) setBusy(true);
     try {
-      const results = await Promise.allSettled(ids.map(async (id) => catalogApi.read(id)));
+      const results = await Promise.allSettled(requestedIds.map(async (id) => catalogApi.read(id)));
       const accepted = results.flatMap((result) => result.status === "fulfilled" &&
         result.value.category === expectedCategory ? [result.value] : []);
-      const failedIds = new Set(ids.filter((_id, index) => {
+      const failedIds = new Set(requestedIds.filter((_id, index) => {
         const result = results[index];
         return result?.status !== "fulfilled" || result.value.category !== expectedCategory;
       }));
-      const preserved = catalogsRef.current.filter((catalog) => failedIds.has(catalog.accountId) &&
+      for (const id of requestedIds) {
+        if (failedIds.has(id)) retryAfterMs.current.set(id, Date.now() + 30_000);
+        else retryAfterMs.current.delete(id);
+      }
+      const preserved = catalogsRef.current.filter((catalog) =>
+        (!requestedIds.includes(catalog.accountId) || failedIds.has(catalog.accountId)) &&
         !accepted.some((candidate) => candidate.accountId === catalog.accountId));
       const nextCatalogs = [...accepted, ...preserved];
       catalogsRef.current = nextCatalogs;
@@ -264,13 +271,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const catalogAccounts = items.filter((account) => account.capabilities.includes("CATALOG"));
       const availableCandidates = catalogAccounts.filter((account) => account.sessionState === "ACTIVE");
       const targetCategory = fixedCategory ?? category;
-      const available = availableCandidates.filter((account) => account.category !== null ||
-        !availableCandidates.some((candidate) => candidate.provider === account.provider && candidate.category === targetCategory));
-      const requestedAccount = available.find((account) => account.id === requested.current.account);
+      const available = availableCandidates.filter((account) => account.category !== null);
+      const requestedAccount = available.find((account) => account.id === requested.current.account &&
+        account.category === targetCategory);
       let initialCategory: CatalogCategory = fixedCategory ?? (requestedAccount?.category === "LOL" ? "LOL" : category);
-      const hasInitialCategory = available.some((account) => account.category === null || account.category === initialCategory);
+      const hasInitialCategory = available.some((account) => account.category === initialCategory);
       if (!hasInitialCategory && available.some((account) => account.category === "LOL")) initialCategory = "LOL";
-      const initial = new Set(available.filter((account) => account.category === null || account.category === initialCategory)
+      const initial = new Set(available.filter((account) => account.category === initialCategory)
         .map((account) => account.id));
       const cached = loadCatalogCache(window.localStorage).filter((catalog) => initial.has(catalog.accountId));
       catalogsRef.current = cached;
@@ -298,7 +305,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   const events = useMemo(() => buildComparisonEvents(catalogs).filter((item) => item.event.category === category), [catalogs, category]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)), [events, nowMs]);
-  const displayEvents = useMemo(() => visibleEvents.filter((item) => new Set(item.providers).size >= 2).sort((left, right) => {
+  const displayEvents = useMemo(() => visibleEvents.filter((item) => item.observedRows.length > 0).sort((left, right) => {
     const leftSignalRank = signals.findIndex((signal) => signal.event.key === left.key);
     const rightSignalRank = signals.findIndex((signal) => signal.event.key === right.key);
     if (leftSignalRank >= 0 || rightSignalRank >= 0) {
@@ -319,6 +326,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     return left.event.startAtUtcMs - right.event.startAtUtcMs;
   }), [movements, signals, visibleEvents]);
   const hiddenNonComparableCount = visibleEvents.length - displayEvents.length;
+  const crossBookEventCount = displayEvents.filter((item) => item.observedRows.some((row) =>
+    new Set(row.cells.map((cell) => cell.provider)).size >= 2)).length;
   useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
     const match = events.find((item) => Object.values(item.providerEventIds).includes(requested.current.event!));
@@ -330,7 +339,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   if (selectedEvent !== undefined) {
     const primary = selectedEvent.catalogs[0]!;
     const detailBooks: readonly ComparisonBook[] = comparisonProviders.map((provider) => {
-      const providerAccounts = accounts.filter((account) => account.provider === provider);
+      const providerAccounts = accounts.filter((account) => account.provider === provider && account.category === category);
       return { provider, connected: providerAccounts.length > 0,
         selected: providerAccounts.some((account) => selectedIds.has(account.id)),
         hasExactEvent: selectedEvent.providers.includes(provider) };
@@ -351,7 +360,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     setSignals([]); setMovements([]); setMessage(null); setSelectedKey(null);
     signalTracker.current = new LagSignalTracker();
     movementTracker.current = new PriceMovementTracker();
-    const nextIds = accounts.filter((account) => account.category === null || account.category === next)
+    const nextIds = accounts.filter((account) => account.category === next)
       .map((account) => account.id).filter((id) => selectedIds.has(id));
     if (nextIds.length > 0) void loadIds(nextIds, true, next);
   };
@@ -385,8 +394,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     {catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
       <span>{catalogs.length - staleAccountIds.size} fresh provider(s)</span>
       {staleAccountIds.size > 0 && <span>{staleAccountIds.size} stale snapshot{staleAccountIds.size === 1 ? "" : "s"} retained</span>}
-      <span>{displayEvents.length} cross-book match(es)</span>
-      <span>{hiddenNonComparableCount} event{hiddenNonComparableCount === 1 ? "" : "s"} without an exact two-book ticket hidden · review mappings</span></div>}
+      <span>{displayEvents.length} match(es) with supported two-way tickets</span>
+      <span>{crossBookEventCount} exact cross-book match(es)</span>
+      <span>{hiddenNonComparableCount} event{hiddenNonComparableCount === 1 ? "" : "s"} without a supported two-way ticket hidden · review mappings</span></div>}
     {catalogs.length > 0 && <LagSignalPanel signals={signals} />}
     {catalogs.length > 0 && <PriceMovementPanel movements={movements} />}
     <LagSignalToast signal={signals[0] ?? null} />

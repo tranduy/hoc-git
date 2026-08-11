@@ -226,13 +226,14 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
 
-  it("hides single-book matches from the cross-book monitor", async () => {
+  it("shows single-book tickets for observation without presenting an arbitrage", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
-    expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
-    expect(screen.getByText(/1 event without an exact two-book ticket hidden/u)).toBeTruthy();
+    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("1 match(es) with supported two-way tickets")).toBeTruthy();
+    expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
+    expect(screen.getByText(/Chưa đủ hai giá đối nghịch từ hai sàn/u)).toBeTruthy();
   });
 
   it("shows a mapped two-provider event even when no exact handicap line is shared", async () => {
@@ -252,18 +253,18 @@ describe("LiveCatalogPage", () => {
         providerCatalog(sbobetAccount, "-1.5") }} />);
 
     expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("1 cross-book match(es)")).toBeTruthy();
-    expect(screen.getByText("Chưa có vé chấp 0.5 phù hợp")).toBeTruthy();
+    expect(screen.getByText("1 match(es) with supported two-way tickets")).toBeTruthy();
+    expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
     expect(screen.getByRole("button", { name: "View & watch Alpha vs Beta" })).toBeTruthy();
   });
 
-  it("does not expose a single CMD price row as a comparison", async () => {
+  it("exposes a single-provider price row as observation but never as an arbitrage", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "Load live catalog" }));
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
-    expect(screen.getByText("0 cross-book match(es)")).toBeTruthy();
+    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
     expect(screen.queryByRole("button", { name: /^(bet|wager|place bet)$/iu })).toBeNull();
   });
@@ -323,7 +324,7 @@ describe("LiveCatalogPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Football" }));
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
     expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -355,8 +356,8 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async () => lolCatalog }} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "LoL" }));
-    expect(await screen.findByText(/1 event without an exact two-book ticket hidden/u)).toBeTruthy();
-    expect(screen.queryByText("G2 vs TH")).toBeNull();
+    expect(await screen.findByText("G2 vs TH")).toBeTruthy();
+    expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
   });
 
   it("restores LoL after a page reload and does not filter valid LoL catalogs as Football", async () => {
@@ -387,7 +388,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [lolAccount] }} catalogApi={{ read }} />);
 
     expect((await screen.findByRole("button", { name: "LoL" })).getAttribute("aria-pressed")).toBe("true");
-    expect(await screen.findByText(/1 event without an exact two-book ticket hidden/u)).toBeTruthy();
+    expect(await screen.findByText("G2 vs TH")).toBeTruthy();
     expect(read).toHaveBeenCalledWith(lolAccount.id);
   });
 
@@ -426,5 +427,21 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByText("Nguồn đã chọn đang lỗi hoặc trả sai category — chưa thể kết luận là không có trận.")).toBeTruthy();
     expect(screen.queryByText(/hiện không có trận trong catalog/u)).toBeNull();
+  });
+
+  it("never loads a legacy account without a category into the fixed LoL screen", async () => {
+    const legacyFootball: AccountStatus = { ...account, id: "legacy-saba", alias: "SABA Football live current",
+      provider: "SABA", category: null };
+    const lolAccount: AccountStatus = { ...account, id: "im-lol", alias: "IM LoL live", provider: "IM", category: "LOL" };
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => ({ ...catalog, accountId: id,
+      provider: "IM", category: "LOL", events: [], markets: [], quotes: [] }));
+
+    render(<LiveCatalogPage fixedCategory="LOL"
+      accountApi={{ ...accountApi, list: async () => [legacyFootball, lolAccount] }} catalogApi={{ read }} />);
+
+    expect(await screen.findByText("IM LoL live")).toBeTruthy();
+    expect(screen.queryByText("SABA Football live current")).toBeNull();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledWith(lolAccount.id);
   });
 });

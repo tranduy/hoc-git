@@ -72,10 +72,11 @@ const lolCatalog = (provider: "SABA" | "IM", id: string, participantA: string, p
 };
 
 describe("catalog comparison", () => {
-  it("hides an exact ticket until a second provider exposes the same semantic market", () => {
+  it("shows a single-provider ticket for observation but keeps it out of verified comparison rows", () => {
     const result = buildComparisonEvents([handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"])]);
 
-    expect(result[0]?.observedRows).toEqual([]);
+    expect(result[0]?.observedRows).toHaveLength(1);
+    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA"]);
     expect(result[0]?.rows).toEqual([]);
   });
 
@@ -175,15 +176,16 @@ describe("catalog comparison", () => {
 
     const result = buildComparisonEvents([ambiguous, sbobet]);
 
-    expect(result[0]?.observedRows).toEqual([]);
+    expect(result[0]?.observedRows).toHaveLength(1);
+    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SBOBET"]);
     expect(result[0]?.rows).toEqual([]);
   });
 
-  it("shows only live events and pre-match events in the next two hours", () => {
+  it("shows live events and pre-match events in the next 24 hours", () => {
     const now = 1_000_000;
     expect(isVisibleEvent({ ...event("SABA", "live"), isLive: true, startAtUtcMs: 1 }, now)).toBe(true);
-    expect(isVisibleEvent({ ...event("SABA", "soon"), startAtUtcMs: now + 7_200_000 }, now)).toBe(true);
-    expect(isVisibleEvent({ ...event("SABA", "later"), startAtUtcMs: now + 7_200_001 }, now)).toBe(false);
+    expect(isVisibleEvent({ ...event("SABA", "soon"), startAtUtcMs: now + 86_400_000 }, now)).toBe(true);
+    expect(isVisibleEvent({ ...event("SABA", "later"), startAtUtcMs: now + 86_400_001 }, now)).toBe(false);
     expect(isVisibleEvent({ ...event("SABA", "old"), startAtUtcMs: now - 1 }, now)).toBe(false);
   });
 

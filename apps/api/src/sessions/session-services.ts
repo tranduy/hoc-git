@@ -55,6 +55,16 @@ export interface ManagedSessionServices extends SessionServices {
   close(): Promise<void>;
 }
 
+function isSafeCapturedLaunch(value: string, expectedHost?: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.username === "" && url.password === "" &&
+      (expectedHost === undefined || url.hostname === expectedHost);
+  } catch {
+    return false;
+  }
+}
+
 export function createSessionServices(options: CreateSessionServicesOptions): ManagedSessionServices {
   if (options.localAppData.trim().length === 0) throw new Error("LOCAL_APP_DATA_REQUIRED");
   const clock = options.clock ?? { nowMs: Date.now };
@@ -85,7 +95,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     profilesRoot: join(profilesRoot, "providers-sbobet"), headless: true
   });
   const imEsportsBrowser = new PlaywrightImEsportsBrowserManager({
-    profilesRoot: join(profilesRoot, "providers-im-esports"), headless: true
+    profilesRoot: join(profilesRoot, "providers-im-esports"), headless: true, startupTimeoutMs: 8_000
   });
   const automation = options.automation ?? new PlaywrightFabetAutomation({
     profilePath: join(profilesRoot, "fabet"),
@@ -104,10 +114,10 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     vault,
     validators: new SessionValidatorRegistry(options.validators ?? [
       new CmdSessionValidator(cmdBrowser),
-      new SabaSessionValidator({ verifyLaunch: async (launchUrl) =>
-        await sabaBrowser.verifyLaunch(launchUrl) || await sabaEsportsBrowser.verifyLaunch(launchUrl) }),
-      new SbobetSessionValidator(sbobetBrowser),
-      new ImSessionValidator(imEsportsBrowser)
+      new SabaSessionValidator({ verifyLaunch: async (launchUrl) => isSafeCapturedLaunch(launchUrl) }),
+      new SbobetSessionValidator({ verifyLaunch: async (launchUrl) => isSafeCapturedLaunch(launchUrl) }),
+      new ImSessionValidator({ verifyLaunch: async (launchUrl) =>
+        isSafeCapturedLaunch(launchUrl, "imesports.techplay.com") })
     ]),
     clock,
     idFactory,

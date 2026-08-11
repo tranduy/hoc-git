@@ -174,6 +174,24 @@ function eligibleTwoWayCells(cells: readonly ComparisonCell[], requireSameSettle
     .sort((left, right) => right.length - left.length)[0] ?? [];
 }
 
+function displayTwoWayCells(cells: readonly ComparisonCell[]): readonly ComparisonCell[] {
+  const accepted: ComparisonCell[] = [];
+  let outcomeDomain: string | null = null;
+  const byProvider = new Map<ProviderId, ComparisonCell[]>();
+  for (const cell of cells.filter(isFocusedTwoWayTicket)) {
+    byProvider.set(cell.provider, [...(byProvider.get(cell.provider) ?? []), cell]);
+  }
+  for (const candidates of byProvider.values()) {
+    if (candidates.length !== 1) continue;
+    const cell = candidates[0]!;
+    const selections = [...new Set(cell.quotes.map((quote) => quote.selection))].sort().join("|");
+    if (outcomeDomain !== null && selections !== outcomeDomain) continue;
+    outcomeDomain ??= selections;
+    accepted.push(cell);
+  }
+  return accepted;
+}
+
 function isHalfGoalLine(line: string | null): boolean {
   if (line === null) return false;
   const value = Math.abs(Number(line));
@@ -191,7 +209,7 @@ export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
     cell.market.scope === "SERIES" && cell.market.line === null && domain.length === 2;
 }
 
-export function isVisibleEvent(event: ProviderEvent, nowMs: number, horizonMs = 7_200_000): boolean {
+export function isVisibleEvent(event: ProviderEvent, nowMs: number, horizonMs = 86_400_000): boolean {
   return event.isLive || (event.startAtUtcMs >= nowMs && event.startAtUtcMs <= nowMs + horizonMs);
 }
 
@@ -275,8 +293,8 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
       }
     }
     const observedRows = [...rowGroups.entries()].flatMap(([rowKey, rawCells]) => {
-      const cells = eligibleTwoWayCells(rawCells.filter(isFocusedTwoWayTicket), false);
-      if (new Set(cells.map((cell) => cell.provider)).size < 2) return [];
+      const cells = displayTwoWayCells(rawCells);
+      if (cells.length === 0) return [];
       const outcomeDomain = [...new Set(cells[0]!.quotes.map((quote) => quote.selection))].sort();
       return [{ key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
         line: cells[0]!.market.line, settlementProfile: cells[0]!.market.settlementProfile,

@@ -46,13 +46,13 @@ export class PlaywrightImEsportsBrowserManager {
   }
 
   async readCatalog(input: { readonly sessionId: string; readonly launchUrl: string }): Promise<readonly ImEsportsMarketRecord[]> {
-    let session = await this.#get(input);
-    try { return await this.#waitForCatalog(session); }
-    catch {
+    const session = await this.#get(input);
+    try {
+      return await this.#waitForCatalog(session);
+    } catch {
       await session.context.close().catch(() => undefined);
       this.#sessions.delete(input.sessionId);
-      session = await this.#get(input);
-      return this.#waitForCatalog(session);
+      throw new Error("IM_ESPORTS_CATALOG_UNAVAILABLE");
     }
   }
 
