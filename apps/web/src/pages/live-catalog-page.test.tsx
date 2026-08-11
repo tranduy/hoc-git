@@ -62,7 +62,11 @@ describe("LiveCatalogPage", () => {
     const sabaAccount = fresh("saba-account", "SABA");
     const sbobetAccount = fresh("sbobet-account", "SBOBET");
 
-    expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount, sbobetAccount], 20_000)).toEqual([candidate]);
+    expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount, sbobetAccount], 20_000)).toEqual([]);
+    expect(filterAccountBackedSignals([candidate], [saba, sbobet], [
+      { ...sabaAccount, capabilities: [...sabaAccount.capabilities, "PREFLIGHT"] },
+      { ...sbobetAccount, capabilities: [...sbobetAccount.capabilities, "PREFLIGHT"] }
+    ], 20_000)).toEqual([candidate]);
     expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount,
       { ...sbobetAccount, profileState: "UNAVAILABLE", balance: null, balanceAsOfMs: null }], 20_000)).toEqual([]);
     expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount,
@@ -73,7 +77,7 @@ describe("LiveCatalogPage", () => {
       { ...sbobetAccount, currency: "UUS" }], 20_000)).toEqual([]);
   });
 
-  it("shows the immediate best lag signal after one provider flips its two prices", async () => {
+  it("shows the immediate price movement but no executable signal without ticket preflight", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const executableProfile = { currency: "VND", balance: "1000000", balanceAsOfMs: 1_000 } as const;
     const sabaAccount: AccountStatus = { ...account, ...executableProfile,
@@ -106,15 +110,13 @@ describe("LiveCatalogPage", () => {
     expect(await screen.findByText(/Waiting for a provider price change/u)).toBeTruthy();
     await act(async () => vi.advanceTimersByTimeAsync(250));
 
-    expect(screen.getByText("Best live lag signal")).toBeTruthy();
+    expect(screen.queryByText("Best live lag signal")).toBeNull();
     expect(screen.getByText("Biến động giá gần nhất")).toBeTruthy();
     expect(screen.getByText(/MẠNH NHẤT · Alpha vs Beta/u)).toBeTruthy();
     expect(screen.getAllByText("1.7 → 2.2").length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Movement #SABA AWAY 1.7 to 2.2")).toBeTruthy();
-    expect(screen.getByLabelText("Leg #SBOBET HOME at 2.2")).toBeTruthy();
-    expect(screen.getAllByText(/Worst profit 20,000 VND/u)).toHaveLength(2);
-    expect(screen.getByText("READ-ONLY")).toBeTruthy();
-    expect(screen.getByText("PRICE GAP DETECTED")).toBeTruthy();
+    expect(screen.queryByLabelText("Leg #SBOBET HOME at 2.2")).toBeNull();
+    expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
+    expect(screen.getByText(/ƯỚC TÍNH QUAN SÁT/u)).toBeTruthy();
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
@@ -444,7 +446,7 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async () => emptyCatalog }} />);
 
     expect(await screen.findByText("Nguồn hoạt động bình thường nhưng hiện không có trận trong catalog.")).toBeTruthy();
-    expect(screen.getByText("1 nguồn giá + profile cược đã xác minh")).toBeTruthy();
+    expect(screen.getByText("1 nguồn giá + profile đã xác minh; preflight vé chưa có")).toBeTruthy();
   });
 
   it("refreshes the selected betting profile before its 30-second balance gate expires", async () => {
@@ -456,7 +458,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage fixedCategory="FOOTBALL"
       accountApi={{ ...accountApi, list: async () => [stale], refresh }} catalogApi={catalogApi} />);
 
-    expect(await screen.findByText("1 nguồn giá + profile cược đã xác minh")).toBeTruthy();
+    expect(await screen.findByText("1 nguồn giá + profile đã xác minh; preflight vé chưa có")).toBeTruthy();
     expect(refresh).toHaveBeenCalledWith(stale.id);
   });
 

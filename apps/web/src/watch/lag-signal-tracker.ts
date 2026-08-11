@@ -98,7 +98,7 @@ export class LagSignalTracker {
           }
         }
 
-        const plan = buildFixedBaseStakePlan(row, selectedProviders, policy);
+        const plan = buildFixedBaseStakePlan(row, selectedProviders, policy, observedAtMs);
         if (plan === null || new Decimal(plan.worstCaseProfit).lt(this.minimumWorstCaseProfit)) {
           this.#active.delete(signalKey);
           continue;

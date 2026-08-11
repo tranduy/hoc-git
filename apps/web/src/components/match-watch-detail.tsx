@@ -20,7 +20,7 @@ import {
 } from "../catalog/comparison.js";
 import type { ProviderId } from "@tool-chenh/contracts";
 import { ArbitrageAlertToast } from "./arbitrage-alert-toast.js";
-import { buildFixedBaseStakePlan, buildObservedFixedBaseStakeEstimate,
+import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
 
@@ -273,9 +273,9 @@ export function MatchWatchDetail({
             <tbody>{currentComparison.observedRows.map((observedRow) => {
               const verifiedRow = currentComparison.rows.find((candidate) => candidate.key === observedRow.key);
               const displayRow = verifiedRow ?? observedTicketAsComparisonRow(observedRow);
-              const verifiedPlan = verifiedRow === undefined ? null : buildFixedBaseStakePlan(verifiedRow, selectedProviders, stakePolicy);
-              const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy);
               const signal = lagSignals.find((candidate) => candidate.row.key === observedRow.key);
+              const verifiedPlan = signal?.plan ?? null;
+              const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy);
               const money = (value: string): string => `${Number(value).toLocaleString("en-US")} VND`;
               return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
               <th>Chấp toàn trận<small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>

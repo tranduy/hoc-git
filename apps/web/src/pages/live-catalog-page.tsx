@@ -7,7 +7,7 @@ import { buildComparisonEvents, decimalOdds, estimatedLiveStartAtMs, formatCount
   isVisibleEvent, observedTicketAsComparisonRow, selectionLabel, type ComparisonEvent,
   type ComparisonRow } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
-import { buildFixedBaseStakePlan, buildObservedFixedBaseStakeEstimate,
+import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
 import { PriceMovementTracker, type ObservedPriceMovement } from "../watch/price-movement-tracker.js";
@@ -77,7 +77,8 @@ export function filterAccountBackedSignals(
       const balance = account.balance === null ? null : wholeUnits(account.balance);
       const stake = wholeUnits(leg.stake);
       return account.sessionState === "ACTIVE" && account.profileState === "FRESH" &&
-        account.capabilities.includes("PROFILE") && account.currency === signal.plan.currency &&
+        account.capabilities.includes("PROFILE") && account.capabilities.includes("PREFLIGHT") &&
+        account.currency === signal.plan.currency &&
         account.balanceAsOfMs !== null && observedAtMs >= account.balanceAsOfMs &&
         observedAtMs - account.balanceAsOfMs <= executableProfileMaxAgeMs &&
         balance !== null && stake !== null && balance >= stake;
@@ -112,11 +113,15 @@ function ProviderSourceStatus({ accounts, selected }: { readonly accounts: reado
   return <section className="provider-source-status" aria-label="Trạng thái nguồn dữ liệu">{comparisonProviders.map((provider) => {
     const matches = accounts.filter((account) => account.provider === provider);
     const active = matches.filter((account) => account.sessionState === "ACTIVE" && selected.has(account.id)).length;
-    const bettingReady = matches.some((account) => account.sessionState === "ACTIVE" && selected.has(account.id) &&
+    const profileReady = matches.some((account) => account.sessionState === "ACTIVE" && selected.has(account.id) &&
       account.profileState === "FRESH" && account.capabilities.includes("PROFILE") &&
+      account.currency !== null && account.balance !== null);
+    const bettingReady = matches.some((account) => account.sessionState === "ACTIVE" && selected.has(account.id) &&
+      account.profileState === "FRESH" && account.capabilities.includes("PROFILE") && account.capabilities.includes("PREFLIGHT") &&
       account.currency !== null && account.balance !== null);
     const state = active > 0 ? bettingReady
       ? `${active} nguồn giá + profile cược đã xác minh`
+      : profileReady ? `${active} nguồn giá + profile đã xác minh; preflight vé chưa có`
       : `${active} nguồn giá; đăng nhập cược/số dư chưa xác minh`
       : matches.some((account) => account.reason === "EXPIRED") ? "Nguồn hết hạn — cần đăng nhập/lấy launch mới"
       : matches.some((account) => account.reason === "SCHEMA_CHANGED") ? "Lỗi nguồn/schema — không phải không có trận"
@@ -126,9 +131,13 @@ function ProviderSourceStatus({ accounts, selected }: { readonly accounts: reado
   })}</section>;
 }
 
-function stakePolicy(baseStake: string): FixedBaseStakePolicy {
+function observedStakePolicy(baseStake: string): FixedBaseStakePolicy {
   return { currency: "VND", baseStake, minStake: "30000", maxStake: baseStake,
     stakeStep: "1000", balance: baseStake };
+}
+
+function executableStakePolicy(baseStake: string): FixedBaseStakePolicy {
+  return { ...observedStakePolicy(baseStake), requireProviderConstraints: true, providerConstraints: {} };
 }
 
 function money(value: string): string {
@@ -156,9 +165,9 @@ function ComparisonTable({ item, baseStake, signals }: { readonly item: Comparis
     {item.observedRows.map((observedRow) => {
       const verifiedRow = item.rows.find((candidate) => candidate.key === observedRow.key);
       const displayRow = verifiedRow ?? observedTicketAsComparisonRow(observedRow);
-      const verifiedPlan = verifiedRow === undefined ? null : buildFixedBaseStakePlan(verifiedRow, selectedProviders, stakePolicy(baseStake));
-      const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy(baseStake));
       const signal = signals.find((candidate) => candidate.event.key === item.key && candidate.row.key === observedRow.key);
+      const verifiedPlan = signal?.plan ?? null;
+      const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, observedStakePolicy(baseStake));
       return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
       <th>{observedRow.marketType === "SERIES_WINNER" ? "Thắng series" : "Chấp toàn trận"}
         <small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>
@@ -327,7 +336,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const nextEvents = buildComparisonEvents(nextCatalogs);
       const providers = new Set<ProviderId>(accepted.map((catalog) => catalog.provider));
       const observedAtMs = accepted.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
-      const candidates = signalTracker.current.update(nextEvents, providers, stakePolicy(baseStakeRef.current), observedAtMs);
+      const candidates = signalTracker.current.update(nextEvents, providers, executableStakePolicy(baseStakeRef.current), observedAtMs);
       setSignals(filterAccountBackedSignals(candidates, accepted, accountsRef.current, observedAtMs));
       setMovements(movementTracker.current.update(nextEvents, observedAtMs));
       const failed = results.length - accepted.length;

@@ -78,4 +78,42 @@ describe("fixed-base two-way stake planning", () => {
   ])("rejects %s", (_name, cells) => {
     expect(buildFixedBaseStakePlan(row("FT_TOTAL", cells as readonly ComparisonCell[]), selected, policy)).toBeNull();
   });
+
+  it("uses separate provider limits, balance and stake steps", () => {
+    const strictPolicy: FixedBaseStakePolicy = { ...policy, requireProviderConstraints: true,
+      providerConstraints: {
+        SABA: { currency: "VND", minStake: "50000", maxStake: "200000", stakeStep: "5000",
+          balance: "200000", feeType: "NONE", feeRate: null, verifiedAsOfMs: 900, expiresAtMs: 1100 },
+        SBOBET: { currency: "VND", minStake: "25000", maxStake: "100000", stakeStep: "500",
+          balance: "80000", feeType: "NONE", feeRate: null, verifiedAsOfMs: 900, expiresAtMs: 1100 }
+      } };
+    const plan = buildFixedBaseStakePlan(row("FT_TOTAL", [
+      cell("SABA", "FT_TOTAL", { OVER: "1.8" }), cell("SBOBET", "FT_TOTAL", { UNDER: "2.5" })
+    ]), selected, strictPolicy, 1000);
+    expect(plan?.legs).toMatchObject([{ provider: "SABA", stake: "100000" }, { provider: "SBOBET", stake: "72000" }]);
+  });
+
+  it("fails closed when either provider constraint is missing, expired, or cannot fund its leg", () => {
+    const candidate = row("FT_TOTAL", [
+      cell("SABA", "FT_TOTAL", { OVER: "1.8" }), cell("SBOBET", "FT_TOTAL", { UNDER: "2.5" })
+    ]);
+    const saba = { currency: "VND", minStake: "50000", maxStake: "200000", stakeStep: "1000",
+      balance: "200000", feeType: "NONE" as const, feeRate: null, verifiedAsOfMs: 900, expiresAtMs: 1100 };
+    expect(buildFixedBaseStakePlan(candidate, selected,
+      { ...policy, requireProviderConstraints: true, providerConstraints: { SABA: saba } }, 1000)).toBeNull();
+    expect(buildFixedBaseStakePlan(candidate, selected, { ...policy, requireProviderConstraints: true,
+      providerConstraints: { SABA: saba, SBOBET: { ...saba, balance: "50000" } } }, 1000)).toBeNull();
+    expect(buildFixedBaseStakePlan(candidate, selected, { ...policy, requireProviderConstraints: true,
+      providerConstraints: { SABA: { ...saba, expiresAtMs: 999 }, SBOBET: saba } }, 1000)).toBeNull();
+  });
+
+  it("calculates profit after provider fees and rejects a gross-only edge", () => {
+    const constraint = { currency: "VND", minStake: "1000", maxStake: "200000", stakeStep: "1000",
+      balance: "200000", feeType: "PROFIT" as const, feeRate: "0.2", verifiedAsOfMs: 900, expiresAtMs: 1100 };
+    const candidate = row("FT_TOTAL", [
+      cell("SABA", "FT_TOTAL", { OVER: "2.02" }), cell("SBOBET", "FT_TOTAL", { UNDER: "2.02" })
+    ]);
+    expect(buildFixedBaseStakePlan(candidate, selected, { ...policy, requireProviderConstraints: true,
+      providerConstraints: { SABA: constraint, SBOBET: constraint } }, 1000)).toBeNull();
+  });
 });
