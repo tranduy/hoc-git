@@ -4,7 +4,7 @@ import type { CmdCatalogInputRecord } from "@tool-chenh/adapters";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import {
   clickSafeStructuralCategory,
-  waitForCmdIdentitySignals,
+  collectCmdIdentitySignals,
   extractCmdCatalogRecords,
   findCmdCatalogPage,
   findProviderRuntimeFrame,
@@ -185,6 +185,19 @@ export interface PlaywrightCmdBrowserManagerOptions {
   readonly startupTimeoutMs?: number;
 }
 
+export function isVerifiedCmdFootballIdentity(signals: CmdIdentitySignals): boolean {
+  return signals.runtime && signals.football && signals.cmdBundle;
+}
+
+function mergeIdentitySignals(left: CmdIdentitySignals, right: CmdIdentitySignals): CmdIdentitySignals {
+  return {
+    runtime: left.runtime || right.runtime,
+    football: left.football || right.football,
+    esports: left.esports || right.esports,
+    cmdBundle: left.cmdBundle || right.cmdBundle
+  };
+}
+
 export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCatalogRecordReader {
   readonly #profilesRoot: string;
   readonly #headless: boolean;
@@ -203,18 +216,32 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
 
   async verifyLaunch(launchUrl: string): Promise<boolean> {
     const signals = await this.inspectLaunchIdentity(launchUrl);
-    return signals.runtime && signals.football && signals.esports && signals.cmdBundle;
+    return isVerifiedCmdFootballIdentity(signals);
   }
 
   async inspectLaunchIdentity(launchUrl: string): Promise<CmdIdentitySignals> {
     const sessionId = `identity-${createHash("sha256").update(launchUrl).digest("hex").slice(0, 24)}`;
-    let session: OpenCmdSession | null = null;
+    const safeUrl = validateCmdLaunchUrl(launchUrl);
+    let context: BrowserContext | null = null;
     try {
-      session = await this.#open({ sessionId, launchUrl });
-      return await waitForCmdIdentitySignals(session.page, this.#startupTimeoutMs);
+      context = await chromium.launchPersistentContext(
+        join(this.#profilesRoot, cmdProfileDirectoryName(sessionId)),
+        { headless: this.#headless, acceptDownloads: false }
+      );
+      const launcher = context.pages()[0] ?? await context.newPage();
+      await launcher.goto(safeUrl, { waitUntil: "domcontentloaded", timeout: this.#startupTimeoutMs });
+      const deadline = Date.now() + this.#startupTimeoutMs;
+      let signals: CmdIdentitySignals = { runtime: false, football: false, esports: false, cmdBundle: false };
+      while (!isVerifiedCmdFootballIdentity(signals) && Date.now() < deadline) {
+        const samples = await Promise.all(context.pages().map(collectCmdIdentitySignals));
+        signals = samples.reduce(mergeIdentitySignals, signals);
+        if (!isVerifiedCmdFootballIdentity(signals)) {
+          await launcher.waitForTimeout(Math.min(100, Math.max(1, deadline - Date.now())));
+        }
+      }
+      return signals;
     } finally {
-      this.#sessions.delete(sessionId);
-      await session?.context.close().catch(() => undefined);
+      await context?.close().catch(() => undefined);
     }
   }
 

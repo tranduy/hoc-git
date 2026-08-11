@@ -2,10 +2,16 @@ import { chromium } from "playwright";
 import { describe, expect, it } from "vitest";
 import { cmdProfileDirectoryName, readCmdFootballCatalog, readStableFootballCatalog,
   catalogStructuralFingerprint, readWithOneSessionRecovery, runCoalesced,
-  validateCmdLaunchUrl } from "./cmd-browser-manager.js";
+  isVerifiedCmdFootballIdentity, validateCmdLaunchUrl } from "./cmd-browser-manager.js";
 import type { CmdCatalogInputRecord } from "@tool-chenh/adapters";
 
 describe("CMD browser manager safety", () => {
+  it("verifies the CMD Football runtime without requiring an unrelated eSports icon", () => {
+    expect(isVerifiedCmdFootballIdentity({ runtime: true, football: true, esports: false, cmdBundle: true })).toBe(true);
+    expect(isVerifiedCmdFootballIdentity({ runtime: true, football: true, esports: true, cmdBundle: false })).toBe(false);
+    expect(isVerifiedCmdFootballIdentity({ runtime: false, football: true, esports: true, cmdBundle: true })).toBe(false);
+  });
+
   it("invalidates a stale provider session and retries once with a fresh session", async () => {
     const stale = { id: "stale" };
     const fresh = { id: "fresh" };

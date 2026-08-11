@@ -53,11 +53,24 @@ export function launcherTextIsSafe(label: string): boolean {
 
 export function launcherLabelFromCard(name: string, thumbnailSource: string | null): string {
   const normalized = name.trim().replace(/\s+/gu, " ");
-  if (normalized.toUpperCase() !== "ESPORTS") return normalized;
   const source = (thumbnailSource ?? "").toLowerCase();
+  if (source.includes("tpsports_")) return "APSPORT";
+  if (source.includes("tsports_")) return "BTI";
+  if (normalized.toUpperCase() !== "ESPORTS") return normalized;
   if (source.includes("saba_esport")) return "SABA-SPORTS";
   if (source.includes("bti_esport")) return "BTI";
   return normalized;
+}
+
+export function safeLauncherAssetName(thumbnailSource: string | null): string | null {
+  if (thumbnailSource === null || thumbnailSource.length > 2_048) return null;
+  try {
+    const pathname = new URL(thumbnailSource, "https://lobby.invalid").pathname;
+    const basename = pathname.split("/").at(-1) ?? "";
+    return /^[a-z0-9._-]{1,128}$/iu.test(basename) ? basename : null;
+  } catch {
+    return null;
+  }
 }
 
 export function providerLaunchUrlFromResponseBody(value: unknown): string | null {
@@ -196,6 +209,12 @@ export class FabetBrowserDriver {
           capturedAtMs,
           vaultRecordId
         });
+        process.stderr.write(`Fabet launcher candidate: ${JSON.stringify({
+          category: lobby.category,
+          sourceLabel: navigation.label,
+          providerHint: providerHint(navigation.label, launch.hostname),
+          hostname: launch.hostname
+        })}\n`);
       }
     }
     this.#diagnostics = candidates;
@@ -295,6 +314,10 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         const fallbackName = await control.innerText().catch(() => "");
         const label = launcherLabelFromCard(cardName === "" ? fallbackName : cardName, thumbnailSource);
         if (!launcherTextIsSafe(label) || !(await control.isVisible().catch(() => false))) continue;
+        process.stderr.write(`Fabet lobby card: ${JSON.stringify({
+          label,
+          asset: safeLauncherAssetName(thumbnailSource)
+        })}\n`);
         const popups: Page[] = [];
         const existingPages = new Set(context.pages());
         const launchBodies: Array<Promise<string | null>> = [];

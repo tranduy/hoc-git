@@ -7,6 +7,7 @@ import {
   capturedTopLevelNavigation,
   FabetBrowserDriver,
   launcherLabelFromCard,
+  safeLauncherAssetName,
   launcherTextIsSafe,
   providerLaunchUrlFromResponseBody,
   PlaywrightFabetAutomation,
@@ -112,7 +113,7 @@ describe("FabetBrowserDriver", () => {
       }],
       "https://fabet.party/lobby-the-thao?type=esports": [{
         url: "https://esports.vendor.test/start?session=esports-secret-canary",
-        label: "T-SPORTS"
+        label: "APSPORT"
       }, {
         url: "https://sbobet.vendor.test/start?session=sbobet-secret-canary",
         label: "K-SPORTS"
@@ -133,7 +134,7 @@ describe("FabetBrowserDriver", () => {
 
     expect(launches).toEqual([
       expect.objectContaining({ category: "FOOTBALL", providerHint: "SABA", hostname: "sports.vendor.test" }),
-      expect.objectContaining({ category: "LOL", providerHint: "CMD", hostname: "esports.vendor.test" }),
+      expect.objectContaining({ category: "LOL", providerHint: "APSPORT", hostname: "esports.vendor.test" }),
       expect.objectContaining({ category: "LOL", providerHint: "SBOBET", hostname: "sbobet.vendor.test" }),
       expect.objectContaining({ category: "LOL", providerHint: "IM", hostname: "imesports.techplay.com" })
     ]);
@@ -181,6 +182,14 @@ describe("FabetBrowserDriver", () => {
     expect(launcherLabelFromCard("C-Sports", "/game/sabaport.webp")).toBe("C-Sports");
     expect(launcherLabelFromCard("Esports", "/game/saba_esportss_landscape.avif")).toBe("SABA-SPORTS");
     expect(launcherLabelFromCard("Esports", "/game/bti_esportss_landscape.avif")).toBe("BTI");
+    expect(launcherLabelFromCard("T-Sports", "/game/tpsports_landscape.webp")).toBe("APSPORT");
+    expect(launcherLabelFromCard("T-Sports", "/game/tsports_landscape.avif")).toBe("BTI");
+  });
+
+  it("keeps only a bounded asset basename for launcher diagnostics", () => {
+    expect(safeLauncherAssetName("https://cdn.test/game/t_sport.png?token=secret-canary")).toBe("t_sport.png");
+    expect(safeLauncherAssetName("/game/AP-Sports_2.webp")).toBe("AP-Sports_2.webp");
+    expect(safeLauncherAssetName("data:text/plain,secret-canary")).toBeNull();
   });
 
   it("accepts only the provider launch field from the game-url response shape", () => {

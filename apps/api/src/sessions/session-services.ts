@@ -35,6 +35,10 @@ import { PlaywrightImEsportsBrowserManager } from "../providers/im/im-esports-br
 import { ImEsportsObservedCatalogReader } from "../providers/im/im-esports-observed-catalog.js";
 import { ImSessionValidator } from "../providers/im/im-session-validator.js";
 import { ImProfileReader } from "../providers/im/im-profile-reader.js";
+import { PlaywrightApsportBrowserManager } from "../providers/apsport/apsport-browser-manager.js";
+import { ApsportSessionValidator } from "../providers/apsport/apsport-session-validator.js";
+import { ApsportObservedCatalogReader } from "../providers/apsport/apsport-observed-catalog.js";
+import { ApsportProfileReader } from "../providers/apsport/apsport-profile-reader.js";
 
 export interface CreateSessionServicesOptions {
   readonly localAppData: string;
@@ -97,6 +101,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const imEsportsBrowser = new PlaywrightImEsportsBrowserManager({
     profilesRoot: join(profilesRoot, "providers-im-esports"), headless: true, startupTimeoutMs: 8_000
   });
+  const apsportBrowser = new PlaywrightApsportBrowserManager({
+    profilesRoot: join(profilesRoot, "providers-apsport"), headless: true
+  });
   const automation = options.automation ?? new PlaywrightFabetAutomation({
     profilePath: join(profilesRoot, "fabet"),
     headless: false
@@ -117,7 +124,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       new SabaSessionValidator({ verifyLaunch: async (launchUrl) => isSafeCapturedLaunch(launchUrl) }),
       new SbobetSessionValidator({ verifyLaunch: async (launchUrl) => isSafeCapturedLaunch(launchUrl) }),
       new ImSessionValidator({ verifyLaunch: async (launchUrl) =>
-        isSafeCapturedLaunch(launchUrl, "imesports.techplay.com") })
+        isSafeCapturedLaunch(launchUrl, "imesports.techplay.com") }),
+      new ApsportSessionValidator(apsportBrowser)
     ]),
     clock,
     idFactory,
@@ -135,7 +143,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       new CmdProfileReader({ source: cmdBrowser, clock }),
       new SabaProfileReader({ source: sabaBrowser, clock }),
       new SbobetProfileReader({ source: sbobetBrowser, clock }),
-      new ImProfileReader()
+      new ImProfileReader(),
+      new ApsportProfileReader({ source: apsportBrowser, clock })
     ],
     clock,
     idFactory
@@ -163,13 +172,15 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     accounts, source: imEsportsBrowser,
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
+  const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts, source: apsportBrowser });
   return {
     manager,
     discovery,
     trustStore,
     accounts,
     catalogReader: new MultiProviderCatalogReader([
-      catalogReader, sabaEsportsCatalogReader, imEsportsCatalogReader, sabaCatalogReader, sbobetCatalogReader
+      catalogReader, sabaEsportsCatalogReader, imEsportsCatalogReader, sabaCatalogReader, sbobetCatalogReader,
+      apsportCatalogReader
     ]),
     sabaCatalogReader,
     async tick(): Promise<void> {
@@ -178,7 +189,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     async close(): Promise<void> {
       await Promise.all([
         automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaFootballPushBrowser.close(), sabaEsportsBrowser.close(),
-        sbobetBrowser.close(), imEsportsBrowser.close()
+        sbobetBrowser.close(), imEsportsBrowser.close(), apsportBrowser.close()
       ]);
     }
   };

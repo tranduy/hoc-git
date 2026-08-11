@@ -29,6 +29,8 @@ export interface SbobetCatalogOptions {
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
   readonly sequence: number;
+  readonly provider?: "SBOBET" | "APSPORT";
+  readonly settlementProfile?: string;
 }
 
 export interface NormalizedSbobetCatalog {
@@ -87,6 +89,13 @@ function liveTiming(record: SbobetCatalogInputRecord, observedAtMs: number) {
     period: `${match[1]}H`,
     clockMs: Number(match[2]) * 60_000
   };
+  if (/(?:live|trực\s*tiếp|hiệp)/iu.test(record.timeText)) return {
+    isLive: true,
+    startAtUtcMs: observedAtMs,
+    period: /(?:hiệp\s*1|1h)/iu.test(record.timeText) ? "1H"
+      : /(?:hiệp\s*2|2h)/iu.test(record.timeText) ? "2H" : null,
+    clockMs: null
+  };
   if (record.startAtUtcMs !== null && record.startAtUtcMs !== undefined && Number.isFinite(record.startAtUtcMs)) return {
     isLive: false,
     startAtUtcMs: record.startAtUtcMs,
@@ -109,6 +118,8 @@ export function normalizeSbobetCatalog(
   const markets: ProviderMarket[] = [];
   const quotes: ProviderQuote[] = [];
   const diagnostics: string[] = [];
+  const provider = options.provider ?? "SBOBET";
+  const settlementProfile = options.settlementProfile ?? "football-regulation-including-added-time";
   if (!Number.isFinite(options.observedAtMs) || !Number.isFinite(options.receivedMonotonicMs) || !Number.isSafeInteger(options.sequence)) {
     return { events, markets, quotes, diagnostics: ["SBOBET_CATALOG_OPTIONS_INVALID"] };
   }
@@ -140,12 +151,12 @@ export function normalizeSbobetCatalog(
       }
       const status = market.selections.some((selection) => selection.locked) ? "SUSPENDED" as const : "OPEN" as const;
       recordMarkets.push({
-        provider: "SBOBET", category: "FOOTBALL", providerEventId: record.eventId,
+        provider, category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, marketType: market.marketType, scope: "FULL_TIME", line,
-        settlementProfile: "football-regulation-including-added-time", status
+        settlementProfile, status
       });
       recordQuotes.push(...market.selections.map((selection): ProviderQuote => ({
-        provider: "SBOBET", category: "FOOTBALL", providerEventId: record.eventId,
+        provider, category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, providerSelectionId: selection.selectionId,
         marketType: market.marketType, scope: "FULL_TIME", selection: selection.selection, line,
         rawOdds: selection.priceText, rawFormat: market.marketType === "FT_1X2" ? "DECIMAL" : "MALAY",
@@ -160,7 +171,7 @@ export function normalizeSbobetCatalog(
     const currentScore = score(record.scoreText);
     const isVirtual = virtualFootballEvidence(record.leagueName, teams);
     events.push({
-      provider: "SBOBET", category: "FOOTBALL", providerEventId: record.eventId,
+      provider, category: "FOOTBALL", providerEventId: record.eventId,
       competition: record.leagueName.trim(), seasonStage: null, startAtUtcMs: timing.startAtUtcMs,
       participantA: teams[0]!, participantB: teams[1]!, eventScope: "REGULATION", bestOf: null,
       isLive: timing.isLive, rematchCandidate: timing.isLive, fixtureDiscriminator: null,
