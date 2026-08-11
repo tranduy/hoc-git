@@ -3,8 +3,9 @@ import type { AccountStatus, ProviderEvent, ProviderMarket, ProviderQuote } from
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountApiLike } from "../api/accounts.js";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
-import { LiveCatalogPage } from "./live-catalog-page.js";
+import { filterAccountBackedSignals, LiveCatalogPage } from "./live-catalog-page.js";
 import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
+import type { LagSignal } from "../watch/lag-signal-tracker.js";
 
 const account: AccountStatus = {
   id: "account-1", alias: "CMD main", provider: "CMD", category: "FOOTBALL", sessionState: "ACTIVE", profileState: "FRESH",
@@ -50,10 +51,35 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
+  it("keeps catalog-only or stale-balance providers out of executable lag signals", () => {
+    const saba = { ...catalog, accountId: "saba-account", provider: "SABA" as const };
+    const sbobet = { ...catalog, accountId: "sbobet-account", provider: "SBOBET" as const };
+    const candidate = { plan: { currency: "VND", legs: [
+      { provider: "SABA", stake: "100000" }, { provider: "SBOBET", stake: "80000" }
+    ] } } as unknown as LagSignal;
+    const fresh = (id: string, provider: "SABA" | "SBOBET"): AccountStatus => ({ ...account,
+      id, provider, alias: provider, currency: "VND", balance: "500000", balanceAsOfMs: 10_000 });
+    const sabaAccount = fresh("saba-account", "SABA");
+    const sbobetAccount = fresh("sbobet-account", "SBOBET");
+
+    expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount, sbobetAccount], 20_000)).toEqual([candidate]);
+    expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount,
+      { ...sbobetAccount, profileState: "UNAVAILABLE", balance: null, balanceAsOfMs: null }], 20_000)).toEqual([]);
+    expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount,
+      { ...sbobetAccount, balanceAsOfMs: 1 }], 40_002)).toEqual([]);
+    expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount,
+      { ...sbobetAccount, balance: "79000" }], 20_000)).toEqual([]);
+    expect(filterAccountBackedSignals([candidate], [saba, sbobet], [sabaAccount,
+      { ...sbobetAccount, currency: "UUS" }], 20_000)).toEqual([]);
+  });
+
   it("shows the immediate best lag signal after one provider flips its two prices", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
-    const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
+    const executableProfile = { currency: "VND", balance: "1000000", balanceAsOfMs: 1_000 } as const;
+    const sabaAccount: AccountStatus = { ...account, ...executableProfile,
+      id: "saba-account", alias: "SABA main", provider: "SABA" };
+    const sbobetAccount: AccountStatus = { ...account, ...executableProfile,
+      id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
     const providerCatalog = (providerAccount: AccountStatus, over: string, under: string,
       observedAtMs: number): LiveCatalogResponse => ({
       ...catalog, observedAtMs, accountId: providerAccount.id, provider: providerAccount.provider,
@@ -418,7 +444,7 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async () => emptyCatalog }} />);
 
     expect(await screen.findByText("Nguồn hoạt động bình thường nhưng hiện không có trận trong catalog.")).toBeTruthy();
-    expect(screen.getByText("1 nguồn đang hoạt động")).toBeTruthy();
+    expect(screen.getByText("1 nguồn giá + profile cược đã xác minh")).toBeTruthy();
   });
 
   it("labels a failed provider read as a source error and never as no matches", async () => {
@@ -460,6 +486,23 @@ describe("LiveCatalogPage", () => {
     expect(screen.getAllByText("Alpha vs Beta")).toHaveLength(1);
     expect(read).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledWith(current.id);
+  });
+
+  it("prefers a betting-profile-ready account over a lexically newer catalog-only duplicate", async () => {
+    const ready: AccountStatus = { ...account, id: "a-ready", alias: "SABA profile ready", provider: "SABA",
+      currency: "VND", balance: "500000", balanceAsOfMs: Date.now() };
+    const catalogOnly: AccountStatus = { ...account, id: "z-catalog", alias: "SABA catalog only", provider: "SABA",
+      profileState: "UNAVAILABLE", currency: null, balance: null, balanceAsOfMs: null };
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => ({ ...catalog, accountId: id,
+      provider: "SABA", events: [{ ...event, provider: "SABA" }], markets: [{ ...market, provider: "SABA" }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" })) }));
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [ready, catalogOnly] }} catalogApi={{ read }} />);
+
+    expect(await screen.findByText("SABA profile ready")).toBeTruthy();
+    expect(screen.queryByText("SABA catalog only")).toBeNull();
+    expect(read).toHaveBeenCalledWith(ready.id);
   });
 
   it("shows a healthy provider immediately while another selected provider is still pending", async () => {

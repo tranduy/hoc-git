@@ -17,6 +17,7 @@ const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
 const comparisonProviders: readonly ProviderId[] = ["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"];
 const catalogRefreshIntervalMs = 250;
+const executableProfileMaxAgeMs = 30_000;
 const catalogCategoryStorageKey = "tool-chenh.live-catalog.category.v1";
 type CatalogCategory = "FOOTBALL" | "LOL";
 
@@ -34,16 +35,52 @@ function saveCatalogCategory(storage: Storage, category: CatalogCategory): void 
 
 function oneAccountPerProvider(accounts: readonly AccountStatus[]): readonly AccountStatus[] {
   const selected = new Map<ProviderId, AccountStatus>();
+  const profileRank = (account: AccountStatus): number => account.profileState === "FRESH" ? 2
+    : account.profileState === "STALE" ? 1 : 0;
   for (const account of accounts) {
     const current = selected.get(account.provider);
     if (current === undefined || (current.sessionState !== "ACTIVE" && account.sessionState === "ACTIVE") ||
-      (current.sessionState === account.sessionState && account.id.localeCompare(current.id) > 0)) {
+      (current.sessionState === account.sessionState && profileRank(account) > profileRank(current)) ||
+      (current.sessionState === account.sessionState && profileRank(account) === profileRank(current) &&
+        account.id.localeCompare(current.id) > 0)) {
       selected.set(account.provider, account);
     }
   }
   return comparisonProviders.flatMap((provider) => {
     const account = selected.get(provider);
     return account === undefined ? [] : [account];
+  });
+}
+
+function wholeUnits(value: string): bigint | null {
+  const match = /^(0|[1-9]\d*)(?:\.\d+)?$/u.exec(value);
+  return match === null ? null : BigInt(match[1]!);
+}
+
+export function filterAccountBackedSignals(
+  signals: readonly LagSignal[], acceptedCatalogs: readonly LiveCatalogResponse[],
+  accounts: readonly AccountStatus[], observedAtMs: number
+): readonly LagSignal[] {
+  const accountById = new Map(accounts.map((account) => [account.id, account]));
+  const accountByProvider = new Map<ProviderId, AccountStatus>();
+  for (const catalog of acceptedCatalogs) {
+    const account = accountById.get(catalog.accountId);
+    if (account !== undefined && account.provider === catalog.provider) accountByProvider.set(catalog.provider, account);
+  }
+  return signals.filter((signal) => {
+    const legAccounts = signal.plan.legs.map((leg) => accountByProvider.get(leg.provider));
+    if (legAccounts.some((account) => account === undefined) ||
+      new Set(legAccounts.map((account) => account!.id)).size !== 2) return false;
+    return signal.plan.legs.every((leg, index) => {
+      const account = legAccounts[index]!;
+      const balance = account.balance === null ? null : wholeUnits(account.balance);
+      const stake = wholeUnits(leg.stake);
+      return account.sessionState === "ACTIVE" && account.profileState === "FRESH" &&
+        account.capabilities.includes("PROFILE") && account.currency === signal.plan.currency &&
+        account.balanceAsOfMs !== null && observedAtMs >= account.balanceAsOfMs &&
+        observedAtMs - account.balanceAsOfMs <= executableProfileMaxAgeMs &&
+        balance !== null && stake !== null && balance >= stake;
+    });
   });
 }
 
@@ -74,11 +111,16 @@ function ProviderSourceStatus({ accounts, selected }: { readonly accounts: reado
   return <section className="provider-source-status" aria-label="Trạng thái nguồn dữ liệu">{comparisonProviders.map((provider) => {
     const matches = accounts.filter((account) => account.provider === provider);
     const active = matches.filter((account) => account.sessionState === "ACTIVE" && selected.has(account.id)).length;
-    const state = active > 0 ? `${active} nguồn đang hoạt động`
+    const bettingReady = matches.some((account) => account.sessionState === "ACTIVE" && selected.has(account.id) &&
+      account.profileState === "FRESH" && account.capabilities.includes("PROFILE") &&
+      account.currency !== null && account.balance !== null);
+    const state = active > 0 ? bettingReady
+      ? `${active} nguồn giá + profile cược đã xác minh`
+      : `${active} nguồn giá; đăng nhập cược/số dư chưa xác minh`
       : matches.some((account) => account.reason === "EXPIRED") ? "Nguồn hết hạn — cần đăng nhập/lấy launch mới"
       : matches.some((account) => account.reason === "SCHEMA_CHANGED") ? "Lỗi nguồn/schema — không phải không có trận"
       : matches.length > 0 ? "Nguồn không hoạt động — không phải không có trận" : "Chưa cấu hình nguồn";
-    return <span className={active > 0 ? "source-state source-state--active" : "source-state source-state--error"}
+    return <span className={active > 0 && bettingReady ? "source-state source-state--active" : "source-state source-state--error"}
       key={provider}><b>#{provider}</b>{state}</span>;
   })}</section>;
 }
@@ -226,6 +268,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const signalTracker = useRef(new LagSignalTracker());
   const movementTracker = useRef(new PriceMovementTracker());
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
+  const accountsRef = useRef<readonly AccountStatus[]>([]);
   const refreshInFlight = useRef(false);
   const retryAfterMs = useRef(new Map<string, number>());
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
@@ -280,7 +323,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const nextEvents = buildComparisonEvents(nextCatalogs);
       const providers = new Set<ProviderId>(accepted.map((catalog) => catalog.provider));
       const observedAtMs = accepted.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
-      setSignals(signalTracker.current.update(nextEvents, providers, stakePolicy(baseStakeRef.current), observedAtMs));
+      const candidates = signalTracker.current.update(nextEvents, providers, stakePolicy(baseStakeRef.current), observedAtMs);
+      setSignals(filterAccountBackedSignals(candidates, accepted, accountsRef.current, observedAtMs));
       setMovements(movementTracker.current.update(nextEvents, observedAtMs));
       const failed = results.length - accepted.length;
       if (accepted.length === 0 && preserved.length > 0) setMessage(`${failed} selected provider(s) unavailable; last verified snapshots are retained as stale. Signals are disabled until a fresh read succeeds.`);
@@ -298,6 +342,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   useEffect(() => {
     void accountApi.list().then((items) => {
       const catalogAccounts = items.filter((account) => account.capabilities.includes("CATALOG"));
+      accountsRef.current = catalogAccounts;
       const availableCandidates = catalogAccounts.filter((account) => account.sessionState === "ACTIVE");
       const targetCategory = fixedCategory ?? category;
       const available = availableCandidates.filter((account) => account.category !== null);
