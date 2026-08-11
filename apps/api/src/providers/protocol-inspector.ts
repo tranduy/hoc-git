@@ -255,6 +255,8 @@ function redactedStringShape(value: string): { readonly encoding: "base64" | "he
 
 export function structuralWebSocketFrameShape(payload: unknown): unknown {
   if (typeof payload !== "string") return "binary";
+  const stomp = structuralSockJsStompShape(payload);
+  if (stomp !== null) return stomp;
   const objectStart = payload.indexOf("{");
   const arrayStart = payload.indexOf("[");
   const starts = [objectStart, arrayStart].filter((index) => index >= 0);
@@ -277,6 +279,44 @@ export function structuralWebSocketFrameShape(payload: unknown): unknown {
   } catch {
     return "text";
   }
+}
+
+function structuralSockJsStompShape(payload: string): unknown | null {
+  const candidate = payload.startsWith("a[") ? payload.slice(1) : payload.startsWith("[") ? payload : null;
+  if (candidate === null) return null;
+  let frames: unknown;
+  try { frames = JSON.parse(candidate); } catch { return null; }
+  if (!Array.isArray(frames) || frames.length === 0 || frames.some((item) => typeof item !== "string")) return null;
+  const shapes = (frames as string[]).flatMap((frame) => {
+    const separator = frame.indexOf("\n\n");
+    const head = separator < 0 ? frame.replace(/\0+$/u, "") : frame.slice(0, separator);
+    const lines = head.split("\n");
+    const command = lines.shift()?.trim() ?? "";
+    if (!/^[A-Z]{2,24}$/u.test(command)) return [];
+    const headers = lines.flatMap((line) => {
+      const colon = line.indexOf(":");
+      const name = colon < 1 ? "" : line.slice(0, colon).trim().toLowerCase();
+      return /^[a-z0-9_-]{1,64}$/u.test(name) ? [name] : [];
+    }).sort();
+    const rawBody = separator < 0 ? "" : frame.slice(separator + 2).replace(/\0+$/u, "").trim();
+    let body: unknown = rawBody.length === 0 ? null : redactedStringShape(rawBody);
+    if (/^[\[{]/u.test(rawBody)) {
+      try {
+        const parsedBody = JSON.parse(rawBody) as unknown;
+        body = structuralBodyShapeAtDepth(parsedBody, 12);
+        if (typeof parsedBody === "object" && parsedBody !== null && !Array.isArray(parsedBody)) {
+          const nested = (parsedBody as Record<string, unknown>).body;
+          if (typeof nested === "string" && /^[\[{]/u.test(nested.trim())) {
+            try {
+              (body as Record<string, unknown>).body = structuralBodyShapeAtDepth(JSON.parse(nested) as unknown, 16);
+            } catch { /* The outer redacted string shape remains safe. */ }
+          }
+        }
+      } catch { /* Redacted string shape is safe. */ }
+    }
+    return [{ command, headers, body }];
+  });
+  return shapes.length === 0 ? null : { protocol: "SOCKJS_STOMP", frames: shapes };
 }
 
 export function structuralBodyHash(value: unknown): string {

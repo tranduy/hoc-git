@@ -92,12 +92,18 @@ async function main() {
   const pollMs = Number(argument("--poll-ms", "1000"));
   const requestedEventId = argument("--event-id", "");
   const matchQuery = argument("--match-query", "").toLocaleLowerCase();
+  const requestedAccountId = argument("--account-id", "");
+  const requestedProvider = argument("--provider", "").toUpperCase();
+  const requestedCategory = argument("--category", "").toUpperCase();
   if (!Number.isSafeInteger(durationMs) || durationMs < 1_000 || !Number.isSafeInteger(pollMs) || pollMs < 250) {
     throw new Error("WATCH_OPTIONS_INVALID");
   }
   const accountsResponse = await readJson(`${baseUrl}/api/accounts`);
   const account = accountsResponse.accounts?.find((candidate) =>
-    candidate.sessionState === "ACTIVE" && candidate.capabilities?.includes("CATALOG"));
+    candidate.sessionState === "ACTIVE" && candidate.capabilities?.includes("CATALOG") &&
+    (requestedAccountId.length === 0 || candidate.id === requestedAccountId) &&
+    (requestedProvider.length === 0 || candidate.provider === requestedProvider) &&
+    (requestedCategory.length === 0 || candidate.category === requestedCategory));
   if (account === undefined) throw new Error("NO_ACTIVE_CATALOG_ACCOUNT");
   let previous = await readJson(`${baseUrl}/api/catalog/accounts/${encodeURIComponent(account.id)}`);
   if (previous.dataMode !== "LIVE") throw new Error("LIVE_MODE_REQUIRED");

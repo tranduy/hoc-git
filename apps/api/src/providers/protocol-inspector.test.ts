@@ -164,6 +164,31 @@ describe("protocol inspector", () => {
     });
   });
 
+  it("unwraps SockJS/STOMP frames while retaining only header names and JSON structure", () => {
+    const shape = structuralWebSocketFrameShape(
+      'a["MESSAGE\\ndestination:/private/secret-account\\nsubscription:secret-token\\n\\n{\\"events\\":[{\\"id\\":7,\\"odds\\":[1.8]}],\\"token\\":\\"secret-canary\\"}\\u0000"]'
+    );
+    expect(shape).toEqual({
+      protocol: "SOCKJS_STOMP",
+      frames: [{
+        command: "MESSAGE", headers: ["destination", "subscription"],
+        body: { events: [{ id: "number", odds: ["number"] }], token: "string" }
+      }]
+    });
+    expect(JSON.stringify(shape)).not.toMatch(/secret|private/iu);
+  });
+
+  it("describes nested JSON response bodies without exposing their values", () => {
+    const shape = structuralWebSocketFrameShape(
+      'a["MESSAGE\\ncontent-type:application/json\\n\\n{\\"body\\":\\"{\\\\\\"events\\\\\\":[{\\\\\\"team\\\\\\":\\\\\\"secret-name\\\\\\",\\\\\\"odds\\\\\\":[1.9]}]}\\",\\"statusCodeValue\\":200}\\u0000"]'
+    );
+    expect(shape).toEqual({ protocol: "SOCKJS_STOMP", frames: [{
+      command: "MESSAGE", headers: ["content-type"],
+      body: { body: { events: [{ odds: ["number"], team: "string" }] }, statusCodeValue: "number" }
+    }] });
+    expect(JSON.stringify(shape)).not.toContain("secret-name");
+  });
+
   it("describes candidate controls without free text or unrelated class tokens", () => {
     expect(safeControlShape({
       tagName: "DIV",
