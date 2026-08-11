@@ -252,6 +252,48 @@ describe("browser protocol inspector", () => {
     await page.close();
   });
 
+  it("extracts only allowlisted handicap groups at the browser boundary", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <section class="c-odds-table--sport1"><div class="c-league" data-leagueid="league-1">
+        <div class="c-league__name">League</div><div class="c-match" data-matchid="event-1">
+          <div class="c-match-time">1H12'</div><span class="c-team-name">A</span><span class="c-team-name">B</span>
+          <div class="c-match__odds-group">
+            <div data-bt="1"><div class="c-odds-button"><span>0.5</span><span class="c-odds" data-moid="ah">0.8</span></div><div class="c-odds-button"><span class="c-odds" data-moid="ah">-0.9</span></div></div>
+            <div data-bt="3"><span class="c-odds" data-moid="total">0.7</span><span class="c-odds" data-moid="total">-0.8</span></div>
+            <div data-bt="5"><span class="c-odds" data-moid="1x2">2.1</span><span class="c-odds" data-moid="1x2">3.2</span><span class="c-odds" data-moid="1x2">3.4</span></div>
+          </div>
+        </div>
+      </div></section>`);
+
+    const records = await extractCmdCatalogRecords(page, 10, "1", ["1"]);
+    expect(records[0]?.groups.map((group) => group.betTypeIds)).toEqual([["1"]]);
+    await page.close();
+  });
+
+  it("scans independent provider frames concurrently", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const fakeFrame = (matchId: string) => ({
+      evaluate: async () => {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+        active -= 1;
+        return [{ sportId: "1", leagueId: "league", leagueName: "League", matchId,
+          timeText: "1H12'", teamNames: ["A", "B"], groups: [] }];
+      }
+    });
+    const fakePage = { frames: () => [fakeFrame("one"), fakeFrame("two")] } as unknown as Parameters<
+      typeof extractCmdCatalogRecords
+    >[0];
+
+    const records = await extractCmdCatalogRecords(fakePage, 10, "1", ["1"]);
+
+    expect(maximumActive).toBe(2);
+    expect(records.map((record) => record.matchId)).toEqual(["one", "two"]);
+  });
+
   it("collects catalog navigation labels only from the event side navigation", async () => {
     const page = await browser.newPage();
     await page.setContent(`

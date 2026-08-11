@@ -31,16 +31,15 @@ describe("CmdObservedCatalogReader", () => {
     expect(result.events[0]?.provider).toBe("SABA");
   });
 
-  it("returns only normalized live catalog evidence and marks one-provider rows non-comparable", async () => {
+  it("returns only normalized half-goal handicap evidence and marks one-provider rows non-comparable", async () => {
     const reader = new CmdObservedCatalogReader({
       accounts: { withActiveHandle: async (_id, _provider, consume) => consume(handle) },
       source: { readCatalog: async () => [{
         sportId: "1", leagueId: "league-1", leagueName: "Premier Test", matchId: "match-1",
         timeText: "08/17 02:30AM", teamNames: ["Alpha", "Beta"], groups: [{
-          betTypeIds: ["5"], labels: ["1", "X", "2"], odds: [
-            { marketOddsId: "market-1", priceText: "2.1", status: null, greyedOut: null },
-            { marketOddsId: "market-1", priceText: "3.2", status: null, greyedOut: null },
-            { marketOddsId: "market-1", priceText: "3.4", status: null, greyedOut: null }
+          betTypeIds: ["1"], labels: ["0.5"], odds: [
+            { marketOddsId: "market-1", priceText: "0.8", status: null, greyedOut: null, lineText: "0.5" },
+            { marketOddsId: "market-1", priceText: "-0.9", status: null, greyedOut: null, lineText: null }
           ]
         }]
       }] },
@@ -54,8 +53,8 @@ describe("CmdObservedCatalogReader", () => {
       comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 1_788_000_000_000
     });
     expect(result.events).toEqual([expect.objectContaining({ participantA: "Alpha", participantB: "Beta" })]);
-    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_1X2" })]);
-    expect(result.quotes.map((quote) => quote.rawOdds)).toEqual(["2.1", "3.2", "3.4"]);
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_AH", line: "-0.5" })]);
+    expect(result.quotes.map((quote) => quote.rawOdds)).toEqual(["0.8", "-0.9"]);
     expect(JSON.stringify(result)).not.toMatch(/secret-canary|private\.test|launch\?/u);
   });
 
@@ -73,7 +72,7 @@ describe("CmdObservedCatalogReader", () => {
     await expect(reader.read("account-1")).rejects.toThrow("CMD_CATALOG_SCHEMA_ERROR");
   });
 
-  it("quarantines one malformed market while retaining an exact sibling market", async () => {
+  it("drops totals, 1X2, and quarter-goal handicaps while retaining an exact half-goal handicap", async () => {
     const reader = new CmdObservedCatalogReader({
       accounts: { withActiveHandle: async (_id, _provider, consume) => consume(handle) },
       source: { readCatalog: async () => [{
@@ -87,6 +86,14 @@ describe("CmdObservedCatalogReader", () => {
             { marketOddsId: "1x2", priceText: "2.1", status: null, greyedOut: null },
             { marketOddsId: "1x2", priceText: "3.2", status: null, greyedOut: null },
             { marketOddsId: "1x2", priceText: "3.4", status: null, greyedOut: null }
+          ] },
+          { betTypeIds: ["1"], labels: ["0/0.5"], odds: [
+            { marketOddsId: "quarter", priceText: "0.7", status: null, greyedOut: null, lineText: "0/0.5" },
+            { marketOddsId: "quarter", priceText: "-0.8", status: null, greyedOut: null, lineText: null }
+          ] },
+          { betTypeIds: ["1"], labels: ["0.5"], odds: [
+            { marketOddsId: "half", priceText: "0.8", status: null, greyedOut: null, lineText: "0.5" },
+            { marketOddsId: "half", priceText: "-0.9", status: null, greyedOut: null, lineText: null }
           ] }
         ]
       }] },
@@ -95,9 +102,9 @@ describe("CmdObservedCatalogReader", () => {
     });
 
     const result = await reader.read("account-1");
-    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_1X2" })]);
-    expect(result.quotes).toHaveLength(3);
-    expect(result.rejectedMarketCount).toBe(1);
+    expect(result.markets).toEqual([expect.objectContaining({ providerMarketId: "half", marketType: "FT_AH", line: "-0.5" })]);
+    expect(result.quotes).toHaveLength(2);
+    expect(result.rejectedMarketCount).toBe(0);
   });
 
   it("retains an exact full-time half-goal handicap market", async () => {

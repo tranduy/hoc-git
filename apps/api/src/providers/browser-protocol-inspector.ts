@@ -308,14 +308,13 @@ export interface CmdCatalogRecord {
 export async function extractCmdCatalogRecords(
   page: Page,
   limit = 200,
-  sportFilter?: "1" | "43"
+  sportFilter?: "1" | "43",
+  allowedBetTypeIds?: readonly string[]
 ): Promise<readonly CmdCatalogRecord[]> {
   if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1_000) throw new Error("invalid CMD catalog limit");
-  const output: CmdCatalogRecord[] = [];
-  for (const frame of page.frames()) {
-    const remaining = limit - output.length;
-    if (remaining <= 0) break;
-    const records = await frame.evaluate(({ frameLimit, requestedSport }) => {
+  const batches = await Promise.all(page.frames().map(async (frame) => frame.evaluate(({
+    frameLimit, requestedSport, requestedBetTypes
+  }) => {
       const clean = (value: string | null | undefined, max = 160): string => {
         const normalized = value?.replace(/\s+/gu, " ").trim() ?? "";
         return normalized.length <= max ? normalized : "";
@@ -372,7 +371,8 @@ export async function extractCmdCatalogRecords(
             }).filter((odd) => odd.marketOddsId.length > 0 && odd.priceText.length > 0);
               return { betTypeIds, labels, odds };
             });
-          }).filter((group) => group.odds.length > 0);
+          }).filter((group) => group.odds.length > 0 && (requestedBetTypes === null ||
+            (group.betTypeIds.length === 1 && requestedBetTypes.includes(group.betTypeIds[0]!))));
           const teamNames = [...match.querySelectorAll(".c-team-name")]
             .map((element) => clean(element.textContent, 160)).filter((value) => value.length > 0)
             .filter((value, index, values) => values.indexOf(value) === index).slice(0, 4);
@@ -389,10 +389,10 @@ export async function extractCmdCatalogRecords(
         }
       }
       return result;
-    }, { frameLimit: remaining, requestedSport: sportFilter }).catch(() => [] as CmdCatalogRecord[]);
-    output.push(...records);
-  }
-  return output;
+    }, { frameLimit: limit, requestedSport: sportFilter,
+      requestedBetTypes: allowedBetTypeIds === undefined ? null : [...allowedBetTypeIds] })
+    .catch(() => [] as CmdCatalogRecord[])));
+  return batches.flat().slice(0, limit);
 }
 
 export interface CmdCatalogNavigationShape {

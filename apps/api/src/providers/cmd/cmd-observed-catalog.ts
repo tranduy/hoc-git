@@ -87,18 +87,21 @@ export class CmdObservedCatalogReader {
       const eventOnly = normalizeObservedFootballCatalog(this.#provider, [{ ...record, groups: [] }], normalizationOptions);
       if (eventOnly.diagnostics.length > 0 || eventOnly.events.length !== 1) {
         rejectedMarketCount += Math.max(1, record.groups.filter((group) =>
-          group.betTypeIds.length === 1 && ["1", "3", "5"].includes(group.betTypeIds[0]!)).length);
+          group.betTypeIds.length === 1 && group.betTypeIds[0] === "1").length);
         continue;
       }
       events.push(eventOnly.events[0]!);
       for (const group of record.groups) {
-        if (group.betTypeIds.length !== 1 || !["1", "3", "5"].includes(group.betTypeIds[0]!)) continue;
+        if (group.betTypeIds.length !== 1 || group.betTypeIds[0] !== "1") continue;
         const marketOnly = normalizeObservedFootballCatalog(this.#provider, [{ ...record, groups: [group] }], normalizationOptions);
         if (marketOnly.diagnostics.length > 0) {
           rejectedMarketCount += 1;
           continue;
         }
-        markets.push(...marketOnly.markets);
+        const market = marketOnly.markets[0];
+        if (market === undefined || market.marketType !== "FT_AH" || market.line === null ||
+          !/^-?(?:0|[1-9]\d*)\.5$/u.test(market.line)) continue;
+        markets.push(market);
         quotes.push(...marketOnly.quotes);
       }
     }

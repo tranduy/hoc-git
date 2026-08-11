@@ -13,6 +13,7 @@ import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
 const comparisonProviders: readonly ProviderId[] = ["SABA", "SBOBET", "CMD", "APSPORT", "BTI"];
+const catalogRefreshIntervalMs = 250;
 
 function ProviderSelector({ accounts, selected, toggle }: {
   readonly accounts: readonly AccountStatus[];
@@ -189,7 +190,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   useEffect(() => {
     if (category !== "FOOTBALL" || selectedIds.size === 0) return;
-    const timer = window.setInterval(() => void loadIds([...selectedIds]), 1_000);
+    const timer = window.setInterval(() => void loadIds([...selectedIds]), catalogRefreshIntervalMs);
     return () => window.clearInterval(timer);
   }, [category, loadIds, selectedIds]);
 

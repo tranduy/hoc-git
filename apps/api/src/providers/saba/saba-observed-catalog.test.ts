@@ -31,9 +31,9 @@ describe("SabaObservedCatalogReader", () => {
       source: { readCatalog: async () => [{
         sportId: "1", leagueId: "league", leagueName: "Eliteserien", matchId: "match",
         timeText: "2H37'", teamNames: ["Kristiansund BK", "Molde"], groups: [{
-          betTypeIds: ["3"], labels: ["2.5", "u"], odds: [
-            { marketOddsId: "total", priceText: "-0.85", status: null, greyedOut: "false" },
-            { marketOddsId: "total", priceText: "0.69", status: null, greyedOut: "false" }
+          betTypeIds: ["1"], labels: ["0.5"], odds: [
+            { marketOddsId: "handicap", priceText: "-0.85", status: null, greyedOut: "false", lineText: "0.5" },
+            { marketOddsId: "handicap", priceText: "0.69", status: null, greyedOut: "false", lineText: null }
           ]
         }]
       }] },
@@ -43,7 +43,7 @@ describe("SabaObservedCatalogReader", () => {
     const result = await reader.read("saba-account");
     expect(result.provider).toBe("SABA");
     expect(result.events[0]).toMatchObject({ provider: "SABA", participantA: "Kristiansund BK", participantB: "Molde" });
-    expect(result.markets[0]).toMatchObject({ provider: "SABA", marketType: "FT_TOTAL", line: "2.5" });
+    expect(result.markets[0]).toMatchObject({ provider: "SABA", marketType: "FT_AH", line: "-0.5" });
     expect(JSON.stringify(result)).not.toMatch(/secret-canary|saba\.test/iu);
   });
 });

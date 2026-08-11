@@ -32,13 +32,118 @@ export function cmdProfileDirectoryName(sessionId: string): string {
   return `cmd-${digest}`;
 }
 
-export async function readCmdFootballCatalog(page: Page): Promise<readonly CmdCatalogInputRecord[]> {
-  const selectedFootball = await clickSafeStructuralCategory(page, "1", 1_500);
-  const records = await extractCmdCatalogRecords(page, 500, "1");
-  if (!selectedFootball && records.length === 0) {
-    throw new Error("CMD_CATALOG_UNAVAILABLE");
+export interface StableFootballCatalogProbe {
+  read(): Promise<readonly CmdCatalogInputRecord[]>;
+  select(): Promise<boolean>;
+  wait(delayMs: number): Promise<void>;
+}
+
+export interface StableFootballCatalogOptions {
+  readonly maxWaitMs: number;
+  readonly pollingIntervalMs: number;
+  readonly stableSampleCount: number;
+  readonly trustedStructuralFingerprint?: string;
+}
+
+const defaultStableFootballCatalogOptions: StableFootballCatalogOptions = {
+  maxWaitMs: 3_000,
+  pollingIntervalMs: 75,
+  stableSampleCount: 2
+};
+
+function focusedHandicapRecords(records: readonly CmdCatalogInputRecord[]): readonly CmdCatalogInputRecord[] {
+  return records.filter((record) => {
+    const evidence = `${record.leagueName} ${record.teamNames.join(" ")}`.normalize("NFKC").toLocaleLowerCase("en");
+    return !/(?:soccer marble|e[\s-]?soccer|\bvirtual\b|simulated reality|spinner world cup|\bpes\b|áº£o|Ä‘iá»‡n tá»­)/u.test(evidence);
+  }).map((record) => ({
+    ...record,
+    groups: record.groups.filter((group) => group.betTypeIds.length === 1 && group.betTypeIds[0] === "1")
+  }));
+}
+
+function hasUsableHandicap(records: readonly CmdCatalogInputRecord[]): boolean {
+  return records.some((record) => record.matchId.length > 0 && record.teamNames.length === 2 &&
+    record.groups.some((group) => group.odds.length === 2 && group.odds.every((odd) =>
+      odd.marketOddsId.length > 0 && odd.priceText.length > 0)));
+}
+
+export function catalogStructuralFingerprint(records: readonly CmdCatalogInputRecord[]): string {
+  return JSON.stringify(records.map((record) => ({
+    sportId: record.sportId,
+    leagueId: record.leagueId,
+    leagueName: record.leagueName,
+    matchId: record.matchId,
+    timeText: record.timeText,
+    teamNames: record.teamNames,
+    groups: record.groups.map((group) => ({
+      betTypeIds: group.betTypeIds,
+      labels: group.labels,
+      odds: group.odds.map((odd) => ({ marketOddsId: odd.marketOddsId, lineText: odd.lineText ?? null }))
+    }))
+  })));
+}
+
+export async function readStableFootballCatalog(
+  probe: StableFootballCatalogProbe,
+  options: StableFootballCatalogOptions = defaultStableFootballCatalogOptions
+): Promise<readonly CmdCatalogInputRecord[]> {
+  if (!Number.isFinite(options.maxWaitMs) || options.maxWaitMs <= 0 ||
+    !Number.isFinite(options.pollingIntervalMs) || options.pollingIntervalMs <= 0 ||
+    !Number.isSafeInteger(options.stableSampleCount) || options.stableSampleCount < 2) {
+    throw new Error("CMD_CATALOG_OPTIONS_INVALID");
   }
-  return records;
+  let records = focusedHandicapRecords(await probe.read());
+  if (!hasUsableHandicap(records)) await probe.select();
+  let previousFingerprint: string | null = options.trustedStructuralFingerprint ?? null;
+  let stableSamples = previousFingerprint === null ? 0 : options.stableSampleCount - 1;
+  let fallback: readonly CmdCatalogInputRecord[] = [];
+  const attempts = Math.ceil(options.maxWaitMs / options.pollingIntervalMs) + 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (records.length > 0) fallback = records;
+    if (hasUsableHandicap(records)) {
+      const fingerprint = catalogStructuralFingerprint(records);
+      stableSamples = fingerprint === previousFingerprint ? stableSamples + 1 : 1;
+      previousFingerprint = fingerprint;
+      if (stableSamples >= options.stableSampleCount) return records;
+    } else {
+      previousFingerprint = null;
+      stableSamples = 0;
+    }
+    if (attempt + 1 < attempts) {
+      await probe.wait(options.pollingIntervalMs);
+      records = focusedHandicapRecords(await probe.read());
+    }
+  }
+  if (fallback.length > 0) return fallback;
+  throw new Error("CMD_CATALOG_UNAVAILABLE");
+}
+
+export async function readCmdFootballCatalog(
+  page: Page,
+  trustedStructuralFingerprint?: string
+): Promise<readonly CmdCatalogInputRecord[]> {
+  return readStableFootballCatalog({
+    read: async () => extractCmdCatalogRecords(page, 500, "1", ["1"]),
+    select: async () => clickSafeStructuralCategory(page, "1", 0),
+    wait: async (delayMs) => page.waitForTimeout(delayMs)
+  }, {
+    ...defaultStableFootballCatalogOptions,
+    ...(trustedStructuralFingerprint === undefined ? {} : { trustedStructuralFingerprint })
+  });
+}
+
+export async function runCoalesced<TKey, TValue>(
+  pending: Map<TKey, Promise<TValue>>,
+  key: TKey,
+  operation: () => Promise<TValue>
+): Promise<TValue> {
+  const current = pending.get(key);
+  if (current !== undefined) return current;
+  const created = Promise.resolve().then(operation).finally(() => {
+    if (pending.get(key) === created) pending.delete(key);
+  });
+  pending.set(key, created);
+  return created;
 }
 
 export async function readWithOneSessionRecovery<TSession, TResult>(input: {
@@ -71,6 +176,7 @@ interface OpenCmdSession {
   readonly context: BrowserContext;
   readonly page: Page;
   footballSelected: boolean;
+  catalogFingerprint: string | undefined;
 }
 
 export interface PlaywrightCmdBrowserManagerOptions {
@@ -85,6 +191,7 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
   readonly #startupTimeoutMs: number;
   readonly #sessions = new Map<string, OpenCmdSession>();
   readonly #opening = new Map<string, Promise<OpenCmdSession>>();
+  readonly #reading = new Map<string, Promise<readonly CmdCatalogInputRecord[]>>();
 
   constructor(options: PlaywrightCmdBrowserManagerOptions) {
     if (options.profilesRoot.trim().length === 0 || !Number.isFinite(options.startupTimeoutMs ?? 30_000) ||
@@ -126,23 +233,25 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
     readonly sessionId: string;
     readonly launchUrl: string;
   }): Promise<readonly CmdCatalogInputRecord[]> {
-    return readWithOneSessionRecovery({
+    return runCoalesced(this.#reading, input.sessionId, async () => readWithOneSessionRecovery({
       acquire: async () => this.#get(input),
       invalidate: async (session) => this.#invalidate(input.sessionId, session),
       recover: async (session) => {
         await session.page.reload({ waitUntil: "domcontentloaded", timeout: this.#startupTimeoutMs });
       },
       read: async (session) => {
-        const records = await readCmdFootballCatalog(session.page);
+        const records = await readCmdFootballCatalog(session.page, session.catalogFingerprint);
         session.footballSelected = true;
+        session.catalogFingerprint = catalogStructuralFingerprint(records);
         return records;
       }
-    });
+    }));
   }
 
   async close(): Promise<void> {
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
+    this.#reading.clear();
     await Promise.allSettled(sessions.map(async (session) => session.context.close()));
   }
 
@@ -179,7 +288,7 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
         if (page === null) await launcher.waitForTimeout(250);
       }
       if (page === null) throw new Error("CMD_CATALOG_UNAVAILABLE");
-      const session: OpenCmdSession = { context, page, footballSelected: false };
+      const session: OpenCmdSession = { context, page, footballSelected: false, catalogFingerprint: undefined };
       this.#sessions.set(input.sessionId, session);
       return session;
     } catch {

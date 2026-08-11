@@ -78,7 +78,7 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
     expect(await screen.findByText(/Waiting for a provider price change/u)).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(250));
 
     expect(screen.getByText("Best live lag signal")).toBeTruthy();
     expect(screen.getByLabelText("Movement #SABA AWAY 1.7 to 2.2")).toBeTruthy();
@@ -182,7 +182,7 @@ describe("LiveCatalogPage", () => {
 
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
     expect(await screen.findByRole("columnheader", { name: "SABA" })).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(250));
 
     expect(screen.getByRole("columnheader", { name: "SABA" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
