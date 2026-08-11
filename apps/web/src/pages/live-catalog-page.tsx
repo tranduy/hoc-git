@@ -41,9 +41,31 @@ function ProviderSelector({ accounts, selected, toggle }: {
     const providerAccounts = accounts.filter((account) => account.provider === provider);
     if (providerAccounts.length === 0) return [<label className="provider-selector__unavailable" key={provider}>
       <input aria-label={`${provider} unavailable`} disabled type="checkbox" /><b>#{provider}</b><small>not connected</small></label>];
-    return providerAccounts.map((account) => <label key={account.id}><input checked={selected.has(account.id)}
+    const activeAccounts = providerAccounts.filter((account) => account.sessionState === "ACTIVE");
+    if (activeAccounts.length === 0) {
+      const detail = providerAccounts.some((account) => account.reason === "EXPIRED") ? "nguồn hết hạn"
+        : providerAccounts.some((account) => account.reason === "SCHEMA_CHANGED") ? "lỗi schema nguồn"
+        : "nguồn không hoạt động";
+      return [<label className="provider-selector__unavailable" key={provider}>
+        <input aria-label={`${provider} ${detail}`} disabled type="checkbox" /><b>#{provider}</b><small>{detail}</small></label>];
+    }
+    return activeAccounts.map((account) => <label key={account.id}><input checked={selected.has(account.id)}
       onChange={() => toggle(account.id)} type="checkbox" /><span>{account.alias}</span><b>#{account.provider}</b></label>);
   })}</fieldset>;
+}
+
+function ProviderSourceStatus({ accounts, selected }: { readonly accounts: readonly AccountStatus[];
+  readonly selected: ReadonlySet<string> }) {
+  return <section className="provider-source-status" aria-label="Trạng thái nguồn dữ liệu">{comparisonProviders.map((provider) => {
+    const matches = accounts.filter((account) => account.provider === provider);
+    const active = matches.filter((account) => account.sessionState === "ACTIVE" && selected.has(account.id)).length;
+    const state = active > 0 ? `${active} nguồn đang hoạt động`
+      : matches.some((account) => account.reason === "EXPIRED") ? "Nguồn hết hạn — cần đăng nhập/lấy launch mới"
+      : matches.some((account) => account.reason === "SCHEMA_CHANGED") ? "Lỗi nguồn/schema — không phải không có trận"
+      : matches.length > 0 ? "Nguồn không hoạt động — không phải không có trận" : "Chưa cấu hình nguồn";
+    return <span className={active > 0 ? "source-state source-state--active" : "source-state source-state--error"}
+      key={provider}><b>#{provider}</b>{state}</span>;
+  })}</section>;
 }
 
 function stakePolicy(baseStake: string): FixedBaseStakePolicy {
@@ -170,6 +192,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   readonly fixedCategory?: CatalogCategory;
 }) {
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [category, setCategory] = useState<CatalogCategory>(() => fixedCategory ?? loadCatalogCategory(window.localStorage));
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
@@ -207,7 +230,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const results = await Promise.allSettled(ids.map(async (id) => catalogApi.read(id)));
       const accepted = results.flatMap((result) => result.status === "fulfilled" &&
         result.value.category === expectedCategory ? [result.value] : []);
-      const failedIds = new Set(ids.filter((_id, index) => results[index]?.status === "rejected"));
+      const failedIds = new Set(ids.filter((_id, index) => {
+        const result = results[index];
+        return result?.status !== "fulfilled" || result.value.category !== expectedCategory;
+      }));
       const preserved = catalogsRef.current.filter((catalog) => failedIds.has(catalog.accountId) &&
         !accepted.some((candidate) => candidate.accountId === catalog.accountId));
       const nextCatalogs = [...accepted, ...preserved];
@@ -222,9 +248,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       setMovements(movementTracker.current.update(nextEvents, observedAtMs));
       const failed = results.length - accepted.length;
       if (accepted.length === 0 && preserved.length > 0) setMessage(`${failed} selected provider(s) unavailable; last verified snapshots are retained as stale. Signals are disabled until a fresh read succeeds.`);
-      else if (accepted.length === 0) setMessage("Live catalog is unavailable. No selected provider returned a verified catalog.");
+      else if (accepted.length === 0) setMessage("Nguồn đã chọn đang lỗi hoặc trả sai category — chưa thể kết luận là không có trận.");
       else if (failed > 0 && preserved.length > 0) setMessage(`${failed} selected provider(s) unavailable; last verified snapshot is retained as stale.`);
       else if (failed > 0) setMessage(`${failed} selected provider(s) unavailable; available books are still shown.`);
+      else if (accepted.every((catalog) => catalog.events.length === 0)) setMessage("Nguồn hoạt động bình thường nhưng hiện không có trận trong catalog.");
       else setMessage(null);
     } finally {
       refreshInFlight.current = false;
@@ -234,7 +261,11 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   useEffect(() => {
     void accountApi.list().then((items) => {
-      const available = items.filter((account) => account.capabilities.includes("CATALOG") && account.sessionState === "ACTIVE");
+      const catalogAccounts = items.filter((account) => account.capabilities.includes("CATALOG"));
+      const availableCandidates = catalogAccounts.filter((account) => account.sessionState === "ACTIVE");
+      const targetCategory = fixedCategory ?? category;
+      const available = availableCandidates.filter((account) => account.category !== null ||
+        !availableCandidates.some((candidate) => candidate.provider === account.provider && candidate.category === targetCategory));
       const requestedAccount = available.find((account) => account.id === requested.current.account);
       let initialCategory: CatalogCategory = fixedCategory ?? (requestedAccount?.category === "LOL" ? "LOL" : category);
       const hasInitialCategory = available.some((account) => account.category === null || account.category === initialCategory);
@@ -245,13 +276,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       catalogsRef.current = cached;
       setCatalogs(cached);
       setStaleAccountIds(new Set(cached.map((catalog) => catalog.accountId)));
-      setAccounts(available); setSelectedIds(new Set(available.map((account) => account.id)));
+      setAccounts(catalogAccounts); setAccountsLoaded(true); setSelectedIds(new Set(available.map((account) => account.id)));
       setCategory(initialCategory); saveCatalogCategory(window.localStorage, initialCategory);
       if (!autoLoaded.current && initial.size > 0) {
         autoLoaded.current = true;
         void loadIds([...initial], true, initialCategory);
       }
-    }).catch(() => setMessage("Provider accounts are unavailable."));
+    }).catch(() => { setAccountsLoaded(true); setMessage("Không đọc được trạng thái account/provider."); });
   }, [accountApi, fixedCategory, loadIds]);
 
   useEffect(() => {
@@ -349,6 +380,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true, category)} type="button">
         {busy ? "Loading…" : "Compare selected books"}</button>
     </section>
+    {accountsLoaded && <ProviderSourceStatus accounts={categoryAccounts} selected={selectedIds} />}
     {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}
     {catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
       <span>{catalogs.length - staleAccountIds.size} fresh provider(s)</span>

@@ -99,7 +99,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     vault,
     validators: new SessionValidatorRegistry(options.validators ?? [
       new CmdSessionValidator(cmdBrowser),
-      new SabaSessionValidator(sabaEsportsBrowser),
+      new SabaSessionValidator({ verifyLaunch: async (launchUrl) =>
+        await sabaBrowser.verifyLaunch(launchUrl) || await sabaEsportsBrowser.verifyLaunch(launchUrl) }),
       new SbobetSessionValidator(sbobetBrowser),
       new ImSessionValidator(imEsportsBrowser)
     ]),

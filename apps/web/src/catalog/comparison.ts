@@ -42,7 +42,8 @@ export interface ComparisonEvent {
 type EventOrientation = "SAME" | "SWAPPED";
 
 function identityText(value: string): string {
-  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("en");
+  return value.normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
+    .replace(/đ/gu, "d").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/^clb\s+/u, "").replace(/\s+/gu, " ");
 }
 
 function eventKey(event: ProviderEvent): string {

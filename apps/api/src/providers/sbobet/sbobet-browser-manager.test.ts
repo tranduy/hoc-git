@@ -26,6 +26,10 @@ describe("extractSbobetRecords", () => {
             <div class="un-promotion"><div class="odd-item" id="odd-item-result-h"><span class="odd-val">2.1</span></div>
               <div class="odd-item" id="odd-item-result-d"><span class="odd-val">3.2</span></div>
               <div class="odd-item" id="odd-item-result-a"><span class="odd-val">3.4</span></div></div>
+            <div class="un-promotion">
+              <div class="odd-row"><span class="rate-asian">0.5</span><div class="odd-item" id="odd-item-alt-h"><span class="odd-val">0.20</span></div></div>
+              <div class="odd-row"><span class="rate-asian"></span><div class="odd-item" id="odd-item-alt-a"><span class="odd-val">-0.30</span></div></div>
+            </div>
           </div>
         </div>
       </section>`);

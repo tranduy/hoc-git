@@ -50,8 +50,12 @@ export async function extractSbobetRecords(page: Page): Promise<readonly SbobetC
       }
       return { marketId: `${id}:${marketType}:${lineText ?? ""}`, marketType, lineText, selections };
     };
-    const markets = columns.map((column) => market(column))
-      .filter((value) => value !== null && value.selections.length > 0);
+    const extracted = columns.flatMap((column) => {
+      const value = market(column);
+      return value === null || value.selections.length === 0 ? [] : [value];
+    });
+    const markets = extracted.filter((candidate, index) =>
+      extracted.findIndex((market) => market.marketType === candidate.marketType) === index);
     return { eventId: id, leagueName: league, timeText, scoreText, teamNames: teams, markets };
   })) as Promise<readonly SbobetCatalogInputRecord[]>;
 }

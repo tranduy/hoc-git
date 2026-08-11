@@ -96,6 +96,17 @@ describe("catalog comparison", () => {
     expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SBOBET"]);
   });
 
+  it("matches the same Vietnamese club across provider accents and the CLB display prefix", () => {
+    const saba = handicapCatalog("SABA", "saba-vn", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-vn", "-0.5", ["0.78", "-0.86"]);
+    const localizedSaba = { ...saba, events: [{ ...saba.events[0]!, participantA: "Adelaide United",
+      participantB: "CLB Công An Hà Nội" }] };
+    const localizedSbobet = { ...sbobet, events: [{ ...sbobet.events[0]!, participantA: "Adelaide United",
+      participantB: "Cong An Ha Noi" }] };
+
+    expect(buildComparisonEvents([localizedSaba, localizedSbobet])).toHaveLength(1);
+  });
+
   it("matches a reversed LoL participant order and reorients TEAM_A/TEAM_B to the anchor event", () => {
     const saba = lolCatalog("SABA", "saba-lol", "Nongshim Esports Academy", "Dplus KIA Challengers", ["2.20", "1.65"],
       "saba-esports-two-way-moneyline");

@@ -283,11 +283,11 @@ describe("LiveCatalogPage", () => {
     const unavailableCatalogApi: CatalogApiLike = { read: async () => { throw new Error("unavailable"); } };
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={unavailableCatalogApi} />);
 
-    expect(await screen.findByText(/Live catalog is unavailable/u)).toBeTruthy();
+    expect(await screen.findByText(/Nguồn đã chọn đang lỗi hoặc trả sai category/u)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "LoL" }));
 
     expect(screen.getByLabelText("SABA unavailable")).toBeTruthy();
-    expect(screen.queryByText(/Live catalog is unavailable/u)).toBeNull();
+    expect(screen.queryByText(/Nguồn đã chọn đang lỗi hoặc trả sai category/u)).toBeNull();
   });
 
   it("retries the same Football account after leaving and returning to the category", async () => {
@@ -295,7 +295,7 @@ describe("LiveCatalogPage", () => {
       .mockRejectedValueOnce(new Error("stale provider page"))
       .mockResolvedValue(catalog);
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={{ read }} />);
-    expect(await screen.findByText(/Live catalog is unavailable/u)).toBeTruthy();
+    expect(await screen.findByText(/Nguồn đã chọn đang lỗi hoặc trả sai category/u)).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "LoL" }));
     fireEvent.click(screen.getByRole("button", { name: "Football" }));
@@ -375,5 +375,34 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
     expect(screen.getByText(/Cross-book comparison unavailable/u)).toBeTruthy();
+  });
+
+  it("labels an expired Football source instead of presenting it as an empty catalog", async () => {
+    const expired: AccountStatus = { ...account, sessionState: "ACTION_REQUIRED", reason: "EXPIRED" };
+    const read = vi.fn(async () => catalog);
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [expired] }} catalogApi={{ read }} />);
+
+    expect(await screen.findByText("Nguồn hết hạn — cần đăng nhập/lấy launch mới")).toBeTruthy();
+    expect(screen.getByLabelText("CMD nguồn hết hạn")).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("only says there are no matches after a successful empty provider response", async () => {
+    const emptyCatalog: LiveCatalogResponse = { ...catalog, events: [], markets: [], quotes: [] };
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi}
+      catalogApi={{ read: async () => emptyCatalog }} />);
+
+    expect(await screen.findByText("Nguồn hoạt động bình thường nhưng hiện không có trận trong catalog.")).toBeTruthy();
+    expect(screen.getByText("1 nguồn đang hoạt động")).toBeTruthy();
+  });
+
+  it("labels a failed provider read as a source error and never as no matches", async () => {
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi}
+      catalogApi={{ read: async () => { throw new Error("provider failed"); } }} />);
+
+    expect(await screen.findByText("Nguồn đã chọn đang lỗi hoặc trả sai category — chưa thể kết luận là không có trận.")).toBeTruthy();
+    expect(screen.queryByText(/hiện không có trận trong catalog/u)).toBeNull();
   });
 });

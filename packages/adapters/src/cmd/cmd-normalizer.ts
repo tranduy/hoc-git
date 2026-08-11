@@ -162,7 +162,8 @@ export function normalizeObservedFootballCatalog(
 
   for (const record of records) {
     const timing = eventTime(record.timeText, options);
-    const teams = record.teamNames.map((team) => team.trim()).filter((team) => team.length > 0);
+    const teams = [...new Map(record.teamNames.map((team) => team.trim().replace(/\s*\(N\)\s*$/iu, "").trim())
+      .filter((team) => team.length > 0).map((team) => [team.toLocaleLowerCase("en-US"), team])).values()];
     const supported = record.groups.filter((group) => group.betTypeIds.length === 1 && ["1", "3", "5"].includes(group.betTypeIds[0]!) &&
       (group.betTypeIds[0] !== "1" || group.odds.some((odd) => odd.lineText !== undefined)));
     let invalid = record.sportId !== "1" || record.matchId.trim().length === 0 || record.leagueName.trim().length === 0 ||

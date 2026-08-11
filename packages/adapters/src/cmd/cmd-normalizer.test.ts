@@ -119,6 +119,18 @@ describe("normalizeCmdCatalog", () => {
     expect(awayGives.markets[0]?.line).toBe("0.5");
   });
 
+  it("removes the neutral-ground marker and duplicate team node emitted by the current CMD DOM", () => {
+    const currentDom = { ...structuredClone(record), teamNames: ["Lions FC (N)", "Melbourne City FC", "Lions FC"] };
+    const result = normalizeCmdCatalog([currentDom], {
+      observedAtMs: Date.UTC(2026, 7, 11), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
+    });
+
+    expect(result.events).toEqual([expect.objectContaining({
+      participantA: "Lions FC", participantB: "Melbourne City FC"
+    })]);
+    expect(result.diagnostics).toEqual([]);
+  });
+
   it("accepts the observed live clock format with stoppage time", () => {
     const live = { ...record, timeText: "2H48'+6", groups: [record.groups[2]!] };
     const result = normalizeCmdCatalog([live], {
