@@ -22,6 +22,7 @@ export type SessionHealthReason =
 export interface RedactedSessionStatus {
   readonly id: string;
   readonly provider: string;
+  readonly category: Category | null;
   readonly source: SessionSource;
   readonly state: SessionState;
   readonly trustedHostname: string | null;

@@ -4,6 +4,7 @@ import { SessionApi } from "./sessions.js";
 const status = {
   id: "manual-1",
   provider: "SABA",
+  category: null,
   source: "MANUAL_PROVIDER_SESSION",
   state: "ACTIVE",
   trustedHostname: null,

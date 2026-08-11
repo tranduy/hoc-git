@@ -85,6 +85,7 @@ describe("RedactedSessionStatusSchema", () => {
   const completeStatus = () => ({
     id: "session-1",
     provider: "SABA",
+    category: "FOOTBALL" as const,
     source: "MANUAL_PROVIDER_SESSION",
     state: "ACTIVE",
     trustedHostname: "sports.example.test",

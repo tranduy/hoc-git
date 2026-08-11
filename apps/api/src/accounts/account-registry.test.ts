@@ -23,6 +23,7 @@ async function setup() {
   const clock = { value: 1_000 };
   const statuses = ["session-a", "session-b"].map((id) => ({
     id, provider: "CMD", source: "MANUAL_PROVIDER_SESSION" as const, state: "ACTIVE" as const,
+    category: null,
     trustedHostname: null, acquiredAtMs: 1, lastValidatedAtMs: 1, renewAfterMs: 99_999,
     secretConfigured: true, reason: null
   }));
@@ -94,6 +95,7 @@ describe("AccountRegistry", () => {
       sessions: {
         listStatuses: async () => ({ sessions: [{
           id: "session-a", provider: "CMD", source: "MANUAL_PROVIDER_SESSION", state: "INVALID",
+          category: null,
           trustedHostname: null, acquiredAtMs: 1, lastValidatedAtMs: 1, renewAfterMs: 2,
           secretConfigured: true, reason: "EXPIRED"
         }] }),

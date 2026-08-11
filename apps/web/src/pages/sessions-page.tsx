@@ -250,10 +250,11 @@ export function SessionsPage({
         </div>
         {sessions.length === 0 ? <p className="empty-state">No session is configured.</p> : (
           <div className="table-wrap"><table><thead><tr>
-            <th>Provider</th><th>Source</th><th>State</th><th>Trusted host</th><th>Last checked</th><th>Forced renewal</th><th>Diagnostic</th><th>Actions</th>
+            <th>Provider</th><th>Category</th><th>Source</th><th>State</th><th>Trusted host</th><th>Last checked</th><th>Forced renewal</th><th>Diagnostic</th><th>Actions</th>
           </tr></thead><tbody>{sessions.map((session) => (
             <tr key={session.id}>
               <td>{session.provider}</td>
+              <td>{session.category ?? "—"}</td>
               <td>{session.source === "FABET_LOGIN" ? "Fabet login" : "Direct"}</td>
               <td><strong className={`session-state session-state--${session.state.toLowerCase()}`}>{displayState(session.state)}</strong></td>
               <td>{session.trustedHostname ?? "—"}</td>

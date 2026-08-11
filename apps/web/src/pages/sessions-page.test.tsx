@@ -7,6 +7,7 @@ import type { AccountApiLike } from "../api/accounts.js";
 const active: RedactedSessionStatus = {
   id: "manual-1",
   provider: "SABA",
+  category: null,
   source: "MANUAL_PROVIDER_SESSION",
   state: "ACTIVE",
   trustedHostname: null,

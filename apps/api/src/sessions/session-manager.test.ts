@@ -268,4 +268,36 @@ describe("SessionManager", () => {
     await manager.resetFabet();
     expect(resetCalls).toBe(1);
   });
+
+  it("keeps Football and LoL launches separate when provider and hostname are identical", async () => {
+    const vault = await createVault();
+    const manager = new SessionManager({
+      vault,
+      validators: new SessionValidatorRegistry([]),
+      clock: { nowMs: () => 50 },
+      idFactory: () => "unused",
+      fabetDriver: {
+        login: async () => undefined,
+        captureLobbyLaunches: async () => {
+          await vault.save("football-launch", { kind: "LAUNCH_URL", value: "https://same.vendor.test/football", capturedAtMs: 50 });
+          await vault.save("lol-launch", { kind: "LAUNCH_URL", value: "https://same.vendor.test/lol", capturedAtMs: 50 });
+          return [
+            { category: "FOOTBALL", providerHint: "SABA", hostname: "same.vendor.test", capturedAtMs: 50, vaultRecordId: "football-launch" },
+            { category: "LOL", providerHint: "SABA", hostname: "same.vendor.test", capturedAtMs: 50, vaultRecordId: "lol-launch" }
+          ];
+        },
+        resetProfile: async () => undefined
+      }
+    });
+
+    await manager.configureFabet({
+      entryUrl: "https://fabet.party/", username: "development-user", password: "development-pass",
+      trustedHostname: "fabet.party"
+    });
+
+    const launches = (await manager.listStatuses()).sessions.filter((session) => session.provider === "SABA");
+    expect(launches).toHaveLength(2);
+    expect(launches.map((session) => session.category).sort()).toEqual(["FOOTBALL", "LOL"]);
+    expect(new Set(launches.map((session) => session.id)).size).toBe(2);
+  });
 });

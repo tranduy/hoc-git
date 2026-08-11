@@ -64,6 +64,7 @@ export const SessionHealthReasonSchema = z.enum([
 export const RedactedSessionStatusSchema = z.strictObject({
   id: z.string().trim().min(1),
   provider: z.string().trim().min(1),
+  category: z.enum(["FOOTBALL", "LOL"]).nullable(),
   source: SessionSourceSchema,
   state: SessionStateSchema,
   trustedHostname: z.string().trim().min(1).nullable(),

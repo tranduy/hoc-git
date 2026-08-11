@@ -10,6 +10,7 @@
     "dev": "npm run build && node dist/server.js",
     "start": "node dist/server.js",
     "inspect:launch": "npm run build && node dist/providers/inspect-launch.js",
+    "inspect:saba-push": "npm run build && node dist/providers/saba/inspect-saba-push.js",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

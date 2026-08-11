@@ -1,4 +1,5 @@
 import type {
+  Category,
   RedactedSessionStatus,
   SessionHealthReason,
   SessionSource,
@@ -25,6 +26,7 @@ interface StoredSession {
   readonly version: 1;
   readonly id: string;
   readonly provider: string;
+  readonly category: Category | null;
   readonly source: SessionSource;
   readonly state: SessionState;
   readonly trustedHostname: string | null;
@@ -87,13 +89,15 @@ function parseStoredSession(value: SecretRecord | null): StoredSession | null {
     !["TOKEN", "COOKIE_BUNDLE", "LAUNCH_URL", "FABET_CREDENTIALS"].includes(String(secretFields.kind)) ||
     typeof secretFields.value !== "string"
   ) return null;
-  return value as unknown as StoredSession;
+  const category = value.category === "FOOTBALL" || value.category === "LOL" ? value.category : null;
+  return { ...(value as unknown as StoredSession), category };
 }
 
 function publicStatus(record: StoredSession): RedactedSessionStatus {
   return {
     id: record.id,
     provider: record.provider,
+    category: record.category,
     source: record.source,
     state: record.state,
     trustedHostname: record.trustedHostname,
@@ -131,6 +135,7 @@ export class SessionManager {
       version: 1,
       id: this.#idFactory(),
       provider,
+      category: null,
       source: "MANUAL_PROVIDER_SESSION",
       state: "VALIDATING",
       trustedHostname: input.kind === "LAUNCH_URL" ? this.#hostname(input.secret) : null,
@@ -151,6 +156,7 @@ export class SessionManager {
       version: 1,
       id: "fabet",
       provider: "FABET",
+      category: null,
       source: "FABET_LOGIN",
       state: "VALIDATING",
       trustedHostname: input.trustedHostname,
@@ -383,11 +389,13 @@ export class SessionManager {
         ? `UNKNOWN (${candidate.hostname})`
         : candidate.providerHint;
       const slug = provider.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "") || "unknown";
+      const categorySlug = candidate.category.toLowerCase();
       const hostHash = createHash("sha256").update(candidate.hostname).digest("hex").slice(0, 12);
       const record: StoredSession = {
         version: 1,
-        id: `fabet-launch-${slug}-${hostHash}`,
+        id: `fabet-launch-${slug}-${categorySlug}-${hostHash}`,
         provider,
+        category: candidate.category,
         source: "FABET_LOGIN",
         state: "ACTION_REQUIRED",
         trustedHostname: candidate.hostname,
