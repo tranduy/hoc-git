@@ -32,4 +32,15 @@ describe("ApsportTicketPreflightReader", () => {
     await expect(reader.preflight(handle, { ...request, providerSelectionId: "other" }))
       .rejects.toThrow("PREFLIGHT_IDENTITY_MISMATCH");
   });
+
+  it("uses the exact short-lived slip constraint and blocks the known insufficient balance", async () => {
+    const reader = new ApsportTicketPreflightReader({ source: { readCatalog: async () => snapshot,
+      readTicketConstraint: async () => ({ providerSelectionId: "home-1", currency: "VND", minStake: "50000",
+        maxStake: "352359000", stakeStep: "1000", balance: "29000", observedAtMs: 2000 })
+    }, clock: { nowMs: () => 2000 } });
+    await expect(reader.preflight(handle, { ...request, requestedStake: "29000" })).resolves.toMatchObject({
+      constraint: { minStake: "50000", balance: "29000", expiresAtMs: 5000 }, eligible: false,
+      reasons: ["BELOW_MIN"]
+    });
+  });
 });

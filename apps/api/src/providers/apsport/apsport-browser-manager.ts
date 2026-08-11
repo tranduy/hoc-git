@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import { collectSafeControlShapes } from "../browser-protocol-inspector.js";
+import { parseApsportTicketConstraint, type ApsportTicketConstraintSnapshot } from "./apsport-ticket-constraint.js";
 
 export interface ApsportIdentityEvidence {
   readonly hostname: string;
@@ -89,6 +90,7 @@ export class PlaywrightApsportBrowserManager {
   readonly #sessions = new Map<string, OpenApsportSession>();
   readonly #opening = new Map<string, Promise<OpenApsportSession>>();
   readonly #reads = new Map<string, Promise<ApsportCatalogSnapshot>>();
+  readonly #ticketReads = new Map<string, Promise<ApsportTicketConstraintSnapshot | null>>();
 
   constructor(options: { profilesRoot: string; headless?: boolean; startupTimeoutMs?: number }) {
     this.#profilesRoot = options.profilesRoot;
@@ -115,11 +117,60 @@ export class PlaywrightApsportBrowserManager {
     return { ...await extractApsportProfile(session.page), observedAtMs: Date.now() };
   }
 
+  async readTicketConstraint(input: { sessionId: string; launchUrl: string;
+    providerSelectionId: string }): Promise<ApsportTicketConstraintSnapshot | null> {
+    const active = this.#ticketReads.get(input.sessionId);
+    if (active !== undefined) return active;
+    const next = this.#readTicketConstraint(input.launchUrl, input.providerSelectionId).finally(() => {
+      if (this.#ticketReads.get(input.sessionId) === next) this.#ticketReads.delete(input.sessionId);
+    });
+    this.#ticketReads.set(input.sessionId, next);
+    return next;
+  }
+
   async close(): Promise<void> {
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
     this.#reads.clear();
+    this.#ticketReads.clear();
     await Promise.allSettled(sessions.map((session) => session.context.close()));
+  }
+
+  async #readTicketConstraint(launchUrl: string, providerSelectionId: string): Promise<ApsportTicketConstraintSnapshot | null> {
+    const session = await this.#get(launchUrl);
+    const clicked = await session.page.evaluate((selectionId) => {
+      const element = document.getElementById(`odd-item-${selectionId}`) as HTMLElement | null;
+      if (element === null) return false;
+      element.click();
+      return true;
+    }, providerSelectionId).catch(() => false);
+    if (!clicked) return null;
+    const deadline = Date.now() + 1_500;
+    while (Date.now() < deadline) {
+      const evidence = await session.page.evaluate((selectionId) => {
+        const bodyText = document.body.innerText;
+        const lines = bodyText.split(/\r?\n/u);
+        const input = [...document.querySelectorAll<HTMLInputElement>("input.input-stake")].find((candidate) => {
+          const style = getComputedStyle(candidate); const bounds = candidate.getBoundingClientRect();
+          return !candidate.disabled && style.display !== "none" && style.visibility !== "hidden" &&
+            bounds.width > 0 && bounds.height > 0;
+        });
+        const placeholderLimits = input === undefined ? null : /^\s*([1-9]\d{0,2}(?:,\d{3})*|[1-9]\d*)\s*-\s*([1-9]\d{0,2}(?:,\d{3})*|[1-9]\d*)\s*$/u.exec(input.placeholder);
+        const visibleLimit = lines.find((line) => /(?:Tối\s*thiểu\s*-\s*Tối\s*đa\s*)?[\d,.]+\s*-\s*[\d,.]+\s*K\b/iu.test(line));
+        const limitText = visibleLimit ?? (placeholderLimits === null ? "" : `${placeholderLimits[1]} - ${placeholderLimits[2]} K`);
+        const balanceText = document.querySelector(".user-balance")?.textContent?.trim() ?? "";
+        return { providerSelectionId: selectionId,
+          selectionMatched: document.getElementById(`odd-item-${selectionId}`) !== null && limitText !== "",
+          limitText, stakeStepText: input?.step || (placeholderLimits === null ? "" : "1"),
+          balanceText, observedAtMs: Date.now() };
+      }, providerSelectionId).catch(() => null);
+      if (evidence !== null) {
+        const parsed = parseApsportTicketConstraint(evidence);
+        if (parsed !== null) return parsed;
+      }
+      await session.page.waitForTimeout(50);
+    }
+    return null;
   }
 
   async #readCatalog(launchUrl: string): Promise<ApsportCatalogSnapshot> {

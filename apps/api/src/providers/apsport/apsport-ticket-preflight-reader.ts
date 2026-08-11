@@ -4,9 +4,12 @@ import { toDecimal } from "@tool-chenh/core";
 import type { ActiveSecretHandle } from "../../sessions/types.js";
 import type { ProviderTicketPreflightReader } from "../provider-capabilities.js";
 import type { ApsportCatalogSnapshot } from "./apsport-browser-manager.js";
+import type { ApsportTicketConstraintSnapshot } from "./apsport-ticket-constraint.js";
 
 export interface ApsportPreflightSource {
   readCatalog(input: { readonly sessionId: string; readonly launchUrl: string }): Promise<ApsportCatalogSnapshot>;
+  readTicketConstraint?(input: { readonly sessionId: string; readonly launchUrl: string;
+    readonly providerSelectionId: string }): Promise<ApsportTicketConstraintSnapshot | null>;
 }
 
 function plain(value: ReturnType<typeof toDecimal>): string { return value.toFixed(value.decimalPlaces()); }
@@ -15,7 +18,10 @@ export class ApsportTicketPreflightReader implements ProviderTicketPreflightRead
   readonly provider = "APSPORT" as const;
   readonly capabilities = ["PREFLIGHT"] as const;
   readonly #source: ApsportPreflightSource;
-  constructor(options: { readonly source: ApsportPreflightSource }) { this.#source = options.source; }
+  readonly #clock: { nowMs(): number };
+  constructor(options: { readonly source: ApsportPreflightSource; readonly clock?: { nowMs(): number } }) {
+    this.#source = options.source; this.#clock = options.clock ?? { nowMs: Date.now };
+  }
 
   async preflight(handle: ActiveSecretHandle, request: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight> {
     if (handle.provider !== "APSPORT" || handle.category !== "FOOTBALL") throw new Error("PREFLIGHT_ACCOUNT_UNAVAILABLE");
@@ -31,13 +37,29 @@ export class ApsportTicketPreflightReader implements ProviderTicketPreflightRead
         candidate.line === request.line);
       if (quote === undefined) throw new Error("PREFLIGHT_IDENTITY_MISMATCH");
       const decimalOdds = plain(toDecimal(quote.rawOdds, quote.rawFormat));
-      const reasons: ProviderTicketPreflight["reasons"][number][] = ["LIMIT_UNAVAILABLE"];
+      const limit = await this.#source.readTicketConstraint?.({ sessionId: handle.sessionId,
+        launchUrl: secret.value, providerSelectionId: quote.providerSelectionId }) ?? null;
+      const nowMs = this.#clock.nowMs();
+      const fresh = limit !== null && limit.providerSelectionId === quote.providerSelectionId &&
+        Number.isFinite(limit.observedAtMs) && limit.observedAtMs <= nowMs + 1_000 && nowMs - limit.observedAtMs <= 1_000;
+      const constraint = fresh ? { currency: limit.currency, minStake: limit.minStake, maxStake: limit.maxStake,
+        stakeStep: limit.stakeStep, balance: limit.balance, feeType: "NONE" as const, feeRate: null,
+        verifiedAsOfMs: limit.observedAtMs, expiresAtMs: limit.observedAtMs + 3_000 } : null;
+      const reasons: ProviderTicketPreflight["reasons"][number][] = [];
+      if (constraint === null) reasons.push("LIMIT_UNAVAILABLE");
       if (decimalOdds !== request.expectedDecimalOdds) reasons.push("ODDS_CHANGED");
       if (quote.status !== "OPEN") reasons.push("MARKET_NOT_OPEN");
+      if (constraint !== null) {
+        const stake = toDecimal(request.requestedStake, "DECIMAL");
+        if (stake.lt(toDecimal(constraint.minStake, "DECIMAL"))) reasons.push("BELOW_MIN");
+        if (stake.gt(toDecimal(constraint.maxStake, "DECIMAL"))) reasons.push("ABOVE_MAX");
+        if (!stake.mod(toDecimal(constraint.stakeStep, "DECIMAL")).isZero()) reasons.push("STAKE_STEP_MISMATCH");
+        if (stake.gt(toDecimal(constraint.balance, "DECIMAL"))) reasons.push("INSUFFICIENT_BALANCE");
+      }
       return { accountId: request.accountId, provider: "APSPORT", providerEventId: quote.providerEventId,
         providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId,
         selection: quote.selection, line: quote.line, decimalOdds, quoteStatus: quote.status,
-        constraint: null, eligible: false, reasons };
+        constraint, eligible: quote.status === "OPEN" && constraint !== null && reasons.length === 0, reasons };
     });
   }
 }
