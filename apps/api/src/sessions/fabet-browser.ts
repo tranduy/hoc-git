@@ -83,7 +83,7 @@ export function capturedTopLevelNavigation(lobbyOrigin: string, label: string, v
   }
 }
 
-function providerHint(label: string): string {
+function providerHint(label: string, hostname: string): string {
   const upper = label.trim().toUpperCase();
   if (upper.includes("SABA") || upper === "C-SPORTS") return "SABA";
   if (upper === "CMD" || upper === "T-SPORTS") return "CMD";
@@ -92,6 +92,7 @@ function providerHint(label: string): string {
   if (/^APS?PORT$/u.test(upper)) return "APSPORT";
   if (upper === "BTI") return "BTI";
   if (upper === "I-SPORTS") return "IM";
+  if (hostname.toLowerCase() === "imesports.techplay.com") return "IM";
   return "UNKNOWN";
 }
 
@@ -178,7 +179,7 @@ export class FabetBrowserDriver {
         });
         candidates.push({
           category: lobby.category,
-          providerHint: providerHint(navigation.label),
+          providerHint: providerHint(navigation.label, launch.hostname),
           hostname: launch.hostname,
           capturedAtMs,
           vaultRecordId

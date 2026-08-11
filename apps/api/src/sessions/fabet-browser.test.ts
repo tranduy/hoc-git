@@ -104,6 +104,9 @@ describe("FabetBrowserDriver", () => {
       }, {
         url: "https://sbobet.vendor.test/start?session=sbobet-secret-canary",
         label: "K-SPORTS"
+      }, {
+        url: "https://imesports.techplay.com/esportsitev2/index.html?token=im-secret-canary",
+        label: "ESPORTS"
       }]
     };
     let id = 0;
@@ -119,9 +122,10 @@ describe("FabetBrowserDriver", () => {
     expect(launches).toEqual([
       expect.objectContaining({ category: "FOOTBALL", providerHint: "SABA", hostname: "sports.vendor.test" }),
       expect.objectContaining({ category: "LOL", providerHint: "CMD", hostname: "esports.vendor.test" }),
-      expect.objectContaining({ category: "LOL", providerHint: "SBOBET", hostname: "sbobet.vendor.test" })
+      expect.objectContaining({ category: "LOL", providerHint: "SBOBET", hostname: "sbobet.vendor.test" }),
+      expect.objectContaining({ category: "LOL", providerHint: "IM", hostname: "imesports.techplay.com" })
     ]);
-    expect(JSON.stringify(launches)).not.toMatch(/launch-secret-canary|esports-secret-canary/u);
+    expect(JSON.stringify(launches)).not.toMatch(/launch-secret-canary|esports-secret-canary|im-secret-canary/u);
     expect(await context.vault.load(launches[0]!.vaultRecordId)).toEqual({
       kind: "LAUNCH_URL",
       value: "https://sports.vendor.test/launch?token=launch-secret-canary",
