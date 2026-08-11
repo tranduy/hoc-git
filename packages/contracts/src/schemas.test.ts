@@ -45,6 +45,13 @@ describe("live account and preflight schemas", () => {
       decimalOdds: "2.2", quoteStatus: "OPEN", constraint: { ...constraint, expiresAtMs: 3000 },
       eligible: true, reasons: ["ODDS_CHANGED"] }).success).toBe(false);
   });
+
+  it("allows a blocked exact quote to report unavailable limits without inventing a constraint", () => {
+    expect(ProviderTicketPreflightSchema.safeParse({ accountId: "a", provider: "BTI", providerEventId: "e",
+      providerMarketId: "m", providerSelectionId: "s", selection: "HOME", line: "-0.5",
+      decimalOdds: "2.2", quoteStatus: "OPEN", constraint: null,
+      eligible: false, reasons: ["LIMIT_UNAVAILABLE"] }).success).toBe(true);
+  });
   it("accepts Malay odds format for providers that publish signed Asian prices", () => {
     expect(OddsFormatSchema.parse("MALAY")).toBe("MALAY");
   });

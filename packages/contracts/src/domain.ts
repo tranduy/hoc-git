@@ -106,7 +106,7 @@ export interface ProviderTicketPreflight {
   readonly line: string | null;
   readonly decimalOdds: string;
   readonly quoteStatus: QuoteStatus;
-  readonly constraint: ProviderStakeConstraint;
+  readonly constraint: ProviderStakeConstraint | null;
   readonly eligible: boolean;
   readonly reasons: readonly ("IDENTITY_MISMATCH" | "ODDS_CHANGED" | "MARKET_NOT_OPEN" |
     "BELOW_MIN" | "ABOVE_MAX" | "INSUFFICIENT_BALANCE" | "LIMIT_UNAVAILABLE")[];

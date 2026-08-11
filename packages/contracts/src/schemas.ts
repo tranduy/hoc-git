@@ -257,13 +257,16 @@ export const ProviderTicketPreflightSchema = z.strictObject({
   line: DecimalStringSchema.nullable(),
   decimalOdds: NonnegativeDecimalStringSchema,
   quoteStatus: QuoteStatusSchema,
-  constraint: ProviderStakeConstraintSchema,
+  constraint: ProviderStakeConstraintSchema.nullable(),
   eligible: z.boolean(),
   reasons: z.array(z.enum(["IDENTITY_MISMATCH", "ODDS_CHANGED", "MARKET_NOT_OPEN",
     "BELOW_MIN", "ABOVE_MAX", "INSUFFICIENT_BALANCE", "LIMIT_UNAVAILABLE"])).max(8)
 }).superRefine((result, context) => {
-  if (result.eligible !== (result.quoteStatus === "OPEN" && result.reasons.length === 0)) {
+  if (result.eligible !== (result.quoteStatus === "OPEN" && result.constraint !== null && result.reasons.length === 0)) {
     context.addIssue({ code: "custom", path: ["eligible"], message: "eligible result must be open with no reasons" });
+  }
+  if (result.constraint === null && !result.reasons.includes("LIMIT_UNAVAILABLE")) {
+    context.addIssue({ code: "custom", path: ["reasons"], message: "missing constraint must report unavailable limits" });
   }
 }) satisfies z.ZodType<ProviderTicketPreflight>;
 

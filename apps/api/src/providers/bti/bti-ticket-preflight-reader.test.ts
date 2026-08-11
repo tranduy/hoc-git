@@ -1,0 +1,44 @@
+import type { ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
+import { describe, expect, it } from "vitest";
+import { BtiTicketPreflightReader } from "./bti-ticket-preflight-reader.js";
+
+const selection = (id: string, side: 1 | 3, line: number, malay: string, locked = false) =>
+  [id, { VI: "team" }, { VI: "team line" }, locked, false, 1.9, ["", "1.90", "", "", "", malay], side, 2, {}, "", "event", "market", line];
+const market = (id: string, selections: unknown[]) =>
+  [id, "Cược trực tiếp", "Cược trực tiếp", ["HC39", "full time", 1], "event", "league", "1", selections];
+const payload = { serializedData: [["league", "Giải thật", 0, "", false, "", "", "", "", "", "1", "Football", [[
+  "event-real", [["home-id", { VI: "Alpha" }], ["away-id", { VI: "Beta" }]], "Alpha vs Beta", "", ["0", "0"], true,
+  false, [], ["event-real", 0, [], [market("market-real", [selection("home-real", 1, -0.5, "0.82"),
+    selection("away-real", 3, 0.5, "-0.92")])]]
+]]]] };
+
+const request: ProviderTicketPreflightRequest = { accountId: "account-1", providerEventId: "event-real",
+  providerMarketId: "market-real:-0.5", providerSelectionId: "home-real", selection: "HOME", line: "-0.5",
+  expectedDecimalOdds: "1.82", requestedStake: "29000" };
+const handle = { sessionId: "session-1", provider: "BTI", category: "FOOTBALL" as const,
+  withSecret: async <T>(consume: (secret: { kind: "LAUNCH_URL"; value: string }) => Promise<T>) =>
+    consume({ kind: "LAUNCH_URL", value: "https://private.test/" }) };
+
+describe("BtiTicketPreflightReader", () => {
+  it("re-reads the exact public ticket and blocks honestly while limits are unavailable", async () => {
+    const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
+    const reader = new BtiTicketPreflightReader({ source: { readCatalog: async () => ({
+      records: extractBtiCatalogRecords(payload), observedAtMs: 1000, receivedMonotonicMs: 10
+    }) } });
+    await expect(reader.preflight(handle, request)).resolves.toMatchObject({ provider: "BTI",
+      providerEventId: "event-real", providerMarketId: "market-real:-0.5", providerSelectionId: "home-real",
+      decimalOdds: "1.82", quoteStatus: "OPEN", constraint: null, eligible: false,
+      reasons: ["LIMIT_UNAVAILABLE"] });
+  });
+
+  it("reports an odds change and rejects any identity mismatch", async () => {
+    const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
+    const reader = new BtiTicketPreflightReader({ source: { readCatalog: async () => ({
+      records: extractBtiCatalogRecords(payload), observedAtMs: 1000, receivedMonotonicMs: 10
+    }) } });
+    await expect(reader.preflight(handle, { ...request, expectedDecimalOdds: "1.9" })).resolves.toMatchObject({
+      reasons: ["LIMIT_UNAVAILABLE", "ODDS_CHANGED"] });
+    await expect(reader.preflight(handle, { ...request, providerSelectionId: "other" }))
+      .rejects.toThrow("PREFLIGHT_IDENTITY_MISMATCH");
+  });
+});
