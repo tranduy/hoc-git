@@ -95,6 +95,35 @@ export async function clickSafeStructuralCategory(
   return false;
 }
 
+export async function clickSafeLiveCatalog(page: Page, delayMs = 2_000): Promise<boolean> {
+  for (const frame of page.frames()) {
+    const controls = frame.locator(".c-side-nav--event .c-side-nav__btn");
+    const count = Math.min(await controls.count(), 20);
+    for (let index = 0; index < count; index += 1) {
+      const control = controls.nth(index);
+      if (!(await control.isVisible().catch(() => false))) continue;
+      const dataView = (await control.getAttribute("data-view").catch(() => null))?.trim().toLocaleLowerCase("en");
+      const label = (await control.innerText().catch(() => "")).trim().replace(/\s+/gu, " ").toLocaleLowerCase("vi");
+      if (dataView !== "live" && label !== "live" && label !== "tr\u1ef1c ti\u1ebfp") continue;
+      await control.click({ timeout: 2_000 });
+      if (delayMs > 0) await page.waitForTimeout(delayMs);
+      return true;
+    }
+    const labels = frame.getByText(/^\s*(?:live|tr\u1ef1c ti\u1ebfp)\s*\d*\s*$/iu);
+    const labelCount = Math.min(await labels.count(), 20);
+    for (let index = 0; index < labelCount; index += 1) {
+      const label = labels.nth(index);
+      if (!(await label.isVisible().catch(() => false))) continue;
+      const control = label.locator("xpath=ancestor-or-self::*[self::a or self::button or @role='button' or @onclick][1]");
+      const target = await control.count() > 0 ? control : label;
+      await target.click({ timeout: 2_000 });
+      if (delayMs > 0) await page.waitForTimeout(delayMs);
+      return true;
+    }
+  }
+  return false;
+}
+
 export async function findAccessTokenFrame<T extends {
   evaluate(pageFunction: () => boolean): Promise<boolean>;
 }>(page: { frames(): readonly T[] }): Promise<T | null> {

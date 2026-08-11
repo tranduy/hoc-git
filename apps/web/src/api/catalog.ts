@@ -56,23 +56,34 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
 
 export class CatalogApi implements CatalogApiLike {
   readonly #fetch: typeof fetch;
+  readonly #timeoutMs: number;
 
-  constructor(fetcher: typeof fetch = window.fetch.bind(window)) {
+  constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 12_000) {
     this.#fetch = fetcher;
+    this.#timeoutMs = timeoutMs;
   }
 
   async read(accountId: string): Promise<LiveCatalogResponse> {
-    const response = await this.#fetch(`/api/catalog/accounts/${encodeURIComponent(accountId)}`, {
-      method: "GET",
-      cache: "no-store"
-    });
-    if (!response.ok) throw new Error(`Live catalog request failed (${response.status})`);
-    let value: unknown;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
-      value = await response.json();
-    } catch {
-      throw new Error("Invalid live catalog response");
+      const response = await this.#fetch(`/api/catalog/accounts/${encodeURIComponent(accountId)}`, {
+        method: "GET", cache: "no-store", signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`Live catalog request failed (${response.status})`);
+      let value: unknown;
+      try {
+        value = await response.json();
+      } catch (error) {
+        if (controller.signal.aborted) throw new Error("Live catalog request timed out");
+        throw new Error("Invalid live catalog response");
+      }
+      return parseLiveCatalogResponse(value, accountId);
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error("Live catalog request timed out");
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
     }
-    return parseLiveCatalogResponse(value, accountId);
   }
 }

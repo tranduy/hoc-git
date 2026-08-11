@@ -444,4 +444,37 @@ describe("LiveCatalogPage", () => {
     expect(read).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledWith(lolAccount.id);
   });
+
+  it("loads only one account per provider so duplicate SABA bindings cannot duplicate matches", async () => {
+    const older: AccountStatus = { ...account, id: "a-saba", alias: "SABA old", provider: "SABA" };
+    const current: AccountStatus = { ...account, id: "z-saba", alias: "SABA current", provider: "SABA" };
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => ({ ...catalog, accountId: id,
+      provider: "SABA", events: [{ ...event, provider: "SABA" }],
+      markets: [{ ...market, provider: "SABA" }], quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" })) }));
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [older, current] }} catalogApi={{ read }} />);
+
+    expect(await screen.findByText("SABA current")).toBeTruthy();
+    expect(screen.queryByText("SABA old")).toBeNull();
+    expect(screen.getAllByText("Alpha vs Beta")).toHaveLength(1);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledWith(current.id);
+  });
+
+  it("shows a healthy provider immediately while another selected provider is still pending", async () => {
+    const sabaAccount: AccountStatus = { ...account, id: "saba-fast", alias: "SABA fast", provider: "SABA" };
+    const imAccount: AccountStatus = { ...account, id: "im-pending", alias: "IM pending", provider: "IM" };
+    const sabaCatalog: LiveCatalogResponse = {
+      ...catalog, accountId: sabaAccount.id, provider: "SABA",
+      events: [{ ...event, provider: "SABA" }], markets: [{ ...market, provider: "SABA" }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" }))
+    };
+    const never = new Promise<LiveCatalogResponse>(() => undefined);
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, imAccount] }}
+      catalogApi={{ read: async (id) => id === sabaAccount.id ? sabaCatalog : never }} />);
+
+    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect((screen.getByLabelText("Load live catalog") as HTMLButtonElement).disabled).toBe(true);
+  });
 });

@@ -32,6 +32,21 @@ function saveCatalogCategory(storage: Storage, category: CatalogCategory): void 
   try { storage.setItem(catalogCategoryStorageKey, category); } catch { /* storage is optional */ }
 }
 
+function oneAccountPerProvider(accounts: readonly AccountStatus[]): readonly AccountStatus[] {
+  const selected = new Map<ProviderId, AccountStatus>();
+  for (const account of accounts) {
+    const current = selected.get(account.provider);
+    if (current === undefined || (current.sessionState !== "ACTIVE" && account.sessionState === "ACTIVE") ||
+      (current.sessionState === account.sessionState && account.id.localeCompare(current.id) > 0)) {
+      selected.set(account.provider, account);
+    }
+  }
+  return comparisonProviders.flatMap((provider) => {
+    const account = selected.get(provider);
+    return account === undefined ? [] : [account];
+  });
+}
+
 function ProviderSelector({ accounts, selected, toggle }: {
   readonly accounts: readonly AccountStatus[];
   readonly selected: ReadonlySet<string>;
@@ -216,8 +231,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event") });
   const autoLoaded = useRef(false);
-  const categoryAccounts = useMemo(() => accounts.filter((account) =>
-    account.category === category), [accounts, category]);
+  const categoryAccounts = useMemo(() => oneAccountPerProvider(accounts.filter((account) =>
+    account.category === category)), [accounts, category]);
   const categorySelectedIds = useMemo(() => categoryAccounts.filter((account) => selectedIds.has(account.id))
     .map((account) => account.id), [categoryAccounts, selectedIds]);
 
@@ -229,7 +244,21 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     refreshInFlight.current = true;
     if (foreground) setBusy(true);
     try {
-      const results = await Promise.allSettled(requestedIds.map(async (id) => catalogApi.read(id)));
+      const results = await Promise.allSettled(requestedIds.map(async (id) => {
+        const value = await catalogApi.read(id);
+        if (value.category === expectedCategory) {
+          const nextCatalogs = [value, ...catalogsRef.current.filter((catalog) => catalog.accountId !== id)];
+          catalogsRef.current = nextCatalogs;
+          saveCatalogCache(window.localStorage, nextCatalogs);
+          setCatalogs(nextCatalogs);
+          setStaleAccountIds((current) => {
+            const next = new Set(current);
+            next.delete(id);
+            return next;
+          });
+        }
+        return value;
+      }));
       const accepted = results.flatMap((result) => result.status === "fulfilled" &&
         result.value.category === expectedCategory ? [result.value] : []);
       const failedIds = new Set(requestedIds.filter((_id, index) => {
@@ -277,7 +306,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       let initialCategory: CatalogCategory = fixedCategory ?? (requestedAccount?.category === "LOL" ? "LOL" : category);
       const hasInitialCategory = available.some((account) => account.category === initialCategory);
       if (!hasInitialCategory && available.some((account) => account.category === "LOL")) initialCategory = "LOL";
-      const initial = new Set(available.filter((account) => account.category === initialCategory)
+      const initial = new Set(oneAccountPerProvider(available.filter((account) => account.category === initialCategory))
         .map((account) => account.id));
       const cached = loadCatalogCache(window.localStorage).filter((catalog) => initial.has(catalog.accountId));
       catalogsRef.current = cached;

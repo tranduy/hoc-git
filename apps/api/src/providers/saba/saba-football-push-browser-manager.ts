@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { normalizeSabaFootballRecords } from "@tool-chenh/adapters";
 import { chromium, type BrowserContext, type Page, type WebSocket } from "playwright";
-import { clickSafeStructuralCategory, findCmdCatalogPage } from "../browser-protocol-inspector.js";
+import { clickSafeLiveCatalog, clickSafeStructuralCategory, findCmdCatalogPage } from "../browser-protocol-inspector.js";
 import { validateCmdLaunchUrl } from "../cmd/cmd-browser-manager.js";
 import { SabaPushDecoder } from "./saba-push-decoder.js";
 import { parseSabaSocketFrame } from "./saba-socket-frame.js";
@@ -11,6 +11,12 @@ interface OpenSession {
   readonly context: BrowserContext;
   readonly page: Page;
   readonly snapshots: Map<string, readonly Readonly<Record<string, unknown>>[]>;
+}
+
+export function markSabaLiveContextRecords(
+  records: readonly Readonly<Record<string, unknown>>[]
+): readonly Readonly<Record<string, unknown>>[] {
+  return records.map((record) => record.type === "m" ? { ...record, marketid: "L" } : record);
 }
 
 export class PlaywrightSabaFootballPushBrowserManager {
@@ -115,7 +121,10 @@ export class PlaywrightSabaFootballPushBrowserManager {
       await page.goto(launchUrl, { waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
       await page.waitForTimeout(1_500);
       page = await findCmdCatalogPage(context.pages()) ?? page;
-      await clickSafeStructuralCategory(page, "1", 0).catch(() => false);
+      await clickSafeStructuralCategory(page, "1", 1_500).catch(() => false);
+      snapshots.clear();
+      const liveSelected = await clickSafeLiveCatalog(page, 1_500).catch(() => false);
+      if (!liveSelected) throw new Error("SABA_FOOTBALL_LIVE_NAVIGATION_UNAVAILABLE");
       const session = { context, page, snapshots };
       this.#sessions.set(input.sessionId, session);
       return session;
@@ -128,7 +137,7 @@ export class PlaywrightSabaFootballPushBrowserManager {
   async #waitForCatalog(session: OpenSession): Promise<readonly Readonly<Record<string, unknown>>[]> {
     const deadline = Date.now() + this.#timeoutMs;
     while (Date.now() < deadline) {
-      const records = [...session.snapshots.values()].flat();
+      const records = markSabaLiveContextRecords([...session.snapshots.values()].flat());
       const normalized = normalizeSabaFootballRecords(records, {
         observedAtMs: Date.now(), receivedMonotonicMs: performance.now(), sequence: 1
       });

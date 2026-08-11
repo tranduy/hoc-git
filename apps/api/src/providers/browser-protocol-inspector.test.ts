@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   clickSafeStructuralCategories,
   clickSafeStructuralCategory,
+  clickSafeLiveCatalog,
   collectCmdCatalogShapes,
   extractCmdCatalogRecords,
   collectCmdCatalogNavigation,
@@ -303,6 +304,27 @@ describe("browser protocol inspector", () => {
     expect(await collectCmdCatalogNavigation(page)).toEqual([{
       tagName: "div", classTokens: ["c-side-nav__btn"], dataKeys: ["data-view"], text: "Sắp diễn ra"
     }]);
+    await page.close();
+  });
+
+  it("selects only the live event navigation and never an upcoming control", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <nav class="c-side-nav--event">
+        <button class="c-side-nav__btn" data-view="upcoming">Upcoming</button>
+        <button class="c-side-nav__btn" data-view="live" onclick="document.body.dataset.selected='live'">Live</button>
+      </nav>
+    `);
+    expect(await clickSafeLiveCatalog(page, 0)).toBe(true);
+    expect(await page.locator("body").getAttribute("data-selected")).toBe("live");
+    await page.close();
+  });
+
+  it("selects a Vietnamese live tab with a count even when the provider does not use the expected class", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`<div onclick="document.body.dataset.selected='live'"><span>Tr\u1ef1c ti\u1ebfp</span><b>145</b></div>`);
+    expect(await clickSafeLiveCatalog(page, 0)).toBe(true);
+    expect(await page.locator("body").getAttribute("data-selected")).toBe("live");
     await page.close();
   });
 

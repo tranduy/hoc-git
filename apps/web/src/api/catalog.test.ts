@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CatalogApi } from "./catalog.js";
 
 const response = {
@@ -11,6 +11,8 @@ const response = {
   rejectedMarketCount: 0,
   events: [], markets: [], quotes: []
 };
+
+afterEach(() => vi.useRealTimers());
 
 describe("CatalogApi", () => {
   it("loads a live account catalog through a path parameter", async () => {
@@ -33,5 +35,30 @@ describe("CatalogApi", () => {
     const saba = { ...response, provider: "SABA" };
     const api = new CatalogApi(async () => new Response(JSON.stringify(saba), { status: 200 }));
     await expect(api.read("account-1")).resolves.toEqual(saba);
+  });
+
+  it("aborts a provider request that would otherwise block the whole comparison screen", async () => {
+    vi.useFakeTimers();
+    const api = new CatalogApi((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }), 10);
+
+    const result = expect(api.read("account-1")).rejects.toThrow("Live catalog request timed out");
+    await vi.advanceTimersByTimeAsync(10);
+    await result;
+  });
+
+  it("keeps the deadline active while the response body is still being read", async () => {
+    vi.useFakeTimers();
+    const api = new CatalogApi(async (_input, init) => ({
+      ok: true,
+      json: () => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      })
+    } as Response), 10);
+
+    const result = expect(api.read("account-1")).rejects.toThrow("Live catalog request timed out");
+    await vi.advanceTimersByTimeAsync(10);
+    await result;
   });
 });
