@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import { chromium, type BrowserContext, type Page, type Response } from "playwright";
+import { chromium, type BrowserContext, type Page, type Response, type Route } from "playwright";
 import type { Category } from "@tool-chenh/contracts";
 import { SecretVault } from "./secret-vault.js";
 import { TrustedDomainStore } from "./trusted-domain-store.js";
@@ -80,6 +80,18 @@ export function capturedTopLevelNavigation(lobbyOrigin: string, label: string, v
     return { url: value, label: label.trim().replace(/\s+/gu, " ") };
   } catch {
     return null;
+  }
+}
+
+export function shouldBlockExternalProviderNavigation(
+  lobbyOrigin: string, requestUrl: string, isNavigationRequest: boolean
+): boolean {
+  if (!isNavigationRequest) return false;
+  try {
+    const target = new URL(requestUrl);
+    return (target.protocol === "https:" || target.protocol === "http:") && target.origin !== lobbyOrigin;
+  } catch {
+    return false;
   }
 }
 
@@ -304,9 +316,18 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
             // Ignore malformed or unrelated response URLs.
           }
         };
+        const blockExternalProviderNavigation = async (route: Route): Promise<void> => {
+          const request = route.request();
+          if (shouldBlockExternalProviderNavigation(lobbyOrigin, request.url(), request.isNavigationRequest())) {
+            await route.abort("blockedbyclient");
+          } else {
+            await route.continue();
+          }
+        };
         context.on("page", onPage);
         page.on("popup", onPage);
         page.on("response", onResponse);
+        await context.route("**/*", blockExternalProviderNavigation);
         try {
           const play = control.locator(".game-item__play-btn button").first();
           if (await play.count() > 0) {
@@ -317,6 +338,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
           }
           await page.waitForTimeout(1_500);
         } finally {
+          await context.unroute("**/*", blockExternalProviderNavigation);
           context.off("page", onPage);
           page.off("popup", onPage);
           page.off("response", onResponse);

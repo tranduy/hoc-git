@@ -134,7 +134,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     readers: options.profileReaders ?? [
       new CmdProfileReader({ source: cmdBrowser, clock }),
       new SabaProfileReader({ source: sabaBrowser, clock }),
-      new SbobetProfileReader(),
+      new SbobetProfileReader({ source: sbobetBrowser, clock }),
       new ImProfileReader()
     ],
     clock,

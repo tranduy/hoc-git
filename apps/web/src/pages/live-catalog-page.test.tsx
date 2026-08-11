@@ -447,6 +447,19 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText("1 nguồn giá + profile cược đã xác minh")).toBeTruthy();
   });
 
+  it("refreshes the selected betting profile before its 30-second balance gate expires", async () => {
+    const stale: AccountStatus = { ...account, profileState: "STALE", balanceAsOfMs: 1 };
+    const refreshed: AccountStatus = { ...stale, profileState: "FRESH", currency: "VND",
+      balance: "500000", balanceAsOfMs: Date.now() };
+    const refresh = vi.fn(async () => refreshed);
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [stale], refresh }} catalogApi={catalogApi} />);
+
+    expect(await screen.findByText("1 nguồn giá + profile cược đã xác minh")).toBeTruthy();
+    expect(refresh).toHaveBeenCalledWith(stale.id);
+  });
+
   it("labels a failed provider read as a source error and never as no matches", async () => {
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi}
       catalogApi={{ read: async () => { throw new Error("provider failed"); } }} />);

@@ -80,6 +80,18 @@ describe("AccountRegistry", () => {
     expect((await context.registry.listStatuses())[0]).toMatchObject({ profileState: "STALE" });
   });
 
+  it("clears the public error reason after a successful profile refresh", async () => {
+    const context = await setup();
+    const account = await context.registry.register({ sessionId: "session-a", alias: "Main", provider: "CMD" });
+
+    expect(account).toMatchObject({ profileState: "UNAVAILABLE", reason: "SCHEMA_CHANGED" });
+    expect(await context.registry.refresh(account.id)).toMatchObject({
+      sessionState: "ACTIVE",
+      profileState: "FRESH",
+      reason: null
+    });
+  });
+
   it("rejects an unknown or mismatched provider identity", async () => {
     const context = await setup();
     await expect(context.registry.register({ sessionId: "session-a", alias: "Unknown", provider: "UNKNOWN" as "CMD" }))

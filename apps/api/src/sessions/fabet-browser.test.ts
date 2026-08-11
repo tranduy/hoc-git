@@ -10,6 +10,7 @@ import {
   launcherTextIsSafe,
   providerLaunchUrlFromResponseBody,
   PlaywrightFabetAutomation,
+  shouldBlockExternalProviderNavigation,
   type CapturedNavigation,
   type FabetBrowserAutomation
 } from "./fabet-browser.js";
@@ -78,6 +79,17 @@ describe("FabetBrowserDriver", () => {
     expect(capturedTopLevelNavigation(
       "https://fabet.party", "Deposit", "https://sports.vendor.test/launch"
     )).toBeNull();
+  });
+  it("blocks only external top-level provider navigation while preserving the launch API request", () => {
+    expect(shouldBlockExternalProviderNavigation(
+      "https://fabet.party", "https://sports.vendor.test/one-time-launch", true
+    )).toBe(true);
+    expect(shouldBlockExternalProviderNavigation(
+      "https://fabet.party", "https://fabet.party/api/v3/game-url", true
+    )).toBe(false);
+    expect(shouldBlockExternalProviderNavigation(
+      "https://fabet.party", "https://cdn.vendor.test/card.webp", false
+    )).toBe(false);
   });
   it("blocks credential transmission until the exact hostname is trusted", async () => {
     const context = await setup();

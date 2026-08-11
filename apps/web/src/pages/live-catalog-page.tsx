@@ -18,6 +18,7 @@ const defaultCatalogApi = new CatalogApi();
 const comparisonProviders: readonly ProviderId[] = ["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"];
 const catalogRefreshIntervalMs = 250;
 const executableProfileMaxAgeMs = 30_000;
+const profileRefreshIntervalMs = 15_000;
 const catalogCategoryStorageKey = "tool-chenh.live-catalog.category.v1";
 type CatalogCategory = "FOOTBALL" | "LOL";
 
@@ -278,6 +279,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     account.category === category)), [accounts, category]);
   const categorySelectedIds = useMemo(() => categoryAccounts.filter((account) => selectedIds.has(account.id))
     .map((account) => account.id), [categoryAccounts, selectedIds]);
+  const profileRefreshKey = useMemo(() => categoryAccounts.filter((account) => selectedIds.has(account.id) &&
+    account.sessionState === "ACTIVE" && account.capabilities.includes("PROFILE"))
+    .map((account) => account.id).sort().join("|"), [categoryAccounts, selectedIds]);
 
   const loadIds = useCallback(async (
     ids: readonly string[], foreground: boolean, expectedCategory: CatalogCategory
@@ -371,6 +375,27 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const timer = window.setInterval(() => void loadIds(categorySelectedIds, false, category), catalogRefreshIntervalMs);
     return () => window.clearInterval(timer);
   }, [categorySelectedIds, loadIds]);
+
+  useEffect(() => {
+    const ids = profileRefreshKey === "" ? [] : profileRefreshKey.split("|");
+    if (ids.length === 0) return;
+    let cancelled = false;
+    const refreshProfiles = async (): Promise<void> => {
+      const results = await Promise.allSettled(ids.map((id) => accountApi.refresh(id)));
+      if (cancelled) return;
+      const refreshed = new Map(results.flatMap((result, index) => result.status === "fulfilled" &&
+        result.value.id === ids[index] ? [[result.value.id, result.value] as const] : []));
+      if (refreshed.size === 0) return;
+      setAccounts((current) => {
+        const next = current.map((account) => refreshed.get(account.id) ?? account);
+        accountsRef.current = next;
+        return next;
+      });
+    };
+    void refreshProfiles();
+    const timer = window.setInterval(() => void refreshProfiles(), profileRefreshIntervalMs);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [accountApi, profileRefreshKey]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);

@@ -158,7 +158,7 @@ export class AccountRegistry {
       balance: record.profile?.balance ?? null,
       balanceAsOfMs: record.profile?.asOfMs ?? null,
       capabilities: [...new Set(capabilities)],
-      reason: boundSession?.reason ?? (session === null ? record.profileReason : "SCHEMA_CHANGED")
+      reason: boundSession?.reason ?? record.profileReason
     });
   }
 

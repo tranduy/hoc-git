@@ -25,6 +25,12 @@ export interface SbobetCatalogSnapshot {
   readonly receivedMonotonicMs: number;
 }
 
+export interface SbobetProfileSnapshot {
+  readonly displayName: string;
+  readonly balanceText: string;
+  readonly observedAtMs: number;
+}
+
 function safeLaunchUrl(value: string): string {
   if (value.length === 0 || value.length > 24_000) throw new Error("SBOBET_LAUNCH_URL_INVALID");
   const parsed = new URL(value);
@@ -114,6 +120,13 @@ export class PlaywrightSbobetBrowserManager {
     });
     this.#reads.set(input.sessionId, next);
     return next;
+  }
+  async readProfile(input: { sessionId: string; launchUrl: string }): Promise<SbobetProfileSnapshot> {
+    const session = await this.#get(input);
+    const displayName = (await session.page.locator(".user-name").first().textContent().catch(() => null))?.trim() ?? "";
+    const balanceText = (await session.page.locator(".payment-money").first().textContent().catch(() => null))?.trim() ?? "";
+    if (displayName.length === 0 || balanceText.length === 0) throw new Error("SBOBET_PROFILE_UNAVAILABLE");
+    return { displayName, balanceText, observedAtMs: Date.now() };
   }
   async #readCatalog(input: { sessionId: string; launchUrl: string }): Promise<SbobetCatalogSnapshot> {
     let session = await this.#get(input);
