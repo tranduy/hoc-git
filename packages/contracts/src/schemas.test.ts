@@ -7,6 +7,9 @@ import {
   OddsFormatSchema,
   PreflightRequestSchema,
   PreflightTicketSchema,
+  ProviderStakeConstraintSchema,
+  ProviderTicketPreflightSchema,
+  ProviderTicketPreflightRequestSchema,
   ProviderConnectionStatusSchema,
   ProviderEventSchema,
   ProviderMarketSchema,
@@ -19,6 +22,29 @@ import {
 } from "./schemas.js";
 
 describe("live account and preflight schemas", () => {
+  it("binds a short-lived provider constraint to one exact ticket", () => {
+    const request = { accountId: "account-1", providerEventId: "event-1", providerMarketId: "market-1",
+      providerSelectionId: "selection-1", selection: "HOME", line: "-0.5",
+      expectedDecimalOdds: "2.2", requestedStake: "100000" };
+    const constraint = { currency: "VND", minStake: "50000", maxStake: "200000", stakeStep: "1000",
+      balance: "300000", feeType: "NONE" as const, feeRate: null, verifiedAsOfMs: 1000, expiresAtMs: 3500 };
+    expect(ProviderTicketPreflightRequestSchema.safeParse(request).success).toBe(true);
+    expect(ProviderStakeConstraintSchema.safeParse(constraint).success).toBe(true);
+    expect(ProviderTicketPreflightSchema.safeParse({ accountId: request.accountId, provider: "SABA",
+      providerEventId: request.providerEventId, providerMarketId: request.providerMarketId,
+      providerSelectionId: request.providerSelectionId, selection: request.selection, line: request.line,
+      decimalOdds: "2.2", quoteStatus: "OPEN", constraint, eligible: true, reasons: [] }).success).toBe(true);
+  });
+
+  it("rejects long-lived or internally inconsistent provider preflight evidence", () => {
+    const constraint = { currency: "VND", minStake: "50000", maxStake: "200000", stakeStep: "1000",
+      balance: "300000", feeType: "NONE" as const, feeRate: null, verifiedAsOfMs: 1000, expiresAtMs: 5000 };
+    expect(ProviderStakeConstraintSchema.safeParse(constraint).success).toBe(false);
+    expect(ProviderTicketPreflightSchema.safeParse({ accountId: "a", provider: "SABA", providerEventId: "e",
+      providerMarketId: "m", providerSelectionId: "s", selection: "HOME", line: "-0.5",
+      decimalOdds: "2.2", quoteStatus: "OPEN", constraint: { ...constraint, expiresAtMs: 3000 },
+      eligible: true, reasons: ["ODDS_CHANGED"] }).success).toBe(false);
+  });
   it("accepts Malay odds format for providers that publish signed Asian prices", () => {
     expect(OddsFormatSchema.parse("MALAY")).toBe("MALAY");
   });

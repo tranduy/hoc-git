@@ -15,6 +15,9 @@ import type {
   PreflightLeg,
   PreflightRequest,
   PreflightTicket,
+  ProviderStakeConstraint,
+  ProviderTicketPreflight,
+  ProviderTicketPreflightRequest,
   ProfileState,
   ProviderCapability,
   ProviderConnectionState,
@@ -209,6 +212,60 @@ export const PreflightRequestSchema = z.strictObject({
     context.addIssue({ code: "custom", path: ["accountBId"], message: "preflight accounts must be distinct" });
   }
 }) satisfies z.ZodType<PreflightRequest>;
+
+export const ProviderTicketPreflightRequestSchema = z.strictObject({
+  accountId: z.string().trim().min(1).max(128),
+  providerEventId: z.string().trim().min(1).max(256),
+  providerMarketId: z.string().trim().min(1).max(256),
+  providerSelectionId: z.string().trim().min(1).max(256),
+  selection: z.string().trim().min(1).max(128),
+  line: DecimalStringSchema.nullable(),
+  expectedDecimalOdds: NonnegativeDecimalStringSchema,
+  requestedStake: NonnegativeDecimalStringSchema
+}) satisfies z.ZodType<ProviderTicketPreflightRequest>;
+
+export const ProviderStakeConstraintSchema = z.strictObject({
+  currency: z.string().regex(/^[A-Z]{3,8}$/u),
+  minStake: NonnegativeDecimalStringSchema,
+  maxStake: NonnegativeDecimalStringSchema,
+  stakeStep: NonnegativeDecimalStringSchema,
+  balance: NonnegativeDecimalStringSchema,
+  feeType: z.enum(["NONE", "PROFIT", "PAYOUT"]),
+  feeRate: NonnegativeDecimalStringSchema.nullable(),
+  verifiedAsOfMs: z.number().finite().nonnegative(),
+  expiresAtMs: z.number().finite().nonnegative()
+}).superRefine((constraint, context) => {
+  if ((constraint.feeType === "NONE") !== (constraint.feeRate === null)) {
+    context.addIssue({ code: "custom", path: ["feeRate"], message: "fee rate must match fee type" });
+  }
+  if (Number(constraint.maxStake) < Number(constraint.minStake)) {
+    context.addIssue({ code: "custom", path: ["maxStake"], message: "max stake must be at least min stake" });
+  }
+  const lifetimeMs = constraint.expiresAtMs - constraint.verifiedAsOfMs;
+  if (lifetimeMs <= 0 || lifetimeMs > 3_000) {
+    context.addIssue({ code: "custom", path: ["expiresAtMs"], message: "constraint lifetime must be within three seconds" });
+  }
+}) satisfies z.ZodType<ProviderStakeConstraint>;
+
+export const ProviderTicketPreflightSchema = z.strictObject({
+  accountId: z.string().trim().min(1).max(128),
+  provider: ProviderIdSchema,
+  providerEventId: z.string().trim().min(1).max(256),
+  providerMarketId: z.string().trim().min(1).max(256),
+  providerSelectionId: z.string().trim().min(1).max(256),
+  selection: z.string().trim().min(1).max(128),
+  line: DecimalStringSchema.nullable(),
+  decimalOdds: NonnegativeDecimalStringSchema,
+  quoteStatus: QuoteStatusSchema,
+  constraint: ProviderStakeConstraintSchema,
+  eligible: z.boolean(),
+  reasons: z.array(z.enum(["IDENTITY_MISMATCH", "ODDS_CHANGED", "MARKET_NOT_OPEN",
+    "BELOW_MIN", "ABOVE_MAX", "INSUFFICIENT_BALANCE", "LIMIT_UNAVAILABLE"])).max(8)
+}).superRefine((result, context) => {
+  if (result.eligible !== (result.quoteStatus === "OPEN" && result.reasons.length === 0)) {
+    context.addIssue({ code: "custom", path: ["eligible"], message: "eligible result must be open with no reasons" });
+  }
+}) satisfies z.ZodType<ProviderTicketPreflight>;
 
 export const PreflightLegSchema = z.strictObject({
   accountId: z.string().trim().min(1).max(128),

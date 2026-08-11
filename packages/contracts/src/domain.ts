@@ -73,6 +73,45 @@ export interface PreflightRequest {
   readonly maxOddsDriftBps: number;
 }
 
+export interface ProviderTicketPreflightRequest {
+  readonly accountId: string;
+  readonly providerEventId: string;
+  readonly providerMarketId: string;
+  readonly providerSelectionId: string;
+  readonly selection: string;
+  readonly line: string | null;
+  readonly expectedDecimalOdds: string;
+  readonly requestedStake: string;
+}
+
+export interface ProviderStakeConstraint {
+  readonly currency: string;
+  readonly minStake: string;
+  readonly maxStake: string;
+  readonly stakeStep: string;
+  readonly balance: string;
+  readonly feeType: "NONE" | "PROFIT" | "PAYOUT";
+  readonly feeRate: string | null;
+  readonly verifiedAsOfMs: number;
+  readonly expiresAtMs: number;
+}
+
+export interface ProviderTicketPreflight {
+  readonly accountId: string;
+  readonly provider: ProviderId;
+  readonly providerEventId: string;
+  readonly providerMarketId: string;
+  readonly providerSelectionId: string;
+  readonly selection: string;
+  readonly line: string | null;
+  readonly decimalOdds: string;
+  readonly quoteStatus: QuoteStatus;
+  readonly constraint: ProviderStakeConstraint;
+  readonly eligible: boolean;
+  readonly reasons: readonly ("IDENTITY_MISMATCH" | "ODDS_CHANGED" | "MARKET_NOT_OPEN" |
+    "BELOW_MIN" | "ABOVE_MAX" | "INSUFFICIENT_BALANCE" | "LIMIT_UNAVAILABLE")[];
+}
+
 export interface PreflightLeg {
   readonly accountId: string;
   readonly provider: ProviderId;

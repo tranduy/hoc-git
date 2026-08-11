@@ -1,4 +1,4 @@
-import type { ProviderId, ProviderQuote } from "@tool-chenh/contracts";
+import type { ProviderId, ProviderQuote, ProviderStakeConstraint } from "@tool-chenh/contracts";
 import { Decimal, effectiveDecimal, type FeeModel } from "@tool-chenh/core";
 import type { ComparisonRow } from "../catalog/comparison.js";
 
@@ -11,18 +11,6 @@ export interface FixedBaseStakePolicy {
   readonly balance: string;
   readonly providerConstraints?: Readonly<Partial<Record<ProviderId, ProviderStakeConstraint>>>;
   readonly requireProviderConstraints?: boolean;
-}
-
-export interface ProviderStakeConstraint {
-  readonly currency: string;
-  readonly minStake: string;
-  readonly maxStake: string;
-  readonly stakeStep: string;
-  readonly balance: string;
-  readonly feeType: "NONE" | "PROFIT" | "PAYOUT";
-  readonly feeRate: string | null;
-  readonly verifiedAsOfMs: number;
-  readonly expiresAtMs: number;
 }
 
 export interface FixedBaseStakeLeg {
