@@ -41,4 +41,43 @@ describe("BtiTicketPreflightReader", () => {
     await expect(reader.preflight(handle, { ...request, providerSelectionId: "other" }))
       .rejects.toThrow("PREFLIGHT_IDENTITY_MISMATCH");
   });
+
+  it("returns a short-lived constraint only when the exact BTI slip exposes every limit", async () => {
+    const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
+    const reader = new BtiTicketPreflightReader({ source: {
+      readCatalog: async () => ({ records: extractBtiCatalogRecords(payload), observedAtMs: 1000,
+        receivedMonotonicMs: 10 }),
+      readTicketConstraint: async () => ({ providerSelectionId: "home-real", currency: "VND",
+        minStake: "25250", maxStake: "17669910", stakeStep: "10", balance: "29610", observedAtMs: 2000 })
+    }, clock: { nowMs: () => 2100 } });
+
+    await expect(reader.preflight(handle, { ...request, requestedStake: "29000" })).resolves.toMatchObject({
+      constraint: { currency: "VND", minStake: "25250", maxStake: "17669910", stakeStep: "10",
+        balance: "29610", feeType: "NONE", feeRate: null, verifiedAsOfMs: 2000, expiresAtMs: 5000 },
+      eligible: true, reasons: []
+    });
+  });
+
+  it("keeps the ticket blocked for incomplete limits and reports stake failures independently", async () => {
+    const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
+    const source = { readCatalog: async () => ({ records: extractBtiCatalogRecords(payload), observedAtMs: 1000,
+      receivedMonotonicMs: 10 }), readTicketConstraint: async () => null };
+    await expect(new BtiTicketPreflightReader({ source }).preflight(handle, request)).resolves.toMatchObject({
+      constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"]
+    });
+
+    const constrained = new BtiTicketPreflightReader({ source: { ...source,
+      readTicketConstraint: async () => ({ providerSelectionId: "home-real", currency: "VND",
+        minStake: "30000", maxStake: "100000", stakeStep: "1000", balance: "50000", observedAtMs: 2000 })
+    }, clock: { nowMs: () => 2000 } });
+    await expect(constrained.preflight(handle, { ...request, requestedStake: "29000" })).resolves.toMatchObject({
+      eligible: false, reasons: ["BELOW_MIN"]
+    });
+    await expect(constrained.preflight(handle, { ...request, requestedStake: "51000" })).resolves.toMatchObject({
+      eligible: false, reasons: ["INSUFFICIENT_BALANCE"]
+    });
+    await expect(constrained.preflight(handle, { ...request, requestedStake: "30500" })).resolves.toMatchObject({
+      eligible: false, reasons: ["STAKE_STEP_MISMATCH"]
+    });
+  });
 });
