@@ -43,6 +43,7 @@ import { PlaywrightBtiBrowserManager } from "../providers/bti/bti-browser-manage
 import { BtiSessionValidator } from "../providers/bti/bti-session-validator.js";
 import { BtiObservedCatalogReader } from "../providers/bti/bti-observed-catalog.js";
 import { BtiProfileReader } from "../providers/bti/bti-profile-reader.js";
+import { ProviderPreflightRegistry } from "../preflight/provider-preflight-registry.js";
 
 export interface CreateSessionServicesOptions {
   readonly localAppData: string;
@@ -59,6 +60,7 @@ export interface ManagedSessionServices extends SessionServices {
   readonly accounts: AccountRegistry;
   readonly catalogReader: MultiProviderCatalogReader;
   readonly sabaCatalogReader: SabaObservedCatalogReader;
+  readonly providerPreflight: ProviderPreflightRegistry;
   tick(): Promise<void>;
   close(): Promise<void>;
 }
@@ -183,6 +185,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts, source: apsportBrowser });
   const btiCatalogReader = new BtiObservedCatalogReader({ accounts, source: btiBrowser });
+  const providerPreflight = new ProviderPreflightRegistry({ accounts, readers: [] });
   return {
     manager,
     discovery,
@@ -193,6 +196,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       apsportCatalogReader, btiCatalogReader
     ]),
     sabaCatalogReader,
+    providerPreflight,
     async tick(): Promise<void> {
       await manager.tick();
     },

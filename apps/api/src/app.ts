@@ -9,6 +9,7 @@ import { registerSnapshotRoute } from "./routes/snapshot.js";
 import { registerSessionRoutes, type SessionServices } from "./routes/sessions.js";
 import { registerCatalogRoutes, type CatalogReaderLike } from "./routes/catalog.js";
 import type { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
+import { registerProviderPreflightRoutes, type ProviderPreflightLike } from "./routes/provider-preflight.js";
 
 export interface AppOptions {
   readonly viteOrigin?: string;
@@ -18,6 +19,7 @@ export interface AppOptions {
   readonly accountRegistry?: AccountRegistryLike;
   readonly catalogReader?: CatalogReaderLike;
   readonly catalogTelemetry?: CatalogTelemetryRegistry;
+  readonly providerPreflight?: ProviderPreflightLike;
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
@@ -120,6 +122,7 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.sessionServices !== undefined) registerSessionRoutes(app, options.sessionServices);
   if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
   if (options.catalogReader !== undefined) registerCatalogRoutes(app, options.catalogReader, options.catalogTelemetry);
+  if (options.providerPreflight !== undefined) registerProviderPreflightRoutes(app, options.providerPreflight);
   void app.register(async (instance) => {
     registerOpportunityWebsocket(instance, runtime, { heartbeatIntervalMs, maxBufferedBytes });
   });

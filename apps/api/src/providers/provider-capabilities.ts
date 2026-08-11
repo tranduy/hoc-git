@@ -1,4 +1,5 @@
-import type { ProviderCapability, ProviderId } from "@tool-chenh/contracts";
+import type { ProviderCapability, ProviderId, ProviderTicketPreflight,
+  ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
 import type { ActiveSecretHandle } from "../sessions/types.js";
 
 export interface ProviderProfile {
@@ -12,4 +13,10 @@ export interface ProviderProfileReader {
   readonly provider: ProviderId;
   readonly capabilities: readonly ProviderCapability[];
   readProfile(handle: ActiveSecretHandle): Promise<ProviderProfile>;
+}
+
+export interface ProviderTicketPreflightReader {
+  readonly provider: ProviderId;
+  readonly capabilities: readonly ProviderCapability[];
+  preflight(handle: ActiveSecretHandle, request: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight>;
 }
