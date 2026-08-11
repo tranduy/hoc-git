@@ -43,7 +43,8 @@ type EventOrientation = "SAME" | "SWAPPED";
 
 function identityText(value: string): string {
   return value.normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
-    .replace(/đ/gu, "d").replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/^clb\s+/u, "").replace(/\s+/gu, " ");
+    .replace(/đ/gu, "d").replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+    .replace(/^(?:(?:clb|fc|sc|scu|afc|cf)\s+)+/u, "").replace(/\s+/gu, " ");
 }
 
 function eventKey(event: ProviderEvent): string {
@@ -74,22 +75,77 @@ function swapLolEvent(event: ProviderEvent): ProviderEvent {
       seriesScoreA: event.liveState.seriesScoreB, seriesScoreB: event.liveState.seriesScoreA } };
 }
 
+function sameEventVariant(left: ProviderEvent, right: ProviderEvent): boolean {
+  if (left.category !== right.category || left.eventScope !== right.eventScope) return false;
+  if (left.category === "FOOTBALL" && right.category === "FOOTBALL") {
+    return left.isVirtual === right.isVirtual && left.sportVariant === right.sportVariant;
+  }
+  return left.category === "LOL" && right.category === "LOL" && left.gameVariant === right.gameVariant;
+}
+
+function footballLiveEvidenceCompatible(left: ProviderEvent, right: ProviderEvent,
+  orientation: EventOrientation): boolean {
+  if (left.category !== "FOOTBALL" || right.category !== "FOOTBALL") return true;
+  const leftState = left.liveState; const rightState = right.liveState;
+  if (leftState === null || rightState === null) return true;
+  if (leftState.period !== null && rightState.period !== null && leftState.period !== rightState.period) return false;
+  const leftScoreKnown = leftState.scoreHome !== null && leftState.scoreAway !== null;
+  const rightScoreKnown = rightState.scoreHome !== null && rightState.scoreAway !== null;
+  if (!leftScoreKnown || !rightScoreKnown) return true;
+  return orientation === "SAME"
+    ? leftState.scoreHome === rightState.scoreHome && leftState.scoreAway === rightState.scoreAway
+    : leftState.scoreHome === rightState.scoreAway && leftState.scoreAway === rightState.scoreHome;
+}
+
+function participantOrientation(left: ProviderEvent, right: ProviderEvent): EventOrientation | null {
+  const same = identityText(left.participantA) === identityText(right.participantA) &&
+    identityText(left.participantB) === identityText(right.participantB);
+  if (same) return "SAME";
+  const swapped = identityText(left.participantA) === identityText(right.participantB) &&
+    identityText(left.participantB) === identityText(right.participantA);
+  return swapped && (left.category === "FOOTBALL" || left.category === "LOL") ? "SWAPPED" : null;
+}
+
 function compatibleEventOrientation(left: ProviderEvent, right: ProviderEvent): EventOrientation | null {
   if (left.category !== right.category || left.isLive !== right.isLive) return null;
+  if (!sameEventVariant(left, right)) return null;
   const withinKickoffTolerance = left.isLive || Math.abs(left.startAtUtcMs - right.startAtUtcMs) <= 120_000;
   if (!withinKickoffTolerance) return null;
-  if (eventSemanticKey(left) === eventSemanticKey(right)) return "SAME";
-  if (left.category === "LOL" && right.category === "LOL" &&
-    eventSemanticKey(left) === eventSemanticKey(swapLolEvent(right))) return "SWAPPED";
-  return null;
+  if (left.fixtureDiscriminator !== null && right.fixtureDiscriminator !== null &&
+    left.fixtureDiscriminator !== right.fixtureDiscriminator) return null;
+  const orientation = participantOrientation(left, right);
+  if (orientation === null || !footballLiveEvidenceCompatible(left, right, orientation)) return null;
+  if (left.category === "LOL" && eventSemanticKey(left) !==
+    eventSemanticKey(orientation === "SWAPPED" ? swapLolEvent(right) : right)) return null;
+  return orientation;
+}
+
+function invertLine(line: string | null): string | null {
+  if (line === null) return null;
+  const value = Number(line);
+  if (!Number.isFinite(value)) return line;
+  return String(Object.is(-value, -0) ? 0 : -value);
+}
+
+function orientMarket(market: ProviderMarket, orientation: EventOrientation): ProviderMarket {
+  if (orientation !== "SWAPPED" || market.category !== "FOOTBALL" ||
+    (market.marketType !== "FT_AH" && market.marketType !== "FH_AH")) return market;
+  return { ...market, line: invertLine(market.line) };
 }
 
 function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrientation): readonly ProviderQuote[] {
   if (orientation !== "SWAPPED") return quotes;
   return quotes.map((quote) => {
-    if (quote.category !== "LOL") return quote;
-    if (quote.selection === "TEAM_A") return { ...quote, selection: "TEAM_B" };
-    if (quote.selection === "TEAM_B") return { ...quote, selection: "TEAM_A" };
+    if (quote.category === "LOL") {
+      if (quote.selection === "TEAM_A") return { ...quote, selection: "TEAM_B" };
+      if (quote.selection === "TEAM_B") return { ...quote, selection: "TEAM_A" };
+      return quote;
+    }
+    if (quote.category === "FOOTBALL") {
+      const selection = quote.selection === "HOME" ? "AWAY" : quote.selection === "AWAY" ? "HOME" : quote.selection;
+      const line = quote.marketType === "FT_AH" || quote.marketType === "FH_AH" ? invertLine(quote.line) : quote.line;
+      return { ...quote, selection, line };
+    }
     return quote;
   }).sort((left, right) => left.selection.localeCompare(right.selection));
 }
@@ -208,11 +264,13 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
     for (const catalog of group.catalogs) {
       const providerEventId = group.ids[catalog.provider];
       for (const market of catalog.markets.filter((candidate) => candidate.providerEventId === providerEventId)) {
-        const rowKey = marketKey(market);
+        const orientation = group.orientations[catalog.provider] ?? "SAME";
+        const orientedMarket = orientMarket(market, orientation);
+        const rowKey = marketKey(orientedMarket);
         const cells = rowGroups.get(rowKey) ?? [];
-        cells.push({ provider: catalog.provider, market,
+        cells.push({ provider: catalog.provider, market: orientedMarket,
           quotes: orientQuotes(catalog.quotes.filter((quote) => quote.providerMarketId === market.providerMarketId),
-            group.orientations[catalog.provider] ?? "SAME") });
+            orientation) });
         rowGroups.set(rowKey, cells);
       }
     }

@@ -298,7 +298,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   const events = useMemo(() => buildComparisonEvents(catalogs).filter((item) => item.event.category === category), [catalogs, category]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)), [events, nowMs]);
-  const displayEvents = useMemo(() => visibleEvents.filter((item) => item.observedRows.length > 0).sort((left, right) => {
+  const displayEvents = useMemo(() => visibleEvents.filter((item) => new Set(item.providers).size >= 2).sort((left, right) => {
     const leftSignalRank = signals.findIndex((signal) => signal.event.key === left.key);
     const rightSignalRank = signals.findIndex((signal) => signal.event.key === right.key);
     if (leftSignalRank >= 0 || rightSignalRank >= 0) {

@@ -107,6 +107,17 @@ describe("catalog comparison", () => {
     expect(buildComparisonEvents([localizedSaba, localizedSbobet])).toHaveLength(1);
   });
 
+  it("matches leading football club designators used by different providers", () => {
+    const saba = handicapCatalog("SABA", "saba-club", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-club", "-0.5", ["0.78", "-0.86"]);
+    const namedSaba = { ...saba, events: [{ ...saba.events[0]!, participantA: "Sporting Braga U23",
+      participantB: "SC Farense U23" }] };
+    const namedSbobet = { ...sbobet, events: [{ ...sbobet.events[0]!, participantA: "Sporting Braga U23",
+      participantB: "Farense U23" }] };
+
+    expect(buildComparisonEvents([namedSaba, namedSbobet])).toHaveLength(1);
+  });
+
   it("matches a reversed LoL participant order and reorients TEAM_A/TEAM_B to the anchor event", () => {
     const saba = lolCatalog("SABA", "saba-lol", "Nongshim Esports Academy", "Dplus KIA Challengers", ["2.20", "1.65"],
       "saba-esports-two-way-moneyline");
@@ -127,12 +138,17 @@ describe("catalog comparison", () => {
     expect(selectionLabel(result[0]!.event, "TEAM_B")).toBe("Dplus KIA Challengers");
   });
 
-  it("does not reverse-match football because HOME/AWAY handicap orientation is not proven safe", () => {
+  it("reverse-matches football only after reorienting HOME/AWAY and the handicap sign", () => {
     const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
-    const sbobet = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-event", "0.5", ["0.78", "-0.86"]);
     const reversed = { ...sbobet, events: [{ ...sbobet.events[0]!, participantA: "Molde", participantB: "Kristiansund BK" }] };
 
-    expect(buildComparisonEvents([saba, reversed])).toHaveLength(2);
+    const result = buildComparisonEvents([saba, reversed]);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.observedRows[0]?.line).toBe("-0.5");
+    expect(result[0]?.observedRows[0]?.cells[1]?.quotes.map((quote) => [quote.selection, quote.rawOdds])).toEqual([
+      ["AWAY", "0.78"], ["HOME", "-0.86"]
+    ]);
   });
 
   it("shows same-ticket prices but blocks profit when settlement profiles differ", () => {
@@ -246,6 +262,22 @@ describe("catalog comparison", () => {
     const liveSbo: LiveCatalogResponse = { ...sbo, events: [{ ...sbo.events[0]!, isLive: true, startAtUtcMs: 25_000,
       competition: "Giải VĐQG Na Uy", liveState: { period: "2H", scoreHome: 1, scoreAway: 0, clockMs: 3_001_000 } } as ProviderEvent] };
     expect(buildComparisonEvents([liveSaba, liveSbo])[0]?.providers).toEqual(["SABA", "SBOBET"]);
+  });
+
+  it("accepts missing live score evidence but rejects a contradictory known score or period", () => {
+    const saba = handicapCatalog("SABA", "one", "-0.5", ["0.82", "-0.90"]);
+    const sbo = handicapCatalog("SBOBET", "two", "-0.5", ["0.78", "-0.86"]);
+    const missing: LiveCatalogResponse = { ...saba, events: [{ ...saba.events[0]!, isLive: true,
+      liveState: { period: "2H", scoreHome: null, scoreAway: null, clockMs: 2_800_000 } } as ProviderEvent] };
+    const known: LiveCatalogResponse = { ...sbo, events: [{ ...sbo.events[0]!, isLive: true,
+      liveState: { period: "2H", scoreHome: 1, scoreAway: 0, clockMs: 2_900_000 } } as ProviderEvent] };
+    expect(buildComparisonEvents([missing, known])).toHaveLength(1);
+    const contradictoryScore = { ...missing, events: [{ ...missing.events[0]!,
+      liveState: { period: "2H", scoreHome: 0, scoreAway: 2, clockMs: 2_800_000 } } as ProviderEvent] };
+    const contradictoryPeriod = { ...known, events: [{ ...known.events[0]!,
+      liveState: { period: "1H", scoreHome: 1, scoreAway: 0, clockMs: 2_900_000 } } as ProviderEvent] };
+    expect(buildComparisonEvents([contradictoryScore, known])).toHaveLength(2);
+    expect(buildComparisonEvents([missing, contradictoryPeriod])).toHaveLength(2);
   });
 
   it("calculates and ranks a positive cross-book margin from the best complete outcomes", () => {

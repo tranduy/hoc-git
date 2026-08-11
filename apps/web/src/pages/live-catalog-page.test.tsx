@@ -235,6 +235,28 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText(/1 event without an exact two-book ticket hidden/u)).toBeTruthy();
   });
 
+  it("shows a mapped two-provider event even when no exact handicap line is shared", async () => {
+    const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
+    const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
+    const providerCatalog = (providerAccount: AccountStatus, line: string): LiveCatalogResponse => ({
+      ...catalog, accountId: providerAccount.id, provider: providerAccount.provider,
+      events: [{ ...event, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event` }],
+      markets: [{ ...market, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event`,
+        providerMarketId: `${providerAccount.provider}-market`, line }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: providerAccount.provider,
+        providerEventId: `${providerAccount.provider}-event`, providerMarketId: `${providerAccount.provider}-market`,
+        providerSelectionId: `${providerAccount.provider}-${quote.selection}`, line }))
+    });
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }}
+      catalogApi={{ read: async (id) => id === sabaAccount.id ? providerCatalog(sabaAccount, "-0.5") :
+        providerCatalog(sbobetAccount, "-1.5") }} />);
+
+    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("1 cross-book match(es)")).toBeTruthy();
+    expect(screen.getByText("Chưa có vé chấp 0.5 phù hợp")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "View & watch Alpha vs Beta" })).toBeTruthy();
+  });
+
   it("does not expose a single CMD price row as a comparison", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "Load live catalog" }));
