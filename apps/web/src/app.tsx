@@ -8,19 +8,27 @@ import { MappingsPage } from "./pages/mappings-page.js";
 import { SessionsPage } from "./pages/sessions-page.js";
 import { LiveCatalogPage } from "./pages/live-catalog-page.js";
 
-type Route = "/" | "/live-catalog" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions";
+type Route = "/" | "/football-live" | "/lol-live" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions";
 
 const routes: ReadonlyArray<{ readonly path: Route; readonly label: string }> = [
   { path: "/", label: "Dashboard" },
-  { path: "/live-catalog", label: "Live Catalog" },
-  { path: "/football", label: "Football" },
-  { path: "/lol", label: "LoL" },
+  { path: "/football-live", label: "Football Live" },
+  { path: "/lol-live", label: "LoL Live" },
+  { path: "/football", label: "Football Overview" },
+  { path: "/lol", label: "LoL Overview" },
   { path: "/opportunities", label: "Opportunities" },
   { path: "/mappings", label: "Mapping Review" },
   { path: "/sessions", label: "Sessions" }
 ];
 
 function routeFor(pathname: string): Route {
+  if (pathname === "/live-catalog") {
+    try {
+      return window.localStorage.getItem("tool-chenh.live-catalog.category.v1") === "LOL" ? "/lol-live" : "/football-live";
+    } catch {
+      return "/football-live";
+    }
+  }
   return routes.some((route) => route.path === pathname) ? pathname as Route : "/";
 }
 
@@ -39,6 +47,10 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
   }, [initialSnapshot]);
 
   useEffect(() => {
+    if (window.location.pathname === "/live-catalog") window.history.replaceState({}, "", route);
+  }, [route]);
+
+  useEffect(() => {
     const onPopState = () => setRoute(routeFor(window.location.pathname));
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -54,7 +66,8 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
     setRoute(path);
   };
   const content = route === "/sessions" ? <SessionsPage />
-    : route === "/live-catalog" ? <LiveCatalogPage />
+    : route === "/football-live" ? <LiveCatalogPage fixedCategory="FOOTBALL" key="FOOTBALL-LIVE" />
+    : route === "/lol-live" ? <LiveCatalogPage fixedCategory="LOL" key="LOL-LIVE" />
     : snapshot === undefined
     ? <header className="page-header"><h1>Loading {routeLabel}</h1><p>Waiting for a fresh local snapshot. No opportunity or mapping decision is available yet.</p></header>
     : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} />

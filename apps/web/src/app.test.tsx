@@ -40,22 +40,36 @@ describe("App navigation", () => {
   it("shows every primary view and filters Football and LoL event rows", () => {
     render(<App initialSnapshot={snapshot} />);
 
-    for (const label of ["Dashboard", "Football", "LoL", "Opportunities", "Mapping Review", "Sessions"]) {
+    for (const label of ["Dashboard", "Football Live", "LoL Live", "Football Overview", "LoL Overview", "Opportunities", "Mapping Review", "Sessions"]) {
       expect(screen.getByRole("link", { name: label })).toBeTruthy();
     }
 
-    fireEvent.click(screen.getByRole("link", { name: "Football" }));
+    fireEvent.click(screen.getByRole("link", { name: "Football Overview" }));
     expect(screen.getByRole("heading", { name: "Football" })).toBeTruthy();
     expect(screen.getByText("Northbridge")).toBeTruthy();
     expect(screen.queryByText("Blue Comets")).toBeNull();
 
-    fireEvent.click(screen.getByRole("link", { name: "LoL" }));
+    fireEvent.click(screen.getByRole("link", { name: "LoL Overview" }));
     expect(screen.getByRole("heading", { name: "LoL" })).toBeTruthy();
     expect(screen.getByText("Blue Comets")).toBeTruthy();
     expect(screen.queryByText("Northbridge")).toBeNull();
 
     fireEvent.click(screen.getByRole("link", { name: "Sessions" }));
     expect(screen.getByRole("heading", { name: "Sessions" })).toBeTruthy();
+  });
+
+  it("uses independent menu routes for Football Live and LoL Live", () => {
+    window.history.replaceState({}, "", "/lol-live");
+    render(<App initialSnapshot={snapshot} />);
+
+    expect(screen.getByRole("heading", { name: "LoL Live Price Gaps" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Category" })).toBeNull();
+    expect(screen.getByRole("link", { name: "LoL Live" }).getAttribute("aria-current")).toBe("page");
+
+    fireEvent.click(screen.getByRole("link", { name: "Football Live" }));
+    expect(screen.getByRole("heading", { name: "Football Live Price Gaps" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Category" })).toBeNull();
+    expect(window.location.pathname).toBe("/football-live");
   });
 
   it("names provider state with an icon label and text", () => {
@@ -79,7 +93,7 @@ describe("App navigation", () => {
 
   it("composes timing, competition, market, and mapping filters against rendered rows", () => {
     render(<App initialSnapshot={snapshot} />);
-    fireEvent.click(screen.getByRole("link", { name: "Football" }));
+    fireEvent.click(screen.getByRole("link", { name: "Football Overview" }));
 
     fireEvent.change(screen.getByLabelText("Timing"), { target: { value: "PRE_MATCH" } });
     fireEvent.change(screen.getByLabelText("Competition"), { target: { value: "Premier League" } });
@@ -104,7 +118,7 @@ describe("App navigation", () => {
       mappingStatus: "REVIEW_REQUIRED" as const
     };
     render(<App initialSnapshot={{ ...snapshot, markets: [...snapshot.markets, market] }} />);
-    fireEvent.click(screen.getByRole("link", { name: "Football" }));
+    fireEvent.click(screen.getByRole("link", { name: "Football Overview" }));
 
     fireEvent.change(screen.getByLabelText("Mapping"), { target: { value: "REVIEW_REQUIRED" } });
 
@@ -123,7 +137,7 @@ describe("App navigation", () => {
       ]
     };
     render(<App initialSnapshot={authoritative} />);
-    fireEvent.click(screen.getByRole("link", { name: "Football" }));
+    fireEvent.click(screen.getByRole("link", { name: "Football Overview" }));
 
     expect(within(screen.getByText("Northbridge").closest("tr")!).getByText("Live")).toBeTruthy();
     expect(within(screen.getByText("City Academy").closest("tr")!).getByText("Pre-match")).toBeTruthy();
@@ -142,25 +156,25 @@ describe("App navigation", () => {
 
   it("does not leak Football filter choices into the LoL category", () => {
     render(<App initialSnapshot={snapshot} />);
-    fireEvent.click(screen.getByRole("link", { name: "Football" }));
+    fireEvent.click(screen.getByRole("link", { name: "Football Overview" }));
     fireEvent.change(screen.getByLabelText("Timing"), { target: { value: "LIVE" } });
     expect(screen.getByText("City Academy")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("link", { name: "LoL" }));
+    fireEvent.click(screen.getByRole("link", { name: "LoL Overview" }));
     expect(screen.getByText("Blue Comets")).toBeTruthy();
     expect((screen.getByLabelText("Timing") as HTMLSelectElement).value).toBe("ALL");
   });
 
   it("renders Back and Forward navigation, announces the route, and moves focus to main", async () => {
     render(<App initialSnapshot={snapshot} />);
-    fireEvent.click(screen.getByRole("link", { name: "Football" }));
-    fireEvent.click(screen.getByRole("link", { name: "LoL" }));
+    fireEvent.click(screen.getByRole("link", { name: "Football Overview" }));
+    fireEvent.click(screen.getByRole("link", { name: "LoL Overview" }));
 
     window.history.back();
     await waitFor(() => expect(screen.getByRole("heading", { name: "Football" })).toBeTruthy());
     expect(screen.getByRole("status").textContent).toContain("Football");
     expect(document.activeElement).toBe(document.querySelector("main"));
-    expect(screen.getByRole("link", { name: "Football" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("link", { name: "Football Overview" }).getAttribute("aria-current")).toBe("page");
 
     window.history.forward();
     await waitFor(() => expect(screen.getByRole("heading", { name: "LoL" })).toBeTruthy());

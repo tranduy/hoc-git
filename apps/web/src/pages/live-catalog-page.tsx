@@ -164,13 +164,14 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
   </aside>;
 }
 
-export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi }: {
+export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi, fixedCategory }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
+  readonly fixedCategory?: CatalogCategory;
 }) {
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
-  const [category, setCategory] = useState<CatalogCategory>(() => loadCatalogCategory(window.localStorage));
+  const [category, setCategory] = useState<CatalogCategory>(() => fixedCategory ?? loadCatalogCategory(window.localStorage));
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
   const [staleAccountIds, setStaleAccountIds] = useState<ReadonlySet<string>>(new Set());
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
@@ -235,7 +236,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     void accountApi.list().then((items) => {
       const available = items.filter((account) => account.capabilities.includes("CATALOG") && account.sessionState === "ACTIVE");
       const requestedAccount = available.find((account) => account.id === requested.current.account);
-      let initialCategory: CatalogCategory = requestedAccount?.category === "LOL" ? "LOL" : category;
+      let initialCategory: CatalogCategory = fixedCategory ?? (requestedAccount?.category === "LOL" ? "LOL" : category);
       const hasInitialCategory = available.some((account) => account.category === null || account.category === initialCategory);
       if (!hasInitialCategory && available.some((account) => account.category === "LOL")) initialCategory = "LOL";
       const initial = new Set(available.filter((account) => account.category === null || account.category === initialCategory)
@@ -251,7 +252,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         void loadIds([...initial], true, initialCategory);
       }
     }).catch(() => setMessage("Provider accounts are unavailable."));
-  }, [accountApi, loadIds]);
+  }, [accountApi, fixedCategory, loadIds]);
 
   useEffect(() => {
     if (categorySelectedIds.length === 0) return;
@@ -331,12 +332,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   };
 
   return <>
-    <header className="page-header"><p className="eyebrow">Immediate two-book lag monitor</p><h1>Live Price Gaps</h1>
+    <header className="page-header"><p className="eyebrow">{category === "FOOTBALL" ? "Football" : "League of Legends"} · immediate two-book lag monitor</p>
+      <h1>{category === "FOOTBALL" ? "Football Live Price Gaps" : "LoL Live Price Gaps"}</h1>
       <p>Only exact two-outcome markets shared by at least two selected books can produce a signal.</p></header>
     <section className="catalog-toolbar" aria-label="Catalog controls">
-      <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
+      {fixedCategory === undefined && <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
         onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
-        onClick={() => changeCategory("LOL")} type="button">LoL</button></div>
+        onClick={() => changeCategory("LOL")} type="button">LoL</button></div>}
       <ProviderSelector accounts={categoryAccounts} selected={selectedIds} toggle={toggle} />
       <label className="stake-config">Base stake for every match (VND)<input aria-label="Base stake for every match (VND)"
         inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
