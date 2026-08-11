@@ -17,6 +17,20 @@ const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
 const comparisonProviders: readonly ProviderId[] = ["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"];
 const catalogRefreshIntervalMs = 250;
+const catalogCategoryStorageKey = "tool-chenh.live-catalog.category.v1";
+type CatalogCategory = "FOOTBALL" | "LOL";
+
+function loadCatalogCategory(storage: Storage): CatalogCategory {
+  try {
+    return storage.getItem(catalogCategoryStorageKey) === "LOL" ? "LOL" : "FOOTBALL";
+  } catch {
+    return "FOOTBALL";
+  }
+}
+
+function saveCatalogCategory(storage: Storage, category: CatalogCategory): void {
+  try { storage.setItem(catalogCategoryStorageKey, category); } catch { /* storage is optional */ }
+}
 
 function ProviderSelector({ accounts, selected, toggle }: {
   readonly accounts: readonly AccountStatus[];
@@ -156,7 +170,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 }) {
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
-  const [category, setCategory] = useState<"FOOTBALL" | "LOL">("FOOTBALL");
+  const [category, setCategory] = useState<CatalogCategory>(() => loadCatalogCategory(window.localStorage));
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
   const [staleAccountIds, setStaleAccountIds] = useState<ReadonlySet<string>>(new Set());
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
@@ -183,7 +197,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     .map((account) => account.id), [categoryAccounts, selectedIds]);
 
   const loadIds = useCallback(async (
-    ids: readonly string[], foreground = false, expectedCategory: "FOOTBALL" | "LOL" = category
+    ids: readonly string[], foreground: boolean, expectedCategory: CatalogCategory
   ): Promise<void> => {
     if (ids.length === 0 || refreshInFlight.current) return;
     refreshInFlight.current = true;
@@ -215,27 +229,33 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       refreshInFlight.current = false;
       if (foreground) setBusy(false);
     }
-  }, [catalogApi, category]);
+  }, [catalogApi]);
 
   useEffect(() => {
     void accountApi.list().then((items) => {
       const available = items.filter((account) => account.capabilities.includes("CATALOG") && account.sessionState === "ACTIVE");
-      const initial = new Set(available.map((account) => account.id));
+      const requestedAccount = available.find((account) => account.id === requested.current.account);
+      let initialCategory: CatalogCategory = requestedAccount?.category === "LOL" ? "LOL" : category;
+      const hasInitialCategory = available.some((account) => account.category === null || account.category === initialCategory);
+      if (!hasInitialCategory && available.some((account) => account.category === "LOL")) initialCategory = "LOL";
+      const initial = new Set(available.filter((account) => account.category === null || account.category === initialCategory)
+        .map((account) => account.id));
       const cached = loadCatalogCache(window.localStorage).filter((catalog) => initial.has(catalog.accountId));
       catalogsRef.current = cached;
       setCatalogs(cached);
       setStaleAccountIds(new Set(cached.map((catalog) => catalog.accountId)));
-      setAccounts(available); setSelectedIds(initial);
-      if (!autoLoaded.current && available.length > 0) {
+      setAccounts(available); setSelectedIds(new Set(available.map((account) => account.id)));
+      setCategory(initialCategory); saveCatalogCategory(window.localStorage, initialCategory);
+      if (!autoLoaded.current && initial.size > 0) {
         autoLoaded.current = true;
-        void loadIds([...initial], true);
+        void loadIds([...initial], true, initialCategory);
       }
     }).catch(() => setMessage("Provider accounts are unavailable."));
   }, [accountApi, loadIds]);
 
   useEffect(() => {
     if (categorySelectedIds.length === 0) return;
-    const timer = window.setInterval(() => void loadIds(categorySelectedIds), catalogRefreshIntervalMs);
+    const timer = window.setInterval(() => void loadIds(categorySelectedIds, false, category), catalogRefreshIntervalMs);
     return () => window.clearInterval(timer);
   }, [categorySelectedIds, loadIds]);
 
@@ -293,8 +313,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const toggle = (id: string): void => setSelectedIds((current) => {
     const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
   });
-  const changeCategory = (next: "FOOTBALL" | "LOL"): void => {
+  const changeCategory = (next: CatalogCategory): void => {
     setCategory(next); setCatalogs([]); catalogsRef.current = []; setStaleAccountIds(new Set());
+    saveCatalogCategory(window.localStorage, next);
     setSignals([]); setMovements([]); setMessage(null); setSelectedKey(null);
     signalTracker.current = new LagSignalTracker();
     movementTracker.current = new PriceMovementTracker();
@@ -323,7 +344,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           if (saveBaseStake(window.localStorage, value)) { setBaseStake(value); setStakeError(null); }
           else setStakeError("Use a whole VND amount of at least 30,000 in 1,000 VND steps.");
         }} />{stakeError === null ? <small>Applied to the lower-odds leg.</small> : <small role="alert">{stakeError}</small>}</label>
-      <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true)} type="button">
+      <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true, category)} type="button">
         {busy ? "Loading…" : "Compare selected books"}</button>
     </section>
     {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}

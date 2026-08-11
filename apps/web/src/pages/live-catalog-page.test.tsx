@@ -337,6 +337,38 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByText("G2 vs TH")).toBeNull();
   });
 
+  it("restores LoL after a page reload and does not filter valid LoL catalogs as Football", async () => {
+    const lolAccount: AccountStatus = { ...account, id: "saba-lol", alias: "SABA LoL", provider: "SABA", category: "LOL" };
+    const lolCatalog: LiveCatalogResponse = {
+      ...catalog, accountId: lolAccount.id, provider: "SABA", category: "LOL",
+      events: [{
+        provider: "SABA", category: "LOL", providerEventId: "lol-reload", competition: "League of Legends - LCK",
+        seasonStage: null, startAtUtcMs: Date.now() + 60_000, participantA: "G2", participantB: "TH",
+        eventScope: "SERIES", bestOf: 5, isLive: false, rematchCandidate: null,
+        fixtureDiscriminator: null, gameVariant: "LOL_PC", liveState: null
+      }],
+      markets: [{
+        provider: "SABA", category: "LOL", providerEventId: "lol-reload", providerMarketId: "series-reload",
+        marketType: "SERIES_WINNER", scope: "SERIES", line: null,
+        settlementProfile: "saba-esports-two-way-moneyline", status: "OPEN"
+      }],
+      quotes: ["TEAM_A", "TEAM_B"].map((selection, index) => ({
+        provider: "SABA", category: "LOL", providerEventId: "lol-reload", providerMarketId: "series-reload",
+        providerSelectionId: `reload-${index}`, marketType: "SERIES_WINNER", scope: "SERIES", selection,
+        line: null, rawOdds: index === 0 ? "1.8" : "2.0", rawFormat: "DECIMAL", status: "OPEN",
+        isLive: false, sourceTimestampMs: null, receivedMonotonicMs: 1, sequence: 1
+      }))
+    };
+    window.localStorage.setItem("tool-chenh.live-catalog.category.v1", "LOL");
+    const read = vi.fn(async () => lolCatalog);
+
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [lolAccount] }} catalogApi={{ read }} />);
+
+    expect((await screen.findByRole("button", { name: "LoL" })).getAttribute("aria-pressed")).toBe("true");
+    expect(await screen.findByText(/1 event without an exact two-book ticket hidden/u)).toBeTruthy();
+    expect(read).toHaveBeenCalledWith(lolAccount.id);
+  });
+
   it("reopens a selected match detail from its safe URL identity", async () => {
     window.history.replaceState({}, "", "/live-catalog?account=account-1&event=event-1");
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
