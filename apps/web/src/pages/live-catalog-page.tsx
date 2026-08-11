@@ -140,14 +140,21 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event") });
   const autoLoaded = useRef(false);
+  const categoryAccounts = useMemo(() => accounts.filter((account) =>
+    account.category === null || account.category === category), [accounts, category]);
+  const categorySelectedIds = useMemo(() => categoryAccounts.filter((account) => selectedIds.has(account.id))
+    .map((account) => account.id), [categoryAccounts, selectedIds]);
 
-  const loadIds = useCallback(async (ids: readonly string[], foreground = false): Promise<void> => {
+  const loadIds = useCallback(async (
+    ids: readonly string[], foreground = false, expectedCategory: "FOOTBALL" | "LOL" = category
+  ): Promise<void> => {
     if (ids.length === 0 || refreshInFlight.current) return;
     refreshInFlight.current = true;
     if (foreground) setBusy(true);
     try {
       const results = await Promise.allSettled(ids.map(async (id) => catalogApi.read(id)));
-      const accepted = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const accepted = results.flatMap((result) => result.status === "fulfilled" &&
+        result.value.category === expectedCategory ? [result.value] : []);
       const failedIds = new Set(ids.filter((_id, index) => results[index]?.status === "rejected"));
       const preserved = catalogsRef.current.filter((catalog) => failedIds.has(catalog.accountId) &&
         !accepted.some((candidate) => candidate.accountId === catalog.accountId));
@@ -170,7 +177,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       refreshInFlight.current = false;
       if (foreground) setBusy(false);
     }
-  }, [catalogApi]);
+  }, [catalogApi, category]);
 
   useEffect(() => {
     void accountApi.list().then((items) => {
@@ -189,17 +196,17 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, [accountApi, loadIds]);
 
   useEffect(() => {
-    if (category !== "FOOTBALL" || selectedIds.size === 0) return;
-    const timer = window.setInterval(() => void loadIds([...selectedIds]), catalogRefreshIntervalMs);
+    if (categorySelectedIds.length === 0) return;
+    const timer = window.setInterval(() => void loadIds(categorySelectedIds), catalogRefreshIntervalMs);
     return () => window.clearInterval(timer);
-  }, [category, loadIds, selectedIds]);
+  }, [categorySelectedIds, loadIds]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, []);
 
-  const events = useMemo(() => buildComparisonEvents(catalogs), [catalogs]);
+  const events = useMemo(() => buildComparisonEvents(catalogs).filter((item) => item.event.category === category), [catalogs, category]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)), [events, nowMs]);
   const displayEvents = useMemo(() => visibleEvents.filter((item) => item.observedRows.length > 0).sort((left, right) => {
     const leftSignalRank = signals.findIndex((signal) => signal.event.key === left.key);
@@ -245,7 +252,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     setCategory(next); setCatalogs([]); catalogsRef.current = []; setStaleAccountIds(new Set());
     setSignals([]); setMessage(null); setSelectedKey(null);
     signalTracker.current = new LagSignalTracker();
-    if (next === "FOOTBALL") void loadIds([...selectedIds], true);
+    const nextIds = accounts.filter((account) => account.category === null || account.category === next)
+      .map((account) => account.id).filter((id) => selectedIds.has(id));
+    if (nextIds.length > 0) void loadIds(nextIds, true, next);
   };
   const watch = (item: ComparisonEvent): void => {
     const primary = item.catalogs[0]!;
@@ -261,25 +270,24 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
         onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
         onClick={() => changeCategory("LOL")} type="button">LoL</button></div>
-      <ProviderSelector accounts={accounts} selected={selectedIds} toggle={toggle} />
+      <ProviderSelector accounts={categoryAccounts} selected={selectedIds} toggle={toggle} />
       <label className="stake-config">Base stake for every match (VND)<input aria-label="Base stake for every match (VND)"
         inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
           const value = event.currentTarget.value; setBaseStakeInput(value);
           if (saveBaseStake(window.localStorage, value)) { setBaseStake(value); setStakeError(null); }
           else setStakeError("Use a whole VND amount of at least 30,000 in 1,000 VND steps.");
         }} />{stakeError === null ? <small>Applied to the lower-odds leg.</small> : <small role="alert">{stakeError}</small>}</label>
-      <button aria-label="Load live catalog" disabled={busy || selectedIds.size === 0 || category !== "FOOTBALL"} onClick={() => void loadIds([...selectedIds], true)} type="button">
+      <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true)} type="button">
         {busy ? "Loading…" : "Compare selected books"}</button>
     </section>
-    {category === "LOL" && <p className="stale-warning">No verified live LoL adapter is connected yet.</p>}
     {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}
-    {category === "FOOTBALL" && catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
+    {catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
       <span>{catalogs.length - staleAccountIds.size} fresh provider(s)</span>
       {staleAccountIds.size > 0 && <span>{staleAccountIds.size} stale snapshot{staleAccountIds.size === 1 ? "" : "s"} retained</span>}
       <span>{displayEvents.length} cross-book match(es)</span>
       <span>{hiddenNonComparableCount} event{hiddenNonComparableCount === 1 ? "" : "s"} without an exact two-book ticket hidden · review mappings</span></div>}
-    {category === "FOOTBALL" && catalogs.length > 0 && <LagSignalPanel signals={signals} />}
-    <LagSignalToast signal={category === "FOOTBALL" ? signals[0] ?? null : null} />
+    {catalogs.length > 0 && <LagSignalPanel signals={signals} />}
+    <LagSignalToast signal={signals[0] ?? null} />
     <div className="catalog-event-list">{displayEvents.map((item) => {
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
       const observedAtMs = item.catalogs.find((catalog) => catalog.provider === item.event.provider)?.observedAtMs ??

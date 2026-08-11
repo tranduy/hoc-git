@@ -14,7 +14,7 @@ export interface ObservedProviderCatalog {
   readonly dataMode: "LIVE";
   readonly accountId: string;
   readonly provider: ProviderId;
-  readonly category: "FOOTBALL";
+  readonly category: "FOOTBALL" | "LOL";
   readonly comparisonState: "AWAITING_SECOND_PROVIDER";
   readonly observedAtMs: number;
   readonly rejectedMarketCount: number;

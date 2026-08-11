@@ -148,6 +148,7 @@ export class AccountRegistry {
       : this.#clock.nowMs() - record.profile.asOfMs <= profileFreshnessMs ? "FRESH" as const : "STALE" as const;
     return AccountStatusSchema.parse({
       id: record.id, alias: record.alias, provider: record.provider,
+      category: boundSession?.category ?? null,
       sessionState: boundSession?.state ?? "INVALID", profileState,
       redactedLabel: record.profile?.redactedLabel ?? null,
       currency: record.profile?.currency ?? null,

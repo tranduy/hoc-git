@@ -22,6 +22,8 @@ import { PlaywrightSabaBrowserManager } from "../providers/saba/saba-browser-man
 import { SabaObservedCatalogReader } from "../providers/saba/saba-observed-catalog.js";
 import { SabaProfileReader } from "../providers/saba/saba-profile-reader.js";
 import { SabaSessionValidator } from "../providers/saba/saba-session-validator.js";
+import { PlaywrightSabaEsportsBrowserManager } from "../providers/saba/saba-esports-browser-manager.js";
+import { SabaEsportsObservedCatalogReader } from "../providers/saba/saba-esports-observed-catalog.js";
 import { SessionValidatorRegistry } from "./validators.js";
 import { MultiProviderCatalogReader } from "../providers/multi-provider-catalog.js";
 import { PlaywrightSbobetBrowserManager } from "../providers/sbobet/sbobet-browser-manager.js";
@@ -66,6 +68,10 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     profilesRoot: join(profilesRoot, "providers-saba"),
     headless: false
   });
+  const sabaEsportsBrowser = new PlaywrightSabaEsportsBrowserManager({
+    profilesRoot: join(profilesRoot, "providers-saba-esports"),
+    headless: false
+  });
   const sbobetBrowser = new PlaywrightSbobetBrowserManager({
     profilesRoot: join(profilesRoot, "providers-sbobet"), headless: false
   });
@@ -86,7 +92,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     vault,
     validators: new SessionValidatorRegistry(options.validators ?? [
       new CmdSessionValidator(cmdBrowser),
-      new SabaSessionValidator(sabaBrowser),
+      new SabaSessionValidator(sabaEsportsBrowser),
       new SbobetSessionValidator(sbobetBrowser)
     ]),
     clock,
@@ -125,18 +131,26 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     accounts, source: sbobetBrowser,
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
+  const sabaEsportsCatalogReader = new SabaEsportsObservedCatalogReader({
+    accounts, source: sabaEsportsBrowser,
+    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
+  });
   return {
     manager,
     discovery,
     trustStore,
     accounts,
-    catalogReader: new MultiProviderCatalogReader([catalogReader, sabaCatalogReader, sbobetCatalogReader]),
+    catalogReader: new MultiProviderCatalogReader([
+      catalogReader, sabaEsportsCatalogReader, sabaCatalogReader, sbobetCatalogReader
+    ]),
     sabaCatalogReader,
     async tick(): Promise<void> {
       await manager.tick();
     },
     async close(): Promise<void> {
-      await Promise.all([automation.close(), cmdBrowser.close(), sabaBrowser.close(), sbobetBrowser.close()]);
+      await Promise.all([
+        automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaEsportsBrowser.close(), sbobetBrowser.close()
+      ]);
     }
   };
 }

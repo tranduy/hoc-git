@@ -165,6 +165,7 @@ export const AccountStatusSchema = z.strictObject({
   id: z.string().trim().min(1).max(128),
   alias: z.string().trim().min(1).max(80),
   provider: ProviderIdSchema,
+  category: CategorySchema.nullable(),
   sessionState: SessionStateSchema,
   profileState: ProfileStateSchema,
   redactedLabel: z.string().trim().min(1).max(128).nullable(),

@@ -1,4 +1,4 @@
-import type { ProviderId } from "@tool-chenh/contracts";
+import type { Category, ProviderId } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 
 export type CatalogTelemetryState = "SUCCESS" | "UNAVAILABLE" | "SCHEMA_ERROR";
@@ -10,7 +10,7 @@ export interface CatalogJournalEntry {
   readonly type: CatalogJournalEventType;
   readonly atMs: number;
   readonly provider: ProviderId | null;
-  readonly category: "FOOTBALL" | null;
+  readonly category: Category | null;
   readonly providerEventId: string | null;
   readonly providerMarketId: string | null;
   readonly providerSelectionId: string | null;
@@ -47,7 +47,7 @@ export interface CatalogReadTiming {
 export interface CatalogReadTelemetry {
   readonly accountId: string;
   readonly provider: ProviderId | null;
-  readonly category: "FOOTBALL" | null;
+  readonly category: Category | null;
   readonly state: CatalogTelemetryState;
   readonly requestStartedAtMs: number;
   readonly completedAtMs: number;

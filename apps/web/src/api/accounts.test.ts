@@ -5,6 +5,7 @@ const account = {
   id: "account-1",
   alias: "CMD account 1",
   provider: "CMD",
+  category: null,
   sessionState: "ACTIVE",
   profileState: "FRESH",
   redactedLabel: "••••1445",

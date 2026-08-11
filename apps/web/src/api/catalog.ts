@@ -3,6 +3,8 @@ import {
   ProviderMarketSchema,
   ProviderQuoteSchema,
   ProviderIdSchema,
+  CategorySchema,
+  type Category,
   type ProviderId,
   type ProviderEvent,
   type ProviderMarket,
@@ -13,7 +15,7 @@ export interface LiveCatalogResponse {
   readonly dataMode: "LIVE";
   readonly accountId: string;
   readonly provider: ProviderId;
-  readonly category: "FOOTBALL";
+  readonly category: Category;
   readonly comparisonState: "AWAITING_SECOND_PROVIDER";
   readonly observedAtMs: number;
   readonly rejectedMarketCount: number;
@@ -32,16 +34,20 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
   const events = ProviderEventSchema.array().safeParse(record.events);
   const markets = ProviderMarketSchema.array().safeParse(record.markets);
   const quotes = ProviderQuoteSchema.array().safeParse(record.quotes);
+  const category = CategorySchema.safeParse(record.category);
   if (
     record.dataMode !== "LIVE" || typeof record.accountId !== "string" || record.accountId !== expectedAccountId ||
-    !ProviderIdSchema.safeParse(record.provider).success || record.provider === "FABET" || record.category !== "FOOTBALL" ||
+    !ProviderIdSchema.safeParse(record.provider).success || record.provider === "FABET" || !category.success ||
     record.comparisonState !== "AWAITING_SECOND_PROVIDER" ||
     typeof record.observedAtMs !== "number" || !Number.isFinite(record.observedAtMs) ||
     typeof record.rejectedMarketCount !== "number" || !Number.isSafeInteger(record.rejectedMarketCount) || record.rejectedMarketCount < 0 ||
-    !events.success || !markets.success || !quotes.success
+    !events.success || !markets.success || !quotes.success ||
+    events.data.some((event) => event.category !== category.data || event.provider !== record.provider) ||
+    markets.data.some((market) => market.category !== category.data || market.provider !== record.provider) ||
+    quotes.data.some((quote) => quote.category !== category.data || quote.provider !== record.provider)
   ) throw new Error("Invalid live catalog response");
   return {
-    dataMode: "LIVE", accountId: expectedAccountId, provider: record.provider as ProviderId, category: "FOOTBALL",
+    dataMode: "LIVE", accountId: expectedAccountId, provider: record.provider as ProviderId, category: category.data,
     comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: record.observedAtMs,
     rejectedMarketCount: record.rejectedMarketCount,
     events: events.data, markets: markets.data, quotes: quotes.data

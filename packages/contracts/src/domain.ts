@@ -46,6 +46,7 @@ export interface AccountStatus {
   readonly id: string;
   readonly alias: string;
   readonly provider: ProviderId;
+  readonly category: Category | null;
   readonly sessionState: SessionState;
   readonly profileState: ProfileState;
   readonly redactedLabel: string | null;

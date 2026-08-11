@@ -26,6 +26,7 @@ describe("live account and preflight schemas", () => {
     id: "account-a",
     alias: "Main CMD",
     provider: "CMD",
+    category: "FOOTBALL" as const,
     sessionState: "ACTIVE",
     profileState: "FRESH",
     redactedLabel: "03******90",

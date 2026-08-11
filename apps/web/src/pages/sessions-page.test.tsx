@@ -42,6 +42,7 @@ class FakeAccountApi implements AccountApiLike {
     id: "account-1",
     alias: "CMD account 1",
     provider: "CMD",
+    category: null,
     sessionState: "ACTIVE",
     profileState: "FRESH",
     redactedLabel: "••••1445",
@@ -56,6 +57,7 @@ class FakeAccountApi implements AccountApiLike {
   async register(input: { sessionId: string; alias: string; provider: AccountStatus["provider"] }): Promise<AccountStatus> {
     const created: AccountStatus = {
       id: `account-${this.accounts.length + 1}`, alias: input.alias, provider: input.provider,
+      category: null,
       sessionState: "ACTIVE", profileState: "UNAVAILABLE", redactedLabel: null, currency: null,
       balance: null, balanceAsOfMs: null, capabilities: input.provider === "CMD" ? ["PROFILE", "CATALOG"] : [], reason: "SCHEMA_CHANGED"
     };

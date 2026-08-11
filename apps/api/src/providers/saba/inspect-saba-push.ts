@@ -1,9 +1,11 @@
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
+import { normalizeSabaLolRecords } from "@tool-chenh/adapters";
 import { DpapiProtector } from "../../sessions/dpapi-protector.js";
 import { SecretVault } from "../../sessions/secret-vault.js";
 import { SabaPushDecoder } from "./saba-push-decoder.js";
 import { parseSabaSocketFrame } from "./saba-socket-frame.js";
+import { exactSabaLolUrl } from "./saba-esports-navigation.js";
 
 interface InspectableSessionRecord {
   readonly secret: { readonly kind: "LAUNCH_URL"; readonly value: string };
@@ -96,6 +98,7 @@ async function main(): Promise<void> {
     if (socketCount === 0 && await page.locator("body").innerText().catch(() => "") === "") {
       await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
     }
+    await page.goto(exactSabaLolUrl(page.url()), { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.waitForTimeout(durationMs);
     const pageSignals = await Promise.all(context.pages().map(async (item) => item.evaluate(() => {
       const bodyText = document.body?.innerText ?? "";
@@ -112,9 +115,11 @@ async function main(): Promise<void> {
     }).catch(() => ({ title: "", bodyTextLength: 0, hasErrorText: true, hasSport43Control: false,
       scriptCount: 0, hasSocketIoScript: false }))));
     const recordTypes = new Map<string, number>();
+    const allRecords = [...channelSnapshots.values()].flat();
     const matchSamples: Record<string, unknown>[] = [];
     const oddsSamples: Record<string, unknown>[] = [];
     const betTypeSamples: Record<string, unknown>[] = [];
+    const leagueSamples: Record<string, unknown>[] = [];
     for (const records of channelSnapshots.values()) for (const item of records) {
       if (typeof item.type !== "string") continue;
       const type = item.type.startsWith("-") ? item.type.slice(1) : item.type;
@@ -140,7 +145,14 @@ async function main(): Promise<void> {
         marketname: item.marketname, bettypegroupid: item.bettypegroupid,
         fields: Object.keys(item).sort()
       });
+      if (type === "l" && leagueSamples.length < 12) leagueSamples.push({
+        leagueid: item.leagueid, leaguenameen: item.leaguenameen, leaguegroupid: item.leaguegroupid,
+        sporttype: item.sporttype, countrycode: item.countrycode, fields: Object.keys(item).sort()
+      });
     }
+    const normalized = normalizeSabaLolRecords(allRecords, {
+      observedAtMs: Date.now(), receivedMonotonicMs: performance.now(), sequence: 1
+    });
     process.stdout.write(`${JSON.stringify({
       socketCount,
       pageCount: context.pages().length,
@@ -154,7 +166,22 @@ async function main(): Promise<void> {
       schemaErrorShapes: [...schemaErrorShapes].sort().map((value) => JSON.parse(value) as unknown),
       channelRecords: Object.fromEntries([...channelRecords].sort()),
       recordTypes: Object.fromEntries([...recordTypes].sort()),
-      samples: { matches: matchSamples, odds: oddsSamples, betTypes: betTypeSamples }
+      normalized: {
+        eventCount: normalized.events.length,
+        marketCount: normalized.markets.length,
+        quoteCount: normalized.quotes.length,
+        diagnosticCount: normalized.diagnostics.length,
+        events: normalized.events.slice(0, 5).map((event) => ({
+          providerEventId: event.providerEventId, competition: event.competition,
+          participantA: event.participantA, participantB: event.participantB,
+          startAtUtcMs: event.startAtUtcMs, isLive: event.isLive
+        })),
+        markets: normalized.markets.slice(0, 10).map((market) => ({
+          providerEventId: market.providerEventId, providerMarketId: market.providerMarketId,
+          marketType: market.marketType, scope: market.scope, status: market.status
+        }))
+      },
+      samples: { matches: matchSamples, odds: oddsSamples, betTypes: betTypeSamples, leagues: leagueSamples }
     }, null, 2)}\n`);
   } finally {
     await browser.close();

@@ -7,7 +7,7 @@ import { LiveCatalogPage } from "./live-catalog-page.js";
 import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
 
 const account: AccountStatus = {
-  id: "account-1", alias: "CMD main", provider: "CMD", sessionState: "ACTIVE", profileState: "FRESH",
+  id: "account-1", alias: "CMD main", provider: "CMD", category: "FOOTBALL", sessionState: "ACTIVE", profileState: "FRESH",
   redactedLabel: "••••1445", currency: "UUS", balance: "0", balanceAsOfMs: 100,
   capabilities: ["PROFILE", "CATALOG"], reason: null
 };
@@ -266,10 +266,11 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText(/Cross-book comparison unavailable.*SBOBET/u)).toBeTruthy();
   });
 
-  it("states honestly that LoL is not connected yet", async () => {
+  it("keeps LoL loading available while showing that no LoL account is connected", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "LoL" }));
-    expect(screen.getByText("No verified live LoL adapter is connected yet.")).toBeTruthy();
+    expect(screen.getByLabelText("SABA unavailable")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Load live catalog" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("clears a Football catalog error when switching to LoL", async () => {
@@ -279,7 +280,7 @@ describe("LiveCatalogPage", () => {
     expect(await screen.findByText(/Live catalog is unavailable/u)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "LoL" }));
 
-    expect(screen.getByText("No verified live LoL adapter is connected yet.")).toBeTruthy();
+    expect(screen.getByLabelText("SABA unavailable")).toBeTruthy();
     expect(screen.queryByText(/Live catalog is unavailable/u)).toBeNull();
   });
 
@@ -296,6 +297,38 @@ describe("LiveCatalogPage", () => {
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
     expect(screen.queryByText("Alpha vs Beta")).toBeNull();
     expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("loads verified SABA LoL series moneylines but keeps single-book tickets hidden", async () => {
+    const lolAccount: AccountStatus = { ...account, id: "saba-lol", alias: "SABA LoL", provider: "SABA", category: "LOL" };
+    const lolEvent: ProviderEvent = {
+      provider: "SABA", category: "LOL", providerEventId: "lol-1", competition: "League of Legends - LCK",
+      seasonStage: null, startAtUtcMs: Date.now() + 60_000, participantA: "G2", participantB: "TH",
+      eventScope: "SERIES", bestOf: 5, isLive: false, rematchCandidate: null,
+      fixtureDiscriminator: null, gameVariant: "LOL_PC", liveState: null
+    };
+    const lolMarket: ProviderMarket = {
+      provider: "SABA", category: "LOL", providerEventId: "lol-1", providerMarketId: "series-1",
+      marketType: "SERIES_WINNER", scope: "SERIES", line: null,
+      settlementProfile: "saba-esports-two-way-moneyline", status: "OPEN"
+    };
+    const lolCatalog: LiveCatalogResponse = {
+      dataMode: "LIVE", accountId: lolAccount.id, provider: "SABA", category: "LOL",
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: Date.now(), rejectedMarketCount: 0,
+      events: [lolEvent], markets: [lolMarket], quotes: ["TEAM_A", "TEAM_B"].map((selection, index) => ({
+        provider: "SABA", category: "LOL", providerEventId: "lol-1", providerMarketId: "series-1",
+        providerSelectionId: `series-${index}`, marketType: "SERIES_WINNER", scope: "SERIES", selection,
+        line: null, rawOdds: index === 0 ? "-0.5" : "0.4", rawFormat: "MALAY", status: "OPEN",
+        isLive: false, sourceTimestampMs: null, receivedMonotonicMs: 1, sequence: 1
+      }))
+    };
+    render(<LiveCatalogPage
+      accountApi={{ ...accountApi, list: async () => [lolAccount] }}
+      catalogApi={{ read: async () => lolCatalog }} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "LoL" }));
+    expect(await screen.findByText(/1 event without an exact two-book ticket hidden/u)).toBeTruthy();
+    expect(screen.queryByText("G2 vs TH")).toBeNull();
   });
 
   it("reopens a selected match detail from its safe URL identity", async () => {
