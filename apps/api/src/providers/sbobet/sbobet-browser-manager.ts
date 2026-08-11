@@ -60,6 +60,17 @@ export async function extractSbobetRecords(page: Page): Promise<readonly SbobetC
   })) as Promise<readonly SbobetCatalogInputRecord[]>;
 }
 
+export async function isSbobetCatalogReady(page: Page): Promise<boolean> {
+  return page.locator(".wrapper-match-component").evaluateAll((nodes) => nodes.some((node) => {
+    const text = (element: Element | null): string => element?.textContent?.trim().replace(/\s+/gu, " ") ?? "";
+    const eventId = node.getAttribute("id")?.match(/wrapper-match-component-([^\s-]+)/u)?.[1] ?? "";
+    const league = text(node.closest(".league-component")?.querySelector(".league-name") ?? null);
+    const teams = [...node.querySelectorAll(".row-team-name")].slice(0, 2).map(text).filter(Boolean);
+    const hasPrice = [...node.querySelectorAll(".odd-item .odd-val")].some((odd) => text(odd).length > 0);
+    return eventId.length > 0 && league.length > 0 && teams.length === 2 && hasPrice;
+  }));
+}
+
 export class PlaywrightSbobetBrowserManager {
   readonly #profilesRoot: string; readonly #headless: boolean; readonly #timeout: number;
   readonly #sessions = new Map<string, OpenSession>(); readonly #opening = new Map<string, Promise<OpenSession>>();
@@ -91,7 +102,7 @@ export class PlaywrightSbobetBrowserManager {
       await launcher.goto(safeLaunchUrl(input.launchUrl), { waitUntil: "domcontentloaded", timeout: this.#timeout });
       const deadline = Date.now() + this.#timeout; let found: Page | null = null;
       while (found === null && Date.now() < deadline) {
-        for (const page of context.pages()) if (await page.locator(".wrapper-match-component").count() > 0) { found = page; break; }
+        for (const page of context.pages()) if (await isSbobetCatalogReady(page)) { found = page; break; }
         if (found === null) await launcher.waitForTimeout(250);
       }
       if (found === null) throw new Error("SBOBET_CATALOG_UNAVAILABLE");

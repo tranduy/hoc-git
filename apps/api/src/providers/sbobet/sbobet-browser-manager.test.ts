@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser } from "playwright";
-import { extractSbobetRecords } from "./sbobet-browser-manager.js";
+import { extractSbobetRecords, isSbobetCatalogReady } from "./sbobet-browser-manager.js";
 
 describe("extractSbobetRecords", () => {
   let browser: Browser;
@@ -43,6 +43,19 @@ describe("extractSbobetRecords", () => {
     expect(result[0]?.markets.map((market) => [market.marketType, market.lineText])).toEqual([
       ["FT_AH", "0.5"], ["FT_TOTAL", "2.5"], ["FT_1X2", null]
     ]);
+    await page.close();
+  });
+
+  it("does not accept the cold-start shell before teams and prices are rendered", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`<section class="league-component"><span class="league-name">Allsvenskan</span>
+      <div class="wrapper-match-component" id="wrapper-match-component-5388803"></div></section>`);
+    expect(await isSbobetCatalogReady(page)).toBe(false);
+    await page.locator(".wrapper-match-component").evaluate((node) => {
+      node.innerHTML = `<span class="row-team-name">IK Sirius</span><span class="row-team-name">Brommapojkarna</span>
+        <div class="odd-item"><span class="odd-val">0.79</span></div>`;
+    });
+    expect(await isSbobetCatalogReady(page)).toBe(true);
     await page.close();
   });
 });
