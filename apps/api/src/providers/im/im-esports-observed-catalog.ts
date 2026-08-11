@@ -19,7 +19,7 @@ export class ImEsportsObservedCatalogReader {
       handle.withSecret(async (secret) => {
         if (secret.kind !== "LAUNCH_URL") throw new Error("IM_ESPORTS_CATALOG_UNAVAILABLE");
         return this.#source.readCatalog({ sessionId: handle.sessionId, launchUrl: secret.value });
-      }));
+      }), "LOL");
     const now = this.#clock.now();
     const sequence = (this.#sequences.get(accountId) ?? 0) + 1;
     const normalized = normalizeImLolRecords(records, { receivedMonotonicMs: now.monotonicNowMs, sequence });

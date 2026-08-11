@@ -23,7 +23,7 @@ export class SabaEsportsObservedCatalogReader {
       handle.withSecret(async (secret) => {
         if (secret.kind !== "LAUNCH_URL") throw new Error("SABA_ESPORTS_CATALOG_UNAVAILABLE");
         return this.#source.readCatalog({ sessionId: handle.sessionId, launchUrl: secret.value });
-      }));
+      }), "LOL");
     const now = this.#clock.now();
     const sequence = (this.#sequences.get(accountId) ?? 0) + 1;
     const normalized = normalizeSabaLolRecords(records, {

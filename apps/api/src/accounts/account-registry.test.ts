@@ -23,13 +23,14 @@ async function setup() {
   const clock = { value: 1_000 };
   const statuses = ["session-a", "session-b"].map((id) => ({
     id, provider: "CMD", source: "MANUAL_PROVIDER_SESSION" as const, state: "ACTIVE" as const,
-    category: null,
+    category: "FOOTBALL" as const,
     trustedHostname: null, acquiredAtMs: 1, lastValidatedAtMs: 1, renewAfterMs: 99_999,
     secretConfigured: true, reason: null
   }));
   const handles = new Map<string, ActiveSecretHandle>(statuses.map((status) => [status.id, {
     sessionId: status.id,
     provider: "CMD",
+    category: status.category,
     withSecret: async (consume) => consume({ kind: "TOKEN", value: `${status.id}-secret-canary` })
   }]));
   let nextId = 0;
@@ -114,5 +115,18 @@ describe("AccountRegistry", () => {
       .rejects.toThrow("ACCOUNT_PROVIDER_MISMATCH");
     await expect(context.registry.withActiveHandle(account.id, "CMD", async (handle) => handle.sessionId))
       .resolves.toBe("session-a");
+  });
+
+  it("rejects the wrong catalog category before opening the provider secret", async () => {
+    const context = await setup();
+    const account = await context.registry.register({ sessionId: "session-a", alias: "Main", provider: "CMD" });
+    let consumed = false;
+
+    await expect(context.registry.withActiveHandle(account.id, "CMD", async () => {
+      consumed = true; return "wrong";
+    }, "LOL")).rejects.toThrow("ACCOUNT_CATEGORY_MISMATCH");
+    expect(consumed).toBe(false);
+    await expect(context.registry.withActiveHandle(account.id, "CMD", async () => "football", "FOOTBALL"))
+      .resolves.toBe("football");
   });
 });

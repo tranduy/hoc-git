@@ -6,6 +6,7 @@ import { SecretVault } from "../../sessions/secret-vault.js";
 import { SabaPushDecoder } from "./saba-push-decoder.js";
 import { parseSabaSocketFrame } from "./saba-socket-frame.js";
 import { exactSabaLolUrl } from "./saba-esports-navigation.js";
+import { clickSafeStructuralCategory, findCmdCatalogPage } from "../browser-protocol-inspector.js";
 
 interface InspectableSessionRecord {
   readonly secret: { readonly kind: "LAUNCH_URL"; readonly value: string };
@@ -22,22 +23,21 @@ function inspectable(value: unknown): value is InspectableSessionRecord {
 async function main(): Promise<void> {
   const sessionId = process.argv[2];
   const durationMs = Number(process.argv[3] ?? "20000");
+  const category = process.argv[4] ?? "LOL";
   const localAppData = process.env.LOCALAPPDATA;
   if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || localAppData === undefined ||
-    !Number.isSafeInteger(durationMs) || durationMs < 1_000 || durationMs > 60_000) {
-    throw new Error("Usage: inspect-saba-push <redacted-session-id> [duration-ms]");
+    !Number.isSafeInteger(durationMs) || durationMs < 1_000 || durationMs > 60_000 ||
+    !["FOOTBALL", "LOL"].includes(category)) {
+    throw new Error("Usage: inspect-saba-push <redacted-session-id> [duration-ms] [FOOTBALL|LOL]");
   }
   const authRoot = resolve(join(localAppData, "tool-chenh", ".auth"));
   const vault = new SecretVault({ directory: join(authRoot, "vault"), protector: new DpapiProtector() });
   const record = await vault.load(`session-${sessionId}`);
   if (!inspectable(record)) throw new Error("Inspectable launch session not found");
 
-  // The observed provider deliberately does not start its push transport in
-  // Chromium headless mode, so protocol verification must use the same headed
-  // runtime as the production browser-backed adapter.
-  const browser = await chromium.launch({ headless: false });
+  const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
-  const page = await context.newPage();
+  let page = await context.newPage();
   const channelRecords = new Map<string, number>();
   const channelSnapshots = new Map<string, readonly Readonly<Record<string, unknown>>[]>();
   let socketCount = 0;
@@ -98,7 +98,12 @@ async function main(): Promise<void> {
     if (socketCount === 0 && await page.locator("body").innerText().catch(() => "") === "") {
       await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
     }
-    await page.goto(exactSabaLolUrl(page.url()), { waitUntil: "domcontentloaded", timeout: 30_000 });
+    if (category === "LOL") {
+      await page.goto(exactSabaLolUrl(page.url()), { waitUntil: "domcontentloaded", timeout: 30_000 });
+    } else {
+      page = await findCmdCatalogPage(context.pages()) ?? page;
+      await clickSafeStructuralCategory(page, "1", 0).catch(() => false);
+    }
     await page.waitForTimeout(durationMs);
     const pageSignals = await Promise.all(context.pages().map(async (item) => item.evaluate(() => {
       const bodyText = document.body?.innerText ?? "";
@@ -124,13 +129,13 @@ async function main(): Promise<void> {
       if (typeof item.type !== "string") continue;
       const type = item.type.startsWith("-") ? item.type.slice(1) : item.type;
       recordTypes.set(type, (recordTypes.get(type) ?? 0) + 1);
-      if (type === "m" && matchSamples.length < 3) matchSamples.push({
+      if (type === "m" && matchSamples.length < 20) matchSamples.push({
         matchid: item.matchid, leagueid: item.leagueid, leaguenameen: item.leaguenameen,
         hteamnameen: item.hteamnameen, ateamnameen: item.ateamnameen,
         kickofftime: item.kickofftime, eventstatus: item.eventstatus, marketid: item.marketid,
-        bestofmap: item.bestofmap, gamestatus: item.gamestatus
+        bestofmap: item.bestofmap, gamestatus: item.gamestatus, sporttype: item.sporttype
       });
-      if (type === "o" && oddsSamples.length < 5) oddsSamples.push({
+      if (type === "o" && oddsSamples.length < 100) oddsSamples.push({
         oddsid: item.oddsid, matchid: item.matchid, bettype: item.bettype,
         parenttypeid: item.parenttypeid, oddsstatus: item.oddsstatus,
         odds1a: item.odds1a, odds2a: item.odds2a, hdp1: item.hdp1, hdp2: item.hdp2,
@@ -150,10 +155,11 @@ async function main(): Promise<void> {
         sporttype: item.sporttype, countrycode: item.countrycode, fields: Object.keys(item).sort()
       });
     }
-    const normalized = normalizeSabaLolRecords(allRecords, {
+    const normalized = category === "LOL" ? normalizeSabaLolRecords(allRecords, {
       observedAtMs: Date.now(), receivedMonotonicMs: performance.now(), sequence: 1
-    });
+    }) : null;
     process.stdout.write(`${JSON.stringify({
+      category,
       socketCount,
       pageCount: context.pages().length,
       pageSignals,
@@ -167,19 +173,19 @@ async function main(): Promise<void> {
       channelRecords: Object.fromEntries([...channelRecords].sort()),
       recordTypes: Object.fromEntries([...recordTypes].sort()),
       normalized: {
-        eventCount: normalized.events.length,
-        marketCount: normalized.markets.length,
-        quoteCount: normalized.quotes.length,
-        diagnosticCount: normalized.diagnostics.length,
-        events: normalized.events.slice(0, 5).map((event) => ({
+        eventCount: normalized?.events.length ?? 0,
+        marketCount: normalized?.markets.length ?? 0,
+        quoteCount: normalized?.quotes.length ?? 0,
+        diagnosticCount: normalized?.diagnostics.length ?? 0,
+        events: normalized?.events.slice(0, 5).map((event) => ({
           providerEventId: event.providerEventId, competition: event.competition,
           participantA: event.participantA, participantB: event.participantB,
           startAtUtcMs: event.startAtUtcMs, isLive: event.isLive
-        })),
-        markets: normalized.markets.slice(0, 10).map((market) => ({
+        })) ?? [],
+        markets: normalized?.markets.slice(0, 10).map((market) => ({
           providerEventId: market.providerEventId, providerMarketId: market.providerMarketId,
           marketType: market.marketType, scope: market.scope, status: market.status
-        }))
+        })) ?? []
       },
       samples: { matches: matchSamples, odds: oddsSamples, betTypes: betTypeSamples, leagues: leagueSamples }
     }, null, 2)}\n`);

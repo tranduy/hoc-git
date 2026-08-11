@@ -1,6 +1,6 @@
 export type SecretRecord = Readonly<Record<string, unknown>>;
 
-import type { SessionHealthReason } from "@tool-chenh/contracts";
+import type { Category, SessionHealthReason } from "@tool-chenh/contracts";
 
 export type ProviderSecretKind = "TOKEN" | "COOKIE_BUNDLE" | "LAUNCH_URL" | "FABET_CREDENTIALS";
 
@@ -22,6 +22,7 @@ export interface SessionValidator {
 export interface ActiveSecretHandle {
   readonly sessionId: string;
   readonly provider: string;
+  readonly category?: Category | null;
   withSecret<T>(consume: (secret: ProviderSecret) => Promise<T>): Promise<T>;
 }
 

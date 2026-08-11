@@ -3,6 +3,7 @@ import {
   type CmdCatalogInputRecord
 } from "@tool-chenh/adapters";
 import type {
+  Category,
   ProviderId,
   ProviderEvent,
   ProviderMarket,
@@ -27,7 +28,8 @@ export interface ActiveAccountAccess {
   withActiveHandle<T>(
     id: string,
     provider: ProviderId,
-    consume: (handle: ActiveSecretHandle) => Promise<T>
+    consume: (handle: ActiveSecretHandle) => Promise<T>,
+    expectedCategory?: Category
   ): Promise<T>;
 }
 
@@ -66,7 +68,7 @@ export class CmdObservedCatalogReader {
       records = await this.#accounts.withActiveHandle(accountId, this.#provider, async (handle) => handle.withSecret(async (secret) => {
         if (secret.kind !== "LAUNCH_URL") throw new Error("CMD_CATALOG_UNAVAILABLE");
         return this.#source.readCatalog({ sessionId: handle.sessionId, launchUrl: secret.value });
-      }));
+      }), "FOOTBALL");
     } catch {
       throw new Error("CMD_CATALOG_UNAVAILABLE");
     }

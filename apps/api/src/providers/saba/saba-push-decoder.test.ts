@@ -96,4 +96,26 @@ describe("SabaPushDecoder", () => {
     expect(decoder.apply({ bridgeId: "b4", revision: "batch-1", rows: [[0, "done"]] }))
       .toMatchObject({ duplicate: true, changes: [] });
   });
+
+  it("ignores multiplexed non-catalog rows without quarantining catalog state", () => {
+    const decoder = new SabaPushDecoder();
+    const result = decoder.apply({ bridgeId: "b7", revision: "r1", rows: [
+      ["f", 0, ["type", "siteid", "isPeakHour"]],
+      [0, "reset"], [0, 88, 1, 12, 2, true], [0, "future-control", 1, 12], [0, "done"]
+    ] });
+    expect(result).toMatchObject({ fullSnapshot: true, records: [], duplicate: false });
+  });
+
+  it("rejects a sequence gap without mutating state and accepts a replacement full snapshot", () => {
+    const decoder = new SabaPushDecoder();
+    decoder.apply({ bridgeId: "b8", revision: "r0001", rows: [
+      ["f", 0, fields], [0, "reset"], [0, "m", 1, 5], [0, "done"]
+    ] });
+    expect(() => decoder.apply({ bridgeId: "b8", revision: "r0003", rows: [
+      [0, "m", 1, 6]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP");
+    expect(decoder.apply({ bridgeId: "b8", revision: "r0004", rows: [
+      [0, "reset"], [0, "m", 1, 9], [0, "done"]
+    ] }).records).toEqual([expect.objectContaining({ matchid: 9 })]);
+  });
 });

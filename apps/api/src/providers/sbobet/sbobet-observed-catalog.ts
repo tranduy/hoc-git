@@ -14,7 +14,7 @@ export class SbobetObservedCatalogReader {
     const records = await this.#accounts.withActiveHandle(accountId, "SBOBET", async (handle) => handle.withSecret(async (secret) => {
       if (secret.kind !== "LAUNCH_URL") throw new Error("SBOBET_CATALOG_UNAVAILABLE");
       return this.#source.readCatalog({ sessionId: handle.sessionId, launchUrl: secret.value });
-    }));
+    }), "FOOTBALL");
     const now = this.#clock.now(); const sequence = (this.#sequences.get(accountId) ?? 0) + 1;
     const options = { observedAtMs: now.wallClockNowMs, receivedMonotonicMs: now.monotonicNowMs, sequence };
     const events: ObservedProviderCatalog["events"][number][] = [];

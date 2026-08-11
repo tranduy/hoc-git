@@ -255,6 +255,7 @@ export class SessionManager {
     return {
       sessionId: current.id,
       provider: current.provider,
+      category: current.category,
       withSecret: async <T>(consume: (secret: ProviderSecret) => Promise<T>): Promise<T> => {
         const latest = await this.#load(id);
         if (!this.#isUsable(latest)) throw new Error("SESSION_NOT_ACTIVE");

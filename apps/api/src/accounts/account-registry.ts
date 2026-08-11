@@ -3,6 +3,7 @@ import {
   DecimalStringSchema,
   ProviderIdSchema,
   type AccountStatus,
+  type Category,
   type ProviderCapability,
   type ProviderId,
   type RedactedSessionStatus,
@@ -133,12 +134,14 @@ export class AccountRegistry {
   async withActiveHandle<T>(
     id: string,
     expectedProvider: ProviderId,
-    consume: (handle: ActiveSecretHandle) => Promise<T>
+    consume: (handle: ActiveSecretHandle) => Promise<T>,
+    expectedCategory?: Category
   ): Promise<T> {
     const record = await this.#loadRequired(id);
     if (record.provider !== expectedProvider) throw new Error("ACCOUNT_PROVIDER_MISMATCH");
     const handle = await this.#sessions.getActiveSecretHandle(record.sessionId);
     if (handle === null || handle.provider !== record.provider) throw new Error("ACCOUNT_SESSION_UNAVAILABLE");
+    if (expectedCategory !== undefined && handle.category !== expectedCategory) throw new Error("ACCOUNT_CATEGORY_MISMATCH");
     return consume(handle);
   }
 

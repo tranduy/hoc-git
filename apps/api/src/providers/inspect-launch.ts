@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   const record = await vault.load(`session-${sessionId}`);
   if (!inspectable(record)) throw new Error("Inspectable launch session not found");
   const context = await chromium.launchPersistentContext(join(root, "browser-profiles", "fabet-inspector"), {
-    headless: false, acceptDownloads: false
+    headless: true, acceptDownloads: false
   });
   const observations = new Map<string, ProtocolObservation & { readonly bodyShape?: unknown }>();
   const scriptEndpoints = new Set<string>();

@@ -19,6 +19,7 @@ import { CmdProfileReader } from "../providers/cmd/cmd-profile-reader.js";
 import { CmdSessionValidator } from "../providers/cmd/cmd-session-validator.js";
 import { CmdObservedCatalogReader } from "../providers/cmd/cmd-observed-catalog.js";
 import { PlaywrightSabaBrowserManager } from "../providers/saba/saba-browser-manager.js";
+import { PlaywrightSabaFootballPushBrowserManager } from "../providers/saba/saba-football-push-browser-manager.js";
 import { SabaObservedCatalogReader } from "../providers/saba/saba-observed-catalog.js";
 import { SabaProfileReader } from "../providers/saba/saba-profile-reader.js";
 import { SabaSessionValidator } from "../providers/saba/saba-session-validator.js";
@@ -66,21 +67,25 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const profilesRoot = join(root, "browser-profiles");
   const cmdBrowser = new PlaywrightCmdBrowserManager({
     profilesRoot: join(profilesRoot, "providers"),
-    headless: false
+    headless: true
   });
   const sabaBrowser = new PlaywrightSabaBrowserManager({
     profilesRoot: join(profilesRoot, "providers-saba"),
-    headless: false
+    headless: true
+  });
+  const sabaFootballPushBrowser = new PlaywrightSabaFootballPushBrowserManager({
+    profilesRoot: join(profilesRoot, "providers-saba-football-push"),
+    headless: true
   });
   const sabaEsportsBrowser = new PlaywrightSabaEsportsBrowserManager({
     profilesRoot: join(profilesRoot, "providers-saba-esports"),
-    headless: false
+    headless: true
   });
   const sbobetBrowser = new PlaywrightSbobetBrowserManager({
-    profilesRoot: join(profilesRoot, "providers-sbobet"), headless: false
+    profilesRoot: join(profilesRoot, "providers-sbobet"), headless: true
   });
   const imEsportsBrowser = new PlaywrightImEsportsBrowserManager({
-    profilesRoot: join(profilesRoot, "providers-im-esports"), headless: false
+    profilesRoot: join(profilesRoot, "providers-im-esports"), headless: true
   });
   const automation = options.automation ?? new PlaywrightFabetAutomation({
     profilePath: join(profilesRoot, "fabet"),
@@ -133,9 +138,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const sabaCatalogReader = new SabaObservedCatalogReader({
     accounts,
-    source: sabaBrowser,
-    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
-    timezoneOffsetMinutes: 420
+    source: sabaFootballPushBrowser,
+    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const sbobetCatalogReader = new SbobetObservedCatalogReader({
     accounts, source: sbobetBrowser,
@@ -163,7 +167,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     },
     async close(): Promise<void> {
       await Promise.all([
-        automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaEsportsBrowser.close(),
+        automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaFootballPushBrowser.close(), sabaEsportsBrowser.close(),
         sbobetBrowser.close(), imEsportsBrowser.close()
       ]);
     }

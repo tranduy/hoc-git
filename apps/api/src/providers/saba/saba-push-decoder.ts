@@ -56,13 +56,27 @@ function publicRecord(value: Readonly<Record<string, unknown>>): Readonly<Record
   return { ...value };
 }
 
-function recordKey(record: Readonly<Record<string, unknown>>): { readonly key: string; readonly deleted: boolean } {
+function revisionGap(previous: string | null, next: string | null): boolean {
+  if (previous === null || next === null) return false;
+  const left = /^(.*?)(\d+)$/u.exec(previous);
+  const right = /^(.*?)(\d+)$/u.exec(next);
+  if (left === null || right === null || left[1] !== right[1]) return false;
+  const before = BigInt(left[2]!);
+  const after = BigInt(right[2]!);
+  return after !== before + 1n;
+}
+
+function recordKey(record: Readonly<Record<string, unknown>>): { readonly key: string; readonly deleted: boolean } | null {
   const rawType = record.type;
-  if (typeof rawType !== "string" || rawType.length === 0) protocolError("TYPE");
+  // SABA multiplexes account/configuration rows over the same Socket.IO
+  // transport. Those rows can use a numeric discriminator and are unrelated
+  // to the sportsbook catalog. Ignore them without discarding the accepted
+  // catalog snapshot; structural field-table errors still fail closed above.
+  if (typeof rawType !== "string" || rawType.length === 0) return null;
   const deleted = rawType.startsWith("-") || rawType === "dm" || rawType === "do";
   const type = deleted ? rawType.slice(1) : rawType;
   const keys = typeKeys[type];
-  if (keys === undefined) protocolError(`UNKNOWN_TYPE:${type}`);
+  if (keys === undefined) return null;
   const values = keys.map((key) => record[key]);
   if (values.some((value) => value === undefined || value === null || String(value).length === 0)) {
     protocolError(`MISSING_KEY:${type}:${keys.join(",")}`);
@@ -135,6 +149,7 @@ export class SabaPushDecoder {
         continue;
       }
       const identity = recordKey(decoded);
+      if (identity === null) continue;
       if (identity.deleted) {
         records.delete(identity.key);
         changes.push({ operation: "DELETE", key: identity.key, record: publicRecord(decoded) });
@@ -159,6 +174,9 @@ export class SabaPushDecoder {
       };
     }
     if (!snapshotOpen && sawDone) protocolError("UNEXPECTED_DONE");
+    if (current.pending === null && !sawReset && revisionGap(current.lastRevision, frame.revision)) {
+      protocolError("SEQUENCE_GAP");
+    }
     const committedRevision = frame.revision ?? current.pending?.lastRevision ?? null;
     const next: ChannelState = { fields, records, lastRevision: committedRevision, pending: null };
     this.#channels.set(frame.bridgeId, next);
