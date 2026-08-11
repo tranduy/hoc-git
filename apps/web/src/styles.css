@@ -39,6 +39,9 @@ main { max-width: 1440px; margin-left: 224px; padding: calc(var(--space) * 5); }
 .balanced-plan--estimate > strong { color: var(--warning); }
 .rate-gap-summary { display: grid; gap: 4px; margin-bottom: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #11171d; }
 .rate-gap-summary small { color: var(--muted); }.rate-gap-summary b { color: var(--text); }
+.price-movement-panel { display: grid; gap: var(--space); margin-bottom: calc(var(--space) * 2); padding: calc(var(--space) * 2); border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.price-movement-panel header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space); }.price-movement-panel h2 { margin: 0; }.price-movement-panel p, .price-movement-panel small { color: var(--muted); }
+.price-movement-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space); }.price-movement { display: grid; gap: 4px; padding: calc(var(--space) * 1.5); border-left: 4px solid var(--warning); background: #11171d; }.price-movement--strongest { border-color: var(--focus); }.price-movement strong { color: var(--warning); font-size: 1.15rem; }
 .provider-selector { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space); min-width: min(100%, 420px); margin: 0; padding: var(--space); border: 1px solid var(--line); border-radius: 6px; }
 .provider-selector legend { padding: 0 4px; color: var(--muted); font-size: .8rem; }
 .provider-selector label { display: flex; grid-auto-flow: column; align-items: center; gap: 6px; min-height: 34px; padding: 3px 8px; border-radius: 999px; background: #11171d; color: var(--text); cursor: pointer; }

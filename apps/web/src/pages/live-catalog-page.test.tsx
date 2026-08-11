@@ -81,6 +81,9 @@ describe("LiveCatalogPage", () => {
     await act(async () => vi.advanceTimersByTimeAsync(250));
 
     expect(screen.getByText("Best live lag signal")).toBeTruthy();
+    expect(screen.getByText("Biến động giá gần nhất")).toBeTruthy();
+    expect(screen.getByText(/MẠNH NHẤT · Alpha vs Beta/u)).toBeTruthy();
+    expect(screen.getAllByText("1.7 → 2.2").length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Movement #SABA AWAY 1.7 to 2.2")).toBeTruthy();
     expect(screen.getByLabelText("Leg #SBOBET HOME at 2.2")).toBeTruthy();
     expect(screen.getAllByText(/Worst profit 20,000 VND/u)).toHaveLength(2);

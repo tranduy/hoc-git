@@ -10,6 +10,7 @@ import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch
 import { buildFixedBaseStakePlan, buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
+import { PriceMovementTracker, type ObservedPriceMovement } from "../watch/price-movement-tracker.js";
 import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
 
 const defaultAccountApi = new AccountApi();
@@ -118,6 +119,20 @@ function LagSignalPanel({ signals }: { readonly signals: readonly LagSignal[] })
   </section>;
 }
 
+function PriceMovementPanel({ movements }: { readonly movements: readonly ObservedPriceMovement[] }) {
+  return <section className="price-movement-panel" aria-label="Recent observed price movements" aria-live="polite">
+    <header><h2>Biến động giá gần nhất</h2><small>Đo ngay trên mỗi snapshot mới · không chờ cửa sổ 5 phút</small></header>
+    {movements.length === 0 ? <p>Chưa phát hiện odds thay đổi trên các vé chung đang hiển thị.</p> :
+      <div className="price-movement-list">{movements.slice(0, 5).map((movement, index) => <article
+        className={index === 0 ? "price-movement price-movement--strongest" : "price-movement"} key={movement.key}>
+        <b>{index === 0 ? "MẠNH NHẤT · " : ""}{movement.event.event.participantA} vs {movement.event.event.participantB}</b>
+        <span>#{movement.provider} · {selectionLabel(movement.event.event, movement.selection)}</span>
+        <strong>{movement.previousDecimal} → {movement.currentDecimal}</strong>
+        <small>Độ dịch chuyển {movement.magnitude} · {new Date(movement.changedAtMs).toLocaleTimeString()}</small>
+      </article>)}</div>}
+  </section>;
+}
+
 function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
   const [visible, setVisible] = useState<LagSignal | null>(null);
   useEffect(() => {
@@ -145,6 +160,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
   const [staleAccountIds, setStaleAccountIds] = useState<ReadonlySet<string>>(new Set());
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
+  const [movements, setMovements] = useState<readonly ObservedPriceMovement[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -155,6 +171,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const baseStakeRef = useRef(baseStake);
   baseStakeRef.current = baseStake;
   const signalTracker = useRef(new LagSignalTracker());
+  const movementTracker = useRef(new PriceMovementTracker());
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
   const refreshInFlight = useRef(false);
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
@@ -187,6 +204,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const providers = new Set<ProviderId>(accepted.map((catalog) => catalog.provider));
       const observedAtMs = accepted.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
       setSignals(signalTracker.current.update(nextEvents, providers, stakePolicy(baseStakeRef.current), observedAtMs));
+      setMovements(movementTracker.current.update(nextEvents, observedAtMs));
       const failed = results.length - accepted.length;
       if (accepted.length === 0 && preserved.length > 0) setMessage(`${failed} selected provider(s) unavailable; last verified snapshots are retained as stale. Signals are disabled until a fresh read succeeds.`);
       else if (accepted.length === 0) setMessage("Live catalog is unavailable. No selected provider returned a verified catalog.");
@@ -236,11 +254,18 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       if (rightSignalRank < 0) return -1;
       if (leftSignalRank !== rightSignalRank) return leftSignalRank - rightSignalRank;
     }
+    const leftMovementRank = movements.findIndex((movement) => movement.event.key === left.key);
+    const rightMovementRank = movements.findIndex((movement) => movement.event.key === right.key);
+    if (leftMovementRank >= 0 || rightMovementRank >= 0) {
+      if (leftMovementRank < 0) return 1;
+      if (rightMovementRank < 0) return -1;
+      if (leftMovementRank !== rightMovementRank) return leftMovementRank - rightMovementRank;
+    }
     const edge = (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY);
     if (edge !== 0) return edge;
     if (left.event.isLive !== right.event.isLive) return left.event.isLive ? 1 : -1;
     return left.event.startAtUtcMs - right.event.startAtUtcMs;
-  }), [signals, visibleEvents]);
+  }), [movements, signals, visibleEvents]);
   const hiddenNonComparableCount = visibleEvents.length - displayEvents.length;
   useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
@@ -270,8 +295,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   });
   const changeCategory = (next: "FOOTBALL" | "LOL"): void => {
     setCategory(next); setCatalogs([]); catalogsRef.current = []; setStaleAccountIds(new Set());
-    setSignals([]); setMessage(null); setSelectedKey(null);
+    setSignals([]); setMovements([]); setMessage(null); setSelectedKey(null);
     signalTracker.current = new LagSignalTracker();
+    movementTracker.current = new PriceMovementTracker();
     const nextIds = accounts.filter((account) => account.category === null || account.category === next)
       .map((account) => account.id).filter((id) => selectedIds.has(id));
     if (nextIds.length > 0) void loadIds(nextIds, true, next);
@@ -307,6 +333,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <span>{displayEvents.length} cross-book match(es)</span>
       <span>{hiddenNonComparableCount} event{hiddenNonComparableCount === 1 ? "" : "s"} without an exact two-book ticket hidden · review mappings</span></div>}
     {catalogs.length > 0 && <LagSignalPanel signals={signals} />}
+    {catalogs.length > 0 && <PriceMovementPanel movements={movements} />}
     <LagSignalToast signal={signals[0] ?? null} />
     <div className="catalog-event-list">{displayEvents.map((item) => {
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
