@@ -45,7 +45,9 @@ describe("provider catalog route", () => {
         requestStartedAtMs: 1_000, completedAtMs: 1_025, durationMs: 25,
         observedAtMs: 900, newestSourceTimestampMs: 800, sourceAgeMs: 225,
         eventCount: 1, marketCount: 1, quoteCount: 2, rejectedMarketCount: 4,
-        totalReads: 1, successCount: 1, failureCount: 0, schemaErrorCount: 0
+        totalReads: 1, successCount: 1, failureCount: 0, schemaErrorCount: 0,
+        latestSequence: null, sequenceGapCount: 0, recoveryCount: 0, priceChangeCount: 0,
+        statusChangeCount: 0, consecutiveFailures: 0, journalErrorCount: 0
       }]
     });
     expect(response.body).not.toContain("sourceTimestampMs");

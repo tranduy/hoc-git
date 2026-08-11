@@ -1,10 +1,13 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { join } from "node:path";
 import { FixtureAdapter, type FixtureSnapshot } from "@tool-chenh/adapters";
 import type { Category, DataMode } from "@tool-chenh/contracts";
 import { buildApp, validateViteOrigin } from "./app.js";
 import { Runtime } from "./runtime.js";
 import { createSessionServices } from "./sessions/session-services.js";
+import { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
+import { JsonlCatalogJournal } from "./routes/catalog-jsonl-journal.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -157,6 +160,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     throw new Error("LOCAL_APP_DATA_REQUIRED");
   }
   const sessionServices = createSessionServices({ localAppData });
+  const catalogTelemetry = new CatalogTelemetryRegistry(undefined, new JsonlCatalogJournal(
+    join(localAppData, "tool-chenh", "logs", "catalog-changes.jsonl")
+  ));
   const runtime = config.dataMode === "FIXTURE"
     ? createFixtureRuntime(config.fixtureReplaySpeed)
     : createLiveRuntime();
@@ -167,7 +173,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
     sessionServices,
     accountRegistry: sessionServices.accounts,
-    catalogReader: sessionServices.catalogReader
+    catalogReader: sessionServices.catalogReader,
+    catalogTelemetry
   });
   await app.listen({ host: config.host, port: config.port });
   const sessionTimer = setInterval(() => {

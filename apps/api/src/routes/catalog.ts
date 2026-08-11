@@ -22,11 +22,15 @@ export function registerCatalogRoutes(
     const started = telemetry.now();
     try {
       const catalog = await reader.read(parsed.data.accountId);
-      telemetry.recordSuccess(parsed.data.accountId, catalog, telemetry.complete(started));
+      await telemetry.recordSuccess(parsed.data.accountId, catalog, telemetry.complete(started));
       return catalog;
     } catch (error) {
       const schemaError = error instanceof Error && /(?:^|_)CATALOG_SCHEMA_ERROR$/u.test(error.message);
-      telemetry.recordFailure(parsed.data.accountId, schemaError ? "SCHEMA_ERROR" : "UNAVAILABLE", telemetry.complete(started));
+      await telemetry.recordFailure(
+        parsed.data.accountId,
+        schemaError ? "SCHEMA_ERROR" : "UNAVAILABLE",
+        telemetry.complete(started)
+      );
       if (schemaError) {
         return reply.code(422).send({ error: "CATALOG_SCHEMA_ERROR" });
       }
