@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   capturedTopLevelNavigation,
   FabetBrowserDriver,
+  launcherLabelFromCard,
   launcherTextIsSafe,
+  providerLaunchUrlFromResponseBody,
   PlaywrightFabetAutomation,
   type CapturedNavigation,
   type FabetBrowserAutomation
@@ -27,6 +29,7 @@ class FakeAutomation implements FabetBrowserAutomation {
   closed = false;
   authenticated = true;
   launches: Record<string, CapturedNavigation[]> = {};
+  authenticatedUrlValue: string | null = null;
 
   async login(input: { entryUrl: string; username: string; password: string }): Promise<void> {
     this.loginCalls.push(input);
@@ -39,6 +42,10 @@ class FakeAutomation implements FabetBrowserAutomation {
 
   async isAuthenticated(): Promise<boolean> {
     return this.authenticated;
+  }
+
+  async authenticatedUrl(): Promise<string> {
+    return this.authenticatedUrlValue ?? this.loginCalls.at(-1)?.entryUrl ?? "https://fabet.party/";
   }
 
   async close(): Promise<void> {
@@ -126,6 +133,22 @@ describe("FabetBrowserDriver", () => {
     ]);
   });
 
+  it("uses the trusted final origin after Fabet redirects to its current domain", async () => {
+    const context = await setup();
+    await context.trustStore.approve("fabet.com");
+    await context.trustStore.approve("fabet.party");
+    context.automation.authenticatedUrlValue = "https://fabet.party/home";
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 30 }, idFactory: () => "1" });
+
+    await driver.login({ entryUrl: "https://fabet.com/", username: "development-user", password: "development-pass" });
+    await driver.captureLobbyLaunches();
+
+    expect(context.automation.lobbyCalls).toEqual([
+      "https://fabet.party/lobby-the-thao?type=livesports",
+      "https://fabet.party/lobby-the-thao?type=esports"
+    ]);
+  });
+
   it.each([
     ["SABA-SPORTS", true],
     ["BTI", true],
@@ -136,6 +159,18 @@ describe("FabetBrowserDriver", () => {
     ["", false]
   ])("classifies launcher text %s without allowing wager controls", (label, expected) => {
     expect(launcherTextIsSafe(label)).toBe(expected);
+  });
+
+  it("uses the card name and thumbnail to disambiguate generic esports launchers", () => {
+    expect(launcherLabelFromCard("C-Sports", "/game/sabaport.webp")).toBe("C-Sports");
+    expect(launcherLabelFromCard("Esports", "/game/saba_esportss_landscape.avif")).toBe("SABA-SPORTS");
+    expect(launcherLabelFromCard("Esports", "/game/bti_esportss_landscape.avif")).toBe("BTI");
+  });
+
+  it("accepts only the provider launch field from the game-url response shape", () => {
+    expect(providerLaunchUrlFromResponseBody({ data: { url: "https://provider.test/launch" } }))
+      .toBe("https://provider.test/launch");
+    expect(providerLaunchUrlFromResponseBody({ url: "https://provider.test/wrong-level" })).toBeNull();
   });
 
   it("deletes only its isolated profile after reset", async () => {
@@ -156,19 +191,24 @@ describe("FabetBrowserDriver", () => {
 });
 
 describe("PlaywrightFabetAutomation", () => {
-  it("captures a provider launch from the real lobby card container", async () => {
-    const lobby = createServer((_request, response) => {
+  it("captures a provider launch returned by the lobby game-url API", async () => {
+    const lobby = createServer((request, response) => {
+      if (request.url === "/api/v3/game-url") {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ data: { url: "https://example.com/api-launch" } }));
+        return;
+      }
       response.setHeader("content-type", "text/html; charset=utf-8");
-      response.end(`<script>setTimeout(() => { const card=document.createElement('div');card.className='game-item lobby';card.textContent='C-SPORTS';card.onclick=()=>window.open('https://example.com/launch');document.body.append(card); }, 300)</script>`);
+      response.end(`<div class="game-item lobby"><img class="game-item__thumb" src="/game/saba_esportss_landscape.avif"><p class="game-item__name">Esports</p><div class="game-item__play-btn"><button onclick="fetch('/api/v3/game-url')">Play</button></div></div>`);
     });
     await new Promise<void>((resolve) => lobby.listen(0, "127.0.0.1", resolve));
     const lobbyAddress = lobby.address();
     if (lobbyAddress === null || typeof lobbyAddress === "string") throw new Error("lobby server did not bind");
-    const profilePath = join(await setup().then((value) => value.directory), "card-profile");
+    const profilePath = join(await setup().then((value) => value.directory), "api-card-profile");
     const automation = new PlaywrightFabetAutomation({ profilePath, headless: true });
     try {
       await expect(automation.captureNavigations(`http://127.0.0.1:${lobbyAddress.port}/`)).resolves.toEqual([
-        { label: "C-SPORTS", url: "https://example.com/launch" }
+        { label: "SABA-SPORTS", url: "https://example.com/api-launch" }
       ]);
     } finally {
       await automation.close();
@@ -191,7 +231,7 @@ describe("PlaywrightFabetAutomation", () => {
           document.body.innerHTML = '<button id="open">Đăng Nhập</button><section id="modal" hidden><input autocomplete="username"><input type="password"><button id="submit">Đăng Nhập</button></section>';
           document.querySelector('#open').onclick = () => { document.querySelector('#modal').hidden = false; };
           document.querySelector('#submit').onclick = () => fetch('/submitted').then(() => {
-            document.body.innerHTML = '<button>Nạp Tiền</button>';
+            setTimeout(() => { document.body.innerHTML = '<button>Nạp Tiền</button>'; }, 400);
           });
         }, 300);
       </script></body></html>`);
@@ -251,6 +291,10 @@ describe("PlaywrightFabetAutomation", () => {
       }
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end(`<!doctype html><html><body>
+        <div class="modal dynamic__modal" style="position:fixed;inset:0;z-index:12;background:white">
+          <span class="icon-close-btn" onclick="this.parentElement.remove()">Close</span>
+          <label>Không hiển thị lại</label>
+        </div>
         <div class="swal2-container" style="position:fixed;inset:0;z-index:11;background:white">Notice</div>
         <script>
           setTimeout(() => document.querySelector('.swal2-container').remove(), 300);

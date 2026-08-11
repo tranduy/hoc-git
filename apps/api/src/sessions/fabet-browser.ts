@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Page, type Response } from "playwright";
 import type { Category } from "@tool-chenh/contracts";
 import { SecretVault } from "./secret-vault.js";
 import { TrustedDomainStore } from "./trusted-domain-store.js";
@@ -15,6 +15,7 @@ export interface FabetBrowserAutomation {
   login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void>;
   captureNavigations(lobbyUrl: string): Promise<readonly CapturedNavigation[]>;
   isAuthenticated(): Promise<boolean>;
+  authenticatedUrl?(): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -48,6 +49,23 @@ const forbiddenPattern = /(?:\bbet\b|wager|đặt\s*cược|xác\s*nhận\s*cư�
 export function launcherTextIsSafe(label: string): boolean {
   const normalized = label.trim().replace(/\s+/gu, " ");
   return normalized.length > 0 && !forbiddenPattern.test(normalized) && launcherPattern.test(normalized);
+}
+
+export function launcherLabelFromCard(name: string, thumbnailSource: string | null): string {
+  const normalized = name.trim().replace(/\s+/gu, " ");
+  if (normalized.toUpperCase() !== "ESPORTS") return normalized;
+  const source = (thumbnailSource ?? "").toLowerCase();
+  if (source.includes("saba_esport")) return "SABA-SPORTS";
+  if (source.includes("bti_esport")) return "BTI";
+  return normalized;
+}
+
+export function providerLaunchUrlFromResponseBody(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const data = (value as Record<string, unknown>).data;
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+  const url = (data as Record<string, unknown>).url;
+  return typeof url === "string" ? url : null;
 }
 
 export function capturedTopLevelNavigation(lobbyOrigin: string, label: string, value: string): CapturedNavigation | null {
@@ -127,7 +145,13 @@ export class FabetBrowserDriver {
     }
     await this.#automation.login(input);
     if (!(await this.#automation.isAuthenticated())) throw new FabetBrowserError("UNAUTHORIZED");
-    this.#baseOrigin = entry.origin;
+    const authenticated = this.#automation.authenticatedUrl === undefined
+      ? entry
+      : safeHttpsUrl(await this.#automation.authenticatedUrl());
+    if (!(await this.#trustStore.isTrusted(authenticated.hostname))) {
+      throw new FabetBrowserError("DOMAIN_APPROVAL_REQUIRED");
+    }
+    this.#baseOrigin = authenticated.origin;
   }
 
   async captureLobbyLaunches(): Promise<readonly LaunchCandidate[]> {
@@ -253,18 +277,58 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     const count = Math.min(await controls.count(), 200);
     for (let index = 0; index < count; index += 1) {
         const control = controls.nth(index);
-        const label = (await control.innerText().catch(() => "")).trim();
+        const cardName = await control.locator(".game-item__name").first().innerText().catch(() => "");
+        const thumbnailSource = await control.locator("img.game-item__thumb").first().getAttribute("src").catch(() => null);
+        const fallbackName = await control.innerText().catch(() => "");
+        const label = launcherLabelFromCard(cardName === "" ? fallbackName : cardName, thumbnailSource);
         if (!launcherTextIsSafe(label) || !(await control.isVisible().catch(() => false))) continue;
         const popups: Page[] = [];
+        const existingPages = new Set(context.pages());
+        const launchBodies: Array<Promise<string | null>> = [];
         const onPage = (popup: Page): void => { popups.push(popup); };
+        const onResponse = (response: Response): void => {
+          try {
+            const responseUrl = new URL(response.url());
+            if (
+              responseUrl.origin === lobbyOrigin &&
+              responseUrl.pathname === "/api/v3/game-url" &&
+              response.request().method() === "GET" &&
+              response.ok()
+            ) {
+              launchBodies.push(response.json()
+                .then((body: unknown) => providerLaunchUrlFromResponseBody(body))
+                .catch(() => null));
+            }
+          } catch {
+            // Ignore malformed or unrelated response URLs.
+          }
+        };
         context.on("page", onPage);
+        page.on("popup", onPage);
+        page.on("response", onResponse);
         try {
-          await control.click({ timeout: 2_000 }).catch(() => undefined);
-          await page.waitForTimeout(750);
+          const play = control.locator(".game-item__play-btn button").first();
+          if (await play.count() > 0) {
+            await control.hover({ timeout: 2_000 }).catch(() => undefined);
+            await play.click({ timeout: 2_000 }).catch(() => undefined);
+          } else {
+            await control.click({ timeout: 2_000 }).catch(() => undefined);
+          }
+          await page.waitForTimeout(1_500);
         } finally {
           context.off("page", onPage);
+          page.off("popup", onPage);
+          page.off("response", onResponse);
         }
-        for (const popup of popups) {
+        for (const launchBody of launchBodies) {
+          const launchUrl = await launchBody;
+          if (launchUrl !== null) record(launchUrl, label);
+        }
+        const openedPages = [...new Set([
+          ...popups,
+          ...context.pages().filter((candidate) => !existingPages.has(candidate))
+        ])];
+        for (const popup of openedPages) {
           await popup.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => undefined);
           record(popup.url(), label);
           await popup.close().catch(() => undefined);
@@ -280,19 +344,19 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   async isAuthenticated(): Promise<boolean> {
     const page = await this.#getPage();
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      const password = page.locator("input[type='password']");
-      if (await password.count() > 0 && await password.first().isVisible().catch(() => false)) return false;
-      const loginButtons = page.getByRole("button", { name: /đăng\s*nhập|login/iu });
-      for (let index = 0; index < await loginButtons.count(); index += 1) {
-        if (await loginButtons.nth(index).isVisible().catch(() => false)) return false;
-      }
       const authenticatedControls = page.getByRole("button", { name: /nạp\s*tiền|deposit/iu });
       for (let index = 0; index < await authenticatedControls.count(); index += 1) {
         if (await authenticatedControls.nth(index).isVisible().catch(() => false)) return true;
       }
+      // The SPA keeps the form visible while applying a successful login response.
+      // Wait for a positive authenticated control instead of failing on that transient state.
       await page.waitForTimeout(250);
     }
     return false;
+  }
+
+  async authenticatedUrl(): Promise<string> {
+    return (await this.#getPage()).url();
   }
 
   async close(): Promise<void> {
@@ -302,6 +366,15 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   }
 
   async #dismissBlockingPromotions(page: Page): Promise<void> {
+    const dynamicCloses = page.locator([
+      ".dynamic__modal:visible .icon-close-btn",
+      ".dynamic-popup:visible .icon-close-btn",
+      ".modal:visible .icon-close-btn"
+    ].join(", "));
+    for (let index = 0; index < Math.min(await dynamicCloses.count(), 5); index += 1) {
+      const close = dynamicCloses.nth(index);
+      if (await close.isVisible().catch(() => false)) await close.click({ timeout: 2_000 });
+    }
     const dialogs = page.getByRole("dialog", { name: /khuyến\s*mãi|promotion/iu });
     for (let index = 0; index < Math.min(await dialogs.count(), 5); index += 1) {
       const dialog = dialogs.nth(index);
