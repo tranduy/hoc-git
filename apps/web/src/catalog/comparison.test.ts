@@ -79,6 +79,18 @@ describe("catalog comparison", () => {
     expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SBOBET"]);
   });
 
+  it("shows same-ticket prices but blocks profit when settlement profiles differ", () => {
+    const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+    const unverified = { ...sbobet, markets: [{ ...sbobet.markets[0]!, settlementProfile: "provider-specific-unverified" }] };
+
+    const result = buildComparisonEvents([saba, unverified]);
+
+    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SBOBET"]);
+    expect(result[0]?.rows).toEqual([]);
+    expect(result[0]?.bestMargin).toBeNull();
+  });
+
   it("rejects an ambiguous provider contribution instead of merging duplicate semantic markets", () => {
     const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
     const duplicateMarket = { ...saba.markets[0]!, providerMarketId: "saba-duplicate" };

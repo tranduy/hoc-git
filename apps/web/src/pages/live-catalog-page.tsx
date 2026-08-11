@@ -12,7 +12,7 @@ import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
 
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
-const comparisonProviders: readonly ProviderId[] = ["SABA", "SBOBET", "CMD", "APSPORT", "BTI"];
+const comparisonProviders: readonly ProviderId[] = ["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"];
 const catalogRefreshIntervalMs = 250;
 
 function ProviderSelector({ accounts, selected, toggle }: {
@@ -48,7 +48,8 @@ function ComparisonTable({ item, baseStake, signals }: { readonly item: Comparis
       const plan = row === undefined ? null : buildFixedBaseStakePlan(row, selectedProviders, stakePolicy(baseStake));
       const signal = signals.find((candidate) => candidate.event.key === item.key && candidate.row.key === observedRow.key);
       return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
-      <th>Chấp toàn trận<small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>
+      <th>{observedRow.marketType === "SERIES_WINNER" ? "Thắng series" : "Chấp toàn trận"}
+        <small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>
         <b className={signal === undefined ? "edge-badge" : "edge-badge edge-badge--positive"}>
           {signal === undefined ? "ĐANG THEO DÕI" : "ĐỦ ĐIỀU KIỆN · LÃI ≥ 20.000 VND"}</b></th>
       {item.providers.map((provider) => {
@@ -57,7 +58,7 @@ function ComparisonTable({ item, baseStake, signals }: { readonly item: Comparis
           <div className="rate-cell">{cell.quotes.map((quote) => <span
             className={row?.bestBySelection[quote.selection] === provider ? "rate-quote rate-quote--best" : "rate-quote"}
             key={quote.providerSelectionId}>{quote.selection} {quote.rawOdds} {quote.rawFormat} · {quote.status}</span>)}</div>}</td>;
-      })}<td>{plan === null ? <span className="rate-missing">Chưa có cặp 2 sàn cân được</span>
+      })}<td>{plan === null ? <span className="rate-missing">Đang hiển thị giá · chưa đủ bằng chứng settlement để cân</span>
         : <div className="balanced-plan"><strong>{signal === undefined ? "GIÁ HIỆN TẠI" : "SẴN SÀNG (READ-ONLY)"}</strong>{plan.legs.map((leg) => <span key={leg.selection}>
           <small>#{leg.provider} · {leg.selection} @ {leg.decimalOdds}</small><b>{money(leg.stake)} {leg.role.toLowerCase()}</b>
         </span>)}<span>Total {money(plan.totalStake)}</span>{plan.legs.map((leg) => <span key={`${leg.selection}-profit`}>

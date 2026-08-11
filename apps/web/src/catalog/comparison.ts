@@ -70,10 +70,10 @@ function compatibleEvent(left: ProviderEvent, right: ProviderEvent): boolean {
 }
 
 function marketKey(market: ProviderMarket): string {
-  return [market.marketType, market.scope, market.line ?? "", market.settlementProfile].join("|");
+  return [market.marketType, market.scope, market.line ?? ""].join("|");
 }
 
-function eligibleTwoWayCells(cells: readonly ComparisonCell[]): readonly ComparisonCell[] {
+function eligibleTwoWayCells(cells: readonly ComparisonCell[], requireSameSettlement = true): readonly ComparisonCell[] {
   const marketType = cells[0]?.market.marketType;
   if (marketType === undefined || marketType === "FT_1X2" || marketType === "FH_1X2") return [];
   const domains = new Map<string, ComparisonCell[]>();
@@ -84,7 +84,7 @@ function eligibleTwoWayCells(cells: readonly ComparisonCell[]): readonly Compari
     const cell = candidates[0]!;
     const selections = [...new Set(cell.quotes.map((quote) => quote.selection))].sort();
     if (selections.length !== 2) continue;
-    const signature = selections.join("|");
+    const signature = [selections.join("|"), requireSameSettlement ? cell.market.settlementProfile : "DISPLAY_ONLY"].join("|");
     const matching = domains.get(signature) ?? [];
     matching.push(cell);
     domains.set(signature, matching);
@@ -153,7 +153,7 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
       }
     }
     const observedRows = [...rowGroups.entries()].flatMap(([rowKey, rawCells]) => {
-      const cells = eligibleTwoWayCells(rawCells.filter(isFocusedTwoWayTicket));
+      const cells = eligibleTwoWayCells(rawCells.filter(isFocusedTwoWayTicket), false);
       if (new Set(cells.map((cell) => cell.provider)).size < 2) return [];
       const outcomeDomain = [...new Set(cells[0]!.quotes.map((quote) => quote.selection))].sort();
       return [{ key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
