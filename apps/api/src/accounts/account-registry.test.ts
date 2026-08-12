@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { ProviderProfileReader } from "../providers/provider-capabilities.js";
 import { SecretVault } from "../sessions/secret-vault.js";
 import type { ActiveSecretHandle, SecretProtector } from "../sessions/types.js";
 import { AccountRegistry } from "./account-registry.js";
@@ -16,7 +17,10 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-async function setup() {
+async function setup(options: {
+  profileReadTimeoutMs?: number;
+  readProfile?: ProviderProfileReader["readProfile"];
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(), "tool-chenh-account-"));
   directories.push(directory);
   const vault = new SecretVault({ directory, protector });
@@ -43,15 +47,16 @@ async function setup() {
     readers: [{
       provider: "CMD",
       capabilities: ["PROFILE", "CATALOG", "PREFLIGHT"],
-      readProfile: async (handle) => handle.withSecret(async (secret) => ({
+      readProfile: options.readProfile ?? (async (handle) => handle.withSecret(async (secret) => ({
         redactedLabel: handle.sessionId === "session-a" ? "A***1" : "B***2",
         currency: "VND",
         balance: secret.value.startsWith("session-") ? "100000" : "0",
         asOfMs: clock.value
-      }))
+      })))
     }],
     clock: { nowMs: () => clock.value },
-    idFactory: () => `account-${++nextId}`
+    idFactory: () => `account-${++nextId}`,
+    ...(options.profileReadTimeoutMs === undefined ? {} : { profileReadTimeoutMs: options.profileReadTimeoutMs })
   });
   return { vault, clock, registry };
 }
@@ -90,6 +95,44 @@ describe("AccountRegistry", () => {
       profileState: "FRESH",
       reason: null
     });
+  });
+
+  it("fails closed within the configured deadline when a profile reader hangs", async () => {
+    const context = await setup({
+      profileReadTimeoutMs: 10,
+      readProfile: async () => new Promise<never>(() => undefined)
+    });
+    const account = await context.registry.register({ sessionId: "session-a", alias: "Main", provider: "CMD" });
+
+    await expect(context.registry.refresh(account.id)).resolves.toMatchObject({
+      profileState: "UNAVAILABLE",
+      reason: "UNREACHABLE"
+    });
+  });
+
+  it("coalesces concurrent refreshes for the same account", async () => {
+    let reads = 0;
+    const context = await setup({
+      readProfile: async () => {
+        reads += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          redactedLabel: "A***1",
+          currency: "VND",
+          balance: "100000",
+          asOfMs: 1_000
+        };
+      }
+    });
+    const account = await context.registry.register({ sessionId: "session-a", alias: "Main", provider: "CMD" });
+
+    const [first, second] = await Promise.all([
+      context.registry.refresh(account.id),
+      context.registry.refresh(account.id)
+    ]);
+
+    expect(reads).toBe(1);
+    expect(first).toEqual(second);
   });
 
   it("rejects an unknown or mismatched provider identity", async () => {

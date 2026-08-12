@@ -7,6 +7,7 @@ import {
   collectCmdIdentitySignals,
   extractCmdCatalogRecords,
   findCmdCatalogPage,
+  findProviderAccountFrame,
   findProviderRuntimeFrame,
   inspectExactCmdTicket,
   readProviderAccountStore
@@ -276,7 +277,7 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
     return readStableCmdAccountStore({
       read: async () => {
         for (const page of session.context.pages()) {
-          const frame = await findProviderRuntimeFrame(page);
+          const frame = await findProviderAccountFrame(page);
           if (frame === null) continue;
           const state = await readProviderAccountStore(frame);
           if (state !== null) return state;

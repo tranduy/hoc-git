@@ -280,6 +280,19 @@ export async function readProviderAccountStore(frame: Frame): Promise<unknown> {
   }).catch(() => null);
 }
 
+export async function findProviderAccountFrame(page: Page): Promise<Frame | null> {
+  for (const frame of page.frames()) {
+    const ready = await frame.evaluate(() => {
+      const attrs = (globalThis as unknown as {
+        UtilPack?: { accountStore?: { attrs?: unknown } }
+      }).UtilPack?.accountStore?.attrs;
+      return typeof attrs === "object" && attrs !== null;
+    }).catch(() => false);
+    if (ready) return frame;
+  }
+  return null;
+}
+
 export type ReadOnlyProfileProbeInput = (
   | { readonly endpoint: "/Customer/Balance"; readonly method: "POST" }
   | { readonly endpoint: "/CashMember/GetUserInfo"; readonly method: "GET" }

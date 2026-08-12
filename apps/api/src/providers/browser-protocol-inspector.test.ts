@@ -15,6 +15,7 @@ import {
   discoverApiOriginFromFrame,
   findApiOriginFromPage,
   findAccessTokenFrame,
+  findProviderAccountFrame,
   findProviderRuntimeFrame,
   inspectExactCmdTicket,
   probeReadOnlyProfileThroughRuntime,
@@ -171,6 +172,20 @@ describe("browser protocol inspector", () => {
     expect(await readProviderAccountStore(page.mainFrame())).toEqual({
       balanceContent: { cashBalance: "100000" }, Currency: "VND"
     });
+    await page.close();
+  });
+
+  it("finds an account-store frame without requiring the provider API runtime to be ready", async () => {
+    const page = await browser.newPage();
+    await page.goto(testOrigin);
+    await page.evaluate(() => {
+      (globalThis as unknown as { UtilPack: unknown }).UtilPack = {
+        accountStore: { attrs: { Bal: { BCredit: "29.61", Curr: "INH" } } }
+      };
+    });
+    expect(await findProviderRuntimeFrame(page)).toBeNull();
+    expect(await findProviderAccountFrame(page)).toBe(page.mainFrame());
+    expect(await readProviderAccountStore(page.mainFrame())).toEqual({ Bal: { BCredit: "29.61", Curr: "INH" } });
     await page.close();
   });
 

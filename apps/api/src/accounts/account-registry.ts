@@ -38,6 +38,7 @@ export interface AccountRegistryOptions {
   readonly readers: readonly ProviderProfileReader[];
   readonly clock: { nowMs(): number };
   readonly idFactory: () => string;
+  readonly profileReadTimeoutMs?: number;
 }
 
 function parseStoredAccount(value: SecretRecord | null): StoredAccount | null {
@@ -65,6 +66,8 @@ export class AccountRegistry {
   readonly #readers: ReadonlyMap<ProviderId, ProviderProfileReader>;
   readonly #clock: { nowMs(): number };
   readonly #idFactory: () => string;
+  readonly #profileReadTimeoutMs: number;
+  readonly #refreshes = new Map<string, Promise<AccountStatus>>();
 
   constructor(options: AccountRegistryOptions) {
     this.#vault = options.vault;
@@ -72,6 +75,10 @@ export class AccountRegistry {
     this.#readers = new Map(options.readers.map((reader) => [reader.provider, reader]));
     this.#clock = options.clock;
     this.#idFactory = options.idFactory;
+    this.#profileReadTimeoutMs = options.profileReadTimeoutMs ?? 30_000;
+    if (!Number.isFinite(this.#profileReadTimeoutMs) || this.#profileReadTimeoutMs <= 0) {
+      throw new Error("PROFILE_READ_TIMEOUT_INVALID");
+    }
   }
 
   async register(input: { sessionId: string; alias: string; provider: ProviderId }): Promise<AccountStatus> {
@@ -92,6 +99,18 @@ export class AccountRegistry {
   }
 
   async refresh(id: string): Promise<AccountStatus> {
+    const active = this.#refreshes.get(id);
+    if (active !== undefined) return active;
+    const refresh = this.#refresh(id);
+    this.#refreshes.set(id, refresh);
+    try {
+      return await refresh;
+    } finally {
+      if (this.#refreshes.get(id) === refresh) this.#refreshes.delete(id);
+    }
+  }
+
+  async #refresh(id: string): Promise<AccountStatus> {
     const record = await this.#loadRequired(id);
     const session = (await this.#sessions.listStatuses()).sessions.find((candidate) => candidate.id === record.sessionId);
     if (session === undefined) return this.#public({ ...record, profile: null, profileReason: "SCHEMA_CHANGED" }, null);
@@ -108,7 +127,7 @@ export class AccountRegistry {
       return this.#public(unavailable, session);
     }
     try {
-      const profile = await reader.readProfile(handle);
+      const profile = await this.#readProfile(reader, handle);
       if (!DecimalStringSchema.safeParse(profile.balance).success || !/^[A-Z]{3,8}$/u.test(profile.currency) ||
         !Number.isFinite(profile.asOfMs) || profile.asOfMs < 0 || profile.redactedLabel.trim().length === 0) {
         throw new Error("invalid provider profile");
@@ -120,6 +139,19 @@ export class AccountRegistry {
       const unavailable = { ...record, profile: null, profileReason: "UNREACHABLE" as const };
       await this.#save(unavailable);
       return this.#public(unavailable, session, reader.capabilities);
+    }
+  }
+
+  async #readProfile(reader: ProviderProfileReader, handle: ActiveSecretHandle): Promise<ProviderProfile> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("PROFILE_READ_TIMEOUT")), this.#profileReadTimeoutMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([reader.readProfile(handle), timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
