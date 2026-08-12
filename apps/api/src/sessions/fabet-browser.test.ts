@@ -402,6 +402,55 @@ describe("PlaywrightFabetAutomation", () => {
     }
   }, 20_000);
 
+  it("serializes launcher navigation across different providers sharing the Fabet lobby page", async () => {
+    let activeLobbyRequests = 0;
+    let maximumActiveLobbyRequests = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/saba-provider" || request.url === "/im-provider") {
+        response.end(`<!doctype html><main>${request.url === "/saba-provider" ? "SABA" : "IM"}</main>`);
+        return;
+      }
+      if (request.url !== "/lobby") {
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
+      activeLobbyRequests += 1;
+      maximumActiveLobbyRequests = Math.max(maximumActiveLobbyRequests, activeLobbyRequests);
+      setTimeout(() => {
+        activeLobbyRequests -= 1;
+        response.end(`<!doctype html>
+          <div class="game-item lobby"><img class="game-item__thumb" src="/game/saba.webp">
+            <p class="game-item__name">SABA-SPORTS</p><div class="game-item__play-btn">
+            <button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/saba-provider')">Play</button></div></div>
+          <div class="game-item lobby"><img class="game-item__thumb" src="/game/im.webp">
+            <p class="game-item__name">I-SPORTS</p><div class="game-item__play-btn">
+            <button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/im-provider')">Play</button></div></div>`);
+      }, 100);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const automation = new PlaywrightFabetAutomation({
+      profilePath: join(await setup().then((value) => value.directory), "cross-provider-launch-profile"), headless: true
+    });
+    const lobbyUrl = `http://127.0.0.1:${address.port}/lobby`;
+    try {
+      const results = await Promise.all([
+        automation.withProviderPage({ lobbyUrl, provider: "SABA", category: "FOOTBALL" },
+          async (page) => page.locator("main").innerText()),
+        automation.withProviderPage({ lobbyUrl, provider: "IM", category: "FOOTBALL" },
+          async (page) => page.locator("main").innerText())
+      ]);
+      expect(results).toEqual(["SABA", "IM"]);
+      expect(maximumActiveLobbyRequests).toBe(1);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
   it("clicks the exact I-SPORTS Football card without falling back to C-SPORTS", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");

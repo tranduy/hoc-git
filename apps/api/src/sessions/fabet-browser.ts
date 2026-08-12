@@ -337,6 +337,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   readonly #providerPages = new Map<string, Page>();
   readonly #providerOpenings = new Map<string, Promise<Page>>();
   readonly #providerUses = new Map<string, Promise<void>>();
+  #providerOpeningTail: Promise<void> = Promise.resolve();
 
   constructor(options: PlaywrightFabetAutomationOptions) {
     this.#profilePath = options.profilePath;
@@ -496,7 +497,14 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         this.#providerPages.delete(key);
         let opening = this.#providerOpenings.get(key);
         if (opening === undefined) {
-          opening = this.#openProviderPage(input, key).finally(() => {
+          const previousOpening = this.#providerOpeningTail;
+          let releaseOpening = (): void => undefined;
+          const currentOpening = new Promise<void>((resolveOpening) => { releaseOpening = resolveOpening; });
+          this.#providerOpeningTail = currentOpening;
+          opening = previousOpening.catch(() => undefined).then(async () => this.#openProviderPage(input, key))
+            .finally(() => {
+              releaseOpening();
+            }).finally(() => {
             if (this.#providerOpenings.get(key) === opening) this.#providerOpenings.delete(key);
           });
           this.#providerOpenings.set(key, opening);
@@ -541,6 +549,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     this.#providerPages.clear();
     this.#providerOpenings.clear();
     this.#providerUses.clear();
+    this.#providerOpeningTail = Promise.resolve();
   }
 
   async #openProviderPage(input: { readonly lobbyUrl: string; readonly provider: FabetJitProvider;
