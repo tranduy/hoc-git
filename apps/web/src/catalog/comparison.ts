@@ -218,8 +218,10 @@ export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
   const domain = [...new Set(cell.quotes.map((quote) => quote.selection))].sort();
   if (cell.market.status !== "OPEN" || cell.quotes.some((quote) => quote.status !== "OPEN")) return false;
   if (cell.market.category === "FOOTBALL") {
-    return cell.market.marketType === "FT_AH" && cell.market.scope === "FULL_TIME" &&
-      isHalfGoalLine(cell.market.line) && domain.join("|") === "AWAY|HOME";
+    if (cell.market.scope !== "FULL_TIME" || !isHalfGoalLine(cell.market.line)) return false;
+    if (cell.market.marketType === "FT_AH") return domain.join("|") === "AWAY|HOME";
+    if (cell.market.marketType === "FT_TOTAL") return domain.join("|") === "OVER|UNDER";
+    return false;
   }
   return cell.market.category === "LOL" && cell.market.marketType === "SERIES_WINNER" &&
     cell.market.scope === "SERIES" && cell.market.line === null && domain.join("|") === "TEAM_A|TEAM_B";

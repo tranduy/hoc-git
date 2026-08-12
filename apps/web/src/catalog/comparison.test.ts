@@ -99,11 +99,14 @@ describe("catalog comparison", () => {
       markets: [...focused.markets, ...unsupported.markets],
       quotes: [...focused.quotes, ...unsupported.quotes]
     });
+    const quarterTotal = (source: LiveCatalogResponse): LiveCatalogResponse => ({ ...source,
+      markets: source.markets.map((market) => ({ ...market, line: "2.25" })),
+      quotes: source.quotes.map((quote) => ({ ...quote, line: "2.25" })) });
     const result = buildComparisonEvents([
       combine(handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]),
-        catalog("SABA", "saba-event", ["2.2", "2.2"])),
+        quarterTotal(catalog("SABA", "saba-event", ["2.2", "2.2"]))),
       combine(handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]),
-        catalog("SBOBET", "sbo-event", ["2.3", "2.1"]))
+        quarterTotal(catalog("SBOBET", "sbo-event", ["2.3", "2.1"])))
     ]);
 
     expect(result[0]?.rows.map((row) => row.marketType)).toEqual(["FT_AH"]);
@@ -117,6 +120,55 @@ describe("catalog comparison", () => {
 
     expect(result[0]?.observedRows).toHaveLength(1);
     expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SBOBET"]);
+  });
+
+  it("compares exact full-time half-goal totals across providers", () => {
+    const result = buildComparisonEvents([
+      catalog("SABA", "saba-total", ["2.20", "1.72"]),
+      catalog("SBOBET", "sbobet-total", ["2.08", "1.85"])
+    ]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.observedRows).toHaveLength(1);
+    expect(result[0]?.rows).toHaveLength(1);
+    expect(result[0]?.rows[0]).toMatchObject({
+      marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5"
+    });
+    expect(result[0]?.rows[0]?.cells.map((cell) => [cell.provider,
+      cell.quotes.map((quote) => quote.selection)])).toEqual([
+      ["SABA", ["OVER", "UNDER"]], ["SBOBET", ["OVER", "UNDER"]]
+    ]);
+  });
+
+  it.each([
+    ["quarter line", { line: "2.25" }, { line: "2.25" }],
+    ["missing line", { line: null }, { line: null }],
+    ["different lines", { line: "2.5" }, { line: "3.5" }],
+    ["different settlement", { settlementProfile: "football-regulation-including-added-time" },
+      { settlementProfile: "provider-specific-total" }]
+  ])("does not verify full-time totals with %s", (_caseName, leftMarket, rightMarket) => {
+    const left = catalog("SABA", "saba-total", ["2.20", "1.72"]);
+    const right = catalog("SBOBET", "sbobet-total", ["2.08", "1.85"]);
+    const change = (source: LiveCatalogResponse, marketPatch: Partial<ProviderMarket>): LiveCatalogResponse => {
+      const market = { ...source.markets[0]!, ...marketPatch };
+      return { ...source, markets: [market], quotes: source.quotes.map((quote) => ({
+        ...quote, line: market.line
+      })) };
+    };
+
+    const result = buildComparisonEvents([change(left, leftMarket), change(right, rightMarket)]);
+    expect(result.flatMap((item) => item.rows)).toEqual([]);
+  });
+
+  it("does not accept HOME and AWAY as the outcome domain for a total", () => {
+    const wrongDomain = (source: LiveCatalogResponse): LiveCatalogResponse => ({ ...source,
+      quotes: source.quotes.map((quote, index) => ({ ...quote, selection: index === 0 ? "HOME" : "AWAY" })) });
+
+    const result = buildComparisonEvents([
+      wrongDomain(catalog("SABA", "saba-total", ["2.20", "1.72"])),
+      wrongDomain(catalog("SBOBET", "sbobet-total", ["2.08", "1.85"]))
+    ]);
+    expect(result.flatMap((item) => item.rows)).toEqual([]);
   });
 
   it("matches the same Vietnamese club across provider accents and the CLB display prefix", () => {
