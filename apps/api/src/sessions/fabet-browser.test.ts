@@ -285,6 +285,7 @@ describe("FabetBrowserDriver", () => {
   it("uses the card name and thumbnail to disambiguate generic esports launchers", () => {
     expect(launcherLabelFromCard("C-Sports", "/game/sabaport.webp")).toBe("C-Sports");
     expect(launcherLabelFromCard("Esports", "/game/saba_esportss_landscape.avif")).toBe("SABA-SPORTS");
+    expect(launcherLabelFromCard("Esports", "/game/betradar_esportss_landscape.avif")).toBe("I-SPORTS");
     expect(launcherLabelFromCard("Esports", "/game/bti_esportss_landscape.avif")).toBe("BTI");
     expect(launcherLabelFromCard("T-Sports", "/game/tpsports_landscape.webp")).toBe("APSPORT");
     expect(launcherLabelFromCard("T-Sports", "/game/tsports_landscape.avif")).toBe("BTI");
@@ -295,6 +296,13 @@ describe("FabetBrowserDriver", () => {
     expect(launcherMatchesProviderCategory("BTI", "LOL", "BTI", "/game/tsports_landscape.avif")).toBe(false);
     expect(launcherMatchesProviderCategory("BTI", "FOOTBALL", "BTI", "/game/bti_esportss_landscape.avif")).toBe(false);
     expect(launcherMatchesProviderCategory("BTI", "FOOTBALL", "BTI", "/game/tsports_landscape.avif")).toBe(true);
+  });
+
+  it("binds IM LoL only to Betradar esports and IM Football only to I-Sports", () => {
+    expect(launcherMatchesProviderCategory("IM", "LOL", "I-SPORTS", "/game/betradar_esportss_landscape.avif")).toBe(true);
+    expect(launcherMatchesProviderCategory("IM", "LOL", "I-SPORTS", "/game/isports_landscape.webp")).toBe(false);
+    expect(launcherMatchesProviderCategory("IM", "FOOTBALL", "I-SPORTS", "/game/betradar_esportss_landscape.avif")).toBe(false);
+    expect(launcherMatchesProviderCategory("IM", "FOOTBALL", "I-SPORTS", "/game/isports_landscape.webp")).toBe(true);
   });
 
   it("keeps only a bounded asset basename for launcher diagnostics", () => {

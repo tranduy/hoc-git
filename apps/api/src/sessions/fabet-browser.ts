@@ -62,6 +62,7 @@ export function launcherLabelFromCard(name: string, thumbnailSource: string | nu
   if (source.includes("tsports_")) return "BTI";
   if (normalized.toUpperCase() !== "ESPORTS") return normalized;
   if (source.includes("saba_esport")) return "SABA-SPORTS";
+  if (source.includes("betradar_esport")) return "I-SPORTS";
   if (source.includes("bti_esport")) return "BTI";
   return normalized;
 }
@@ -156,9 +157,13 @@ export function launcherMatchesProviderCategory(
   thumbnailSource: string | null
 ): boolean {
   if (!launcherMatchesCategory(category, label)) return false;
+  const asset = safeLauncherAssetName(thumbnailSource)?.toLocaleLowerCase("en") ?? "";
+  if (provider === "IM") {
+    const isImEsports = asset.includes("betradar_esport");
+    return category === "LOL" ? isImEsports : !isImEsports;
+  }
   if (provider !== "BTI") return true;
 
-  const asset = safeLauncherAssetName(thumbnailSource)?.toLocaleLowerCase("en") ?? "";
   const isBtiEsports = asset.includes("bti_esport");
   return category === "LOL" ? isBtiEsports : !isBtiEsports;
 }

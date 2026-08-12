@@ -35,6 +35,7 @@ import { SbobetProfileReader } from "../providers/sbobet/sbobet-profile-reader.j
 import { SbobetSessionValidator } from "../providers/sbobet/sbobet-session-validator.js";
 import { SbobetTicketPreflightReader } from "../providers/sbobet/sbobet-ticket-preflight-reader.js";
 import { PlaywrightImEsportsBrowserManager } from "../providers/im/im-esports-browser-manager.js";
+import { JitImEsportsCatalogSource } from "../providers/im/im-esports-jit-source.js";
 import { PlaywrightImFootballBrowserManager } from "../providers/im/im-football-browser-manager.js";
 import { JitImFootballCatalogSource } from "../providers/im/im-football-jit-source.js";
 import { ImFootballObservedCatalogReader } from "../providers/im/im-football-observed-catalog.js";
@@ -221,7 +222,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const imEsportsCatalogReader = new ImEsportsObservedCatalogReader({
-    accounts: catalogSources, source: imEsportsBrowser,
+    accounts: catalogSources, source: new JitImEsportsCatalogSource({
+      fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) }, browser: imEsportsBrowser
+    }),
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const imFootballCatalogReader = new ImFootballObservedCatalogReader({

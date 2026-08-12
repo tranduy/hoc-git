@@ -56,6 +56,21 @@ export class PlaywrightImEsportsBrowserManager {
     }
   }
 
+  async readCatalogFromPage(page: Page): Promise<readonly ImEsportsMarketRecord[]> {
+    validateImLaunchUrl(page.url());
+    const session: OpenSession = { context: page.context(), page, records: [] };
+    const listener = this.#catalogResponseListener(session);
+    page.on("response", listener);
+    try {
+      await page.reload({ waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
+      return await this.#waitForCatalog(session);
+    } catch {
+      throw new Error("IM_ESPORTS_CATALOG_UNAVAILABLE");
+    } finally {
+      page.off("response", listener);
+    }
+  }
+
   async close(): Promise<void> {
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
@@ -81,18 +96,7 @@ export class PlaywrightImEsportsBrowserManager {
     try {
       const page = context.pages()[0] ?? await context.newPage();
       const session: OpenSession = { context, page, records: [] };
-      const pending = new Set<Promise<void>>();
-      const capture = async (response: Response): Promise<void> => {
-        const url = new URL(response.url());
-        if (response.request().method() !== "POST" || url.hostname !== "imesports.techplay.com" ||
-          url.pathname !== "/api/GetIndexMatchV2" || !response.ok()) return;
-        const records = extractImCatalogRecords(await response.json());
-        if (records.length > 0) session.records = records;
-      };
-      page.on("response", (response) => {
-        const operation = capture(response).catch(() => undefined).finally(() => pending.delete(operation));
-        pending.add(operation);
-      });
+      page.on("response", this.#catalogResponseListener(session));
       await page.goto(launchUrl, { waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
       this.#sessions.set(input.sessionId, session);
       return session;
@@ -100,6 +104,18 @@ export class PlaywrightImEsportsBrowserManager {
       await context.close().catch(() => undefined);
       throw new Error("IM_ESPORTS_BROWSER_UNAVAILABLE");
     }
+  }
+
+  #catalogResponseListener(session: OpenSession): (response: Response) => void {
+    return (response) => {
+      void (async () => {
+        const url = new URL(response.url());
+        if (response.request().method() !== "POST" || url.hostname !== "imesports.techplay.com" ||
+          url.pathname !== "/api/GetIndexMatchV2" || !response.ok()) return;
+        const records = extractImCatalogRecords(await response.json());
+        if (records.length > 0) session.records = records;
+      })().catch(() => undefined);
+    };
   }
 
   async #waitForCatalog(session: OpenSession): Promise<readonly ImEsportsMarketRecord[]> {
