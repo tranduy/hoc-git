@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { Page } from "playwright";
 import { SecretVault } from "./secret-vault.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionValidatorRegistry } from "./validators.js";
@@ -299,5 +300,29 @@ describe("SessionManager", () => {
     expect(launches).toHaveLength(2);
     expect(launches.map((session) => session.category).sort()).toEqual(["FOOTBALL", "LOL"]);
     expect(new Set(launches.map((session) => session.id)).size).toBe(2);
+  });
+
+  it("rehydrates the saved Fabet login before acquiring a provider popup after restart", async () => {
+    const vault = await createVault();
+    const first = new SessionManager({ vault, validators: new SessionValidatorRegistry([]),
+      clock: { nowMs: () => 60 }, idFactory: () => "unused", fabetDriver: {
+        login: async () => undefined, captureLobbyLaunches: async () => [], resetProfile: async () => undefined
+      } });
+    await first.configureFabet({ entryUrl: "https://fabet.party/", username: "development-user",
+      password: "development-pass", trustedHostname: "fabet.party" });
+    let ready = false; let loginCalls = 0;
+    const second = new SessionManager({ vault, validators: new SessionValidatorRegistry([]),
+      clock: { nowMs: () => 60 }, idFactory: () => "unused", fabetDriver: {
+        login: async () => { ready = true; loginCalls += 1; }, captureLobbyLaunches: async () => [],
+        resetProfile: async () => undefined,
+        withProviderPage: async (_provider, _category, consume) => {
+          if (!ready) throw Object.assign(new Error("NOT_AUTHENTICATED"), { code: "NOT_AUTHENTICATED" });
+          return consume({} as Page);
+        }
+      } });
+
+    await expect(second.withFabetProviderPage("SABA", "FOOTBALL", async () => "live-popup"))
+      .resolves.toBe("live-popup");
+    expect(loginCalls).toBe(1);
   });
 });

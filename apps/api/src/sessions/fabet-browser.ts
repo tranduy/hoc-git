@@ -16,6 +16,8 @@ export interface FabetBrowserAutomation {
   captureNavigations(lobbyUrl: string): Promise<readonly CapturedNavigation[]>;
   isAuthenticated(): Promise<boolean>;
   authenticatedUrl?(): Promise<string>;
+  withProviderPage?<T>(input: { readonly lobbyUrl: string; readonly provider: "SABA";
+    readonly category: Category }, consume: (page: Page) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -141,6 +143,28 @@ function providerHint(label: string, hostname: string): string {
   return "UNKNOWN";
 }
 
+function sabaLauncherPriority(rawName: string, label: string, thumbnailSource: string | null): number {
+  const normalizedName = rawName.trim().toLocaleUpperCase("en").replace(/\s+/gu, "-");
+  if (/^SABA(?:-SPORTS)?$/u.test(normalizedName)) return 0;
+  const asset = safeLauncherAssetName(thumbnailSource)?.toLocaleUpperCase("en") ?? "";
+  if (label === "SABA-SPORTS" || asset.includes("SABA")) return 1;
+  // C-SPORTS is a legacy alias that can point to SABA, but an explicit
+  // SABA-SPORTS card on the same lobby is always the authoritative launcher.
+  if (normalizedName === "C-SPORTS") return 2;
+  return 3;
+}
+
+function safeBrowserFailureReason(error: unknown): string {
+  if (!(error instanceof Error)) return "UNKNOWN";
+  if (/target page|context.*closed|page.*closed/iu.test(error.message)) return "PAGE_CLOSED";
+  if (/intercepts pointer events/iu.test(error.message)) return "POINTER_INTERCEPTED";
+  if (/not visible/iu.test(error.message)) return "NOT_VISIBLE";
+  if (/outside of the viewport/iu.test(error.message)) return "OUTSIDE_VIEWPORT";
+  if (/not enabled/iu.test(error.message)) return "NOT_ENABLED";
+  if (error.name === "TimeoutError" || /timeout/iu.test(error.message)) return "TIMEOUT";
+  return "UNKNOWN";
+}
+
 function safeHttpsUrl(value: string): URL {
   let url: URL;
   try {
@@ -241,6 +265,16 @@ export class FabetBrowserDriver {
     return candidates;
   }
 
+  async withProviderPage<T>(provider: "SABA", category: Category,
+    consume: (page: Page) => Promise<T>): Promise<T> {
+    if (this.#baseOrigin === null) throw new FabetBrowserError("NOT_AUTHENTICATED");
+    if (this.#automation.withProviderPage === undefined) throw new FabetBrowserError("NOT_AUTHENTICATED");
+    const type = category === "FOOTBALL" ? "livesports" : "esports";
+    return this.#automation.withProviderPage({
+      lobbyUrl: `${this.#baseOrigin}/lobby-the-thao?type=${type}`, provider, category
+    }, consume);
+  }
+
   redactedDiagnostics(): readonly LaunchCandidate[] {
     return this.#diagnostics.map((candidate) => ({ ...candidate }));
   }
@@ -267,6 +301,9 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   readonly #headless: boolean;
   #context: BrowserContext | null = null;
   #page: Page | null = null;
+  readonly #providerPages = new Map<string, Page>();
+  readonly #providerOpenings = new Map<string, Promise<Page>>();
+  readonly #providerUses = new Map<string, Promise<void>>();
 
   constructor(options: PlaywrightFabetAutomationOptions) {
     this.#profilePath = options.profilePath;
@@ -329,8 +366,12 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     const count = Math.min(await controls.count(), 200);
     for (let index = 0; index < count; index += 1) {
         const control = controls.nth(index);
-        const cardName = await control.locator(".game-item__name").first().innerText().catch(() => "");
-        const thumbnailSource = await control.locator("img.game-item__thumb").first().getAttribute("src").catch(() => null);
+        const nameElement = control.locator(".game-item__name").first();
+        const thumbnail = control.locator("img.game-item__thumb").first();
+        const cardName = await nameElement.count() > 0 ? await nameElement.innerText().catch(() => "") : "";
+        const thumbnailSource = await thumbnail.count() > 0
+          ? await thumbnail.getAttribute("src").catch(() => null)
+          : null;
         const fallbackName = await control.innerText().catch(() => "");
         const label = launcherLabelFromCard(cardName === "" ? fallbackName : cardName, thumbnailSource);
         if (!launcherTextIsSafe(label) || !(await control.isVisible().catch(() => false))) continue;
@@ -408,6 +449,40 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     return [...captured.values()];
   }
 
+  async withProviderPage<T>(input: { readonly lobbyUrl: string; readonly provider: "SABA";
+    readonly category: Category }, consume: (page: Page) => Promise<T>): Promise<T> {
+    const key = `${input.provider}\u0000${input.category}`;
+    const previousUse = this.#providerUses.get(key) ?? Promise.resolve();
+    let releaseUse = (): void => undefined;
+    const currentUse = new Promise<void>((resolveUse) => { releaseUse = resolveUse; });
+    this.#providerUses.set(key, currentUse);
+    await previousUse.catch(() => undefined);
+    try {
+      let providerPage = this.#providerPages.get(key) ?? null;
+      if (providerPage === null || providerPage.isClosed()) {
+        this.#providerPages.delete(key);
+        let opening = this.#providerOpenings.get(key);
+        if (opening === undefined) {
+          opening = this.#openProviderPage(input, key).finally(() => {
+            if (this.#providerOpenings.get(key) === opening) this.#providerOpenings.delete(key);
+          });
+          this.#providerOpenings.set(key, opening);
+        }
+        providerPage = await opening;
+      }
+      try {
+        return await consume(providerPage);
+      } catch (error) {
+        this.#providerPages.delete(key);
+        await providerPage.close().catch(() => undefined);
+        throw error;
+      }
+    } finally {
+      releaseUse();
+      if (this.#providerUses.get(key) === currentUse) this.#providerUses.delete(key);
+    }
+  }
+
   async isAuthenticated(): Promise<boolean> {
     const page = await this.#getPage();
     for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -430,6 +505,245 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     await this.#context?.close();
     this.#context = null;
     this.#page = null;
+    this.#providerPages.clear();
+    this.#providerOpenings.clear();
+    this.#providerUses.clear();
+  }
+
+  async #openProviderPage(input: { readonly lobbyUrl: string; readonly provider: "SABA";
+    readonly category: Category }, key: string): Promise<Page> {
+    const context = await this.#getContext();
+    const lobbyOrigin = new URL(input.lobbyUrl).origin;
+    const lobbyPage = await context.newPage();
+    let providerPage: Page | null = null;
+    let stage = "LOBBY_NAVIGATION";
+    try {
+      await lobbyPage.goto(input.lobbyUrl, { waitUntil: "domcontentloaded" });
+      await this.#dismissBlockingPromotions(lobbyPage);
+      stage = "CARD_DISCOVERY";
+      const lobbyCards = lobbyPage.locator(".game-item.lobby");
+      const loginControls = lobbyPage.getByRole("button", { name: /\u0111\u0103ng\s*nh\u1eadp|login/iu });
+      let lobbyReady = false;
+      const lobbyDeadline = Date.now() + 10_000;
+      while (Date.now() < lobbyDeadline) {
+        for (let index = 0; index < await loginControls.count(); index += 1) {
+          if (await loginControls.nth(index).isVisible().catch(() => false)) {
+            throw new FabetBrowserError("NOT_AUTHENTICATED");
+          }
+        }
+        if (await lobbyCards.count() > 0 && await lobbyCards.first().isVisible().catch(() => false)) {
+          lobbyReady = true;
+          break;
+        }
+        await lobbyPage.waitForTimeout(100);
+      }
+      if (!lobbyReady) throw new Error("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
+      let control = null as ReturnType<Page["locator"]> | null;
+      let controlSignature: string | null = null;
+      let controlPriority = Number.POSITIVE_INFINITY;
+      for (let index = 0; index < Math.min(await lobbyCards.count(), 200); index += 1) {
+        const candidate = lobbyCards.nth(index);
+        const nameElement = candidate.locator(".game-item__name").first();
+        const thumbnail = candidate.locator("img.game-item__thumb").first();
+        const cardName = await nameElement.count() > 0 ? await nameElement.innerText().catch(() => "") : "";
+        const thumbnailSource = await thumbnail.count() > 0
+          ? await thumbnail.getAttribute("src").catch(() => null)
+          : null;
+        const fallbackName = await candidate.innerText().catch(() => "");
+        const rawName = cardName === "" ? fallbackName : cardName;
+        const label = launcherLabelFromCard(rawName, thumbnailSource);
+        if (providerHint(label, "") === input.provider && await candidate.isVisible().catch(() => false)) {
+          const signature = `${label.trim().toLocaleUpperCase("en")}\u0000${safeLauncherAssetName(thumbnailSource) ?? ""}`;
+          const priority = sabaLauncherPriority(rawName, label, thumbnailSource);
+          if (priority < controlPriority) {
+            control = candidate;
+            controlSignature = signature;
+            controlPriority = priority;
+          } else if (priority === controlPriority && controlSignature !== signature) {
+            process.stderr.write(`Fabet SABA card ambiguity: ${JSON.stringify([controlSignature, signature])}\n`);
+            throw new Error("FABET_PROVIDER_LAUNCH_AMBIGUOUS");
+          }
+        }
+      }
+      if (control === null) throw new Error("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
+      if (controlPriority === 0) {
+        const stableExplicitSaba = lobbyPage.locator(".game-item.lobby", { hasText: /SABA-SPORTS/iu }).first();
+        if (await stableExplicitSaba.isVisible().catch(() => false)) control = stableExplicitSaba;
+      } else if (controlPriority >= 1) {
+        const stableLegacySaba = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
+        if (await stableLegacySaba.isVisible().catch(() => false)) control = stableLegacySaba;
+      }
+      const existingPages = new Set(context.pages());
+      const launchResponse = lobbyPage.waitForResponse((response) => {
+        try {
+          const url = new URL(response.url());
+          return url.origin === lobbyOrigin && url.pathname === "/api/v3/game-url" && response.ok();
+        } catch { return false; }
+      }, { timeout: 10_000 }).then(async (response) => providerLaunchUrlFromResponseBody(await response.json()))
+        .catch(() => null);
+      stage = "CARD_CLICK";
+      let clicked = false;
+      let clickFailure: unknown = null;
+      const hasVisibleLobbyCard = async (): Promise<boolean> => {
+        for (let index = 0; index < Math.min(await lobbyCards.count(), 200); index += 1) {
+          if (await lobbyCards.nth(index).isVisible().catch(() => false)) return true;
+        }
+        return false;
+      };
+      const providerNavigationStarted = async (): Promise<boolean> => {
+        if (context.pages().some((candidate) => !existingPages.has(candidate) && !candidate.isClosed())) return true;
+        if (lobbyPage.isClosed()) return true;
+        try {
+          const url = new URL(lobbyPage.url());
+          if ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== lobbyOrigin) return true;
+        } catch { return false; }
+        return !(await hasVisibleLobbyCard()) &&
+          await lobbyPage.locator(".competition-select").first().isVisible().catch(() => false);
+      };
+      for (let attempt = 0; attempt < 3 && !clicked; attempt += 1) {
+        await this.#dismissBlockingPromotions(lobbyPage);
+        if (controlPriority >= 1) {
+          const point = await lobbyPage.evaluate(() => {
+            const card = [...document.querySelectorAll<HTMLElement>(".game-item.lobby")].find((candidate) =>
+              candidate.querySelector(".game-item__name")?.textContent?.trim().toLocaleUpperCase("en") === "C-SPORTS" &&
+              candidate.getClientRects().length > 0);
+            if (card === undefined) return null;
+            const rect = card.getBoundingClientRect();
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+          }).catch(() => null);
+          if (point !== null) {
+            try {
+              await lobbyPage.mouse.move(point.x, point.y);
+              await lobbyPage.waitForTimeout(500);
+              const playPoint = await lobbyPage.evaluate(() => {
+                const card = [...document.querySelectorAll<HTMLElement>(".game-item.lobby")].find((candidate) =>
+                  candidate.querySelector(".game-item__name")?.textContent?.trim().toLocaleUpperCase("en") === "C-SPORTS" &&
+                  candidate.getClientRects().length > 0);
+                const button = card?.querySelector<HTMLElement>(".game-item__play-btn button");
+                if (button === null || button === undefined) return null;
+                const rect = button.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0
+                  ? { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } : null;
+              }).catch(() => null);
+              await lobbyPage.mouse.click(playPoint?.x ?? point.x, playPoint?.y ?? point.y);
+              for (let wait = 0; wait < 30 && !clicked; wait += 1) {
+                await lobbyPage.waitForTimeout(100).catch(() => undefined);
+                clicked = await providerNavigationStarted();
+              }
+              if (!clicked) {
+                const currentLaunchUrl = await launchResponse;
+                if (currentLaunchUrl !== null) {
+                  const launch = new URL(currentLaunchUrl);
+                  if ((launch.protocol === "https:" || launch.protocol === "http:") &&
+                    launch.username === "" && launch.password === "") {
+                    providerPage = await context.newPage();
+                    await providerPage.goto(currentLaunchUrl, { waitUntil: "domcontentloaded", timeout: 10_000 });
+                    clicked = true;
+                  }
+                }
+              }
+            } catch (error) { clickFailure = error; }
+          }
+        }
+        if (clicked) break;
+        if (controlPriority === 0) {
+          const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /SABA-SPORTS/iu }).first();
+          if (await refreshed.isVisible().catch(() => false)) control = refreshed;
+        } else if (controlPriority >= 1) {
+          const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
+          if (await refreshed.isVisible().catch(() => false)) control = refreshed;
+        }
+        const thumbnail = control.locator("img.game-item__thumb").first();
+        if (await thumbnail.isVisible().catch(() => false)) {
+          try {
+            await thumbnail.click({ timeout: 2_000 });
+            for (let wait = 0; wait < 10 && !clicked; wait += 1) {
+              await lobbyPage.waitForTimeout(100).catch(() => undefined);
+              clicked = await providerNavigationStarted();
+            }
+          } catch (error) { clickFailure = error; }
+        }
+        if (!clicked && controlPriority >= 1) {
+          const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
+          if (await refreshed.isVisible().catch(() => false)) control = refreshed;
+        }
+        const play = control.locator(".game-item__play-btn button").first();
+        if (!clicked && await play.count() > 0) {
+          await control.hover({ timeout: 2_000 }).catch(() => undefined);
+          if (controlPriority >= 1) {
+            const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
+            if (await refreshed.isVisible().catch(() => false)) control = refreshed;
+          }
+          const activePlay = control.locator(".game-item__play-btn button").first();
+          try { await activePlay.click({ timeout: 2_000 }); clicked = true; }
+          catch (error) {
+            clickFailure = error;
+            await lobbyPage.waitForTimeout(150).catch(() => undefined);
+            clicked = await providerNavigationStarted();
+          }
+        }
+        if (!clicked) {
+          try { await control.click({ timeout: 3_000 }); clicked = true; }
+          catch (error) {
+            clickFailure = error;
+            await lobbyPage.waitForTimeout(150).catch(() => undefined);
+            clicked = await providerNavigationStarted();
+          }
+        }
+        if (!clicked) await lobbyPage.waitForTimeout(150);
+      }
+      if (!clicked) {
+        const keyboardLauncher = control.locator(".game-item__play-btn button").first();
+        if (await keyboardLauncher.count() > 0) {
+          await keyboardLauncher.focus().catch(() => undefined);
+          await lobbyPage.keyboard.press("Enter").catch((error) => { clickFailure = error; });
+          for (let attempt = 0; attempt < 20 && !clicked; attempt += 1) {
+            await lobbyPage.waitForTimeout(100).catch(() => undefined);
+            clicked = await providerNavigationStarted();
+          }
+        }
+      }
+      if (!clicked) {
+        throw clickFailure ?? new Error("FABET_PROVIDER_CARD_CLICK_FAILED");
+      }
+      stage = "POPUP_DISCOVERY";
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (providerPage !== null && !providerPage.isClosed()) break;
+        const opened = context.pages().find((candidate) => !existingPages.has(candidate) && !candidate.isClosed() &&
+          (() => {
+            try {
+              const url = new URL(candidate.url());
+              return (url.protocol === "http:" || url.protocol === "https:") && url.origin !== lobbyOrigin;
+            } catch { return false; }
+          })());
+        let samePage: Page | null = null;
+        if (!lobbyPage.isClosed()) {
+          let external = false;
+          try {
+            const url = new URL(lobbyPage.url());
+            external = (url.protocol === "http:" || url.protocol === "https:") && url.origin !== lobbyOrigin;
+          } catch { external = false; }
+          const embeddedProvider = !(await hasVisibleLobbyCard()) &&
+            await lobbyPage.locator(".competition-select").first().isVisible().catch(() => false);
+          if (external || embeddedProvider) samePage = lobbyPage;
+        }
+        providerPage = opened ?? samePage;
+        if (providerPage !== null) break;
+        await lobbyPage.waitForTimeout(100);
+      }
+      if (providerPage === null) throw new Error("FABET_PROVIDER_POPUP_UNAVAILABLE");
+      stage = "POPUP_LOAD";
+      await providerPage.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => undefined);
+      this.#providerPages.set(key, providerPage);
+      return providerPage;
+    } catch (error) {
+      if (error instanceof FabetBrowserError ||
+        (error instanceof Error && /^[A-Z0-9_]+$/u.test(error.message))) throw error;
+      throw new Error(`FABET_PROVIDER_${stage}_${safeBrowserFailureReason(error)}`, { cause: error });
+    } finally {
+      if (providerPage !== lobbyPage) await lobbyPage.close().catch(() => undefined);
+    }
   }
 
   async #dismissBlockingPromotions(page: Page): Promise<void> {
@@ -469,7 +783,8 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   async #getContext(): Promise<BrowserContext> {
     this.#context ??= await chromium.launchPersistentContext(this.#profilePath, {
       headless: this.#headless,
-      acceptDownloads: false
+      acceptDownloads: false,
+      viewport: { width: 1_920, height: 1_080 }
     });
     return this.#context;
   }

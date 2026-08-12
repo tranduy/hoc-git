@@ -90,6 +90,54 @@ export function markSabaLiveContextRecords(
   return records.map((record) => record.type === "m" ? { ...record, marketid: "L" } : record);
 }
 
+export async function readSabaFootballCatalogFromPage(
+  page: Page,
+  timeoutMs = 20_000
+): Promise<readonly Readonly<Record<string, unknown>>[]> {
+  const cdp = await page.context().newCDPSession(page);
+  const snapshots = new SabaSocketSnapshots();
+  const generation = snapshots.beginSocket();
+  const decoder = new SabaViewDecoder();
+  let viewGeneration = 0;
+  const onFrame = (event: { response?: { payloadData?: unknown } }): void => {
+    const payload = event.response?.payloadData;
+    if (typeof payload !== "string") return;
+    let frame = null;
+    try {
+      frame = parseSabaSocketFrame(payload);
+      if (frame === null) return;
+      const applied = decoder.apply(viewGeneration, frame);
+      snapshots.replace(generation, frame.bridgeId, applied.records, Date.now(), performance.now());
+    } catch {
+      if (frame !== null) snapshots.discard(generation, frame.bridgeId);
+    }
+  };
+  cdp.on("Network.webSocketFrameReceived", onFrame);
+  try {
+    await cdp.send("Network.enable");
+    const catalogPage = await findCmdCatalogPage([page]) ?? page;
+    await clickSafeStructuralCategory(catalogPage, "1", 1_500).catch(() => false);
+    await clickSafeLiveCatalog(catalogPage, 1_500).catch(() => false);
+    viewGeneration += 1;
+    snapshots.clear();
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const records = markSabaLiveContextRecords(snapshots.records());
+      const clock = snapshots.latestClock();
+      if (clock !== null) {
+        const normalized = normalizeSabaFootballRecords(records, {
+          observedAtMs: clock.observedAtMs, receivedMonotonicMs: clock.receivedMonotonicMs, sequence: 1
+        });
+        if (normalized.events.length > 0 && normalized.markets.length > 0) return records;
+      }
+      await page.waitForTimeout(50);
+    }
+    throw new Error("SABA_FOOTBALL_CATALOG_UNAVAILABLE");
+  } finally {
+    await cdp.detach().catch(() => undefined);
+  }
+}
+
 export class PlaywrightSabaFootballPushBrowserManager {
   readonly #profilesRoot: string;
   readonly #headless: boolean;

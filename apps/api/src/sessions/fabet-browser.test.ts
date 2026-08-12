@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { Page } from "playwright";
 import {
   capturedTopLevelNavigation,
   FabetBrowserDriver,
@@ -33,6 +34,7 @@ class FakeAutomation implements FabetBrowserAutomation {
   authenticated = true;
   launches: Record<string, CapturedNavigation[]> = {};
   authenticatedUrlValue: string | null = null;
+  providerPageCalls: Array<{ lobbyUrl: string; provider: "SABA"; category: "FOOTBALL" | "LOL" }> = [];
 
   async login(input: { entryUrl: string; username: string; password: string }): Promise<void> {
     this.loginCalls.push(input);
@@ -49,6 +51,12 @@ class FakeAutomation implements FabetBrowserAutomation {
 
   async authenticatedUrl(): Promise<string> {
     return this.authenticatedUrlValue ?? this.loginCalls.at(-1)?.entryUrl ?? "https://fabet.party/";
+  }
+
+  async withProviderPage<T>(input: { lobbyUrl: string; provider: "SABA"; category: "FOOTBALL" | "LOL" },
+    consume: (page: Page) => Promise<T>): Promise<T> {
+    this.providerPageCalls.push(input);
+    return consume({} as Page);
   }
 
   async close(): Promise<void> {
@@ -172,6 +180,20 @@ describe("FabetBrowserDriver", () => {
     ]);
   });
 
+  it("derives the SABA lobby from the authenticated Fabet origin for just-in-time use", async () => {
+    const context = await setup();
+    await context.trustStore.approve("fabet.party");
+    context.automation.authenticatedUrlValue = "https://fabet.party/home";
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 30 }, idFactory: () => "1" });
+    await driver.login({ entryUrl: "https://fabet.party/", username: "development-user", password: "development-pass" });
+
+    await expect(driver.withProviderPage("SABA", "FOOTBALL", async () => "provider-result"))
+      .resolves.toBe("provider-result");
+    expect(context.automation.providerPageCalls.at(-1)).toEqual({
+      lobbyUrl: "https://fabet.party/lobby-the-thao?type=livesports", provider: "SABA", category: "FOOTBALL"
+    });
+  });
+
   it.each([
     ["SABA-SPORTS", true],
     ["BTI", true],
@@ -222,6 +244,115 @@ describe("FabetBrowserDriver", () => {
 });
 
 describe("PlaywrightFabetAutomation", () => {
+  it("reports an expired Fabet login instead of waiting for missing lobby cards", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      response.end("<!doctype html><button>Đăng nhập</button>");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const automation = new PlaywrightFabetAutomation({
+      profilePath: join(await setup().then((value) => value.directory), "logged-out-profile"), headless: true
+    });
+    try {
+      await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
+        provider: "SABA", category: "FOOTBALL" }, async () => undefined))
+        .rejects.toMatchObject({ code: "NOT_AUTHENTICATED" });
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 5_000);
+
+  it("clicks the real SABA lobby card and reuses the popup in the Fabet browser context", async () => {
+    let launchCount = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/provider") {
+        launchCount += 1;
+        response.end("<!doctype html><title>SABA live</title><main>Provider ready</main>");
+        return;
+      }
+      const card = `<div class="game-item lobby">
+        <img class="game-item__thumb" src="/game/sabaport.webp"><p class="game-item__name">SABA-SPORTS</p>
+        <div class="game-item__play-btn"><button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/provider')">Play</button></div>
+      </div>`;
+      response.end(`<!doctype html><div class="game-item lobby">
+        <p class="game-item__name">C-SPORTS</p><div class="game-item__play-btn"><button>Play</button></div>
+      </div>${card}${card}`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const profilePath = join(await setup().then((value) => value.directory), "provider-popup-profile");
+    const automation = new PlaywrightFabetAutomation({ profilePath, headless: true });
+    const lobbyUrl = `http://127.0.0.1:${address.port}/lobby`;
+    let activeConsumers = 0;
+    let maximumActiveConsumers = 0;
+    const consume = async <T>(operation: () => Promise<T>): Promise<T> => {
+      activeConsumers += 1;
+      maximumActiveConsumers = Math.max(maximumActiveConsumers, activeConsumers);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return await operation();
+      } finally {
+        activeConsumers -= 1;
+      }
+    };
+    try {
+      const [body, title] = await Promise.all([
+        automation.withProviderPage({ lobbyUrl, provider: "SABA", category: "FOOTBALL" },
+          async (page) => consume(async () => page.locator("main").innerText())),
+        automation.withProviderPage({ lobbyUrl, provider: "SABA", category: "FOOTBALL" },
+          async (page) => consume(async () => page.title()))
+      ]);
+      expect(body).toBe("Provider ready");
+      expect(title).toBe("SABA live");
+      await expect(automation.withProviderPage({ lobbyUrl, provider: "SABA", category: "FOOTBALL" },
+        async (page) => page.title())).resolves.toBe("SABA live");
+      expect(launchCount).toBe(1);
+      expect(maximumActiveConsumers).toBe(1);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
+  it("discards a failed SABA popup so the next read clicks a fresh lobby launch", async () => {
+    let launchCount = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/provider") {
+        launchCount += 1;
+        response.end("<!doctype html><main>Provider ready</main>");
+        return;
+      }
+      response.end(`<!doctype html><div class="game-item lobby">
+        <img class="game-item__thumb" src="/game/sabaport.webp"><p class="game-item__name">SABA-SPORTS</p>
+        <div class="game-item__play-btn"><button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/provider')">Play</button></div>
+      </div>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const automation = new PlaywrightFabetAutomation({
+      profilePath: join(await setup().then((value) => value.directory), "failed-popup-profile"), headless: true
+    });
+    const input = { lobbyUrl: `http://127.0.0.1:${address.port}/lobby`, provider: "SABA" as const,
+      category: "FOOTBALL" as const };
+    try {
+      await expect(automation.withProviderPage(input, async () => { throw new Error("SOURCE_EXPIRED"); }))
+        .rejects.toThrow("SOURCE_EXPIRED");
+      await expect(automation.withProviderPage(input, async (page) => page.locator("main").innerText()))
+        .resolves.toBe("Provider ready");
+      expect(launchCount).toBe(2);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
   it("captures a provider launch returned by the lobby game-url API", async () => {
     const lobby = createServer((request, response) => {
       if (request.url === "/api/v3/game-url") {

@@ -7,6 +7,7 @@ import type {
   SessionStatusList
 } from "@tool-chenh/contracts";
 import { createHash } from "node:crypto";
+import type { Page } from "playwright";
 import type { LaunchCandidate } from "./fabet-browser.js";
 import { SecretVault } from "./secret-vault.js";
 import type {
@@ -58,6 +59,7 @@ export interface SessionManagerOptions {
   readonly fabetDriver?: {
     login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void>;
     captureLobbyLaunches(): Promise<readonly LaunchCandidate[]>;
+    withProviderPage?<T>(provider: "SABA", category: Category, consume: (page: Page) => Promise<T>): Promise<T>;
     resetProfile(): Promise<void>;
   };
   readonly resetFabetState?: () => Promise<void>;
@@ -117,6 +119,7 @@ export class SessionManager {
   readonly #fabetDriver: SessionManagerOptions["fabetDriver"];
   readonly #resetFabetState: () => Promise<void>;
   readonly #inflight = new Map<string, Promise<RedactedSessionStatus>>();
+  #fabetRehydration: Promise<void> | null = null;
 
   constructor(options: SessionManagerOptions) {
     this.#vault = options.vault;
@@ -264,6 +267,20 @@ export class SessionManager {
     };
   }
 
+  async withFabetProviderPage<T>(provider: "SABA", category: Category,
+    consume: (page: Page) => Promise<T>): Promise<T> {
+    const driver = this.#fabetDriver;
+    if (driver?.withProviderPage === undefined) throw new Error("FABET_PROVIDER_POPUP_UNAVAILABLE");
+    try {
+      return await driver.withProviderPage(provider, category, consume);
+    } catch (error) {
+      if (typeof error !== "object" || error === null ||
+        (error as Record<string, unknown>).code !== "NOT_AUTHENTICATED") throw error;
+    }
+    await this.#rehydrateFabet();
+    return driver.withProviderPage(provider, category, consume);
+  }
+
   async resetFabet(): Promise<void> {
     const records = await this.#listRecords();
     await Promise.all(records
@@ -271,6 +288,24 @@ export class SessionManager {
       .map(async (record) => this.#vault.delete(`${recordPrefix}${record.id}`)));
     await this.#fabetDriver?.resetProfile();
     await this.#resetFabetState();
+  }
+
+  async #rehydrateFabet(): Promise<void> {
+    if (this.#fabetRehydration !== null) return this.#fabetRehydration;
+    const operation = (async () => {
+      const record = await this.#load("fabet");
+      if (record === null || record.secret.kind !== "FABET_CREDENTIALS" || this.#fabetDriver === undefined) {
+        throw new Error("FABET_SESSION_UNAVAILABLE");
+      }
+      let fields: Record<string, unknown>;
+      try { fields = JSON.parse(record.secret.value) as Record<string, unknown>; }
+      catch { throw new Error("FABET_SESSION_UNAVAILABLE"); }
+      if (typeof fields.entryUrl !== "string" || typeof fields.username !== "string" ||
+        typeof fields.password !== "string") throw new Error("FABET_SESSION_UNAVAILABLE");
+      await this.#fabetDriver.login({ entryUrl: fields.entryUrl, username: fields.username, password: fields.password });
+    })().finally(() => { if (this.#fabetRehydration === operation) this.#fabetRehydration = null; });
+    this.#fabetRehydration = operation;
+    return operation;
   }
 
   async #renewRecord(record: StoredSession, failureReason: SessionHealthReason): Promise<RedactedSessionStatus> {

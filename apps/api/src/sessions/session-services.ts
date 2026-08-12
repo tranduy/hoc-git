@@ -19,6 +19,9 @@ import { CmdProfileReader } from "../providers/cmd/cmd-profile-reader.js";
 import { CmdSessionValidator } from "../providers/cmd/cmd-session-validator.js";
 import { CmdObservedCatalogReader } from "../providers/cmd/cmd-observed-catalog.js";
 import { PlaywrightSabaBrowserManager } from "../providers/saba/saba-browser-manager.js";
+import { FabetSabaBrowserManager } from "../providers/saba/fabet-saba-browser-manager.js";
+import { PlaywrightSabaFootballPushBrowserManager } from "../providers/saba/saba-football-push-browser-manager.js";
+import { SabaObservedCatalogReader } from "../providers/saba/saba-observed-catalog.js";
 import { SabaProfileReader } from "../providers/saba/saba-profile-reader.js";
 import { SabaSessionValidator } from "../providers/saba/saba-session-validator.js";
 import { PlaywrightSabaEsportsBrowserManager } from "../providers/saba/saba-esports-browser-manager.js";
@@ -67,7 +70,7 @@ export interface CreateSessionServicesOptions {
 export interface ManagedSessionServices extends SessionServices {
   readonly accounts: AccountRegistry;
   readonly catalogReader: MultiProviderCatalogReader;
-  readonly sabaCatalogReader: CmdObservedCatalogReader;
+  readonly sabaCatalogReader: SabaObservedCatalogReader;
   readonly providerPreflight: ProviderPreflightRegistry;
   readonly receiptProtocol: ReceiptProtocolRegistry;
   readonly receiptReaders: readonly ReceiptReader[];
@@ -99,9 +102,12 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     profilesRoot: join(profilesRoot, "providers"),
     headless: true
   });
-  const sabaBrowser = new PlaywrightSabaBrowserManager({
+  const sabaDirectBrowser = new PlaywrightSabaBrowserManager({
     profilesRoot: join(profilesRoot, "providers-saba"),
     headless: true
+  });
+  const sabaFootballPushBrowser = new PlaywrightSabaFootballPushBrowserManager({
+    profilesRoot: join(profilesRoot, "providers-saba-football-push"), headless: true
   });
   const sabaEsportsBrowser = new PlaywrightSabaEsportsBrowserManager({
     profilesRoot: join(profilesRoot, "providers-saba-esports"),
@@ -148,6 +154,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     fabetDriver,
     resetFabetState: async () => trustStore.resetFabetHosts()
   });
+  const sabaBrowser = new FabetSabaBrowserManager({ fabet: {
+    withProviderPage: manager.withFabetProviderPage.bind(manager)
+  }, fallback: sabaDirectBrowser, catalogFallback: sabaFootballPushBrowser });
   const discovery = new DomainDiscovery({
     trustStore,
     fetch: options.fetch ?? globalThis.fetch
@@ -172,10 +181,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
     timezoneOffsetMinutes: 420
   });
-  const sabaCatalogReader = new CmdObservedCatalogReader({
-    provider: "SABA", accounts, source: sabaBrowser,
-    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
-    timezoneOffsetMinutes: 420
+  const sabaCatalogReader = new SabaObservedCatalogReader({
+    accounts, source: { readCatalog: sabaBrowser.readRawCatalog.bind(sabaBrowser) },
+    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const sbobetCatalogReader = new SbobetObservedCatalogReader({
     accounts, source: sbobetBrowser,
@@ -223,7 +231,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     },
     async close(): Promise<void> {
       await Promise.all([
-        automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaEsportsBrowser.close(),
+        automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaFootballPushBrowser.close(), sabaEsportsBrowser.close(),
         sbobetBrowser.close(), imEsportsBrowser.close(), apsportBrowser.close(), btiBrowser.close()
       ]);
     }
