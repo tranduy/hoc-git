@@ -30,6 +30,7 @@ import {
 } from "./protocol-inspector.js";
 import { extractImCatalogRecords } from "./im/im-catalog-source.js";
 import {
+  extractSbobetMarketDomCandidates,
   inspectSbobetMarketGroups,
   inspectSbobetMarketLabelEvidence
 } from "./sbobet/sbobet-direct-catalog.js";
@@ -84,6 +85,7 @@ async function main(): Promise<void> {
   const imCatalogRecordsOnly = argumentsList.includes("--im-catalog-records");
   const sbobetMarketShapesOnly = argumentsList.includes("--sbobet-market-shapes");
   const sbobetMarketLabelsOnly = argumentsList.includes("--sbobet-market-labels");
+  const sbobetMarketDomCorrelationOnly = argumentsList.includes("--sbobet-market-dom-correlation");
   const localAppData = process.env.LOCALAPPDATA;
   if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || !localAppData) {
     throw new Error("Usage: npm run inspect:launch -- <redacted-session-id>");
@@ -104,6 +106,7 @@ async function main(): Promise<void> {
   const imCatalogRecords: unknown[] = [];
   const sbobetMarketShapes = new Map<string, ReturnType<typeof inspectSbobetMarketGroups>[number]>();
   const sbobetMarketLabels = new Map<string, unknown>();
+  const sbobetMarketDomCandidates = new Map<string, ReturnType<typeof extractSbobetMarketDomCandidates>[number]>();
   let catalogNavigation: unknown[] = [];
   const pending = new Set<Promise<void>>();
   const recordResponse = async (response: Response): Promise<void> => {
@@ -144,6 +147,9 @@ async function main(): Promise<void> {
         if (imCatalogRecordsOnly) imCatalogRecords.push(...extractImCatalogRecords(body).slice(0, 40));
         if (sbobetMarketShapesOnly) for (const shape of inspectSbobetMarketGroups(body)) {
           sbobetMarketShapes.set(JSON.stringify(shape), shape);
+        }
+        if (sbobetMarketDomCorrelationOnly) for (const candidate of extractSbobetMarketDomCandidates(body, ["25", "27"])) {
+          sbobetMarketDomCandidates.set(JSON.stringify(candidate), candidate);
         }
         bodyShapeHash = structuralBodyHash(body);
         bodyShape = imCatalogShapeOnly ? structuralBodyShapeAtDepth(body, 16) : structuralBodyShape(body);
@@ -214,7 +220,8 @@ async function main(): Promise<void> {
       await clickSafeStructuralCategory(page, "1", 2_000).catch(() => false);
       catalogNavigation = [...await collectCmdCatalogNavigation(page)];
     }
-    if (!catalogRecordsOnly && !catalogNavigationOnly && !ticketShapeOnly && !sbobetMarketLabelsOnly) {
+    if (!catalogRecordsOnly && !catalogNavigationOnly && !ticketShapeOnly && !sbobetMarketLabelsOnly &&
+      !sbobetMarketDomCorrelationOnly) {
       const controls = page.locator("a, button, [role='button'], [onclick], [aria-label], [title]");
       const controlCount = Math.min(await controls.count(), 250);
       for (let index = 0, clicked = 0; index < controlCount && clicked < 12; index += 1) {
@@ -257,6 +264,58 @@ async function main(): Promise<void> {
     }
     await page.waitForTimeout(15_000);
     await Promise.allSettled([...pending]);
+    const sbobetMarketDomCorrelation = sbobetMarketDomCorrelationOnly
+      ? await Promise.all([...sbobetMarketDomCandidates.values()].slice(0, 32).map(async (candidate) => {
+        const evidence = [] as Array<{ found: number; secondHalf: boolean; handicap: boolean; total: boolean }>;
+        for (const candidatePage of context.pages()) for (const frame of candidatePage.frames()) {
+          const value = await frame.evaluate((selectionIds) => {
+            let found = 0;
+            let secondHalf = true;
+            let handicap = true;
+            let total = true;
+            for (const selectionId of selectionIds) {
+              const node = document.getElementById(`odd-item-${selectionId}`);
+              if (node === null) continue;
+              found += 1;
+              const contexts: string[] = [];
+              let current: Element | null = node;
+              for (let depth = 0; depth < 6 && current !== null; depth += 1, current = current.parentElement) {
+                const content = current.textContent?.replace(/\s+/gu, " ").trim() ?? "";
+                if (content.length > 0 && content.length <= 1_000) contexts.push(content);
+              }
+              const box = node.getBoundingClientRect();
+              const centerX = box.left + box.width / 2;
+              const spatialLabels = [...document.querySelectorAll<HTMLElement>("*")].flatMap((element) => {
+                const ownText = [...element.childNodes].filter((child) => child.nodeType === Node.TEXT_NODE)
+                  .map((child) => child.textContent ?? "").join(" ").replace(/\s+/gu, " ").trim();
+                if (ownText.length === 0 || ownText.length > 120 ||
+                  !/(?:second\s*half|2nd\s*half|\b2h\b|hiệp\s*2|hiep\s*2|handicap|\bhdp\b|chấp|chap|over\s*\/?\s*under|\bo\s*\/?\s*u\b|total|tài\s*\/?\s*xỉu|tai\s*\/?\s*xiu)/iu.test(ownText)) return [];
+                const labelBox = element.getBoundingClientRect();
+                if (labelBox.width <= 0 || labelBox.height <= 0 || labelBox.top > box.top || box.top - labelBox.bottom > 600 ||
+                  centerX < labelBox.left - 20 || centerX > labelBox.right + 20) return [];
+                return [{ text: ownText, distance: box.top - labelBox.bottom }];
+              }).sort((left, right) => left.distance - right.distance).slice(0, 8).map((item) => item.text);
+              if (spatialLabels.length > 0) contexts.push(spatialLabels.join(" "));
+              contexts.sort((left, right) => left.length - right.length);
+              const classification = contexts.find((content) =>
+                /(?:second\s*half|2nd\s*half|\b2h\b|hiệp\s*2|hiep\s*2)/iu.test(content));
+              secondHalf &&= classification !== undefined;
+              handicap &&= classification !== undefined && /(?:handicap|\bhdp\b|chấp|chap)/iu.test(classification);
+              total &&= classification !== undefined && /(?:over\s*\/?\s*under|\bo\s*\/?\s*u\b|total|tài\s*\/?\s*xỉu|tai\s*\/?\s*xiu)/iu
+                .test(classification);
+            }
+            return { found, secondHalf: found > 0 && secondHalf, handicap: found > 0 && handicap,
+              total: found > 0 && total };
+          }, candidate.selectionIds).catch(() => null);
+          if (value !== null && value.found > 0) evidence.push(value);
+        }
+        const foundSelectionCount = evidence.reduce((sum, item) => sum + item.found, 0);
+        const semantic = foundSelectionCount < candidate.selectionIds.length ? "UNPROVEN"
+          : evidence.every((item) => item.secondHalf && item.handicap) ? "SECOND_HALF_HANDICAP"
+          : evidence.every((item) => item.secondHalf && item.total) ? "SECOND_HALF_OVER_UNDER" : "UNPROVEN";
+        return { eventId: candidate.eventId, groupKey: candidate.groupKey,
+          expectedSelectionCount: candidate.selectionIds.length, foundSelectionCount, semantic };
+      })) : [];
     const output = ticketShapeOnly
       ? ticketShape
       : imCatalogRecordsOnly
@@ -265,6 +324,8 @@ async function main(): Promise<void> {
       ? [...sbobetMarketShapes.values()]
       : sbobetMarketLabelsOnly
       ? [...sbobetMarketLabels.values()]
+      : sbobetMarketDomCorrelationOnly
+      ? sbobetMarketDomCorrelation
       : profileShapesOnly
       ? profileShapes
       : catalogNavigationOnly

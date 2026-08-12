@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   extractSbobetDirectCatalogRecords,
+  extractSbobetMarketDomCandidates,
   inspectSbobetMarketGroups,
   inspectSbobetMarketLabelEvidence
 } from "./sbobet-direct-catalog.js";
@@ -75,6 +76,22 @@ describe("inspectSbobetMarketGroups", () => {
     expect(result.length).toBeLessThanOrEqual(32);
     expect(result.every((group) => group.rowCount <= 8 && group.rowShapes.every((row) =>
       row.tokenCount <= 16 && row.tokenKinds.length <= 16))).toBe(true);
+  });
+});
+
+describe("extractSbobetMarketDomCandidates", () => {
+  it("extracts only bounded selection IDs for explicitly requested groups", () => {
+    const body = [{ "8": 5574638, "7": {
+      "25": ["2.5 0.93*55746380250002005h -0.91*55746380250002005a 730078508181025 0 0"],
+      "27": ["0.5 -0.91*55746380270009905h 0.79*55746380270009905a h 730078508161105 0 0"],
+      "999": ["secret-token-should-not-leak"]
+    } }];
+
+    expect(extractSbobetMarketDomCandidates(body, ["25", "27"])).toEqual([
+      { eventId: "5574638", groupKey: "25", selectionIds: ["55746380250002005h", "55746380250002005a"] },
+      { eventId: "5574638", groupKey: "27", selectionIds: ["55746380270009905h", "55746380270009905a"] }
+    ]);
+    expect(JSON.stringify(extractSbobetMarketDomCandidates(body, ["25"]))).not.toContain("secret-token");
   });
 });
 

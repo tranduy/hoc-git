@@ -16,6 +16,12 @@ export interface SbobetMarketLabelEvidence {
   readonly contextShape: string;
 }
 
+export interface SbobetMarketDomCandidate {
+  readonly eventId: string;
+  readonly groupKey: string;
+  readonly selectionIds: readonly string[];
+}
+
 const pairPattern = /^(-?(?:0|1)(?:\.\d+)?)\*(\d+[had])$/u;
 
 function halfGoalLine(value: string): boolean {
@@ -68,6 +74,44 @@ export function inspectSbobetMarketGroups(body: unknown): readonly SbobetMarketG
   };
   visit(body, 0);
   return [...groups.values()].sort((left, right) => Number(left.groupKey) - Number(right.groupKey));
+}
+
+export function extractSbobetMarketDomCandidates(
+  body: unknown,
+  allowedGroupKeys: readonly string[]
+): readonly SbobetMarketDomCandidate[] {
+  const allowed = new Set(allowedGroupKeys.filter((key) => /^\d{1,4}$/u.test(key)).slice(0, 8));
+  const candidates = new Map<string, SbobetMarketDomCandidate>();
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 20 || candidates.size >= 32 || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.slice(0, 64).forEach((child) => visit(child, depth + 1));
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const eventIdValue = record["8"];
+    const eventId = typeof eventIdValue === "string" || typeof eventIdValue === "number"
+      ? String(eventIdValue) : null;
+    const groups = record["7"];
+    if (eventId !== null && /^\d{1,30}$/u.test(eventId) && groups !== null && typeof groups === "object" &&
+      !Array.isArray(groups)) {
+      for (const [groupKey, rows] of Object.entries(groups as Record<string, unknown>)) {
+        if (!allowed.has(groupKey) || !Array.isArray(rows)) continue;
+        for (const row of rows.slice(0, 8)) {
+          if (typeof row !== "string") continue;
+          const selectionIds = [...row.matchAll(/\*(-?\d{1,40}[had])/gu)].map((match) => match[1]!)
+            .filter((selectionId) => /^\d{1,40}[had]$/u.test(selectionId)).slice(0, 4);
+          if (selectionIds.length < 2) continue;
+          const key = `${eventId}:${groupKey}:${selectionIds.join("|")}`;
+          candidates.set(key, { eventId, groupKey, selectionIds });
+          if (candidates.size >= 32) return;
+        }
+      }
+    }
+    Object.values(record).slice(0, 64).forEach((child) => visit(child, depth + 1));
+  };
+  visit(body, 0);
+  return [...candidates.values()];
 }
 
 export function inspectSbobetMarketLabelEvidence(source: string): readonly SbobetMarketLabelEvidence[] {
