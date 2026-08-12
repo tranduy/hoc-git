@@ -11,6 +11,9 @@ import { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { JsonlCatalogJournal } from "./routes/catalog-jsonl-journal.js";
 import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
 import { resolveProviderFees } from "./providers/provider-fees.js";
+import { FileExecutionIdempotencyStore } from "./execution/file-execution-idempotency-store.js";
+import { ProviderPreflightDryRunAdapter } from "./execution/provider-preflight-dry-run-adapter.js";
+import { TwoLegExecutor } from "./execution/two-leg-executor.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -179,6 +182,16 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const controller = new AbortController();
   await runtime.start(controller.signal);
   const twoLegPreflight = new TwoLegPreflight({ opportunities: runtime, providers: sessionServices.providerPreflight });
+  const executionDryRun = new TwoLegExecutor({
+    adapters: (["SABA", "SBOBET", "APSPORT", "BTI"] as const).map((provider) =>
+      new ProviderPreflightDryRunAdapter({ provider,
+        preflight: sessionServices.providerPreflight.preflight.bind(sessionServices.providerPreflight) })),
+    verifyTicket: (ticket) => twoLegPreflight.verifyTicket(ticket),
+    idempotencyStore: new FileExecutionIdempotencyStore(
+      join(localAppData, "tool-chenh", "execution-idempotency")
+    ),
+    timeoutMs: 10_000
+  });
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
@@ -188,7 +201,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     ...(config.dataMode === "LIVE" ? { catalogObserver: catalogBridge } : {}),
     catalogTelemetry,
     providerPreflight: sessionServices.providerPreflight,
-    twoLegPreflight
+    twoLegPreflight,
+    executionDryRun
   });
   await app.listen({ host: config.host, port: config.port });
   const sessionTimer = setInterval(() => {

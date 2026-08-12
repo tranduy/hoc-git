@@ -160,7 +160,7 @@ export class TwoLegPreflight {
     const legs = providerLegs.map(({ leg, accountId }, index) => ({
       accountId, provider: results[index]!.provider, providerEventId: leg.providerEventId,
       providerMarketId: leg.providerMarketId, providerSelectionId: leg.providerSelectionId,
-      selection: leg.selection, decimalOdds: results[index]!.decimalOdds, stake: leg.stake,
+      selection: leg.selection, line: opportunity.line, decimalOdds: results[index]!.decimalOdds, stake: leg.stake,
       currency: results[index]!.constraint!.currency, balance: results[index]!.constraint!.balance,
       balanceAsOfMs: results[index]!.constraint!.verifiedAsOfMs,
       quoteAsOfMs: results[index]!.constraint!.verifiedAsOfMs

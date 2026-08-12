@@ -1,27 +1,11 @@
-import type { PreflightTicket, ProviderId } from "@tool-chenh/contracts";
+import type { ExecutionLegResult, ExecutionRequest, PreflightTicket, ProviderId,
+  TwoLegExecutionResult } from "@tool-chenh/contracts";
 
 type ExecutionLeg = PreflightTicket["legs"][number];
-interface ExecutionLegIdentity {
-  readonly provider: ProviderId;
-  readonly providerSelectionId: string;
-}
-export type ExecutionLegResult = ExecutionLegIdentity & (
-  | { readonly status: "ACCEPTED"; readonly reason: null }
-  | { readonly status: "REJECTED"; readonly reason: "ODDS_CHANGED" | "MARKET_SUSPENDED" | "LIMIT_CHANGED" |
-    "INSUFFICIENT_BALANCE" | "PROVIDER_REJECTED" }
-  | { readonly status: "UNKNOWN"; readonly reason: "TIMEOUT" | "ADAPTER_ERROR" | "ADAPTER_UNAVAILABLE" |
-    "IDENTITY_MISMATCH" }
-);
+export type { ExecutionLegResult, TwoLegExecutionResult } from "@tool-chenh/contracts";
 export interface ExecutionLegAdapter {
   readonly provider: ProviderId;
   dryRun(leg: ExecutionLeg): Promise<ExecutionLegResult>;
-}
-export interface TwoLegExecutionResult {
-  readonly ticketId: string;
-  readonly idempotencyKey: string;
-  readonly mode: "DRY_RUN";
-  readonly status: "BOTH_ACCEPTED" | "NONE_ACCEPTED" | "PARTIAL_FAILURE";
-  readonly legs: readonly [ExecutionLegResult, ExecutionLegResult];
 }
 export type ExecutionIdempotencyClaim =
   | { readonly status: "CLAIMED" }
@@ -56,8 +40,7 @@ export class TwoLegExecutor {
     if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) throw new Error("EXECUTION_TIMEOUT_INVALID");
   }
 
-  async execute(input: { readonly ticket: PreflightTicket; readonly idempotencyKey: string;
-    readonly mode: "DRY_RUN" }): Promise<TwoLegExecutionResult> {
+  async execute(input: ExecutionRequest): Promise<TwoLegExecutionResult> {
     if (input.idempotencyKey.length < 16 || input.idempotencyKey.length > 256) {
       throw new Error("EXECUTION_IDEMPOTENCY_KEY_INVALID");
     }

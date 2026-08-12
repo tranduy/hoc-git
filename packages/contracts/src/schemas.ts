@@ -7,6 +7,8 @@ import type {
   CanonicalMarket,
   Category,
   DataMode,
+  ExecutionLegResult,
+  ExecutionRequest,
   MappingEvidence,
   MappingStatus,
   MarketType,
@@ -29,6 +31,7 @@ import type {
   ProviderQuote,
   RedactedSessionStatus,
   RealtimeMessage,
+  TwoLegExecutionResult,
   QuoteIneligibilityReason,
   QuoteMovement,
   QuoteStatus,
@@ -303,6 +306,7 @@ export const PreflightLegSchema = z.strictObject({
   providerMarketId: z.string().trim().min(1),
   providerSelectionId: z.string().trim().min(1),
   selection: z.string().trim().min(1),
+  line: DecimalStringSchema.nullable(),
   decimalOdds: NonnegativeDecimalStringSchema,
   stake: NonnegativeDecimalStringSchema,
   currency: z.string().regex(/^[A-Z]{3,8}$/u),
@@ -333,6 +337,45 @@ export const PreflightTicketSchema = z.strictObject({
     context.addIssue({ code: "custom", path: ["legs", 1, "accountId"], message: "ticket accounts must be distinct" });
   }
 }) satisfies z.ZodType<PreflightTicket>;
+
+export const ExecutionRequestSchema = z.strictObject({
+  ticket: PreflightTicketSchema,
+  idempotencyKey: z.string().min(16).max(256),
+  mode: z.literal("DRY_RUN")
+}) satisfies z.ZodType<ExecutionRequest>;
+
+const ExecutionLegResultSchema = z.discriminatedUnion("status", [
+  z.strictObject({ provider: ProviderIdSchema, providerSelectionId: z.string().trim().min(1),
+    status: z.literal("ACCEPTED"), reason: z.null() }),
+  z.strictObject({ provider: ProviderIdSchema, providerSelectionId: z.string().trim().min(1),
+    status: z.literal("REJECTED"), reason: z.enum([
+      "ODDS_CHANGED", "MARKET_SUSPENDED", "LIMIT_CHANGED", "INSUFFICIENT_BALANCE", "PROVIDER_REJECTED"
+    ]) }),
+  z.strictObject({ provider: ProviderIdSchema, providerSelectionId: z.string().trim().min(1),
+    status: z.literal("UNKNOWN"), reason: z.enum([
+      "TIMEOUT", "ADAPTER_ERROR", "ADAPTER_UNAVAILABLE", "IDENTITY_MISMATCH"
+    ]) })
+]) satisfies z.ZodType<ExecutionLegResult>;
+
+export const TwoLegExecutionResultSchema = z.strictObject({
+  ticketId: z.string().trim().min(1).max(256),
+  idempotencyKey: z.string().min(16).max(256),
+  mode: z.literal("DRY_RUN"),
+  status: z.enum(["BOTH_ACCEPTED", "NONE_ACCEPTED", "PARTIAL_FAILURE"]),
+  legs: z.tuple([ExecutionLegResultSchema, ExecutionLegResultSchema])
+}).superRefine((result, context) => {
+  const accepted = result.legs.filter((leg) => leg.status === "ACCEPTED").length;
+  const expected = accepted === 2 ? "BOTH_ACCEPTED"
+    : accepted === 0 && result.legs.every((leg) => leg.status === "REJECTED") ? "NONE_ACCEPTED"
+      : "PARTIAL_FAILURE";
+  if (result.status !== expected) {
+    context.addIssue({ code: "custom", path: ["status"], message: "status must match both leg results" });
+  }
+  if (result.legs[0].provider === result.legs[1].provider) {
+    context.addIssue({ code: "custom", path: ["legs", 1, "provider"],
+      message: "execution legs must use distinct providers" });
+  }
+}) satisfies z.ZodType<TwoLegExecutionResult>;
 
 const footballMarketTypes = new Set<MarketType>(["FT_1X2", "FT_AH", "FT_TOTAL", "FH_1X2", "FH_AH", "FH_TOTAL"]);
 const lolMarketTypes = new Set<MarketType>([

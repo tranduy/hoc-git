@@ -3,6 +3,7 @@ import {
   AccountStatusSchema,
   AppSnapshotSchema,
   CanonicalMarketSchema,
+  ExecutionRequestSchema,
   OpportunitySchema,
   OddsFormatSchema,
   PreflightRequestSchema,
@@ -18,7 +19,8 @@ import {
   RedactedSessionStatusSchema,
   RealtimeMessageSchema,
   SessionStatusListSchema,
-  StakeLegSchema
+  StakeLegSchema,
+  TwoLegExecutionResultSchema
 } from "./schemas.js";
 
 describe("live account and preflight schemas", () => {
@@ -122,7 +124,7 @@ describe("live account and preflight schemas", () => {
     const leg = {
       accountId: "account-a", provider: "CMD", providerEventId: "event-1",
       providerMarketId: "market-1", providerSelectionId: "selection-1",
-      selection: "HOME", decimalOdds: "2.1", stake: "50000", currency: "VND",
+      selection: "HOME", line: "-0.5", decimalOdds: "2.1", stake: "50000", currency: "VND",
       balance: "100000", balanceAsOfMs: 2_000, quoteAsOfMs: 2_000
     };
     expect(PreflightTicketSchema.safeParse({
@@ -132,6 +134,36 @@ describe("live account and preflight schemas", () => {
       nonce: "nonce-value-123456", signature: "signature-value-123456",
       legs: [leg, { ...leg, accountId: "account-b", provider: "SABA" }]
     }).success).toBe(false);
+  });
+
+  it("accepts only an explicit dry-run execution request and strict two-leg result", () => {
+    const leg = {
+      accountId: "account-a", provider: "CMD", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1",
+      selection: "HOME", line: "-0.5", decimalOdds: "2.1", stake: "50000", currency: "VND",
+      balance: "100000", balanceAsOfMs: 2_000, quoteAsOfMs: 2_000
+    };
+    const ticket = {
+      ticketId: "ticket-1", opportunityId: "opp-1", canonicalEventId: "event-c",
+      canonicalMarketId: "market-c", baseCurrency: "VND", totalStakeBase: "100000",
+      worstCaseProfit: "2000", issuedAtMs: 2_000, expiresAtMs: 5_000,
+      nonce: "nonce-value-123456", signature: "signature-value-123456",
+      legs: [leg, { ...leg, accountId: "account-b", provider: "SABA" }]
+    };
+    expect(ExecutionRequestSchema.safeParse({ ticket, idempotencyKey: "request-key-123456", mode: "DRY_RUN" }).success)
+      .toBe(true);
+    expect(ExecutionRequestSchema.safeParse({ ticket, idempotencyKey: "request-key-123456", mode: "LIVE" }).success)
+      .toBe(false);
+    expect(TwoLegExecutionResultSchema.safeParse({ ticketId: "ticket-1", idempotencyKey: "request-key-123456",
+      mode: "DRY_RUN", status: "BOTH_ACCEPTED", legs: [
+        { provider: "CMD", providerSelectionId: "selection-1", status: "ACCEPTED", reason: null },
+        { provider: "SABA", providerSelectionId: "selection-2", status: "ACCEPTED", reason: null }
+      ] }).success).toBe(true);
+    expect(TwoLegExecutionResultSchema.safeParse({ ticketId: "ticket-1", idempotencyKey: "request-key-123456",
+      mode: "DRY_RUN", status: "BOTH_ACCEPTED", legs: [
+        { provider: "CMD", providerSelectionId: "selection-1", status: "ACCEPTED", reason: null },
+        { provider: "SABA", providerSelectionId: "selection-2", status: "REJECTED", reason: "ODDS_CHANGED" }
+      ] }).success).toBe(false);
   });
 });
 

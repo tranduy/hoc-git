@@ -10,10 +10,10 @@ const ticket: PreflightTicket = { ticketId: "ticket-1", opportunityId: "opp-1",
   totalStakeBase: "180000", worstCaseProfit: "20000", issuedAtMs: 1000, expiresAtMs: 3000,
   nonce: "nonce-1234567890123456", signature: "signature-1234567890123456",
   legs: [{ accountId: "account-a", provider: "SBOBET", providerEventId: "event-a",
-    providerMarketId: "market-a", providerSelectionId: "home", selection: "HOME", decimalOdds: "2",
+    providerMarketId: "market-a", providerSelectionId: "home", selection: "HOME", line: "-0.5", decimalOdds: "2",
     stake: "100000", currency: "VND", balance: "500000", balanceAsOfMs: 1000, quoteAsOfMs: 1000 },
   { accountId: "account-b", provider: "APSPORT", providerEventId: "event-b",
-    providerMarketId: "market-b", providerSelectionId: "away", selection: "AWAY", decimalOdds: "2.5",
+    providerMarketId: "market-b", providerSelectionId: "away", selection: "AWAY", line: "-0.5", decimalOdds: "2.5",
     stake: "80000", currency: "VND", balance: "500000", balanceAsOfMs: 1000, quoteAsOfMs: 1000 }] };
 
 describe("two-leg preflight route", () => {

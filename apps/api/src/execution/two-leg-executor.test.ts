@@ -8,10 +8,10 @@ const ticket: PreflightTicket = {
   nonce: "nonce-1234567890123456", signature: "signature-1234567890123456",
   legs: [
     { accountId: "sb", provider: "SBOBET", providerEventId: "sb-event", providerMarketId: "sb-market",
-      providerSelectionId: "sb-home", selection: "HOME", decimalOdds: "2", stake: "100000", currency: "VND",
+      providerSelectionId: "sb-home", selection: "HOME", line: "-0.5", decimalOdds: "2", stake: "100000", currency: "VND",
       balance: "500000", balanceAsOfMs: 1000, quoteAsOfMs: 1000 },
     { accountId: "ap", provider: "APSPORT", providerEventId: "ap-event", providerMarketId: "ap-market",
-      providerSelectionId: "ap-away", selection: "AWAY", decimalOdds: "2.5", stake: "80000", currency: "VND",
+      providerSelectionId: "ap-away", selection: "AWAY", line: "-0.5", decimalOdds: "2.5", stake: "80000", currency: "VND",
       balance: "500000", balanceAsOfMs: 1000, quoteAsOfMs: 1000 }
   ]
 };

@@ -124,12 +124,38 @@ export interface PreflightLeg {
   readonly providerMarketId: string;
   readonly providerSelectionId: string;
   readonly selection: string;
+  readonly line: string | null;
   readonly decimalOdds: string;
   readonly stake: string;
   readonly currency: string;
   readonly balance: string;
   readonly balanceAsOfMs: number;
   readonly quoteAsOfMs: number;
+}
+
+export interface ExecutionRequest {
+  readonly ticket: PreflightTicket;
+  readonly idempotencyKey: string;
+  readonly mode: "DRY_RUN";
+}
+
+export type ExecutionLegResult = {
+  readonly provider: ProviderId;
+  readonly providerSelectionId: string;
+} & (
+  | { readonly status: "ACCEPTED"; readonly reason: null }
+  | { readonly status: "REJECTED"; readonly reason: "ODDS_CHANGED" | "MARKET_SUSPENDED" |
+    "LIMIT_CHANGED" | "INSUFFICIENT_BALANCE" | "PROVIDER_REJECTED" }
+  | { readonly status: "UNKNOWN"; readonly reason: "TIMEOUT" | "ADAPTER_ERROR" |
+    "ADAPTER_UNAVAILABLE" | "IDENTITY_MISMATCH" }
+);
+
+export interface TwoLegExecutionResult {
+  readonly ticketId: string;
+  readonly idempotencyKey: string;
+  readonly mode: "DRY_RUN";
+  readonly status: "BOTH_ACCEPTED" | "NONE_ACCEPTED" | "PARTIAL_FAILURE";
+  readonly legs: readonly [ExecutionLegResult, ExecutionLegResult];
 }
 
 export interface PreflightTicket {
