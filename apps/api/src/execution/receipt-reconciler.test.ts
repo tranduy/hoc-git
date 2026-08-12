@@ -81,6 +81,15 @@ describe("ReceiptReconciler", () => {
     expect(trip).toHaveBeenCalledOnce();
   });
 
+  it("fails closed when a terminal reconciliation cannot be persisted", async () => {
+    const trip = vi.fn(); const journal = { record: vi.fn(async () => { throw new Error("disk full"); }) };
+    const service = new ReceiptReconciler({ readers: [reader("SABA", observation(0)),
+      reader("SBOBET", observation(1))], journal, clock: { nowMs: () => 5000 }, tripKillSwitch: trip });
+    await expect(service.reconcile({ ticket, result })).resolves.toMatchObject({ status: "IN_DOUBT",
+      reasons: ["RECONCILIATION_PERSISTENCE_FAILED"] });
+    expect(journal.record).toHaveBeenCalledOnce(); expect(trip).toHaveBeenCalledOnce();
+  });
+
   it("does not query providers for a safely completed prepare failure", async () => {
     const lookup = vi.fn(); const service = new ReceiptReconciler({ readers: [{ provider: "SABA", lookup }],
       tripKillSwitch: vi.fn() });

@@ -26,13 +26,18 @@ export interface ReceiptReader {
 export type ReconciliationReason = "RECEIPT_READER_UNAVAILABLE" | "RECEIPT_NOT_FOUND" |
   "RECEIPT_PENDING" | "RECEIPT_IDENTITY_MISMATCH" | "RECEIPT_STATUS_MISMATCH" |
   "RECEIPT_READER_ERROR" | "RECEIPT_READER_TIMEOUT" | "EXECUTION_TICKET_MISMATCH" |
-  "EXECUTION_LEG_IDENTITY_MISMATCH";
+  "EXECUTION_LEG_IDENTITY_MISMATCH" | "RECONCILIATION_PERSISTENCE_FAILED";
 
 export interface ReconciliationResult {
   readonly status: "VERIFIED" | "IN_DOUBT" | "CONFLICT";
   readonly executionStatus: LiveTwoLegResult["status"];
   readonly observations: readonly ReceiptObservation[];
   readonly reasons: readonly ReconciliationReason[];
+}
+
+export interface ReconciliationJournal {
+  record(ticket: PreflightTicket, execution: LiveTwoLegResult, reconciliation: ReconciliationResult,
+    recordedAtMs: number): Promise<unknown>;
 }
 
 const receiptReaderTimeout = Symbol("RECEIPT_READER_TIMEOUT");
@@ -76,13 +81,18 @@ export class ReceiptReconciler {
   readonly #readers: ReadonlyMap<ProviderId, ReceiptReader>;
   readonly #tripKillSwitch: (result: LiveTwoLegResult) => void;
   readonly #timeoutMs: number;
+  readonly #journal: ReconciliationJournal | null;
+  readonly #clock: { nowMs(): number };
 
   constructor(options: { readonly readers: readonly ReceiptReader[];
     readonly timeoutMs?: number;
+    readonly journal?: ReconciliationJournal;
+    readonly clock?: { nowMs(): number };
     readonly tripKillSwitch: (result: LiveTwoLegResult) => void }) {
     this.#readers = new Map(options.readers.map((reader) => [reader.provider, reader]));
     this.#timeoutMs = options.timeoutMs ?? 3_000;
     if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) throw new Error("RECEIPT_TIMEOUT_INVALID");
+    this.#journal = options.journal ?? null; this.#clock = options.clock ?? { nowMs: Date.now };
     this.#tripKillSwitch = options.tripKillSwitch;
   }
 
@@ -133,7 +143,17 @@ export class ReceiptReconciler {
     const conflict = reasons.some((reason) => reason === "RECEIPT_IDENTITY_MISMATCH" ||
       reason === "RECEIPT_STATUS_MISMATCH");
     const status = conflict ? "CONFLICT" as const : reasons.length > 0 ? "IN_DOUBT" as const : "VERIFIED" as const;
+    const reconciliation: ReconciliationResult = { status, executionStatus: input.result.status,
+      observations, reasons };
+    if (status !== "IN_DOUBT" && this.#journal !== null) {
+      try { await this.#journal.record(input.ticket, input.result, reconciliation, this.#clock.nowMs()); }
+      catch {
+        this.#tripKillSwitch(input.result);
+        return { status: "IN_DOUBT", executionStatus: input.result.status, observations,
+          reasons: ["RECONCILIATION_PERSISTENCE_FAILED"] };
+      }
+    }
     if (status !== "VERIFIED" || input.result.status === "PARTIAL_FAILURE") this.#tripKillSwitch(input.result);
-    return { status, executionStatus: input.result.status, observations, reasons };
+    return reconciliation;
   }
 }
