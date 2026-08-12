@@ -35,6 +35,13 @@ export function cmdProfileDirectoryName(sessionId: string): string {
   return `cmd-${digest}`;
 }
 
+export async function findCmdProviderPage(pages: readonly Page[]): Promise<Page | null> {
+  for (const page of pages) {
+    if (await findProviderAccountFrame(page) !== null) return page;
+  }
+  return findCmdCatalogPage(pages);
+}
+
 export interface StableFootballCatalogProbe {
   read(): Promise<readonly CmdCatalogInputRecord[]>;
   select(): Promise<boolean>;
@@ -369,7 +376,7 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
       const deadline = Date.now() + this.#startupTimeoutMs;
       let page: Page | null = null;
       while (page === null && Date.now() < deadline) {
-        page = await findCmdCatalogPage(context.pages());
+        page = await findCmdProviderPage(context.pages());
         if (page === null) await launcher.waitForTimeout(250);
       }
       if (page === null) throw new Error("CMD_CATALOG_UNAVAILABLE");

@@ -32,6 +32,19 @@ export interface SbobetProfileSnapshot {
   readonly observedAtMs: number;
 }
 
+export async function retrySbobetCatalogAfterReload<T>(
+  page: Pick<Page, "reload">,
+  read: () => Promise<T>,
+  timeout = 30_000
+): Promise<T> {
+  try {
+    return await read();
+  } catch {
+    await page.reload({ waitUntil: "domcontentloaded", timeout });
+    return read();
+  }
+}
+
 function safeLaunchUrl(value: string): string {
   if (value.length === 0 || value.length > 24_000) throw new Error("SBOBET_LAUNCH_URL_INVALID");
   const parsed = new URL(value);
@@ -141,15 +154,12 @@ export class PlaywrightSbobetBrowserManager {
     this.#ticketReads.set(key, next); return next;
   }
   async #readCatalog(input: { sessionId: string; launchUrl: string }): Promise<SbobetCatalogSnapshot> {
-    let session = await this.#get(input);
-    try {
-      return await this.#readDirectCatalog(input.sessionId, session);
-    }
-    catch {
-      await session.context.close().catch(() => undefined); this.#sessions.delete(input.sessionId);
-      session = await this.#get(input);
-      return this.#readDirectCatalog(input.sessionId, session);
-    }
+    const session = await this.#get(input);
+    return retrySbobetCatalogAfterReload(
+      session.page,
+      async () => this.#readDirectCatalog(input.sessionId, session),
+      this.#timeout
+    );
   }
   async close(): Promise<void> { const all = [...this.#sessions.values()]; this.#sessions.clear(); this.#ticketReads.clear();
     await Promise.allSettled(all.map((item) => item.context.close())); }

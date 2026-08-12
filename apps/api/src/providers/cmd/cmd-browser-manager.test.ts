@@ -2,7 +2,7 @@ import { chromium } from "playwright";
 import { describe, expect, it } from "vitest";
 import { cmdLaunchFingerprint, cmdProfileDirectoryName, readCmdFootballCatalog, readStableFootballCatalog, readStableCmdAccountStore,
   catalogStructuralFingerprint, readWithOneSessionRecovery, runCoalesced,
-  isVerifiedCmdFootballIdentity, validateCmdLaunchUrl } from "./cmd-browser-manager.js";
+  findCmdProviderPage, isVerifiedCmdFootballIdentity, validateCmdLaunchUrl } from "./cmd-browser-manager.js";
 import type { CmdCatalogInputRecord } from "@tool-chenh/adapters";
 
 describe("CMD browser manager safety", () => {
@@ -109,6 +109,21 @@ describe("CMD browser manager safety", () => {
     expect(directory).toMatch(/^cmd-[a-f0-9]{24}$/u);
     expect(directory).not.toContain(sessionId);
     expect(cmdProfileDirectoryName(sessionId)).toBe(directory);
+  });
+
+  it("accepts a provider account runtime for profile reads before the Football navigation icon is visible", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<main>Provider loading</main><script>
+        window.UtilPack = { accountStore: { attrs: {
+          DisplayUserName: "development", Curr: "INH", Bal: { BCredit: "29.61", Curr: "INH" }
+        } } };
+      </script>`);
+      await expect(findCmdProviderPage([page])).resolves.toBe(page);
+    } finally {
+      await browser.close();
+    }
   });
 
   it("reads an already-visible football table without requiring a navigation icon", async () => {
