@@ -503,6 +503,81 @@ describe("LiveCatalogPage", () => {
     expect(read).toHaveBeenCalledWith(current.id);
   });
 
+  it("falls back to another active account for the same provider when the preferred binding cannot read", async () => {
+    const fallback: AccountStatus = { ...account, id: "a-saba-working", alias: "SABA working", provider: "SABA" };
+    const preferred: AccountStatus = { ...account, id: "z-saba-broken", alias: "SABA broken", provider: "SABA" };
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => {
+      if (id === preferred.id) throw new Error("stale provider page");
+      return { ...catalog, accountId: id, provider: "SABA",
+        events: [{ ...event, provider: "SABA" }], markets: [{ ...market, provider: "SABA" }],
+        quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" })) };
+    });
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [fallback, preferred] }} catalogApi={{ read }} />);
+
+    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect(read).toHaveBeenNthCalledWith(1, preferred.id);
+    expect(read).toHaveBeenNthCalledWith(2, fallback.id);
+    expect(screen.getByText("1 fresh provider(s)")).toBeTruthy();
+  });
+
+  it("prefers a reachable active binding over a newer unreachable duplicate", async () => {
+    const reachable: AccountStatus = { ...account, id: "a-reachable", alias: "SABA reachable", provider: "SABA",
+      profileState: "UNAVAILABLE", currency: null, balance: null, balanceAsOfMs: null, reason: "SCHEMA_CHANGED" };
+    const unreachable: AccountStatus = { ...reachable, id: "z-unreachable", alias: "SABA unreachable", reason: "UNREACHABLE" };
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => ({ ...catalog, accountId: id,
+      provider: "SABA", events: [{ ...event, provider: "SABA" }], markets: [{ ...market, provider: "SABA" }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" })) }));
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [reachable, unreachable] }} catalogApi={{ read }} />);
+
+    expect(await screen.findByText("SABA reachable")).toBeTruthy();
+    expect(screen.queryByText("SABA unreachable")).toBeNull();
+    expect(read).toHaveBeenCalledWith(reachable.id);
+  });
+
+  it("prefers the account launched by the live Fabet lobby over stale direct SABA bindings", async () => {
+    const fabet: AccountStatus = { ...account, id: "a-fabet", alias: "SABA Fabet lobby", provider: "SABA",
+      sessionSource: "FABET_LOGIN", profileState: "UNAVAILABLE", currency: null, balance: null, balanceAsOfMs: null,
+      reason: "UNREACHABLE" };
+    const direct: AccountStatus = { ...account, id: "z-direct", alias: "SABA direct", provider: "SABA",
+      sessionSource: "MANUAL_PROVIDER_SESSION" };
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => ({ ...catalog, accountId: id,
+      provider: "SABA", events: [{ ...event, provider: "SABA" }], markets: [{ ...market, provider: "SABA" }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" })) }));
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [fabet, direct] }} catalogApi={{ read }} />);
+
+    expect(await screen.findByText("SABA Fabet lobby")).toBeTruthy();
+    expect(read).toHaveBeenCalledWith(fabet.id);
+  });
+
+  it("shows provider discovery as loading instead of falsely saying every source is disconnected", () => {
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi,
+      list: async () => new Promise<readonly AccountStatus[]>(() => undefined) }} catalogApi={catalogApi} />);
+
+    expect(screen.getByLabelText("SABA loading")).toBeTruthy();
+    expect(screen.queryByLabelText("SABA unavailable")).toBeNull();
+  });
+
+  it("retries account discovery after the API is temporarily unavailable during page load", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const list = vi.fn<AccountApiLike["list"]>()
+      .mockRejectedValueOnce(new Error("api starting"))
+      .mockResolvedValue([account]);
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list }} catalogApi={catalogApi} />);
+    expect(await screen.findByText(/Không đọc được trạng thái account\/provider/u)).toBeTruthy();
+
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(await screen.findByText("CMD main")).toBeTruthy();
+    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
   it("prefers a betting-profile-ready account over a lexically newer catalog-only duplicate", async () => {
     const ready: AccountStatus = { ...account, id: "a-ready", alias: "SABA profile ready", provider: "SABA",
       currency: "VND", balance: "500000", balanceAsOfMs: Date.now() };

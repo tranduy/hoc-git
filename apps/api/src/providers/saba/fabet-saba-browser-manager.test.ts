@@ -13,7 +13,8 @@ describe("Fabet SABA browser manager", () => {
     const manager = new FabetSabaBrowserManager({
       fabet: { withProviderPage: async (_provider, _category, consume) => consume({} as Page) },
       fallback,
-      pageReader: { readCatalog: async () => catalog, readAccountStore: async () => ({ balance: 100 }),
+      pageReader: { readCatalog: async () => catalog, readRawCatalog: async () => catalog,
+        readAccountStore: async () => ({ balance: 100 }),
         readTicketConstraint: async () => null }
     });
 
@@ -27,10 +28,33 @@ describe("Fabet SABA browser manager", () => {
       readTicketConstraint: vi.fn(), close: vi.fn(async () => undefined) };
     const manager = new FabetSabaBrowserManager({
       fabet: { withProviderPage: vi.fn() }, fallback,
-      pageReader: { readCatalog: vi.fn(), readAccountStore: vi.fn(), readTicketConstraint: vi.fn() }
+      pageReader: { readCatalog: vi.fn(), readRawCatalog: vi.fn(), readAccountStore: vi.fn(), readTicketConstraint: vi.fn() }
     });
 
     await expect(manager.readCatalog({ sessionId: "manual-saba", launchUrl: "https://direct.test" }))
       .resolves.toEqual(catalog);
+  });
+
+  it("coalesces concurrent live raw-catalog reads so browser tabs cannot relaunch SABA repeatedly", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let providerPageCalls = 0;
+    const fabet = { withProviderPage: async <T>(_provider: "SABA", _category: "FOOTBALL" | "LOL",
+      consume: (page: Page) => Promise<T>): Promise<T> => { providerPageCalls += 1; return consume({} as Page); } };
+    const readRawCatalog = vi.fn(async () => { await gate; return catalog; });
+    const manager = new FabetSabaBrowserManager({
+      fabet,
+      fallback: { readCatalog: vi.fn(async () => []), readAccountStore: vi.fn(),
+        readTicketConstraint: vi.fn(), close: vi.fn(async () => undefined) },
+      pageReader: { readCatalog: vi.fn(), readRawCatalog, readAccountStore: vi.fn(), readTicketConstraint: vi.fn() }
+    });
+    const input = { sessionId: "fabet-launch-saba-football-host", launchUrl: "https://expired.test" };
+
+    const first = manager.readRawCatalog(input);
+    const second = manager.readRawCatalog(input);
+    expect(providerPageCalls).toBe(1);
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([catalog, catalog]);
+    expect(readRawCatalog).toHaveBeenCalledTimes(1);
   });
 });

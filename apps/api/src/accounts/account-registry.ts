@@ -195,6 +195,7 @@ export class AccountRegistry {
     return AccountStatusSchema.parse({
       id: record.id, alias: record.alias, provider: record.provider,
       category: boundSession?.category ?? null,
+      sessionSource: boundSession?.source,
       sessionState: boundSession?.state ?? "INVALID", profileState,
       redactedLabel: record.profile?.redactedLabel ?? null,
       currency: record.profile?.currency ?? null,

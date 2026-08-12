@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
-import { chromium, type BrowserContext, type Page, type Response, type WebSocket } from "playwright";
+import { chromium, type BrowserContext, type Page, type Response } from "playwright";
 import {
-  appendBoundedSbobetSocketPayload, correlateSbobetPublicIds, decodeSbobetJsonBody,
-  decodeSbobetStompBodies, isSbobetResponseCandidate
+  appendBoundedSbobetSocketPayload, decodeSbobetJsonBody, isSbobetResponseCandidate
 } from "./sbobet-stomp.js";
 import { extractSbobetDirectCatalogRecords } from "./sbobet-direct-catalog.js";
 import { parseSbobetTicketConstraint, type SbobetTicketConstraintSnapshot } from "./sbobet-ticket-constraint.js";
@@ -15,8 +14,6 @@ import type { DecodedSbobetReceipt } from "./sbobet-receipt-decoder.js";
 interface OpenSession {
   readonly context: BrowserContext;
   readonly page: Page;
-  readonly socketPayloads: string[];
-  readonly httpPayloads: string[];
   readonly responseTasks: Set<Promise<void>>;
   readonly eventPayloads: string[];
   readonly eventClock: { value: { readonly observedAtMs: number; readonly receivedMonotonicMs: number } | null };
@@ -119,8 +116,6 @@ export class PlaywrightSbobetBrowserManager {
   readonly #sessions = new Map<string, OpenSession>(); readonly #opening = new Map<string, Promise<OpenSession>>();
   readonly #reads = new Map<string, Promise<SbobetCatalogSnapshot>>();
   readonly #ticketReads = new Map<string, Promise<SbobetTicketConstraintSnapshot | null>>();
-  readonly #correlationReported = new Set<string>();
-  readonly #correlationSummaryReported = new Set<string>();
   constructor(options: { profilesRoot: string; headless?: boolean; startupTimeoutMs?: number }) {
     this.#profilesRoot = options.profilesRoot; this.#headless = options.headless ?? false; this.#timeout = options.startupTimeoutMs ?? 30_000;
   }
@@ -168,7 +163,7 @@ export class PlaywrightSbobetBrowserManager {
     const session = await this.#get(input);
     return retrySbobetCatalogAfterReload(
       session.page,
-      async () => this.#readDirectCatalog(input.sessionId, session),
+      async () => this.#readDirectCatalog(session),
       this.#timeout
     );
   }
@@ -246,26 +241,17 @@ export class PlaywrightSbobetBrowserManager {
     const context = await chromium.launchPersistentContext(join(this.#profilesRoot,
       `sbobet-${createHash("sha256").update(input.sessionId).digest("hex").slice(0, 24)}`),
     { headless: this.#headless, acceptDownloads: false });
-    const socketPayloads: string[] = [];
-    const httpPayloads: string[] = [];
     const responseTasks = new Set<Promise<void>>();
     const eventPayloads: string[] = [];
     const eventClock = { value: null as { readonly observedAtMs: number; readonly receivedMonotonicMs: number } | null };
     const eventRequest = {
       value: null as { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null
     };
-    const attachSocket = (socket: WebSocket): void => {
-      socket.on("framereceived", (event) => {
-        if (typeof event.payload !== "string") return;
-        appendBoundedSbobetSocketPayload(socketPayloads, event.payload);
-      });
-    };
     const captureResponse = async (response: Response): Promise<void> => {
       if (response.status() !== 200 ||
         !isSbobetResponseCandidate(response.url(), response.request().resourceType())) return;
       try {
         const payload = await response.text();
-        appendBoundedSbobetSocketPayload(httpPayloads, payload);
         const url = new URL(response.url());
         if (url.pathname === "/api/v2/getEvent") {
           appendBoundedSbobetSocketPayload(eventPayloads, payload, {
@@ -280,9 +266,6 @@ export class PlaywrightSbobetBrowserManager {
       const task = captureResponse(response).finally(() => responseTasks.delete(task));
       responseTasks.add(task);
     });
-    const attachPage = (page: Page): void => { page.on("websocket", attachSocket); };
-    context.pages().forEach(attachPage);
-    context.on("page", attachPage);
     try { const launcher = context.pages()[0] ?? await context.newPage();
       await launcher.goto(safeLaunchUrl(input.launchUrl), { waitUntil: "domcontentloaded", timeout: this.#timeout });
       const deadline = Date.now() + this.#timeout; let found: Page | null = null;
@@ -292,7 +275,7 @@ export class PlaywrightSbobetBrowserManager {
       }
       if (found === null) throw new Error("SBOBET_CATALOG_UNAVAILABLE");
       const session = {
-        context, page: found, socketPayloads, httpPayloads, responseTasks, eventPayloads, eventClock,
+        context, page: found, responseTasks, eventPayloads, eventClock,
         eventRequest
       };
       this.#sessions.set(input.sessionId, session); return session;
@@ -324,11 +307,10 @@ export class PlaywrightSbobetBrowserManager {
     } catch { throw new Error("SBOBET_DIRECT_REFRESH_UNAVAILABLE"); }
   }
 
-  async #readDirectCatalog(sessionId: string, session: OpenSession): Promise<SbobetCatalogSnapshot> {
+  async #readDirectCatalog(session: OpenSession): Promise<SbobetCatalogSnapshot> {
     await Promise.allSettled([...session.responseTasks]);
     await this.#refreshDirectEvent(session);
     const fallbackRecords = await extractSbobetRecords(session.page);
-    await this.#reportSafeCorrelation(sessionId, session, fallbackRecords);
     const latest = session.eventPayloads.at(-1);
     const clock = session.eventClock.value;
     if (latest === undefined || clock === null) throw new Error("SBOBET_DIRECT_CATALOG_UNAVAILABLE");
@@ -339,38 +321,4 @@ export class PlaywrightSbobetBrowserManager {
     return { records, ...clock };
   }
 
-  async #reportSafeCorrelation(
-    sessionId: string, session: OpenSession, records: readonly SbobetCatalogInputRecord[]
-  ): Promise<void> {
-    if (this.#correlationReported.has(sessionId)) return;
-    await Promise.allSettled([...session.responseTasks]);
-    if (session.socketPayloads.length === 0 && session.httpPayloads.length === 0) return;
-    const socketBodies = session.socketPayloads.flatMap((payload) => decodeSbobetStompBodies(payload));
-    const httpBodies = session.httpPayloads.flatMap((payload) => decodeSbobetJsonBody(payload));
-    const bodies = [...socketBodies, ...httpBodies];
-    const eventIds = new Set(records.map((record) => record.eventId));
-    const selectionIds = new Set(records.flatMap((record) => record.markets.flatMap((market) =>
-      market.selections.map((selection) => selection.selectionId.replace(/[had]$/iu, "")))));
-    const publicIds = [...eventIds, ...selectionIds];
-    const evidence = correlateSbobetPublicIds(bodies, publicIds);
-    const eventEvidence = evidence.filter((item) => eventIds.has(item.target));
-    const selectionEvidence = evidence.filter((item) => selectionIds.has(item.target));
-    if (bodies.length > 0 && !this.#correlationSummaryReported.has(sessionId)) {
-      this.#correlationSummaryReported.add(sessionId);
-      process.stderr.write(`SBOBET direct-feed correlation summary: ${JSON.stringify({
-        capturedFrames: session.socketPayloads.length,
-        decodedSocketBodies: socketBodies.length,
-        capturedHttpBodies: httpBodies.length,
-        publicEventTargets: eventIds.size,
-        publicSelectionTargets: selectionIds.size,
-        correlatedEvents: eventEvidence.length,
-        correlatedSelections: selectionEvidence.length
-      })}\n`);
-    }
-    if (evidence.length === 0) return;
-    this.#correlationReported.add(sessionId);
-    process.stderr.write(`SBOBET direct-feed public ID correlation: ${JSON.stringify({
-      events: eventEvidence.slice(0, 10), selections: selectionEvidence.slice(0, 10)
-    })}\n`);
-  }
 }

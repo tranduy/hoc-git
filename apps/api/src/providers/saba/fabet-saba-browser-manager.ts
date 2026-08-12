@@ -20,12 +20,14 @@ interface Fallback {
 
 interface PageReader {
   readCatalog(page: Page): Promise<readonly CmdCatalogInputRecord[]>;
+  readRawCatalog(page: Page): Promise<readonly Readonly<Record<string, unknown>>[]>;
   readAccountStore(page: Page): Promise<unknown>;
   readTicketConstraint(page: Page, input: TicketInput): Promise<CmdTicketConstraintSnapshot | null>;
 }
 
 const realPageReader: PageReader = {
   readCatalog: readCmdFootballCatalog,
+  readRawCatalog: readSabaFootballCatalogFromPage,
   readAccountStore: async (page) => readStableCmdAccountStore({
     read: async () => {
       const frame = await findProviderAccountFrame(page);
@@ -64,6 +66,7 @@ export class FabetSabaBrowserManager {
   readonly #fallback: Fallback;
   readonly #catalogFallback: { readCatalog(input: Input): Promise<readonly Readonly<Record<string, unknown>>[]> };
   readonly #pageReader: PageReader;
+  #rawCatalogRead: Promise<readonly Readonly<Record<string, unknown>>[]> | null = null;
 
   constructor(options: { readonly fabet: Pick<FabetBrowserDriver, "withProviderPage">;
     readonly fallback: Fallback;
@@ -85,8 +88,12 @@ export class FabetSabaBrowserManager {
 
   readRawCatalog(input: Input): Promise<readonly Readonly<Record<string, unknown>>[]> {
     if (!isFabetSabaFootballSession(input.sessionId)) return this.#catalogFallback.readCatalog(input);
-    return observedJitRead(async () => this.#fabet.withProviderPage("SABA", "FOOTBALL",
-      async (page) => readSabaFootballCatalogFromPage(page)));
+    if (this.#rawCatalogRead !== null) return this.#rawCatalogRead;
+    const operation = observedJitRead(async () => this.#fabet.withProviderPage("SABA", "FOOTBALL",
+      async (page) => this.#pageReader.readRawCatalog(page)));
+    this.#rawCatalogRead = operation;
+    void operation.finally(() => { if (this.#rawCatalogRead === operation) this.#rawCatalogRead = null; }).catch(() => undefined);
+    return operation;
   }
 
   readAccountStore(input: Input): Promise<unknown> {

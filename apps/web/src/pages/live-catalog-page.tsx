@@ -38,11 +38,21 @@ function oneAccountPerProvider(accounts: readonly AccountStatus[]): readonly Acc
   const selected = new Map<ProviderId, AccountStatus>();
   const profileRank = (account: AccountStatus): number => account.profileState === "FRESH" ? 2
     : account.profileState === "STALE" ? 1 : 0;
+  const sourceRank = (account: AccountStatus): number => account.reason === null ? 3
+    : account.reason === "SCHEMA_CHANGED" ? 2 : account.reason === "UNREACHABLE" ? 1 : 0;
+  const launchRank = (account: AccountStatus): number => account.sessionSource === "FABET_LOGIN" ? 1 : 0;
   for (const account of accounts) {
     const current = selected.get(account.provider);
     if (current === undefined || (current.sessionState !== "ACTIVE" && account.sessionState === "ACTIVE") ||
-      (current.sessionState === account.sessionState && profileRank(account) > profileRank(current)) ||
-      (current.sessionState === account.sessionState && profileRank(account) === profileRank(current) &&
+      (current.sessionState === account.sessionState && launchRank(account) > launchRank(current)) ||
+      (current.sessionState === account.sessionState && launchRank(account) === launchRank(current) &&
+        profileRank(account) > profileRank(current)) ||
+      (current.sessionState === account.sessionState && launchRank(account) === launchRank(current) &&
+        profileRank(account) === profileRank(current) &&
+        sourceRank(account) > sourceRank(current)) ||
+      (current.sessionState === account.sessionState && launchRank(account) === launchRank(current) &&
+        profileRank(account) === profileRank(current) &&
+        sourceRank(account) === sourceRank(current) &&
         account.id.localeCompare(current.id) > 0)) {
       selected.set(account.provider, account);
     }
@@ -86,15 +96,17 @@ export function filterAccountBackedSignals(
   });
 }
 
-function ProviderSelector({ accounts, selected, toggle }: {
+function ProviderSelector({ accounts, loaded, selected, toggle }: {
   readonly accounts: readonly AccountStatus[];
+  readonly loaded: boolean;
   readonly selected: ReadonlySet<string>;
   readonly toggle: (id: string) => void;
 }) {
   return <fieldset className="provider-selector"><legend>Books to compare</legend>{comparisonProviders.flatMap((provider) => {
     const providerAccounts = accounts.filter((account) => account.provider === provider);
     if (providerAccounts.length === 0) return [<label className="provider-selector__unavailable" key={provider}>
-      <input aria-label={`${provider} unavailable`} disabled type="checkbox" /><b>#{provider}</b><small>not connected</small></label>];
+      <input aria-label={`${provider} ${loaded ? "unavailable" : "loading"}`} disabled type="checkbox" />
+      <b>#{provider}</b><small>{loaded ? "not connected" : "loading source…"}</small></label>];
     const activeAccounts = providerAccounts.filter((account) => account.sessionState === "ACTIVE");
     if (activeAccounts.length === 0) {
       const detail = providerAccounts.some((account) => account.reason === "EXPIRED") ? "nguồn hết hạn"
@@ -281,6 +293,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const accountsRef = useRef<readonly AccountStatus[]>([]);
   const refreshInFlight = useRef(false);
   const retryAfterMs = useRef(new Map<string, number>());
+  const workingAccountIds = useRef(new Map<ProviderId, string>());
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event") });
   const autoLoaded = useRef(false);
@@ -301,7 +314,31 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     if (foreground) setBusy(true);
     try {
       const results = await Promise.allSettled(requestedIds.map(async (id) => {
-        const value = await catalogApi.read(id);
+        const requestedAccount = accountsRef.current.find((account) => account.id === id);
+        const fallbackAccounts = requestedAccount === undefined ? [] : accountsRef.current.filter((account) =>
+          account.id !== id && account.provider === requestedAccount.provider && account.category === expectedCategory &&
+          account.sessionState === "ACTIVE" && account.capabilities.includes("CATALOG"));
+        const workingId = requestedAccount === undefined ? undefined : workingAccountIds.current.get(requestedAccount.provider);
+        const candidateIds = [...new Set([
+          ...(workingId === undefined ? [] : [workingId]), id, ...fallbackAccounts.map((account) => account.id)
+        ])].slice(0, 3);
+        let value: LiveCatalogResponse | null = null;
+        let lastError: unknown = new Error("No active catalog account");
+        for (const candidateId of candidateIds) {
+          try {
+            const candidate = await catalogApi.read(candidateId);
+            if (candidate.category !== expectedCategory ||
+              (requestedAccount !== undefined && candidate.provider !== requestedAccount.provider)) {
+              throw new Error("Catalog identity mismatch");
+            }
+            value = candidate;
+            workingAccountIds.current.set(candidate.provider, candidate.accountId);
+            break;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        if (value === null) throw lastError;
         if (value.category === expectedCategory) {
           const nextCatalogs = [value, ...catalogsRef.current.filter((catalog) => catalog.accountId !== id)];
           catalogsRef.current = nextCatalogs;
@@ -353,7 +390,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, [catalogApi]);
 
   useEffect(() => {
-    void accountApi.list().then((items) => {
+    let cancelled = false;
+    let retryTimer: number | undefined;
+    const discoverAccounts = (): void => { void accountApi.list().then((items) => {
+      if (cancelled) return;
       const catalogAccounts = items.filter((account) => account.capabilities.includes("CATALOG"));
       accountsRef.current = catalogAccounts;
       const availableCandidates = catalogAccounts.filter((account) => account.sessionState === "ACTIVE");
@@ -376,7 +416,14 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         autoLoaded.current = true;
         void loadIds([...initial], true, initialCategory);
       }
-    }).catch(() => { setAccountsLoaded(true); setMessage("Không đọc được trạng thái account/provider."); });
+    }).catch(() => {
+      if (cancelled) return;
+      setAccountsLoaded(true);
+      setMessage("Không đọc được trạng thái account/provider. Đang tự thử lại…");
+      retryTimer = window.setTimeout(discoverAccounts, 2_000);
+    }); };
+    discoverAccounts();
+    return () => { cancelled = true; if (retryTimer !== undefined) window.clearTimeout(retryTimer); };
   }, [accountApi, fixedCategory, loadIds]);
 
   useEffect(() => {
@@ -390,6 +437,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     if (ids.length === 0) return;
     let cancelled = false;
     const refreshProfiles = async (): Promise<void> => {
+      if (refreshInFlight.current) return;
       const results = await Promise.allSettled(ids.map((id) => accountApi.refresh(id)));
       if (cancelled) return;
       const refreshed = new Map(results.flatMap((result, index) => result.status === "fulfilled" &&
@@ -487,7 +535,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       {fixedCategory === undefined && <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
         onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
         onClick={() => changeCategory("LOL")} type="button">LoL</button></div>}
-      <ProviderSelector accounts={categoryAccounts} selected={selectedIds} toggle={toggle} />
+      <ProviderSelector accounts={categoryAccounts} loaded={accountsLoaded} selected={selectedIds} toggle={toggle} />
       <label className="stake-config">Base stake for every match (VND)<input aria-label="Base stake for every match (VND)"
         inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
           const value = event.currentTarget.value; setBaseStakeInput(value);

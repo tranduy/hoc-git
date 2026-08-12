@@ -58,7 +58,7 @@ export class CatalogApi implements CatalogApiLike {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
 
-  constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 12_000) {
+  constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 45_000) {
     this.#fetch = fetcher;
     this.#timeoutMs = timeoutMs;
   }
