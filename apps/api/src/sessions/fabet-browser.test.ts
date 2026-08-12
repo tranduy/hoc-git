@@ -164,6 +164,30 @@ describe("FabetBrowserDriver", () => {
     ]);
   });
 
+  it("does not bind a Football C-Sports launch to the LoL SABA reader", async () => {
+    const context = await setup();
+    await context.trustStore.approve("fabet.party");
+    context.automation.launches = {
+      "https://fabet.party/lobby-the-thao?type=livesports": [{
+        url: "https://football.saba.test/DepositProcessLogin?token=football-secret", label: "C-SPORTS"
+      }],
+      "https://fabet.party/lobby-the-thao?type=esports": [{
+        url: "https://football.saba.test/DepositProcessLogin?token=wrong-category", label: "C-SPORTS"
+      }, {
+        url: "https://esports.estorb.com/ESports/43/LOL?token=lol-secret", label: "SABA-SPORTS"
+      }]
+    };
+    let id = 0;
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 30 }, idFactory: () => String(++id) });
+    await driver.login({ entryUrl: "https://fabet.party/", username: "development-user", password: "development-pass" });
+
+    const launches = await driver.captureLobbyLaunches();
+
+    expect(launches.filter((launch) => launch.category === "LOL" && launch.providerHint === "SABA"))
+      .toEqual([expect.objectContaining({ hostname: "esports.estorb.com" })]);
+    expect(launches.some((launch) => launch.category === "LOL" && launch.hostname === "football.saba.test")).toBe(false);
+  });
+
   it("uses the trusted final origin after Fabet redirects to its current domain", async () => {
     const context = await setup();
     await context.trustStore.approve("fabet.com");
@@ -313,6 +337,35 @@ describe("PlaywrightFabetAutomation", () => {
         async (page) => page.title())).resolves.toBe("SABA live");
       expect(launchCount).toBe(1);
       expect(maximumActiveConsumers).toBe(1);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
+  it("does not abort provider launch when a stale promotion close control cannot be clicked", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/provider") {
+        response.end("<!doctype html><main>Provider ready</main>");
+        return;
+      }
+      response.end(`<!doctype html><div class="dynamic__modal"><button class="icon-close-btn" disabled>close</button></div>
+        <div class="game-item lobby"><img class="game-item__thumb" src="/game/sabaport.webp">
+        <p class="game-item__name">SABA-SPORTS</p><div class="game-item__play-btn">
+        <button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/provider')">Play</button>
+        </div></div>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const automation = new PlaywrightFabetAutomation({
+      profilePath: join(await setup().then((value) => value.directory), "stale-promotion-profile"), headless: true
+    });
+    try {
+      await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
+        provider: "SABA", category: "FOOTBALL" }, async (page) => page.locator("main").innerText()))
+        .resolves.toBe("Provider ready");
     } finally {
       await automation.close();
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));

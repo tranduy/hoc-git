@@ -143,6 +143,10 @@ function providerHint(label: string, hostname: string): string {
   return "UNKNOWN";
 }
 
+export function launcherMatchesCategory(category: Category, label: string): boolean {
+  return category !== "LOL" || label.trim().toLocaleUpperCase("en") !== "C-SPORTS";
+}
+
 function sabaLauncherPriority(rawName: string, label: string, thumbnailSource: string | null): number {
   const normalizedName = rawName.trim().toLocaleUpperCase("en").replace(/\s+/gu, "-");
   if (/^SABA(?:-SPORTS)?$/u.test(normalizedName)) return 0;
@@ -235,6 +239,7 @@ export class FabetBrowserDriver {
     for (const lobby of lobbies) {
       const navigations = await this.#automation.captureNavigations(lobby.url);
       for (const navigation of navigations) {
+        if (!launcherMatchesCategory(lobby.category, navigation.label)) continue;
         if (seen.has(navigation.url)) continue;
         const launch = safeHttpsUrl(navigation.url);
         if (launch.origin === this.#baseOrigin) continue;
@@ -552,7 +557,8 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         const fallbackName = await candidate.innerText().catch(() => "");
         const rawName = cardName === "" ? fallbackName : cardName;
         const label = launcherLabelFromCard(rawName, thumbnailSource);
-        if (providerHint(label, "") === input.provider && await candidate.isVisible().catch(() => false)) {
+        if (providerHint(label, "") === input.provider && launcherMatchesCategory(input.category, label) &&
+          await candidate.isVisible().catch(() => false)) {
           const signature = `${label.trim().toLocaleUpperCase("en")}\u0000${safeLauncherAssetName(thumbnailSource) ?? ""}`;
           const priority = sabaLauncherPriority(rawName, label, thumbnailSource);
           if (priority < controlPriority) {
@@ -569,7 +575,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       if (controlPriority === 0) {
         const stableExplicitSaba = lobbyPage.locator(".game-item.lobby", { hasText: /SABA-SPORTS/iu }).first();
         if (await stableExplicitSaba.isVisible().catch(() => false)) control = stableExplicitSaba;
-      } else if (controlPriority >= 1) {
+      } else if (controlPriority >= 1 && input.category === "FOOTBALL") {
         const stableLegacySaba = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
         if (await stableLegacySaba.isVisible().catch(() => false)) control = stableLegacySaba;
       }
@@ -602,7 +608,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       };
       for (let attempt = 0; attempt < 3 && !clicked; attempt += 1) {
         await this.#dismissBlockingPromotions(lobbyPage);
-        if (controlPriority >= 1) {
+        if (controlPriority >= 1 && input.category === "FOOTBALL") {
           const point = await lobbyPage.evaluate(() => {
             const card = [...document.querySelectorAll<HTMLElement>(".game-item.lobby")].find((candidate) =>
               candidate.querySelector(".game-item__name")?.textContent?.trim().toLocaleUpperCase("en") === "C-SPORTS" &&
@@ -649,7 +655,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         if (controlPriority === 0) {
           const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /SABA-SPORTS/iu }).first();
           if (await refreshed.isVisible().catch(() => false)) control = refreshed;
-        } else if (controlPriority >= 1) {
+        } else if (controlPriority >= 1 && input.category === "FOOTBALL") {
           const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
           if (await refreshed.isVisible().catch(() => false)) control = refreshed;
         }
@@ -663,14 +669,14 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
             }
           } catch (error) { clickFailure = error; }
         }
-        if (!clicked && controlPriority >= 1) {
+        if (!clicked && controlPriority >= 1 && input.category === "FOOTBALL") {
           const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
           if (await refreshed.isVisible().catch(() => false)) control = refreshed;
         }
         const play = control.locator(".game-item__play-btn button").first();
         if (!clicked && await play.count() > 0) {
           await control.hover({ timeout: 2_000 }).catch(() => undefined);
-          if (controlPriority >= 1) {
+          if (controlPriority >= 1 && input.category === "FOOTBALL") {
             const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
             if (await refreshed.isVisible().catch(() => false)) control = refreshed;
           }
@@ -754,14 +760,14 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     ].join(", "));
     for (let index = 0; index < Math.min(await dynamicCloses.count(), 5); index += 1) {
       const close = dynamicCloses.nth(index);
-      if (await close.isVisible().catch(() => false)) await close.click({ timeout: 2_000 });
+      if (await close.isVisible().catch(() => false)) await close.click({ timeout: 2_000 }).catch(() => undefined);
     }
     const dialogs = page.getByRole("dialog", { name: /khuyến\s*mãi|promotion/iu });
     for (let index = 0; index < Math.min(await dialogs.count(), 5); index += 1) {
       const dialog = dialogs.nth(index);
       if (!(await dialog.isVisible().catch(() => false))) continue;
       const close = dialog.getByRole("button", { name: /close|đóng/iu }).first();
-      if (await close.isVisible().catch(() => false)) await close.click({ timeout: 2_000 });
+      if (await close.isVisible().catch(() => false)) await close.click({ timeout: 2_000 }).catch(() => undefined);
     }
   }
 
