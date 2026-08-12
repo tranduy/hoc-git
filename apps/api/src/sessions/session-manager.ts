@@ -427,18 +427,23 @@ export class SessionManager {
       const slug = provider.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "") || "unknown";
       const categorySlug = candidate.category.toLowerCase();
       const hostHash = createHash("sha256").update(candidate.hostname).digest("hex").slice(0, 12);
+      const id = `fabet-launch-${slug}-${categorySlug}-${hostHash}`;
+      const previous = await this.#load(id);
+      const preservesVerifiedIdentity = previous !== null && previous.source === "FABET_LOGIN" &&
+        previous.state === "ACTIVE" && previous.provider === provider && previous.category === candidate.category &&
+        previous.trustedHostname === candidate.hostname;
       const record: StoredSession = {
         version: 1,
-        id: `fabet-launch-${slug}-${categorySlug}-${hostHash}`,
+        id,
         provider,
         category: candidate.category,
         source: "FABET_LOGIN",
-        state: "ACTION_REQUIRED",
+        state: preservesVerifiedIdentity ? "ACTIVE" : "ACTION_REQUIRED",
         trustedHostname: candidate.hostname,
         acquiredAtMs: candidate.capturedAtMs,
-        lastValidatedAtMs: null,
+        lastValidatedAtMs: preservesVerifiedIdentity ? previous.lastValidatedAtMs : null,
         renewAfterMs: candidate.capturedAtMs + renewalIntervalMs,
-        reason: "SCHEMA_CHANGED",
+        reason: preservesVerifiedIdentity ? null : "SCHEMA_CHANGED",
         secret: { kind: "LAUNCH_URL", value: stored.value }
       };
       await this.#save(record);

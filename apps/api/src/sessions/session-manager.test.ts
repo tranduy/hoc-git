@@ -270,6 +270,43 @@ describe("SessionManager", () => {
     expect(resetCalls).toBe(1);
   });
 
+  it("keeps an exact verified lounge active when Fabet refreshes its one-time launch", async () => {
+    const vault = await createVault();
+    const clock = { wallClockNowMs: 40 };
+    let launchVersion = 0;
+    const validator = new FakeValidator();
+    const manager = new SessionManager({
+      vault,
+      validators: new SessionValidatorRegistry([validator]),
+      clock: { nowMs: () => clock.wallClockNowMs },
+      idFactory: () => "unused",
+      fabetDriver: {
+        login: async () => undefined,
+        captureLobbyLaunches: async () => {
+          launchVersion += 1;
+          await vault.save("current-launch", { kind: "LAUNCH_URL",
+            value: `https://sports.vendor.test/launch?v=${launchVersion}`, capturedAtMs: clock.wallClockNowMs });
+          return [{ category: "FOOTBALL", providerHint: "SABA", hostname: "sports.vendor.test",
+            capturedAtMs: clock.wallClockNowMs, vaultRecordId: "current-launch" }];
+        },
+        resetProfile: async () => undefined
+      }
+    });
+    await manager.configureFabet({ entryUrl: "https://fabet.party/", username: "development-user",
+      password: "development-pass", trustedHostname: "fabet.party" });
+    const launch = (await manager.listStatuses()).sessions.find((session) => session.provider === "SABA")!;
+    await manager.validate(launch.id);
+
+    clock.wallClockNowMs = 86_400_040;
+    await manager.renew("fabet");
+
+    expect((await manager.listStatuses()).sessions.find((session) => session.id === launch.id)).toMatchObject({
+      state: "ACTIVE", reason: null, acquiredAtMs: 86_400_040, renewAfterMs: 172_800_040
+    });
+    const handle = await manager.getActiveSecretHandle(launch.id);
+    expect(await handle?.withSecret(async (secret) => secret.value)).toBe("https://sports.vendor.test/launch?v=2");
+  });
+
   it("keeps Football and LoL launches separate when provider and hostname are identical", async () => {
     const vault = await createVault();
     const manager = new SessionManager({
