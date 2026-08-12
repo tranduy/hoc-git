@@ -23,6 +23,8 @@ import { ArbitrageAlertToast } from "./arbitrage-alert-toast.js";
 import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
+import type { RankedTicket } from "../watch/ranked-tickets.js";
+import { RankedTicketTable } from "./ranked-ticket-table.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
@@ -80,6 +82,8 @@ export function MatchWatchDetail({
   pollDelayMs = 1_000,
   staleAfterMs = 10_000,
   baseStake = "100000",
+  rankedTickets = [],
+  highlightTicketKey = null,
   storage = window.localStorage,
   clock = systemClock
 }: {
@@ -95,6 +99,8 @@ export function MatchWatchDetail({
   readonly pollDelayMs?: number;
   readonly staleAfterMs?: number;
   readonly baseStake?: string;
+  readonly rankedTickets?: readonly RankedTicket[];
+  readonly highlightTicketKey?: string | null;
   readonly storage?: Storage;
   readonly clock?: () => number;
 }) {
@@ -264,6 +270,16 @@ export function MatchWatchDetail({
           : <button onClick={() => setWatching(true)} type="button">Resume watching</button>}
         <button onClick={clearLog} type="button">Clear log</button>
       </div>
+
+      {currentComparison !== undefined && event !== null && <section className="watch-ranked-tickets"
+        aria-label="Exact ranked tickets">
+        <h2>Top exact two-book tickets</h2>
+        {highlightTicketKey !== null && !rankedTickets.some((ticket) => ticket.key === highlightTicketKey) &&
+          <p className="connection-warning" role="status">The exact ticket expired before it could be opened.</p>}
+        {rankedTickets.length === 0 ? <p>No exact verified ticket is currently available.</p> :
+          <RankedTicketTable event={event} providers={currentComparison.providers.filter((provider) => selectedProviders.has(provider))}
+            tickets={rankedTickets} highlightTicketKey={highlightTicketKey} />}
+      </section>}
 
       <div className="match-watch__layout">
         <section className="watch-prices" aria-labelledby="current-prices-heading">

@@ -239,6 +239,11 @@ describe("LiveCatalogPage", () => {
     expect(ticket.textContent).toContain("Guaranteed 45,000 VND");
     expect(preflightRequests.some((request) => request.accountId === sabaAccount.id)).toBe(true);
     expect(preflightRequests.some((request) => request.accountId === sbobetAccount.id)).toBe(true);
+    const toast = await screen.findByRole("button", { name: /Open profitable ticket Alpha vs Beta/u });
+    fireEvent.click(toast);
+    expect(new URLSearchParams(window.location.search).get("ticket")).toBe("FT_AH|FULL_TIME|-0.5");
+    const highlighted = await screen.findByRole("row", { name: /Ticket FT_AH/u });
+    expect(highlighted.className).toContain("ranked-ticket-row--highlight");
   });
 
   it("keeps the last verified provider snapshot visible when the next poll fails", async () => {

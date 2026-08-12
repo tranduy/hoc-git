@@ -8,12 +8,15 @@ import { buildComparisonEvents, decimalOdds, estimatedLiveStartAtMs, formatCount
   isVisibleEvent, observedTicketAsComparisonRow, selectionLabel, type ComparisonEvent,
   type ComparisonRow } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
+import { ProfitToastStack } from "../components/profit-toast-stack.js";
 import { RankedTicketTable } from "../components/ranked-ticket-table.js";
 import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
 import { PriceMovementTracker, type ObservedPriceMovement } from "../watch/price-movement-tracker.js";
 import { rankedEvent, sortRankedEvents } from "../watch/ranked-tickets.js";
+import { NotificationSound } from "../watch/notification-sound.js";
+import { ProfitAlertTracker, type ProfitAlert } from "../watch/profit-alert-tracker.js";
 import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
 import { TicketPreflightCoordinator, type VerifiedTicketEvidence } from "../watch/ticket-preflight-coordinator.js";
 
@@ -288,6 +291,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [highlightTicketKey, setHighlightTicketKey] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get("ticket"));
+  const [profitAlerts, setProfitAlerts] = useState<readonly ProfitAlert[]>([]);
   const [nowMs, setNowMs] = useState(Date.now());
   const [baseStake, setBaseStake] = useState(() => loadBaseStake(window.localStorage));
   const [baseStakeInput, setBaseStakeInput] = useState(baseStake);
@@ -297,13 +303,17 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const signalTracker = useRef(new LagSignalTracker());
   const movementTracker = useRef(new PriceMovementTracker());
   const preflightCoordinator = useRef(new TicketPreflightCoordinator(providerPreflightApi));
+  const profitAlertTracker = useRef(new ProfitAlertTracker());
+  const notificationSound = useRef<NotificationSound | null>(null);
+  if (notificationSound.current === null) notificationSound.current = new NotificationSound();
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
   const accountsRef = useRef<readonly AccountStatus[]>([]);
   const refreshInFlight = useRef(false);
   const retryAfterMs = useRef(new Map<string, number>());
   const workingAccountIds = useRef(new Map<ProviderId, string>());
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
-    event: new URLSearchParams(window.location.search).get("event") });
+    event: new URLSearchParams(window.location.search).get("event"),
+    ticket: new URLSearchParams(window.location.search).get("ticket") });
   const autoLoaded = useRef(false);
   const categoryAccounts = useMemo(() => oneAccountPerProvider(accounts.filter((account) =>
     account.category === category)), [accounts, category]);
@@ -487,6 +497,11 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const hiddenNonComparableCount = visibleEvents.length - rankedEvents.length;
   const crossBookEventCount = rankedEvents.filter((item) => item.tickets.length > 0).length;
   useEffect(() => {
+    const emitted = profitAlertTracker.current.update(rankedEvents, Date.now());
+    if (emitted.length > 0) setProfitAlerts((current) => [...current, ...emitted].slice(-20));
+  }, [rankedEvents]);
+  useEffect(() => () => notificationSound.current?.dispose(), []);
+  useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
     const match = events.find((item) => Object.values(item.providerEventIds).includes(requested.current.event!));
     if (match !== undefined) setSelectedKey(match.key);
@@ -504,8 +519,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     });
     return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
       baseStake={baseStake} books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent}
+      highlightTicketKey={highlightTicketKey} rankedTickets={rankedByEvent.get(selectedEvent.key)?.tickets ?? []}
       lagSignals={signals.filter((signal) => signal.event.key === selectedEvent.key)}
-      onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); }}
+      onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); setHighlightTicketKey(null); }}
       providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
   }
 
@@ -528,6 +544,17 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const eventId = item.providerEventIds[primary.provider]!;
     const query = new URLSearchParams(); query.set("event", eventId); query.set("account", primary.accountId);
     window.history.replaceState({}, "", `${window.location.pathname}?${query.toString()}`); setSelectedKey(item.key);
+    setHighlightTicketKey(null);
+  };
+  const openProfitAlert = (alert: ProfitAlert): void => {
+    const primary = alert.event.catalogs[0];
+    if (primary === undefined) return;
+    const eventId = alert.event.providerEventIds[primary.provider];
+    if (eventId === undefined) return;
+    const query = new URLSearchParams({ event: eventId, account: primary.accountId, ticket: alert.ticket.key });
+    window.history.replaceState({}, "", `${window.location.pathname}?${query.toString()}`);
+    setHighlightTicketKey(alert.ticket.key);
+    setSelectedKey(alert.event.key);
   };
 
   return <>
@@ -558,7 +585,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <span>{hiddenNonComparableCount} event{hiddenNonComparableCount === 1 ? "" : "s"} without a supported two-way ticket hidden · review mappings</span></div>}
     {catalogs.length > 0 && <LagSignalPanel signals={signals} />}
     {catalogs.length > 0 && <PriceMovementPanel movements={movements} />}
-    <LagSignalToast signal={signals[0] ?? null} />
+    <ProfitToastStack alerts={profitAlerts} onOpen={openProfitAlert} sound={notificationSound.current} />
     <div className="catalog-event-list">{displayEvents.map((item) => {
       const ranked = rankedByEvent.get(item.key)!;
       const label = `${item.event.participantA} vs ${item.event.participantB}`;

@@ -1,4 +1,5 @@
 import type { ProviderEvent, ProviderId } from "@tool-chenh/contracts";
+import { useEffect } from "react";
 import { decimalOdds, selectionLabel } from "../catalog/comparison.js";
 import type { RankedTicket } from "../watch/ranked-tickets.js";
 
@@ -23,6 +24,12 @@ export function RankedTicketTable({ event, providers, tickets, highlightTicketKe
   readonly highlightTicketKey?: string | null;
 }) {
   const visible = tickets.slice(0, 5);
+  useEffect(() => {
+    if (highlightTicketKey === null || highlightTicketKey === undefined) return;
+    const row = document.getElementById(ticketDomId(tickets[0]?.eventKey ?? "", highlightTicketKey));
+    row?.scrollIntoView?.({ block: "center" });
+    row?.focus();
+  }, [highlightTicketKey, tickets]);
   return <div className="ranked-ticket-table-wrap"><table className="ranked-ticket-table"
     aria-label={`Top exact tickets for ${event.participantA} vs ${event.participantB}`}>
     <thead><tr><th>Ticket / line</th>{providers.map((provider) => <th aria-label={provider} key={provider}>#{provider} prices</th>)}

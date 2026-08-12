@@ -395,7 +395,7 @@ git commit -m "feat: show top exact tickets by guaranteed profit"
 - Modify: `apps/web/src/components/match-watch-detail.test.tsx`
 - Modify: `apps/web/src/styles.css`
 
-- [ ] **Step 1: Write alert lifecycle RED tests**
+- [x] **Step 1: Write alert lifecycle RED tests**
 
 For `ProfitAlertTracker`, assert:
 
@@ -406,7 +406,7 @@ For `ProfitAlertTracker`, assert:
 - identity is `event key + ticket key + sorted provider/selection legs`;
 - observation-only tickets never alert.
 
-- [ ] **Step 2: Write toast/audio/deep-link RED tests**
+- [x] **Step 2: Write toast/audio/deep-link RED tests**
 
 With fake timers, render six alerts and assert only five remain, newest is at the bottom, each expires after exactly 5,000 ms, and clicking creates:
 
@@ -416,7 +416,7 @@ With fake timers, render six alerts and assert only five remain, newest is at th
 
 Assert the detail page scrolls/focuses the exact ticket row and applies a temporary highlight. Mock `AudioContext` and test no sound before pointer/keyboard unlock, one short sound per newly enqueued alert after unlock, and swallowed constructor/resume/start errors.
 
-- [ ] **Step 3: Run RED**
+- [x] **Step 3: Run RED**
 
 Run:
 
@@ -426,7 +426,7 @@ npm.cmd test --workspace @tool-chenh/web -- --run src/watch/profit-alert-tracker
 
 Expected: FAIL because only one ten-second non-clickable toast exists and no audio/deep-link ticket identity exists.
 
-- [ ] **Step 4: Implement pure alert tracking**
+- [x] **Step 4: Implement pure alert tracking**
 
 ```ts
 export interface ProfitAlert {
@@ -443,15 +443,15 @@ export class ProfitAlertTracker {
 
 Store last alerted profit and whether each identity is currently above threshold. Return only newly emitted alerts from each update; prune identities no longer present after marking them below threshold.
 
-- [ ] **Step 5: Implement sound and toast presentation**
+- [x] **Step 5: Implement sound and toast presentation**
 
 Use a tiny Web Audio oscillator created only after a global `pointerdown` or `keydown`. `play()` must return without throwing. `ProfitToastStack` owns the five-second timers and maximum-five visible queue; it receives an `onOpen(alert)` callback rather than editing location itself.
 
-- [ ] **Step 6: Wire exact navigation and detail highlight**
+- [x] **Step 6: Wire exact navigation and detail highlight**
 
 Extend the page's request parsing with `ticket`. On toast click, set `event`, `account`, and exact `ticket` query params, open the already-mapped event, and pass `highlightTicketKey` to `MatchWatchDetail`/the ranked table. Use `CSS.escape` or React refs, `scrollIntoView({ block: "center" })`, and focus a row with `tabIndex={-1}`. If the exact ticket expired before navigation, show an explicit message and never highlight a different ticket.
 
-- [ ] **Step 7: Run focused tests and typecheck**
+- [x] **Step 7: Run focused tests and typecheck**
 
 Run:
 
@@ -462,7 +462,7 @@ npm.cmd run typecheck --workspace @tool-chenh/web
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```powershell
 git add apps/web/src/watch/profit-alert-tracker.ts apps/web/src/watch/profit-alert-tracker.test.ts apps/web/src/watch/notification-sound.ts apps/web/src/watch/notification-sound.test.ts apps/web/src/components/profit-toast-stack.tsx apps/web/src/components/profit-toast-stack.test.tsx apps/web/src/pages/live-catalog-page.tsx apps/web/src/pages/live-catalog-page.test.tsx apps/web/src/components/match-watch-detail.tsx apps/web/src/components/match-watch-detail.test.tsx apps/web/src/styles.css
