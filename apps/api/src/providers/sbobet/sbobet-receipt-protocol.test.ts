@@ -4,6 +4,8 @@ import { chromium, type Browser } from "playwright";
 import {
   inspectReadOnlyReceiptProtocol,
   isSafeReceiptHistoryLabel,
+  readReadOnlySbobetReceiptHistory,
+  safeReceiptReplayHeaders,
   safeReceiptResponseCandidate
 } from "./sbobet-receipt-protocol.js";
 
@@ -30,10 +32,13 @@ describe("SBOBET read-only receipt protocol", () => {
       if (request.url?.startsWith("/api/v2/bet/getBetsReporting") === true) {
         response.setHeader("content-type", "application/json");
         const settled = new URL(request.url, "http://127.0.0.1").searchParams.get("status") === "Settled";
+        const row = Array.from({ length: 39 }, () => null as unknown);
+        Object.assign(row, { 0: "secret-ticket", 1: "2026-08-12", 2: 1, 3: "league",
+          4: "home vs away", 5: "handicap", 6: "home", 7: "-0.5", 8: "-0.8",
+          9: "100000", 10: "180000", 11: "Unsettled", 12: "Settled", 15: 1,
+          18: "2026-08-12", 19: "VND", 25: "MALAY", 35: "FT", 37: 1 });
         response.end(JSON.stringify(JSON.stringify(settled
-          ? { betReportingDtos: [["secret-ticket", "2026-08-12", 1, "league", "home vs away",
-            "handicap", "home", "-0.5", "1.8", "100000", "180000", null, "Settled", null,
-            "1-0", 1, "0-0", null, "2026-08-12", "VND"]], total: 1 }
+          ? { betReportingDtos: [row], total: 1 }
           : { betReportingDtos: [], total: 0 })));
         return;
       }
@@ -77,6 +82,13 @@ describe("SBOBET read-only receipt protocol", () => {
     expect(safeReceiptResponseCandidate("POST", `${origin}/api/bet-history/submit`)).toBe(false);
     expect(safeReceiptResponseCandidate("POST", `${origin}/api/place-wager-history`)).toBe(false);
     expect(safeReceiptResponseCandidate("GET", `${origin}/npm.historyc8ed28.js`)).toBe(false);
+  });
+
+  it("replays only application auth headers and removes HTTP/2/browser transport headers", () => {
+    expect(safeReceiptReplayHeaders({ ":authority": "host", ":path": "/secret", token: "opaque",
+      lng: "vi", accept: "application/json", origin: "https://origin.test", "sec-fetch-site": "same-site",
+      cookie: "secret", "x-request-id": "request" })).toEqual({ token: "opaque", lng: "vi",
+      accept: "application/json", "x-request-id": "request" });
   });
 
   it("clicks only history and returns structural metadata without secret values", async () => {
@@ -143,6 +155,46 @@ describe("SBOBET read-only receipt protocol", () => {
     expect(serialized).not.toContain("secret-ticket");
     expect(serialized).not.toContain("100000");
     expect(serialized).not.toContain("status=Settled");
+    await context.close();
+  });
+
+  it("returns decoded active and settled rows only to the internal receipt reader", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`<button id="history">Bet history</button>
+      <script>document.querySelector('#history').onclick=()=>fetch('/api/v2/bet/getBetsReporting')</script>`);
+
+    const receipts = await readReadOnlySbobetReceiptHistory(context, page, { waitMs: 100 });
+
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ purchaseId: "secret-ticket", totalStake: "100000", status: "Settled" });
+    await context.close();
+  });
+
+  it("reopens an already-open history popup when the first toggle produces no request", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`<button id="history">Bet history</button><script>
+      let open=true; document.querySelector('#history').onclick=()=>{ open=!open;
+        if(open) fetch('/api/v2/bet/getBetsReporting'); };</script>`);
+
+    await expect(readReadOnlySbobetReceiptHistory(context, page, { waitMs: 50 }))
+      .resolves.toHaveLength(1);
+    await context.close();
+  });
+
+  it("does not mistake the popup heading for the history navigation control", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`<div class="bet-history-popup-component"><span>Bet history</span></div>
+      <button id="history-nav">Bet history</button>
+      <script>document.querySelector('#history-nav').onclick=()=>fetch('/api/v2/bet/getBetsReporting')</script>`);
+
+    await expect(readReadOnlySbobetReceiptHistory(context, page, { waitMs: 50 }))
+      .resolves.toHaveLength(1);
     await context.close();
   });
 

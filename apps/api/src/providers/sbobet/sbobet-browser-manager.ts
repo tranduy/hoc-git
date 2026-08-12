@@ -8,7 +8,9 @@ import {
 } from "./sbobet-stomp.js";
 import { extractSbobetDirectCatalogRecords } from "./sbobet-direct-catalog.js";
 import { parseSbobetTicketConstraint, type SbobetTicketConstraintSnapshot } from "./sbobet-ticket-constraint.js";
-import { inspectReadOnlyReceiptProtocol, type ReceiptProtocolInspection } from "./sbobet-receipt-protocol.js";
+import { inspectReadOnlyReceiptProtocol, readReadOnlySbobetReceiptHistory,
+  type ReceiptProtocolInspection } from "./sbobet-receipt-protocol.js";
+import type { DecodedSbobetReceipt } from "./sbobet-receipt-decoder.js";
 
 interface OpenSession {
   readonly context: BrowserContext;
@@ -147,6 +149,10 @@ export class PlaywrightSbobetBrowserManager {
   async inspectReceiptProtocol(input: { sessionId: string; launchUrl: string }): Promise<ReceiptProtocolInspection> {
     const session = await this.#get(input);
     return inspectReadOnlyReceiptProtocol(session.context, session.page);
+  }
+  async readReceiptHistory(input: { sessionId: string; launchUrl: string }): Promise<readonly DecodedSbobetReceipt[]> {
+    const session = await this.#get(input);
+    return readReadOnlySbobetReceiptHistory(session.context, session.page);
   }
   async readTicketConstraint(input: { sessionId: string; launchUrl: string;
     providerSelectionId: string; participantA: string; participantB: string; selection: string;

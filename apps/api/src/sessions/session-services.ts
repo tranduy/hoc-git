@@ -49,6 +49,8 @@ import { SabaTicketPreflightReader } from "../providers/saba/saba-ticket-preflig
 import type { FeeModel } from "@tool-chenh/core";
 import { ReceiptProtocolRegistry } from "../receipts/receipt-protocol-registry.js";
 import { SbobetReceiptProtocolReader } from "../providers/sbobet/sbobet-receipt-protocol-reader.js";
+import { SbobetExecutionReceiptReader } from "../providers/sbobet/sbobet-execution-receipt-reader.js";
+import type { ReceiptReader } from "../execution/receipt-reconciler.js";
 
 export interface CreateSessionServicesOptions {
   readonly localAppData: string;
@@ -68,6 +70,7 @@ export interface ManagedSessionServices extends SessionServices {
   readonly sabaCatalogReader: CmdObservedCatalogReader;
   readonly providerPreflight: ProviderPreflightRegistry;
   readonly receiptProtocol: ReceiptProtocolRegistry;
+  readonly receiptReaders: readonly ReceiptReader[];
   tick(): Promise<void>;
   close(): Promise<void>;
 }
@@ -199,6 +202,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
         ...(options.providerFees?.SBOBET === undefined ? {} : { fee: options.providerFees.SBOBET }) })] });
   const receiptProtocol = new ReceiptProtocolRegistry({ accounts,
     readers: [new SbobetReceiptProtocolReader({ source: sbobetBrowser })] });
+  const receiptReaders: readonly ReceiptReader[] = [new SbobetExecutionReceiptReader({
+    accounts, source: sbobetBrowser
+  })];
   return {
     manager,
     discovery,
@@ -211,6 +217,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     sabaCatalogReader,
     providerPreflight,
     receiptProtocol,
+    receiptReaders,
     async tick(): Promise<void> {
       await manager.tick();
     },
