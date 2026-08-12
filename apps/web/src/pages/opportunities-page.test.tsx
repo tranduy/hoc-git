@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { AppSnapshot } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpportunityCard } from "../components/opportunity-card.js";
@@ -65,6 +65,43 @@ describe("OpportunitiesPage", () => {
     expect(within(card).getByLabelText("Minimum stake: 5; maximum stake: 250")).toBeTruthy();
     expect(screen.queryByText("negative margin")).toBeNull();
     expect(screen.queryByText("NEGATIVE_MARGIN")).toBeNull();
+  });
+
+  it("runs preflight then a read-only two-leg dry check and shows both leg results", async () => {
+    const calls: string[] = [];
+    const accounts = [{ id: "saba-account", alias: "Saba", provider: "SABA", category: "FOOTBALL",
+      sessionState: "ACTIVE", profileState: "FRESH", redactedLabel: "Saba", currency: "USD", balance: "500",
+      balanceAsOfMs: 1_800_000_000_000, capabilities: ["CATALOG", "PROFILE", "PREFLIGHT"], reason: null },
+    { id: "im-account", alias: "IM", provider: "IM", category: "FOOTBALL",
+      sessionState: "ACTIVE", profileState: "FRESH", redactedLabel: "IM", currency: "USD", balance: "500",
+      balanceAsOfMs: 1_800_000_000_000, capabilities: ["CATALOG", "PROFILE", "PREFLIGHT"], reason: null }] as const;
+    const ticket = { ticketId: "ticket-1", opportunityId: "opportunity-1", canonicalEventId: "event-1",
+      canonicalMarketId: "market-1", baseCurrency: "USD", totalStakeBase: "100", worstCaseProfit: "1",
+      issuedAtMs: 1000, expiresAtMs: 3000, nonce: "nonce-value-123456", signature: "signature-value-123456",
+      legs: [
+        { accountId: "saba-account", provider: "SABA", providerEventId: "saba-1",
+          providerMarketId: "saba-market", providerSelectionId: "over", selection: "Over 2.5", line: "2.5",
+          decimalOdds: "1.98", stake: "50", currency: "USD", balance: "500", balanceAsOfMs: 1000, quoteAsOfMs: 1000 },
+        { accountId: "im-account", provider: "IM", providerEventId: "im-1",
+          providerMarketId: "im-market", providerSelectionId: "under", selection: "Under 2.5", line: "2.5",
+          decimalOdds: "2.02", stake: "50", currency: "USD", balance: "500", balanceAsOfMs: 1000, quoteAsOfMs: 1000 }
+      ]
+    } as const;
+    render(<OpportunitiesPage snapshot={snapshot} connectionState="LIVE"
+      accountApi={{ list: async () => accounts, register: async () => { throw new Error("unused"); },
+        refresh: async () => { throw new Error("unused"); } }}
+      executionApi={{ preflight: async () => { calls.push("preflight"); return ticket; },
+        dryRun: async () => { calls.push("dry-run"); return { ticketId: "ticket-1",
+          idempotencyKey: "request-key-123456", mode: "DRY_RUN", status: "BOTH_ACCEPTED", legs: [
+            { provider: "SABA", providerSelectionId: "over", status: "ACCEPTED", reason: null },
+            { provider: "IM", providerSelectionId: "under", status: "ACCEPTED", reason: null }
+          ] }; } }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Run two-leg dry check" }));
+    expect(await screen.findByText("DRY RUN: BOTH_ACCEPTED")).toBeTruthy();
+    expect(screen.getByText("SABA: ACCEPTED")).toBeTruthy();
+    expect(screen.getByText("IM: ACCEPTED")).toBeTruthy();
+    expect(calls).toEqual(["preflight", "dry-run"]);
   });
 
   it("marks all opportunities ineligible while disconnected without offering an execution action", () => {
