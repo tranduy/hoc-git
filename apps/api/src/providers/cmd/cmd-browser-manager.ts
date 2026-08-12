@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { CmdCatalogInputRecord } from "@tool-chenh/adapters";
+import { normalizeCmdAccountStore, type CmdCatalogInputRecord } from "@tool-chenh/adapters";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import {
   clickSafeStructuralCategory,
@@ -36,6 +36,25 @@ export interface StableFootballCatalogProbe {
   read(): Promise<readonly CmdCatalogInputRecord[]>;
   select(): Promise<boolean>;
   wait(delayMs: number): Promise<void>;
+}
+
+export async function readStableCmdAccountStore(probe: {
+  read(): Promise<unknown>;
+  wait(delayMs: number): Promise<void>;
+}, options: { readonly maxWaitMs: number; readonly pollingIntervalMs: number } = {
+  maxWaitMs: 3_000, pollingIntervalMs: 100
+}): Promise<unknown> {
+  if (!Number.isFinite(options.maxWaitMs) || options.maxWaitMs <= 0 ||
+    !Number.isFinite(options.pollingIntervalMs) || options.pollingIntervalMs <= 0) {
+    throw new Error("CMD_PROFILE_OPTIONS_INVALID");
+  }
+  const attempts = Math.ceil(options.maxWaitMs / options.pollingIntervalMs) + 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const value = await probe.read();
+    if (normalizeCmdAccountStore(value, 0) !== null) return value;
+    if (attempt + 1 < attempts) await probe.wait(options.pollingIntervalMs);
+  }
+  throw new Error("CMD_PROFILE_UNAVAILABLE");
 }
 
 export interface StableFootballCatalogOptions {
@@ -175,8 +194,13 @@ export async function readWithOneSessionRecovery<TSession, TResult>(input: {
 interface OpenCmdSession {
   readonly context: BrowserContext;
   readonly page: Page;
+  readonly launchFingerprint: string;
   footballSelected: boolean;
   catalogFingerprint: string | undefined;
+}
+
+export function cmdLaunchFingerprint(launchUrl: string): string {
+  return createHash("sha256").update(validateCmdLaunchUrl(launchUrl)).digest("hex");
 }
 
 export interface PlaywrightCmdBrowserManagerOptions {
@@ -203,7 +227,7 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
   readonly #headless: boolean;
   readonly #startupTimeoutMs: number;
   readonly #sessions = new Map<string, OpenCmdSession>();
-  readonly #opening = new Map<string, Promise<OpenCmdSession>>();
+  readonly #opening = new Map<string, { readonly launchFingerprint: string; readonly promise: Promise<OpenCmdSession> }>();
   readonly #reading = new Map<string, Promise<readonly CmdCatalogInputRecord[]>>();
 
   constructor(options: PlaywrightCmdBrowserManagerOptions) {
@@ -247,13 +271,18 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
 
   async readAccountStore(input: { readonly sessionId: string; readonly launchUrl: string }): Promise<unknown> {
     const session = await this.#get(input);
-    for (const page of session.context.pages()) {
-      const frame = await findProviderRuntimeFrame(page);
-      if (frame === null) continue;
-      const state = await readProviderAccountStore(frame);
-      if (state !== null) return state;
-    }
-    throw new Error("CMD_PROFILE_UNAVAILABLE");
+    return readStableCmdAccountStore({
+      read: async () => {
+        for (const page of session.context.pages()) {
+          const frame = await findProviderRuntimeFrame(page);
+          if (frame === null) continue;
+          const state = await readProviderAccountStore(frame);
+          if (state !== null) return state;
+        }
+        return null;
+      },
+      wait: async (delayMs) => session.page.waitForTimeout(delayMs)
+    });
   }
 
   async readCatalog(input: {
@@ -283,12 +312,23 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
   }
 
   async #get(input: { readonly sessionId: string; readonly launchUrl: string }): Promise<OpenCmdSession> {
+    const launchFingerprint = cmdLaunchFingerprint(input.launchUrl);
     const current = this.#sessions.get(input.sessionId);
-    if (current !== undefined && !current.page.isClosed()) return current;
+    if (current !== undefined && !current.page.isClosed() && current.launchFingerprint === launchFingerprint) return current;
+    if (current !== undefined) await this.#invalidate(input.sessionId, current);
     const pending = this.#opening.get(input.sessionId);
-    if (pending !== undefined) return pending;
-    const operation = this.#open(input).finally(() => this.#opening.delete(input.sessionId));
-    this.#opening.set(input.sessionId, operation);
+    if (pending !== undefined && pending.launchFingerprint === launchFingerprint) return pending.promise;
+    if (pending !== undefined) {
+      await pending.promise.catch(() => undefined);
+      const superseded = this.#sessions.get(input.sessionId);
+      if (superseded !== undefined && superseded.launchFingerprint !== launchFingerprint) {
+        await this.#invalidate(input.sessionId, superseded);
+      }
+    }
+    const operation = this.#open(input).finally(() => {
+      if (this.#opening.get(input.sessionId)?.promise === operation) this.#opening.delete(input.sessionId);
+    });
+    this.#opening.set(input.sessionId, { launchFingerprint, promise: operation });
     return operation;
   }
 
@@ -315,7 +355,8 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
         if (page === null) await launcher.waitForTimeout(250);
       }
       if (page === null) throw new Error("CMD_CATALOG_UNAVAILABLE");
-      const session: OpenCmdSession = { context, page, footballSelected: false, catalogFingerprint: undefined };
+      const session: OpenCmdSession = { context, page, launchFingerprint: cmdLaunchFingerprint(launchUrl),
+        footballSelected: false, catalogFingerprint: undefined };
       this.#sessions.set(input.sessionId, session);
       return session;
     } catch {

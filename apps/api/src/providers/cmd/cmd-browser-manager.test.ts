@@ -1,11 +1,35 @@
 import { chromium } from "playwright";
 import { describe, expect, it } from "vitest";
-import { cmdProfileDirectoryName, readCmdFootballCatalog, readStableFootballCatalog,
+import { cmdLaunchFingerprint, cmdProfileDirectoryName, readCmdFootballCatalog, readStableFootballCatalog, readStableCmdAccountStore,
   catalogStructuralFingerprint, readWithOneSessionRecovery, runCoalesced,
   isVerifiedCmdFootballIdentity, validateCmdLaunchUrl } from "./cmd-browser-manager.js";
 import type { CmdCatalogInputRecord } from "@tool-chenh/adapters";
 
 describe("CMD browser manager safety", () => {
+  it("changes the browser-cache fingerprint when a renewed launch token changes on the same host", () => {
+    const first = cmdLaunchFingerprint("https://sports.test/launch?token=one");
+    const second = cmdLaunchFingerprint("https://sports.test/launch?token=two");
+    expect(first).not.toBe(second);
+    expect(cmdLaunchFingerprint("https://sports.test/launch?token=one")).toBe(first);
+    expect(first).not.toContain("one");
+  });
+
+  it("waits for the account store to contain a complete normalizable balance", async () => {
+    const samples = [null, { Bal: { BCredit: "", Curr: "VND" }, DisplayUserName: "account" },
+      { Bal: { BCredit: "29000", Curr: "VND" }, DisplayUserName: "account" }];
+    let waits = 0;
+    await expect(readStableCmdAccountStore({ read: async () => samples.shift(),
+      wait: async () => { waits += 1; } }, { maxWaitMs: 300, pollingIntervalMs: 100 }))
+      .resolves.toMatchObject({ Bal: { BCredit: "29000", Curr: "VND" } });
+    expect(waits).toBe(2);
+  });
+
+  it("fails closed when the account store never becomes complete", async () => {
+    await expect(readStableCmdAccountStore({ read: async () => ({ Bal: { BCredit: "" } }),
+      wait: async () => undefined }, { maxWaitMs: 200, pollingIntervalMs: 100 }))
+      .rejects.toThrow("CMD_PROFILE_UNAVAILABLE");
+  });
+
   it("verifies the CMD Football runtime without requiring an unrelated eSports icon", () => {
     expect(isVerifiedCmdFootballIdentity({ runtime: true, football: true, esports: false, cmdBundle: true })).toBe(true);
     expect(isVerifiedCmdFootballIdentity({ runtime: true, football: true, esports: true, cmdBundle: false })).toBe(false);

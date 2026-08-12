@@ -45,6 +45,24 @@ function key(observation: ProtocolObservation & { readonly bodyShapeHash?: strin
   return JSON.stringify(observation);
 }
 
+function safeAccountStoreReadiness(value: unknown): Record<string, string> {
+  const root = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : {};
+  const bal = typeof root.Bal === "object" && root.Bal !== null && !Array.isArray(root.Bal)
+    ? root.Bal as Record<string, unknown> : {};
+  const balanceText = typeof bal.BCredit === "string" || typeof bal.BCredit === "number"
+    ? String(bal.BCredit).trim() : "";
+  const currencyText = typeof (bal.Curr ?? root.Curr) === "string" ? String(bal.Curr ?? root.Curr).trim() : "";
+  const labels = [root.DisplayUserName, root.LicUserName, root.Name, root.Nick]
+    .filter((item): item is string => typeof item === "string");
+  return {
+    balance: balanceText.length === 0 ? "EMPTY" : /^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(balanceText)
+      ? "VALID_DECIMAL" : /^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/u.test(balanceText) ? "VALID_GROUPED_DECIMAL" : "OTHER",
+    currency: currencyText.length === 0 ? "EMPTY" : /^[A-Za-z]{3,8}$/u.test(currencyText) ? "VALID_CODE" : "OTHER",
+    label: labels.some((item) => item.trim().length > 0) ? "PRESENT" : "EMPTY"
+  };
+}
+
 async function main(): Promise<void> {
   const argumentsList = process.argv.slice(2);
   const sessionId = argumentsList.find((argument) => !argument.startsWith("--"));
@@ -144,6 +162,7 @@ async function main(): Promise<void> {
         const accountStore = await readProviderAccountStore(runtimeFrame);
         profileShapes.push({
           source: "ACCOUNT_STORE",
+          readiness: safeAccountStoreReadiness(accountStore),
           bodyShapeHash: structuralBodyHash(accountStore),
           bodyShape: structuralBodyShape(accountStore)
         });
