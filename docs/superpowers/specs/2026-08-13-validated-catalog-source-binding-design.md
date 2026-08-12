@@ -73,9 +73,10 @@ rebind or mutate a bettor account.
 
 ## Persistence And Failure Handling
 
-Logical bindings are recoverable derived state. Persistence is best-effort and
-must be wrapped in `try/catch`; a write failure cannot block health, an existing
-catalog read, or another provider.
+Logical bindings are recoverable derived state and are not written to a new
+binding file. Existing vault/account persistence remains wrapped in its current
+fail-closed error boundary; a storage failure cannot promote a source or block
+health, an already running catalog read, or another provider.
 
 If no eligible session exists, the source reports unavailable with an explicit
 reason. The application may show a bounded last-success snapshot as stale, but
@@ -106,7 +107,8 @@ Implementation follows red-green TDD and must cover:
 - category-null and wrong-category sessions cannot bind;
 - unsupported pairs cannot acquire a logical source;
 - tie-breaking is deterministic;
-- persistence failure leaves existing reads operational;
+- session metadata or delegated-account storage failure fails closed without
+  stopping an already running source or another provider;
 - UI retains selection when the backing launcher changes;
 - catalog-only sources cannot be used for preflight or execution;
 - source expiration disables signals while preserving an explicitly stale view;
