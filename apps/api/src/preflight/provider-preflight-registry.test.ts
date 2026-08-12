@@ -1,5 +1,5 @@
 import type { AccountStatus, ProviderTicketPreflight, ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ProviderPreflightRegistry } from "./provider-preflight-registry.js";
 
 const request: ProviderTicketPreflightRequest = { accountId: "account-1", providerEventId: "event-1",
@@ -25,6 +25,25 @@ function registry(preflight = async (): Promise<ProviderTicketPreflight> => resu
 describe("ProviderPreflightRegistry", () => {
   it("returns strict evidence bound to the requested account and ticket", async () => {
     await expect(registry().preflight(request)).resolves.toEqual(result);
+  });
+
+  it("coalesces concurrent checks of the same exact account ticket", async () => {
+    let release!: () => void;
+    let calls = 0;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const service = registry(async () => {
+      calls += 1;
+      await gate;
+      return result;
+    });
+
+    const first = service.preflight(request);
+    const second = service.preflight(request);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    release();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([result, result]);
+    expect(calls).toBe(1);
   });
 
   it.each([

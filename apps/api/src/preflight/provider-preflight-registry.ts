@@ -13,6 +13,7 @@ interface AccountAccess {
 export class ProviderPreflightRegistry {
   readonly #accounts: AccountAccess;
   readonly #readers: ReadonlyMap<ProviderId, ProviderTicketPreflightReader>;
+  readonly #inflight = new Map<string, Promise<ProviderTicketPreflight>>();
 
   constructor(options: { readonly accounts: AccountAccess; readonly readers: readonly ProviderTicketPreflightReader[] }) {
     this.#accounts = options.accounts;
@@ -28,6 +29,20 @@ export class ProviderPreflightRegistry {
 
   async preflight(input: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight> {
     const request = ProviderTicketPreflightRequestSchema.parse(input);
+    const key = JSON.stringify([request.accountId, request.providerEventId, request.providerMarketId,
+      request.providerSelectionId, request.selection, request.line, request.expectedDecimalOdds, request.requestedStake]);
+    const active = this.#inflight.get(key);
+    if (active !== undefined) return active;
+    const operation = this.#preflight(request);
+    this.#inflight.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.#inflight.get(key) === operation) this.#inflight.delete(key);
+    }
+  }
+
+  async #preflight(request: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight> {
     const provider = await this.providerForAccount(request.accountId);
     const reader = this.#readers.get(provider);
     if (reader === undefined || !reader.capabilities.includes("PREFLIGHT")) {
