@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
+import { TwoLegPreflight } from "./preflight/two-leg-preflight.js";
 import { FixtureAdapter, type FixtureSnapshot } from "@tool-chenh/adapters";
 import type { Category, DataMode } from "@tool-chenh/contracts";
 import { buildApp, validateViteOrigin } from "./app.js";
@@ -168,6 +169,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     : createLiveRuntime();
   const controller = new AbortController();
   await runtime.start(controller.signal);
+  const twoLegPreflight = new TwoLegPreflight({ opportunities: runtime, providers: sessionServices.providerPreflight });
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
@@ -175,7 +177,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     accountRegistry: sessionServices.accounts,
     catalogReader: sessionServices.catalogReader,
     catalogTelemetry,
-    providerPreflight: sessionServices.providerPreflight
+    providerPreflight: sessionServices.providerPreflight,
+    twoLegPreflight
   });
   await app.listen({ host: config.host, port: config.port });
   const sessionTimer = setInterval(() => {

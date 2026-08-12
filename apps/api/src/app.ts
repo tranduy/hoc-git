@@ -10,6 +10,7 @@ import { registerSessionRoutes, type SessionServices } from "./routes/sessions.j
 import { registerCatalogRoutes, type CatalogReaderLike } from "./routes/catalog.js";
 import type { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { registerProviderPreflightRoutes, type ProviderPreflightLike } from "./routes/provider-preflight.js";
+import { registerTwoLegPreflightRoutes, type TwoLegPreflightLike } from "./routes/two-leg-preflight.js";
 
 export interface AppOptions {
   readonly viteOrigin?: string;
@@ -20,6 +21,7 @@ export interface AppOptions {
   readonly catalogReader?: CatalogReaderLike;
   readonly catalogTelemetry?: CatalogTelemetryRegistry;
   readonly providerPreflight?: ProviderPreflightLike;
+  readonly twoLegPreflight?: TwoLegPreflightLike;
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
@@ -123,6 +125,7 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
   if (options.catalogReader !== undefined) registerCatalogRoutes(app, options.catalogReader, options.catalogTelemetry);
   if (options.providerPreflight !== undefined) registerProviderPreflightRoutes(app, options.providerPreflight);
+  if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight);
   void app.register(async (instance) => {
     registerOpportunityWebsocket(instance, runtime, { heartbeatIntervalMs, maxBufferedBytes });
   });
