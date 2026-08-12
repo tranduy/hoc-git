@@ -23,6 +23,15 @@ export interface TwoLegExecutionResult {
   readonly status: "BOTH_ACCEPTED" | "NONE_ACCEPTED" | "PARTIAL_FAILURE";
   readonly legs: readonly [ExecutionLegResult, ExecutionLegResult];
 }
+export type ExecutionIdempotencyClaim =
+  | { readonly status: "CLAIMED" }
+  | { readonly status: "COMPLETED"; readonly result: TwoLegExecutionResult }
+  | { readonly status: "PENDING" }
+  | { readonly status: "CONFLICT" };
+export interface ExecutionIdempotencyStore {
+  claim(idempotencyKey: string, fingerprint: string): Promise<ExecutionIdempotencyClaim>;
+  complete(idempotencyKey: string, fingerprint: string, result: TwoLegExecutionResult): Promise<void>;
+}
 
 function requestFingerprint(ticket: PreflightTicket): string {
   return JSON.stringify([ticket.ticketId, ticket.signature, ticket.nonce]);
@@ -33,15 +42,17 @@ export class TwoLegExecutor {
   readonly #verifyTicket: (ticket: PreflightTicket) => boolean;
   readonly #clock: { nowMs(): number };
   readonly #timeoutMs: number;
+  readonly #idempotencyStore: ExecutionIdempotencyStore | null;
   readonly #requests = new Map<string, { fingerprint: string; result: Promise<TwoLegExecutionResult> }>();
 
   constructor(options: { readonly adapters: readonly ExecutionLegAdapter[];
     readonly verifyTicket: (ticket: PreflightTicket) => boolean; readonly clock?: { nowMs(): number };
-    readonly timeoutMs?: number }) {
+    readonly timeoutMs?: number; readonly idempotencyStore?: ExecutionIdempotencyStore }) {
     this.#adapters = new Map(options.adapters.map((adapter) => [adapter.provider, adapter]));
     this.#verifyTicket = options.verifyTicket;
     this.#clock = options.clock ?? { nowMs: Date.now };
     this.#timeoutMs = options.timeoutMs ?? 3_000;
+    this.#idempotencyStore = options.idempotencyStore ?? null;
     if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) throw new Error("EXECUTION_TIMEOUT_INVALID");
   }
 
@@ -56,17 +67,35 @@ export class TwoLegExecutor {
       if (existing.fingerprint !== fingerprint) throw new Error("EXECUTION_IDEMPOTENCY_CONFLICT");
       return existing.result;
     }
-    const result = this.#execute(input.ticket, input.idempotencyKey);
+    const result = this.#executeIdempotent(input.ticket, input.idempotencyKey, fingerprint);
     this.#requests.set(input.idempotencyKey, { fingerprint, result });
     return result;
   }
 
-  async #execute(ticket: PreflightTicket, idempotencyKey: string): Promise<TwoLegExecutionResult> {
+  async #executeIdempotent(ticket: PreflightTicket, idempotencyKey: string,
+    fingerprint: string): Promise<TwoLegExecutionResult> {
     if (!this.#verifyTicket(ticket)) throw new Error("EXECUTION_TICKET_INVALID");
     if (ticket.expiresAtMs <= this.#clock.nowMs()) throw new Error("EXECUTION_TICKET_EXPIRED");
     if (ticket.legs.length !== 2 || ticket.legs[0].provider === ticket.legs[1].provider) {
       throw new Error("EXECUTION_TWO_PROVIDER_TICKET_REQUIRED");
     }
+    if (this.#idempotencyStore !== null) {
+      const claim = await this.#idempotencyStore.claim(idempotencyKey, fingerprint);
+      if (claim.status === "CONFLICT") throw new Error("EXECUTION_IDEMPOTENCY_CONFLICT");
+      if (claim.status === "PENDING") throw new Error("EXECUTION_IDEMPOTENCY_IN_DOUBT");
+      if (claim.status === "COMPLETED") {
+        if (claim.result.idempotencyKey !== idempotencyKey || claim.result.ticketId !== ticket.ticketId) {
+          throw new Error("EXECUTION_IDEMPOTENCY_STORE_INVALID");
+        }
+        return claim.result;
+      }
+    }
+    const result = await this.#executeLegs(ticket, idempotencyKey);
+    await this.#idempotencyStore?.complete(idempotencyKey, fingerprint, result);
+    return result;
+  }
+
+  async #executeLegs(ticket: PreflightTicket, idempotencyKey: string): Promise<TwoLegExecutionResult> {
     const operations = ticket.legs.map((leg) => {
       const adapter = this.#adapters.get(leg.provider);
       if (adapter === undefined) return Promise.resolve<ExecutionLegResult>({ provider: leg.provider,
