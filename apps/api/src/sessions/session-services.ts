@@ -49,6 +49,9 @@ import { PlaywrightBtiBrowserManager } from "../providers/bti/bti-browser-manage
 import { BtiSessionValidator } from "../providers/bti/bti-session-validator.js";
 import { BtiObservedCatalogReader } from "../providers/bti/bti-observed-catalog.js";
 import { BtiProfileReader } from "../providers/bti/bti-profile-reader.js";
+import { PlaywrightBtiEsportsPageReader } from "../providers/bti/bti-esports-source.js";
+import { JitBtiEsportsCatalogSource } from "../providers/bti/bti-esports-jit-source.js";
+import { BtiEsportsObservedCatalogReader } from "../providers/bti/bti-esports-observed-catalog.js";
 import { ProviderPreflightRegistry } from "../preflight/provider-preflight-registry.js";
 import { BtiTicketPreflightReader } from "../providers/bti/bti-ticket-preflight-reader.js";
 import { ApsportTicketPreflightReader } from "../providers/apsport/apsport-ticket-preflight-reader.js";
@@ -92,7 +95,8 @@ const supportedCatalogPairs = [
   { provider: "APSPORT", category: "FOOTBALL", alias: "AP Sports · APSPORT" },
   { provider: "BTI", category: "FOOTBALL", alias: "BTI Football" },
   { provider: "IM", category: "FOOTBALL", alias: "I-Sports · IM", anchorProvider: "FABET", anchorCategory: null },
-  { provider: "IM", category: "LOL", alias: "IM Esports" }
+  { provider: "IM", category: "LOL", alias: "IM Esports" },
+  { provider: "BTI", category: "LOL", alias: "BTI Esports", anchorProvider: "FABET", anchorCategory: null }
 ] as const satisfies readonly SupportedCatalogPair[];
 
 function isSafeCapturedLaunch(value: string, expectedHost?: string): boolean {
@@ -228,6 +232,12 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts: catalogSources, source: apsportBrowser });
   const btiCatalogReader = new BtiObservedCatalogReader({ accounts: catalogSources, source: btiBrowser });
+  const btiEsportsCatalogReader = new BtiEsportsObservedCatalogReader({
+    source: new JitBtiEsportsCatalogSource({
+      fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) },
+      browser: new PlaywrightBtiEsportsPageReader()
+    })
+  });
   const providerPreflight = new ProviderPreflightRegistry({ accounts,
     readers: [new SabaTicketPreflightReader({ source: sabaBrowser,
       ...(options.providerFees?.SABA === undefined ? {} : { fee: options.providerFees.SABA }) }),
@@ -256,7 +266,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       { provider: "SABA", category: "FOOTBALL", reader: sabaCatalogReader },
       { provider: "SBOBET", category: "FOOTBALL", reader: sbobetCatalogReader },
       { provider: "APSPORT", category: "FOOTBALL", reader: apsportCatalogReader },
-      { provider: "BTI", category: "FOOTBALL", reader: btiCatalogReader }
+      { provider: "BTI", category: "FOOTBALL", reader: btiCatalogReader },
+      { provider: "BTI", category: "LOL", reader: btiEsportsCatalogReader }
     ] }),
     sabaCatalogReader,
     providerPreflight,

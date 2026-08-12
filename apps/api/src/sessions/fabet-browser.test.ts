@@ -14,6 +14,7 @@ import {
   PlaywrightFabetAutomation,
   shouldBlockExternalProviderNavigation,
   isProviderLaunchResponseForCurrentCard,
+  launcherMatchesProviderCategory,
   type CapturedNavigation,
   type FabetBrowserAutomation
 } from "./fabet-browser.js";
@@ -34,7 +35,7 @@ class FakeAutomation implements FabetBrowserAutomation {
   authenticated = true;
   launches: Record<string, CapturedNavigation[]> = {};
   authenticatedUrlValue: string | null = null;
-  providerPageCalls: Array<{ lobbyUrl: string; provider: "SABA" | "IM"; category: "FOOTBALL" | "LOL" }> = [];
+  providerPageCalls: Array<{ lobbyUrl: string; provider: "SABA" | "IM" | "CMD" | "BTI"; category: "FOOTBALL" | "LOL" }> = [];
 
   async login(input: { entryUrl: string; username: string; password: string }): Promise<void> {
     this.loginCalls.push(input);
@@ -53,7 +54,7 @@ class FakeAutomation implements FabetBrowserAutomation {
     return this.authenticatedUrlValue ?? this.loginCalls.at(-1)?.entryUrl ?? "https://fabet.party/";
   }
 
-  async withProviderPage<T>(input: { lobbyUrl: string; provider: "SABA" | "IM"; category: "FOOTBALL" | "LOL" },
+  async withProviderPage<T>(input: { lobbyUrl: string; provider: "SABA" | "IM" | "CMD" | "BTI"; category: "FOOTBALL" | "LOL" },
     consume: (page: Page) => Promise<T>): Promise<T> {
     this.providerPageCalls.push(input);
     return consume({} as Page);
@@ -245,6 +246,30 @@ describe("FabetBrowserDriver", () => {
     });
   });
 
+  it("derives the live-sports lobby for just-in-time CMD Football use", async () => {
+    const context = await setup();
+    await context.trustStore.approve("fabet.party");
+    context.automation.authenticatedUrlValue = "https://fabet.party/home";
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 30 }, idFactory: () => "1" });
+
+    await driver.withProviderPage("CMD", "FOOTBALL", async () => "cmd-result");
+    expect(context.automation.providerPageCalls.at(-1)).toEqual({
+      lobbyUrl: "https://fabet.party/lobby-the-thao?type=livesports", provider: "CMD", category: "FOOTBALL"
+    });
+  });
+
+  it("derives the esports lobby for just-in-time BTI LoL use", async () => {
+    const context = await setup();
+    await context.trustStore.approve("fabet.party");
+    context.automation.authenticatedUrlValue = "https://fabet.party/home";
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 30 }, idFactory: () => "1" });
+
+    await driver.withProviderPage("BTI", "LOL", async () => "bti-result");
+    expect(context.automation.providerPageCalls.at(-1)).toEqual({
+      lobbyUrl: "https://fabet.party/lobby-the-thao?type=esports", provider: "BTI", category: "LOL"
+    });
+  });
+
   it.each([
     ["SABA-SPORTS", true],
     ["BTI", true],
@@ -263,6 +288,13 @@ describe("FabetBrowserDriver", () => {
     expect(launcherLabelFromCard("Esports", "/game/bti_esportss_landscape.avif")).toBe("BTI");
     expect(launcherLabelFromCard("T-Sports", "/game/tpsports_landscape.webp")).toBe("APSPORT");
     expect(launcherLabelFromCard("T-Sports", "/game/tsports_landscape.avif")).toBe("BTI");
+  });
+
+  it("binds BTI LoL only to the esports asset and never the Football asset", () => {
+    expect(launcherMatchesProviderCategory("BTI", "LOL", "BTI", "/game/bti_esportss_landscape.avif")).toBe(true);
+    expect(launcherMatchesProviderCategory("BTI", "LOL", "BTI", "/game/tsports_landscape.avif")).toBe(false);
+    expect(launcherMatchesProviderCategory("BTI", "FOOTBALL", "BTI", "/game/bti_esportss_landscape.avif")).toBe(false);
+    expect(launcherMatchesProviderCategory("BTI", "FOOTBALL", "BTI", "/game/tsports_landscape.avif")).toBe(true);
   });
 
   it("keeps only a bounded asset basename for launcher diagnostics", () => {
@@ -395,6 +427,34 @@ describe("PlaywrightFabetAutomation", () => {
       await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
         provider: "IM", category: "FOOTBALL" }, async (page) => page.locator("main").innerText()))
         .resolves.toBe("IM provider ready");
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
+  it("clicks the exact T-SPORTS Football card for CMD", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/cmd-provider") {
+        response.end("<!doctype html><title>CMD Football live</title><main>CMD provider ready</main>");
+        return;
+      }
+      response.end(`<!doctype html><div class="game-item lobby"><img class="game-item__thumb" src="/game/tsports.webp">
+        <p class="game-item__name">T-SPORTS</p><div class="game-item__play-btn">
+        <button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/cmd-provider')">Play</button>
+        </div></div>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const automation = new PlaywrightFabetAutomation({
+      profilePath: join(await setup().then((value) => value.directory), "cmd-football-popup-profile"), headless: true
+    });
+    try {
+      await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
+        provider: "CMD", category: "FOOTBALL" }, async (page) => page.locator("main").innerText()))
+        .resolves.toBe("CMD provider ready");
     } finally {
       await automation.close();
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));

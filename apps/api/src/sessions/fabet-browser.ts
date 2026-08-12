@@ -11,7 +11,7 @@ export interface CapturedNavigation {
   readonly label: string;
 }
 
-export type FabetJitProvider = "SABA" | "IM";
+export type FabetJitProvider = "SABA" | "IM" | "CMD" | "BTI";
 
 export interface FabetBrowserAutomation {
   login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void>;
@@ -147,6 +147,20 @@ function providerHint(label: string, hostname: string): string {
 
 export function launcherMatchesCategory(category: Category, label: string): boolean {
   return category !== "LOL" || label.trim().toLocaleUpperCase("en") !== "C-SPORTS";
+}
+
+export function launcherMatchesProviderCategory(
+  provider: FabetJitProvider,
+  category: Category,
+  label: string,
+  thumbnailSource: string | null
+): boolean {
+  if (!launcherMatchesCategory(category, label)) return false;
+  if (provider !== "BTI") return true;
+
+  const asset = safeLauncherAssetName(thumbnailSource)?.toLocaleLowerCase("en") ?? "";
+  const isBtiEsports = asset.includes("bti_esport");
+  return category === "LOL" ? isBtiEsports : !isBtiEsports;
 }
 
 function sabaLauncherPriority(rawName: string, label: string, thumbnailSource: string | null): number {
@@ -571,7 +585,8 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         const fallbackName = await candidate.innerText().catch(() => "");
         const rawName = cardName === "" ? fallbackName : cardName;
         const label = launcherLabelFromCard(rawName, thumbnailSource);
-        if (providerHint(label, "") === input.provider && launcherMatchesCategory(input.category, label) &&
+        if (providerHint(label, "") === input.provider &&
+          launcherMatchesProviderCategory(input.provider, input.category, label, thumbnailSource) &&
           await candidate.isVisible().catch(() => false)) {
           const signature = `${label.trim().toLocaleUpperCase("en")}\u0000${safeLauncherAssetName(thumbnailSource) ?? ""}`;
           const priority = sabaLauncherPriority(rawName, label, thumbnailSource);
@@ -580,7 +595,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
             controlSignature = signature;
             controlPriority = priority;
           } else if (priority === controlPriority && controlSignature !== signature) {
-            process.stderr.write(`Fabet SABA card ambiguity: ${JSON.stringify([controlSignature, signature])}\n`);
+            process.stderr.write(`Fabet provider card ambiguity: ${JSON.stringify([controlSignature, signature])}\n`);
             throw new Error("FABET_PROVIDER_LAUNCH_AMBIGUOUS");
           }
         }

@@ -8,3 +8,4 @@ export * from "./sbobet/sbobet-normalizer.js";
 export * from "./saba/saba-esports-normalizer.js";
 export * from "./saba/saba-football-normalizer.js";
 export * from "./im/im-esports-normalizer.js";
+export * from "./bti/bti-esports-normalizer.js";
