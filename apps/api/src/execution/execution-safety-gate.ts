@@ -7,12 +7,15 @@ export class ExecutionSafetyGate {
   readonly #clock: { nowMs(): number };
   readonly #ttlMs: number;
   readonly #tokenFactory: () => string;
+  readonly #readinessCheck: (() => boolean) | null;
   readonly #arms = new Map<string, Arm>();
   #killSwitchReason: string | null = null;
 
   constructor(options: { readonly enabled?: boolean; readonly clock?: { nowMs(): number };
-    readonly ttlMs?: number; readonly tokenFactory?: () => string } = {}) {
+    readonly ttlMs?: number; readonly tokenFactory?: () => string; readonly readinessCheck?: () => boolean } = {}) {
     this.#enabled = options.enabled ?? false;
+    if (this.#enabled && options.readinessCheck === undefined) throw new Error("LIVE_READINESS_CHECK_REQUIRED");
+    this.#readinessCheck = options.readinessCheck ?? null;
     this.#clock = options.clock ?? { nowMs: Date.now };
     this.#ttlMs = options.ttlMs ?? 10_000;
     this.#tokenFactory = options.tokenFactory ?? (() => randomBytes(32).toString("hex"));
@@ -24,6 +27,7 @@ export class ExecutionSafetyGate {
   arm(ticketId: string, confirmation: string): string {
     if (!this.#enabled) throw new Error("LIVE_EXECUTION_DISABLED");
     if (this.#killSwitchReason !== null) throw new Error("LIVE_KILL_SWITCH_TRIPPED");
+    if (this.#readinessCheck?.() !== true) throw new Error("LIVE_EXECUTION_NOT_READY");
     if (ticketId.trim().length === 0 || confirmation !== `ARM ${ticketId}`) {
       throw new Error("LIVE_CONFIRMATION_INVALID");
     }
