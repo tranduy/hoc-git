@@ -19,8 +19,6 @@ import { CmdProfileReader } from "../providers/cmd/cmd-profile-reader.js";
 import { CmdSessionValidator } from "../providers/cmd/cmd-session-validator.js";
 import { CmdObservedCatalogReader } from "../providers/cmd/cmd-observed-catalog.js";
 import { PlaywrightSabaBrowserManager } from "../providers/saba/saba-browser-manager.js";
-import { PlaywrightSabaFootballPushBrowserManager } from "../providers/saba/saba-football-push-browser-manager.js";
-import { SabaObservedCatalogReader } from "../providers/saba/saba-observed-catalog.js";
 import { SabaProfileReader } from "../providers/saba/saba-profile-reader.js";
 import { SabaSessionValidator } from "../providers/saba/saba-session-validator.js";
 import { PlaywrightSabaEsportsBrowserManager } from "../providers/saba/saba-esports-browser-manager.js";
@@ -62,7 +60,7 @@ export interface CreateSessionServicesOptions {
 export interface ManagedSessionServices extends SessionServices {
   readonly accounts: AccountRegistry;
   readonly catalogReader: MultiProviderCatalogReader;
-  readonly sabaCatalogReader: SabaObservedCatalogReader;
+  readonly sabaCatalogReader: CmdObservedCatalogReader;
   readonly providerPreflight: ProviderPreflightRegistry;
   tick(): Promise<void>;
   close(): Promise<void>;
@@ -94,10 +92,6 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const sabaBrowser = new PlaywrightSabaBrowserManager({
     profilesRoot: join(profilesRoot, "providers-saba"),
-    headless: true
-  });
-  const sabaFootballPushBrowser = new PlaywrightSabaFootballPushBrowserManager({
-    profilesRoot: join(profilesRoot, "providers-saba-football-push"),
     headless: true
   });
   const sabaEsportsBrowser = new PlaywrightSabaEsportsBrowserManager({
@@ -169,10 +163,10 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
     timezoneOffsetMinutes: 420
   });
-  const sabaCatalogReader = new SabaObservedCatalogReader({
-    accounts,
-    source: sabaFootballPushBrowser,
-    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
+  const sabaCatalogReader = new CmdObservedCatalogReader({
+    provider: "SABA", accounts, source: sabaBrowser,
+    clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
+    timezoneOffsetMinutes: 420
   });
   const sbobetCatalogReader = new SbobetObservedCatalogReader({
     accounts, source: sbobetBrowser,
@@ -208,7 +202,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     },
     async close(): Promise<void> {
       await Promise.all([
-        automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaFootballPushBrowser.close(), sabaEsportsBrowser.close(),
+        automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaEsportsBrowser.close(),
         sbobetBrowser.close(), imEsportsBrowser.close(), apsportBrowser.close(), btiBrowser.close()
       ]);
     }
