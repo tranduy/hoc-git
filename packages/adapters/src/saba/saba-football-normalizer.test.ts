@@ -36,6 +36,40 @@ describe("normalizeSabaFootballRecords", () => {
     expect(normalized.markets[0]).toMatchObject({ line: "-0.5" });
   });
 
+  it("maps a real SABA full-time half-goal total as exact OVER and UNDER", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 150746, leaguenameen: "AFC Champions League Two Qualifiers", sporttype: 1 },
+      { type: "m", matchid: 132130281, leagueid: 150746, hteamnameen: "East Bengal FC",
+        ateamnameen: "Al Arabi", kickofftime: 1_786_545_340, marketid: "L", sporttype: 1 },
+      { type: "o", oddsid: 1044675909, matchid: 132130281, bettype: 3, parenttypeid: 3,
+        oddsstatus: "running", enable: 1, odds1a: -0.63, odds2a: 0.45, hdp1: 1.5, hdp2: 0 }
+    ], options);
+
+    expect(normalized.markets).toEqual([expect.objectContaining({
+      providerMarketId: "1044675909", marketType: "FT_TOTAL", scope: "FULL_TIME", line: "1.5", status: "OPEN"
+    })]);
+    expect(normalized.quotes.map((quote) => [quote.selection, quote.rawOdds, quote.line])).toEqual([
+      ["OVER", "-0.63", "1.5"], ["UNDER", "0.45", "1.5"]
+    ]);
+  });
+
+  it("rejects non-half-goal and structurally inconsistent SABA totals", () => {
+    const base = { type: "o", matchid: 2, bettype: 3, parenttypeid: 3,
+      oddsstatus: "running", enable: 1, odds1a: 0.9, odds2a: -0.9, hdp2: 0 };
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 10, marketid: "L", sporttype: 1 },
+      { ...base, oddsid: 3, hdp1: 2.25 },
+      { ...base, oddsid: 4, hdp1: 2 },
+      { ...base, oddsid: 5, hdp1: 2.5, hdp2: 0.5 },
+      { ...base, oddsid: 6, hdp1: 2.5, parenttypeid: 8 }
+    ], options);
+
+    expect(normalized.markets).toEqual([]);
+    expect(normalized.quotes).toEqual([]);
+  });
+
   it("rejects quarter lines, three-way markets, invalid prices and non-football matches", () => {
     const base = { type: "o", matchid: 2, parenttypeid: 1, oddsstatus: "running", odds1a: 0.9, odds2a: -0.9 };
     const normalized = normalizeSabaFootballRecords([

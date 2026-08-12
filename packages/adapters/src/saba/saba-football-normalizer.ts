@@ -51,6 +51,17 @@ function canonicalHomeHandicap(record: RawRecord): string | null {
   return String(value);
 }
 
+function canonicalTotalLine(record: RawRecord): string | null {
+  const total = finite(record.hdp1);
+  const secondary = finite(record.hdp2);
+  // Live SABA Football metadata identifies bettype 3 as Over/Under and
+  // carries the total in hdp1 with a zero hdp2. Keep only x.5 lines so
+  // neither outcome can settle as a push or half-win/half-loss.
+  if (total === null || secondary !== 0 || total <= 0 || Number.isInteger(total) ||
+    !Number.isInteger(total * 2)) return null;
+  return String(total);
+}
+
 export function normalizeSabaFootballRecords(
   records: readonly RawRecord[],
   options: SabaFootballNormalizeOptions
@@ -113,14 +124,16 @@ export function normalizeSabaFootballRecords(
 
   const seenMarkets = new Set<string>();
   for (const record of records) {
-    if (record.type !== "o" || record.bettype !== 1 || (record.parenttypeid !== undefined && record.parenttypeid !== 1)) continue;
+    if (record.type !== "o" || (record.bettype !== 1 && record.bettype !== 3) ||
+      (record.parenttypeid !== undefined && record.parenttypeid !== record.bettype)) continue;
     const matchId = id(record.matchid);
     const oddsId = id(record.oddsid);
     if (matchId === null || !acceptedMatches.has(matchId)) continue;
-    const line = canonicalHomeHandicap(record);
-    const home = malay(record.odds1a);
-    const away = malay(record.odds2a);
-    if (oddsId === null || line === null || home === null || away === null || seenMarkets.has(oddsId)) {
+    const marketType = record.bettype === 1 ? "FT_AH" as const : "FT_TOTAL" as const;
+    const line = marketType === "FT_AH" ? canonicalHomeHandicap(record) : canonicalTotalLine(record);
+    const firstPrice = malay(record.odds1a);
+    const secondPrice = malay(record.odds2a);
+    if (oddsId === null || line === null || firstPrice === null || secondPrice === null || seenMarkets.has(oddsId)) {
       diagnostics.push("SABA_FOOTBALL_MARKET_REJECTED");
       continue;
     }
@@ -129,13 +142,14 @@ export function normalizeSabaFootballRecords(
     const isLive = matches.get(matchId)?.marketid === "L";
     markets.push({
       provider: "SABA", category: "FOOTBALL", providerEventId: matchId, providerMarketId: oddsId,
-      marketType: "FT_AH", scope: "FULL_TIME", line,
+      marketType, scope: "FULL_TIME", line,
       settlementProfile: "football-regulation-including-added-time", status
     });
-    quotes.push(...(["HOME", "AWAY"] as const).map((selection, index): ProviderQuote => ({
+    const selections = marketType === "FT_AH" ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
+    quotes.push(...selections.map((selection, index): ProviderQuote => ({
       provider: "SABA", category: "FOOTBALL", providerEventId: matchId, providerMarketId: oddsId,
-      providerSelectionId: `${oddsId}:${selection.toLowerCase()}`, marketType: "FT_AH", scope: "FULL_TIME",
-      selection, line, rawOdds: index === 0 ? home : away, rawFormat: "MALAY", status, isLive,
+      providerSelectionId: `${oddsId}:${selection.toLowerCase()}`, marketType, scope: "FULL_TIME",
+      selection, line, rawOdds: index === 0 ? firstPrice : secondPrice, rawFormat: "MALAY", status, isLive,
       sourceTimestampMs: null, receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
     })));
   }

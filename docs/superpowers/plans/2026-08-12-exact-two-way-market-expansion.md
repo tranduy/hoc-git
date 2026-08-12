@@ -4,7 +4,7 @@
 
 **Goal:** Add exact full-time totals to the existing two-book monitor while preserving fail-closed mapping, ranking, and preflight behavior.
 
-**Architecture:** Keep provider decoders unchanged because SABA/SBOBET/APSPORT/BTI already expose normalized `FT_TOTAL` markets. Extend the single UI focus predicate to allow only full-time half-goal totals with the exact `OVER|UNDER` domain; the existing semantic row key, settlement grouping, ranker, stake planner, and preflight coordinator then consume the row unchanged.
+**Architecture:** Extend the single UI focus predicate to allow only full-time half-goal totals with the exact `OVER|UNDER` domain; the existing semantic row key, settlement grouping, ranker, stake planner, and preflight coordinator then consume the row unchanged. SBOBET, CMD, APSPORT and BTI already expose normalized `FT_TOTAL`. SABA required a source-backed normalizer extension after its live metadata confirmed `bettype=3` is `Over/Under` and that the total is carried in `hdp1` with zero `hdp2`.
 
 **Tech Stack:** TypeScript, React, Vitest, Zod contracts, exact decimal stake planner.
 
@@ -64,3 +64,11 @@
 - [ ] Run `git diff --check` and inspect `git status --short` without touching unrelated BTI/history work.
 - [ ] Append a checkpoint to `proccess.md` recording exact supported markets, exclusions, test counts, and that no live execution was enabled.
 - [ ] Commit the checkpoint and any remaining owned changes without staging unrelated work.
+
+### Completion addendum: SABA source coverage
+
+- [x] Renew Fabet read-only and inspect a fresh SABA Football launch without opening a bet slip or submitting a wager.
+- [x] Confirm live SABA metadata maps `bettype=3` to `Over/Under` and observe real records carrying the line in `hdp1` with `hdp2=0`.
+- [x] Add RED/GREEN adapter regressions for exact `FT_TOTAL / FULL_TIME / OVER|UNDER` output.
+- [x] Reject integer, quarter, inconsistent secondary-line, and parent-type-mismatch records fail-closed.
+- [x] Prove the normalized total passes through `SabaObservedCatalogReader`.

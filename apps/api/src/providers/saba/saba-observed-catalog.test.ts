@@ -34,7 +34,9 @@ describe("SabaObservedCatalogReader", () => {
         { type: "m", matchid: "match", leagueid: "league", hteamnameen: "Kristiansund BK",
           ateamnameen: "Molde", kickofftime: 1_788_000_000, marketid: "L", sporttype: 1 },
         { type: "o", oddsid: "handicap", matchid: "match", bettype: 1, parenttypeid: 1,
-          oddsstatus: "running", enable: 1, odds1a: -0.85, odds2a: 0.69, hdp1: 0, hdp2: 0.5 }
+          oddsstatus: "running", enable: 1, odds1a: -0.85, odds2a: 0.69, hdp1: 0, hdp2: 0.5 },
+        { type: "o", oddsid: "total", matchid: "match", bettype: 3, parenttypeid: 3,
+          oddsstatus: "running", enable: 1, odds1a: 0.81, odds2a: -0.99, hdp1: 2.5, hdp2: 0 }
       ] },
       clock: { now: () => ({ wallClockNowMs: 1_788_000_000_000, monotonicNowMs: 500 }) }
     });
@@ -42,7 +44,9 @@ describe("SabaObservedCatalogReader", () => {
     expect(result.provider).toBe("SABA");
     expect(requestedCategory).toBe("FOOTBALL");
     expect(result.events[0]).toMatchObject({ provider: "SABA", participantA: "Kristiansund BK", participantB: "Molde" });
-    expect(result.markets[0]).toMatchObject({ provider: "SABA", marketType: "FT_AH", line: "0.5" });
+    expect(result.markets.map((market) => [market.marketType, market.line])).toEqual([
+      ["FT_AH", "0.5"], ["FT_TOTAL", "2.5"]
+    ]);
     expect(JSON.stringify(result)).not.toMatch(/secret-canary|saba\.test/iu);
   });
 });
