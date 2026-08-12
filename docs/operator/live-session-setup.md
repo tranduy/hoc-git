@@ -49,6 +49,14 @@ Secrets are encrypted with Windows DPAPI for the current Windows user and stored
 
 This milestone is read-only. No balance is used and no wager is submitted. Any future execution feature must require explicit confirmation for each bet before either leg is placed.
 
+Provider preflight fees must be declared explicitly before starting the API. The server never assumes that a bookmaker is fee-free. Set `PROVIDER_FEES_JSON` to a strict JSON object containing only verified policies, for example:
+
+```powershell
+$env:PROVIDER_FEES_JSON='{"SABA":{"type":"NONE"},"SBOBET":{"type":"PROFIT","rate":"0.01"}}'
+```
+
+Supported fee types are `NONE`, `PROFIT`, and `PAYOUT`. Charged rates must be plain decimal strings from `0` (inclusive) to `1` (exclusive). Unknown providers, extra fields, exponent notation, or missing policies fail closed; a provider with no policy cannot produce a preflight-ready leg.
+
 ## Watch one live match
 
 1. Open `http://127.0.0.1:4311/live-catalog`.

@@ -46,6 +46,7 @@ import { ProviderPreflightRegistry } from "../preflight/provider-preflight-regis
 import { BtiTicketPreflightReader } from "../providers/bti/bti-ticket-preflight-reader.js";
 import { ApsportTicketPreflightReader } from "../providers/apsport/apsport-ticket-preflight-reader.js";
 import { SabaTicketPreflightReader } from "../providers/saba/saba-ticket-preflight-reader.js";
+import type { FeeModel } from "@tool-chenh/core";
 
 export interface CreateSessionServicesOptions {
   readonly localAppData: string;
@@ -56,6 +57,7 @@ export interface CreateSessionServicesOptions {
   readonly idFactory?: () => string;
   readonly validators?: readonly SessionValidator[];
   readonly profileReaders?: readonly ProviderProfileReader[];
+  readonly providerFees?: Partial<Record<"SABA" | "SBOBET" | "APSPORT" | "BTI", FeeModel>>;
 }
 
 export interface ManagedSessionServices extends SessionServices {
@@ -184,10 +186,14 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts, source: apsportBrowser });
   const btiCatalogReader = new BtiObservedCatalogReader({ accounts, source: btiBrowser });
   const providerPreflight = new ProviderPreflightRegistry({ accounts,
-    readers: [new SabaTicketPreflightReader({ source: sabaBrowser }),
-      new BtiTicketPreflightReader({ source: btiBrowser }),
-      new ApsportTicketPreflightReader({ source: apsportBrowser }),
-      new SbobetTicketPreflightReader({ source: sbobetBrowser })] });
+    readers: [new SabaTicketPreflightReader({ source: sabaBrowser,
+      ...(options.providerFees?.SABA === undefined ? {} : { fee: options.providerFees.SABA }) }),
+      new BtiTicketPreflightReader({ source: btiBrowser,
+        ...(options.providerFees?.BTI === undefined ? {} : { fee: options.providerFees.BTI }) }),
+      new ApsportTicketPreflightReader({ source: apsportBrowser,
+        ...(options.providerFees?.APSPORT === undefined ? {} : { fee: options.providerFees.APSPORT }) }),
+      new SbobetTicketPreflightReader({ source: sbobetBrowser,
+        ...(options.providerFees?.SBOBET === undefined ? {} : { fee: options.providerFees.SBOBET }) })] });
   return {
     manager,
     discovery,

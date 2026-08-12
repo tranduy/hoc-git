@@ -18,7 +18,7 @@ const handle = { sessionId: "session-1", provider: "SBOBET", category: "FOOTBALL
 
 describe("SbobetTicketPreflightReader", () => {
   it("revalidates exact identity and stays blocked without exact slip limits", async () => {
-    const reader = new SbobetTicketPreflightReader({ source: { readCatalog: async () => snapshot } });
+    const reader = new SbobetTicketPreflightReader({ source: { readCatalog: async () => snapshot }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({ provider: "SBOBET",
       providerEventId: "event-1", providerMarketId: "market-1", providerSelectionId: "home-1h",
       decimalOdds: "1.82", constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"] });
@@ -30,9 +30,10 @@ describe("SbobetTicketPreflightReader", () => {
     const reader = new SbobetTicketPreflightReader({ source: { readCatalog: async () => snapshot,
       readTicketConstraint: async () => ({ providerSelectionId: "home-1h", currency: "VND", minStake: "50000",
         maxStake: "329868000", stakeStep: "1000", balance: "29000", observedAtMs: 2000 })
-    }, clock: { nowMs: () => 2000 } });
+    }, clock: { nowMs: () => 2000 }, fee: { type: "PROFIT", rate: "0.01" } });
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({
-      constraint: { minStake: "50000", balance: "29000", expiresAtMs: 5000 }, eligible: false,
+      constraint: { minStake: "50000", balance: "29000", feeType: "PROFIT", feeRate: "0.01",
+        expiresAtMs: 5000 }, eligible: false,
       reasons: ["INSUFFICIENT_BALANCE"]
     });
   });

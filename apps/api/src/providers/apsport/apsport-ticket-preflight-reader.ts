@@ -1,6 +1,6 @@
 import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import type { ProviderTicketPreflight, ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
-import { toDecimal } from "@tool-chenh/core";
+import { Decimal, toDecimal, type FeeModel } from "@tool-chenh/core";
 import type { ActiveSecretHandle } from "../../sessions/types.js";
 import type { ProviderTicketPreflightReader } from "../provider-capabilities.js";
 import type { ApsportCatalogSnapshot } from "./apsport-browser-manager.js";
@@ -19,8 +19,10 @@ export class ApsportTicketPreflightReader implements ProviderTicketPreflightRead
   readonly capabilities = ["PREFLIGHT"] as const;
   readonly #source: ApsportPreflightSource;
   readonly #clock: { nowMs(): number };
-  constructor(options: { readonly source: ApsportPreflightSource; readonly clock?: { nowMs(): number } }) {
-    this.#source = options.source; this.#clock = options.clock ?? { nowMs: Date.now };
+  readonly #fee: FeeModel | null;
+  constructor(options: { readonly source: ApsportPreflightSource; readonly clock?: { nowMs(): number };
+    readonly fee?: FeeModel }) {
+    this.#source = options.source; this.#clock = options.clock ?? { nowMs: Date.now }; this.#fee = options.fee ?? null;
   }
 
   async preflight(handle: ActiveSecretHandle, request: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight> {
@@ -42,11 +44,13 @@ export class ApsportTicketPreflightReader implements ProviderTicketPreflightRead
       const nowMs = this.#clock.nowMs();
       const fresh = limit !== null && limit.providerSelectionId === quote.providerSelectionId &&
         Number.isFinite(limit.observedAtMs) && limit.observedAtMs <= nowMs + 1_000 && nowMs - limit.observedAtMs <= 1_000;
-      const constraint = fresh ? { currency: limit.currency, minStake: limit.minStake, maxStake: limit.maxStake,
-        stakeStep: limit.stakeStep, balance: limit.balance, feeType: "NONE" as const, feeRate: null,
+      const constraint = fresh && this.#fee !== null ? { currency: limit.currency, minStake: limit.minStake, maxStake: limit.maxStake,
+        stakeStep: limit.stakeStep, balance: limit.balance, feeType: this.#fee.type,
+        feeRate: this.#fee.type === "NONE" ? null : plain(new Decimal(this.#fee.rate)),
         verifiedAsOfMs: limit.observedAtMs, expiresAtMs: limit.observedAtMs + 3_000 } : null;
       const reasons: ProviderTicketPreflight["reasons"][number][] = [];
-      if (constraint === null) reasons.push("LIMIT_UNAVAILABLE");
+      if (!fresh) reasons.push("LIMIT_UNAVAILABLE");
+      if (this.#fee === null) reasons.push("FINANCIAL_POLICY_UNAVAILABLE");
       if (decimalOdds !== request.expectedDecimalOdds) reasons.push("ODDS_CHANGED");
       if (quote.status !== "OPEN") reasons.push("MARKET_NOT_OPEN");
       if (constraint !== null) {

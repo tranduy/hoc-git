@@ -109,7 +109,8 @@ export interface ProviderTicketPreflight {
   readonly constraint: ProviderStakeConstraint | null;
   readonly eligible: boolean;
   readonly reasons: readonly ("IDENTITY_MISMATCH" | "ODDS_CHANGED" | "MARKET_NOT_OPEN" |
-    "BELOW_MIN" | "ABOVE_MAX" | "STAKE_STEP_MISMATCH" | "INSUFFICIENT_BALANCE" | "LIMIT_UNAVAILABLE")[];
+    "BELOW_MIN" | "ABOVE_MAX" | "STAKE_STEP_MISMATCH" | "INSUFFICIENT_BALANCE" | "LIMIT_UNAVAILABLE" |
+    "FINANCIAL_POLICY_UNAVAILABLE")[];
 }
 
 export interface PreflightLeg {

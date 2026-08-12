@@ -19,7 +19,7 @@ describe("SabaTicketPreflightReader", () => {
     const reader = new SabaTicketPreflightReader({ source: { readCatalog: async () => records,
       readTicketConstraint: async () => ({ providerSelectionId: "market:home", rawOdds: "0.94", currency: "INH",
         minStake: "30", maxStake: "54945", stakeStep: "1", balance: "29.61", observedAtMs: 1000 }) },
-    clock: { nowMs: () => 1000, monotonicNowMs: () => 500 } });
+    clock: { nowMs: () => 1000, monotonicNowMs: () => 500 }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({ provider: "SABA", decimalOdds: "1.94",
       constraint: { currency: "VND", minStake: "30000", maxStake: "54945000", stakeStep: "1000", balance: "29610" },
       eligible: false, reasons: ["INSUFFICIENT_BALANCE"] });
@@ -27,10 +27,20 @@ describe("SabaTicketPreflightReader", () => {
 
   it("fails closed on exact identity mismatch or missing ticket limits", async () => {
     const reader = new SabaTicketPreflightReader({ source: { readCatalog: async () => records },
-      clock: { nowMs: () => 1000, monotonicNowMs: () => 500 } });
+      clock: { nowMs: () => 1000, monotonicNowMs: () => 500 }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, { ...request, providerSelectionId: "other" }))
       .rejects.toThrow("PREFLIGHT_IDENTITY_MISMATCH");
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({ constraint: null,
       eligible: false, reasons: ["LIMIT_UNAVAILABLE"] });
+  });
+
+  it("does not invent a fee-free constraint when no provider fee policy is configured", async () => {
+    const reader = new SabaTicketPreflightReader({ source: { readCatalog: async () => records,
+      readTicketConstraint: async () => ({ providerSelectionId: "market:home", rawOdds: "0.94", currency: "INH",
+        minStake: "30", maxStake: "54945", stakeStep: "1", balance: "200", observedAtMs: 1000 }) },
+    clock: { nowMs: () => 1000, monotonicNowMs: () => 500 } });
+
+    await expect(reader.preflight(handle, request)).resolves.toMatchObject({ constraint: null, eligible: false,
+      reasons: ["FINANCIAL_POLICY_UNAVAILABLE"] });
   });
 });

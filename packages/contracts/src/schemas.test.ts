@@ -52,6 +52,13 @@ describe("live account and preflight schemas", () => {
       decimalOdds: "2.2", quoteStatus: "OPEN", constraint: null,
       eligible: false, reasons: ["LIMIT_UNAVAILABLE"] }).success).toBe(true);
   });
+
+  it("allows a blocked exact quote to report missing financial policy without inventing fee-free terms", () => {
+    expect(ProviderTicketPreflightSchema.safeParse({ accountId: "a", provider: "SABA", providerEventId: "e",
+      providerMarketId: "m", providerSelectionId: "s", selection: "HOME", line: "-0.5",
+      decimalOdds: "2.2", quoteStatus: "OPEN", constraint: null,
+      eligible: false, reasons: ["FINANCIAL_POLICY_UNAVAILABLE"] }).success).toBe(true);
+  });
   it("accepts Malay odds format for providers that publish signed Asian prices", () => {
     expect(OddsFormatSchema.parse("MALAY")).toBe("MALAY");
   });

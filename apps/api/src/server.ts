@@ -10,6 +10,7 @@ import { createSessionServices } from "./sessions/session-services.js";
 import { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { JsonlCatalogJournal } from "./routes/catalog-jsonl-journal.js";
 import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
+import { resolveProviderFees } from "./providers/provider-fees.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -164,7 +165,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   if (localAppData === undefined || localAppData.trim().length === 0) {
     throw new Error("LOCAL_APP_DATA_REQUIRED");
   }
-  const sessionServices = createSessionServices({ localAppData });
+  const sessionServices = createSessionServices({
+    localAppData,
+    providerFees: resolveProviderFees(env)
+  });
   const catalogTelemetry = new CatalogTelemetryRegistry(undefined, new JsonlCatalogJournal(
     join(localAppData, "tool-chenh", "logs", "catalog-changes.jsonl")
   ));

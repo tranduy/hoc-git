@@ -1,6 +1,6 @@
 import { normalizeObservedFootballCatalog, type CmdCatalogInputRecord } from "@tool-chenh/adapters";
 import type { ProviderTicketPreflight, ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
-import { toDecimal } from "@tool-chenh/core";
+import { Decimal, toDecimal, type FeeModel } from "@tool-chenh/core";
 import type { ActiveSecretHandle } from "../../sessions/types.js";
 import type { ProviderTicketPreflightReader } from "../provider-capabilities.js";
 import type { CmdTicketConstraintSnapshot } from "../cmd/cmd-ticket-constraint.js";
@@ -20,11 +20,13 @@ export class SabaTicketPreflightReader implements ProviderTicketPreflightReader 
   readonly capabilities = ["PREFLIGHT"] as const;
   readonly #source: SabaPreflightSource;
   readonly #clock: { nowMs(): number; monotonicNowMs(): number };
+  readonly #fee: FeeModel | null;
 
   constructor(options: { readonly source: SabaPreflightSource;
-    readonly clock?: { nowMs(): number; monotonicNowMs(): number } }) {
+    readonly clock?: { nowMs(): number; monotonicNowMs(): number }; readonly fee?: FeeModel }) {
     this.#source = options.source;
     this.#clock = options.clock ?? { nowMs: Date.now, monotonicNowMs: () => performance.now() };
+    this.#fee = options.fee ?? null;
   }
 
   async preflight(handle: ActiveSecretHandle, request: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight> {
@@ -54,14 +56,16 @@ export class SabaTicketPreflightReader implements ProviderTicketPreflightReader 
       const completeMoney = minStake !== null && maxStake !== null && stakeStep !== null && balance !== null &&
         minStake.unitScale === maxStake.unitScale && minStake.unitScale === stakeStep.unitScale &&
         minStake.unitScale === balance.unitScale;
-      const constraint = fresh && completeMoney ? { currency: "VND" as const, minStake: minStake.amount,
+      const constraint = fresh && completeMoney && this.#fee !== null ? { currency: "VND" as const, minStake: minStake.amount,
         maxStake: maxStake.amount, stakeStep: stakeStep.amount, balance: balance.amount,
-        feeType: "NONE" as const, feeRate: null, verifiedAsOfMs: limit.observedAtMs,
+        feeType: this.#fee.type, feeRate: this.#fee.type === "NONE" ? null : plain(new Decimal(this.#fee.rate)),
+        verifiedAsOfMs: limit.observedAtMs,
         expiresAtMs: limit.observedAtMs + 3_000 } : null;
       const rawOdds = fresh ? limit.rawOdds : quote.rawOdds;
       const decimalOdds = plain(toDecimal(rawOdds, quote.rawFormat));
       const reasons: ProviderTicketPreflight["reasons"][number][] = [];
-      if (constraint === null) reasons.push("LIMIT_UNAVAILABLE");
+      if (!fresh || !completeMoney) reasons.push("LIMIT_UNAVAILABLE");
+      if (this.#fee === null) reasons.push("FINANCIAL_POLICY_UNAVAILABLE");
       if (decimalOdds !== request.expectedDecimalOdds) reasons.push("ODDS_CHANGED");
       if (quote.status !== "OPEN") reasons.push("MARKET_NOT_OPEN");
       if (constraint !== null) {

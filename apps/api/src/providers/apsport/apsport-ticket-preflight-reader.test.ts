@@ -18,7 +18,7 @@ const handle = { sessionId: "session-1", provider: "APSPORT", category: "FOOTBAL
 
 describe("ApsportTicketPreflightReader", () => {
   it("re-reads exact APSPORT identity and odds while limits are unavailable", async () => {
-    const reader = new ApsportTicketPreflightReader({ source: { readCatalog: async () => snapshot } });
+    const reader = new ApsportTicketPreflightReader({ source: { readCatalog: async () => snapshot }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({ provider: "APSPORT",
       providerEventId: "event-1", providerMarketId: "market-1", providerSelectionId: "home-1",
       decimalOdds: "1.82", quoteStatus: "OPEN", constraint: null, eligible: false,
@@ -26,7 +26,7 @@ describe("ApsportTicketPreflightReader", () => {
   });
 
   it("reports changed odds and refuses a different provider selection", async () => {
-    const reader = new ApsportTicketPreflightReader({ source: { readCatalog: async () => snapshot } });
+    const reader = new ApsportTicketPreflightReader({ source: { readCatalog: async () => snapshot }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, { ...request, expectedDecimalOdds: "1.9" })).resolves.toMatchObject({
       reasons: ["LIMIT_UNAVAILABLE", "ODDS_CHANGED"] });
     await expect(reader.preflight(handle, { ...request, providerSelectionId: "other" }))
@@ -37,9 +37,10 @@ describe("ApsportTicketPreflightReader", () => {
     const reader = new ApsportTicketPreflightReader({ source: { readCatalog: async () => snapshot,
       readTicketConstraint: async () => ({ providerSelectionId: "home-1", currency: "VND", minStake: "50000",
         maxStake: "352359000", stakeStep: "1000", balance: "29000", observedAtMs: 2000 })
-    }, clock: { nowMs: () => 2000 } });
+    }, clock: { nowMs: () => 2000 }, fee: { type: "PAYOUT", rate: "0.02" } });
     await expect(reader.preflight(handle, { ...request, requestedStake: "29000" })).resolves.toMatchObject({
-      constraint: { minStake: "50000", balance: "29000", expiresAtMs: 5000 }, eligible: false,
+      constraint: { minStake: "50000", balance: "29000", feeType: "PAYOUT", feeRate: "0.02",
+        expiresAtMs: 5000 }, eligible: false,
       reasons: ["BELOW_MIN"]
     });
   });

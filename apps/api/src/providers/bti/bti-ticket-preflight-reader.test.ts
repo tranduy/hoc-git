@@ -24,7 +24,7 @@ describe("BtiTicketPreflightReader", () => {
     const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
     const reader = new BtiTicketPreflightReader({ source: { readCatalog: async () => ({
       records: extractBtiCatalogRecords(payload), observedAtMs: 1000, receivedMonotonicMs: 10
-    }) } });
+    }) }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({ provider: "BTI",
       providerEventId: "event-real", providerMarketId: "market-real:-0.5", providerSelectionId: "home-real",
       decimalOdds: "1.82", quoteStatus: "OPEN", constraint: null, eligible: false,
@@ -35,7 +35,7 @@ describe("BtiTicketPreflightReader", () => {
     const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
     const reader = new BtiTicketPreflightReader({ source: { readCatalog: async () => ({
       records: extractBtiCatalogRecords(payload), observedAtMs: 1000, receivedMonotonicMs: 10
-    }) } });
+    }) }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, { ...request, expectedDecimalOdds: "1.9" })).resolves.toMatchObject({
       reasons: ["LIMIT_UNAVAILABLE", "ODDS_CHANGED"] });
     await expect(reader.preflight(handle, { ...request, providerSelectionId: "other" }))
@@ -49,11 +49,11 @@ describe("BtiTicketPreflightReader", () => {
         receivedMonotonicMs: 10 }),
       readTicketConstraint: async () => ({ providerSelectionId: "home-real", currency: "VND",
         minStake: "25250", maxStake: "17669910", stakeStep: "10", balance: "29610", observedAtMs: 2000 })
-    }, clock: { nowMs: () => 2100 } });
+    }, clock: { nowMs: () => 2100 }, fee: { type: "PROFIT", rate: "0.03" } });
 
     await expect(reader.preflight(handle, { ...request, requestedStake: "29000" })).resolves.toMatchObject({
       constraint: { currency: "VND", minStake: "25250", maxStake: "17669910", stakeStep: "10",
-        balance: "29610", feeType: "NONE", feeRate: null, verifiedAsOfMs: 2000, expiresAtMs: 5000 },
+        balance: "29610", feeType: "PROFIT", feeRate: "0.03", verifiedAsOfMs: 2000, expiresAtMs: 5000 },
       eligible: true, reasons: []
     });
   });
@@ -62,14 +62,14 @@ describe("BtiTicketPreflightReader", () => {
     const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
     const source = { readCatalog: async () => ({ records: extractBtiCatalogRecords(payload), observedAtMs: 1000,
       receivedMonotonicMs: 10 }), readTicketConstraint: async () => null };
-    await expect(new BtiTicketPreflightReader({ source }).preflight(handle, request)).resolves.toMatchObject({
+    await expect(new BtiTicketPreflightReader({ source, fee: { type: "NONE" } }).preflight(handle, request)).resolves.toMatchObject({
       constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"]
     });
 
     const constrained = new BtiTicketPreflightReader({ source: { ...source,
       readTicketConstraint: async () => ({ providerSelectionId: "home-real", currency: "VND",
         minStake: "30000", maxStake: "100000", stakeStep: "1000", balance: "50000", observedAtMs: 2000 })
-    }, clock: { nowMs: () => 2000 } });
+    }, clock: { nowMs: () => 2000 }, fee: { type: "NONE" } });
     await expect(constrained.preflight(handle, { ...request, requestedStake: "29000" })).resolves.toMatchObject({
       eligible: false, reasons: ["BELOW_MIN"]
     });
