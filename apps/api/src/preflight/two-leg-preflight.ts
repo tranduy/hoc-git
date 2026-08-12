@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { PreflightRequestSchema, PreflightTicketSchema, type Opportunity, type PreflightRequest,
   type PreflightTicket, type ProviderId, type ProviderTicketPreflight,
   type ProviderStakeConstraint, type ProviderTicketPreflightRequest, type StakeLeg } from "@tool-chenh/contracts";
@@ -63,6 +63,15 @@ export class TwoLegPreflight {
     const key = randomBytes(32);
     this.#signer = options.signer ?? ((payload) => createHmac("sha256", key).update(payload).digest("hex"));
     this.#timeoutMs = options.timeoutMs ?? 3_000;
+  }
+
+  verifyTicket(input: PreflightTicket): boolean {
+    const parsed = PreflightTicketSchema.safeParse(input);
+    if (!parsed.success) return false;
+    const { signature, ...unsigned } = parsed.data;
+    const expected = Buffer.from(this.#signer(JSON.stringify(unsigned)), "utf8");
+    const actual = Buffer.from(signature, "utf8");
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
   }
 
   async preflight(input: PreflightRequest): Promise<PreflightTicket> {

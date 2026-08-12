@@ -60,6 +60,21 @@ describe("TwoLegPreflight", () => {
     expect(preflight).toHaveBeenCalledTimes(2);
   });
 
+  it("verifies its own signed ticket and rejects any mutated execution field", async () => {
+    const service = new TwoLegPreflight({ opportunities: { getSnapshot: () => ({ opportunities: [opportunity] }) },
+      providers: { providerForAccount: async (id) => id === "sb" ? "SBOBET" : "APSPORT",
+        preflight: async (request) => result(request, request.accountId === "sb" ? "SBOBET" : "APSPORT") },
+      clock: { nowMs: () => 1500 } });
+    const issued = await service.preflight({ opportunityId: "opp-1", accountAId: "sb", accountBId: "ap",
+      maxOddsDriftBps: 25 });
+
+    expect(service.verifyTicket(issued)).toBe(true);
+    expect(service.verifyTicket({ ...issued, legs: [{ ...issued.legs[0], stake: "200000" }, issued.legs[1]] }))
+      .toBe(false);
+    const replacement = issued.signature.endsWith("0") ? "1" : "0";
+    expect(service.verifyTicket({ ...issued, signature: `${issued.signature.slice(0, -1)}${replacement}` })).toBe(false);
+  });
+
   it("fails before opening slips when accounts do not cover two distinct leg providers", async () => {
     const preflight = vi.fn();
     const service = new TwoLegPreflight({ opportunities: { getSnapshot: () => ({ opportunities: [opportunity] }) },
