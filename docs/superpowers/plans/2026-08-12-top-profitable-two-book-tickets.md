@@ -20,7 +20,7 @@
 - Create: `apps/web/src/api/provider-preflight.ts`
 - Create: `apps/web/src/api/provider-preflight.test.ts`
 
-- [ ] **Step 1: Write the failing parser/request tests**
+- [x] **Step 1: Write the failing parser/request tests**
 
 Test the exact request body, `cache: "no-store"`, successful `ProviderTicketPreflightSchema` parsing, non-2xx error propagation, malformed response rejection, and verify that no execution URL is ever used.
 
@@ -37,13 +37,13 @@ it("posts one exact ticket leg and parses verified constraints", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the focused test and record RED**
+- [x] **Step 2: Run the focused test and record RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/api/provider-preflight.test.ts`
 
 Expected: FAIL because `provider-preflight.ts` does not exist.
 
-- [ ] **Step 3: Implement the minimal strict client**
+- [x] **Step 3: Implement the minimal strict client**
 
 Expose only:
 
@@ -60,7 +60,7 @@ export class ProviderPreflightApi implements ProviderPreflightApiLike {
 
 Validate outbound input with `ProviderTicketPreflightRequestSchema`, validate inbound JSON with `ProviderTicketPreflightSchema`, and map non-2xx JSON `{error}` to a safe `Error`. Never persist the result because its lifetime is at most three seconds.
 
-- [ ] **Step 4: Run focused tests and typecheck**
+- [x] **Step 4: Run focused tests and typecheck**
 
 Run:
 
@@ -71,7 +71,7 @@ npm.cmd run typecheck --workspace @tool-chenh/web
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add apps/web/src/api/provider-preflight.ts apps/web/src/api/provider-preflight.test.ts
