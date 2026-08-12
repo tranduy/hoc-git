@@ -50,7 +50,7 @@
 - Consumes: `SessionStatusList`, `ActiveSecretHandle`, `CatalogSourceIdentity`, and `ActiveAccountAccess`.
 - Produces: `CatalogSourceStatus`, `CatalogSourceStatusSchema`, `CatalogSourceRegistry.listStatuses()`, `resolveCatalogSource(id)`, and `withActiveHandle(...)`.
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Add strict schema tests equivalent to:
 
@@ -79,13 +79,13 @@ expect(() => CatalogSourceStatusSchema.parse({
 })).toThrow();
 ```
 
-- [ ] **Step 2: Run contract tests and verify RED**
+- [x] **Step 2: Run contract tests and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/contracts -- --run src/schemas.test.ts`
 
 Expected: FAIL because `CatalogSourceStatusSchema` is not exported.
 
-- [ ] **Step 3: Add the exact contract**
+- [x] **Step 3: Add the exact contract**
 
 Add to `domain.ts`:
 
@@ -121,13 +121,13 @@ export const CatalogSourceStatusSchema = z.strictObject({
 });
 ```
 
-- [ ] **Step 4: Run contract tests and typecheck**
+- [x] **Step 4: Run contract tests and typecheck**
 
 Run: `npm.cmd test --workspace @tool-chenh/contracts -- --run src/schemas.test.ts; npm.cmd run typecheck --workspace @tool-chenh/contracts`
 
 Expected: all contract tests pass and typecheck exits 0.
 
-- [ ] **Step 5: Write failing resolver tests**
+- [x] **Step 5: Write failing resolver tests**
 
 Cover these observable behaviors with real resolver calls:
 
@@ -149,13 +149,13 @@ await expect(registry.resolveCatalogSource("catalog-source:SABA:LOL"))
 
 Fixtures must include a newer `ACTION_REQUIRED` session, a category-null legacy session, a wrong-category ACTIVE session, two same-time ACTIVE sessions, and a manual account ID delegated to `accounts`.
 
-- [ ] **Step 6: Run resolver tests and verify RED**
+- [x] **Step 6: Run resolver tests and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/api -- --run src/catalog/catalog-source-registry.test.ts`
 
 Expected: FAIL because `CatalogSourceRegistry` does not exist.
 
-- [ ] **Step 7: Implement the minimal resolver**
+- [x] **Step 7: Implement the minimal resolver**
 
 Use these public signatures:
 
@@ -180,13 +180,13 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
 
 Select eligible sessions by exact provider/category and `state === "ACTIVE"`; order by `acquiredAtMs ?? -1`, then `id`. For non-logical IDs, delegate both resolution and handle access to `AccountRegistry`. Return a stable key `catalog-source|provider|category` for logical sources. Re-resolve before handle consumption and confirm the returned handle still has the expected provider/category.
 
-- [ ] **Step 8: Run focused resolver and contract gates**
+- [x] **Step 8: Run focused resolver and contract gates**
 
 Run: `npm.cmd test --workspace @tool-chenh/api -- --run src/catalog/catalog-source-registry.test.ts; npm.cmd run typecheck --workspace @tool-chenh/api`
 
 Expected: resolver tests pass and API typecheck exits 0.
 
-- [ ] **Step 9: Commit Task 1**
+- [x] **Step 9: Commit Task 1**
 
 ```powershell
 git add packages/contracts/src/domain.ts packages/contracts/src/schemas.ts packages/contracts/src/schemas.test.ts apps/api/src/catalog/catalog-source-registry.ts apps/api/src/catalog/catalog-source-registry.test.ts
@@ -210,7 +210,7 @@ git commit -m "feat: resolve validated logical catalog sources"
 - Consumes: `CatalogSourceRegistry` from Task 1.
 - Produces: `GET /api/catalog/sources`, `ManagedSessionServices.catalogSources`, and catalog readers backed by logical-source resolution.
 
-- [ ] **Step 1: Write failing route tests**
+- [x] **Step 1: Write failing route tests**
 
 Test that `/api/catalog/sources` returns only strict redacted statuses and that registry failure produces `503 { error: "CATALOG_SOURCES_UNAVAILABLE" }` without affecting `/api/health`.
 
@@ -223,13 +223,13 @@ expect(response.json()).toEqual({ sources: [expect.objectContaining({
 expect(JSON.stringify(response.json())).not.toMatch(/token|cookie|launchUrl|trustedHostname/iu);
 ```
 
-- [ ] **Step 2: Run route tests and verify RED**
+- [x] **Step 2: Run route tests and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/api -- --run src/routes/catalog-sources.test.ts`
 
 Expected: FAIL because the route is absent.
 
-- [ ] **Step 3: Implement and register the route**
+- [x] **Step 3: Implement and register the route**
 
 Create:
 
@@ -246,13 +246,13 @@ export function registerCatalogSourceRoutes(
 
 Validate the outgoing array with `CatalogSourceStatusSchema.array()` before sending it. Coalesce simultaneous list calls for 250 ms, mirroring account-route behavior. Catch list failures and return only the safe error code.
 
-- [ ] **Step 4: Run route tests and verify GREEN**
+- [x] **Step 4: Run route tests and verify GREEN**
 
 Run: `npm.cmd test --workspace @tool-chenh/api -- --run src/routes/catalog-sources.test.ts src/app.test.ts`
 
 Expected: route and app tests pass.
 
-- [ ] **Step 5: Write failing composition tests**
+- [x] **Step 5: Write failing composition tests**
 
 Assert that session services:
 
@@ -261,13 +261,13 @@ Assert that session services:
 - resolve a stable logical source to the newest ACTIVE test session;
 - still allow a manual account ID through the delegate path.
 
-- [ ] **Step 6: Run composition tests and verify RED**
+- [x] **Step 6: Run composition tests and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/api -- --run src/sessions/session-services.test.ts`
 
 Expected: FAIL because `catalogSources` is absent.
 
-- [ ] **Step 7: Compose supported pairs once**
+- [x] **Step 7: Compose supported pairs once**
 
 Define one immutable pair list in `session-services.ts`:
 
@@ -287,13 +287,13 @@ Construct `CatalogSourceRegistry({ sessions: manager, accounts, supportedPairs }
 
 Do not add IM Football or BTI LoL until their reader registrations exist. CMD may appear unavailable until a validated session exists.
 
-- [ ] **Step 8: Run API focused and full gates**
+- [x] **Step 8: Run API focused and full gates**
 
 Run: `npm.cmd test --workspace @tool-chenh/api -- --run src/catalog/catalog-source-registry.test.ts src/routes/catalog-sources.test.ts src/sessions/session-services.test.ts src/routes/catalog.test.ts; npm.cmd run typecheck --workspace @tool-chenh/api`
 
 Expected: all focused tests pass and API typecheck exits 0.
 
-- [ ] **Step 9: Commit Task 2**
+- [x] **Step 9: Commit Task 2**
 
 ```powershell
 git add apps/api/src/routes/catalog-sources.ts apps/api/src/routes/catalog-sources.test.ts apps/api/src/app.ts apps/api/src/app.test.ts apps/api/src/sessions/session-services.ts apps/api/src/sessions/session-services.test.ts apps/api/src/server.ts
@@ -315,7 +315,7 @@ git commit -m "feat: expose stable validated catalog sources"
 - Consumes: `GET /api/catalog/sources`, existing `GET /api/accounts`, and stable logical source IDs.
 - Produces: provider checkboxes driven by catalog sources; profile/preflight driven only by real bettor accounts.
 
-- [ ] **Step 1: Write failing client tests**
+- [x] **Step 1: Write failing client tests**
 
 ```ts
 const sources = await new CatalogSourceApi(fetcher).list();
@@ -327,13 +327,13 @@ expect(sources).toEqual([expect.objectContaining({
 
 Reject extra fields, malformed IDs, provider/category mismatch, non-JSON, and non-2xx responses.
 
-- [ ] **Step 2: Run client tests and verify RED**
+- [x] **Step 2: Run client tests and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/api/catalog-sources.test.ts`
 
 Expected: FAIL because `CatalogSourceApi` is absent.
 
-- [ ] **Step 3: Implement the strict source client**
+- [x] **Step 3: Implement the strict source client**
 
 Expose:
 
@@ -350,13 +350,13 @@ export class CatalogSourceApi implements CatalogSourceApiLike {
 
 Use `cache: "no-store"` and validate with `CatalogSourceStatusSchema.array()`.
 
-- [ ] **Step 4: Run client tests and verify GREEN**
+- [x] **Step 4: Run client tests and verify GREEN**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/api/catalog-sources.test.ts`
 
 Expected: all client tests pass.
 
-- [ ] **Step 5: Write failing page regressions**
+- [x] **Step 5: Write failing page regressions**
 
 Add tests proving:
 
@@ -367,13 +367,13 @@ Add tests proving:
 5. An unavailable source remains visible with its explicit reason; it is not rendered as zero matches.
 6. Football and LoL screens request only their fixed category.
 
-- [ ] **Step 6: Run page tests and verify RED**
+- [x] **Step 6: Run page tests and verify RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/pages/live-catalog-page.test.tsx`
 
 Expected: FAIL because the page still derives catalog selection from `AccountStatus`.
 
-- [ ] **Step 7: Separate the two identities in the page**
+- [x] **Step 7: Separate the two identities in the page**
 
 Replace `oneAccountPerProvider(accounts)` for catalog loading with source statuses grouped by provider/category. Keep `AccountApi` for profiles and preflight only.
 
@@ -393,13 +393,13 @@ Use accepted catalog providers to select bettor accounts for `TicketPreflightCoo
 
 On source refresh, replace status metadata but retain checkbox membership by stable source ID. If a source becomes unavailable, retain only bounded stale display and invalidate signals/preflight immediately.
 
-- [ ] **Step 8: Run web focused gates**
+- [x] **Step 8: Run web focused gates**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/api/catalog-sources.test.ts src/pages/live-catalog-page.test.tsx src/watch/ticket-preflight-coordinator.test.ts src/watch/ranked-tickets.test.ts; npm.cmd run typecheck --workspace @tool-chenh/web`
 
 Expected: all focused tests pass and Web typecheck exits 0.
 
-- [ ] **Step 9: Commit Task 3**
+- [x] **Step 9: Commit Task 3**
 
 ```powershell
 git add apps/web/src/api/catalog-sources.ts apps/web/src/api/catalog-sources.test.ts apps/web/src/pages/live-catalog-page.tsx apps/web/src/pages/live-catalog-page.test.tsx apps/web/src/watch/ticket-preflight-coordinator.test.ts

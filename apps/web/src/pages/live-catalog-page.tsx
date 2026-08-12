@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
+import type { AccountStatus, CatalogSourceStatus, Category, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, catalogRetryDelayMs, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
+import type { CatalogSourceApiLike } from "../api/catalog-sources.js";
 import { defaultProviderPreflightApi, type ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import { loadCatalogCache, saveCatalogCache } from "../catalog/catalog-cache.js";
 import { buildComparisonEvents, decimalOdds, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
@@ -70,6 +71,37 @@ function oneAccountPerProvider(accounts: readonly AccountStatus[]): readonly Acc
   });
 }
 
+export function selectBettingAccount(
+  accounts: readonly AccountStatus[], provider: ProviderId, category: Category
+): AccountStatus | null {
+  return [...accounts].filter((account) => account.provider === provider && account.category === category &&
+    account.sessionState === "ACTIVE" && account.profileState === "FRESH" &&
+    account.capabilities.includes("PROFILE") && account.capabilities.includes("PREFLIGHT") &&
+    account.currency !== null && account.balance !== null && account.balanceAsOfMs !== null)
+    .sort((left, right) => right.balanceAsOfMs! - left.balanceAsOfMs! || right.id.localeCompare(left.id))[0] ?? null;
+}
+
+function selectProfileAccount(
+  accounts: readonly AccountStatus[], provider: ProviderId, category: Category
+): AccountStatus | null {
+  return [...accounts].filter((account) => account.provider === provider && account.category === category &&
+    account.sessionState === "ACTIVE" && account.capabilities.includes("PROFILE"))
+    .sort((left, right) => (right.balanceAsOfMs ?? -1) - (left.balanceAsOfMs ?? -1) ||
+      right.id.localeCompare(left.id))[0] ?? null;
+}
+
+function legacyCatalogSources(accounts: readonly AccountStatus[]): readonly CatalogSourceStatus[] {
+  return oneAccountPerProvider(accounts).map((account) => ({
+    id: account.id,
+    alias: account.alias,
+    provider: account.provider as Exclude<ProviderId, "FABET">,
+    category: account.category!,
+    sessionState: account.sessionState,
+    acquiredAtMs: account.balanceAsOfMs,
+    reason: account.reason
+  }));
+}
+
 function wholeUnits(value: string): bigint | null {
   const match = /^(0|[1-9]\d*)(?:\.\d+)?$/u.exec(value);
   return match === null ? null : BigInt(match[1]!);
@@ -79,11 +111,10 @@ export function filterAccountBackedSignals(
   signals: readonly LagSignal[], acceptedCatalogs: readonly LiveCatalogResponse[],
   accounts: readonly AccountStatus[], observedAtMs: number
 ): readonly LagSignal[] {
-  const accountById = new Map(accounts.map((account) => [account.id, account]));
   const accountByProvider = new Map<ProviderId, AccountStatus>();
   for (const catalog of acceptedCatalogs) {
-    const account = accountById.get(catalog.accountId);
-    if (account !== undefined && account.provider === catalog.provider) accountByProvider.set(catalog.provider, account);
+    const account = selectBettingAccount(accounts, catalog.provider, catalog.category);
+    if (account !== null) accountByProvider.set(catalog.provider, account);
   }
   return signals.filter((signal) => {
     const legAccounts = signal.plan.legs.map((leg) => accountByProvider.get(leg.provider));
@@ -104,7 +135,7 @@ export function filterAccountBackedSignals(
 }
 
 function ProviderSelector({ accounts, loaded, selected, toggle }: {
-  readonly accounts: readonly AccountStatus[];
+  readonly accounts: readonly CatalogSourceStatus[];
   readonly loaded: boolean;
   readonly selected: ReadonlySet<string>;
   readonly toggle: (id: string) => void;
@@ -127,17 +158,17 @@ function ProviderSelector({ accounts, loaded, selected, toggle }: {
   })}</fieldset>;
 }
 
-function ProviderSourceStatus({ accounts, selected }: { readonly accounts: readonly AccountStatus[];
-  readonly selected: ReadonlySet<string> }) {
+function ProviderSourceStatus({ accounts, bettingAccounts, category, selected }: {
+  readonly accounts: readonly CatalogSourceStatus[]; readonly bettingAccounts: readonly AccountStatus[];
+  readonly category: CatalogCategory; readonly selected: ReadonlySet<string> }) {
   return <section className="provider-source-status" aria-label="Trạng thái nguồn dữ liệu">{comparisonProviders.map((provider) => {
     const matches = accounts.filter((account) => account.provider === provider);
     const active = matches.filter((account) => account.sessionState === "ACTIVE" && selected.has(account.id)).length;
-    const profileReady = matches.some((account) => account.sessionState === "ACTIVE" && selected.has(account.id) &&
-      account.profileState === "FRESH" && account.capabilities.includes("PROFILE") &&
-      account.currency !== null && account.balance !== null);
-    const bettingReady = matches.some((account) => account.sessionState === "ACTIVE" && selected.has(account.id) &&
-      account.profileState === "FRESH" && account.capabilities.includes("PROFILE") && account.capabilities.includes("PREFLIGHT") &&
-      account.currency !== null && account.balance !== null);
+    const selectedSource = active > 0;
+    const profile = selectProfileAccount(bettingAccounts, provider, category);
+    const profileReady = selectedSource && profile?.profileState === "FRESH" &&
+      profile.currency !== null && profile.balance !== null;
+    const bettingReady = selectedSource && selectBettingAccount(bettingAccounts, provider, category) !== null;
     const state = active > 0 ? bettingReady
       ? `${active} nguồn giá + profile cược đã xác minh`
       : profileReady ? `${active} nguồn giá + profile đã xác minh; preflight vé chưa có`
@@ -273,13 +304,15 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
 }
 
 export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi,
-  providerPreflightApi = defaultProviderPreflightApi, fixedCategory }: {
+  catalogSourceApi, providerPreflightApi = defaultProviderPreflightApi, fixedCategory }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
+  readonly catalogSourceApi?: CatalogSourceApiLike;
   readonly providerPreflightApi?: ProviderPreflightApiLike;
   readonly fixedCategory?: CatalogCategory;
 }) {
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
+  const [sources, setSources] = useState<readonly CatalogSourceStatus[]>([]);
   const [accountsLoaded, setAccountsLoaded] = useState(false);
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(new Set());
   const [category, setCategory] = useState<CatalogCategory>(() => fixedCategory ?? loadCatalogCategory(window.localStorage));
@@ -308,20 +341,21 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   if (notificationSound.current === null) notificationSound.current = new NotificationSound();
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
   const accountsRef = useRef<readonly AccountStatus[]>([]);
+  const sourcesRef = useRef<readonly CatalogSourceStatus[]>([]);
   const refreshInFlight = useRef(false);
   const retryAfterMs = useRef(new Map<string, number>());
-  const workingAccountIds = useRef(new Map<ProviderId, string>());
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event"),
     ticket: new URLSearchParams(window.location.search).get("ticket") });
   const autoLoaded = useRef(false);
-  const categoryAccounts = useMemo(() => oneAccountPerProvider(accounts.filter((account) =>
-    account.category === category)), [accounts, category]);
-  const categorySelectedIds = useMemo(() => categoryAccounts.filter((account) => selectedIds.has(account.id))
-    .map((account) => account.id), [categoryAccounts, selectedIds]);
-  const profileRefreshKey = useMemo(() => categoryAccounts.filter((account) => selectedIds.has(account.id) &&
-    account.sessionState === "ACTIVE" && account.capabilities.includes("PROFILE"))
-    .map((account) => account.id).sort().join("|"), [categoryAccounts, selectedIds]);
+  const categorySources = useMemo(() => sources.filter((source) => source.category === category), [sources, category]);
+  const categorySelectedIds = useMemo(() => categorySources.filter((source) => selectedIds.has(source.id))
+    .map((source) => source.id), [categorySources, selectedIds]);
+  const profileRefreshKey = useMemo(() => categorySources.filter((source) => selectedIds.has(source.id) &&
+    source.sessionState === "ACTIVE").flatMap((source) => {
+      const profile = selectProfileAccount(accounts, source.provider, category);
+      return profile === null ? [] : [profile.id];
+    }).sort().join("|"), [accounts, category, categorySources, selectedIds]);
 
   const loadIds = useCallback(async (
     ids: readonly string[], foreground: boolean, expectedCategory: CatalogCategory
@@ -332,25 +366,19 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     if (foreground) setBusy(true);
     try {
       const results = await Promise.allSettled(requestedIds.map(async (id) => {
-        const requestedAccount = accountsRef.current.find((account) => account.id === id);
-        const fallbackAccounts = requestedAccount === undefined ? [] : accountsRef.current.filter((account) =>
-          account.id !== id && account.provider === requestedAccount.provider && account.category === expectedCategory &&
-          account.sessionState === "ACTIVE" && account.capabilities.includes("CATALOG"));
-        const workingId = requestedAccount === undefined ? undefined : workingAccountIds.current.get(requestedAccount.provider);
-        const candidateIds = [...new Set([
-          ...(workingId === undefined ? [] : [workingId]), id, ...fallbackAccounts.map((account) => account.id)
-        ])].slice(0, 3);
+        const requestedSource = sourcesRef.current.find((source) => source.id === id);
+        if (requestedSource === undefined) throw new Error("Catalog source is unavailable");
+        const legacyFallbackIds = catalogSourceApi === undefined ? accountsRef.current.filter((account) =>
+          account.id !== id && account.provider === requestedSource.provider && account.category === expectedCategory &&
+          account.sessionState === "ACTIVE" && account.capabilities.includes("CATALOG")).map((account) => account.id) : [];
         let value: LiveCatalogResponse | null = null;
-        let lastError: unknown = new Error("No active catalog account");
-        for (const candidateId of candidateIds) {
+        let lastError: unknown = new Error("Catalog source is unavailable");
+        for (const candidateId of [id, ...legacyFallbackIds].slice(0, 3)) {
           try {
             const candidate = await catalogApi.read(candidateId);
-            if (candidate.category !== expectedCategory ||
-              (requestedAccount !== undefined && candidate.provider !== requestedAccount.provider)) {
-              throw new Error("Catalog identity mismatch");
-            }
+            if (candidate.category !== expectedCategory || candidate.provider !== requestedSource.provider ||
+              (catalogSourceApi !== undefined && candidate.accountId !== id)) throw new Error("Catalog identity mismatch");
             value = candidate;
-            workingAccountIds.current.set(candidate.provider, candidate.accountId);
             break;
           } catch (error) {
             lastError = error;
@@ -398,8 +426,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       setSignals(filterAccountBackedSignals(candidates, accepted, accountsRef.current, observedAtMs));
       const nextMovements = movementTracker.current.update(nextEvents, observedAtMs);
       setMovements(nextMovements);
-      const acceptedAccountIds = new Set(accepted.map((catalog) => catalog.accountId));
-      const selectedAccounts = accountsRef.current.filter((account) => acceptedAccountIds.has(account.id));
+      const selectedAccounts = accepted.flatMap((catalog) => {
+        const bettor = selectBettingAccount(accountsRef.current, catalog.provider, catalog.category);
+        return bettor === null ? [] : [bettor];
+      });
       const nextVerified = await preflightCoordinator.current.refresh({ events: nextEvents,
         selectedAccounts, selectedProviders: providers, policy: observedStakePolicy(baseStakeRef.current) });
       setVerifiedTickets(nextVerified);
@@ -414,30 +444,35 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       refreshInFlight.current = false;
       if (foreground) setBusy(false);
     }
-  }, [catalogApi]);
+  }, [catalogApi, catalogSourceApi]);
 
   useEffect(() => {
     let cancelled = false;
     let retryTimer: number | undefined;
-    const discoverAccounts = (): void => { void accountApi.list().then((items) => {
+    const discoverAccounts = (): void => { void Promise.all([
+      accountApi.list(),
+      catalogSourceApi === undefined ? Promise.resolve(null) : catalogSourceApi.list()
+    ]).then(([items, discoveredSources]) => {
       if (cancelled) return;
       const catalogAccounts = items.filter((account) => account.capabilities.includes("CATALOG"));
-      accountsRef.current = catalogAccounts;
-      const availableCandidates = catalogAccounts.filter((account) => account.sessionState === "ACTIVE");
+      accountsRef.current = items;
+      const nextSources = discoveredSources ?? legacyCatalogSources(catalogAccounts.filter((account) => account.category !== null));
+      sourcesRef.current = nextSources;
+      const availableCandidates = nextSources.filter((source) => source.sessionState === "ACTIVE");
       const targetCategory = fixedCategory ?? category;
-      const available = availableCandidates.filter((account) => account.category !== null);
-      const requestedAccount = available.find((account) => account.id === requested.current.account &&
-        account.category === targetCategory);
-      let initialCategory: CatalogCategory = fixedCategory ?? (requestedAccount?.category === "LOL" ? "LOL" : category);
-      const hasInitialCategory = available.some((account) => account.category === initialCategory);
-      if (!hasInitialCategory && available.some((account) => account.category === "LOL")) initialCategory = "LOL";
-      const initial = new Set(oneAccountPerProvider(available.filter((account) => account.category === initialCategory))
-        .map((account) => account.id));
+      const requestedSource = availableCandidates.find((source) => source.id === requested.current.account &&
+        source.category === targetCategory);
+      let initialCategory: CatalogCategory = fixedCategory ?? (requestedSource?.category === "LOL" ? "LOL" : category);
+      const hasInitialCategory = availableCandidates.some((source) => source.category === initialCategory);
+      if (!hasInitialCategory && availableCandidates.some((source) => source.category === "LOL")) initialCategory = "LOL";
+      const initial = new Set(availableCandidates.filter((source) => source.category === initialCategory)
+        .map((source) => source.id));
       const cached = loadCatalogCache(window.localStorage).filter((catalog) => initial.has(catalog.accountId));
       catalogsRef.current = cached;
       setCatalogs(cached);
       setStaleAccountIds(new Set(cached.map((catalog) => catalog.accountId)));
-      setAccounts(catalogAccounts); setAccountsLoaded(true); setSelectedIds(new Set(available.map((account) => account.id)));
+      setAccounts(items); setSources(nextSources); setAccountsLoaded(true);
+      setSelectedIds(new Set(availableCandidates.map((source) => source.id)));
       setCategory(initialCategory); saveCatalogCategory(window.localStorage, initialCategory);
       if (!autoLoaded.current && initial.size > 0) {
         autoLoaded.current = true;
@@ -451,7 +486,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     }); };
     discoverAccounts();
     return () => { cancelled = true; if (retryTimer !== undefined) window.clearTimeout(retryTimer); };
-  }, [accountApi, fixedCategory, loadIds]);
+  }, [accountApi, catalogSourceApi, fixedCategory, loadIds]);
 
   useEffect(() => {
     if (categorySelectedIds.length === 0) return;
@@ -488,9 +523,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   const events = useMemo(() => buildComparisonEvents(catalogs).filter((item) => item.event.category === category), [catalogs, category]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)), [events, nowMs]);
-  const selectedProviderIds = useMemo(() => new Set<ProviderId>(categoryAccounts.filter((account) =>
-    selectedIds.has(account.id) && account.sessionState === "ACTIVE").map((account) => account.provider)),
-  [categoryAccounts, selectedIds]);
+  const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
+    selectedIds.has(source.id) && source.sessionState === "ACTIVE").map((source) => source.provider)),
+  [categorySources, selectedIds]);
   const rankedEvents = useMemo(() => sortRankedEvents(visibleEvents.filter((item) => item.observedRows.length > 0)
     .map((item) => rankedEvent({ event: item, verified: verifiedTickets, movements,
       selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake), nowMs }))),
@@ -530,8 +565,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     preflightCoordinator.current.clear();
     signalTracker.current = new LagSignalTracker();
     movementTracker.current = new PriceMovementTracker();
-    const nextIds = accounts.filter((account) => account.category === next)
-      .map((account) => account.id).filter((id) => selectedIds.has(id));
+    const nextIds = sources.filter((source) => source.category === next)
+      .map((source) => source.id).filter((id) => selectedIds.has(id));
     if (nextIds.length > 0) void loadIds(nextIds, true, next);
   };
   const watch = (item: ComparisonEvent): void => {
@@ -554,9 +589,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const selectedDetail = selectedEvent === undefined ? null : (() => {
     const primary = selectedEvent.catalogs[0]!;
     const detailBooks: readonly ComparisonBook[] = comparisonProviders.map((provider) => {
-      const providerAccounts = accounts.filter((account) => account.provider === provider && account.category === category);
-      return { provider, connected: providerAccounts.length > 0,
-        selected: providerAccounts.some((account) => selectedIds.has(account.id)),
+      const providerSources = sources.filter((source) => source.provider === provider && source.category === category);
+      return { provider, connected: providerSources.length > 0,
+        selected: providerSources.some((source) => selectedIds.has(source.id)),
         hasExactEvent: selectedEvent.providers.includes(provider) };
     });
     return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
@@ -575,7 +610,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       {fixedCategory === undefined && <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
         onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
         onClick={() => changeCategory("LOL")} type="button">LoL</button></div>}
-      <ProviderSelector accounts={categoryAccounts} loaded={accountsLoaded} selected={selectedIds} toggle={toggle} />
+      <ProviderSelector accounts={categorySources} loaded={accountsLoaded} selected={selectedIds} toggle={toggle} />
       <label className="stake-config">Base stake for every match (VND)<input aria-label="Base stake for every match (VND)"
         inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
           const value = event.currentTarget.value; setBaseStakeInput(value);
@@ -587,7 +622,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true, category)} type="button">
         {busy ? "Loading…" : "Compare selected books"}</button>
     </section>
-    {accountsLoaded && <ProviderSourceStatus accounts={categoryAccounts} selected={selectedIds} />}
+    {accountsLoaded && <ProviderSourceStatus accounts={categorySources} bettingAccounts={accounts}
+      category={category} selected={selectedIds} />}
     {message !== null && <p className="connection-warning session-message" role="status">{message}</p>}
     {catalogs.length > 0 && <div className="catalog-evidence-bar"><strong>LIVE READ-ONLY</strong>
       <span>{catalogs.length - staleAccountIds.size} fresh provider(s)</span>

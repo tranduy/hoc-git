@@ -7,6 +7,7 @@ import { OpportunitiesPage } from "./pages/opportunities-page.js";
 import { MappingsPage } from "./pages/mappings-page.js";
 import { SessionsPage } from "./pages/sessions-page.js";
 import { LiveCatalogPage } from "./pages/live-catalog-page.js";
+import { CatalogSourceApi } from "./api/catalog-sources.js";
 
 type Route = "/" | "/football-live" | "/lol-live" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions";
 
@@ -20,6 +21,8 @@ const routes: ReadonlyArray<{ readonly path: Route; readonly label: string }> = 
   { path: "/mappings", label: "Mapping Review" },
   { path: "/sessions", label: "Sessions" }
 ];
+
+const catalogSourceApi = new CatalogSourceApi();
 
 function routeFor(pathname: string): Route {
   if (pathname === "/live-catalog") {
@@ -66,8 +69,8 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
     setRoute(path);
   };
   const content = route === "/sessions" ? <SessionsPage />
-    : route === "/football-live" ? <LiveCatalogPage fixedCategory="FOOTBALL" key="FOOTBALL-LIVE" />
-    : route === "/lol-live" ? <LiveCatalogPage fixedCategory="LOL" key="LOL-LIVE" />
+    : route === "/football-live" ? <LiveCatalogPage catalogSourceApi={catalogSourceApi} fixedCategory="FOOTBALL" key="FOOTBALL-LIVE" />
+    : route === "/lol-live" ? <LiveCatalogPage catalogSourceApi={catalogSourceApi} fixedCategory="LOL" key="LOL-LIVE" />
     : snapshot === undefined
     ? <header className="page-header"><h1>Loading {routeLabel}</h1><p>Waiting for a fresh local snapshot. No opportunity or mapping decision is available yet.</p></header>
     : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} />

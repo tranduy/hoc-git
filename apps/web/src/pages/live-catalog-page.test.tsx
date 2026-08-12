@@ -1,11 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import type { AccountStatus, ProviderEvent, ProviderMarket, ProviderQuote,
+import type { AccountStatus, CatalogSourceStatus, ProviderEvent, ProviderMarket, ProviderQuote,
   ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountApiLike } from "../api/accounts.js";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
+import type { CatalogSourceApiLike } from "../api/catalog-sources.js";
 import type { ProviderPreflightApiLike } from "../api/provider-preflight.js";
-import { filterAccountBackedSignals, LiveCatalogPage } from "./live-catalog-page.js";
+import { filterAccountBackedSignals, LiveCatalogPage, selectBettingAccount } from "./live-catalog-page.js";
 import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
 
@@ -53,6 +54,27 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
+  it("keeps stable catalog-source identity separate from the newest eligible betting account", async () => {
+    const source: CatalogSourceStatus = { id: "catalog-source:SABA:FOOTBALL", alias: "C-Sports · SABA",
+      provider: "SABA", category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN",
+      acquiredAtMs: 200, reason: null };
+    const older: AccountStatus = { ...account, id: "bettor-old", provider: "SABA", category: "FOOTBALL",
+      alias: "Old bettor", capabilities: ["PROFILE", "PREFLIGHT"], balanceAsOfMs: 100 };
+    const newer: AccountStatus = { ...older, id: "bettor-new", alias: "New bettor", balanceAsOfMs: 200 };
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => ({ ...catalog, accountId: id,
+      provider: "SABA", events: [{ ...event, provider: "SABA" }], markets: [{ ...market, provider: "SABA" }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" })) }));
+    const sourceApi: CatalogSourceApiLike = { list: async () => [source] };
+
+    expect(selectBettingAccount([older, newer], "SABA", "FOOTBALL")?.id).toBe("bettor-new");
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [older, newer] }}
+      catalogApi={{ read }} catalogSourceApi={sourceApi} fixedCategory="FOOTBALL" />);
+
+    expect(await screen.findByText("C-Sports · SABA")).toBeTruthy();
+    expect(read).toHaveBeenCalledWith("catalog-source:SABA:FOOTBALL");
+    expect(read).not.toHaveBeenCalledWith("bettor-new");
+  });
+
   it("keeps catalog-only or stale-balance providers out of executable lag signals", () => {
     const saba = { ...catalog, accountId: "saba-account", provider: "SABA" as const };
     const sbobet = { ...catalog, accountId: "sbobet-account", provider: "SBOBET" as const };
