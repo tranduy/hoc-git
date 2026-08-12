@@ -28,9 +28,10 @@ const opportunity = {
 
 function result(request: ProviderTicketPreflightRequest, provider: ProviderId,
   overrides: Partial<ProviderTicketPreflight> = {}): ProviderTicketPreflight {
+  const limitEvidence = { currency: "VND", minStake: "10000", maxStake: "500000", stakeStep: "1000",
+    balance: "500000", verifiedAsOfMs: 1000, expiresAtMs: 3000 };
   return { ...request, provider, decimalOdds: request.expectedDecimalOdds, quoteStatus: "OPEN",
-    constraint: { currency: "VND", minStake: "10000", maxStake: "500000", stakeStep: "1000",
-      balance: "500000", feeType: "NONE", feeRate: null, verifiedAsOfMs: 1000, expiresAtMs: 3000 },
+    limitEvidence, constraint: { ...limitEvidence, feeType: "NONE", feeRate: null },
     eligible: true, reasons: [], ...overrides };
 }
 

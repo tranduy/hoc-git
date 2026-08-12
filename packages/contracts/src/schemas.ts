@@ -15,6 +15,7 @@ import type {
   PreflightLeg,
   PreflightRequest,
   PreflightTicket,
+  ProviderStakeLimitEvidence,
   ProviderStakeConstraint,
   ProviderTicketPreflight,
   ProviderTicketPreflightRequest,
@@ -224,26 +225,40 @@ export const ProviderTicketPreflightRequestSchema = z.strictObject({
   requestedStake: NonnegativeDecimalStringSchema
 }) satisfies z.ZodType<ProviderTicketPreflightRequest>;
 
-export const ProviderStakeConstraintSchema = z.strictObject({
+const providerStakeLimitEvidenceShape = {
   currency: z.string().regex(/^[A-Z]{3,8}$/u),
   minStake: NonnegativeDecimalStringSchema,
   maxStake: NonnegativeDecimalStringSchema,
   stakeStep: NonnegativeDecimalStringSchema,
   balance: NonnegativeDecimalStringSchema,
-  feeType: z.enum(["NONE", "PROFIT", "PAYOUT"]),
-  feeRate: NonnegativeDecimalStringSchema.nullable(),
   verifiedAsOfMs: z.number().finite().nonnegative(),
   expiresAtMs: z.number().finite().nonnegative()
-}).superRefine((constraint, context) => {
-  if ((constraint.feeType === "NONE") !== (constraint.feeRate === null)) {
-    context.addIssue({ code: "custom", path: ["feeRate"], message: "fee rate must match fee type" });
-  }
-  if (Number(constraint.maxStake) < Number(constraint.minStake)) {
+} as const;
+
+function validateStakeLimitEvidence(limit: ProviderStakeLimitEvidence, context: z.RefinementCtx): void {
+  if (Number(limit.maxStake) < Number(limit.minStake)) {
     context.addIssue({ code: "custom", path: ["maxStake"], message: "max stake must be at least min stake" });
   }
-  const lifetimeMs = constraint.expiresAtMs - constraint.verifiedAsOfMs;
+  if (Number(limit.stakeStep) <= 0) {
+    context.addIssue({ code: "custom", path: ["stakeStep"], message: "stake step must be positive" });
+  }
+  const lifetimeMs = limit.expiresAtMs - limit.verifiedAsOfMs;
   if (lifetimeMs <= 0 || lifetimeMs > 3_000) {
     context.addIssue({ code: "custom", path: ["expiresAtMs"], message: "constraint lifetime must be within three seconds" });
+  }
+}
+
+export const ProviderStakeLimitEvidenceSchema = z.strictObject(providerStakeLimitEvidenceShape)
+  .superRefine(validateStakeLimitEvidence) satisfies z.ZodType<ProviderStakeLimitEvidence>;
+
+export const ProviderStakeConstraintSchema = z.strictObject({
+  ...providerStakeLimitEvidenceShape,
+  feeType: z.enum(["NONE", "PROFIT", "PAYOUT"]),
+  feeRate: NonnegativeDecimalStringSchema.nullable()
+}).superRefine((constraint, context) => {
+  validateStakeLimitEvidence(constraint, context);
+  if ((constraint.feeType === "NONE") !== (constraint.feeRate === null)) {
+    context.addIssue({ code: "custom", path: ["feeRate"], message: "fee rate must match fee type" });
   }
 }) satisfies z.ZodType<ProviderStakeConstraint>;
 
@@ -257,6 +272,7 @@ export const ProviderTicketPreflightSchema = z.strictObject({
   line: DecimalStringSchema.nullable(),
   decimalOdds: NonnegativeDecimalStringSchema,
   quoteStatus: QuoteStatusSchema,
+  limitEvidence: ProviderStakeLimitEvidenceSchema.nullable(),
   constraint: ProviderStakeConstraintSchema.nullable(),
   eligible: z.boolean(),
   reasons: z.array(z.enum(["IDENTITY_MISMATCH", "ODDS_CHANGED", "MARKET_NOT_OPEN",
@@ -269,6 +285,14 @@ export const ProviderTicketPreflightSchema = z.strictObject({
   if (result.constraint === null && !result.reasons.includes("LIMIT_UNAVAILABLE") &&
     !result.reasons.includes("FINANCIAL_POLICY_UNAVAILABLE")) {
     context.addIssue({ code: "custom", path: ["reasons"], message: "missing constraint must report unavailable limits" });
+  }
+  if (result.limitEvidence === null && !result.reasons.includes("LIMIT_UNAVAILABLE")) {
+    context.addIssue({ code: "custom", path: ["reasons"], message: "missing limit evidence must report unavailable limits" });
+  }
+  if (result.constraint !== null && (result.limitEvidence === null ||
+    (["currency", "minStake", "maxStake", "stakeStep", "balance", "verifiedAsOfMs", "expiresAtMs"] as const)
+      .some((key) => result.constraint?.[key] !== result.limitEvidence?.[key]))) {
+    context.addIssue({ code: "custom", path: ["constraint"], message: "constraint must use the reported limit evidence" });
   }
 }) satisfies z.ZodType<ProviderTicketPreflight>;
 

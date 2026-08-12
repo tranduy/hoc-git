@@ -21,7 +21,7 @@ describe("ApsportTicketPreflightReader", () => {
     const reader = new ApsportTicketPreflightReader({ source: { readCatalog: async () => snapshot }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({ provider: "APSPORT",
       providerEventId: "event-1", providerMarketId: "market-1", providerSelectionId: "home-1",
-      decimalOdds: "1.82", quoteStatus: "OPEN", constraint: null, eligible: false,
+      decimalOdds: "1.82", quoteStatus: "OPEN", limitEvidence: null, constraint: null, eligible: false,
       reasons: ["LIMIT_UNAVAILABLE"] });
   });
 
@@ -39,6 +39,7 @@ describe("ApsportTicketPreflightReader", () => {
         maxStake: "352359000", stakeStep: "1000", balance: "29000", observedAtMs: 2000 })
     }, clock: { nowMs: () => 2000 }, fee: { type: "PAYOUT", rate: "0.02" } });
     await expect(reader.preflight(handle, { ...request, requestedStake: "29000" })).resolves.toMatchObject({
+      limitEvidence: { minStake: "50000", maxStake: "352359000", stakeStep: "1000", balance: "29000" },
       constraint: { minStake: "50000", balance: "29000", feeType: "PAYOUT", feeRate: "0.02",
         expiresAtMs: 5000 }, eligible: false,
       reasons: ["BELOW_MIN"]

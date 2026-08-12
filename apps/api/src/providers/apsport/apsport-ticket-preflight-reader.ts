@@ -44,26 +44,28 @@ export class ApsportTicketPreflightReader implements ProviderTicketPreflightRead
       const nowMs = this.#clock.nowMs();
       const fresh = limit !== null && limit.providerSelectionId === quote.providerSelectionId &&
         Number.isFinite(limit.observedAtMs) && limit.observedAtMs <= nowMs + 1_000 && nowMs - limit.observedAtMs <= 1_000;
-      const constraint = fresh && this.#fee !== null ? { currency: limit.currency, minStake: limit.minStake, maxStake: limit.maxStake,
-        stakeStep: limit.stakeStep, balance: limit.balance, feeType: this.#fee.type,
-        feeRate: this.#fee.type === "NONE" ? null : plain(new Decimal(this.#fee.rate)),
+      const limitEvidence = fresh ? { currency: limit.currency, minStake: limit.minStake, maxStake: limit.maxStake,
+        stakeStep: limit.stakeStep, balance: limit.balance,
         verifiedAsOfMs: limit.observedAtMs, expiresAtMs: limit.observedAtMs + 3_000 } : null;
+      const constraint = limitEvidence !== null && this.#fee !== null ? { ...limitEvidence, feeType: this.#fee.type,
+        feeRate: this.#fee.type === "NONE" ? null : plain(new Decimal(this.#fee.rate)),
+      } : null;
       const reasons: ProviderTicketPreflight["reasons"][number][] = [];
       if (!fresh) reasons.push("LIMIT_UNAVAILABLE");
       if (this.#fee === null) reasons.push("FINANCIAL_POLICY_UNAVAILABLE");
       if (decimalOdds !== request.expectedDecimalOdds) reasons.push("ODDS_CHANGED");
       if (quote.status !== "OPEN") reasons.push("MARKET_NOT_OPEN");
-      if (constraint !== null) {
+      if (limitEvidence !== null) {
         const stake = toDecimal(request.requestedStake, "DECIMAL");
-        if (stake.lt(toDecimal(constraint.minStake, "DECIMAL"))) reasons.push("BELOW_MIN");
-        if (stake.gt(toDecimal(constraint.maxStake, "DECIMAL"))) reasons.push("ABOVE_MAX");
-        if (!stake.mod(toDecimal(constraint.stakeStep, "DECIMAL")).isZero()) reasons.push("STAKE_STEP_MISMATCH");
-        if (stake.gt(toDecimal(constraint.balance, "DECIMAL"))) reasons.push("INSUFFICIENT_BALANCE");
+        if (stake.lt(toDecimal(limitEvidence.minStake, "DECIMAL"))) reasons.push("BELOW_MIN");
+        if (stake.gt(toDecimal(limitEvidence.maxStake, "DECIMAL"))) reasons.push("ABOVE_MAX");
+        if (!stake.mod(toDecimal(limitEvidence.stakeStep, "DECIMAL")).isZero()) reasons.push("STAKE_STEP_MISMATCH");
+        if (stake.gt(toDecimal(limitEvidence.balance, "DECIMAL"))) reasons.push("INSUFFICIENT_BALANCE");
       }
       return { accountId: request.accountId, provider: "APSPORT", providerEventId: quote.providerEventId,
         providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId,
         selection: quote.selection, line: quote.line, decimalOdds, quoteStatus: quote.status,
-        constraint, eligible: quote.status === "OPEN" && constraint !== null && reasons.length === 0, reasons };
+        limitEvidence, constraint, eligible: quote.status === "OPEN" && constraint !== null && reasons.length === 0, reasons };
     });
   }
 }

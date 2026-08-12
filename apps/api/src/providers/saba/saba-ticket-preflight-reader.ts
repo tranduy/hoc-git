@@ -56,11 +56,12 @@ export class SabaTicketPreflightReader implements ProviderTicketPreflightReader 
       const completeMoney = minStake !== null && maxStake !== null && stakeStep !== null && balance !== null &&
         minStake.unitScale === maxStake.unitScale && minStake.unitScale === stakeStep.unitScale &&
         minStake.unitScale === balance.unitScale;
-      const constraint = fresh && completeMoney && this.#fee !== null ? { currency: "VND" as const, minStake: minStake.amount,
+      const limitEvidence = fresh && completeMoney ? { currency: "VND" as const, minStake: minStake.amount,
         maxStake: maxStake.amount, stakeStep: stakeStep.amount, balance: balance.amount,
+        verifiedAsOfMs: limit.observedAtMs, expiresAtMs: limit.observedAtMs + 3_000 } : null;
+      const constraint = limitEvidence !== null && this.#fee !== null ? { ...limitEvidence,
         feeType: this.#fee.type, feeRate: this.#fee.type === "NONE" ? null : plain(new Decimal(this.#fee.rate)),
-        verifiedAsOfMs: limit.observedAtMs,
-        expiresAtMs: limit.observedAtMs + 3_000 } : null;
+      } : null;
       const rawOdds = fresh ? limit.rawOdds : quote.rawOdds;
       const decimalOdds = plain(toDecimal(rawOdds, quote.rawFormat));
       const reasons: ProviderTicketPreflight["reasons"][number][] = [];
@@ -68,16 +69,16 @@ export class SabaTicketPreflightReader implements ProviderTicketPreflightReader 
       if (this.#fee === null) reasons.push("FINANCIAL_POLICY_UNAVAILABLE");
       if (decimalOdds !== request.expectedDecimalOdds) reasons.push("ODDS_CHANGED");
       if (quote.status !== "OPEN") reasons.push("MARKET_NOT_OPEN");
-      if (constraint !== null) {
+      if (limitEvidence !== null) {
         const stake = toDecimal(request.requestedStake, "DECIMAL");
-        if (stake.lt(constraint.minStake)) reasons.push("BELOW_MIN");
-        if (stake.gt(constraint.maxStake)) reasons.push("ABOVE_MAX");
-        if (!stake.mod(constraint.stakeStep).isZero()) reasons.push("STAKE_STEP_MISMATCH");
-        if (stake.gt(constraint.balance)) reasons.push("INSUFFICIENT_BALANCE");
+        if (stake.lt(limitEvidence.minStake)) reasons.push("BELOW_MIN");
+        if (stake.gt(limitEvidence.maxStake)) reasons.push("ABOVE_MAX");
+        if (!stake.mod(limitEvidence.stakeStep).isZero()) reasons.push("STAKE_STEP_MISMATCH");
+        if (stake.gt(limitEvidence.balance)) reasons.push("INSUFFICIENT_BALANCE");
       }
       return { accountId: request.accountId, provider: "SABA", providerEventId: quote.providerEventId,
         providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId,
-        selection: quote.selection, line: quote.line, decimalOdds, quoteStatus: quote.status, constraint,
+        selection: quote.selection, line: quote.line, decimalOdds, quoteStatus: quote.status, limitEvidence, constraint,
         eligible: quote.status === "OPEN" && constraint !== null && reasons.length === 0, reasons };
     });
   }

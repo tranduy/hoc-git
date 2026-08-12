@@ -21,6 +21,7 @@ describe("SabaTicketPreflightReader", () => {
         minStake: "30", maxStake: "54945", stakeStep: "1", balance: "29.61", observedAtMs: 1000 }) },
     clock: { nowMs: () => 1000, monotonicNowMs: () => 500 }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({ provider: "SABA", decimalOdds: "1.94",
+      limitEvidence: { currency: "VND", minStake: "30000", maxStake: "54945000", stakeStep: "1000", balance: "29610" },
       constraint: { currency: "VND", minStake: "30000", maxStake: "54945000", stakeStep: "1000", balance: "29610" },
       eligible: false, reasons: ["INSUFFICIENT_BALANCE"] });
   });
@@ -30,7 +31,7 @@ describe("SabaTicketPreflightReader", () => {
       clock: { nowMs: () => 1000, monotonicNowMs: () => 500 }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, { ...request, providerSelectionId: "other" }))
       .rejects.toThrow("PREFLIGHT_IDENTITY_MISMATCH");
-    await expect(reader.preflight(handle, request)).resolves.toMatchObject({ constraint: null,
+    await expect(reader.preflight(handle, request)).resolves.toMatchObject({ limitEvidence: null, constraint: null,
       eligible: false, reasons: ["LIMIT_UNAVAILABLE"] });
   });
 
@@ -40,7 +41,9 @@ describe("SabaTicketPreflightReader", () => {
         minStake: "30", maxStake: "54945", stakeStep: "1", balance: "200", observedAtMs: 1000 }) },
     clock: { nowMs: () => 1000, monotonicNowMs: () => 500 } });
 
-    await expect(reader.preflight(handle, request)).resolves.toMatchObject({ constraint: null, eligible: false,
+    await expect(reader.preflight(handle, request)).resolves.toMatchObject({
+      limitEvidence: { currency: "VND", minStake: "30000", maxStake: "54945000", stakeStep: "1000", balance: "200000" },
+      constraint: null, eligible: false,
       reasons: ["FINANCIAL_POLICY_UNAVAILABLE"] });
   });
 });

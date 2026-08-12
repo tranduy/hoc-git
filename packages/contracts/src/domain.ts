@@ -84,16 +84,19 @@ export interface ProviderTicketPreflightRequest {
   readonly requestedStake: string;
 }
 
-export interface ProviderStakeConstraint {
+export interface ProviderStakeLimitEvidence {
   readonly currency: string;
   readonly minStake: string;
   readonly maxStake: string;
   readonly stakeStep: string;
   readonly balance: string;
-  readonly feeType: "NONE" | "PROFIT" | "PAYOUT";
-  readonly feeRate: string | null;
   readonly verifiedAsOfMs: number;
   readonly expiresAtMs: number;
+}
+
+export interface ProviderStakeConstraint extends ProviderStakeLimitEvidence {
+  readonly feeType: "NONE" | "PROFIT" | "PAYOUT";
+  readonly feeRate: string | null;
 }
 
 export interface ProviderTicketPreflight {
@@ -106,6 +109,7 @@ export interface ProviderTicketPreflight {
   readonly line: string | null;
   readonly decimalOdds: string;
   readonly quoteStatus: QuoteStatus;
+  readonly limitEvidence: ProviderStakeLimitEvidence | null;
   readonly constraint: ProviderStakeConstraint | null;
   readonly eligible: boolean;
   readonly reasons: readonly ("IDENTITY_MISMATCH" | "ODDS_CHANGED" | "MARKET_NOT_OPEN" |

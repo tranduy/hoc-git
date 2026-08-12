@@ -27,7 +27,7 @@ describe("BtiTicketPreflightReader", () => {
     }) }, fee: { type: "NONE" } });
     await expect(reader.preflight(handle, request)).resolves.toMatchObject({ provider: "BTI",
       providerEventId: "event-real", providerMarketId: "market-real:-0.5", providerSelectionId: "home-real",
-      decimalOdds: "1.82", quoteStatus: "OPEN", constraint: null, eligible: false,
+      decimalOdds: "1.82", quoteStatus: "OPEN", limitEvidence: null, constraint: null, eligible: false,
       reasons: ["LIMIT_UNAVAILABLE"] });
   });
 
@@ -52,6 +52,7 @@ describe("BtiTicketPreflightReader", () => {
     }, clock: { nowMs: () => 2100 }, fee: { type: "PROFIT", rate: "0.03" } });
 
     await expect(reader.preflight(handle, { ...request, requestedStake: "29000" })).resolves.toMatchObject({
+      limitEvidence: { currency: "VND", minStake: "25250", maxStake: "17669910", stakeStep: "10", balance: "29610" },
       constraint: { currency: "VND", minStake: "25250", maxStake: "17669910", stakeStep: "10",
         balance: "29610", feeType: "PROFIT", feeRate: "0.03", verifiedAsOfMs: 2000, expiresAtMs: 5000 },
       eligible: true, reasons: []
@@ -63,7 +64,7 @@ describe("BtiTicketPreflightReader", () => {
     const source = { readCatalog: async () => ({ records: extractBtiCatalogRecords(payload), observedAtMs: 1000,
       receivedMonotonicMs: 10 }), readTicketConstraint: async () => null };
     await expect(new BtiTicketPreflightReader({ source, fee: { type: "NONE" } }).preflight(handle, request)).resolves.toMatchObject({
-      constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"]
+      limitEvidence: null, constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"]
     });
 
     const constrained = new BtiTicketPreflightReader({ source: { ...source,
