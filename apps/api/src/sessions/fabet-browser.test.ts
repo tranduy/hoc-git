@@ -12,6 +12,7 @@ import {
   providerLaunchUrlFromResponseBody,
   PlaywrightFabetAutomation,
   shouldBlockExternalProviderNavigation,
+  isProviderLaunchResponseForCurrentCard,
   type CapturedNavigation,
   type FabetBrowserAutomation
 } from "./fabet-browser.js";
@@ -230,7 +231,8 @@ describe("PlaywrightFabetAutomation", () => {
       }
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end(`<div class="game-item lobby"><img class="game-item__thumb" src="/game/saba_esportss_landscape.avif"><p class="game-item__name">Esports</p><div class="game-item__play-btn"><button onclick="fetch('/api/v3/game-url')">Play</button></div></div>`);
-    });
+  });
+
     await new Promise<void>((resolve) => lobby.listen(0, "127.0.0.1", resolve));
     const lobbyAddress = lobby.address();
     if (lobbyAddress === null || typeof lobbyAddress === "string") throw new Error("lobby server did not bind");
@@ -246,6 +248,19 @@ describe("PlaywrightFabetAutomation", () => {
         lobby.close((error) => error === undefined ? resolve() : reject(error)));
     }
   }, 20_000);
+
+  it("does not attribute a delayed launcher response to the next provider card", () => {
+    const previousRequest = { url: () => "https://fabet.party/api/v3/game-url", method: () => "GET" };
+    const currentRequest = { url: () => "https://fabet.party/api/v3/game-url", method: () => "GET" };
+    const response = { url: () => previousRequest.url(), ok: () => true, request: () => previousRequest };
+
+    expect(isProviderLaunchResponseForCurrentCard(
+      "https://fabet.party", response, new Set([currentRequest])
+    )).toBe(false);
+    expect(isProviderLaunchResponseForCurrentCard(
+      "https://fabet.party", response, new Set([previousRequest])
+    )).toBe(true);
+  });
 
   it("waits for a delayed SPA login form before submitting credentials", async () => {
     let submitted = 0;

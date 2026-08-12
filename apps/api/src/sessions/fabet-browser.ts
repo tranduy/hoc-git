@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import { chromium, type BrowserContext, type Page, type Response, type Route } from "playwright";
+import { chromium, type BrowserContext, type Page, type Request, type Response, type Route } from "playwright";
 import type { Category } from "@tool-chenh/contracts";
 import { SecretVault } from "./secret-vault.js";
 import { TrustedDomainStore } from "./trusted-domain-store.js";
@@ -103,6 +103,26 @@ export function shouldBlockExternalProviderNavigation(
   try {
     const target = new URL(requestUrl);
     return (target.protocol === "https:" || target.protocol === "http:") && target.origin !== lobbyOrigin;
+  } catch {
+    return false;
+  }
+}
+
+interface LaunchRequestLike { url(): string; method(): string }
+interface LaunchResponseLike<TRequest extends LaunchRequestLike> { url(): string; ok(): boolean; request(): TRequest }
+
+export function isProviderLaunchResponseForCurrentCard<TRequest extends LaunchRequestLike>(
+  lobbyOrigin: string,
+  response: LaunchResponseLike<TRequest>,
+  initiatedRequests: ReadonlySet<TRequest>
+): boolean {
+  const request = response.request();
+  if (!initiatedRequests.has(request) || request.method() !== "GET" || !response.ok()) return false;
+  try {
+    const requestUrl = new URL(request.url());
+    const responseUrl = new URL(response.url());
+    return requestUrl.origin === lobbyOrigin && requestUrl.pathname === "/api/v3/game-url" &&
+      responseUrl.origin === lobbyOrigin && responseUrl.pathname === "/api/v3/game-url";
   } catch {
     return false;
   }
@@ -321,23 +341,22 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         const popups: Page[] = [];
         const existingPages = new Set(context.pages());
         const launchBodies: Array<Promise<string | null>> = [];
+        const launchRequests = new Set<Request>();
         const onPage = (popup: Page): void => { popups.push(popup); };
-        const onResponse = (response: Response): void => {
+        const onRequest = (request: Request): void => {
           try {
-            const responseUrl = new URL(response.url());
-            if (
-              responseUrl.origin === lobbyOrigin &&
-              responseUrl.pathname === "/api/v3/game-url" &&
-              response.request().method() === "GET" &&
-              response.ok()
-            ) {
-              launchBodies.push(response.json()
-                .then((body: unknown) => providerLaunchUrlFromResponseBody(body))
-                .catch(() => null));
-            }
+            const requestUrl = new URL(request.url());
+            if (requestUrl.origin === lobbyOrigin && requestUrl.pathname === "/api/v3/game-url" &&
+              request.method() === "GET") launchRequests.add(request);
           } catch {
-            // Ignore malformed or unrelated response URLs.
+            // Ignore malformed or unrelated requests.
           }
+        };
+        const onResponse = (response: Response): void => {
+          if (!isProviderLaunchResponseForCurrentCard(lobbyOrigin, response, launchRequests)) return;
+          launchBodies.push(response.json()
+            .then((body: unknown) => providerLaunchUrlFromResponseBody(body))
+            .catch(() => null));
         };
         const blockExternalProviderNavigation = async (route: Route): Promise<void> => {
           const request = route.request();
@@ -349,6 +368,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         };
         context.on("page", onPage);
         page.on("popup", onPage);
+        page.on("request", onRequest);
         page.on("response", onResponse);
         await context.route("**/*", blockExternalProviderNavigation);
         try {
@@ -364,6 +384,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
           await context.unroute("**/*", blockExternalProviderNavigation);
           context.off("page", onPage);
           page.off("popup", onPage);
+          page.off("request", onRequest);
           page.off("response", onResponse);
         }
         for (const launchBody of launchBodies) {
