@@ -9,6 +9,31 @@ const apps: FastifyInstance[] = [];
 afterEach(async () => Promise.all(apps.splice(0).map(async (app) => app.close())));
 
 describe("provider catalog route", () => {
+  it("coalesces concurrent reads for the same account so multiple UI tabs cannot stampede a provider", async () => {
+    let release: ((catalog: ObservedProviderCatalog) => void) | undefined;
+    const pending = new Promise<ObservedProviderCatalog>((resolve) => { release = resolve; });
+    let reads = 0;
+    const app = buildApp(createFixtureRuntime(1_000), {
+      catalogReader: { read: async () => { reads += 1; return pending; } }
+    });
+    apps.push(app);
+
+    const first = app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
+    const second = app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toBe(1);
+
+    release?.({
+      dataMode: "LIVE", accountId: "account-1", provider: "SABA", category: "FOOTBALL",
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100, rejectedMarketCount: 0,
+      events: [], markets: [], quotes: []
+    });
+    expect((await first).statusCode).toBe(200);
+    expect((await second).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" })).statusCode).toBe(200);
+    expect(reads).toBe(1);
+  });
+
   it("records safe per-provider timing, count, and source-age telemetry", async () => {
     let wallNowMs = 1_000;
     let monotonicNowMs = 50;

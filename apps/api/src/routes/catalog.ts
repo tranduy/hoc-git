@@ -19,24 +19,40 @@ export function registerCatalogRoutes(
   telemetry: CatalogTelemetryRegistry = new CatalogTelemetryRegistry(),
   observer?: CatalogObserverLike
 ): void {
+  const readsInFlight = new Map<string, Promise<ObservedProviderCatalog>>();
+  const recentReads = new Map<string, { readonly catalog: ObservedProviderCatalog; readonly completedAtMs: number }>();
+  const coalescingWindowMs = 250;
+
   app.get("/api/catalog/metrics", async () => telemetry.response());
 
   app.get("/api/catalog/accounts/:accountId", async (request, reply) => {
     const parsed = paramsSchema.safeParse(request.params);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
-    const started = telemetry.now();
     try {
-      const catalog = await reader.read(parsed.data.accountId);
-      await telemetry.recordSuccess(parsed.data.accountId, catalog, telemetry.complete(started));
-      observer?.publish(catalog);
+      const accountId = parsed.data.accountId;
+      const recent = recentReads.get(accountId);
+      if (recent !== undefined && performance.now() - recent.completedAtMs < coalescingWindowMs) {
+        return recent.catalog;
+      }
+      let operation = readsInFlight.get(accountId);
+      if (operation === undefined) {
+        const started = telemetry.now();
+        operation = reader.read(accountId).then(async (catalog) => {
+          await telemetry.recordSuccess(accountId, catalog, telemetry.complete(started));
+          observer?.publish(catalog);
+          recentReads.set(accountId, { catalog, completedAtMs: performance.now() });
+          return catalog;
+        }).catch(async (error: unknown) => {
+          const schemaError = error instanceof Error && /(?:^|_)CATALOG_SCHEMA_ERROR$/u.test(error.message);
+          await telemetry.recordFailure(accountId, schemaError ? "SCHEMA_ERROR" : "UNAVAILABLE", telemetry.complete(started));
+          throw error;
+        }).finally(() => readsInFlight.delete(accountId));
+        readsInFlight.set(accountId, operation);
+      }
+      const catalog = await operation;
       return catalog;
     } catch (error) {
       const schemaError = error instanceof Error && /(?:^|_)CATALOG_SCHEMA_ERROR$/u.test(error.message);
-      await telemetry.recordFailure(
-        parsed.data.accountId,
-        schemaError ? "SCHEMA_ERROR" : "UNAVAILABLE",
-        telemetry.complete(started)
-      );
       if (schemaError) {
         return reply.code(422).send({ error: "CATALOG_SCHEMA_ERROR" });
       }
