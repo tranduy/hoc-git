@@ -246,7 +246,7 @@ git commit -m "feat: verify exact catalog ticket pairs"
 - Create: `apps/web/src/watch/ranked-tickets.test.ts`
 - Modify: `apps/web/src/catalog/comparison.test.ts`
 
-- [ ] **Step 1: Add ranking and fail-closed RED tests**
+- [x] **Step 1: Add ranking and fail-closed RED tests**
 
 Create fixtures with seven exact rows and mixed verified/observation evidence. Assert:
 
@@ -257,13 +257,13 @@ Create fixtures with seven exact rows and mixed verified/observation evidence. A
 - result is capped at five per event;
 - event best-profit sort key is derived only from non-expired verified evidence.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/watch/ranked-tickets.test.ts src/catalog/comparison.test.ts`
 
 Expected: FAIL because ranked view models do not exist and current UI-oriented behavior still relies on observed rows.
 
-- [ ] **Step 3: Implement pure ranking**
+- [x] **Step 3: Implement pure ranking**
 
 ```ts
 export interface RankedTicket {
@@ -289,7 +289,7 @@ export function rankTicketsForEvent(input: {
 
 Use `Decimal` comparisons and a default limit of five. `VERIFIED_PROFIT` means `worstCaseProfit >= 20000`; zero/negative and expired evidence cannot be green. Keep observation calculations clearly labelled and exclude them from event profit rank.
 
-- [ ] **Step 4: Run focused tests and typecheck**
+- [x] **Step 4: Run focused tests and typecheck**
 
 Run:
 
@@ -300,7 +300,7 @@ npm.cmd run typecheck --workspace @tool-chenh/web
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add apps/web/src/watch/ranked-tickets.ts apps/web/src/watch/ranked-tickets.test.ts apps/web/src/catalog/comparison.test.ts
