@@ -52,11 +52,23 @@ function isFabetSabaFootballSession(sessionId: string): boolean {
   return /^fabet-launch-saba-football-/u.test(sessionId);
 }
 
+export function classifySabaJitFailure(error: unknown): string {
+  if (!(error instanceof Error)) return "UNKNOWN";
+  if (/^[A-Z0-9_]+$/u.test(error.message)) return error.message;
+  if (/target (?:page|context|browser).*closed|page has been closed|cdp session.*closed/iu.test(error.message)) {
+    return "PAGE_CLOSED";
+  }
+  if (/net::ERR_|name_not_resolved|connection_(?:closed|reset|refused)|timed?\s*out/iu.test(error.message)) {
+    return "NETWORK_ERROR";
+  }
+  if (/execution context was destroyed|navigation.*interrupted/iu.test(error.message)) return "NAVIGATION_INTERRUPTED";
+  return "UNKNOWN";
+}
+
 async function observedJitRead<T>(operation: () => Promise<T>): Promise<T> {
   try { return await operation(); }
   catch (error) {
-    const message = error instanceof Error && /^[A-Z0-9_]+$/u.test(error.message) ? error.message : "UNKNOWN";
-    process.stderr.write(`SABA JIT read failed: ${message}\n`);
+    process.stderr.write(`SABA JIT read failed: ${classifySabaJitFailure(error)}\n`);
     throw error;
   }
 }

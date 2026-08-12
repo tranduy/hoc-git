@@ -5,6 +5,7 @@ import { CatalogTelemetryRegistry } from "./catalog-telemetry.js";
 
 export interface CatalogReaderLike {
   readonly requestTimeoutMs?: number;
+  readonly responseCacheMaxAgeMs?: number;
   sourceKey?(accountId: string): Promise<string>;
   read(accountId: string): Promise<ObservedProviderCatalog>;
 }
@@ -22,7 +23,11 @@ export function registerCatalogRoutes(
   observer?: CatalogObserverLike
 ): void {
   const requestTimeoutMs = reader.requestTimeoutMs ?? 3_000;
+  const responseCacheMaxAgeMs = reader.responseCacheMaxAgeMs ?? 5_000;
   if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) throw new Error("CATALOG_REQUEST_TIMEOUT_INVALID");
+  if (!Number.isFinite(responseCacheMaxAgeMs) || responseCacheMaxAgeMs <= 0) {
+    throw new Error("CATALOG_RESPONSE_CACHE_MAX_AGE_INVALID");
+  }
   const readsInFlight = new Map<string, Promise<ObservedProviderCatalog>>();
   const recentReads = new Map<string, { readonly catalog: ObservedProviderCatalog; readonly completedAtMs: number }>();
   const coalescingWindowMs = 250;
@@ -41,6 +46,25 @@ export function registerCatalogRoutes(
   const forAccount = (catalog: ObservedProviderCatalog, accountId: string): ObservedProviderCatalog =>
     catalog.accountId === accountId ? catalog : { ...catalog, accountId };
 
+  const startRead = (sourceKey: string, accountId: string): Promise<ObservedProviderCatalog> => {
+    const existing = readsInFlight.get(sourceKey);
+    if (existing !== undefined) return existing;
+    const started = telemetry.now();
+    const operation = reader.read(accountId).then(async (catalog) => {
+      await telemetry.recordSuccess(accountId, catalog, telemetry.complete(started));
+      observer?.publish(catalog);
+      recentReads.set(sourceKey, { catalog, completedAtMs: performance.now() });
+      return catalog;
+    }).catch(async (error: unknown) => {
+      const schemaError = error instanceof Error && /(?:^|_)CATALOG_SCHEMA_ERROR$/u.test(error.message);
+      await telemetry.recordFailure(accountId, schemaError ? "SCHEMA_ERROR" : "UNAVAILABLE", telemetry.complete(started));
+      throw error;
+    }).finally(() => { if (readsInFlight.get(sourceKey) === operation) readsInFlight.delete(sourceKey); });
+    readsInFlight.set(sourceKey, operation);
+    void operation.catch(() => undefined);
+    return operation;
+  };
+
   app.get("/api/catalog/metrics", async () => telemetry.response());
 
   app.get("/api/catalog/accounts/:accountId", async (request, reply) => {
@@ -54,25 +78,12 @@ export function registerCatalogRoutes(
         deadlineMs - performance.now()
       );
       const recent = recentReads.get(sourceKey);
-      if (recent !== undefined && performance.now() - recent.completedAtMs < coalescingWindowMs) {
+      const recentAgeMs = recent === undefined ? Number.POSITIVE_INFINITY : performance.now() - recent.completedAtMs;
+      if (recent !== undefined && recentAgeMs < Math.min(coalescingWindowMs, responseCacheMaxAgeMs)) {
         return forAccount(recent.catalog, accountId);
       }
-      let operation = readsInFlight.get(sourceKey);
-      if (operation === undefined) {
-        const started = telemetry.now();
-        operation = reader.read(accountId).then(async (catalog) => {
-          await telemetry.recordSuccess(accountId, catalog, telemetry.complete(started));
-          observer?.publish(catalog);
-          recentReads.set(sourceKey, { catalog, completedAtMs: performance.now() });
-          return catalog;
-        }).catch(async (error: unknown) => {
-          const schemaError = error instanceof Error && /(?:^|_)CATALOG_SCHEMA_ERROR$/u.test(error.message);
-          await telemetry.recordFailure(accountId, schemaError ? "SCHEMA_ERROR" : "UNAVAILABLE", telemetry.complete(started));
-          throw error;
-        }).finally(() => { if (readsInFlight.get(sourceKey) === operation) readsInFlight.delete(sourceKey); });
-        readsInFlight.set(sourceKey, operation);
-        void operation.catch(() => undefined);
-      }
+      const operation = startRead(sourceKey, accountId);
+      if (recent !== undefined && recentAgeMs < responseCacheMaxAgeMs) return forAccount(recent.catalog, accountId);
       const catalog = await within(operation, deadlineMs - performance.now());
       return forAccount(catalog, accountId);
     } catch (error) {

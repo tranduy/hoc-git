@@ -111,6 +111,20 @@ function publicStatus(record: StoredSession): RedactedSessionStatus {
   };
 }
 
+function trustedFabetEntryUrl(entryUrl: string, trustedHostname: string | null): string {
+  if (trustedHostname === null) return entryUrl;
+  try {
+    const trusted = new URL(`https://${trustedHostname}/`);
+    if (trusted.hostname !== trustedHostname.toLowerCase() || trusted.username !== "" || trusted.password !== "") {
+      return entryUrl;
+    }
+    const configured = new URL(entryUrl);
+    return configured.protocol === "https:" && configured.hostname === trusted.hostname ? entryUrl : trusted.toString();
+  } catch {
+    return entryUrl;
+  }
+}
+
 export class SessionManager {
   readonly #vault: SecretVault;
   readonly #validators: SessionValidatorRegistry;
@@ -302,7 +316,8 @@ export class SessionManager {
       catch { throw new Error("FABET_SESSION_UNAVAILABLE"); }
       if (typeof fields.entryUrl !== "string" || typeof fields.username !== "string" ||
         typeof fields.password !== "string") throw new Error("FABET_SESSION_UNAVAILABLE");
-      await this.#fabetDriver.login({ entryUrl: fields.entryUrl, username: fields.username, password: fields.password });
+      await this.#fabetDriver.login({ entryUrl: trustedFabetEntryUrl(fields.entryUrl, record.trustedHostname),
+        username: fields.username, password: fields.password });
     })().finally(() => { if (this.#fabetRehydration === operation) this.#fabetRehydration = null; });
     this.#fabetRehydration = operation;
     return operation;
@@ -321,7 +336,8 @@ export class SessionManager {
         if (typeof fields.entryUrl !== "string" || typeof fields.username !== "string" || typeof fields.password !== "string") {
           throw new Error("invalid credentials");
         }
-        credentials = { entryUrl: fields.entryUrl, username: fields.username, password: fields.password };
+        credentials = { entryUrl: trustedFabetEntryUrl(fields.entryUrl, record.trustedHostname),
+          username: fields.username, password: fields.password };
       } catch {
         return this.#transition(renewing, "INVALID", "VAULT_UNAVAILABLE");
       }

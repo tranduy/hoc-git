@@ -1,12 +1,20 @@
 import type { Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 import type { CmdCatalogInputRecord } from "@tool-chenh/adapters";
-import { FabetSabaBrowserManager } from "./fabet-saba-browser-manager.js";
+import { classifySabaJitFailure, FabetSabaBrowserManager } from "./fabet-saba-browser-manager.js";
 
 const catalog = [{ matchId: "match-1", sportId: "1", leagueId: "league-1", leagueName: "League",
   timeText: "Live", teamNames: ["Home", "Away"] as const, groups: [] }] satisfies readonly CmdCatalogInputRecord[];
 
 describe("Fabet SABA browser manager", () => {
+  it("classifies browser lifecycle failures without exposing provider URLs", () => {
+    expect(classifySabaJitFailure(new Error("page.evaluate: Target page, context or browser has been closed https://secret.test/?token=canary")))
+      .toBe("PAGE_CLOSED");
+    expect(classifySabaJitFailure(new Error("page.goto: net::ERR_NAME_NOT_RESOLVED at https://secret.test/?token=canary")))
+      .toBe("NETWORK_ERROR");
+    expect(classifySabaJitFailure(new Error("private-provider-token-canary"))).toBe("UNKNOWN");
+  });
+
   it("uses the live Fabet popup for Fabet-issued SABA sessions instead of reopening the saved launch URL", async () => {
     const fallback = { readCatalog: vi.fn(async () => []), readAccountStore: vi.fn(),
       readTicketConstraint: vi.fn(), close: vi.fn(async () => undefined) };

@@ -69,6 +69,61 @@ describe("provider catalog route", () => {
     expect(reads).toBe(1);
   });
 
+  it("serves the last completed catalog while starting a slower refresh", async () => {
+    let reads = 0;
+    let releaseFirst: ((catalog: ObservedProviderCatalog) => void) | undefined;
+    const firstRead = new Promise<ObservedProviderCatalog>((resolve) => { releaseFirst = resolve; });
+    const neverCompletes = new Promise<ObservedProviderCatalog>(() => undefined);
+    const catalog: ObservedProviderCatalog = {
+      dataMode: "LIVE", accountId: "account-1", provider: "SBOBET", category: "FOOTBALL",
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100, rejectedMarketCount: 0,
+      events: [], markets: [], quotes: []
+    };
+    const app = buildApp(createFixtureRuntime(1_000), {
+      catalogReader: {
+        requestTimeoutMs: 10,
+        sourceKey: async () => "SBOBET|FOOTBALL|session-1",
+        read: async () => { reads += 1; return reads === 1 ? firstRead : neverCompletes; }
+      }
+    });
+    apps.push(app);
+
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" })).statusCode).toBe(503);
+    releaseFirst?.(catalog);
+    await firstRead;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const cached = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-2" });
+    expect(cached.statusCode).toBe(200);
+    expect(cached.json()).toMatchObject({ accountId: "account-2", provider: "SBOBET" });
+    expect(reads).toBe(2);
+  });
+
+  it("stops serving a completed catalog after its bounded display lifetime", async () => {
+    let reads = 0;
+    const catalog: ObservedProviderCatalog = {
+      dataMode: "LIVE", accountId: "account-1", provider: "BTI", category: "FOOTBALL",
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100, rejectedMarketCount: 0,
+      events: [], markets: [], quotes: []
+    };
+    const app = buildApp(createFixtureRuntime(1_000), {
+      catalogReader: {
+        requestTimeoutMs: 10,
+        responseCacheMaxAgeMs: 20,
+        read: async () => { reads += 1; return reads === 1 ? catalog : new Promise<ObservedProviderCatalog>(() => undefined); }
+      }
+    });
+    apps.push(app);
+
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" })).statusCode).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const expired = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
+
+    expect(expired.statusCode).toBe(503);
+    expect(expired.json()).toEqual({ error: "CATALOG_TIMEOUT" });
+    expect(reads).toBe(2);
+  });
+
   it("keeps health and another source responsive while one source reader is hung", async () => {
     const app = buildApp(createFixtureRuntime(1_000), {
       catalogReader: {

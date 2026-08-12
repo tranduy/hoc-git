@@ -209,6 +209,7 @@ describe("SessionManager", () => {
     const vault = await createVault();
     const clock = { wallClockNowMs: 40 };
     let loginCalls = 0;
+    const loginEntryUrls: string[] = [];
     let captureCalls = 0;
     let resetCalls = 0;
     const manager = new SessionManager({
@@ -217,7 +218,7 @@ describe("SessionManager", () => {
       clock: { nowMs: () => clock.wallClockNowMs },
       idFactory: () => "unused",
       fabetDriver: {
-        login: async () => { loginCalls += 1; },
+        login: async (input) => { loginCalls += 1; loginEntryUrls.push(input.entryUrl); },
         captureLobbyLaunches: async () => {
           captureCalls += 1;
           await vault.save("launch-1", {
@@ -238,7 +239,7 @@ describe("SessionManager", () => {
     });
 
     const configured = await manager.configureFabet({
-      entryUrl: "https://fabet.party/",
+      entryUrl: "https://fabet.com/",
       username: "development-user",
       password: "development-pass",
       trustedHostname: "fabet.party"
@@ -261,6 +262,7 @@ describe("SessionManager", () => {
     clock.wallClockNowMs = 86_400_040;
     await manager.tick();
     expect(loginCalls).toBe(2);
+    expect(loginEntryUrls).toEqual(["https://fabet.com/", "https://fabet.party/"]);
     expect(captureCalls).toBe(2);
     expect((await manager.listStatuses()).sessions.find((session) => session.provider === "FABET")).toMatchObject({
       state: "ACTIVE", acquiredAtMs: 86_400_040, renewAfterMs: 172_800_040
