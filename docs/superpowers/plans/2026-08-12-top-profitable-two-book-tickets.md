@@ -162,7 +162,7 @@ git commit -m "fix: optimize every cross-book leg pair"
 - Create: `apps/web/src/watch/ticket-preflight-coordinator.ts`
 - Create: `apps/web/src/watch/ticket-preflight-coordinator.test.ts`
 
-- [ ] **Step 1: Write coordinator RED tests**
+- [x] **Step 1: Write coordinator RED tests**
 
 Use a fake `ProviderPreflightApiLike` and fake clock. Test:
 
@@ -184,13 +184,13 @@ expect(result.get(`${event.key}::${row.key}`)?.status).toBe("VERIFIED");
 expect(api.requests.every((request) => request.requestedStake !== "0")).toBe(true);
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/watch/ticket-preflight-coordinator.test.ts`
 
 Expected: FAIL because the coordinator does not exist.
 
-- [ ] **Step 3: Implement fail-closed two-phase verification**
+- [x] **Step 3: Implement fail-closed two-phase verification**
 
 Expose:
 
@@ -221,7 +221,7 @@ Algorithm for each exact row and each opposing provider pair:
 
 Preflight every opposing pair whose optimistic no-fee/no-rounding plan can still reach the 20,000 VND threshold; this is a safe upper-bound filter because verified fees and native rounding cannot improve that optimistic profit. Do not truncate candidates before verification: the five-row limit is applied only after verified ranking. Bound request concurrency per provider, coalesce identical in-flight requests, and do not retry an errored key before its next catalog generation. The result map contains only evidence whose `expiresAtMs > nowMs`.
 
-- [ ] **Step 4: Run focused tests and typecheck**
+- [x] **Step 4: Run focused tests and typecheck**
 
 Run:
 
@@ -232,7 +232,7 @@ npm.cmd run typecheck --workspace @tool-chenh/web
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add apps/web/src/watch/ticket-preflight-coordinator.ts apps/web/src/watch/ticket-preflight-coordinator.test.ts
