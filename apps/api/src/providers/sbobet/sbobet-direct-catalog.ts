@@ -172,9 +172,20 @@ export function extractSbobetDirectCatalogRecords(
 ): readonly SbobetCatalogInputRecord[] {
   const fallback = new Map(fallbackRecords.map((record) => [record.eventId, record]));
   const records = new Map<string, SbobetCatalogInputRecord>();
-  const visit = (value: unknown, depth: number): void => {
-    if (depth > 20 || value === null || typeof value !== "object") return;
-    if (Array.isArray(value)) { value.forEach((child) => visit(child, depth + 1)); return; }
+  const stack: Array<{ readonly value: unknown; readonly depth: number }> = [{ value: body, depth: 0 }];
+  const visited = new Set<object>();
+  const maxVisitedNodes = 50_000;
+  while (stack.length > 0 && visited.size < maxVisitedNodes && records.size < fallback.size) {
+    const current = stack.pop()!;
+    const value = current.value;
+    if (current.depth > 20 || value === null || typeof value !== "object" || visited.has(value)) continue;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index -= 1) {
+        stack.push({ value: value[index], depth: current.depth + 1 });
+      }
+      continue;
+    }
     const raw = value as Record<string, unknown>;
     const eventId = typeof raw["8"] === "number" || typeof raw["8"] === "string" ? String(raw["8"]) : null;
     const teams = [raw["2"], raw["3"]];
@@ -200,8 +211,10 @@ export function extractSbobetDirectCatalogRecords(
         markets: unique
       });
     }
-    Object.values(raw).forEach((child) => visit(child, depth + 1));
-  };
-  visit(body, 0);
+    const children = Object.values(raw);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push({ value: children[index], depth: current.depth + 1 });
+    }
+  }
   return [...records.values()];
 }

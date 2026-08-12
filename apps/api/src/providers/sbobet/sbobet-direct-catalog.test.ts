@@ -48,6 +48,14 @@ describe("extractSbobetDirectCatalogRecords", () => {
     } }, { "8": 999, "2": "X", "3": "Y", "7": { "5": ["0.5 0.8*1h -0.9*1a h 12345"] } }];
     expect(extractSbobetDirectCatalogRecords(body, fallback)).toEqual([]);
   });
+
+  it("fails closed before an oversized payload can monopolize the API event loop", () => {
+    const sentinel = new Proxy({}, { ownKeys: () => { throw new Error("UNBOUNDED_TRAVERSAL"); } });
+    const oversized = [...Array.from({ length: 50_001 }, () => ({})), sentinel];
+
+    expect(() => extractSbobetDirectCatalogRecords(oversized, fallback)).not.toThrow();
+    expect(extractSbobetDirectCatalogRecords(oversized, fallback)).toEqual([]);
+  });
 });
 
 describe("inspectSbobetMarketGroups", () => {
