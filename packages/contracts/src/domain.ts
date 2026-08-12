@@ -58,6 +58,17 @@ export interface AccountStatus {
   readonly reason: SessionHealthReason | null;
 }
 
+export interface CatalogSourceStatus {
+  readonly id: string;
+  readonly alias: string;
+  readonly provider: Exclude<ProviderId, "FABET">;
+  readonly category: Category;
+  readonly sessionState: SessionState;
+  readonly sessionSource?: SessionSource | undefined;
+  readonly acquiredAtMs: number | null;
+  readonly reason: SessionHealthReason | null;
+}
+
 export interface QuoteMovement {
   readonly direction: "UP" | "DOWN" | "UNCHANGED";
   readonly previousDecimal: string;

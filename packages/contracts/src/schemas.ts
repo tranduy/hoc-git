@@ -3,6 +3,7 @@ import type {
   AccountStatus,
   AppSnapshot,
   BlockedDiagnostic,
+  CatalogSourceStatus,
   CanonicalEvent,
   CanonicalMarket,
   Category,
@@ -197,6 +198,21 @@ export const AccountStatusSchema = z.strictObject({
     context.addIssue({ code: "custom", path: ["capabilities"], message: "capabilities must be unique" });
   }
 }) satisfies z.ZodType<AccountStatus>;
+
+export const CatalogSourceStatusSchema = z.strictObject({
+  id: z.string().regex(/^catalog-source:(?:CMD|SABA|SBOBET|APSPORT|BTI|IM):(FOOTBALL|LOL)$/u),
+  alias: z.string().trim().min(1).max(80),
+  provider: z.enum(["CMD", "SABA", "SBOBET", "APSPORT", "BTI", "IM"]),
+  category: CategorySchema,
+  sessionState: SessionStateSchema,
+  sessionSource: SessionSourceSchema.optional(),
+  acquiredAtMs: z.number().finite().nonnegative().nullable(),
+  reason: SessionHealthReasonSchema.nullable()
+}).superRefine((source, context) => {
+  if (source.id !== `catalog-source:${source.provider}:${source.category}`) {
+    context.addIssue({ code: "custom", path: ["id"], message: "source id must match provider and category" });
+  }
+}) satisfies z.ZodType<CatalogSourceStatus>;
 
 export const QuoteMovementSchema = z.strictObject({
   direction: z.enum(["UP", "DOWN", "UNCHANGED"]),

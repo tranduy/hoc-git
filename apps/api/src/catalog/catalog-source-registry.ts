@@ -1,0 +1,121 @@
+import {
+  CatalogSourceStatusSchema,
+  type CatalogSourceStatus,
+  type Category,
+  type ProviderId,
+  type RedactedSessionStatus,
+  type SessionStatusList
+} from "@tool-chenh/contracts";
+import type { CatalogSourceIdentity } from "../accounts/account-registry.js";
+import type { ActiveAccountAccess } from "../providers/cmd/cmd-observed-catalog.js";
+import type { ActiveSecretHandle } from "../sessions/types.js";
+
+type CatalogProvider = Exclude<ProviderId, "FABET">;
+
+export interface SupportedCatalogPair {
+  readonly provider: CatalogProvider;
+  readonly category: Category;
+  readonly alias: string;
+}
+
+interface CatalogSessionAccess {
+  listStatuses(): Promise<SessionStatusList>;
+  getActiveSecretHandle(id: string): Promise<ActiveSecretHandle | null>;
+}
+
+interface CatalogAccountDelegate extends ActiveAccountAccess {
+  resolveCatalogSource(id: string): Promise<CatalogSourceIdentity>;
+}
+
+function sourceId(pair: Pick<SupportedCatalogPair, "provider" | "category">): string {
+  return `catalog-source:${pair.provider}:${pair.category}`;
+}
+
+function newest(sessions: readonly RedactedSessionStatus[]): RedactedSessionStatus | null {
+  return [...sessions].sort((left, right) =>
+    (right.acquiredAtMs ?? -1) - (left.acquiredAtMs ?? -1) || right.id.localeCompare(left.id))[0] ?? null;
+}
+
+export class CatalogSourceRegistry implements ActiveAccountAccess {
+  readonly #sessions: CatalogSessionAccess;
+  readonly #accounts: CatalogAccountDelegate;
+  readonly #pairs: readonly SupportedCatalogPair[];
+  readonly #pairsById: ReadonlyMap<string, SupportedCatalogPair>;
+
+  constructor(options: {
+    readonly sessions: CatalogSessionAccess;
+    readonly accounts: CatalogAccountDelegate;
+    readonly supportedPairs: readonly SupportedCatalogPair[];
+  }) {
+    this.#sessions = options.sessions;
+    this.#accounts = options.accounts;
+    const pairs = options.supportedPairs.map((pair) => ({ ...pair, alias: pair.alias.trim() }));
+    if (pairs.some((pair) => pair.alias.length === 0) || new Set(pairs.map(sourceId)).size !== pairs.length) {
+      throw new Error("CATALOG_SOURCE_CONFIG_INVALID");
+    }
+    this.#pairs = pairs;
+    this.#pairsById = new Map(pairs.map((pair) => [sourceId(pair), pair]));
+  }
+
+  async listStatuses(): Promise<readonly CatalogSourceStatus[]> {
+    const sessions = (await this.#sessions.listStatuses()).sessions;
+    return this.#pairs.map((pair) => {
+      const exact = sessions.filter((candidate) =>
+        candidate.provider === pair.provider && candidate.category === pair.category);
+      const selected = newest(exact.filter((candidate) => candidate.state === "ACTIVE")) ?? newest(exact);
+      return CatalogSourceStatusSchema.parse({
+        id: sourceId(pair),
+        alias: pair.alias,
+        provider: pair.provider,
+        category: pair.category,
+        sessionState: selected?.state ?? "UNCONFIGURED",
+        ...(selected === null ? {} : { sessionSource: selected.source }),
+        acquiredAtMs: selected?.acquiredAtMs ?? null,
+        reason: selected?.reason ?? null
+      });
+    });
+  }
+
+  async resolveCatalogSource(id: string): Promise<CatalogSourceIdentity> {
+    const pair = this.#pairsById.get(id);
+    if (pair === undefined) {
+      if (id.startsWith("catalog-source:")) throw new Error("CATALOG_SOURCE_UNAVAILABLE");
+      return this.#accounts.resolveCatalogSource(id);
+    }
+    const selected = await this.#resolveActive(pair);
+    return {
+      provider: pair.provider,
+      category: pair.category,
+      sessionId: selected.id,
+      key: `catalog-source|${pair.provider}|${pair.category}`
+    };
+  }
+
+  async withActiveHandle<T>(
+    id: string,
+    expectedProvider: ProviderId,
+    consume: (handle: ActiveSecretHandle) => Promise<T>,
+    expectedCategory?: Category
+  ): Promise<T> {
+    const pair = this.#pairsById.get(id);
+    if (pair === undefined) {
+      if (id.startsWith("catalog-source:")) throw new Error("CATALOG_SOURCE_UNAVAILABLE");
+      return this.#accounts.withActiveHandle(id, expectedProvider, consume, expectedCategory);
+    }
+    if (pair.provider !== expectedProvider) throw new Error("ACCOUNT_PROVIDER_MISMATCH");
+    if (expectedCategory !== undefined && pair.category !== expectedCategory) throw new Error("ACCOUNT_CATEGORY_MISMATCH");
+    const selected = await this.#resolveActive(pair);
+    const handle = await this.#sessions.getActiveSecretHandle(selected.id);
+    if (handle === null || handle.provider !== pair.provider || handle.category !== pair.category) {
+      throw new Error("CATALOG_SOURCE_UNAVAILABLE");
+    }
+    return consume(handle);
+  }
+
+  async #resolveActive(pair: SupportedCatalogPair): Promise<RedactedSessionStatus> {
+    const selected = newest((await this.#sessions.listStatuses()).sessions.filter((candidate) =>
+      candidate.provider === pair.provider && candidate.category === pair.category && candidate.state === "ACTIVE"));
+    if (selected === null) throw new Error("CATALOG_SOURCE_UNAVAILABLE");
+    return selected;
+  }
+}

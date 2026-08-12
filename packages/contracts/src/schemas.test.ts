@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AccountStatusSchema,
   AppSnapshotSchema,
+  CatalogSourceStatusSchema,
   CanonicalMarketSchema,
   ExecutionRequestSchema,
   OpportunitySchema,
@@ -22,6 +23,36 @@ import {
   StakeLegSchema,
   TwoLegExecutionResultSchema
 } from "./schemas.js";
+
+describe("CatalogSourceStatusSchema", () => {
+  it("accepts one redacted logical source whose id matches its exact provider and category", () => {
+    expect(CatalogSourceStatusSchema.parse({
+      id: "catalog-source:SABA:FOOTBALL",
+      alias: "C-Sports · SABA",
+      provider: "SABA",
+      category: "FOOTBALL",
+      sessionState: "ACTIVE",
+      sessionSource: "FABET_LOGIN",
+      acquiredAtMs: 200,
+      reason: null
+    })).toMatchObject({ provider: "SABA", category: "FOOTBALL" });
+  });
+
+  it("rejects mismatched identity and any secret-shaped extra field", () => {
+    const valid = {
+      id: "catalog-source:SABA:FOOTBALL",
+      alias: "C-Sports · SABA",
+      provider: "SABA" as const,
+      category: "FOOTBALL" as const,
+      sessionState: "ACTIVE" as const,
+      sessionSource: "FABET_LOGIN" as const,
+      acquiredAtMs: 200,
+      reason: null
+    };
+    expect(CatalogSourceStatusSchema.safeParse({ ...valid, category: "LOL" }).success).toBe(false);
+    expect(CatalogSourceStatusSchema.safeParse({ ...valid, token: "must-not-pass" }).success).toBe(false);
+  });
+});
 
 describe("live account and preflight schemas", () => {
   it("binds a short-lived provider constraint to one exact ticket", () => {
