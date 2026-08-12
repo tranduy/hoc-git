@@ -197,6 +197,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
     sessionServices,
     accountRegistry: sessionServices.accounts,
+    catalogSources: sessionServices.catalogSources,
     catalogReader: sessionServices.catalogReader,
     ...(config.dataMode === "LIVE" ? { catalogObserver: catalogBridge } : {}),
     catalogTelemetry,

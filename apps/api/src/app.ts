@@ -8,6 +8,7 @@ import { registerAccountRoutes, type AccountRegistryLike } from "./routes/accoun
 import { registerSnapshotRoute } from "./routes/snapshot.js";
 import { registerSessionRoutes, type SessionServices } from "./routes/sessions.js";
 import { registerCatalogRoutes, type CatalogObserverLike, type CatalogReaderLike } from "./routes/catalog.js";
+import { registerCatalogSourceRoutes, type CatalogSourceRegistryLike } from "./routes/catalog-sources.js";
 import type { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { registerProviderPreflightRoutes, type ProviderPreflightLike } from "./routes/provider-preflight.js";
 import { registerTwoLegPreflightRoutes, type TwoLegPreflightLike } from "./routes/two-leg-preflight.js";
@@ -21,6 +22,7 @@ export interface AppOptions {
   readonly sessionServices?: SessionServices;
   readonly accountRegistry?: AccountRegistryLike;
   readonly catalogReader?: CatalogReaderLike;
+  readonly catalogSources?: CatalogSourceRegistryLike;
   readonly catalogObserver?: CatalogObserverLike;
   readonly catalogTelemetry?: CatalogTelemetryRegistry;
   readonly providerPreflight?: ProviderPreflightLike;
@@ -128,6 +130,7 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   registerSnapshotRoute(app, runtime);
   if (options.sessionServices !== undefined) registerSessionRoutes(app, options.sessionServices);
   if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
+  if (options.catalogSources !== undefined) registerCatalogSourceRoutes(app, options.catalogSources);
   if (options.catalogReader !== undefined) registerCatalogRoutes(
     app, options.catalogReader, options.catalogTelemetry, options.catalogObserver
   );

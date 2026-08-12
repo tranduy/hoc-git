@@ -55,6 +55,7 @@ import { ReceiptProtocolRegistry } from "../receipts/receipt-protocol-registry.j
 import { SbobetReceiptProtocolReader } from "../providers/sbobet/sbobet-receipt-protocol-reader.js";
 import { SbobetExecutionReceiptReader } from "../providers/sbobet/sbobet-execution-receipt-reader.js";
 import type { ReceiptReader } from "../execution/receipt-reconciler.js";
+import { CatalogSourceRegistry, type SupportedCatalogPair } from "../catalog/catalog-source-registry.js";
 
 export interface CreateSessionServicesOptions {
   readonly localAppData: string;
@@ -70,6 +71,7 @@ export interface CreateSessionServicesOptions {
 
 export interface ManagedSessionServices extends SessionServices {
   readonly accounts: AccountRegistry;
+  readonly catalogSources: CatalogSourceRegistry;
   readonly catalogReader: MultiProviderCatalogReader;
   readonly sabaCatalogReader: SabaObservedCatalogReader;
   readonly providerPreflight: ProviderPreflightRegistry;
@@ -78,6 +80,16 @@ export interface ManagedSessionServices extends SessionServices {
   tick(): Promise<void>;
   close(): Promise<void>;
 }
+
+const supportedCatalogPairs = [
+  { provider: "CMD", category: "FOOTBALL", alias: "T-Sports · CMD" },
+  { provider: "SABA", category: "FOOTBALL", alias: "C-Sports · SABA" },
+  { provider: "SABA", category: "LOL", alias: "SABA Esports" },
+  { provider: "SBOBET", category: "FOOTBALL", alias: "K-Sports · SBOBET" },
+  { provider: "APSPORT", category: "FOOTBALL", alias: "AP Sports · APSPORT" },
+  { provider: "BTI", category: "FOOTBALL", alias: "BTI Football" },
+  { provider: "IM", category: "LOL", alias: "IM Esports" }
+] as const satisfies readonly SupportedCatalogPair[];
 
 function isSafeCapturedLaunch(value: string, expectedHost?: string): boolean {
   try {
@@ -176,32 +188,33 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock,
     idFactory
   });
+  const catalogSources = new CatalogSourceRegistry({ sessions: manager, accounts, supportedPairs: supportedCatalogPairs });
   const catalogReader = new CmdObservedCatalogReader({
-    accounts,
+    accounts: catalogSources,
     source: cmdBrowser,
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
     timezoneOffsetMinutes: 420
   });
   const sabaCatalogReader = new SabaObservedCatalogReader({
-    accounts, source: { readCatalog: sabaBrowser.readRawCatalog.bind(sabaBrowser) },
+    accounts: catalogSources, source: { readCatalog: sabaBrowser.readRawCatalog.bind(sabaBrowser) },
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const sbobetCatalogReader = new SbobetObservedCatalogReader({
-    accounts, source: sbobetBrowser,
+    accounts: catalogSources, source: sbobetBrowser,
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const sabaEsportsCatalogReader = new SabaEsportsObservedCatalogReader({
-    accounts, source: new JitSabaEsportsCatalogSource({
+    accounts: catalogSources, source: new JitSabaEsportsCatalogSource({
       fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) }, browser: sabaEsportsBrowser
     }),
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const imEsportsCatalogReader = new ImEsportsObservedCatalogReader({
-    accounts, source: imEsportsBrowser,
+    accounts: catalogSources, source: imEsportsBrowser,
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
-  const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts, source: apsportBrowser });
-  const btiCatalogReader = new BtiObservedCatalogReader({ accounts, source: btiBrowser });
+  const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts: catalogSources, source: apsportBrowser });
+  const btiCatalogReader = new BtiObservedCatalogReader({ accounts: catalogSources, source: btiBrowser });
   const providerPreflight = new ProviderPreflightRegistry({ accounts,
     readers: [new SabaTicketPreflightReader({ source: sabaBrowser,
       ...(options.providerFees?.SABA === undefined ? {} : { fee: options.providerFees.SABA }) }),
@@ -221,7 +234,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     discovery,
     trustStore,
     accounts,
-    catalogReader: new MultiProviderCatalogReader({ sources: accounts, readers: [
+    catalogSources,
+    catalogReader: new MultiProviderCatalogReader({ sources: catalogSources, readers: [
       { provider: "CMD", category: "FOOTBALL", reader: catalogReader },
       { provider: "SABA", category: "LOL", reader: sabaEsportsCatalogReader },
       { provider: "IM", category: "LOL", reader: imEsportsCatalogReader },

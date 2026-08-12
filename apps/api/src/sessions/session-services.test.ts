@@ -47,4 +47,35 @@ describe("createSessionServices", () => {
   it("rejects an empty local application-data root", () => {
     expect(() => createSessionServices({ localAppData: "", protector })).toThrowError("LOCAL_APP_DATA_REQUIRED");
   });
+
+  it("exposes one stable catalog-only source for every registered reader pair", async () => {
+    const localAppData = await mkdtemp(join(tmpdir(), "tool-chenh-catalog-sources-"));
+    directories.push(localAppData);
+    const services = createSessionServices({
+      localAppData,
+      protector,
+      automation: {
+        login: async () => undefined,
+        captureNavigations: async () => [],
+        isAuthenticated: async () => true,
+        close: async () => undefined
+      },
+      fetch: async () => new Response("ok"),
+      clock: { nowMs: () => 100 },
+      idFactory: () => "unused"
+    });
+
+    expect(await services.catalogSources.listStatuses()).toEqual([
+      expect.objectContaining({ id: "catalog-source:CMD:FOOTBALL", provider: "CMD", category: "FOOTBALL" }),
+      expect.objectContaining({ id: "catalog-source:SABA:FOOTBALL", provider: "SABA", category: "FOOTBALL" }),
+      expect.objectContaining({ id: "catalog-source:SABA:LOL", provider: "SABA", category: "LOL" }),
+      expect.objectContaining({ id: "catalog-source:SBOBET:FOOTBALL", provider: "SBOBET", category: "FOOTBALL" }),
+      expect.objectContaining({ id: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT", category: "FOOTBALL" }),
+      expect.objectContaining({ id: "catalog-source:BTI:FOOTBALL", provider: "BTI", category: "FOOTBALL" }),
+      expect.objectContaining({ id: "catalog-source:IM:LOL", provider: "IM", category: "LOL" })
+    ]);
+    await expect(services.catalogReader.sourceKey("catalog-source:BTI:LOL"))
+      .rejects.toThrow("CATALOG_SOURCE_UNAVAILABLE");
+    await services.close();
+  });
 });
