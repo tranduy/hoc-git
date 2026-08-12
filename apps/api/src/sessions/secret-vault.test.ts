@@ -49,6 +49,26 @@ describe("SecretVault", () => {
     await expect(readFile(join(directory, "vault.v1.json.tmp"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("decrypts a requested record set through one batch protector call", async () => {
+    const directory = await temporaryDirectory();
+    const writer = new SecretVault({ directory, protector: reversibleProtector });
+    await writer.save("one", { token: "first" });
+    await writer.save("two", { token: "second" });
+    let batchCalls = 0;
+    const reader = new SecretVault({ directory, protector: {
+      ...reversibleProtector,
+      unprotectMany: async (values) => {
+        batchCalls += 1;
+        return Promise.all(values.map(reversibleProtector.unprotect));
+      }
+    } });
+
+    expect(await reader.loadMany(["two", "missing", "one"])).toEqual([
+      { token: "second" }, null, { token: "first" }
+    ]);
+    expect(batchCalls).toBe(1);
+  });
+
   it("deletes records without affecting siblings", async () => {
     const directory = await temporaryDirectory();
     const vault = new SecretVault({ directory, protector: reversibleProtector });

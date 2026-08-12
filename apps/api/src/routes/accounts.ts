@@ -16,12 +16,31 @@ const registerBody = z.strictObject({
 const accountParams = z.strictObject({ id: z.string().trim().min(1).max(128) });
 
 export function registerAccountRoutes(app: FastifyInstance, accounts: AccountRegistryLike): void {
-  app.get("/api/accounts", async () => ({ accounts: await accounts.listStatuses() }));
+  let listInFlight: Promise<readonly AccountStatus[]> | null = null;
+  let recent: { readonly accounts: readonly AccountStatus[]; readonly completedAtMs: number } | null = null;
+  const coalescingWindowMs = 250;
+  const list = (): Promise<readonly AccountStatus[]> => {
+    if (recent !== null && performance.now() - recent.completedAtMs < coalescingWindowMs) {
+      return Promise.resolve(recent.accounts);
+    }
+    if (listInFlight !== null) return listInFlight;
+    const operation = accounts.listStatuses().then((statuses) => {
+      recent = { accounts: statuses, completedAtMs: performance.now() };
+      return statuses;
+    }).finally(() => { if (listInFlight === operation) listInFlight = null; });
+    listInFlight = operation;
+    return operation;
+  };
+  const invalidate = (): void => { recent = null; };
+
+  app.get("/api/accounts", async () => ({ accounts: await list() }));
   app.post("/api/accounts", async (request, reply) => {
     const parsed = registerBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     try {
-      return await accounts.register(parsed.data);
+      const result = await accounts.register(parsed.data);
+      invalidate();
+      return result;
     } catch (error) {
       const code = error instanceof Error ? error.message : "ACCOUNT_OPERATION_FAILED";
       return reply.code(code === "SESSION_NOT_FOUND" ? 404 : 400).send({ error: code });
@@ -31,7 +50,9 @@ export function registerAccountRoutes(app: FastifyInstance, accounts: AccountReg
     const parsed = accountParams.safeParse(request.params);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     try {
-      return await accounts.refresh(parsed.data.id);
+      const result = await accounts.refresh(parsed.data.id);
+      invalidate();
+      return result;
     } catch (error) {
       const code = error instanceof Error ? error.message : "ACCOUNT_OPERATION_FAILED";
       return reply.code(code === "ACCOUNT_NOT_FOUND" ? 404 : 400).send({ error: code });

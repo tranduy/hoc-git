@@ -29,6 +29,7 @@ export interface ActiveSecretHandle {
 export interface SecretProtector {
   protect(cleartext: Uint8Array): Promise<Uint8Array>;
   unprotect(ciphertext: Uint8Array): Promise<Uint8Array>;
+  unprotectMany?(ciphertexts: readonly Uint8Array[]): Promise<readonly Uint8Array[]>;
 }
 
 export type VaultErrorCode = "INVALID_VAULT_RECORD" | "VAULT_UNAVAILABLE";

@@ -218,7 +218,7 @@ export class AccountRegistry {
 
   async #listRecords(): Promise<StoredAccount[]> {
     const ids = (await this.#vault.listIds()).filter((id) => id.startsWith(recordPrefix));
-    const records = await Promise.all(ids.map((id) => this.#vault.load(id)));
+    const records = await this.#vault.loadMany(ids);
     return records.map(parseStoredAccount).filter((record): record is StoredAccount => record !== null)
       .sort((left, right) => left.id.localeCompare(right.id));
   }

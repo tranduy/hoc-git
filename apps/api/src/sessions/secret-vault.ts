@@ -90,6 +90,35 @@ export class SecretVault {
     }
   }
 
+  async loadMany(ids: readonly string[]): Promise<readonly (SecretRecord | null)[]> {
+    ids.forEach(assertRecordId);
+    if (ids.length === 0) return [];
+    const vault = await this.#read();
+    const present = ids.flatMap((id, index) => {
+      const record = vault.records[id];
+      return record === undefined ? [] : [{ index, ciphertext: Buffer.from(record.ciphertextBase64, "base64") }];
+    });
+    const output: Array<SecretRecord | null> = ids.map(() => null);
+    if (present.length === 0) return output;
+    let cleartexts: readonly Uint8Array[] = [];
+    try {
+      cleartexts = this.#protector.unprotectMany === undefined
+        ? await Promise.all(present.map((item) => this.#protector.unprotect(item.ciphertext)))
+        : await this.#protector.unprotectMany(present.map((item) => item.ciphertext));
+      if (cleartexts.length !== present.length) throw new Error("invalid batch result");
+      cleartexts.forEach((cleartext, index) => {
+        const value: unknown = JSON.parse(new TextDecoder().decode(cleartext));
+        if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("invalid secret record");
+        output[present[index]!.index] = value as SecretRecord;
+      });
+      return output;
+    } catch {
+      throw new VaultError("VAULT_UNAVAILABLE");
+    } finally {
+      cleartexts.forEach((cleartext) => cleartext.fill(0));
+    }
+  }
+
   async delete(id: string): Promise<void> {
     assertRecordId(id);
     await this.#mutate(async (vault) => {

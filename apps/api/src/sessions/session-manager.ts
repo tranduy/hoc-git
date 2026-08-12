@@ -462,7 +462,7 @@ export class SessionManager {
 
   async #listRecords(): Promise<StoredSession[]> {
     const ids = (await this.#vault.listIds()).filter((id) => id.startsWith(recordPrefix));
-    const records = await Promise.all(ids.map(async (id) => parseStoredSession(await this.#vault.load(id))));
+    const records = (await this.#vault.loadMany(ids)).map(parseStoredSession);
     return records.filter((record): record is StoredSession => record !== null).sort((left, right) => left.id.localeCompare(right.id));
   }
 }
