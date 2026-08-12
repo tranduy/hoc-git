@@ -1,16 +1,10 @@
 import type { ProviderEvent, ProviderId } from "@tool-chenh/contracts";
 import { useEffect } from "react";
-import { decimalOdds, selectionLabel } from "../catalog/comparison.js";
+import { decimalOdds, selectionLabel, ticketMarketLabel } from "../catalog/comparison.js";
 import type { RankedTicket } from "../watch/ranked-tickets.js";
 
 function money(value: string): string {
   return `${Number(value).toLocaleString("en-US")} VND`;
-}
-
-function marketLabel(ticket: RankedTicket): string {
-  if (ticket.row.marketType === "SERIES_WINNER") return "Series winner";
-  if (ticket.row.marketType === "FT_AH") return "Full-time handicap";
-  return ticket.row.marketType;
 }
 
 export function ticketDomId(eventKey: string, ticketKey: string): string {
@@ -42,7 +36,7 @@ export function RankedTicketTable({ event, providers, tickets, highlightTicketKe
         className={`${profitable ? "ranked-ticket-row ranked-ticket-row--profitable" :
           "ranked-ticket-row ranked-ticket-row--neutral"}${highlightTicketKey === ticket.key ? " ranked-ticket-row--highlight" : ""}`}
         id={ticketDomId(ticket.eventKey, ticket.key)} key={ticket.key} tabIndex={-1}>
-        <th><strong>{marketLabel(ticket)}</strong><span>{ticket.row.line === null ? "No line" : `Line ${ticket.row.line}`}</span>
+        <th><strong>{ticketMarketLabel(ticket.row.marketType)}</strong><span>{ticket.row.line === null ? "No line" : `Line ${ticket.row.line}`}</span>
           <small>{ticket.key}</small></th>
         {providers.map((provider) => {
           const cell = ticket.row.cells.find((candidate) => candidate.provider === provider);

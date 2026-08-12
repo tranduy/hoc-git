@@ -197,6 +197,36 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
   });
 
+  it("shows exact full-time totals with a clear TÃ i/Xá»‰u label and both provider prices", async () => {
+    const providerAccount = (id: string, provider: "SABA" | "SBOBET"): AccountStatus => ({ ...account,
+      id, provider, alias: `${provider} main` });
+    const sabaAccount = providerAccount("saba-account", "SABA");
+    const sbobetAccount = providerAccount("sbobet-account", "SBOBET");
+    const totalCatalog = (sourceAccount: AccountStatus, odds: readonly [string, string]): LiveCatalogResponse => {
+      const provider = sourceAccount.provider;
+      const providerEventId = `${provider}-event`;
+      const providerMarketId = `${provider}-total-2.5`;
+      return { ...catalog, accountId: sourceAccount.id, provider,
+        events: [{ ...event, provider, providerEventId }],
+        markets: [{ ...market, provider, providerEventId, providerMarketId,
+          marketType: "FT_TOTAL", line: "2.5" }],
+        quotes: (["OVER", "UNDER"] as const).map((selection, index) => ({ ...quotes[index]!, provider,
+          providerEventId, providerMarketId, providerSelectionId: `${provider}-${selection}`,
+          marketType: "FT_TOTAL", selection, line: "2.5", rawOdds: odds[index]! })) };
+    };
+    const saba = totalCatalog(sabaAccount, ["2.20", "1.72"]);
+    const sbobet = totalCatalog(sbobetAccount, ["2.08", "1.85"]);
+
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }}
+      catalogApi={{ read: async (id) => id === sabaAccount.id ? saba : sbobet }} />);
+
+    expect((await screen.findAllByText("T\u00e0i/X\u1ec9u to\u00e0n tr\u1eadn")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("T\u00e0i").some((node) =>
+      node.closest(".ranked-ticket-price")?.textContent?.includes("2.20 DECIMAL"))).toBe(true);
+    expect(screen.getAllByText("X\u1ec9u").some((node) =>
+      node.closest(".ranked-ticket-price")?.textContent?.includes("1.85 DECIMAL"))).toBe(true);
+  });
+
   it("turns an exact row green only after both provider legs pass fresh preflight", async () => {
     const observedAtMs = Date.now();
     const liveAccount = (id: string, provider: "SABA" | "SBOBET"): AccountStatus => ({ ...account, id,

@@ -44,6 +44,20 @@ function ticket(index: number, state: RankedTicket["state"] = "OBSERVATION"): Ra
 }
 
 describe("RankedTicketTable", () => {
+  it("labels an exact full-time total clearly", () => {
+    const base = ticket(1);
+    const total = { ...base, key: "total-1", row: { ...base.row, key: "total-1", marketType: "FT_TOTAL" as const,
+      scope: "FULL_TIME" as const, line: "2.5" } };
+    const footballEvent: ProviderEvent = { provider: "SABA", category: "FOOTBALL", providerEventId: "event-a",
+      competition: "League", seasonStage: null, startAtUtcMs: 10_000, participantA: "Alpha", participantB: "Beta",
+      eventScope: "REGULATION", bestOf: null, isLive: false, rematchCandidate: false, fixtureDiscriminator: null,
+      isVirtual: false, sportVariant: "FOOTBALL", liveState: null };
+
+    render(<RankedTicketTable event={footballEvent} providers={["SABA", "IM"]} tickets={[total]} />);
+
+    expect(screen.getByText("T\u00e0i/X\u1ec9u to\u00e0n tr\u1eadn")).toBeTruthy();
+  });
+
   it("shows at most five horizontal exact tickets with named outcomes, provider prices, stakes and profit", () => {
     render(<RankedTicketTable event={event} providers={["SABA", "IM"]}
       tickets={[ticket(1, "VERIFIED_PROFIT"), ticket(2), ticket(3), ticket(4), ticket(5), ticket(6)]} />);

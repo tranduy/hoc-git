@@ -5,7 +5,7 @@ import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../ap
 import { defaultProviderPreflightApi, type ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import { loadCatalogCache, saveCatalogCache } from "../catalog/catalog-cache.js";
 import { buildComparisonEvents, decimalOdds, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
-  isVisibleEvent, observedTicketAsComparisonRow, selectionLabel, type ComparisonEvent,
+  isVisibleEvent, observedTicketAsComparisonRow, selectionLabel, ticketMarketLabel, type ComparisonEvent,
   type ComparisonRow } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
 import { ProfitToastStack } from "../components/profit-toast-stack.js";
@@ -188,7 +188,7 @@ function ComparisonTable({ item, baseStake, signals }: { readonly item: Comparis
       const verifiedPlan = signal?.plan ?? null;
       const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, observedStakePolicy(baseStake));
       return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
-      <th>{observedRow.marketType === "SERIES_WINNER" ? "Thắng series" : "Chấp toàn trận"}
+      <th>{ticketMarketLabel(observedRow.marketType)}
         <small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>
         <b className={signal === undefined ? "edge-badge" : "edge-badge edge-badge--positive"}>
           {signal === undefined ? "ĐANG THEO DÕI" : "ĐỦ ĐIỀU KIỆN · LÃI ≥ 20.000 VND"}</b></th>

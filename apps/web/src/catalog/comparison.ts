@@ -250,6 +250,13 @@ export function selectionLabel(event: ProviderEvent, selection: string): string 
   return selection;
 }
 
+export function ticketMarketLabel(marketType: string): string {
+  if (marketType === "FT_AH") return "Chấp toàn trận";
+  if (marketType === "FT_TOTAL") return "Tài/Xỉu toàn trận";
+  if (marketType === "SERIES_WINNER") return "Thắng series";
+  return marketType;
+}
+
 export function observedTicketAsComparisonRow(ticket: ObservedTicketRow): ComparisonRow {
   const bestBySelection: Record<string, ProviderId> = {};
   for (const selection of ticket.outcomeDomain) {

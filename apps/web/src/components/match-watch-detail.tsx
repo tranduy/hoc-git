@@ -16,6 +16,7 @@ import {
   formatMatchClock,
   observedTicketAsComparisonRow,
   selectionLabel,
+  ticketMarketLabel,
   type ComparisonEvent
 } from "../catalog/comparison.js";
 import type { ProviderId } from "@tool-chenh/contracts";
@@ -294,7 +295,7 @@ export function MatchWatchDetail({
               const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy);
               const money = (value: string): string => `${Number(value).toLocaleString("en-US")} VND`;
               return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
-              <th>Chấp toàn trận<small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>
+              <th>{ticketMarketLabel(observedRow.marketType)}<small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>
                 <b className={signal === undefined ? "edge-badge" : "edge-badge edge-badge--positive"}>
                   {signal === undefined ? "ĐANG THEO DÕI" : "ĐỦ ĐIỀU KIỆN · LÃI ≥ 20.000 VND"}</b></th>
               {effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => {
