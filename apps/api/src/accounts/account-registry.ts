@@ -111,23 +111,32 @@ export class AccountRegistry {
   }
 
   async #refresh(id: string): Promise<AccountStatus> {
+    const deadlineMs = Date.now() + this.#profileReadTimeoutMs;
     const record = await this.#loadRequired(id);
-    const session = (await this.#sessions.listStatuses()).sessions.find((candidate) => candidate.id === record.sessionId);
-    if (session === undefined) return this.#public({ ...record, profile: null, profileReason: "SCHEMA_CHANGED" }, null);
-    const handle = await this.#sessions.getActiveSecretHandle(record.sessionId);
-    if (handle === null) {
-      const unavailable = { ...record, profile: null, profileReason: session.reason ?? "SCHEMA_CHANGED" };
-      await this.#save(unavailable);
-      return this.#public(unavailable, session);
-    }
-    const reader = this.#readers.get(record.provider);
-    if (reader === undefined) {
-      const unavailable = { ...record, profile: null, profileReason: "SCHEMA_CHANGED" as const };
-      await this.#save(unavailable);
-      return this.#public(unavailable, session);
-    }
+    let session: RedactedSessionStatus | null = null;
+    let capabilities: readonly ProviderCapability[] = [];
     try {
-      const profile = await this.#readProfile(reader, handle);
+      session = (await this.#withinDeadline(this.#sessions.listStatuses(), deadlineMs)).sessions
+        .find((candidate) => candidate.id === record.sessionId) ?? null;
+      if (session === null) {
+        const unavailable = { ...record, profile: null, profileReason: "SCHEMA_CHANGED" as const };
+        await this.#save(unavailable);
+        return this.#public(unavailable, null);
+      }
+      const handle = await this.#withinDeadline(this.#sessions.getActiveSecretHandle(record.sessionId), deadlineMs);
+      if (handle === null) {
+        const unavailable = { ...record, profile: null, profileReason: session.reason ?? "SCHEMA_CHANGED" };
+        await this.#save(unavailable);
+        return this.#public(unavailable, session);
+      }
+      const reader = this.#readers.get(record.provider);
+      if (reader === undefined) {
+        const unavailable = { ...record, profile: null, profileReason: "SCHEMA_CHANGED" as const };
+        await this.#save(unavailable);
+        return this.#public(unavailable, session);
+      }
+      capabilities = reader.capabilities;
+      const profile = await this.#withinDeadline(reader.readProfile(handle), deadlineMs);
       if (!DecimalStringSchema.safeParse(profile.balance).success || !/^[A-Z]{3,8}$/u.test(profile.currency) ||
         !Number.isFinite(profile.asOfMs) || profile.asOfMs < 0 || profile.redactedLabel.trim().length === 0) {
         throw new Error("invalid provider profile");
@@ -138,18 +147,20 @@ export class AccountRegistry {
     } catch {
       const unavailable = { ...record, profile: null, profileReason: "UNREACHABLE" as const };
       await this.#save(unavailable);
-      return this.#public(unavailable, session, reader.capabilities);
+      return this.#public(unavailable, session, capabilities);
     }
   }
 
-  async #readProfile(reader: ProviderProfileReader, handle: ActiveSecretHandle): Promise<ProviderProfile> {
+  async #withinDeadline<T>(operation: Promise<T>, deadlineMs: number): Promise<T> {
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) throw new Error("PROFILE_READ_TIMEOUT");
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error("PROFILE_READ_TIMEOUT")), this.#profileReadTimeoutMs);
+      timer = setTimeout(() => reject(new Error("PROFILE_READ_TIMEOUT")), remainingMs);
       timer.unref?.();
     });
     try {
-      return await Promise.race([reader.readProfile(handle), timeout]);
+      return await Promise.race([operation, timeout]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

@@ -20,6 +20,7 @@ afterEach(async () => {
 async function setup(options: {
   profileReadTimeoutMs?: number;
   readProfile?: ProviderProfileReader["readProfile"];
+  getActiveSecretHandle?: (id: string) => Promise<ActiveSecretHandle | null>;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "tool-chenh-account-"));
   directories.push(directory);
@@ -42,7 +43,7 @@ async function setup(options: {
     vault,
     sessions: {
       listStatuses: async () => ({ sessions: statuses }),
-      getActiveSecretHandle: async (id) => handles.get(id) ?? null
+      getActiveSecretHandle: options.getActiveSecretHandle ?? (async (id) => handles.get(id) ?? null)
     },
     readers: [{
       provider: "CMD",
@@ -101,6 +102,19 @@ describe("AccountRegistry", () => {
     const context = await setup({
       profileReadTimeoutMs: 10,
       readProfile: async () => new Promise<never>(() => undefined)
+    });
+    const account = await context.registry.register({ sessionId: "session-a", alias: "Main", provider: "CMD" });
+
+    await expect(context.registry.refresh(account.id)).resolves.toMatchObject({
+      profileState: "UNAVAILABLE",
+      reason: "UNREACHABLE"
+    });
+  });
+
+  it("applies the same deadline while acquiring an active session handle", async () => {
+    const context = await setup({
+      profileReadTimeoutMs: 10,
+      getActiveSecretHandle: async () => new Promise<never>(() => undefined)
     });
     const account = await context.registry.register({ sessionId: "session-a", alias: "Main", provider: "CMD" });
 
