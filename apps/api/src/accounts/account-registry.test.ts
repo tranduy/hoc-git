@@ -198,4 +198,20 @@ describe("AccountRegistry", () => {
     await expect(context.registry.withActiveHandle(account.id, "CMD", async () => "football", "FOOTBALL"))
       .resolves.toBe("football");
   });
+
+  it("resolves duplicate account aliases to one redacted catalog source identity", async () => {
+    const context = await setup();
+    const first = await context.registry.register({ sessionId: "session-a", alias: "Primary", provider: "CMD" });
+    const second = await context.registry.register({ sessionId: "session-a", alias: "Secondary", provider: "CMD" });
+
+    const firstSource = await context.registry.resolveCatalogSource(first.id);
+    const secondSource = await context.registry.resolveCatalogSource(second.id);
+
+    expect(firstSource).toEqual({
+      provider: "CMD", category: "FOOTBALL", sessionId: "session-a",
+      key: "CMD|FOOTBALL|session-a"
+    });
+    expect(secondSource).toEqual(firstSource);
+    expect(JSON.stringify(firstSource)).not.toMatch(/secret-canary|TOKEN/u);
+  });
 });

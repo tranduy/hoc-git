@@ -32,6 +32,13 @@ interface SessionAccess {
   getActiveSecretHandle(id: string): Promise<ActiveSecretHandle | null>;
 }
 
+export interface CatalogSourceIdentity {
+  readonly provider: ProviderId;
+  readonly category: Category;
+  readonly sessionId: string;
+  readonly key: string;
+}
+
 export interface AccountRegistryOptions {
   readonly vault: SecretVault;
   readonly sessions: SessionAccess;
@@ -186,6 +193,20 @@ export class AccountRegistry {
     if (handle === null || handle.provider !== record.provider) throw new Error("ACCOUNT_SESSION_UNAVAILABLE");
     if (expectedCategory !== undefined && handle.category !== expectedCategory) throw new Error("ACCOUNT_CATEGORY_MISMATCH");
     return consume(handle);
+  }
+
+  async resolveCatalogSource(id: string): Promise<CatalogSourceIdentity> {
+    const record = await this.#loadRequired(id);
+    const handle = await this.#sessions.getActiveSecretHandle(record.sessionId);
+    if (handle === null || handle.provider !== record.provider || handle.category == null) {
+      throw new Error("ACCOUNT_SESSION_UNAVAILABLE");
+    }
+    return {
+      provider: record.provider,
+      category: handle.category,
+      sessionId: handle.sessionId,
+      key: `${record.provider}|${handle.category}|${handle.sessionId}`
+    };
   }
 
   #public(record: StoredAccount, session: RedactedSessionStatus | null, capabilities: readonly ProviderCapability[] = []): AccountStatus {

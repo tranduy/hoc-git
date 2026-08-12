@@ -1,4 +1,5 @@
-import type { ProviderId } from "@tool-chenh/contracts";
+import type { Category, ProviderId } from "@tool-chenh/contracts";
+import type { CatalogSourceIdentity } from "../accounts/account-registry.js";
 import type { ObservedProviderCatalog } from "./cmd/cmd-observed-catalog.js";
 
 export interface ProviderCatalogReader {
@@ -6,23 +7,42 @@ export interface ProviderCatalogReader {
   read(accountId: string): Promise<ObservedProviderCatalog>;
 }
 
-export class MultiProviderCatalogReader {
-  readonly #readers: readonly ProviderCatalogReader[];
+interface CatalogSourceResolver {
+  resolveCatalogSource(accountId: string): Promise<CatalogSourceIdentity>;
+}
 
-  constructor(readers: readonly ProviderCatalogReader[]) {
-    this.#readers = [...readers];
+export interface ProviderCatalogReaderRegistration {
+  readonly provider: ProviderId;
+  readonly category: Category;
+  readonly reader: ProviderCatalogReader;
+}
+
+export class MultiProviderCatalogReader {
+  readonly #sources: CatalogSourceResolver;
+  readonly #readers: ReadonlyMap<string, ProviderCatalogReader>;
+
+  constructor(options: {
+    readonly sources: CatalogSourceResolver;
+    readonly readers: readonly ProviderCatalogReaderRegistration[];
+  }) {
+    this.#sources = options.sources;
+    this.#readers = new Map(options.readers.map((registration) => [
+      `${registration.provider}|${registration.category}`, registration.reader
+    ]));
   }
 
   async read(accountId: string): Promise<ObservedProviderCatalog> {
-    for (const reader of this.#readers) {
-      try {
-        const catalog = await reader.read(accountId);
-        if (catalog.provider !== reader.provider || catalog.accountId !== accountId) continue;
-        return catalog;
-      } catch {
-        // Account ownership and provider health are deliberately not exposed.
+    try {
+      const source = await this.#sources.resolveCatalogSource(accountId);
+      const reader = this.#readers.get(`${source.provider}|${source.category}`);
+      if (reader === undefined || reader.provider !== source.provider) throw new Error("CATALOG_UNAVAILABLE");
+      const catalog = await reader.read(accountId);
+      if (catalog.provider !== source.provider || catalog.category !== source.category || catalog.accountId !== accountId) {
+        throw new Error("CATALOG_UNAVAILABLE");
       }
+      return catalog;
+    } catch {
+      throw new Error("CATALOG_UNAVAILABLE");
     }
-    throw new Error("CATALOG_UNAVAILABLE");
   }
 }

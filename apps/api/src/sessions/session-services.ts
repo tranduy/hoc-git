@@ -218,10 +218,15 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     discovery,
     trustStore,
     accounts,
-    catalogReader: new MultiProviderCatalogReader([
-      catalogReader, sabaEsportsCatalogReader, imEsportsCatalogReader, sabaCatalogReader, sbobetCatalogReader,
-      apsportCatalogReader, btiCatalogReader
-    ]),
+    catalogReader: new MultiProviderCatalogReader({ sources: accounts, readers: [
+      { provider: "CMD", category: "FOOTBALL", reader: catalogReader },
+      { provider: "SABA", category: "LOL", reader: sabaEsportsCatalogReader },
+      { provider: "IM", category: "LOL", reader: imEsportsCatalogReader },
+      { provider: "SABA", category: "FOOTBALL", reader: sabaCatalogReader },
+      { provider: "SBOBET", category: "FOOTBALL", reader: sbobetCatalogReader },
+      { provider: "APSPORT", category: "FOOTBALL", reader: apsportCatalogReader },
+      { provider: "BTI", category: "FOOTBALL", reader: btiCatalogReader }
+    ] }),
     sabaCatalogReader,
     providerPreflight,
     receiptProtocol,
