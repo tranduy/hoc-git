@@ -7,6 +7,7 @@ import {
   decodeSbobetStompBodies, isSbobetResponseCandidate
 } from "./sbobet-stomp.js";
 import { extractSbobetDirectCatalogRecords } from "./sbobet-direct-catalog.js";
+import { parseSbobetTicketConstraint, type SbobetTicketConstraintSnapshot } from "./sbobet-ticket-constraint.js";
 
 interface OpenSession {
   readonly context: BrowserContext;
@@ -101,6 +102,7 @@ export class PlaywrightSbobetBrowserManager {
   readonly #profilesRoot: string; readonly #headless: boolean; readonly #timeout: number;
   readonly #sessions = new Map<string, OpenSession>(); readonly #opening = new Map<string, Promise<OpenSession>>();
   readonly #reads = new Map<string, Promise<SbobetCatalogSnapshot>>();
+  readonly #ticketReads = new Map<string, Promise<SbobetTicketConstraintSnapshot | null>>();
   readonly #correlationReported = new Set<string>();
   readonly #correlationSummaryReported = new Set<string>();
   constructor(options: { profilesRoot: string; headless?: boolean; startupTimeoutMs?: number }) {
@@ -128,6 +130,16 @@ export class PlaywrightSbobetBrowserManager {
     if (displayName.length === 0 || balanceText.length === 0) throw new Error("SBOBET_PROFILE_UNAVAILABLE");
     return { displayName, balanceText, observedAtMs: Date.now() };
   }
+  async readTicketConstraint(input: { sessionId: string; launchUrl: string;
+    providerSelectionId: string; participantA: string; participantB: string; selection: string;
+    line: string | null; rawOdds: string }): Promise<SbobetTicketConstraintSnapshot | null> {
+    const key = `${input.sessionId}:${input.providerSelectionId}`;
+    const active = this.#ticketReads.get(key); if (active !== undefined) return active;
+    const next = this.#readTicketConstraint(input).finally(() => {
+      if (this.#ticketReads.get(key) === next) this.#ticketReads.delete(key);
+    });
+    this.#ticketReads.set(key, next); return next;
+  }
   async #readCatalog(input: { sessionId: string; launchUrl: string }): Promise<SbobetCatalogSnapshot> {
     let session = await this.#get(input);
     try {
@@ -139,7 +151,58 @@ export class PlaywrightSbobetBrowserManager {
       return this.#readDirectCatalog(input.sessionId, session);
     }
   }
-  async close(): Promise<void> { const all = [...this.#sessions.values()]; this.#sessions.clear(); await Promise.allSettled(all.map((item) => item.context.close())); }
+  async close(): Promise<void> { const all = [...this.#sessions.values()]; this.#sessions.clear(); this.#ticketReads.clear();
+    await Promise.allSettled(all.map((item) => item.context.close())); }
+
+  async #readTicketConstraint(input: { sessionId: string; launchUrl: string;
+    providerSelectionId: string; participantA: string; participantB: string; selection: string;
+    line: string | null; rawOdds: string }): Promise<SbobetTicketConstraintSnapshot | null> {
+    const session = await this.#get(input);
+    const selection = session.page.locator(`#odd-item-${input.providerSelectionId}`).first();
+    if (!await selection.isVisible().catch(() => false)) return null;
+    const selectionText = (await selection.textContent().catch(() => null))?.trim() ?? "";
+    await selection.click({ timeout: 1_000 }).catch(() => undefined);
+    const deadline = Date.now() + 1_500;
+    while (Date.now() < deadline) {
+      const evidence = await session.page.evaluate(({ selectionId, selectionText, selectedTeam, line, rawOdds }) => {
+        const text = document.body.innerText;
+        const minimumElements = [...document.querySelectorAll<HTMLElement>("*")].filter((element) =>
+          /M\u1ee9c\s*c\u01b0\u1ee3c\s*t\u1ed1i\s*thi\u1ec3u/iu.test(element.innerText));
+        const slipCandidates = minimumElements.flatMap((element) => {
+          const values: HTMLElement[] = []; let current: HTMLElement | null = element;
+          while (current !== null) { if (/M\u1ee9c\s*c\u01b0\u1ee3c\s*t\u1ed1i\s*\u0111a/iu.test(current.innerText)) values.push(current);
+            current = current.parentElement; }
+          return values;
+        }).sort((left, right) => left.innerText.length - right.innerText.length);
+        const normalizedTeam = selectedTeam.replace(/\s+/gu, " ").trim();
+        const slip = slipCandidates.find((element) => {
+          const value = element.innerText.replace(/\s+/gu, " ");
+          return value.includes(normalizedTeam) && value.includes(rawOdds.replace(/^\+/, "")) &&
+            (line === null || value.includes(line));
+        });
+        const limitLines = (slip?.innerText ?? "").split(/\r?\n/u).filter((item) =>
+          /M\u1ee9c\s*c\u01b0\u1ee3c\s*t\u1ed1i\s*(?:thi\u1ec3u|\u0111a)/iu.test(item));
+        const visibleInputs = [...document.querySelectorAll<HTMLInputElement>("input")].filter((element) => {
+          const style = getComputedStyle(element); const box = element.getBoundingClientRect();
+          return !element.disabled && style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0;
+        });
+        const stakeInput = visibleInputs.find((element) => (element.parentElement?.innerText ?? "").includes("K")) ??
+          visibleInputs.find((element) => element.type === "number" || element.inputMode === "decimal");
+        const balanceText = document.querySelector<HTMLElement>(".payment-money")?.innerText.trim() ?? "";
+        const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(selectionId) : selectionId;
+        const selected = document.querySelector(`#odd-item-${escaped}`);
+        const selectionMatched = selected !== null && selectionText.length > 0 && slip !== undefined &&
+          (selected.textContent?.trim() ?? "") === selectionText && limitLines.length >= 2;
+        return { providerSelectionId: selectionId, selectionMatched, limitText: limitLines.join("\n"),
+          stakeStepText: stakeInput?.step ?? "", balanceText, observedAtMs: Date.now() };
+      }, { selectionId: input.providerSelectionId, selectionText,
+        selectedTeam: input.selection === "HOME" ? input.participantA : input.participantB,
+        line: input.line, rawOdds: input.rawOdds }).catch(() => null);
+      if (evidence !== null) { const parsed = parseSbobetTicketConstraint(evidence); if (parsed !== null) return parsed; }
+      await session.page.waitForTimeout(50);
+    }
+    return null;
+  }
   async #get(input: { sessionId: string; launchUrl: string }): Promise<OpenSession> {
     const existing = this.#sessions.get(input.sessionId); if (existing !== undefined && !existing.page.isClosed()) return existing;
     const opening = this.#opening.get(input.sessionId); if (opening !== undefined) return opening;

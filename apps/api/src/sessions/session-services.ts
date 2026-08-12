@@ -31,6 +31,7 @@ import { PlaywrightSbobetBrowserManager } from "../providers/sbobet/sbobet-brows
 import { SbobetObservedCatalogReader } from "../providers/sbobet/sbobet-observed-catalog.js";
 import { SbobetProfileReader } from "../providers/sbobet/sbobet-profile-reader.js";
 import { SbobetSessionValidator } from "../providers/sbobet/sbobet-session-validator.js";
+import { SbobetTicketPreflightReader } from "../providers/sbobet/sbobet-ticket-preflight-reader.js";
 import { PlaywrightImEsportsBrowserManager } from "../providers/im/im-esports-browser-manager.js";
 import { ImEsportsObservedCatalogReader } from "../providers/im/im-esports-observed-catalog.js";
 import { ImSessionValidator } from "../providers/im/im-session-validator.js";
@@ -189,7 +190,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const btiCatalogReader = new BtiObservedCatalogReader({ accounts, source: btiBrowser });
   const providerPreflight = new ProviderPreflightRegistry({ accounts,
     readers: [new BtiTicketPreflightReader({ source: btiBrowser }),
-      new ApsportTicketPreflightReader({ source: apsportBrowser })] });
+      new ApsportTicketPreflightReader({ source: apsportBrowser }),
+      new SbobetTicketPreflightReader({ source: sbobetBrowser })] });
   return {
     manager,
     discovery,
