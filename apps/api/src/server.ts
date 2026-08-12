@@ -202,7 +202,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     catalogTelemetry,
     providerPreflight: sessionServices.providerPreflight,
     twoLegPreflight,
-    executionDryRun
+    executionDryRun,
+    receiptProtocol: sessionServices.receiptProtocol
   });
   await app.listen({ host: config.host, port: config.port });
   const sessionTimer = setInterval(() => {

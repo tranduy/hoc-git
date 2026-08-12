@@ -8,6 +8,7 @@ import {
 } from "./sbobet-stomp.js";
 import { extractSbobetDirectCatalogRecords } from "./sbobet-direct-catalog.js";
 import { parseSbobetTicketConstraint, type SbobetTicketConstraintSnapshot } from "./sbobet-ticket-constraint.js";
+import { inspectReadOnlyReceiptProtocol, type ReceiptProtocolInspection } from "./sbobet-receipt-protocol.js";
 
 interface OpenSession {
   readonly context: BrowserContext;
@@ -142,6 +143,10 @@ export class PlaywrightSbobetBrowserManager {
     const balanceText = (await session.page.locator(".payment-money").first().textContent().catch(() => null))?.trim() ?? "";
     if (displayName.length === 0 || balanceText.length === 0) throw new Error("SBOBET_PROFILE_UNAVAILABLE");
     return { displayName, balanceText, observedAtMs: Date.now() };
+  }
+  async inspectReceiptProtocol(input: { sessionId: string; launchUrl: string }): Promise<ReceiptProtocolInspection> {
+    const session = await this.#get(input);
+    return inspectReadOnlyReceiptProtocol(session.context, session.page);
   }
   async readTicketConstraint(input: { sessionId: string; launchUrl: string;
     providerSelectionId: string; participantA: string; participantB: string; selection: string;
