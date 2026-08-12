@@ -7,12 +7,17 @@ export interface CatalogReaderLike {
   read(accountId: string): Promise<ObservedProviderCatalog>;
 }
 
+export interface CatalogObserverLike {
+  publish(catalog: ObservedProviderCatalog): void;
+}
+
 const paramsSchema = z.strictObject({ accountId: z.string().trim().min(1).max(128) });
 
 export function registerCatalogRoutes(
   app: FastifyInstance,
   reader: CatalogReaderLike,
-  telemetry: CatalogTelemetryRegistry = new CatalogTelemetryRegistry()
+  telemetry: CatalogTelemetryRegistry = new CatalogTelemetryRegistry(),
+  observer?: CatalogObserverLike
 ): void {
   app.get("/api/catalog/metrics", async () => telemetry.response());
 
@@ -23,6 +28,7 @@ export function registerCatalogRoutes(
     try {
       const catalog = await reader.read(parsed.data.accountId);
       await telemetry.recordSuccess(parsed.data.accountId, catalog, telemetry.complete(started));
+      observer?.publish(catalog);
       return catalog;
     } catch (error) {
       const schemaError = error instanceof Error && /(?:^|_)CATALOG_SCHEMA_ERROR$/u.test(error.message);

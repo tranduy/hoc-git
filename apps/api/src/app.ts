@@ -7,7 +7,7 @@ import { registerHealthRoute } from "./routes/health.js";
 import { registerAccountRoutes, type AccountRegistryLike } from "./routes/accounts.js";
 import { registerSnapshotRoute } from "./routes/snapshot.js";
 import { registerSessionRoutes, type SessionServices } from "./routes/sessions.js";
-import { registerCatalogRoutes, type CatalogReaderLike } from "./routes/catalog.js";
+import { registerCatalogRoutes, type CatalogObserverLike, type CatalogReaderLike } from "./routes/catalog.js";
 import type { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { registerProviderPreflightRoutes, type ProviderPreflightLike } from "./routes/provider-preflight.js";
 import { registerTwoLegPreflightRoutes, type TwoLegPreflightLike } from "./routes/two-leg-preflight.js";
@@ -19,6 +19,7 @@ export interface AppOptions {
   readonly sessionServices?: SessionServices;
   readonly accountRegistry?: AccountRegistryLike;
   readonly catalogReader?: CatalogReaderLike;
+  readonly catalogObserver?: CatalogObserverLike;
   readonly catalogTelemetry?: CatalogTelemetryRegistry;
   readonly providerPreflight?: ProviderPreflightLike;
   readonly twoLegPreflight?: TwoLegPreflightLike;
@@ -123,7 +124,9 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   registerSnapshotRoute(app, runtime);
   if (options.sessionServices !== undefined) registerSessionRoutes(app, options.sessionServices);
   if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
-  if (options.catalogReader !== undefined) registerCatalogRoutes(app, options.catalogReader, options.catalogTelemetry);
+  if (options.catalogReader !== undefined) registerCatalogRoutes(
+    app, options.catalogReader, options.catalogTelemetry, options.catalogObserver
+  );
   if (options.providerPreflight !== undefined) registerProviderPreflightRoutes(app, options.providerPreflight);
   if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight);
   void app.register(async (instance) => {

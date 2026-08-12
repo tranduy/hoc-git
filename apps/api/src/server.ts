@@ -5,10 +5,11 @@ import { TwoLegPreflight } from "./preflight/two-leg-preflight.js";
 import { FixtureAdapter, type FixtureSnapshot } from "@tool-chenh/adapters";
 import type { Category, DataMode } from "@tool-chenh/contracts";
 import { buildApp, validateViteOrigin } from "./app.js";
-import { Runtime } from "./runtime.js";
+import { Runtime, type RuntimeOptions } from "./runtime.js";
 import { createSessionServices } from "./sessions/session-services.js";
 import { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { JsonlCatalogJournal } from "./routes/catalog-jsonl-journal.js";
+import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -91,8 +92,11 @@ export function resolveServerConfig(env: Readonly<Record<string, string | undefi
   };
 }
 
-export function createLiveRuntime(): Runtime {
-  return new Runtime({ adapters: [] });
+export function createLiveRuntime(
+  adapters: RuntimeOptions["adapters"] = [],
+  mappingPolicy?: RuntimeOptions["mappingPolicy"]
+): Runtime {
+  return new Runtime({ adapters, ...(mappingPolicy === undefined ? {} : { mappingPolicy }) });
 }
 
 export function createFixtureRuntime(speed: number): Runtime {
@@ -164,9 +168,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const catalogTelemetry = new CatalogTelemetryRegistry(undefined, new JsonlCatalogJournal(
     join(localAppData, "tool-chenh", "logs", "catalog-changes.jsonl")
   ));
+  const catalogBridge = new LiveCatalogBridge();
   const runtime = config.dataMode === "FIXTURE"
     ? createFixtureRuntime(config.fixtureReplaySpeed)
-    : createLiveRuntime();
+    : createLiveRuntime(catalogBridge.adapters, catalogBridge.mappingPolicy);
   const controller = new AbortController();
   await runtime.start(controller.signal);
   const twoLegPreflight = new TwoLegPreflight({ opportunities: runtime, providers: sessionServices.providerPreflight });
@@ -176,6 +181,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     sessionServices,
     accountRegistry: sessionServices.accounts,
     catalogReader: sessionServices.catalogReader,
+    ...(config.dataMode === "LIVE" ? { catalogObserver: catalogBridge } : {}),
     catalogTelemetry,
     providerPreflight: sessionServices.providerPreflight,
     twoLegPreflight

@@ -249,8 +249,16 @@ function canonicalEvent(candidate: Omit<EventCandidate, "canonical">): Canonical
 }
 
 function canonicalOutcome(quote: ProviderQuote, event: NormalizedEvent): string | null {
-  if (["OVER", "UNDER", "HOME", "DRAW", "AWAY"].includes(quote.selection)) {
+  if (["OVER", "UNDER", "DRAW"].includes(quote.selection)) {
     return quote.selection;
+  }
+  if (quote.selection === "HOME") {
+    return quote.marketType === "FT_1X2" || quote.marketType === "FH_1X2"
+      ? "HOME" : event.canonicalParticipantA;
+  }
+  if (quote.selection === "AWAY") {
+    return quote.marketType === "FT_1X2" || quote.marketType === "FH_1X2"
+      ? "AWAY" : event.canonicalParticipantB;
   }
   if (quote.selection === "TEAM_A") return event.canonicalParticipantA;
   if (quote.selection === "TEAM_B") return event.canonicalParticipantB;

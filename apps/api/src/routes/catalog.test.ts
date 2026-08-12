@@ -54,7 +54,9 @@ describe("provider catalog route", () => {
   });
 
   it("serves a no-store live account catalog without query-string secrets", async () => {
+    const published: ObservedProviderCatalog[] = [];
     const app = buildApp(createFixtureRuntime(1_000), {
+      catalogObserver: { publish: (catalog) => published.push(catalog) },
       catalogReader: { read: async (accountId) => ({
         dataMode: "LIVE" as const,
         accountId,
@@ -72,12 +74,16 @@ describe("provider catalog route", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.json()).toMatchObject({ accountId: "account-1", dataMode: "LIVE" });
+    expect(published).toHaveLength(1);
+    expect(published[0]).toMatchObject({ accountId: "account-1", provider: "CMD" });
   });
 
   it("maps private provider failures to a fixed safe diagnostic", async () => {
     const telemetry = new CatalogTelemetryRegistry();
+    const published: ObservedProviderCatalog[] = [];
     const app = buildApp(createFixtureRuntime(1_000), {
       catalogTelemetry: telemetry,
+      catalogObserver: { publish: (catalog) => published.push(catalog) },
       catalogReader: { read: async () => { throw new Error("private-token-canary"); } }
     });
     apps.push(app);
@@ -86,6 +92,7 @@ describe("provider catalog route", () => {
     expect(response.statusCode).toBe(503);
     expect(response.body).toBe('{"error":"CATALOG_UNAVAILABLE"}');
     expect(response.body).not.toContain("private-token-canary");
+    expect(published).toEqual([]);
     const metrics = (await app.inject({ method: "GET", url: "/api/catalog/metrics" })).json();
     expect(metrics.metrics).toEqual([expect.objectContaining({
       accountId: "account-1", provider: null, state: "UNAVAILABLE",
