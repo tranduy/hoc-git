@@ -19,8 +19,10 @@ describe("normalizeSabaLolRecords", () => {
       participantA: "G2", participantB: "TH", category: "LOL", isLive: true
     })]);
     expect(normalized.markets).toEqual([
-      expect.objectContaining({ providerMarketId: "series", marketType: "SERIES_WINNER", scope: "SERIES" }),
-      expect.objectContaining({ providerMarketId: "map-2", marketType: "MAP_WINNER", scope: "MAP_2" })
+      expect.objectContaining({ providerMarketId: "series", marketType: "SERIES_WINNER", scope: "SERIES",
+        settlementProfile: "lol-series-winner" }),
+      expect.objectContaining({ providerMarketId: "map-2", marketType: "MAP_WINNER", scope: "MAP_2",
+        settlementProfile: "lol-map-winner" })
     ]);
     expect(normalized.quotes.map((quote) => [quote.providerMarketId, quote.selection, quote.rawOdds])).toEqual([
       ["series", "TEAM_A", "-0.5"], ["series", "TEAM_B", "0.4"],

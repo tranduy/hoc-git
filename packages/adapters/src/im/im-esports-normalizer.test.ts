@@ -22,6 +22,24 @@ describe("normalizeImLolRecords", () => {
       .toEqual([["TEAM_A", "1.8", "DECIMAL"], ["TEAM_B", "2.1", "DECIMAL"]]);
   });
 
+  it("normalizes exact IM GameWin records to the evidenced map scope", () => {
+    const result = normalizeImLolRecords([record({ matchNo: 21, gameTypeCode: "GameWin",
+      gameTypeName: "Map 2 Winner", gameOrder: 2, matchDate: "2026-08-11T04:30:00-04:00" })],
+    { receivedMonotonicMs: 5, sequence: 1 });
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "MAP_WINNER", scope: "MAP_2",
+      settlementProfile: "lol-map-winner" })]);
+    expect(result.quotes.map(({ marketType, scope, selection }) => [marketType, scope, selection])).toEqual([
+      ["MAP_WINNER", "MAP_2", "TEAM_A"], ["MAP_WINNER", "MAP_2", "TEAM_B"]
+    ]);
+  });
+
+  it("rejects GameWin without an exact map number from 1 through 5", () => {
+    const result = normalizeImLolRecords([record({ gameTypeCode: "GameWin", gameOrder: 0 }),
+      record({ matchNo: 12, gameTypeCode: "GameWin", gameOrder: 6 })],
+    { receivedMonotonicMs: 5, sequence: 1 });
+    expect(result.markets).toEqual([]);
+  });
+
   it("rejects other games, map markets, malformed odds, and duplicate markets", () => {
     const result = normalizeImLolRecords([
       record({ sportId: 65 }), record({ gameTypeCode: "LiveBall" }),

@@ -226,8 +226,9 @@ export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
     if (cell.market.marketType === "FH_TOTAL") return domain.join("|") === "OVER|UNDER";
     return false;
   }
-  return cell.market.category === "LOL" && cell.market.marketType === "SERIES_WINNER" &&
-    cell.market.scope === "SERIES" && cell.market.line === null && domain.join("|") === "TEAM_A|TEAM_B";
+  if (cell.market.category !== "LOL" || cell.market.line !== null || domain.join("|") !== "TEAM_A|TEAM_B") return false;
+  if (cell.market.marketType === "SERIES_WINNER") return cell.market.scope === "SERIES";
+  return cell.market.marketType === "MAP_WINNER" && /^MAP_[1-5]$/u.test(cell.market.scope);
 }
 
 export function isVisibleEvent(event: ProviderEvent, nowMs: number, horizonMs = 86_400_000): boolean {
@@ -257,6 +258,7 @@ export function ticketMarketLabel(marketType: string): string {
   if (marketType === "FT_AH") return "Chấp toàn trận";
   if (marketType === "FT_TOTAL") return "Tài/Xỉu toàn trận";
   if (marketType === "SERIES_WINNER") return "Thắng series";
+  if (marketType === "MAP_WINNER") return "Map winner";
   if (marketType === "FH_AH") return "First-half handicap";
   if (marketType === "FH_TOTAL") return "First-half total";
   return marketType;

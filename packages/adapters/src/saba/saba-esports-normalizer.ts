@@ -116,7 +116,8 @@ export function normalizeSabaLolRecords(
     const status = record.oddsstatus === "running" ? "OPEN" as const : "SUSPENDED" as const;
     markets.push({
       provider: "SABA", category: "LOL", providerEventId: matchId, providerMarketId: oddsId,
-      marketType, scope, line: null, settlementProfile: "saba-esports-two-way-moneyline", status
+      marketType, scope, line: null,
+      settlementProfile: marketType === "SERIES_WINNER" ? "lol-series-winner" : "lol-map-winner", status
     });
     quotes.push(...(["TEAM_A", "TEAM_B"] as const).map((selection, index): ProviderQuote => ({
       provider: "SABA", category: "LOL", providerEventId: matchId, providerMarketId: oddsId,

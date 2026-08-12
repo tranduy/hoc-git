@@ -439,4 +439,19 @@ describe("catalog comparison", () => {
       ["FH_AH", "FIRST_HALF"], ["FH_TOTAL", "FIRST_HALF"]
     ]);
   });
+
+  it("includes exact LoL map winner rows with the same map index", () => {
+    const mapCatalog = (provider: "SABA" | "IM", eventId: string, scope: "MAP_1" | "MAP_2"): LiveCatalogResponse => {
+      const base = lolCatalog(provider, eventId, "T1", "Gen.G", ["2.10", "1.80"]);
+      return { ...base,
+        markets: [{ ...base.markets[0]!, marketType: "MAP_WINNER", scope,
+          settlementProfile: "lol-map-winner" }],
+        quotes: base.quotes.map((quote) => ({ ...quote, marketType: "MAP_WINNER", scope })) };
+    };
+    expect(buildComparisonEvents([mapCatalog("SABA", "saba", "MAP_2"),
+      mapCatalog("IM", "im", "MAP_2")])[0]?.rows.map((row) => [row.marketType, row.scope]))
+      .toEqual([["MAP_WINNER", "MAP_2"]]);
+    expect(buildComparisonEvents([mapCatalog("SABA", "saba", "MAP_1"),
+      mapCatalog("IM", "im", "MAP_2")])[0]?.rows).toEqual([]);
+  });
 });
