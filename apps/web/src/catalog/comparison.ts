@@ -218,9 +218,12 @@ export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
   const domain = [...new Set(cell.quotes.map((quote) => quote.selection))].sort();
   if (cell.market.status !== "OPEN" || cell.quotes.some((quote) => quote.status !== "OPEN")) return false;
   if (cell.market.category === "FOOTBALL") {
-    if (cell.market.scope !== "FULL_TIME" || !isHalfGoalLine(cell.market.line)) return false;
-    if (cell.market.marketType === "FT_AH") return domain.join("|") === "AWAY|HOME";
-    if (cell.market.marketType === "FT_TOTAL") return domain.join("|") === "OVER|UNDER";
+    if (!isHalfGoalLine(cell.market.line)) return false;
+    if (cell.market.marketType === "FT_AH") return cell.market.scope === "FULL_TIME" && domain.join("|") === "AWAY|HOME";
+    if (cell.market.marketType === "FT_TOTAL") return cell.market.scope === "FULL_TIME" && domain.join("|") === "OVER|UNDER";
+    if (cell.market.scope !== "FIRST_HALF") return false;
+    if (cell.market.marketType === "FH_AH") return domain.join("|") === "AWAY|HOME";
+    if (cell.market.marketType === "FH_TOTAL") return domain.join("|") === "OVER|UNDER";
     return false;
   }
   return cell.market.category === "LOL" && cell.market.marketType === "SERIES_WINNER" &&
@@ -254,6 +257,8 @@ export function ticketMarketLabel(marketType: string): string {
   if (marketType === "FT_AH") return "Chấp toàn trận";
   if (marketType === "FT_TOTAL") return "Tài/Xỉu toàn trận";
   if (marketType === "SERIES_WINNER") return "Thắng series";
+  if (marketType === "FH_AH") return "First-half handicap";
+  if (marketType === "FH_TOTAL") return "First-half total";
   return marketType;
 }
 

@@ -414,4 +414,29 @@ describe("catalog comparison", () => {
     expect(result[0]?.rows[0]?.margin).toBeCloseTo(0.538461, 5);
     expect(result[0]?.bestMargin).toBeCloseTo(0.538461, 5);
   });
+
+  it("includes exact first-half half-goal handicap and total rows", () => {
+    const firstHalf = (provider: "SABA" | "SBOBET", eventId: string): LiveCatalogResponse => {
+      const base = catalog(provider, eventId, ["2.10", "1.80"]);
+      return { ...base, markets: [
+        { ...base.markets[0]!, providerMarketId: `${eventId}-fh-ah`, marketType: "FH_AH",
+          scope: "FIRST_HALF", line: "-0.5", settlementProfile: "football-first-half-including-added-time" },
+        { ...base.markets[0]!, providerMarketId: `${eventId}-fh-total`, marketType: "FH_TOTAL",
+          scope: "FIRST_HALF", line: "1.5", settlementProfile: "football-first-half-including-added-time" }
+      ], quotes: [
+        ...["HOME", "AWAY"].map((selection, index) => ({ ...base.quotes[index]!,
+          providerMarketId: `${eventId}-fh-ah`, providerSelectionId: `${eventId}-fh-ah-${selection}`,
+          marketType: "FH_AH" as const, scope: "FIRST_HALF" as const,
+          selection: selection as "HOME" | "AWAY", line: "-0.5" })),
+        ...["OVER", "UNDER"].map((selection, index) => ({ ...base.quotes[index]!,
+          providerMarketId: `${eventId}-fh-total`, providerSelectionId: `${eventId}-fh-total-${selection}`,
+          marketType: "FH_TOTAL" as const, scope: "FIRST_HALF" as const,
+          selection: selection as "OVER" | "UNDER", line: "1.5" }))
+      ] };
+    };
+    const [result] = buildComparisonEvents([firstHalf("SABA", "saba"), firstHalf("SBOBET", "sbo")]);
+    expect(result?.rows.map(({ marketType, scope }) => [marketType, scope])).toEqual([
+      ["FH_AH", "FIRST_HALF"], ["FH_TOTAL", "FIRST_HALF"]
+    ]);
+  });
 });

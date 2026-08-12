@@ -69,4 +69,27 @@ describe("normalizeSbobetCatalog", () => {
       ["HOME", "MALAY"], ["AWAY", "MALAY"]
     ]);
   });
+
+  it("normalizes first-half handicap and total with first-half scope and settlement", () => {
+    const firstHalf = { ...record, markets: [
+      { marketId: "fh-total", marketType: "FH_TOTAL", lineText: "1.5", selections: [
+        { selectionId: "fh-over", selection: "OVER", priceText: "0.82", locked: false },
+        { selectionId: "fh-under", selection: "UNDER", priceText: "-0.96", locked: false }
+      ] },
+      { marketId: "fh-ah", marketType: "FH_AH", lineText: null, selections: [
+        { selectionId: "fh-home", selection: "HOME", priceText: "0.72", locked: false, lineText: null },
+        { selectionId: "fh-away", selection: "AWAY", priceText: "-0.88", locked: false, lineText: "0.5" }
+      ] }
+    ] } as SbobetCatalogInputRecord;
+
+    const result = normalizeSbobetCatalog([firstHalf], { observedAtMs: 1_788_000_000_000,
+      receivedMonotonicMs: 20, sequence: 3 });
+    expect(result.markets.map(({ marketType, scope, line, settlementProfile }) =>
+      ({ marketType, scope, line, settlementProfile }))).toEqual([
+      { marketType: "FH_TOTAL", scope: "FIRST_HALF", line: "1.5",
+        settlementProfile: "football-first-half-including-added-time" },
+      { marketType: "FH_AH", scope: "FIRST_HALF", line: "0.5",
+        settlementProfile: "football-first-half-including-added-time" }
+    ]);
+  });
 });

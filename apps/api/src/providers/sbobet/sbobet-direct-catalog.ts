@@ -1,5 +1,20 @@
 import type { SbobetCatalogInputRecord, SbobetCatalogMarket, SbobetCatalogSelection } from "@tool-chenh/adapters";
 
+export interface SbobetMarketGroupShape {
+  readonly groupKey: string;
+  readonly rowCount: number;
+  readonly rowShapes: readonly {
+    readonly tokenCount: number;
+    readonly tokenKinds: readonly string[];
+  }[];
+}
+
+export interface SbobetMarketLabelEvidence {
+  readonly label: "FIRST_HALF_OVER_UNDER" | "FIRST_HALF_HANDICAP";
+  readonly nearbyNumericKeys: readonly string[];
+  readonly contextShape: string;
+}
+
 const pairPattern = /^(-?(?:0|1)(?:\.\d+)?)\*(\d+[had])$/u;
 
 function halfGoalLine(value: string): boolean {
@@ -14,23 +29,93 @@ function pair(value: unknown, selection: SbobetCatalogSelection["selection"]): S
   return { selectionId: match[2]!, selection, priceText: match[1]!, locked: false };
 }
 
-function market(value: unknown, type: "FT_TOTAL" | "FT_AH"): SbobetCatalogMarket | null {
+function diagnosticTokenKind(value: string): string {
+  if (/^-?(?:0|[1-9]\d*)\.\d+$/u.test(value)) return "LINE";
+  if (/^-?(?:0|1)(?:\.\d+)?\*\d+h$/u.test(value)) return "ODDS_SELECTION_H";
+  if (/^-?(?:0|1)(?:\.\d+)?\*\d+a$/u.test(value)) return "ODDS_SELECTION_A";
+  if (/^-?(?:0|1)(?:\.\d+)?\*\d+d$/u.test(value)) return "ODDS_SELECTION_D";
+  if (/^\d{4,30}$/u.test(value)) return "INTEGER_ID";
+  if (/^-?\d+$/u.test(value)) return "INTEGER";
+  if (/^[had]$/u.test(value)) return "SIDE";
+  return "OTHER";
+}
+
+export function inspectSbobetMarketGroups(body: unknown): readonly SbobetMarketGroupShape[] {
+  const groups = new Map<string, SbobetMarketGroupShape>();
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 20 || groups.size >= 32 || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.slice(0, 64).forEach((child) => visit(child, depth + 1));
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const marketGroups = record["7"];
+    if (marketGroups !== null && typeof marketGroups === "object" && !Array.isArray(marketGroups)) {
+      for (const [groupKey, rows] of Object.entries(marketGroups as Record<string, unknown>)) {
+        if (groups.size >= 32 || !/^\d{1,4}$/u.test(groupKey) || !Array.isArray(rows)) continue;
+        const rowShapes = rows.slice(0, 8).flatMap((row) => {
+          if (typeof row !== "string") return [];
+          const tokens = row.trim().split(/\s+/u).slice(0, 16);
+          return [{ tokenCount: tokens.length, tokenKinds: tokens.map(diagnosticTokenKind) }];
+        });
+        const previous = groups.get(groupKey);
+        const combined = [...(previous?.rowShapes ?? []), ...rowShapes].slice(0, 8);
+        groups.set(groupKey, { groupKey, rowCount: combined.length, rowShapes: combined });
+      }
+    }
+    Object.values(record).slice(0, 64).forEach((child) => visit(child, depth + 1));
+  };
+  visit(body, 0);
+  return [...groups.values()].sort((left, right) => Number(left.groupKey) - Number(right.groupKey));
+}
+
+export function inspectSbobetMarketLabelEvidence(source: string): readonly SbobetMarketLabelEvidence[] {
+  const bounded = source.slice(0, 10_000_000);
+  const patterns = [
+    { label: "FIRST_HALF_OVER_UNDER" as const,
+      expression: /(?:first|1st)\s*half\s*(?:over\s*\/?\s*under|total)|(?:hiệp|hiep)\s*1\s*(?:tài\s*xỉu|tai\s*xiu)/giu },
+    { label: "FIRST_HALF_HANDICAP" as const,
+      expression: /(?:first|1st)\s*half\s*(?:asian\s*)?handicap|(?:chấp|chap)\s*(?:hiệp|hiep)\s*1/giu }
+  ];
+  const evidence: SbobetMarketLabelEvidence[] = [];
+  for (const { label, expression } of patterns) {
+    for (const match of bounded.matchAll(expression)) {
+      if (evidence.length >= 16 || match.index === undefined) break;
+      const prefix = bounded.slice(Math.max(0, match.index - 96), match.index);
+      const keys = [...prefix.matchAll(/(?:^|[,{;])\s*["']?(\d{1,5})["']?\s*:/gu)]
+        .map((candidate) => candidate[1]!)
+        .slice(-1);
+      const contextShape = bounded.slice(Math.max(0, match.index - 96), match.index + match[0].length + 96)
+        .replace(/https?:\/\/[^\s"']+/gu, "URL")
+        .replace(/\d{6,}/gu, "N")
+        .replace(/[A-Za-z_$][A-Za-z0-9_$-]*/gu, "W")
+        .replace(/\s+/gu, " ")
+        .slice(0, 240);
+      evidence.push({ label, nearbyNumericKeys: [...new Set(keys)], contextShape });
+    }
+  }
+  return evidence;
+}
+
+function market(value: unknown, type: "FT_TOTAL" | "FT_AH" | "FH_TOTAL" | "FH_AH"): SbobetCatalogMarket | null {
   if (typeof value !== "string") return null;
   const tokens = value.trim().split(/\s+/u);
   const line = tokens[0];
   if (line === undefined || !halfGoalLine(line)) return null;
-  const first = pair(tokens[1], type === "FT_TOTAL" ? "OVER" : "HOME");
-  const second = pair(tokens[2], type === "FT_TOTAL" ? "UNDER" : "AWAY");
+  const isTotal = type === "FT_TOTAL" || type === "FH_TOTAL";
+  const isHandicap = type === "FT_AH" || type === "FH_AH";
+  const first = pair(tokens[1], isTotal ? "OVER" : "HOME");
+  const second = pair(tokens[2], isTotal ? "UNDER" : "AWAY");
   if (first === null || second === null) return null;
-  const favored = type === "FT_AH" ? tokens[3] : null;
-  const marketId = type === "FT_AH" ? tokens[4] : tokens[3];
+  const favored = isHandicap ? tokens[3] : null;
+  const marketId = isHandicap ? tokens[4] : tokens[3];
   if (typeof marketId !== "string" || !/^\d{4,30}$/u.test(marketId) ||
-    (type === "FT_AH" && favored !== "h" && favored !== "a")) return null;
-  const selections = type === "FT_AH" ? [
+    (isHandicap && favored !== "h" && favored !== "a")) return null;
+  const selections = isHandicap ? [
     { ...first, lineText: favored === "h" ? line : null },
     { ...second, lineText: favored === "a" ? line : null }
   ] : [first, second];
-  return { marketId, marketType: type, lineText: type === "FT_TOTAL" ? line : null, selections };
+  return { marketId, marketType: type, lineText: isTotal ? line : null, selections };
 }
 
 export function extractSbobetDirectCatalogRecords(
@@ -49,9 +134,11 @@ export function extractSbobetDirectCatalogRecords(
     if (eventId !== null && existing !== undefined && teams.every((team) => typeof team === "string") &&
       typeof markets === "object" && markets !== null && !Array.isArray(markets)) {
       const parsed = Object.entries(markets as Record<string, unknown>).flatMap(([key, rows]) => {
-        if (key !== "3" && key !== "5" || !Array.isArray(rows)) return [];
+        const marketType = key === "3" ? "FT_TOTAL" as const : key === "4" ? "FH_TOTAL" as const
+          : key === "5" ? "FT_AH" as const : key === "6" ? "FH_AH" as const : null;
+        if (marketType === null || !Array.isArray(rows)) return [];
         return rows.flatMap((row) => {
-          const candidate = market(row, key === "3" ? "FT_TOTAL" : "FT_AH");
+          const candidate = market(row, marketType);
           return candidate === null ? [] : [candidate];
         });
       });

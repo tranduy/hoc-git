@@ -10,7 +10,7 @@ export interface SbobetCatalogSelection {
 
 export interface SbobetCatalogMarket {
   readonly marketId: string;
-  readonly marketType: "FT_TOTAL" | "FT_1X2" | "FT_AH";
+  readonly marketType: "FT_TOTAL" | "FT_1X2" | "FT_AH" | "FH_TOTAL" | "FH_AH";
   readonly lineText: string | null;
   readonly selections: readonly SbobetCatalogSelection[];
 }
@@ -119,7 +119,6 @@ export function normalizeSbobetCatalog(
   const quotes: ProviderQuote[] = [];
   const diagnostics: string[] = [];
   const provider = options.provider ?? "SBOBET";
-  const settlementProfile = options.settlementProfile ?? "football-regulation-including-added-time";
   if (!Number.isFinite(options.observedAtMs) || !Number.isFinite(options.receivedMonotonicMs) || !Number.isSafeInteger(options.sequence)) {
     return { events, markets, quotes, diagnostics: ["SBOBET_CATALOG_OPTIONS_INVALID"] };
   }
@@ -134,31 +133,36 @@ export function normalizeSbobetCatalog(
     }
     let invalid = false;
     for (const market of record.markets) {
-      const outcomes = market.marketType === "FT_TOTAL" ? ["OVER", "UNDER"] : market.marketType === "FT_AH"
+      const isTotal = market.marketType === "FT_TOTAL" || market.marketType === "FH_TOTAL";
+      const isHandicap = market.marketType === "FT_AH" || market.marketType === "FH_AH";
+      const scope = market.marketType === "FH_TOTAL" || market.marketType === "FH_AH" ? "FIRST_HALF" as const : "FULL_TIME" as const;
+      const settlementProfile = options.settlementProfile ?? (scope === "FIRST_HALF"
+        ? "football-first-half-including-added-time" : "football-regulation-including-added-time");
+      const outcomes = isTotal ? ["OVER", "UNDER"] : isHandicap
         ? ["HOME", "AWAY"] : ["HOME", "DRAW", "AWAY"];
       const actual = market.selections.map((selection) => selection.selection);
       const ids = new Set(market.selections.map((selection) => selection.selectionId));
-      const line = market.marketType === "FT_TOTAL" ? canonicalLine(market.lineText) : market.marketType === "FT_AH"
+      const line = isTotal ? canonicalLine(market.lineText) : isHandicap
         ? canonicalHomeHandicap(market.selections) : null;
       const pricesValid = market.selections.every((selection) => market.marketType !== "FT_1X2"
         ? signedDecimal.test(selection.priceText) && Number(selection.priceText) !== 0 && Math.abs(Number(selection.priceText)) <= 1
         : decimal.test(selection.priceText) && Number(selection.priceText) > 1);
       if (market.marketId.trim() === "" || ids.size !== outcomes.length || actual.length !== outcomes.length ||
         outcomes.some((outcome) => !actual.includes(outcome as never)) ||
-        ((market.marketType === "FT_TOTAL" || market.marketType === "FT_AH") && line === null) || !pricesValid) {
+        ((isTotal || isHandicap) && line === null) || !pricesValid) {
         invalid = true;
         break;
       }
       const status = market.selections.some((selection) => selection.locked) ? "SUSPENDED" as const : "OPEN" as const;
       recordMarkets.push({
         provider, category: "FOOTBALL", providerEventId: record.eventId,
-        providerMarketId: market.marketId, marketType: market.marketType, scope: "FULL_TIME", line,
+        providerMarketId: market.marketId, marketType: market.marketType, scope, line,
         settlementProfile, status
       });
       recordQuotes.push(...market.selections.map((selection): ProviderQuote => ({
         provider, category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, providerSelectionId: selection.selectionId,
-        marketType: market.marketType, scope: "FULL_TIME", selection: selection.selection, line,
+        marketType: market.marketType, scope, selection: selection.selection, line,
         rawOdds: selection.priceText, rawFormat: market.marketType === "FT_1X2" ? "DECIMAL" : "MALAY",
         status, isLive: timing.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence

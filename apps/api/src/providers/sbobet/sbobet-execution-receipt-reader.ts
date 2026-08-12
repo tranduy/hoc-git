@@ -31,7 +31,8 @@ function exactEvent(value: string, teams: readonly string[]): boolean {
   return parts.length === 2 && parts[0] === normalized(teams[0]!) && parts[1] === normalized(teams[1]!);
 }
 
-function exactMarket(receipt: DecodedSbobetReceipt, marketType: "FT_AH" | "FT_TOTAL" | "FT_1X2"): boolean {
+function exactMarket(receipt: DecodedSbobetReceipt,
+  marketType: "FT_AH" | "FT_TOTAL" | "FT_1X2" | "FH_AH" | "FH_TOTAL"): boolean {
   const name = normalized(receipt.marketDisplayName);
   const period = normalized(receipt.timePeriod).replaceAll(" ", "");
   if (!/^(?:ft|fulltime|toantran)$/u.test(period) && !/(?:full time|toan tran)/u.test(name)) return false;
@@ -99,7 +100,8 @@ export class SbobetExecutionReceiptReader implements ReceiptReader {
         const market = event?.markets.find((candidate) => candidate.marketId === input.leg.providerMarketId);
         const selection = market?.selections.find((candidate) =>
           candidate.selectionId === input.leg.providerSelectionId && candidate.selection === input.leg.selection);
-        if (event === undefined || market === undefined || selection === undefined || market.marketType === "FT_1X2") return null;
+        if (event === undefined || market === undefined || selection === undefined ||
+          market.marketType !== "FT_AH" && market.marketType !== "FT_TOTAL") return null;
         const matches = history.filter((receipt) => exactEvent(receipt.eventDisplayName, event.teamNames) &&
           exactMarket(receipt, market.marketType) && exactSelection(receipt, input.leg.selection, event.teamNames) &&
           exactLine(receipt, input.leg, market.marketType) && receiptDecimalOdds(receipt) === input.leg.decimalOdds &&

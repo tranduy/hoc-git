@@ -53,6 +53,30 @@ describe("normalizeSabaFootballRecords", () => {
     ]);
   });
 
+  it("maps evidenced SABA first-half handicap and total groups with first-half settlement", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "o", oddsid: 7, matchid: 2, bettype: 7, parenttypeid: 7,
+        oddsstatus: "running", enable: 1, odds1a: 0.82, odds2a: -0.96, hdp1: 0, hdp2: 0.5 },
+      { type: "o", oddsid: 8, matchid: 2, bettype: 8, parenttypeid: 8,
+        oddsstatus: "running", enable: 1, odds1a: -0.74, odds2a: 0.62, hdp1: 1.5, hdp2: 0 }
+    ], options);
+
+    expect(normalized.markets.map(({ marketType, scope, line, settlementProfile }) =>
+      ({ marketType, scope, line, settlementProfile }))).toEqual([
+      { marketType: "FH_AH", scope: "FIRST_HALF", line: "0.5",
+        settlementProfile: "football-first-half-including-added-time" },
+      { marketType: "FH_TOTAL", scope: "FIRST_HALF", line: "1.5",
+        settlementProfile: "football-first-half-including-added-time" }
+    ]);
+    expect(normalized.quotes.map(({ marketType, scope, selection }) => [marketType, scope, selection])).toEqual([
+      ["FH_AH", "FIRST_HALF", "HOME"], ["FH_AH", "FIRST_HALF", "AWAY"],
+      ["FH_TOTAL", "FIRST_HALF", "OVER"], ["FH_TOTAL", "FIRST_HALF", "UNDER"]
+    ]);
+  });
+
   it("rejects non-half-goal and structurally inconsistent SABA totals", () => {
     const base = { type: "o", matchid: 2, bettype: 3, parenttypeid: 3,
       oddsstatus: "running", enable: 1, odds1a: 0.9, odds2a: -0.9, hdp2: 0 };

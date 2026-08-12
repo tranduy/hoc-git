@@ -124,13 +124,16 @@ export function normalizeSabaFootballRecords(
 
   const seenMarkets = new Set<string>();
   for (const record of records) {
-    if (record.type !== "o" || (record.bettype !== 1 && record.bettype !== 3) ||
+    if (record.type !== "o" || ![1, 3, 7, 8].includes(record.bettype as number) ||
       (record.parenttypeid !== undefined && record.parenttypeid !== record.bettype)) continue;
     const matchId = id(record.matchid);
     const oddsId = id(record.oddsid);
     if (matchId === null || !acceptedMatches.has(matchId)) continue;
-    const marketType = record.bettype === 1 ? "FT_AH" as const : "FT_TOTAL" as const;
-    const line = marketType === "FT_AH" ? canonicalHomeHandicap(record) : canonicalTotalLine(record);
+    const marketType = record.bettype === 1 ? "FT_AH" as const : record.bettype === 3 ? "FT_TOTAL" as const
+      : record.bettype === 7 ? "FH_AH" as const : "FH_TOTAL" as const;
+    const isHandicap = marketType === "FT_AH" || marketType === "FH_AH";
+    const scope = marketType === "FH_AH" || marketType === "FH_TOTAL" ? "FIRST_HALF" as const : "FULL_TIME" as const;
+    const line = isHandicap ? canonicalHomeHandicap(record) : canonicalTotalLine(record);
     const firstPrice = malay(record.odds1a);
     const secondPrice = malay(record.odds2a);
     if (oddsId === null || line === null || firstPrice === null || secondPrice === null || seenMarkets.has(oddsId)) {
@@ -142,13 +145,14 @@ export function normalizeSabaFootballRecords(
     const isLive = matches.get(matchId)?.marketid === "L";
     markets.push({
       provider: "SABA", category: "FOOTBALL", providerEventId: matchId, providerMarketId: oddsId,
-      marketType, scope: "FULL_TIME", line,
-      settlementProfile: "football-regulation-including-added-time", status
+      marketType, scope, line,
+      settlementProfile: scope === "FIRST_HALF" ? "football-first-half-including-added-time"
+        : "football-regulation-including-added-time", status
     });
-    const selections = marketType === "FT_AH" ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
+    const selections = isHandicap ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
     quotes.push(...selections.map((selection, index): ProviderQuote => ({
       provider: "SABA", category: "FOOTBALL", providerEventId: matchId, providerMarketId: oddsId,
-      providerSelectionId: `${oddsId}:${selection.toLowerCase()}`, marketType, scope: "FULL_TIME",
+      providerSelectionId: `${oddsId}:${selection.toLowerCase()}`, marketType, scope,
       selection, line, rawOdds: index === 0 ? firstPrice : secondPrice, rawFormat: "MALAY", status, isLive,
       sourceTimestampMs: null, receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
     })));

@@ -29,6 +29,10 @@ import {
   type ProtocolObservation
 } from "./protocol-inspector.js";
 import { extractImCatalogRecords } from "./im/im-catalog-source.js";
+import {
+  inspectSbobetMarketGroups,
+  inspectSbobetMarketLabelEvidence
+} from "./sbobet/sbobet-direct-catalog.js";
 
 interface InspectableSessionRecord {
   readonly secret: { readonly kind: "LAUNCH_URL"; readonly value: string };
@@ -78,6 +82,8 @@ async function main(): Promise<void> {
   const catalogNavigationOnly = argumentsList.includes("--catalog-navigation");
   const imCatalogShapeOnly = argumentsList.includes("--im-catalog-shape");
   const imCatalogRecordsOnly = argumentsList.includes("--im-catalog-records");
+  const sbobetMarketShapesOnly = argumentsList.includes("--sbobet-market-shapes");
+  const sbobetMarketLabelsOnly = argumentsList.includes("--sbobet-market-labels");
   const localAppData = process.env.LOCALAPPDATA;
   if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || !localAppData) {
     throw new Error("Usage: npm run inspect:launch -- <redacted-session-id>");
@@ -96,6 +102,8 @@ async function main(): Promise<void> {
   const profileShapes: unknown[] = [];
   const catalogRecords: unknown[] = [];
   const imCatalogRecords: unknown[] = [];
+  const sbobetMarketShapes = new Map<string, ReturnType<typeof inspectSbobetMarketGroups>[number]>();
+  const sbobetMarketLabels = new Map<string, unknown>();
   let catalogNavigation: unknown[] = [];
   const pending = new Set<Promise<void>>();
   const recordResponse = async (response: Response): Promise<void> => {
@@ -108,6 +116,16 @@ async function main(): Promise<void> {
     });
     if (observation === null) return;
     if ((imCatalogShapeOnly || imCatalogRecordsOnly) && observation.pathTemplate !== "/api/GetIndexMatchV2") return;
+    if (sbobetMarketShapesOnly && observation.pathTemplate !== "/api/v2/getEvent") return;
+    if (sbobetMarketLabelsOnly && observation.transport === "SCRIPT") {
+      try {
+        const source = (await response.text()).slice(0, 10_000_000);
+        for (const evidence of inspectSbobetMarketLabelEvidence(source)) {
+          const sourced = { ...evidence, scriptPath: observation.pathTemplate };
+          sbobetMarketLabels.set(JSON.stringify(sourced), sourced);
+        }
+      } catch { /* A failed bundle read contributes no semantic evidence. */ }
+    }
     if (scriptEndpointsOnly && observation.transport === "SCRIPT") {
       try {
         const source = (await response.text()).slice(0, 10_000_000);
@@ -119,7 +137,14 @@ async function main(): Promise<void> {
     if (observation.contentType === "application/json") {
       try {
         const body: unknown = await response.json();
+        if (sbobetMarketLabelsOnly) for (const evidence of inspectSbobetMarketLabelEvidence(JSON.stringify(body))) {
+          const sourced = { ...evidence, responsePath: observation.pathTemplate };
+          sbobetMarketLabels.set(JSON.stringify(sourced), sourced);
+        }
         if (imCatalogRecordsOnly) imCatalogRecords.push(...extractImCatalogRecords(body).slice(0, 40));
+        if (sbobetMarketShapesOnly) for (const shape of inspectSbobetMarketGroups(body)) {
+          sbobetMarketShapes.set(JSON.stringify(shape), shape);
+        }
         bodyShapeHash = structuralBodyHash(body);
         bodyShape = imCatalogShapeOnly ? structuralBodyShapeAtDepth(body, 16) : structuralBodyShape(body);
       } catch { bodyShapeHash = undefined; }
@@ -189,7 +214,7 @@ async function main(): Promise<void> {
       await clickSafeStructuralCategory(page, "1", 2_000).catch(() => false);
       catalogNavigation = [...await collectCmdCatalogNavigation(page)];
     }
-    if (!catalogRecordsOnly && !catalogNavigationOnly && !ticketShapeOnly) {
+    if (!catalogRecordsOnly && !catalogNavigationOnly && !ticketShapeOnly && !sbobetMarketLabelsOnly) {
       const controls = page.locator("a, button, [role='button'], [onclick], [aria-label], [title]");
       const controlCount = Math.min(await controls.count(), 250);
       for (let index = 0, clicked = 0; index < controlCount && clicked < 12; index += 1) {
@@ -236,6 +261,10 @@ async function main(): Promise<void> {
       ? ticketShape
       : imCatalogRecordsOnly
       ? imCatalogRecords
+      : sbobetMarketShapesOnly
+      ? [...sbobetMarketShapes.values()]
+      : sbobetMarketLabelsOnly
+      ? [...sbobetMarketLabels.values()]
       : profileShapesOnly
       ? profileShapes
       : catalogNavigationOnly
