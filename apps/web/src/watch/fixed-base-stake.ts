@@ -37,6 +37,11 @@ export interface FixedBaseStakePlan {
 
 type StakeComparableRow = Pick<ComparisonRow, "key" | "marketType" | "cells">;
 
+export interface OpposingLegPair {
+  readonly first: { readonly provider: ProviderId; readonly quote: ProviderQuote };
+  readonly second: { readonly provider: ProviderId; readonly quote: ProviderQuote };
+}
+
 function plain(value: Decimal): string {
   return value.toFixed(value.decimalPlaces());
 }
@@ -58,6 +63,7 @@ interface BestLeg {
   readonly provider: ProviderId;
   readonly selection: string;
   readonly odds: Decimal;
+  readonly providerSelectionId: string;
 }
 
 function policyDecimal(value: string): Decimal | null {
@@ -103,28 +109,59 @@ function resolveConstraint(provider: ProviderId, policy: FixedBaseStakePolicy, o
   return { minStake, maxStake, stakeStep, balance, fee, feeType: source.feeType, feeRate: source.feeRate };
 }
 
-function buildPlan(row: StakeComparableRow, selectedProviders: ReadonlySet<ProviderId>,
-  policy: FixedBaseStakePolicy, requireProfit: boolean, observedAtMs?: number): FixedBaseStakePlan | null {
-  if (row.marketType === "FT_1X2") return null;
-  const selections = [...new Set(row.cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)))].sort();
-  if (selections.length !== 2) return null;
+function eligibleQuotes(row: StakeComparableRow, selectedProviders: ReadonlySet<ProviderId>): readonly BestLeg[] {
+  return row.cells.flatMap((cell): BestLeg[] => {
+    if (!selectedProviders.has(cell.provider) || cell.market.status !== "OPEN") return [];
+    return cell.quotes.flatMap((quote): BestLeg[] => {
+      if (quote.status !== "OPEN") return [];
+      const odds = oddsOf(quote);
+      return odds === null ? [] : [{ provider: cell.provider, selection: quote.selection, odds,
+        providerSelectionId: quote.providerSelectionId }];
+    });
+  });
+}
 
-  const bestLegs: BestLeg[] = [];
-  for (const selection of selections) {
-    const candidates = row.cells.flatMap((cell): BestLeg[] => {
-      if (!selectedProviders.has(cell.provider) || cell.market.status !== "OPEN") return [];
-      return cell.quotes.flatMap((quote): BestLeg[] => {
-        if (quote.selection !== selection || quote.status !== "OPEN") return [];
-        const odds = oddsOf(quote);
-        return odds === null ? [] : [{ provider: cell.provider, selection, odds }];
-      });
-    }).sort((left, right) => right.odds.comparedTo(left.odds) || left.provider.localeCompare(right.provider));
-    if (candidates[0] === undefined) return null;
-    bestLegs.push(candidates[0]);
-  }
-  if (new Set(bestLegs.map((leg) => leg.provider)).size !== 2) return null;
-  bestLegs.sort((left, right) => left.odds.comparedTo(right.odds) ||
-    left.selection.localeCompare(right.selection) || left.provider.localeCompare(right.provider));
+export function enumerateOpposingLegPairs(row: ComparisonRow,
+  selectedProviders: ReadonlySet<ProviderId>): readonly OpposingLegPair[] {
+  if (row.marketType === "FT_1X2") return [];
+  const quotes = eligibleQuotes(row, selectedProviders);
+  const selections = [...new Set(quotes.map((quote) => quote.selection))].sort();
+  if (selections.length !== 2) return [];
+  const [firstSelection, secondSelection] = selections as [string, string];
+  const quotesFor = (selection: string) => row.cells.flatMap((cell) => {
+    if (!selectedProviders.has(cell.provider) || cell.market.status !== "OPEN") return [];
+    return cell.quotes.filter((quote) => quote.selection === selection && quote.status === "OPEN" && oddsOf(quote) !== null)
+      .map((quote) => ({ provider: cell.provider, quote }));
+  }).sort((left, right) => left.provider.localeCompare(right.provider) ||
+    left.quote.providerSelectionId.localeCompare(right.quote.providerSelectionId));
+  return quotesFor(firstSelection).flatMap((first) => quotesFor(secondSelection)
+    .filter((second) => second.provider !== first.provider)
+    .map((second) => ({ first, second })));
+}
+
+function pairLegs(row: StakeComparableRow, pair: OpposingLegPair): [BestLeg, BestLeg] | null {
+  if (row.marketType === "FT_1X2" || pair.first.provider === pair.second.provider ||
+    pair.first.quote.selection === pair.second.quote.selection) return null;
+  const legs = [pair.first, pair.second].flatMap((candidate): BestLeg[] => {
+    const cell = row.cells.find((item) => item.provider === candidate.provider && item.market.status === "OPEN" &&
+      item.quotes.some((quote) => quote.providerSelectionId === candidate.quote.providerSelectionId));
+    const quote = cell?.quotes.find((item) => item.providerSelectionId === candidate.quote.providerSelectionId &&
+      item.selection === candidate.quote.selection && item.status === "OPEN");
+    const odds = quote === undefined ? null : oddsOf(quote);
+    return quote === undefined || odds === null ? [] : [{ provider: candidate.provider, selection: quote.selection, odds,
+      providerSelectionId: quote.providerSelectionId }];
+  });
+  if (legs.length !== 2 || new Set(eligibleQuotes(row, new Set(row.cells.map((cell) => cell.provider)))
+    .map((leg) => leg.selection)).size !== 2) return null;
+  legs.sort((left, right) => left.odds.comparedTo(right.odds) || left.selection.localeCompare(right.selection) ||
+    left.provider.localeCompare(right.provider) || left.providerSelectionId.localeCompare(right.providerSelectionId));
+  return legs as [BestLeg, BestLeg];
+}
+
+function buildPlanForPair(row: StakeComparableRow, pair: OpposingLegPair,
+  policy: FixedBaseStakePolicy, requireProfit: boolean, observedAtMs?: number): FixedBaseStakePlan | null {
+  const bestLegs = pairLegs(row, pair);
+  if (bestLegs === null) return null;
 
   const baseStake = policyDecimal(policy.baseStake);
   const low = bestLegs[0]!;
@@ -167,20 +204,35 @@ function buildPlan(row: StakeComparableRow, selectedProviders: ReadonlySet<Provi
       feeType: highConstraint.feeType, feeRate: highConstraint.feeRate }
   ];
   return {
-    fingerprint: [row.key, policy.baseStake, ...legs.map((leg) =>
-      `${leg.provider}|${leg.selection}|${leg.decimalOdds}|${leg.stake}`)].join("::"),
+    fingerprint: [row.key, policy.baseStake, ...bestLegs.map((leg, index) =>
+      `${leg.provider}|${leg.selection}|${leg.providerSelectionId}|${legs[index]!.decimalOdds}|${legs[index]!.stake}`)].join("::"),
     currency: policy.currency, legs, totalStake: plain(plan.totalStake),
     profitsBySelection: { [low.selection]: plain(plan.lowProfit), [high.selection]: plain(plan.highProfit) },
     worstCaseProfit: plain(plan.worstCaseProfit), roi: plain(plan.worstCaseProfit.div(plan.totalStake))
   };
 }
 
-export function buildFixedBaseStakePlan(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId>,
+export function buildFixedBaseStakePlanForPair(row: ComparisonRow, pair: OpposingLegPair,
   policy: FixedBaseStakePolicy, observedAtMs?: number): FixedBaseStakePlan | null {
-  return buildPlan(row, selectedProviders, policy, true, observedAtMs);
+  return buildPlanForPair(row, pair, policy, true, observedAtMs);
 }
 
-export function buildObservedFixedBaseStakeEstimate(row: StakeComparableRow, selectedProviders: ReadonlySet<ProviderId>,
+function bestPlan(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId>, policy: FixedBaseStakePolicy,
+  requireProfit: boolean, observedAtMs?: number): FixedBaseStakePlan | null {
+  return enumerateOpposingLegPairs(row, selectedProviders)
+    .flatMap((pair) => {
+      const plan = buildPlanForPair(row, pair, policy, requireProfit, observedAtMs);
+      return plan === null ? [] : [plan];
+    }).sort((left, right) => new Decimal(right.worstCaseProfit).comparedTo(left.worstCaseProfit) ||
+      new Decimal(right.roi).comparedTo(left.roi) || left.fingerprint.localeCompare(right.fingerprint))[0] ?? null;
+}
+
+export function buildFixedBaseStakePlan(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId>,
+  policy: FixedBaseStakePolicy, observedAtMs?: number): FixedBaseStakePlan | null {
+  return bestPlan(row, selectedProviders, policy, true, observedAtMs);
+}
+
+export function buildObservedFixedBaseStakeEstimate(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId>,
   policy: FixedBaseStakePolicy): FixedBaseStakePlan | null {
-  return buildPlan(row, selectedProviders, policy, false);
+  return bestPlan(row, selectedProviders, policy, false);
 }

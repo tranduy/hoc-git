@@ -2,7 +2,7 @@ import type { ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/cont
 import { describe, expect, it } from "vitest";
 import type { ComparisonCell, ComparisonRow } from "../catalog/comparison.js";
 import { buildFixedBaseStakePlan, buildObservedFixedBaseStakeEstimate,
-  type FixedBaseStakePolicy } from "./fixed-base-stake.js";
+  enumerateOpposingLegPairs, type FixedBaseStakePolicy } from "./fixed-base-stake.js";
 
 const selected = new Set<ProviderId>(["SABA", "SBOBET"]);
 const policy: FixedBaseStakePolicy = {
@@ -10,7 +10,7 @@ const policy: FixedBaseStakePolicy = {
   maxStake: "100000", stakeStep: "1000", balance: "100000"
 };
 
-function cell(provider: "SABA" | "SBOBET", marketType: "FT_TOTAL" | "FT_1X2",
+function cell(provider: "SABA" | "SBOBET" | "IM", marketType: "FT_TOTAL" | "FT_1X2",
   prices: Readonly<Record<string, string>>, status: "OPEN" | "SUSPENDED" = "OPEN"): ComparisonCell {
   const providerEventId = `${provider}-event`;
   const providerMarketId = `${provider}-${marketType}`;
@@ -32,6 +32,44 @@ function row(marketType: "FT_TOTAL" | "FT_1X2", cells: readonly ComparisonCell[]
 }
 
 describe("fixed-base two-way stake planning", () => {
+  it("enumerates every opposing selection pair across distinct selected providers", () => {
+    const candidate = row("FT_TOTAL", [
+      cell("SABA", "FT_TOTAL", { OVER: "2.1", UNDER: "2.05" }),
+      cell("SBOBET", "FT_TOTAL", { OVER: "2.2", UNDER: "2.15" }),
+      cell("IM", "FT_TOTAL", { OVER: "2.3", UNDER: "2.25" })
+    ]);
+
+    const pairs = enumerateOpposingLegPairs(candidate, new Set<ProviderId>(["SABA", "SBOBET", "IM"]));
+
+    expect(pairs).toHaveLength(6);
+    expect(pairs.map((pair) => `${pair.first.provider}:${pair.first.quote.selection}|${pair.second.provider}:${pair.second.quote.selection}`))
+      .toEqual([
+        "IM:OVER|SABA:UNDER", "IM:OVER|SBOBET:UNDER", "SABA:OVER|IM:UNDER",
+        "SABA:OVER|SBOBET:UNDER", "SBOBET:OVER|IM:UNDER", "SBOBET:OVER|SABA:UNDER"
+      ]);
+  });
+
+  it("falls back from the highest raw quote when that provider cannot fund the leg", () => {
+    const constraint = { currency: "VND", minStake: "30000", maxStake: "500000", stakeStep: "1000",
+      balance: "500000", feeType: "NONE" as const, feeRate: null, verifiedAsOfMs: 900, expiresAtMs: 1100 };
+    const candidate = row("FT_TOTAL", [
+      cell("IM", "FT_TOTAL", { OVER: "2.4" }),
+      cell("SABA", "FT_TOTAL", { OVER: "2.2" }),
+      cell("SBOBET", "FT_TOTAL", { UNDER: "2.3" })
+    ]);
+
+    const plan = buildFixedBaseStakePlan(candidate, new Set<ProviderId>(["IM", "SABA", "SBOBET"]), {
+      ...policy, requireProviderConstraints: true, providerConstraints: {
+        IM: { ...constraint, balance: "50000" }, SABA: constraint, SBOBET: constraint
+      }
+    }, 1000);
+
+    expect(plan?.legs.map(({ provider, selection }) => ({ provider, selection }))).toEqual([
+      { provider: "SABA", selection: "OVER" }, { provider: "SBOBET", selection: "UNDER" }
+    ]);
+    expect(Number(plan?.worstCaseProfit)).toBeGreaterThan(0);
+  });
+
   it("fixes 100000 on odds 1.8 and balances odds 2.5 with 72000", () => {
     const plan = buildFixedBaseStakePlan(row("FT_TOTAL", [
       cell("SABA", "FT_TOTAL", { OVER: "1.8", UNDER: "1.5" }),

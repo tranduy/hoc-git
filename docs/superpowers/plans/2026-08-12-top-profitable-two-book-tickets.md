@@ -84,7 +84,7 @@ git commit -m "feat: add strict provider preflight client"
 - Modify: `apps/web/src/watch/fixed-base-stake.ts`
 - Modify: `apps/web/src/watch/fixed-base-stake.test.ts`
 
-- [ ] **Step 1: Add RED tests for provider-pair permutations**
+- [x] **Step 1: Add RED tests for provider-pair permutations**
 
 Cover all of the following in `fixed-base-stake.test.ts`:
 
@@ -107,13 +107,13 @@ expect(plan?.legs.map(({ provider, selection, stake }) => ({ provider, selection
 expect(plan?.worstCaseProfit).toBe("20000");
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `npm.cmd test --workspace @tool-chenh/web -- --run src/watch/fixed-base-stake.test.ts`
 
 Expected: at least the all-permutations/fallback test fails because the current implementation selects only one best quote per outcome before applying constraints.
 
-- [ ] **Step 3: Refactor calculation into explicit leg-pair primitives**
+- [x] **Step 3: Refactor calculation into explicit leg-pair primitives**
 
 Add these exports without moving identity decisions into the calculator:
 
@@ -138,7 +138,7 @@ export function buildFixedBaseStakePlanForPair(
 
 `buildFixedBaseStakePlan` must evaluate every enumerated pair, sort by worst-case profit descending, ROI descending, then fingerprint ascending, and return the first plan. Keep all arithmetic in `Decimal`; serialize plain decimal strings only.
 
-- [ ] **Step 4: Run focused and regression tests**
+- [x] **Step 4: Run focused and regression tests**
 
 Run:
 
@@ -149,7 +149,7 @@ npm.cmd run typecheck --workspace @tool-chenh/web
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add apps/web/src/watch/fixed-base-stake.ts apps/web/src/watch/fixed-base-stake.test.ts
