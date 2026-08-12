@@ -53,6 +53,20 @@ export class PlaywrightSabaEsportsBrowserManager {
     }
   }
 
+  async readCatalogFromPage(page: Page): Promise<readonly Readonly<Record<string, unknown>>[]> {
+    const snapshots = new Map<string, readonly Readonly<Record<string, unknown>>[]>();
+    const session = { context: page.context(), page, snapshots };
+    this.#captureSockets(page, snapshots);
+    const deadline = Date.now() + this.#timeoutMs;
+    let target: string | null = null;
+    while (target === null && Date.now() < deadline) {
+      try { target = exactSabaLolUrl(page.url()); } catch { await page.waitForTimeout(100); }
+    }
+    if (target === null) throw new Error("SABA_ESPORTS_BROWSER_UNAVAILABLE");
+    await page.goto(target, { waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
+    return this.#waitForCatalog(session);
+  }
+
   async close(): Promise<void> {
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
@@ -78,22 +92,7 @@ export class PlaywrightSabaEsportsBrowserManager {
     try {
       const page = context.pages()[0] ?? await context.newPage();
       const snapshots = new Map<string, readonly Readonly<Record<string, unknown>>[]>();
-      let socketIndex = 0;
-      page.on("websocket", (socket) => {
-        socketIndex += 1;
-        const socketKey = socketIndex;
-        const decoder = new SabaPushDecoder();
-        socket.on("framereceived", (event) => {
-          try {
-            const frame = parseSabaSocketFrame(event.payload);
-            if (frame === null) return;
-            const applied = decoder.apply(frame);
-            snapshots.set(`${socketKey}:${frame.bridgeId}`, applied.records);
-          } catch {
-            // A malformed or unrelated channel is quarantined independently.
-          }
-        });
-      });
+      this.#captureSockets(page, snapshots);
       await page.goto(launchUrl, { waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
       await page.waitForTimeout(1_500);
       if (await page.locator("body").innerText().catch(() => "") === "") {
@@ -109,6 +108,25 @@ export class PlaywrightSabaEsportsBrowserManager {
     }
   }
 
+  #captureSockets(page: Page, snapshots: Map<string, readonly Readonly<Record<string, unknown>>[]>): void {
+    let socketIndex = 0;
+    page.on("websocket", (socket) => {
+      socketIndex += 1;
+      const socketKey = socketIndex;
+      const decoder = new SabaPushDecoder();
+      socket.on("framereceived", (event) => {
+        try {
+          const frame = parseSabaSocketFrame(event.payload);
+          if (frame === null) return;
+          const applied = decoder.apply(frame);
+          snapshots.set(`${socketKey}:${frame.bridgeId}`, applied.records);
+        } catch {
+          // A malformed or unrelated channel is quarantined independently.
+        }
+      });
+    });
+  }
+
   async #waitForCatalog(session: OpenSession): Promise<readonly Readonly<Record<string, unknown>>[]> {
     const deadline = Date.now() + this.#timeoutMs;
     while (Date.now() < deadline) {
@@ -122,4 +140,3 @@ export class PlaywrightSabaEsportsBrowserManager {
     throw new Error("SABA_ESPORTS_CATALOG_UNAVAILABLE");
   }
 }
-

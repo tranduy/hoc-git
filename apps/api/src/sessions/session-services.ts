@@ -25,6 +25,7 @@ import { SabaObservedCatalogReader } from "../providers/saba/saba-observed-catal
 import { SabaProfileReader } from "../providers/saba/saba-profile-reader.js";
 import { SabaSessionValidator } from "../providers/saba/saba-session-validator.js";
 import { PlaywrightSabaEsportsBrowserManager } from "../providers/saba/saba-esports-browser-manager.js";
+import { JitSabaEsportsCatalogSource } from "../providers/saba/saba-esports-jit-source.js";
 import { SabaEsportsObservedCatalogReader } from "../providers/saba/saba-esports-observed-catalog.js";
 import { SessionValidatorRegistry } from "./validators.js";
 import { MultiProviderCatalogReader } from "../providers/multi-provider-catalog.js";
@@ -190,7 +191,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const sabaEsportsCatalogReader = new SabaEsportsObservedCatalogReader({
-    accounts, source: sabaEsportsBrowser,
+    accounts, source: new JitSabaEsportsCatalogSource({
+      fabet: { withProviderPage: fabetDriver.withProviderPage.bind(fabetDriver) }, browser: sabaEsportsBrowser
+    }),
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
   const imEsportsCatalogReader = new ImEsportsObservedCatalogReader({

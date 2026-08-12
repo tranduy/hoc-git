@@ -229,7 +229,7 @@ export class FabetBrowserDriver {
   }
 
   async captureLobbyLaunches(): Promise<readonly LaunchCandidate[]> {
-    if (this.#baseOrigin === null) throw new FabetBrowserError("NOT_AUTHENTICATED");
+    await this.#resumePersistedProfile();
     const lobbies: ReadonlyArray<{ category: Category; url: string }> = [
       { category: "FOOTBALL", url: `${this.#baseOrigin}/lobby-the-thao?type=livesports` },
       { category: "LOL", url: `${this.#baseOrigin}/lobby-the-thao?type=esports` }
@@ -272,12 +272,24 @@ export class FabetBrowserDriver {
 
   async withProviderPage<T>(provider: "SABA", category: Category,
     consume: (page: Page) => Promise<T>): Promise<T> {
-    if (this.#baseOrigin === null) throw new FabetBrowserError("NOT_AUTHENTICATED");
+    await this.#resumePersistedProfile();
     if (this.#automation.withProviderPage === undefined) throw new FabetBrowserError("NOT_AUTHENTICATED");
     const type = category === "FOOTBALL" ? "livesports" : "esports";
     return this.#automation.withProviderPage({
       lobbyUrl: `${this.#baseOrigin}/lobby-the-thao?type=${type}`, provider, category
     }, consume);
+  }
+
+  async #resumePersistedProfile(): Promise<void> {
+    if (this.#baseOrigin !== null) return;
+    if (!(await this.#automation.isAuthenticated()) || this.#automation.authenticatedUrl === undefined) {
+      throw new FabetBrowserError("NOT_AUTHENTICATED");
+    }
+    const authenticated = safeHttpsUrl(await this.#automation.authenticatedUrl());
+    if (!(await this.#trustStore.isTrusted(authenticated.hostname))) {
+      throw new FabetBrowserError("DOMAIN_APPROVAL_REQUIRED");
+    }
+    this.#baseOrigin = authenticated.origin;
   }
 
   redactedDiagnostics(): readonly LaunchCandidate[] {

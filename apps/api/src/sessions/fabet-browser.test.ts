@@ -204,6 +204,20 @@ describe("FabetBrowserDriver", () => {
     ]);
   });
 
+  it("resumes the persisted authenticated Fabet profile after an API restart", async () => {
+    const context = await setup();
+    await context.trustStore.approve("fabet.party");
+    context.automation.authenticatedUrlValue = "https://fabet.party/home";
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 30 }, idFactory: () => "1" });
+
+    await driver.withProviderPage("SABA", "LOL", async () => "catalog");
+
+    expect(context.automation.loginCalls).toEqual([]);
+    expect(context.automation.providerPageCalls).toEqual([{
+      lobbyUrl: "https://fabet.party/lobby-the-thao?type=esports", provider: "SABA", category: "LOL"
+    }]);
+  });
+
   it("derives the SABA lobby from the authenticated Fabet origin for just-in-time use", async () => {
     const context = await setup();
     await context.trustStore.approve("fabet.party");
