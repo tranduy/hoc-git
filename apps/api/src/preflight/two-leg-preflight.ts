@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { PreflightRequestSchema, PreflightTicketSchema, type Opportunity, type PreflightRequest,
   type PreflightTicket, type ProviderId, type ProviderTicketPreflight,
-  type ProviderTicketPreflightRequest, type StakeLeg } from "@tool-chenh/contracts";
+  type ProviderStakeConstraint, type ProviderTicketPreflightRequest, type StakeLeg } from "@tool-chenh/contracts";
 import { Decimal, effectiveDecimal } from "@tool-chenh/core";
 
 interface OpportunitySource {
@@ -27,6 +27,20 @@ function driftBps(expected: string, actual: string): Decimal {
 
 function feeFor(leg: StakeLeg): { type: "NONE" } | { type: "PROFIT" | "PAYOUT"; rate: string } {
   return leg.feeType === "NONE" ? { type: "NONE" } : { type: leg.feeType, rate: leg.feeRate! };
+}
+
+function stakeFitsConstraint(stakeText: string, constraint: ProviderStakeConstraint): boolean {
+  try {
+    const stake = new Decimal(stakeText);
+    const min = new Decimal(constraint.minStake);
+    const max = new Decimal(constraint.maxStake);
+    const step = new Decimal(constraint.stakeStep);
+    const balance = new Decimal(constraint.balance);
+    return stake.isFinite() && min.isFinite() && max.isFinite() && step.isFinite() && balance.isFinite() &&
+      stake.gte(min) && stake.lte(max) && stake.lte(balance) && step.gt(0) && stake.mod(step).isZero();
+  } catch {
+    return false;
+  }
 }
 
 export class TwoLegPreflight {
@@ -118,6 +132,7 @@ export class TwoLegPreflight {
       }
       if (constraint.currency !== leg.stakeCurrency || constraint.feeType !== leg.feeType ||
         constraint.feeRate !== leg.feeRate) throw new Error("PREFLIGHT_FINANCIAL_POLICY_MISMATCH");
+      if (!stakeFitsConstraint(leg.stake, constraint)) throw new Error("PREFLIGHT_LEG_UNAVAILABLE");
     }
 
     const totalStakeBase = opportunity.legs.reduce((sum, leg) => sum.plus(leg.stakeBase), new Decimal(0));

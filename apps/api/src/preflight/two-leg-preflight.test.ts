@@ -88,6 +88,22 @@ describe("TwoLegPreflight", () => {
       maxOddsDriftBps: 25 })).rejects.toThrow("PREFLIGHT_EXPIRED");
   });
 
+  it.each([
+    ["minimum", { minStake: "110000" }],
+    ["maximum", { maxStake: "99000" }],
+    ["balance", { balance: "99000" }],
+    ["stake step", { stakeStep: "3000" }]
+  ])("independently rejects a provider claiming eligible despite an invalid %s constraint", async (_label, override) => {
+    const service = new TwoLegPreflight({ opportunities: { getSnapshot: () => ({ opportunities: [opportunity] }) },
+      providers: { providerForAccount: async (id) => id === "sb" ? "SBOBET" : "APSPORT",
+        preflight: async (request) => request.accountId === "sb"
+          ? result(request, "SBOBET", { constraint: { ...result(request, "SBOBET").constraint!, ...override } })
+          : result(request, "APSPORT") }, clock: { nowMs: () => 1500 } });
+
+    await expect(service.preflight({ opportunityId: "opp-1", accountAId: "sb", accountBId: "ap",
+      maxOddsDriftBps: 25 })).rejects.toThrow("PREFLIGHT_LEG_UNAVAILABLE");
+  });
+
   it("fails closed when the opportunity disappears while both slips are being checked", async () => {
     let reads = 0;
     const service = new TwoLegPreflight({ opportunities: { getSnapshot: () =>
