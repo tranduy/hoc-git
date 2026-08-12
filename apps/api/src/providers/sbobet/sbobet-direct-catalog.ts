@@ -10,7 +10,8 @@ export interface SbobetMarketGroupShape {
 }
 
 export interface SbobetMarketLabelEvidence {
-  readonly label: "FIRST_HALF_OVER_UNDER" | "FIRST_HALF_HANDICAP";
+  readonly label: "FIRST_HALF_OVER_UNDER" | "FIRST_HALF_HANDICAP" |
+    "SECOND_HALF_OVER_UNDER" | "SECOND_HALF_HANDICAP";
   readonly nearbyNumericKeys: readonly string[];
   readonly contextShape: string;
 }
@@ -75,7 +76,11 @@ export function inspectSbobetMarketLabelEvidence(source: string): readonly Sbobe
     { label: "FIRST_HALF_OVER_UNDER" as const,
       expression: /(?:first|1st)\s*half\s*(?:over\s*\/?\s*under|total)|(?:hiệp|hiep)\s*1\s*(?:tài\s*xỉu|tai\s*xiu)/giu },
     { label: "FIRST_HALF_HANDICAP" as const,
-      expression: /(?:first|1st)\s*half\s*(?:asian\s*)?handicap|(?:chấp|chap)\s*(?:hiệp|hiep)\s*1/giu }
+      expression: /(?:first|1st)\s*half\s*(?:asian\s*)?handicap|(?:chấp|chap)\s*(?:hiệp|hiep)\s*1/giu },
+    { label: "SECOND_HALF_OVER_UNDER" as const,
+      expression: /(?:(?:second|2nd)\s*half|2h)\s*(?:over\s*\/?\s*under|total)|(?:hiệp|hiep)\s*2.{0,30}(?:tài\s*\/?\s*xỉu|tai\s*\/?\s*xiu)|(?:tài\s*\/?\s*xỉu|tai\s*\/?\s*xiu).{0,30}(?:hiệp|hiep)\s*2/giu },
+    { label: "SECOND_HALF_HANDICAP" as const,
+      expression: /(?:(?:second|2nd)\s*half|2h)\s*(?:asian\s*)?handicap|(?:hiệp|hiep)\s*2.{0,30}(?:chấp|chap)|(?:chấp|chap).{0,30}(?:hiệp|hiep)\s*2/giu }
   ];
   const evidence: SbobetMarketLabelEvidence[] = [];
   for (const { label, expression } of patterns) {

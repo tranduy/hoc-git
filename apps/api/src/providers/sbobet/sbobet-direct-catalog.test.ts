@@ -80,12 +80,15 @@ describe("inspectSbobetMarketGroups", () => {
 
 describe("inspectSbobetMarketLabelEvidence", () => {
   it("returns only known market labels and bounded nearby numeric keys", () => {
-    const source = `secret-token-should-not-leak {4:"First Half Over/Under",6:"First Half Handicap",99999:"x"}`;
+    const source = `secret-token-should-not-leak {4:"First Half Over/Under",6:"First Half Handicap",` +
+      `25:"Second Half Over/Under",27:"Second Half Handicap",99999:"x"}`;
 
     const result = inspectSbobetMarketLabelEvidence(source);
     expect(result.map(({ label, nearbyNumericKeys }) => ({ label, nearbyNumericKeys }))).toEqual([
       { label: "FIRST_HALF_OVER_UNDER", nearbyNumericKeys: ["4"] },
-      { label: "FIRST_HALF_HANDICAP", nearbyNumericKeys: ["6"] }
+      { label: "FIRST_HALF_HANDICAP", nearbyNumericKeys: ["6"] },
+      { label: "SECOND_HALF_OVER_UNDER", nearbyNumericKeys: ["25"] },
+      { label: "SECOND_HALF_HANDICAP", nearbyNumericKeys: ["27"] }
     ]);
     expect(JSON.stringify(result)).not.toContain("secret-token");
     expect(result.every((item) => item.contextShape.length <= 240)).toBe(true);
