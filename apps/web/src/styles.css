@@ -128,6 +128,15 @@ main { max-width: 1440px; margin-left: 224px; padding: calc(var(--space) * 5); }
 .lag-signal-list { display: grid; gap: var(--space); }
 .catalog-market-details { margin-top: calc(var(--space) * 1.5); }
 .catalog-market-details > summary { width: max-content; padding: 8px 10px; cursor: pointer; color: var(--muted); }
+.catalog-workspace { display: grid; grid-template-columns: minmax(420px, .9fr) minmax(560px, 1.6fr); gap: calc(var(--space) * 2); align-items: start; }
+.catalog-workspace__list, .catalog-workspace__detail { min-width: 0; }
+.catalog-workspace__list > h2 { margin-top: 0; }
+.catalog-workspace__list { max-height: calc(100vh - 110px); overflow-y: auto; padding-right: 4px; scrollbar-gutter: stable; }
+.catalog-workspace__detail { position: sticky; top: var(--space); max-height: calc(100vh - 32px); overflow: auto; }
+.catalog-workspace__empty { display: grid; min-height: 260px; place-content: center; padding: calc(var(--space) * 3); border: 1px dashed var(--line); border-radius: 10px; background: var(--panel); color: var(--muted); text-align: center; }
+.catalog-event--selected { border-color: var(--focus); box-shadow: inset 4px 0 0 var(--focus); }
+.catalog-event h3 { margin: 4px 0 calc(var(--space) * 1.5); font-size: 1.25rem; }
+@media (max-width: 1180px) { .catalog-workspace { grid-template-columns: 1fr; }.catalog-workspace__list, .catalog-workspace__detail { max-height: none; overflow: visible; }.catalog-workspace__detail { position: static; }.catalog-workspace__empty { min-height: 140px; } }
 @media (max-width: 720px) { .lag-signal__legs { grid-template-columns: 1fr; }.lag-signal__score { justify-items: start; } }
 .ranked-ticket-table-wrap { margin-top: var(--space); overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
 .ranked-ticket-table { min-width: 1260px; font-size: .84rem; }

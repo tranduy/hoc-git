@@ -142,6 +142,17 @@ export function MatchWatchDetail({
   };
 
   useEffect(() => {
+    sampleRef.current = initialSample;
+    setCurrentSample(initialSample);
+    setCurrentComparison(comparisonEvent);
+    for (const catalog of catalogSources) {
+      const eventId = comparisonEvent?.providerEventIds[catalog.provider] ??
+        (catalog.accountId === accountId ? providerEventId : undefined);
+      if (eventId !== undefined) providerSamplesRef.current?.set(catalog.provider, sampleMatch(catalog, eventId));
+    }
+  }, [accountId, catalogSources, comparisonEvent, initialSample, providerEventId]);
+
+  useEffect(() => {
     if (!watching) {
       setWatcherState("STOPPED");
       return;

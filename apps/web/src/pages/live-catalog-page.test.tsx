@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { AccountStatus, ProviderEvent, ProviderMarket, ProviderQuote,
   ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -158,8 +158,8 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={{ read: async () => liveCatalog }} />);
 
     expect(await screen.findByText("LIVE · 1H · 11:00 elapsed")).toBeTruthy();
-    expect(screen.getByText(`Observed ${new Date(liveCatalog.observedAtMs).toLocaleString()}`)).toBeTruthy();
-    expect(screen.getByText(`Approx. started ${new Date(liveCatalog.observedAtMs - 660_000).toLocaleString()}`)).toBeTruthy();
+    expect(screen.getAllByText(`Observed ${new Date(liveCatalog.observedAtMs).toLocaleString()}`).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(`Approx. started ${new Date(liveCatalog.observedAtMs - 660_000).toLocaleString()}`).length).toBeGreaterThan(0);
   });
 
   it("shows provider checkboxes, countdown, provider badges, and side-by-side market rates", async () => {
@@ -193,8 +193,33 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText(/If Alpha wins/u).textContent).toContain("35,000 VND");
     expect(screen.getByText(/If Beta wins/u).textContent).toContain("35,000 VND");
     fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
+    expect(screen.getByRole("region", { name: "Live comparison workspace" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("heading", { name: "Live matches" })).toBeTruthy();
     expect(await screen.findByText("Books shown in this comparison")).toBeTruthy();
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
+  });
+
+  it("updates the selected detail in place on the next catalog delta", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let reads = 0;
+    const read = vi.fn(async (): Promise<LiveCatalogResponse> => {
+      reads += 1;
+      return { ...catalog, observedAtMs: 100 + reads,
+        quotes: quotes.map((quote) => ({ ...quote,
+          rawOdds: quote.selection === "HOME" && reads > 1 ? "2.1" : quote.rawOdds,
+          sequence: reads })) };
+    });
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={{ read }} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "View & watch Alpha vs Beta" }));
+    const selectedButton = screen.getByRole("button", { name: "View & watch Alpha vs Beta" });
+    expect(selectedButton.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+
+    const detail = screen.getByRole("complementary", { name: "Selected match detail" });
+    expect(within(detail).getByText(/Alpha · 2\.1 DECIMAL/u)).toBeTruthy();
+    expect(selectedButton.getAttribute("aria-pressed")).toBe("true");
   });
 
   it("shows exact full-time totals with a clear TÃ i/Xá»‰u label and both provider prices", async () => {

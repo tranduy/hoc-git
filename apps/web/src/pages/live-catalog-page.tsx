@@ -512,21 +512,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, [events, selectedKey]);
 
   const selectedEvent = events.find((item) => item.key === selectedKey);
-  if (selectedEvent !== undefined) {
-    const primary = selectedEvent.catalogs[0]!;
-    const detailBooks: readonly ComparisonBook[] = comparisonProviders.map((provider) => {
-      const providerAccounts = accounts.filter((account) => account.provider === provider && account.category === category);
-      return { provider, connected: providerAccounts.length > 0,
-        selected: providerAccounts.some((account) => selectedIds.has(account.id)),
-        hasExactEvent: selectedEvent.providers.includes(provider) };
-    });
-    return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
-      baseStake={baseStake} books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent}
-      highlightTicketKey={highlightTicketKey} rankedTickets={rankedByEvent.get(selectedEvent.key)?.tickets ?? []}
-      lagSignals={signals.filter((signal) => signal.event.key === selectedEvent.key)}
-      onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); setHighlightTicketKey(null); }}
-      providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
-  }
 
   const invalidateVerifiedTickets = (): void => {
     preflightCoordinator.current.clear();
@@ -566,6 +551,21 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     setHighlightTicketKey(alert.ticket.key);
     setSelectedKey(alert.event.key);
   };
+  const selectedDetail = selectedEvent === undefined ? null : (() => {
+    const primary = selectedEvent.catalogs[0]!;
+    const detailBooks: readonly ComparisonBook[] = comparisonProviders.map((provider) => {
+      const providerAccounts = accounts.filter((account) => account.provider === provider && account.category === category);
+      return { provider, connected: providerAccounts.length > 0,
+        selected: providerAccounts.some((account) => selectedIds.has(account.id)),
+        hasExactEvent: selectedEvent.providers.includes(provider) };
+    });
+    return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
+      baseStake={baseStake} books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent}
+      highlightTicketKey={highlightTicketKey} rankedTickets={rankedByEvent.get(selectedEvent.key)?.tickets ?? []}
+      lagSignals={signals.filter((signal) => signal.event.key === selectedEvent.key)}
+      onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); setHighlightTicketKey(null); }}
+      providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
+  })();
 
   return <>
     <header className="page-header"><p className="eyebrow">{category === "FOOTBALL" ? "Football" : "League of Legends"} · immediate two-book lag monitor</p>
@@ -598,14 +598,15 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     {catalogs.length > 0 && <LagSignalPanel signals={signals} />}
     {catalogs.length > 0 && <PriceMovementPanel movements={movements} />}
     <ProfitToastStack alerts={profitAlerts} onOpen={openProfitAlert} sound={notificationSound.current} />
-    <div className="catalog-event-list">{displayEvents.map((item) => {
+    <section aria-label="Live comparison workspace" className={selectedDetail === null ? "catalog-workspace" : "catalog-workspace catalog-workspace--selected"}>
+      <div className="catalog-workspace__list"><h2>Live matches</h2><div className="catalog-event-list">{displayEvents.map((item) => {
       const ranked = rankedByEvent.get(item.key)!;
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
       const observedAtMs = item.catalogs.find((catalog) => catalog.provider === item.event.provider)?.observedAtMs ??
         item.catalogs[0]!.observedAtMs;
       const estimatedStartAtMs = estimatedLiveStartAtMs(observedAtMs, item.event.liveState);
       const comparisonCount = ranked.tickets.length;
-      return <article className="catalog-event" key={item.key}><header><div><span>{item.event.competition}</span><h2>{label}</h2>
+      return <article className={item.key === selectedKey ? "catalog-event catalog-event--selected" : "catalog-event"} key={item.key}><header><div><span>{item.event.competition}</span><h3>{label}</h3>
         <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
           {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
         <small>{comparisonCount > 0 ? `${comparisonCount} exact two-outcome ticket(s) · top 5 by guaranteed profit` :
@@ -615,9 +616,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           {item.event.isLive ? <><small>Observed {new Date(observedAtMs).toLocaleString()}</small>
             {estimatedStartAtMs !== null && <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}</>
             : <small>Scheduled {new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
-          <button aria-label={`View & watch ${label}`} onClick={() => watch(item)} type="button">View & compare</button></div></header>
-        {comparisonCount > 0 && <details className="catalog-market-details" open><summary>Exact tickets being monitored</summary>
+          <button aria-label={`View & watch ${label}`} aria-pressed={item.key === selectedKey} onClick={() => watch(item)} type="button">View & compare</button></div></header>
+        {comparisonCount > 0 && selectedDetail === null && <details className="catalog-market-details" open><summary>Exact tickets being monitored</summary>
           <RankedTicketTable event={item.event} providers={item.providers} tickets={ranked.tickets} /></details>}</article>;
-    })}</div>
+      })}</div></div>
+      <aside aria-label="Selected match detail" className="catalog-workspace__detail">{selectedDetail ?? <div className="catalog-workspace__empty">
+        <h2>Select a match</h2><p>Click a match on the left to keep the ranked list visible while prices update here.</p>
+      </div>}</aside>
+    </section>
   </>;
 }
