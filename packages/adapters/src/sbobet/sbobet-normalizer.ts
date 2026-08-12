@@ -29,7 +29,7 @@ export interface SbobetCatalogOptions {
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
   readonly sequence: number;
-  readonly provider?: "SBOBET" | "APSPORT" | "BTI";
+  readonly provider?: "SBOBET" | "APSPORT" | "BTI" | "IM";
   readonly settlementProfile?: string;
 }
 

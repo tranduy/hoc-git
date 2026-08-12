@@ -16,6 +16,8 @@ export interface SupportedCatalogPair {
   readonly provider: CatalogProvider;
   readonly category: Category;
   readonly alias: string;
+  readonly anchorProvider?: ProviderId;
+  readonly anchorCategory?: Category | null;
 }
 
 interface CatalogSessionAccess {
@@ -34,6 +36,11 @@ function sourceId(pair: Pick<SupportedCatalogPair, "provider" | "category">): st
 function newest(sessions: readonly RedactedSessionStatus[]): RedactedSessionStatus | null {
   return [...sessions].sort((left, right) =>
     (right.acquiredAtMs ?? -1) - (left.acquiredAtMs ?? -1) || right.id.localeCompare(left.id))[0] ?? null;
+}
+
+function isPairAnchor(session: RedactedSessionStatus, pair: SupportedCatalogPair): boolean {
+  return session.provider === (pair.anchorProvider ?? pair.provider) &&
+    session.category === (pair.anchorCategory === undefined ? pair.category : pair.anchorCategory);
 }
 
 export class CatalogSourceRegistry implements ActiveAccountAccess {
@@ -60,8 +67,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
   async listStatuses(): Promise<readonly CatalogSourceStatus[]> {
     const sessions = (await this.#sessions.listStatuses()).sessions;
     return this.#pairs.map((pair) => {
-      const exact = sessions.filter((candidate) =>
-        candidate.provider === pair.provider && candidate.category === pair.category);
+      const exact = sessions.filter((candidate) => isPairAnchor(candidate, pair));
       const selected = newest(exact.filter((candidate) => candidate.state === "ACTIVE")) ?? newest(exact);
       return CatalogSourceStatusSchema.parse({
         id: sourceId(pair),
@@ -104,6 +110,9 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
     }
     if (pair.provider !== expectedProvider) throw new Error("ACCOUNT_PROVIDER_MISMATCH");
     if (expectedCategory !== undefined && pair.category !== expectedCategory) throw new Error("ACCOUNT_CATEGORY_MISMATCH");
+    if (pair.anchorProvider !== undefined || pair.anchorCategory !== undefined) {
+      throw new Error("CATALOG_SOURCE_HANDLE_UNAVAILABLE");
+    }
     const selected = await this.#resolveActive(pair);
     const handle = await this.#sessions.getActiveSecretHandle(selected.id);
     if (handle === null || handle.provider !== pair.provider || handle.category !== pair.category) {
@@ -114,7 +123,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
 
   async #resolveActive(pair: SupportedCatalogPair): Promise<RedactedSessionStatus> {
     const selected = newest((await this.#sessions.listStatuses()).sessions.filter((candidate) =>
-      candidate.provider === pair.provider && candidate.category === pair.category && candidate.state === "ACTIVE"));
+      isPairAnchor(candidate, pair) && candidate.state === "ACTIVE"));
     if (selected === null) throw new Error("CATALOG_SOURCE_UNAVAILABLE");
     return selected;
   }

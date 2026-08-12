@@ -70,6 +70,14 @@ describe("normalizeSbobetCatalog", () => {
     ]);
   });
 
+  it("preserves IM as the exact provider identity for I-Sports Football records", () => {
+    const result = normalizeSbobetCatalog([record], { observedAtMs: 1_788_000_000_000,
+      receivedMonotonicMs: 20, sequence: 3, provider: "IM" });
+    expect(result.events[0]?.provider).toBe("IM");
+    expect(result.markets.every((market) => market.provider === "IM")).toBe(true);
+    expect(result.quotes.every((quote) => quote.provider === "IM")).toBe(true);
+  });
+
   it("normalizes first-half handicap and total with first-half scope and settlement", () => {
     const firstHalf = { ...record, markets: [
       { marketId: "fh-total", marketType: "FH_TOTAL", lineText: "1.5", selections: [

@@ -34,7 +34,7 @@ class FakeAutomation implements FabetBrowserAutomation {
   authenticated = true;
   launches: Record<string, CapturedNavigation[]> = {};
   authenticatedUrlValue: string | null = null;
-  providerPageCalls: Array<{ lobbyUrl: string; provider: "SABA"; category: "FOOTBALL" | "LOL" }> = [];
+  providerPageCalls: Array<{ lobbyUrl: string; provider: "SABA" | "IM"; category: "FOOTBALL" | "LOL" }> = [];
 
   async login(input: { entryUrl: string; username: string; password: string }): Promise<void> {
     this.loginCalls.push(input);
@@ -53,7 +53,7 @@ class FakeAutomation implements FabetBrowserAutomation {
     return this.authenticatedUrlValue ?? this.loginCalls.at(-1)?.entryUrl ?? "https://fabet.party/";
   }
 
-  async withProviderPage<T>(input: { lobbyUrl: string; provider: "SABA"; category: "FOOTBALL" | "LOL" },
+  async withProviderPage<T>(input: { lobbyUrl: string; provider: "SABA" | "IM"; category: "FOOTBALL" | "LOL" },
     consume: (page: Page) => Promise<T>): Promise<T> {
     this.providerPageCalls.push(input);
     return consume({} as Page);
@@ -232,6 +232,19 @@ describe("FabetBrowserDriver", () => {
     });
   });
 
+  it("derives the live-sports lobby for just-in-time IM Football use", async () => {
+    const context = await setup();
+    await context.trustStore.approve("fabet.party");
+    context.automation.authenticatedUrlValue = "https://fabet.party/home";
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 30 }, idFactory: () => "1" });
+
+    await expect(driver.withProviderPage("IM", "FOOTBALL", async () => "im-provider-result"))
+      .resolves.toBe("im-provider-result");
+    expect(context.automation.providerPageCalls.at(-1)).toEqual({
+      lobbyUrl: "https://fabet.party/lobby-the-thao?type=livesports", provider: "IM", category: "FOOTBALL"
+    });
+  });
+
   it.each([
     ["SABA-SPORTS", true],
     ["BTI", true],
@@ -351,6 +364,37 @@ describe("PlaywrightFabetAutomation", () => {
         async (page) => page.title())).resolves.toBe("SABA live");
       expect(launchCount).toBe(1);
       expect(maximumActiveConsumers).toBe(1);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
+
+  it("clicks the exact I-SPORTS Football card without falling back to C-SPORTS", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/im-provider") {
+        response.end("<!doctype html><title>IM Football live</title><main>IM provider ready</main>");
+        return;
+      }
+      response.end(`<!doctype html>
+        <div class="game-item lobby"><img class="game-item__thumb" src="/game/sabaport.webp">
+          <p class="game-item__name">C-SPORTS</p><div class="game-item__play-btn"><button>Play</button></div></div>
+        <div class="game-item lobby"><img class="game-item__thumb" src="/game/isports.webp">
+          <p class="game-item__name">I-SPORTS</p><div class="game-item__play-btn">
+          <button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/im-provider')">Play</button>
+          </div></div>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const automation = new PlaywrightFabetAutomation({
+      profilePath: join(await setup().then((value) => value.directory), "im-football-popup-profile"), headless: true
+    });
+    try {
+      await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
+        provider: "IM", category: "FOOTBALL" }, async (page) => page.locator("main").innerText()))
+        .resolves.toBe("IM provider ready");
     } finally {
       await automation.close();
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));

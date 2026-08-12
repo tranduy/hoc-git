@@ -11,12 +11,14 @@ export interface CapturedNavigation {
   readonly label: string;
 }
 
+export type FabetJitProvider = "SABA" | "IM";
+
 export interface FabetBrowserAutomation {
   login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void>;
   captureNavigations(lobbyUrl: string): Promise<readonly CapturedNavigation[]>;
   isAuthenticated(): Promise<boolean>;
   authenticatedUrl?(): Promise<string>;
-  withProviderPage?<T>(input: { readonly lobbyUrl: string; readonly provider: "SABA";
+  withProviderPage?<T>(input: { readonly lobbyUrl: string; readonly provider: FabetJitProvider;
     readonly category: Category }, consume: (page: Page) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
@@ -270,7 +272,7 @@ export class FabetBrowserDriver {
     return candidates;
   }
 
-  async withProviderPage<T>(provider: "SABA", category: Category,
+  async withProviderPage<T>(provider: FabetJitProvider, category: Category,
     consume: (page: Page) => Promise<T>): Promise<T> {
     await this.#resumePersistedProfile();
     if (this.#automation.withProviderPage === undefined) throw new FabetBrowserError("NOT_AUTHENTICATED");
@@ -466,7 +468,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     return [...captured.values()];
   }
 
-  async withProviderPage<T>(input: { readonly lobbyUrl: string; readonly provider: "SABA";
+  async withProviderPage<T>(input: { readonly lobbyUrl: string; readonly provider: FabetJitProvider;
     readonly category: Category }, consume: (page: Page) => Promise<T>): Promise<T> {
     const key = `${input.provider}\u0000${input.category}`;
     const previousUse = this.#providerUses.get(key) ?? Promise.resolve();
@@ -527,7 +529,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     this.#providerUses.clear();
   }
 
-  async #openProviderPage(input: { readonly lobbyUrl: string; readonly provider: "SABA";
+  async #openProviderPage(input: { readonly lobbyUrl: string; readonly provider: FabetJitProvider;
     readonly category: Category }, key: string): Promise<Page> {
     const context = await this.#getContext();
     const lobbyOrigin = new URL(input.lobbyUrl).origin;
@@ -584,10 +586,10 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         }
       }
       if (control === null) throw new Error("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
-      if (controlPriority === 0) {
+      if (input.provider === "SABA" && controlPriority === 0) {
         const stableExplicitSaba = lobbyPage.locator(".game-item.lobby", { hasText: /SABA-SPORTS/iu }).first();
         if (await stableExplicitSaba.isVisible().catch(() => false)) control = stableExplicitSaba;
-      } else if (controlPriority >= 1 && input.category === "FOOTBALL") {
+      } else if (input.provider === "SABA" && controlPriority >= 1 && input.category === "FOOTBALL") {
         const stableLegacySaba = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
         if (await stableLegacySaba.isVisible().catch(() => false)) control = stableLegacySaba;
       }
@@ -620,7 +622,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       };
       for (let attempt = 0; attempt < 3 && !clicked; attempt += 1) {
         await this.#dismissBlockingPromotions(lobbyPage);
-        if (controlPriority >= 1 && input.category === "FOOTBALL") {
+        if (input.provider === "SABA" && controlPriority >= 1 && input.category === "FOOTBALL") {
           const point = await lobbyPage.evaluate(() => {
             const card = [...document.querySelectorAll<HTMLElement>(".game-item.lobby")].find((candidate) =>
               candidate.querySelector(".game-item__name")?.textContent?.trim().toLocaleUpperCase("en") === "C-SPORTS" &&
@@ -664,10 +666,10 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
           }
         }
         if (clicked) break;
-        if (controlPriority === 0) {
+        if (input.provider === "SABA" && controlPriority === 0) {
           const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /SABA-SPORTS/iu }).first();
           if (await refreshed.isVisible().catch(() => false)) control = refreshed;
-        } else if (controlPriority >= 1 && input.category === "FOOTBALL") {
+        } else if (input.provider === "SABA" && controlPriority >= 1 && input.category === "FOOTBALL") {
           const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
           if (await refreshed.isVisible().catch(() => false)) control = refreshed;
         }
@@ -681,14 +683,14 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
             }
           } catch (error) { clickFailure = error; }
         }
-        if (!clicked && controlPriority >= 1 && input.category === "FOOTBALL") {
+        if (!clicked && input.provider === "SABA" && controlPriority >= 1 && input.category === "FOOTBALL") {
           const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
           if (await refreshed.isVisible().catch(() => false)) control = refreshed;
         }
         const play = control.locator(".game-item__play-btn button").first();
         if (!clicked && await play.count() > 0) {
           await control.hover({ timeout: 2_000 }).catch(() => undefined);
-          if (controlPriority >= 1 && input.category === "FOOTBALL") {
+          if (input.provider === "SABA" && controlPriority >= 1 && input.category === "FOOTBALL") {
             const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
             if (await refreshed.isVisible().catch(() => false)) control = refreshed;
           }

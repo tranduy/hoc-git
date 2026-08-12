@@ -57,6 +57,27 @@ function registry(sessions: readonly RedactedSessionStatus[]) {
 }
 
 describe("CatalogSourceRegistry", () => {
+  it("can expose a JIT provider catalog only while its Fabet browser anchor is ACTIVE", async () => {
+    const sessions = [session({ id: "fabet", provider: "FABET", category: null, acquiredAtMs: 500 })];
+    const value = new CatalogSourceRegistry({
+      sessions: {
+        listStatuses: async (): Promise<SessionStatusList> => ({ sessions }),
+        getActiveSecretHandle: async () => null
+      },
+      accounts: registry([]).accounts,
+      supportedPairs: [{ provider: "IM", category: "FOOTBALL", alias: "I-Sports · IM",
+        anchorProvider: "FABET", anchorCategory: null }]
+    });
+
+    await expect(value.resolveCatalogSource("catalog-source:IM:FOOTBALL")).resolves.toEqual({
+      provider: "IM", category: "FOOTBALL", sessionId: "fabet", key: "catalog-source|IM|FOOTBALL"
+    });
+    await expect(value.listStatuses()).resolves.toEqual([
+      expect.objectContaining({ id: "catalog-source:IM:FOOTBALL", provider: "IM", category: "FOOTBALL",
+        sessionState: "ACTIVE" })
+    ]);
+  });
+
   it("uses the newest exact ACTIVE session and cannot be displaced by a newer unvalidated or legacy session", async () => {
     const { value } = registry([
       session({ id: "older-active", provider: "SABA", category: "FOOTBALL", acquiredAtMs: 100 }),

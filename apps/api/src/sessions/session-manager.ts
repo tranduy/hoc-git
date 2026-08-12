@@ -8,7 +8,7 @@ import type {
 } from "@tool-chenh/contracts";
 import { createHash } from "node:crypto";
 import type { Page } from "playwright";
-import type { LaunchCandidate } from "./fabet-browser.js";
+import type { FabetJitProvider, LaunchCandidate } from "./fabet-browser.js";
 import { SecretVault } from "./secret-vault.js";
 import type {
   ActiveSecretHandle,
@@ -59,7 +59,7 @@ export interface SessionManagerOptions {
   readonly fabetDriver?: {
     login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void>;
     captureLobbyLaunches(): Promise<readonly LaunchCandidate[]>;
-    withProviderPage?<T>(provider: "SABA", category: Category, consume: (page: Page) => Promise<T>): Promise<T>;
+    withProviderPage?<T>(provider: FabetJitProvider, category: Category, consume: (page: Page) => Promise<T>): Promise<T>;
     resetProfile(): Promise<void>;
   };
   readonly resetFabetState?: () => Promise<void>;
@@ -281,7 +281,7 @@ export class SessionManager {
     };
   }
 
-  async withFabetProviderPage<T>(provider: "SABA", category: Category,
+  async withFabetProviderPage<T>(provider: FabetJitProvider, category: Category,
     consume: (page: Page) => Promise<T>): Promise<T> {
     const driver = this.#fabetDriver;
     if (driver?.withProviderPage === undefined) throw new Error("FABET_PROVIDER_POPUP_UNAVAILABLE");

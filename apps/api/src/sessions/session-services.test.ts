@@ -72,6 +72,7 @@ describe("createSessionServices", () => {
       expect.objectContaining({ id: "catalog-source:SBOBET:FOOTBALL", provider: "SBOBET", category: "FOOTBALL" }),
       expect.objectContaining({ id: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT", category: "FOOTBALL" }),
       expect.objectContaining({ id: "catalog-source:BTI:FOOTBALL", provider: "BTI", category: "FOOTBALL" }),
+      expect.objectContaining({ id: "catalog-source:IM:FOOTBALL", provider: "IM", category: "FOOTBALL" }),
       expect.objectContaining({ id: "catalog-source:IM:LOL", provider: "IM", category: "LOL" })
     ]);
     await expect(services.catalogReader.sourceKey("catalog-source:BTI:LOL"))

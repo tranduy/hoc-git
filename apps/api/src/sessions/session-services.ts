@@ -35,6 +35,9 @@ import { SbobetProfileReader } from "../providers/sbobet/sbobet-profile-reader.j
 import { SbobetSessionValidator } from "../providers/sbobet/sbobet-session-validator.js";
 import { SbobetTicketPreflightReader } from "../providers/sbobet/sbobet-ticket-preflight-reader.js";
 import { PlaywrightImEsportsBrowserManager } from "../providers/im/im-esports-browser-manager.js";
+import { PlaywrightImFootballBrowserManager } from "../providers/im/im-football-browser-manager.js";
+import { JitImFootballCatalogSource } from "../providers/im/im-football-jit-source.js";
+import { ImFootballObservedCatalogReader } from "../providers/im/im-football-observed-catalog.js";
 import { ImEsportsObservedCatalogReader } from "../providers/im/im-esports-observed-catalog.js";
 import { ImSessionValidator } from "../providers/im/im-session-validator.js";
 import { ImProfileReader } from "../providers/im/im-profile-reader.js";
@@ -88,6 +91,7 @@ const supportedCatalogPairs = [
   { provider: "SBOBET", category: "FOOTBALL", alias: "K-Sports · SBOBET" },
   { provider: "APSPORT", category: "FOOTBALL", alias: "AP Sports · APSPORT" },
   { provider: "BTI", category: "FOOTBALL", alias: "BTI Football" },
+  { provider: "IM", category: "FOOTBALL", alias: "I-Sports · IM", anchorProvider: "FABET", anchorCategory: null },
   { provider: "IM", category: "LOL", alias: "IM Esports" }
 ] as const satisfies readonly SupportedCatalogPair[];
 
@@ -132,6 +136,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const imEsportsBrowser = new PlaywrightImEsportsBrowserManager({
     profilesRoot: join(profilesRoot, "providers-im-esports"), headless: true, startupTimeoutMs: 8_000
   });
+  const imFootballBrowser = new PlaywrightImFootballBrowserManager({
+    profilesRoot: join(profilesRoot, "providers-im-football"), headless: true, startupTimeoutMs: 15_000
+  });
   const apsportBrowser = new PlaywrightApsportBrowserManager({
     profilesRoot: join(profilesRoot, "providers-apsport"), headless: true
   });
@@ -158,7 +165,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       new SabaSessionValidator({ verifyLaunch: async (launchUrl) => isSafeCapturedLaunch(launchUrl) }),
       new SbobetSessionValidator({ verifyLaunch: async (launchUrl) => isSafeCapturedLaunch(launchUrl) }),
       new ImSessionValidator({ verifyLaunch: async (launchUrl) =>
-        isSafeCapturedLaunch(launchUrl, "imesports.techplay.com") }),
+        isSafeCapturedLaunch(launchUrl, "imesports.techplay.com") || imFootballBrowser.verifyLaunch(launchUrl) }),
       new ApsportSessionValidator(apsportBrowser),
       new BtiSessionValidator(btiBrowser)
     ]),
@@ -213,6 +220,12 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     accounts: catalogSources, source: imEsportsBrowser,
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
+  const imFootballCatalogReader = new ImFootballObservedCatalogReader({
+    source: new JitImFootballCatalogSource({
+      fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) },
+      browser: imFootballBrowser
+    })
+  });
   const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts: catalogSources, source: apsportBrowser });
   const btiCatalogReader = new BtiObservedCatalogReader({ accounts: catalogSources, source: btiBrowser });
   const providerPreflight = new ProviderPreflightRegistry({ accounts,
@@ -239,6 +252,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       { provider: "CMD", category: "FOOTBALL", reader: catalogReader },
       { provider: "SABA", category: "LOL", reader: sabaEsportsCatalogReader },
       { provider: "IM", category: "LOL", reader: imEsportsCatalogReader },
+      { provider: "IM", category: "FOOTBALL", reader: imFootballCatalogReader },
       { provider: "SABA", category: "FOOTBALL", reader: sabaCatalogReader },
       { provider: "SBOBET", category: "FOOTBALL", reader: sbobetCatalogReader },
       { provider: "APSPORT", category: "FOOTBALL", reader: apsportCatalogReader },
