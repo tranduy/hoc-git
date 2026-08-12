@@ -2,6 +2,7 @@ import { normalizeCmdAccountStore } from "@tool-chenh/adapters";
 import type { ActiveSecretHandle } from "../../sessions/types.js";
 import type { ProviderProfile, ProviderProfileReader } from "../provider-capabilities.js";
 import type { CmdAccountStoreSource } from "../cmd/cmd-profile-reader.js";
+import { normalizeSabaMoney } from "./saba-money.js";
 
 export class SabaProfileReader implements ProviderProfileReader {
   readonly provider = "SABA" as const;
@@ -21,10 +22,12 @@ export class SabaProfileReader implements ProviderProfileReader {
       const raw = await this.#source.readAccountStore({ sessionId: handle.sessionId, launchUrl: secret.value });
       const normalized = normalizeCmdAccountStore(raw, this.#clock.nowMs());
       if (normalized === null) throw new Error("SABA_PROFILE_UNAVAILABLE");
+      const money = normalizeSabaMoney({ currency: normalized.currency, amount: normalized.balance });
+      if (money === null) throw new Error("SABA_PROFILE_UNAVAILABLE");
       return {
         redactedLabel: normalized.redactedLabel,
-        currency: normalized.currency,
-        balance: normalized.balance,
+        currency: money.currency,
+        balance: money.amount,
         asOfMs: normalized.asOfMs
       };
     });

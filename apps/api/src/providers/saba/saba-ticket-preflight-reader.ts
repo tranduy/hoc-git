@@ -4,6 +4,7 @@ import { toDecimal } from "@tool-chenh/core";
 import type { ActiveSecretHandle } from "../../sessions/types.js";
 import type { ProviderTicketPreflightReader } from "../provider-capabilities.js";
 import type { CmdTicketConstraintSnapshot } from "../cmd/cmd-ticket-constraint.js";
+import { normalizeSabaMoney } from "./saba-money.js";
 
 export interface SabaPreflightSource {
   readCatalog(input: { sessionId: string; launchUrl: string }): Promise<readonly CmdCatalogInputRecord[]>;
@@ -46,9 +47,17 @@ export class SabaTicketPreflightReader implements ProviderTicketPreflightReader 
       const nowMs = this.#clock.nowMs();
       const fresh = limit !== null && limit.providerSelectionId === quote.providerSelectionId &&
         limit.observedAtMs <= nowMs + 1_000 && nowMs - limit.observedAtMs <= 1_000;
-      const constraint = fresh ? { currency: limit.currency, minStake: limit.minStake, maxStake: limit.maxStake,
-        stakeStep: limit.stakeStep, balance: limit.balance, feeType: "NONE" as const, feeRate: null,
-        verifiedAsOfMs: limit.observedAtMs, expiresAtMs: limit.observedAtMs + 3_000 } : null;
+      const minStake = fresh ? normalizeSabaMoney({ currency: limit.currency, amount: limit.minStake }) : null;
+      const maxStake = fresh ? normalizeSabaMoney({ currency: limit.currency, amount: limit.maxStake }) : null;
+      const stakeStep = fresh ? normalizeSabaMoney({ currency: limit.currency, amount: limit.stakeStep }) : null;
+      const balance = fresh ? normalizeSabaMoney({ currency: limit.currency, amount: limit.balance }) : null;
+      const completeMoney = minStake !== null && maxStake !== null && stakeStep !== null && balance !== null &&
+        minStake.unitScale === maxStake.unitScale && minStake.unitScale === stakeStep.unitScale &&
+        minStake.unitScale === balance.unitScale;
+      const constraint = fresh && completeMoney ? { currency: "VND" as const, minStake: minStake.amount,
+        maxStake: maxStake.amount, stakeStep: stakeStep.amount, balance: balance.amount,
+        feeType: "NONE" as const, feeRate: null, verifiedAsOfMs: limit.observedAtMs,
+        expiresAtMs: limit.observedAtMs + 3_000 } : null;
       const rawOdds = fresh ? limit.rawOdds : quote.rawOdds;
       const decimalOdds = plain(toDecimal(rawOdds, quote.rawFormat));
       const reasons: ProviderTicketPreflight["reasons"][number][] = [];
