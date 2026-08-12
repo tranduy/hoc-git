@@ -222,7 +222,7 @@ export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
       isHalfGoalLine(cell.market.line) && domain.join("|") === "AWAY|HOME";
   }
   return cell.market.category === "LOL" && cell.market.marketType === "SERIES_WINNER" &&
-    cell.market.scope === "SERIES" && cell.market.line === null && domain.length === 2;
+    cell.market.scope === "SERIES" && cell.market.line === null && domain.join("|") === "TEAM_A|TEAM_B";
 }
 
 export function isVisibleEvent(event: ProviderEvent, nowMs: number, horizonMs = 86_400_000): boolean {
@@ -328,7 +328,8 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
         line: cells[0]!.market.line, settlementProfile: cells[0]!.market.settlementProfile,
         outcomeDomain, cells } satisfies ObservedTicketRow];
     }).sort((left, right) => left.key.localeCompare(right.key));
-    const rows = [...rowGroups.entries()].map(([rowKey, rawCells]) => [rowKey, eligibleTwoWayCells(rawCells)] as const)
+    const rows = [...rowGroups.entries()].map(([rowKey, rawCells]) =>
+      [rowKey, eligibleTwoWayCells(rawCells.filter(isFocusedTwoWayTicket))] as const)
       .filter(([, cells]) => cells.length >= 2).map(([rowKey, cells]): ComparisonRow => observedTicketAsComparisonRow({
         key: rowKey, marketType: cells[0]!.market.marketType, scope: cells[0]!.market.scope,
         line: cells[0]!.market.line, settlementProfile: cells[0]!.market.settlementProfile,

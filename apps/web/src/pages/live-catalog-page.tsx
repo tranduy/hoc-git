@@ -525,9 +525,16 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;
   }
 
-  const toggle = (id: string): void => setSelectedIds((current) => {
+  const invalidateVerifiedTickets = (): void => {
+    preflightCoordinator.current.clear();
+    setVerifiedTickets(new Map());
+  };
+  const toggle = (id: string): void => {
+    invalidateVerifiedTickets();
+    setSelectedIds((current) => {
     const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
-  });
+    });
+  };
   const changeCategory = (next: CatalogCategory): void => {
     setCategory(next); setCatalogs([]); catalogsRef.current = []; setStaleAccountIds(new Set());
     saveCatalogCategory(window.localStorage, next);
@@ -569,7 +576,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <label className="stake-config">Base stake for every match (VND)<input aria-label="Base stake for every match (VND)"
         inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
           const value = event.currentTarget.value; setBaseStakeInput(value);
-          if (saveBaseStake(window.localStorage, value)) { setBaseStake(value); setStakeError(null); }
+          if (saveBaseStake(window.localStorage, value)) {
+            invalidateVerifiedTickets(); setBaseStake(value); setStakeError(null);
+          }
           else setStakeError("Use a whole VND amount of at least 30,000 in 1,000 VND steps.");
         }} />{stakeError === null ? <small>Applied to the lower-odds leg.</small> : <small role="alert">{stakeError}</small>}</label>
       <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true, category)} type="button">

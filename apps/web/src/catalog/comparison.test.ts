@@ -54,6 +54,12 @@ const handicapCatalog = (provider: "SABA" | "SBOBET", id: string, line: string,
   })) };
 };
 
+const decimalHandicapCatalog = (provider: "SABA" | "SBOBET", id: string, line: string,
+  odds: readonly string[]): LiveCatalogResponse => {
+  const value = handicapCatalog(provider, id, line, odds);
+  return { ...value, quotes: value.quotes.map((quote) => ({ ...quote, rawFormat: "DECIMAL" as const })) };
+};
+
 const lolCatalog = (provider: "SABA" | "IM", id: string, participantA: string, participantB: string,
   odds: readonly [string, string], settlementProfile = "lol-series-winner"): LiveCatalogResponse => {
   const lolEvent: ProviderEvent = { provider, category: "LOL", providerEventId: id, competition: "LCK CL",
@@ -85,6 +91,22 @@ describe("catalog comparison", () => {
     const threeWay = threeWayCatalog("SBOBET", "three", ["2.1", "3.2", "3.4"]);
 
     expect(buildComparisonEvents([quarter, threeWay]).every((item) => item.observedRows.length === 0)).toBe(true);
+  });
+
+  it("keeps unsupported two-way markets out of the verified ranking rows", () => {
+    const combine = (focused: LiveCatalogResponse, unsupported: LiveCatalogResponse): LiveCatalogResponse => ({
+      ...focused,
+      markets: [...focused.markets, ...unsupported.markets],
+      quotes: [...focused.quotes, ...unsupported.quotes]
+    });
+    const result = buildComparisonEvents([
+      combine(handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]),
+        catalog("SABA", "saba-event", ["2.2", "2.2"])),
+      combine(handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]),
+        catalog("SBOBET", "sbo-event", ["2.3", "2.1"]))
+    ]);
+
+    expect(result[0]?.rows.map((row) => row.marketType)).toEqual(["FT_AH"]);
   });
 
   it("keeps exact lines separate and combines the same line across providers", () => {
@@ -178,6 +200,18 @@ describe("catalog comparison", () => {
     expect(selectionLabel(result[0]!.event, "TEAM_B")).toBe("Dplus KIA Challengers");
   });
 
+  it("rejects LoL series-winner rows whose outcome domain is not TEAM_A and TEAM_B", () => {
+    const invalid = (source: LiveCatalogResponse): LiveCatalogResponse => ({ ...source,
+      quotes: source.quotes.map((quote, index) => ({ ...quote, selection: index === 0 ? "OVER" : "UNDER" })) });
+    const result = buildComparisonEvents([
+      invalid(lolCatalog("SABA", "saba-lol", "Alpha", "Beta", ["2.2", "1.7"])),
+      invalid(lolCatalog("IM", "im-lol", "Alpha", "Beta", ["2.1", "1.8"]))
+    ]);
+
+    expect(result[0]?.rows).toEqual([]);
+    expect(result[0]?.observedRows).toEqual([]);
+  });
+
   it("reverse-matches football only after reorienting HOME/AWAY and the handicap sign", () => {
     const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
     const sbobet = handicapCatalog("SBOBET", "sbo-event", "0.5", ["0.78", "-0.86"]);
@@ -269,14 +303,14 @@ describe("catalog comparison", () => {
   });
 
   it("groups the same event and makes providers columns for the same exact market", () => {
-    const result = buildComparisonEvents([catalog("SABA", "saba-event", ["2.10", "3.20", "3.40"]),
-      catalog("SBOBET", "sbo-event", ["2.25", "3.10", "3.50"])]);
+    const result = buildComparisonEvents([decimalHandicapCatalog("SABA", "saba-event", "-0.5", ["2.10", "3.20"]),
+      decimalHandicapCatalog("SBOBET", "sbo-event", "-0.5", ["2.25", "3.10"])]);
     expect(result).toHaveLength(1);
     expect(result[0]?.providers).toEqual(["SABA", "SBOBET"]);
     expect(result[0]?.rows[0]?.cells.map((cell) => [cell.provider, cell.quotes[0]?.rawOdds])).toEqual([
       ["SABA", "2.10"], ["SBOBET", "2.25"]
     ]);
-    expect(result[0]?.rows[0]?.bestBySelection.OVER).toBe("SBOBET");
+    expect(result[0]?.rows[0]?.bestBySelection.HOME).toBe("SBOBET");
   });
 
   it("does not merge different teams and formats a stable countdown", () => {
@@ -322,8 +356,8 @@ describe("catalog comparison", () => {
   });
 
   it("calculates and ranks a positive cross-book margin from the best complete outcomes", () => {
-    const result = buildComparisonEvents([catalog("SABA", "s", ["2.50", "3.00", "4.00"]),
-      catalog("SBOBET", "b", ["2.10", "4.00", "3.50"])]);
+    const result = buildComparisonEvents([decimalHandicapCatalog("SABA", "s", "-0.5", ["2.50", "3.00"]),
+      decimalHandicapCatalog("SBOBET", "b", "-0.5", ["2.10", "4.00"])]);
     expect(result[0]?.rows[0]?.crossBook).toBe(true);
     expect(result[0]?.rows[0]?.margin).toBeCloseTo(0.538461, 5);
     expect(result[0]?.bestMargin).toBeCloseTo(0.538461, 5);

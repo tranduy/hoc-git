@@ -148,3 +148,98 @@ test("disconnection fails closed and the local feed reconnects", async ({ page }
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByText("READ ONLY").first()).toBeVisible();
 });
+
+test("top profitable exact tickets stay read-only and open the exact row", async ({ page }) => {
+  let profitable = false;
+  let boosted = false;
+  const requests: string[] = [];
+  const now = Date.now();
+  const account = (id: string, provider: "SABA" | "SBOBET") => ({ id, alias: `${provider} fixture`, provider,
+    category: "FOOTBALL", sessionState: "ACTIVE", profileState: "FRESH", redactedLabel: "fixture-profile",
+    currency: "VND", balance: "500000", balanceAsOfMs: now, capabilities: ["PROFILE", "CATALOG", "PREFLIGHT"], reason: null });
+  const accounts = [account("saba-fixture", "SABA"), account("sbobet-fixture", "SBOBET")];
+  const catalog = (id: string) => {
+    const provider = id === "saba-fixture" ? "SABA" as const : "SBOBET" as const;
+    const eventId = `${provider}-event`;
+    const marketId = `${provider}-market`;
+    const odds = !profitable ? ["1.8", "1.8"] : provider === "SABA"
+      ? [boosted ? "2.4" : "2.2", "1.2"] : ["1.2", boosted ? "3.2" : "3"];
+    return { dataMode: "LIVE", accountId: id, provider, category: "FOOTBALL",
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: Date.now(), rejectedMarketCount: 0,
+      events: [{ provider, category: "FOOTBALL", providerEventId: eventId, competition: "Exact Test League",
+        seasonStage: null, startAtUtcMs: now + 60_000, participantA: "Alpha United", participantB: "Beta City",
+        eventScope: "REGULATION", bestOf: null, isLive: false, rematchCandidate: false,
+        fixtureDiscriminator: null, isVirtual: false, sportVariant: "FOOTBALL", liveState: null }],
+      markets: [{ provider, category: "FOOTBALL", providerEventId: eventId, providerMarketId: marketId,
+        marketType: "FT_AH", scope: "FULL_TIME", line: "-0.5",
+        settlementProfile: "football-regulation-including-added-time", status: "OPEN" }],
+      quotes: (["HOME", "AWAY"] as const).map((selection, index) => ({ provider, category: "FOOTBALL",
+        providerEventId: eventId, providerMarketId: marketId, providerSelectionId: `${provider}-${selection}`,
+        marketType: "FT_AH", scope: "FULL_TIME", selection, line: "-0.5", rawOdds: odds[index],
+        rawFormat: "DECIMAL", status: "OPEN", isLive: false, sourceTimestampMs: Date.now(),
+        receivedMonotonicMs: 1, sequence: 1 })) };
+  };
+  page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+  await page.route("**/api/accounts", (route) => route.fulfill({ json: { accounts } }));
+  await page.route("**/api/accounts/*/refresh", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-2)!;
+    await route.fulfill({ json: accounts.find((candidate) => candidate.id === id) });
+  });
+  await page.route("**/api/catalog/accounts/*", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-1)!;
+    await route.fulfill({ json: catalog(id) });
+  });
+  await page.route("**/api/preflight/provider", async (route) => {
+    const request = route.request().postDataJSON();
+    const provider = request.accountId === "saba-fixture" ? "SABA" : "SBOBET";
+    const verifiedAtMs = Date.now() - 100;
+    const constraint = { currency: "VND", minStake: "30000", maxStake: "500000", stakeStep: "5000",
+      balance: "500000", feeType: "NONE", feeRate: null, verifiedAsOfMs: verifiedAtMs, expiresAtMs: verifiedAtMs + 3_000 };
+    await route.fulfill({ json: { accountId: request.accountId, provider,
+      providerEventId: request.providerEventId, providerMarketId: request.providerMarketId,
+      providerSelectionId: request.providerSelectionId, selection: request.selection, line: request.line,
+      decimalOdds: request.expectedDecimalOdds, quoteStatus: "OPEN", limitEvidence: {
+        currency: constraint.currency, minStake: constraint.minStake, maxStake: constraint.maxStake,
+        stakeStep: constraint.stakeStep, balance: constraint.balance, verifiedAsOfMs: verifiedAtMs,
+        expiresAtMs: constraint.expiresAtMs },
+      constraint, eligible: true, reasons: [] } });
+  });
+
+  await page.goto("/lol-live");
+  await expect(page.getByRole("heading", { name: "LoL Live Price Gaps" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Football Live Price Gaps" })).toHaveCount(0);
+  await page.goto("/football-live");
+  await expect(page.getByRole("heading", { name: "Football Live Price Gaps" })).toBeVisible();
+  await expect(page.getByText("Alpha United vs Beta City", { exact: true })).toBeVisible();
+  const row = page.getByRole("row", { name: /Ticket FT_AH/u });
+  await expect(row).toHaveClass(/ranked-ticket-row--neutral/u);
+  expect(await page.getByRole("row", { name: /Ticket /u }).count()).toBeLessThanOrEqual(5);
+
+  profitable = true;
+  await expect.poll(() => requests.filter((path) => path === "/api/preflight/provider").length,
+    { timeout: 10_000 }).toBeGreaterThan(0);
+  await expect(row).toHaveClass(/ranked-ticket-row--profitable/u, { timeout: 10_000 });
+  await expect(row.getByText(/Stake 100,000 VND/u)).toBeVisible();
+  await expect(row.getByText(/If Alpha United wins/u)).toBeVisible();
+  await expect(row.getByText(/If Beta City wins/u)).toBeVisible();
+  await expect(row.getByText(/Guaranteed /u)).toBeVisible();
+  await expect(row.getByText(/ROI /u)).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const tableDimensions = await page.locator(".ranked-ticket-table-wrap").first().evaluate((element) => ({
+    clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+    parentWidth: element.parentElement?.clientWidth ?? null, viewportWidth: window.innerWidth
+  }));
+  expect(tableDimensions.scrollWidth).toBeGreaterThan(tableDimensions.clientWidth);
+  const firstToast = page.getByRole("button", { name: /Open profitable ticket Alpha United vs Beta City/u });
+  await expect(firstToast).toBeVisible();
+  await expect(firstToast).toHaveCount(0, { timeout: 7_000 });
+
+  boosted = true;
+  const secondToast = page.getByRole("button", { name: /Open profitable ticket Alpha United vs Beta City/u });
+  await expect(secondToast).toBeVisible({ timeout: 10_000 });
+  await secondToast.click();
+  await expect(page).toHaveURL(/ticket=FT_AH%7CFULL_TIME%7C-0\.5/u);
+  await expect(page.getByRole("row", { name: /Ticket FT_AH/u })).toHaveClass(/ranked-ticket-row--highlight/u);
+  expect(requests.some((path) => path.startsWith("/api/execution") ||
+    /\/(?:arm|submit|wager)(?:\/|$)/iu.test(path))).toBe(false);
+});

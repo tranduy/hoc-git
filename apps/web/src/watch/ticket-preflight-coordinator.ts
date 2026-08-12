@@ -27,6 +27,11 @@ interface VerifiedPair {
   readonly expiresAtMs: number;
 }
 
+// BTI's current browser reader can expose prices, but it does not yet prove that
+// stake limits came from the exact requested event/market/selection. Keep it
+// observational until that end-to-end identity binding is available.
+const providersWithoutExactPreflightIdentity = new Set<ProviderId>(["BTI"]);
+
 function pairRequest(row: ComparisonRow, pair: OpposingLegPair, provider: ProviderId,
   accountId: string, stake: string): ProviderTicketPreflightRequest | null {
   const candidate = pair.first.provider === provider ? pair.first : pair.second.provider === provider ? pair.second : null;
@@ -63,7 +68,8 @@ export class TicketPreflightCoordinator {
   #generation = 0;
   #verified = new Map<string, VerifiedTicketEvidence>();
 
-  constructor(private readonly api: ProviderPreflightApiLike, private readonly now: () => number = Date.now) {}
+  constructor(private readonly api: ProviderPreflightApiLike, private readonly now: () => number = Date.now,
+    private readonly requestTimeoutMs = 3_000) {}
 
   clear(): void {
     this.#generation += 1;
@@ -72,33 +78,36 @@ export class TicketPreflightCoordinator {
 
   async refresh(input: TicketPreflightRefreshInput): Promise<ReadonlyMap<string, VerifiedTicketEvidence>> {
     const generation = ++this.#generation;
-    const nowMs = this.now();
     const accountByProvider = new Map<ProviderId, AccountStatus>();
     for (const account of input.selectedAccounts) {
       if (input.selectedProviders.has(account.provider) && account.sessionState === "ACTIVE" &&
-        account.capabilities.includes("PREFLIGHT")) accountByProvider.set(account.provider, account);
+        account.capabilities.includes("PREFLIGHT") &&
+        !providersWithoutExactPreflightIdentity.has(account.provider)) accountByProvider.set(account.provider, account);
     }
 
     const candidates = await Promise.all(input.events.flatMap((event) => event.rows.map(async (row) => {
       const verifiedPairs = await Promise.all(enumerateOpposingLegPairs(row, input.selectedProviders)
-        .map(async (pair) => this.#verifyPair(row, pair, accountByProvider, input.policy, nowMs)));
+        .map(async (pair) => this.#verifyPair(row, pair, accountByProvider, input.policy)));
       const plan = verifiedPairs.flatMap((value) => value === null ? [] : [value]).sort((left, right) =>
         new Decimal(right.plan.worstCaseProfit).comparedTo(left.plan.worstCaseProfit) ||
         new Decimal(right.plan.roi).comparedTo(left.plan.roi) ||
         left.plan.fingerprint.localeCompare(right.plan.fingerprint))[0];
       if (plan === undefined) return null;
       const key = `${event.key}::${row.key}`;
+      const verifiedAtMs = this.now();
       return { key, eventKey: event.key, rowKey: row.key, plan: plan.plan,
-        verifiedAtMs: nowMs, expiresAtMs: plan.expiresAtMs } satisfies VerifiedTicketEvidence;
+        verifiedAtMs, expiresAtMs: plan.expiresAtMs } satisfies VerifiedTicketEvidence;
     })));
 
     if (generation !== this.#generation) return new Map(this.#verified);
-    this.#verified = new Map(candidates.flatMap((value) => value === null ? [] : [[value.key, value] as const]));
+    const publishNowMs = this.now();
+    this.#verified = new Map(candidates.flatMap((value) => value === null || value.expiresAtMs <= publishNowMs
+      ? [] : [[value.key, value] as const]));
     return new Map(this.#verified);
   }
 
   async #verifyPair(row: ComparisonRow, pair: OpposingLegPair, accountByProvider: ReadonlyMap<ProviderId, AccountStatus>,
-    policy: FixedBaseStakePolicy, nowMs: number): Promise<VerifiedPair | null> {
+    policy: FixedBaseStakePolicy): Promise<VerifiedPair | null> {
     const providers = [pair.first.provider, pair.second.provider] as const;
     const accounts = providers.map((provider) => accountByProvider.get(provider));
     if (accounts.some((account) => account === undefined) || accounts[0]!.id === accounts[1]!.id) return null;
@@ -108,12 +117,12 @@ export class TicketPreflightCoordinator {
       requireProviderConstraints: false };
     const optimistic = buildFixedBaseStakePlanForPair(row, pair, optimisticPolicy);
     if (optimistic === null || new Decimal(optimistic.worstCaseProfit).lt(20_000)) return null;
-    const first = await this.#preflightPlan(row, pair, optimistic, providers, accounts as [AccountStatus, AccountStatus], nowMs);
+    const first = await this.#preflightPlan(row, pair, optimistic, providers, accounts as [AccountStatus, AccountStatus]);
     if (first === null) return null;
     const verifiedPolicy: FixedBaseStakePolicy = { ...policy, requireProviderConstraints: true,
       providerConstraints: { [providers[0]]: first.results[0].constraint,
         [providers[1]]: first.results[1].constraint } };
-    const recalculated = buildFixedBaseStakePlanForPair(row, pair, verifiedPolicy, nowMs);
+    const recalculated = buildFixedBaseStakePlanForPair(row, pair, verifiedPolicy, this.now());
     if (recalculated === null || new Decimal(recalculated.worstCaseProfit).lt(20_000)) return null;
     if (sameStakes(optimistic, recalculated)) {
       return { plan: recalculated, expiresAtMs: Math.min(first.results[0].constraint.expiresAtMs,
@@ -121,12 +130,12 @@ export class TicketPreflightCoordinator {
     }
 
     const final = await this.#preflightPlan(row, pair, recalculated, providers,
-      accounts as [AccountStatus, AccountStatus], nowMs);
+      accounts as [AccountStatus, AccountStatus]);
     if (final === null) return null;
     const finalPolicy: FixedBaseStakePolicy = { ...policy, requireProviderConstraints: true,
       providerConstraints: { [providers[0]]: final.results[0].constraint,
         [providers[1]]: final.results[1].constraint } };
-    const finalPlan = buildFixedBaseStakePlanForPair(row, pair, finalPolicy, nowMs);
+    const finalPlan = buildFixedBaseStakePlanForPair(row, pair, finalPolicy, this.now());
     if (finalPlan === null || !sameStakes(recalculated, finalPlan) ||
       new Decimal(finalPlan.worstCaseProfit).lt(20_000)) return null;
     return { plan: finalPlan, expiresAtMs: Math.min(final.results[0].constraint.expiresAtMs,
@@ -134,7 +143,7 @@ export class TicketPreflightCoordinator {
   }
 
   async #preflightPlan(row: ComparisonRow, pair: OpposingLegPair, plan: FixedBaseStakePlan,
-    providers: readonly [ProviderId, ProviderId], accounts: readonly [AccountStatus, AccountStatus], nowMs: number):
+    providers: readonly [ProviderId, ProviderId], accounts: readonly [AccountStatus, AccountStatus]):
     Promise<{ readonly results: readonly [ProviderTicketPreflight & { constraint: ProviderStakeConstraint },
       ProviderTicketPreflight & { constraint: ProviderStakeConstraint }] } | null> {
     const requests = providers.map((provider, index) => {
@@ -146,8 +155,9 @@ export class TicketPreflightCoordinator {
     if (request0 === null || request0 === undefined || request1 === null || request1 === undefined) return null;
     try {
       const [result0, result1] = await Promise.all([this.#request(request0), this.#request(request1)]);
-      if (!matchesRequest(result0, request0, providers[0], nowMs) ||
-        !matchesRequest(result1, request1, providers[1], nowMs) ||
+      const validationNowMs = this.now();
+      if (!matchesRequest(result0, request0, providers[0], validationNowMs) ||
+        !matchesRequest(result1, request1, providers[1], validationNowMs) ||
         result0.constraint.currency !== result1.constraint.currency) return null;
       return { results: [result0, result1] };
     } catch {
@@ -159,10 +169,22 @@ export class TicketPreflightCoordinator {
     const key = JSON.stringify(request);
     const current = this.#inflight.get(key);
     if (current !== undefined) return current;
-    const operation = this.api.preflight(request);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const pending = Promise.race([
+      this.api.preflight(request),
+      new Promise<ProviderTicketPreflight>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("Provider preflight timed out")), this.requestTimeoutMs);
+      })
+    ]);
+    let operation: Promise<ProviderTicketPreflight>;
+    const cleanup = (): void => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (this.#inflight.get(key) === operation) this.#inflight.delete(key);
+    };
+    operation = pending.then((value) => { cleanup(); return value; }, (error: unknown) => {
+      cleanup(); throw error;
+    });
     this.#inflight.set(key, operation);
-    const cleanup = (): void => { if (this.#inflight.get(key) === operation) this.#inflight.delete(key); };
-    void operation.then(cleanup, cleanup);
     return operation;
   }
 }

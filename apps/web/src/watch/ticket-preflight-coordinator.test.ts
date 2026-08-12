@@ -33,6 +33,13 @@ function catalog(provider: "SABA" | "SBOBET", accountId: string,
   };
 }
 
+function relabelProvider(source: LiveCatalogResponse, provider: ProviderId): LiveCatalogResponse {
+  return { ...source, provider,
+    events: source.events.map((event) => ({ ...event, provider })),
+    markets: source.markets.map((market) => ({ ...market, provider })),
+    quotes: source.quotes.map((quote) => ({ ...quote, provider })) };
+}
+
 function account(id: string, provider: ProviderId): AccountStatus {
   return { id, alias: id, provider, category: "FOOTBALL", sessionState: "ACTIVE", profileState: "FRESH",
     redactedLabel: null, currency: "VND", balance: "500000", balanceAsOfMs: nowMs,
@@ -113,5 +120,108 @@ describe("TicketPreflightCoordinator", () => {
 
     expect(verified.size).toBe(0);
     expect(api.requests).toEqual([]);
+  });
+
+  it("accepts fresh evidence observed after refresh starts", async () => {
+    let clock = nowMs;
+    const events = buildComparisonEvents([
+      catalog("SABA", "saba-account", ["2.5", "1.2"]),
+      catalog("SBOBET", "sbobet-account", ["1.2", "2.5"])
+    ]);
+    const api = new FakeApi((value) => {
+      clock = nowMs + 100;
+      return { ...value, constraint: value.constraint === null ? null : { ...value.constraint,
+        verifiedAsOfMs: clock, expiresAtMs: clock + 3_000 } };
+    });
+    const coordinator = new TicketPreflightCoordinator(api, () => clock);
+
+    const verified = await coordinator.refresh({ events,
+      selectedAccounts: [account("saba-account", "SABA"), account("sbobet-account", "SBOBET")],
+      selectedProviders: new Set<ProviderId>(["SABA", "SBOBET"]), policy });
+
+    expect(verified.size).toBe(1);
+  });
+
+  it("rejects evidence that expires while preflight is in flight", async () => {
+    let clock = nowMs;
+    const events = buildComparisonEvents([
+      catalog("SABA", "saba-account", ["2.5", "1.2"]),
+      catalog("SBOBET", "sbobet-account", ["1.2", "2.5"])
+    ]);
+    const api = new FakeApi((value) => {
+      const stale = { ...value, constraint: value.constraint === null ? null : { ...value.constraint,
+        expiresAtMs: nowMs + 50 } };
+      clock = nowMs + 100;
+      return stale;
+    });
+    const coordinator = new TicketPreflightCoordinator(api, () => clock);
+
+    const verified = await coordinator.refresh({ events,
+      selectedAccounts: [account("saba-account", "SABA"), account("sbobet-account", "SBOBET")],
+      selectedProviders: new Set<ProviderId>(["SABA", "SBOBET"]), policy });
+
+    expect(verified.size).toBe(0);
+  });
+
+  it("keeps BTI neutral until its slip reader proves exact ticket identity", async () => {
+    const events = buildComparisonEvents([
+      catalog("SABA", "saba-account", ["2.5", "1.2"]),
+      relabelProvider(catalog("SBOBET", "bti-account", ["1.2", "2.5"]), "BTI")
+    ]);
+    const api = new FakeApi();
+    const coordinator = new TicketPreflightCoordinator(api, () => nowMs);
+
+    const verified = await coordinator.refresh({ events,
+      selectedAccounts: [account("saba-account", "SABA"), account("bti-account", "BTI")],
+      selectedProviders: new Set<ProviderId>(["SABA", "BTI"]), policy });
+
+    expect(verified.size).toBe(0);
+    expect(api.requests).toEqual([]);
+  });
+
+  it("times out a hung provider and permits a later refresh", async () => {
+    let calls = 0;
+    let hanging = true;
+    const hangingApi: ProviderPreflightApiLike = { preflight: async (request) => {
+      calls += 1;
+      if (hanging) return new Promise<ProviderTicketPreflight>(() => undefined);
+      return response(request, request.accountId === "saba-account" ? "SABA" : "SBOBET");
+    } };
+    const events = buildComparisonEvents([
+      catalog("SABA", "saba-account", ["2.5", "1.2"]),
+      catalog("SBOBET", "sbobet-account", ["1.2", "2.5"])
+    ]);
+    const coordinator = new TicketPreflightCoordinator(hangingApi, () => nowMs, 100);
+    const input = { events,
+      selectedAccounts: [account("saba-account", "SABA"), account("sbobet-account", "SBOBET")],
+      selectedProviders: new Set<ProviderId>(["SABA", "SBOBET"]), policy };
+
+    expect((await coordinator.refresh(input)).size).toBe(0);
+    const timedOutCalls = calls;
+    hanging = false;
+    await coordinator.refresh(input);
+    expect(calls).toBeGreaterThan(timedOutCalls);
+  });
+
+  it("does not publish an in-flight generation after clear", async () => {
+    let resolve!: (value: ProviderTicketPreflight) => void;
+    const pendingApi: ProviderPreflightApiLike = { preflight: (request) => new Promise((done) => {
+      resolve = () => done(response(request, request.accountId === "saba-account" ? "SABA" : "SBOBET"));
+    }) };
+    const events = buildComparisonEvents([
+      catalog("SABA", "saba-account", ["2.5", "1.2"]),
+      catalog("SBOBET", "sbobet-account", ["1.2", "2.5"])
+    ]);
+    const coordinator = new TicketPreflightCoordinator(pendingApi, () => nowMs, 50);
+    const refresh = coordinator.refresh({ events,
+      selectedAccounts: [account("saba-account", "SABA"), account("sbobet-account", "SBOBET")],
+      selectedProviders: new Set<ProviderId>(["SABA", "SBOBET"]), policy });
+    await Promise.resolve();
+    coordinator.clear();
+    resolve(response({ accountId: "saba-account", providerEventId: "SABA-event", providerMarketId: "SABA-market",
+      providerSelectionId: "SABA-HOME", selection: "HOME", line: "-0.5", expectedDecimalOdds: "2.5",
+      requestedStake: "100000" }, "SABA"));
+
+    expect((await refresh).size).toBe(0);
   });
 });

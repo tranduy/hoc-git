@@ -71,6 +71,20 @@ export function diffSafeCatalog(previous, current, eventId, detectedAtMs) {
   return output;
 }
 
+export function safeTicketSummary(value) {
+  return {
+    kind: "EXACT_TICKET_SUMMARY",
+    providerCount: value.providerCount,
+    category: value.category,
+    exactRowCount: value.exactRowCount,
+    selectedLegs: (value.legs ?? []).map((leg) => ({ provider: leg.provider, selection: leg.selection,
+      odds: leg.odds, stake: leg.stake })),
+    outcomeProfits: { ...(value.profitsBySelection ?? {}) },
+    worstCaseProfit: value.worstCaseProfit,
+    alertTransition: value.alertTransition
+  };
+}
+
 function argument(name, fallback) {
   const index = process.argv.indexOf(name);
   return index === -1 ? fallback : process.argv[index + 1] ?? fallback;

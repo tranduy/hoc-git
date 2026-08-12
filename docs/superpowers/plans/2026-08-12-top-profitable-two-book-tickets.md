@@ -472,11 +472,11 @@ git commit -m "feat: alert on verified profitable ticket transitions"
 ## Task 7: Prove read-only behavior, run the full gate and update the fixed checklist
 
 **Files:**
-- Modify: `tests/e2e/operator-dashboard.spec.ts`
+- Modify: `tests/e2e/dashboard.spec.ts`
 - Modify: `scripts/smoke-watch-match.test.mjs`
 - Modify: `proccess.md`
 
-- [ ] **Step 1: Add an E2E RED scenario**
+- [x] **Step 1: Add an E2E RED scenario**
 
 Extend the fixture stack with two exact provider rows and catalog generations that move from neutral to at least 20,000 VND guaranteed profit. Assert:
 
@@ -487,21 +487,21 @@ Extend the fixture stack with two exact provider rows and catalog generations th
 - one toast appears, clicking it opens/highlights the exact ticket, and it expires after five seconds;
 - intercepted requests contain catalog/profile/provider-preflight calls only and zero `/api/execution/`, arm or wager-submit requests.
 
-- [ ] **Step 2: Run the targeted E2E test and record RED**
+- [x] **Step 2: Run the targeted E2E test and record RED**
 
 Run: `npm.cmd run test:e2e -- --grep "top profitable exact tickets"`
 
 Expected: FAIL until fixture generations and page integration are complete.
 
-- [ ] **Step 3: Complete fixture data and smoke assertions**
+- [x] **Step 3: Complete fixture data and smoke assertions**
 
 Keep fixture identities/provider market IDs explicit. Update `smoke-watch-match.test.mjs` to log only provider/category counts, exact row count, selected legs, odds, calculated stakes, outcome profits and toast transition. Redact tokens, cookies, credentials and launch URLs.
 
-- [ ] **Step 4: Update the fixed project checklist**
+- [x] **Step 4: Update the fixed project checklist**
 
 Under the existing schedule in `proccess.md`, mark this feature as one fixed task with sub-checkboxes for exact mapping, verified preflight, top-five ranking, horizontal table, alert lifecycle, sound/deep-link and read-only verification. Do not create or renumber unrelated schedule tasks.
 
-- [ ] **Step 5: Run fresh complete verification**
+- [x] **Step 5: Run fresh complete verification**
 
 Run:
 
@@ -518,15 +518,15 @@ git diff --check
 
 Expected: every command exits 0. Review output for secrets and confirm no live wager path was invoked.
 
-- [ ] **Step 6: Perform a browser smoke on both fixed routes**
+- [x] **Step 6: Perform a browser smoke on both fixed routes**
 
 Start the existing local fixture stack and inspect `/football-live` and `/lol-live` at desktop and narrow widths. Verify horizontal scrolling, green threshold, five-row cap, toast stacking/expiry, sound after a user gesture and exact click-to-ticket behavior. Capture only local screenshots with no credentials.
 
-- [ ] **Step 7: Request code review and fix all Critical/Important findings**
+- [x] **Step 7: Request code review and fix all Critical/Important findings**
 
 Use `superpowers:requesting-code-review`, then repeat the relevant RED/GREEN tests and the complete verification gate for every accepted fix.
 
-- [ ] **Step 8: Commit final verification/docs**
+- [x] **Step 8: Commit final verification/docs**
 
 ```powershell
 git add tests/e2e/operator-dashboard.spec.ts scripts/smoke-watch-match.test.mjs proccess.md
@@ -535,10 +535,10 @@ git commit -m "test: verify profitable ticket alert workflow"
 
 ## Completion criteria
 
-- [ ] Only exact mapped two-outcome rows shared by at least two selected providers are shown.
-- [ ] Every valid opposing provider pair is evaluated; the best guaranteed-profit plan is selected.
-- [ ] At most five rows are shown per event and events/rows rank by verified guaranteed profit descending.
-- [ ] Green state and alerts require both provider legs to pass fresh identity/odds/limit/balance preflight and worst-case profit of at least 20,000 VND.
-- [ ] Toasts stack on the right, last five seconds, deduplicate correctly, sound after user gesture and open the exact ticket.
-- [ ] Neutral exact rows remain visible when no profitable ticket exists.
-- [ ] Full test/typecheck/build/E2E gate passes and no execution/wager endpoint is called.
+- [x] Only exact mapped two-outcome rows shared by at least two selected providers are shown.
+- [x] Every valid opposing provider pair is evaluated; the best guaranteed-profit plan is selected.
+- [x] At most five rows are shown per event and events/rows rank by verified guaranteed profit descending.
+- [x] Green state and alerts require both provider legs to pass fresh identity/odds/limit/balance preflight and worst-case profit of at least 20,000 VND.
+- [x] Toasts stack on the right, last five seconds, deduplicate correctly, sound after user gesture and open the exact ticket.
+- [x] Neutral exact rows remain visible when no profitable ticket exists.
+- [x] Full test/typecheck/build/E2E gate passes and no execution/wager endpoint is called.

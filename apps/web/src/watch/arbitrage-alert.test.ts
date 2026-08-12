@@ -56,8 +56,8 @@ describe("watched arbitrage alert planning", () => {
         { provider: "SBOBET", selection: "UNDER", decimalOdds: "2.5", stake: "72000" }
       ]
     });
-    expect(alert?.fingerprint).toContain("SABA|OVER|1.8|100000");
-    expect(alert?.fingerprint).toContain("SBOBET|UNDER|2.5|72000");
+    expect(alert?.fingerprint).toContain("SABA|OVER|SABA-OVER|1.8|100000");
+    expect(alert?.fingerprint).toContain("SBOBET|UNDER|SBOBET-UNDER|2.5|72000");
   });
 
   it("rejects a complete three-outcome plan", () => {
