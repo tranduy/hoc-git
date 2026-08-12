@@ -164,7 +164,7 @@ export class PlaywrightSbobetBrowserManager {
     await selection.click({ timeout: 1_000 }).catch(() => undefined);
     const deadline = Date.now() + 1_500;
     while (Date.now() < deadline) {
-      const evidence = await session.page.evaluate(({ selectionId, selectionText, selectedTeam, line, rawOdds }) => {
+      const evidence = await session.page.evaluate(({ selectionId, selectionText, selectedTeam, selection, line }) => {
         const text = document.body.innerText;
         const minimumElements = [...document.querySelectorAll<HTMLElement>("*")].filter((element) =>
           /M\u1ee9c\s*c\u01b0\u1ee3c\s*t\u1ed1i\s*thi\u1ec3u/iu.test(element.innerText));
@@ -174,14 +174,25 @@ export class PlaywrightSbobetBrowserManager {
             current = current.parentElement; }
           return values;
         }).sort((left, right) => left.innerText.length - right.innerText.length);
-        const normalizedTeam = selectedTeam.replace(/\s+/gu, " ").trim();
+        const normalize = (value: string) => value.normalize("NFKD").replace(/[\u0300-\u036f]/gu, "")
+          .replace(/\s+/gu, " ").trim().toLocaleLowerCase("en");
+        const normalizedTeam = normalize(selectedTeam);
+        const normalizedSelectionText = normalize(selectionText);
+        const selectionNeedles = selection === "OVER" ? ["tai", "over"]
+          : selection === "UNDER" ? ["xiu", "under"] : [normalizedTeam];
         const slip = slipCandidates.find((element) => {
-          const value = element.innerText.replace(/\s+/gu, " ");
-          return value.includes(normalizedTeam) && value.includes(rawOdds.replace(/^\+/, "")) &&
+          const value = normalize(element.innerText);
+          return selectionNeedles.some((needle) => needle !== "" && value.includes(needle)) &&
+            normalizedSelectionText !== "" && value.includes(normalizedSelectionText) &&
             (line === null || value.includes(line));
         });
-        const limitLines = (slip?.innerText ?? "").split(/\r?\n/u).filter((item) =>
-          /M\u1ee9c\s*c\u01b0\u1ee3c\s*t\u1ed1i\s*(?:thi\u1ec3u|\u0111a)/iu.test(item));
+        const slipLines = (slip?.innerText ?? "").split(/\r?\n/u).map((item) => item.trim()).filter(Boolean);
+        const limitLines = slipLines.flatMap((item, index) => {
+          if (!/M\u1ee9c\s*c\u01b0\u1ee3c\s*t\u1ed1i\s*(?:thi\u1ec3u|\u0111a)/iu.test(item)) return [];
+          if (/[\d,.]+\s*K\b/iu.test(item)) return [item];
+          const next = slipLines[index + 1] ?? "";
+          return /^[\d,.]+\s*K\b/iu.test(next) ? [`${item} ${next}`] : [];
+        });
         const visibleInputs = [...document.querySelectorAll<HTMLInputElement>("input")].filter((element) => {
           const style = getComputedStyle(element); const box = element.getBoundingClientRect();
           return !element.disabled && style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0;
@@ -193,11 +204,13 @@ export class PlaywrightSbobetBrowserManager {
         const selected = document.querySelector(`#odd-item-${escaped}`);
         const selectionMatched = selected !== null && selectionText.length > 0 && slip !== undefined &&
           (selected.textContent?.trim() ?? "") === selectionText && limitLines.length >= 2;
+        const integerKLimits = limitLines.length >= 2 && limitLines.every((item) =>
+          /M\u1ee9c\s*c\u01b0\u1ee3c\s*t\u1ed1i\s*(?:thi\u1ec3u|\u0111a)\s*[1-9]\d{0,2}(?:,\d{3})*\s*K\b/iu.test(item));
         return { providerSelectionId: selectionId, selectionMatched, limitText: limitLines.join("\n"),
-          stakeStepText: stakeInput?.step ?? "", balanceText, observedAtMs: Date.now() };
+          stakeStepText: stakeInput?.step || (integerKLimits ? "1" : ""), balanceText, observedAtMs: Date.now() };
       }, { selectionId: input.providerSelectionId, selectionText,
         selectedTeam: input.selection === "HOME" ? input.participantA : input.participantB,
-        line: input.line, rawOdds: input.rawOdds }).catch(() => null);
+        selection: input.selection, line: input.line }).catch(() => null);
       if (evidence !== null) { const parsed = parseSbobetTicketConstraint(evidence); if (parsed !== null) return parsed; }
       await session.page.waitForTimeout(50);
     }
