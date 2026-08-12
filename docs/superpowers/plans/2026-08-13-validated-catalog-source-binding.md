@@ -419,43 +419,43 @@ git commit -m "feat: keep catalog sources stable across launcher rotation"
 - Consumes: production build and existing encrypted local sessions.
 - Produces: evidence-backed provider matrix; no betting state change.
 
-- [ ] **Step 1: Stop only project-owned live readers before automated verification**
+- [x] **Step 1: Stop only project-owned live readers before automated verification**
 
 Resolve port 4310 and Chromium processes whose command line contains the project browser-profile directory. Stop those exact project-owned processes; do not delete profiles, vault records, cookies, or user browser data.
 
-- [ ] **Step 2: Run the full automated gate**
+- [x] **Step 2: Run the full automated gate**
 
 Run: `npm.cmd run verify`
 
 Expected: every workspace typecheck, unit suite, integration suite, fixture-stack test, and watch smoke exits 0.
 
-- [ ] **Step 3: Run production build and diff check**
+- [x] **Step 3: Run production build and diff check**
 
 Run: `npm.cmd run build; git diff --check`
 
 Expected: production builds exit 0 and diff check reports no whitespace errors.
 
-- [ ] **Step 4: Start the production API hidden and verify health**
+- [x] **Step 4: Start the production API hidden and verify health**
 
 Start `node apps/api/dist/server.js` with hidden window and redirected logs under `.run/`. Verify `GET http://127.0.0.1:4310/api/health` returns `mode: "OBSERVE"` and `executionReady: false`.
 
-- [ ] **Step 5: Verify logical source statuses**
+- [x] **Step 5: Verify logical source statuses**
 
 Call `GET /api/catalog/sources`. Record only provider, category, session state, reason, and acquired time. Confirm the response contains no URL, token, cookie, username, password, trusted hostname, or backing session ID.
 
-- [ ] **Step 6: Perform one bounded read-only catalog smoke per ACTIVE source**
+- [x] **Step 6: Perform one bounded read-only catalog smoke per ACTIVE source**
 
 For each ACTIVE logical source, call `/api/catalog/accounts/{logicalSourceId}` and record HTTP status, duration, event count, market count, quote count, rejected market count, and observed timestamp. Never open a bet slip and never call preflight, dry-run execution, receipt, or submit routes in this smoke.
 
-- [ ] **Step 7: Verify launcher rotation without manual account creation**
+- [x] **Step 7: Verify launcher rotation without manual account creation**
 
 Trigger only the existing read-only Fabet renew/capture flow if renewal is due. Confirm the logical source ID remains identical while `acquiredAtMs` advances and a subsequent catalog read succeeds through the new ACTIVE session. If no rotation occurs during the test window, verify the behavior using the registry integration fixture and report the live source as unchanged rather than manufacturing a rotation.
 
-- [ ] **Step 8: Write the report and update the two project records**
+- [x] **Step 8: Write the report and update the two project records**
 
 Create the in-worktree report, append one dated checkpoint to `proccess.md`, and update the provider matrix in `sảnh.md`. State exact snapshot counts, failures, remaining unsupported pairs, test totals, commits, `OBSERVE` mode, and that no bet was sent. Storage/document update errors must be caught and reported without stopping the live API.
 
-- [ ] **Step 9: Commit only files owned by this plan**
+- [x] **Step 9: Commit only files owned by this plan**
 
 ```powershell
 git add docs/superpowers/reports/2026-08-13-validated-catalog-source-binding-report.md
