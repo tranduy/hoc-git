@@ -192,7 +192,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const sabaEsportsCatalogReader = new SabaEsportsObservedCatalogReader({
     accounts, source: new JitSabaEsportsCatalogSource({
-      fabet: { withProviderPage: fabetDriver.withProviderPage.bind(fabetDriver) }, browser: sabaEsportsBrowser
+      fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) }, browser: sabaEsportsBrowser
     }),
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
