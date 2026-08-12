@@ -27,6 +27,16 @@ describe("SBOBET read-only receipt protocol", () => {
         response.end(JSON.stringify({ entries: [{ reference: "secret-reference", result: "won" }] }));
         return;
       }
+      if (request.url?.startsWith("/api/v2/bet/getBetsReporting") === true) {
+        response.setHeader("content-type", "application/json");
+        const settled = new URL(request.url, "http://127.0.0.1").searchParams.get("status") === "Settled";
+        response.end(JSON.stringify(JSON.stringify(settled
+          ? { betReportingDtos: [["secret-ticket", "2026-08-12", 1, "league", "home vs away",
+            "handicap", "home", "-0.5", "1.8", "100000", "180000", null, "Settled", null,
+            "1-0", 1, "0-0", null, "2026-08-12", "VND"]], total: 1 }
+          : { betReportingDtos: [], total: 0 })));
+        return;
+      }
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end(`<!doctype html><button id="history">Lịch sử cược</button><button id="submit">Đặt cược</button>
         <script>document.querySelector('#history').onclick=()=>fetch('/api/bet-history?token=secret-token')</script>`);
@@ -107,6 +117,32 @@ describe("SBOBET read-only receipt protocol", () => {
       shape: "object{entries:array<object{reference:string,result:string}>}"
     })]);
     expect(JSON.stringify(result)).not.toContain("secret-reference");
+    await context.close();
+  });
+
+  it("also inspects settled history read-only without exposing request credentials or row values", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(origin);
+    await page.setContent(`<button id="history">Bet history</button>
+      <script>document.querySelector('#history').onclick=()=>fetch('/api/v2/bet/getBetsReporting')</script>`);
+
+    const result = await inspectReadOnlyReceiptProtocol(context, page, { waitMs: 100 });
+
+    expect(result.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        pathTemplate: "/api/v2/bet/getBetsReporting",
+        shape: "json-string<object{betReportingDtos:array<empty>,total:number}>"
+      }),
+      expect.objectContaining({
+        pathTemplate: "/api/v2/bet/getBetsReporting",
+        shape: expect.stringContaining("betReportingDtos:array<array<")
+      })
+    ]));
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("secret-ticket");
+    expect(serialized).not.toContain("100000");
+    expect(serialized).not.toContain("status=Settled");
     await context.close();
   });
 

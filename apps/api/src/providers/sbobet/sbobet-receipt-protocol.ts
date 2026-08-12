@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { BrowserContext, Locator, Page, Response } from "playwright";
+import type { APIResponse, BrowserContext, Locator, Page, Request, Response } from "playwright";
 
 export interface ReceiptProtocolObservation {
   readonly hostname: string;
@@ -51,8 +51,16 @@ function safeOpaqueDataCandidate(method: string, rawUrl: string, resourceType: s
 }
 
 function valueShape(value: unknown, depth = 0): string {
-  if (depth >= 6) return "depth-limit";
+  if (depth >= 8) return "depth-limit";
   if (value === null) return "null";
+  if (typeof value === "string") {
+    const candidate = value.trim();
+    if (candidate.startsWith("{") || candidate.startsWith("[")) {
+      try { return `json-string<${valueShape(JSON.parse(candidate), depth + 1)}>`; }
+      catch { /* ordinary provider text remains a string */ }
+    }
+    return "string";
+  }
   if (Array.isArray(value)) {
     if (value.length === 0) return "array<empty>";
     const shapes = [...new Set(value.slice(0, 20).map((item) => valueShape(item, depth + 1)))].sort();
@@ -98,6 +106,51 @@ async function safeObservation(response: Response): Promise<ReceiptProtocolObser
   }
 }
 
+function isExactBetsReportingRequest(request: Request): boolean {
+  if (request.method().toUpperCase() !== "GET") return false;
+  try { return new URL(request.url()).pathname === "/api/v2/bet/getBetsReporting"; }
+  catch { return false; }
+}
+
+async function safeReplayObservation(response: APIResponse, rawUrl: string): Promise<ReceiptProtocolObservation | null> {
+  try {
+    const body = (await response.body()).subarray(0, 2_000_000);
+    const text = body.toString("utf8");
+    let shape = "non-json";
+    try { shape = valueShape(JSON.parse(text)); } catch { /* retain only non-json marker */ }
+    const url = new URL(rawUrl);
+    return {
+      hostname: url.hostname,
+      method: "GET",
+      pathTemplate: responsePathTemplate(rawUrl),
+      status: response.status(),
+      contentType: (response.headers()["content-type"] ?? "unknown").split(";", 1)[0]!.toLowerCase(),
+      shape,
+      bodyHash: createHash("sha256").update(body).digest("hex")
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function inspectSettledHistory(context: BrowserContext, request: Request): Promise<ReceiptProtocolObservation | null> {
+  const url = new URL(request.url());
+  url.searchParams.set("index", "0");
+  url.searchParams.set("size", "10");
+  url.searchParams.set("status", "Settled");
+  url.searchParams.set("check-total", "true");
+  const headers = await request.allHeaders();
+  for (const name of ["host", "content-length", "connection", "accept-encoding"]) delete headers[name];
+  try {
+    const response = await context.request.get(url.toString(), {
+      headers, timeout: 5_000, failOnStatusCode: false
+    });
+    return safeReplayObservation(response, url.toString());
+  } catch {
+    return null;
+  }
+}
+
 async function exactHistoryControl(page: Page): Promise<{
   readonly locator: Locator;
   readonly label: "Lịch sử cược" | "Bet history";
@@ -133,8 +186,10 @@ export async function inspectReadOnlyReceiptProtocol(
   }
   if (control === null) throw new Error("SBOBET_HISTORY_CONTROL_UNAVAILABLE");
   const observations: ReceiptProtocolObservation[] = [];
+  let betsReportingRequest: Request | null = null;
   const pending = new Set<Promise<void>>();
   const onResponse = (response: Response): void => {
+    if (isExactBetsReportingRequest(response.request())) betsReportingRequest = response.request();
     const task = safeObservation(response).then((value) => { if (value !== null) observations.push(value); })
       .finally(() => pending.delete(task));
     pending.add(task);
@@ -144,6 +199,10 @@ export async function inspectReadOnlyReceiptProtocol(
     await control.locator.click({ timeout: 2_000 });
     if (waitMs > 0) await control.page.waitForTimeout(waitMs);
     await Promise.allSettled([...pending]);
+    if (betsReportingRequest !== null) {
+      const settled = await inspectSettledHistory(context, betsReportingRequest);
+      if (settled !== null) observations.push(settled);
+    }
   } finally {
     context.off("response", onResponse);
   }
