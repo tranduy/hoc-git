@@ -9,17 +9,20 @@ const apps: FastifyInstance[] = [];
 afterEach(async () => Promise.all(apps.splice(0).map(async (app) => app.close())));
 
 describe("provider catalog route", () => {
-  it("coalesces concurrent reads for the same account so multiple UI tabs cannot stampede a provider", async () => {
+  it("coalesces duplicate account aliases by verified source and rebinds the response account", async () => {
     let release: ((catalog: ObservedProviderCatalog) => void) | undefined;
     const pending = new Promise<ObservedProviderCatalog>((resolve) => { release = resolve; });
     let reads = 0;
     const app = buildApp(createFixtureRuntime(1_000), {
-      catalogReader: { read: async () => { reads += 1; return pending; } }
+      catalogReader: {
+        sourceKey: async () => "SABA|FOOTBALL|session-1",
+        read: async () => { reads += 1; return pending; }
+      }
     });
     apps.push(app);
 
     const first = app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
-    const second = app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
+    const second = app.inject({ method: "GET", url: "/api/catalog/accounts/account-2" });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(reads).toBe(1);
 
@@ -28,10 +31,67 @@ describe("provider catalog route", () => {
       comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100, rejectedMarketCount: 0,
       events: [], markets: [], quotes: []
     });
-    expect((await first).statusCode).toBe(200);
-    expect((await second).statusCode).toBe(200);
+    expect((await first).json()).toMatchObject({ accountId: "account-1" });
+    expect((await second).json()).toMatchObject({ accountId: "account-2" });
     expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" })).statusCode).toBe(200);
     expect(reads).toBe(1);
+  });
+
+  it("times out callers without duplicating the shared read and caches its later completion", async () => {
+    let reads = 0;
+    let release: ((catalog: ObservedProviderCatalog) => void) | undefined;
+    const pending = new Promise<ObservedProviderCatalog>((resolve) => { release = resolve; });
+    const app = buildApp(createFixtureRuntime(1_000), {
+      catalogReader: {
+        requestTimeoutMs: 10,
+        sourceKey: async () => "SBOBET|FOOTBALL|session-1",
+        read: async () => { reads += 1; return pending; }
+      }
+    });
+    apps.push(app);
+
+    const timedOut = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
+    expect(timedOut.statusCode).toBe(503);
+    expect(timedOut.json()).toEqual({ error: "CATALOG_TIMEOUT" });
+    const second = app.inject({ method: "GET", url: "/api/catalog/accounts/account-2" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toBe(1);
+
+    release?.({
+      dataMode: "LIVE", accountId: "account-1", provider: "SBOBET", category: "FOOTBALL",
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100, rejectedMarketCount: 0,
+      events: [], markets: [], quotes: []
+    });
+    expect((await second).json()).toMatchObject({ accountId: "account-2" });
+    const cached = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-3" });
+    expect(cached.statusCode).toBe(200);
+    expect(cached.json()).toMatchObject({ accountId: "account-3" });
+    expect(reads).toBe(1);
+  });
+
+  it("keeps health and another source responsive while one source reader is hung", async () => {
+    const app = buildApp(createFixtureRuntime(1_000), {
+      catalogReader: {
+        requestTimeoutMs: 10,
+        sourceKey: async (accountId) => accountId === "hung" ? "SABA|FOOTBALL|session-hung" : "IM|LOL|session-fast",
+        read: async (accountId) => accountId === "hung" ? new Promise<ObservedProviderCatalog>(() => undefined) : ({
+          dataMode: "LIVE", accountId, provider: "IM", category: "LOL",
+          comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100, rejectedMarketCount: 0,
+          events: [], markets: [], quotes: []
+        })
+      }
+    });
+    apps.push(app);
+
+    const hung = app.inject({ method: "GET", url: "/api/catalog/accounts/hung" });
+    const [health, fast, timeout] = await Promise.all([
+      app.inject({ method: "GET", url: "/api/health" }),
+      app.inject({ method: "GET", url: "/api/catalog/accounts/fast" }),
+      hung
+    ]);
+    expect(health.statusCode).toBe(200);
+    expect(fast.statusCode).toBe(200);
+    expect(timeout.json()).toEqual({ error: "CATALOG_TIMEOUT" });
   });
 
   it("records safe per-provider timing, count, and source-age telemetry", async () => {

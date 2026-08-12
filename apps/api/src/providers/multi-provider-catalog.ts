@@ -31,6 +31,10 @@ export class MultiProviderCatalogReader {
     ]));
   }
 
+  async sourceKey(accountId: string): Promise<string> {
+    return (await this.#sources.resolveCatalogSource(accountId)).key;
+  }
+
   async read(accountId: string): Promise<ObservedProviderCatalog> {
     try {
       const source = await this.#sources.resolveCatalogSource(accountId);
