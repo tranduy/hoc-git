@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
-import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
+import { CatalogApi, catalogRetryDelayMs, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
 import { defaultProviderPreflightApi, type ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import { loadCatalogCache, saveCatalogCache } from "../catalog/catalog-cache.js";
 import { buildComparisonEvents, decimalOdds, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
@@ -376,8 +376,11 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         const result = results[index];
         return result?.status !== "fulfilled" || result.value.category !== expectedCategory;
       }));
-      for (const id of requestedIds) {
-        if (failedIds.has(id)) retryAfterMs.current.set(id, Date.now() + 30_000);
+      for (const [index, id] of requestedIds.entries()) {
+        if (failedIds.has(id)) {
+          const result = results[index];
+          retryAfterMs.current.set(id, Date.now() + catalogRetryDelayMs(result?.status === "rejected" ? result.reason : undefined));
+        }
         else retryAfterMs.current.delete(id);
       }
       const preserved = catalogsRef.current.filter((catalog) =>

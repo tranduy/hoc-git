@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CatalogApi } from "./catalog.js";
+import { CatalogApi, CatalogReadError, catalogRetryDelayMs } from "./catalog.js";
 
 const response = {
   dataMode: "LIVE",
@@ -60,5 +60,21 @@ describe("CatalogApi", () => {
     const result = expect(api.read("account-1")).rejects.toThrow("Live catalog request timed out");
     await vi.advanceTimersByTimeAsync(10);
     await result;
+  });
+
+  it("preserves the server catalog failure code for stale-source diagnostics", async () => {
+    const api = new CatalogApi(async () => new Response(JSON.stringify({ error: "CATALOG_TIMEOUT" }), {
+      status: 503, headers: { "content-type": "application/json" }
+    }));
+
+    await expect(api.read("account-1")).rejects.toMatchObject({
+      name: "CatalogReadError", code: "CATALOG_TIMEOUT", status: 503
+    });
+  });
+
+  it("retries a bounded server timeout quickly without hammering other failures", () => {
+    expect(catalogRetryDelayMs(new CatalogReadError("CATALOG_TIMEOUT", 503))).toBe(500);
+    expect(catalogRetryDelayMs(new CatalogReadError("CATALOG_SCHEMA_ERROR", 503))).toBe(30_000);
+    expect(catalogRetryDelayMs(new Error("network unavailable"))).toBe(30_000);
   });
 });

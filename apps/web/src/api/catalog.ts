@@ -28,6 +28,32 @@ export interface CatalogApiLike {
   read(accountId: string): Promise<LiveCatalogResponse>;
 }
 
+export type CatalogReadErrorCode = "CATALOG_TIMEOUT" | "CATALOG_UNAVAILABLE" | "CATALOG_SCHEMA_ERROR";
+
+export class CatalogReadError extends Error {
+  readonly code: CatalogReadErrorCode;
+  readonly status: number;
+
+  constructor(code: CatalogReadErrorCode, status: number) {
+    super(code === "CATALOG_TIMEOUT" ? "Live catalog request timed out" : code);
+    this.name = "CatalogReadError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
+export function catalogRetryDelayMs(error: unknown): number {
+  return error instanceof CatalogReadError && error.code === "CATALOG_TIMEOUT" ? 500 : 30_000;
+}
+
+function catalogErrorCode(value: unknown): CatalogReadErrorCode {
+  if (typeof value === "object" && value !== null) {
+    const code = (value as Record<string, unknown>).error;
+    if (code === "CATALOG_TIMEOUT" || code === "CATALOG_UNAVAILABLE" || code === "CATALOG_SCHEMA_ERROR") return code;
+  }
+  return "CATALOG_UNAVAILABLE";
+}
+
 export function parseLiveCatalogResponse(value: unknown, expectedAccountId: string): LiveCatalogResponse {
   if (typeof value !== "object" || value === null) throw new Error("Invalid live catalog response");
   const record = value as Record<string, unknown>;
@@ -58,7 +84,7 @@ export class CatalogApi implements CatalogApiLike {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
 
-  constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 45_000) {
+  constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 5_000) {
     this.#fetch = fetcher;
     this.#timeoutMs = timeoutMs;
   }
@@ -70,17 +96,21 @@ export class CatalogApi implements CatalogApiLike {
       const response = await this.#fetch(`/api/catalog/accounts/${encodeURIComponent(accountId)}`, {
         method: "GET", cache: "no-store", signal: controller.signal
       });
-      if (!response.ok) throw new Error(`Live catalog request failed (${response.status})`);
+      if (!response.ok) {
+        let errorBody: unknown = null;
+        try { errorBody = await response.json(); } catch { /* fixed safe fallback below */ }
+        throw new CatalogReadError(catalogErrorCode(errorBody), response.status);
+      }
       let value: unknown;
       try {
         value = await response.json();
       } catch (error) {
-        if (controller.signal.aborted) throw new Error("Live catalog request timed out");
+        if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
         throw new Error("Invalid live catalog response");
       }
       return parseLiveCatalogResponse(value, accountId);
     } catch (error) {
-      if (controller.signal.aborted) throw new Error("Live catalog request timed out");
+      if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
       throw error;
     } finally {
       window.clearTimeout(timeout);
