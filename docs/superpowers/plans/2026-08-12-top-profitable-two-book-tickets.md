@@ -316,7 +316,7 @@ git commit -m "feat: rank top verified two-book tickets"
 - Modify: `apps/web/src/pages/live-catalog-page.test.tsx`
 - Modify: `apps/web/src/styles.css`
 
-- [ ] **Step 1: Write component/page RED tests**
+- [x] **Step 1: Write component/page RED tests**
 
 Assert the rendered table has:
 
@@ -332,7 +332,7 @@ Assert the rendered table has:
 
 Also add a regression that fails if `ComparisonTable` or its replacement iterates `observedRows`.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -342,11 +342,11 @@ npm.cmd test --workspace @tool-chenh/web -- --run src/components/ranked-ticket-t
 
 Expected: FAIL because the current table renders `item.observedRows`, may show single-provider estimates, and has no five-row view model.
 
-- [ ] **Step 3: Implement the presentational table**
+- [x] **Step 3: Implement the presentational table**
 
 `RankedTicketTable` receives only `event`, `providers`, and already-ranked `tickets`; it must perform no mapping or financial calculation. Use one `<tr id={ticketDomId(eventKey, ticket.key)}>` per ticket and a horizontally scrollable wrapper. Display signed Football line and named LoL sides. Remove `ComparisonTable` and stop deriving `displayEvents`, `comparisonCount`, and `crossBookEventCount` from `observedRows`; derive them from ranked exact rows.
 
-- [ ] **Step 4: Wire the preflight coordinator into page polling**
+- [x] **Step 4: Wire the preflight coordinator into page polling**
 
 After each accepted fresh catalog generation:
 
@@ -358,11 +358,11 @@ After each accepted fresh catalog generation:
 
 The 250 ms catalog poll must not overlap provider preflight refreshes. Preflight failures update the ticket reason only; they must not blank the catalog.
 
-- [ ] **Step 5: Add compact horizontal styling**
+- [x] **Step 5: Add compact horizontal styling**
 
 Add `.ranked-ticket-table`, `.ranked-ticket-row--profitable`, `.ranked-ticket-row--neutral`, provider price cells, selected-leg cells and mobile overflow rules. Preserve provider and participant labels at all viewport widths.
 
-- [ ] **Step 6: Run web tests and typecheck**
+- [x] **Step 6: Run web tests and typecheck**
 
 Run:
 
@@ -373,7 +373,7 @@ npm.cmd run typecheck --workspace @tool-chenh/web
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add apps/web/src/components/ranked-ticket-table.tsx apps/web/src/components/ranked-ticket-table.test.tsx apps/web/src/pages/live-catalog-page.tsx apps/web/src/pages/live-catalog-page.test.tsx apps/web/src/styles.css

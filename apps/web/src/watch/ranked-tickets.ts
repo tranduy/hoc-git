@@ -1,6 +1,6 @@
 import type { ProviderId } from "@tool-chenh/contracts";
 import { Decimal } from "@tool-chenh/core";
-import type { ComparisonEvent, ComparisonRow } from "../catalog/comparison.js";
+import { decimalOdds, type ComparisonEvent, type ComparisonRow } from "../catalog/comparison.js";
 import { buildObservedFixedBaseStakeEstimate, type FixedBaseStakePlan,
   type FixedBaseStakePolicy } from "./fixed-base-stake.js";
 import type { ObservedPriceMovement } from "./price-movement-tracker.js";
@@ -16,6 +16,7 @@ export interface RankedTicket {
   readonly state: RankedTicketState;
   readonly reason: string | null;
   readonly movementMagnitude: string;
+  readonly gapsBySelection: Readonly<Record<string, { readonly absolute: string; readonly percent: string }>>;
 }
 
 export interface RankedEvent {
@@ -37,6 +38,26 @@ function numberOf(value: string | undefined): Decimal {
   return new Decimal(value ?? 0);
 }
 
+function priceGaps(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId>): RankedTicket["gapsBySelection"] {
+  const oddsBySelection = new Map<string, Decimal[]>();
+  for (const cell of row.cells) {
+    if (!selectedProviders.has(cell.provider)) continue;
+    for (const quote of cell.quotes) {
+      const odds = decimalOdds(quote);
+      if (odds === null) continue;
+      const current = oddsBySelection.get(quote.selection) ?? [];
+      current.push(new Decimal(odds));
+      oddsBySelection.set(quote.selection, current);
+    }
+  }
+  return Object.fromEntries([...oddsBySelection.entries()].flatMap(([selection, odds]) => {
+    if (odds.length < 2) return [];
+    const minimum = Decimal.min(...odds);
+    const absolute = Decimal.max(...odds).minus(minimum);
+    return [[selection, { absolute: absolute.toString(), percent: absolute.div(minimum).mul(100).toString() }]];
+  }));
+}
+
 export function rankTicketsForEvent(input: {
   readonly event: ComparisonEvent;
   readonly verified: ReadonlyMap<string, VerifiedTicketEvidence>;
@@ -49,16 +70,18 @@ export function rankTicketsForEvent(input: {
   const tickets = input.event.rows.map((row): RankedTicket => {
     const verified = input.verified.get(`${input.event.key}::${row.key}`);
     const movementMagnitude = movementFor(input.event.key, row.key, input.movements);
+    const gapsBySelection = priceGaps(row, input.selectedProviders);
     if (verified !== undefined && verified.eventKey === input.event.key && verified.rowKey === row.key &&
       verified.expiresAtMs > input.nowMs) {
       const profitable = new Decimal(verified.plan.worstCaseProfit).gte(20_000);
       return { key: row.key, eventKey: input.event.key, row, plan: verified.plan,
         state: profitable ? "VERIFIED_PROFIT" : "VERIFIED_NO_PROFIT",
-        reason: profitable ? null : "Verified prices do not reach 20,000 VND guaranteed profit", movementMagnitude };
+        reason: profitable ? null : "Verified prices do not reach 20,000 VND guaranteed profit", movementMagnitude,
+        gapsBySelection };
     }
     return { key: row.key, eventKey: input.event.key, row,
       plan: buildObservedFixedBaseStakeEstimate(row, input.selectedProviders, input.observationPolicy),
-      state: "OBSERVATION", reason: "Provider preflight required", movementMagnitude };
+      state: "OBSERVATION", reason: "Provider preflight required", movementMagnitude, gapsBySelection };
   });
 
   return tickets.sort((left, right) => verifiedRank(left.state) - verifiedRank(right.state) ||

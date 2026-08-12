@@ -1,8 +1,10 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { AccountStatus, ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import type { AccountStatus, ProviderEvent, ProviderMarket, ProviderQuote,
+  ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AccountApiLike } from "../api/accounts.js";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
+import type { ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import { filterAccountBackedSignals, LiveCatalogPage } from "./live-catalog-page.js";
 import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
@@ -116,7 +118,7 @@ describe("LiveCatalogPage", () => {
     expect(screen.getAllByText("1.7 → 2.2").length).toBeGreaterThan(0);
     expect(screen.queryByLabelText("Leg #SBOBET HOME at 2.2")).toBeNull();
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
-    expect(screen.getByText(/ƯỚC TÍNH QUAN SÁT/u)).toBeTruthy();
+    expect(screen.getByText("Provider preflight required")).toBeTruthy();
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
@@ -184,13 +186,59 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText(/Starts in/u)).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SABA" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
-    expect(screen.getAllByText(/Alpha.*2\.25/u).some((element) => String(element.className).includes("best"))).toBe(true);
-    expect(screen.getByText(/Alpha: lệch 0\.450 \(25\.00%\)/u)).toBeTruthy();
-    expect(screen.getByText("Biên cân hiện tại: 18.42%")).toBeTruthy();
-    expect(screen.getAllByText("Lãi/lỗ 35,000 VND")).toHaveLength(2);
+    expect(screen.getByText("2.25 DECIMAL").closest(".ranked-ticket-price")?.className).toContain("--best");
+    expect(screen.getByText(/Alpha: Gap 0\.45 · 25\.00%/u)).toBeTruthy();
+    expect(screen.getByText("ROI 18.42%")).toBeTruthy();
+    expect(screen.getByText("Guaranteed 35,000 VND")).toBeTruthy();
+    expect(screen.getByText(/If Alpha wins/u).textContent).toContain("35,000 VND");
+    expect(screen.getByText(/If Beta wins/u).textContent).toContain("35,000 VND");
     fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
     expect(await screen.findByText("Books shown in this comparison")).toBeTruthy();
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
+  });
+
+  it("turns an exact row green only after both provider legs pass fresh preflight", async () => {
+    const observedAtMs = Date.now();
+    const liveAccount = (id: string, provider: "SABA" | "SBOBET"): AccountStatus => ({ ...account, id,
+      alias: `${provider} main`, provider, currency: "VND", balance: "500000", balanceAsOfMs: observedAtMs,
+      capabilities: ["CATALOG", "PROFILE", "PREFLIGHT"] });
+    const sabaAccount = liveAccount("saba-account", "SABA");
+    const sbobetAccount = liveAccount("sbobet-account", "SBOBET");
+    const liveCatalog = (providerAccount: AccountStatus, odds: readonly [string, string]): LiveCatalogResponse => {
+      const provider = providerAccount.provider;
+      const eventId = `${provider}-event`;
+      const marketId = `${provider}-market`;
+      return { ...catalog, observedAtMs, accountId: providerAccount.id, provider,
+        events: [{ ...event, provider, providerEventId: eventId }],
+        markets: [{ ...market, provider, providerEventId: eventId, providerMarketId: marketId }],
+        quotes: quotes.map((quote, index) => ({ ...quote, provider, providerEventId: eventId,
+          providerMarketId: marketId, providerSelectionId: `${provider}-${quote.selection}`,
+          rawOdds: odds[index]!, sourceTimestampMs: observedAtMs })) };
+    };
+    const saba = liveCatalog(sabaAccount, ["2.2", "1.2"]);
+    const sbobet = liveCatalog(sbobetAccount, ["1.2", "3"]);
+    const preflightRequests: ProviderTicketPreflightRequest[] = [];
+    const providerPreflightApi: ProviderPreflightApiLike = { preflight: async (request) => {
+      preflightRequests.push(request);
+      const provider = request.accountId === sabaAccount.id ? "SABA" as const : "SBOBET" as const;
+      const constraint = { currency: "VND" as const, minStake: "30000", maxStake: "500000",
+        stakeStep: "5000", balance: "500000", feeType: "NONE" as const, feeRate: null,
+        verifiedAsOfMs: observedAtMs, expiresAtMs: Date.now() + 3_000 };
+      return { accountId: request.accountId, provider, providerEventId: request.providerEventId,
+        providerMarketId: request.providerMarketId, providerSelectionId: request.providerSelectionId,
+        selection: request.selection, line: request.line, decimalOdds: request.expectedDecimalOdds,
+        quoteStatus: "OPEN" as const, limitEvidence: constraint, constraint, eligible: true, reasons: [] };
+    } };
+
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }}
+      catalogApi={{ read: async (id) => id === sabaAccount.id ? saba : sbobet }}
+      providerPreflightApi={providerPreflightApi} />);
+
+    const ticket = await screen.findByRole("row", { name: /Ticket FT_AH/u });
+    expect(ticket.className).toContain("ranked-ticket-row--profitable");
+    expect(ticket.textContent).toContain("Guaranteed 45,000 VND");
+    expect(preflightRequests.some((request) => request.accountId === sabaAccount.id)).toBe(true);
+    expect(preflightRequests.some((request) => request.accountId === sbobetAccount.id)).toBe(true);
   });
 
   it("keeps the last verified provider snapshot visible when the next poll fails", async () => {
@@ -254,14 +302,15 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
 
-  it("shows single-book tickets for observation without presenting an arbitrage", async () => {
+  it("shows a single-book event shell without exposing its ticket as a comparison", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
     expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
     expect(screen.getByText("1 match(es) with supported two-way tickets")).toBeTruthy();
     expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
-    expect(screen.getByText(/Chưa đủ hai giá đối nghịch từ hai sàn/u)).toBeTruthy();
+    expect(screen.getByText("No exact two-book ticket shared by the selected providers")).toBeTruthy();
+    expect(screen.queryByRole("table", { name: /Top exact tickets/u })).toBeNull();
   });
 
   it("shows a mapped two-provider event even when no exact handicap line is shared", async () => {

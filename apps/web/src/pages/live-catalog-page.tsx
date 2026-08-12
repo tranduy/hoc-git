@@ -2,16 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
 import { CatalogApi, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
+import { defaultProviderPreflightApi, type ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import { loadCatalogCache, saveCatalogCache } from "../catalog/catalog-cache.js";
 import { buildComparisonEvents, decimalOdds, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, observedTicketAsComparisonRow, selectionLabel, type ComparisonEvent,
   type ComparisonRow } from "../catalog/comparison.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
+import { RankedTicketTable } from "../components/ranked-ticket-table.js";
 import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
 import { PriceMovementTracker, type ObservedPriceMovement } from "../watch/price-movement-tracker.js";
+import { rankedEvent, sortRankedEvents } from "../watch/ranked-tickets.js";
 import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
+import { TicketPreflightCoordinator, type VerifiedTicketEvidence } from "../watch/ticket-preflight-coordinator.js";
 
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
@@ -265,9 +269,11 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
   </aside>;
 }
 
-export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi, fixedCategory }: {
+export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi,
+  providerPreflightApi = defaultProviderPreflightApi, fixedCategory }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
+  readonly providerPreflightApi?: ProviderPreflightApiLike;
   readonly fixedCategory?: CatalogCategory;
 }) {
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
@@ -278,6 +284,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [staleAccountIds, setStaleAccountIds] = useState<ReadonlySet<string>>(new Set());
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
   const [movements, setMovements] = useState<readonly ObservedPriceMovement[]>([]);
+  const [verifiedTickets, setVerifiedTickets] = useState<ReadonlyMap<string, VerifiedTicketEvidence>>(new Map());
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -289,6 +296,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   baseStakeRef.current = baseStake;
   const signalTracker = useRef(new LagSignalTracker());
   const movementTracker = useRef(new PriceMovementTracker());
+  const preflightCoordinator = useRef(new TicketPreflightCoordinator(providerPreflightApi));
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
   const accountsRef = useRef<readonly AccountStatus[]>([]);
   const refreshInFlight = useRef(false);
@@ -375,7 +383,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const observedAtMs = accepted.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
       const candidates = signalTracker.current.update(nextEvents, providers, executableStakePolicy(baseStakeRef.current), observedAtMs);
       setSignals(filterAccountBackedSignals(candidates, accepted, accountsRef.current, observedAtMs));
-      setMovements(movementTracker.current.update(nextEvents, observedAtMs));
+      const nextMovements = movementTracker.current.update(nextEvents, observedAtMs);
+      setMovements(nextMovements);
+      const acceptedAccountIds = new Set(accepted.map((catalog) => catalog.accountId));
+      const selectedAccounts = accountsRef.current.filter((account) => acceptedAccountIds.has(account.id));
+      const nextVerified = await preflightCoordinator.current.refresh({ events: nextEvents,
+        selectedAccounts, selectedProviders: providers, policy: observedStakePolicy(baseStakeRef.current) });
+      setVerifiedTickets(nextVerified);
       const failed = results.length - accepted.length;
       if (accepted.length === 0 && preserved.length > 0) setMessage(`${failed} selected provider(s) unavailable; last verified snapshots are retained as stale. Signals are disabled until a fresh read succeeds.`);
       else if (accepted.length === 0) setMessage("Nguồn đã chọn đang lỗi hoặc trả sai category — chưa thể kết luận là không có trận.");
@@ -461,29 +475,17 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
 
   const events = useMemo(() => buildComparisonEvents(catalogs).filter((item) => item.event.category === category), [catalogs, category]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)), [events, nowMs]);
-  const displayEvents = useMemo(() => visibleEvents.filter((item) => item.observedRows.length > 0).sort((left, right) => {
-    const leftSignalRank = signals.findIndex((signal) => signal.event.key === left.key);
-    const rightSignalRank = signals.findIndex((signal) => signal.event.key === right.key);
-    if (leftSignalRank >= 0 || rightSignalRank >= 0) {
-      if (leftSignalRank < 0) return 1;
-      if (rightSignalRank < 0) return -1;
-      if (leftSignalRank !== rightSignalRank) return leftSignalRank - rightSignalRank;
-    }
-    const leftMovementRank = movements.findIndex((movement) => movement.event.key === left.key);
-    const rightMovementRank = movements.findIndex((movement) => movement.event.key === right.key);
-    if (leftMovementRank >= 0 || rightMovementRank >= 0) {
-      if (leftMovementRank < 0) return 1;
-      if (rightMovementRank < 0) return -1;
-      if (leftMovementRank !== rightMovementRank) return leftMovementRank - rightMovementRank;
-    }
-    const edge = (right.bestMargin ?? Number.NEGATIVE_INFINITY) - (left.bestMargin ?? Number.NEGATIVE_INFINITY);
-    if (edge !== 0) return edge;
-    if (left.event.isLive !== right.event.isLive) return left.event.isLive ? 1 : -1;
-    return left.event.startAtUtcMs - right.event.startAtUtcMs;
-  }), [movements, signals, visibleEvents]);
-  const hiddenNonComparableCount = visibleEvents.length - displayEvents.length;
-  const crossBookEventCount = displayEvents.filter((item) => item.observedRows.some((row) =>
-    new Set(row.cells.map((cell) => cell.provider)).size >= 2)).length;
+  const selectedProviderIds = useMemo(() => new Set<ProviderId>(categoryAccounts.filter((account) =>
+    selectedIds.has(account.id) && account.sessionState === "ACTIVE").map((account) => account.provider)),
+  [categoryAccounts, selectedIds]);
+  const rankedEvents = useMemo(() => sortRankedEvents(visibleEvents.filter((item) => item.observedRows.length > 0)
+    .map((item) => rankedEvent({ event: item, verified: verifiedTickets, movements,
+      selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake), nowMs }))),
+  [baseStake, movements, nowMs, selectedProviderIds, verifiedTickets, visibleEvents]);
+  const displayEvents = rankedEvents.map((item) => item.event);
+  const rankedByEvent = new Map(rankedEvents.map((item) => [item.event.key, item]));
+  const hiddenNonComparableCount = visibleEvents.length - rankedEvents.length;
+  const crossBookEventCount = rankedEvents.filter((item) => item.tickets.length > 0).length;
   useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
     const match = events.find((item) => Object.values(item.providerEventIds).includes(requested.current.event!));
@@ -513,7 +515,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const changeCategory = (next: CatalogCategory): void => {
     setCategory(next); setCatalogs([]); catalogsRef.current = []; setStaleAccountIds(new Set());
     saveCatalogCategory(window.localStorage, next);
-    setSignals([]); setMovements([]); setMessage(null); setSelectedKey(null);
+    setSignals([]); setMovements([]); setMessage(null); setSelectedKey(null); setVerifiedTickets(new Map());
+    preflightCoordinator.current.clear();
     signalTracker.current = new LagSignalTracker();
     movementTracker.current = new PriceMovementTracker();
     const nextIds = accounts.filter((account) => account.category === next)
@@ -557,22 +560,25 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     {catalogs.length > 0 && <PriceMovementPanel movements={movements} />}
     <LagSignalToast signal={signals[0] ?? null} />
     <div className="catalog-event-list">{displayEvents.map((item) => {
+      const ranked = rankedByEvent.get(item.key)!;
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
       const observedAtMs = item.catalogs.find((catalog) => catalog.provider === item.event.provider)?.observedAtMs ??
         item.catalogs[0]!.observedAtMs;
       const estimatedStartAtMs = estimatedLiveStartAtMs(observedAtMs, item.event.liveState);
-      const comparisonCount = item.observedRows.length;
+      const comparisonCount = ranked.tickets.length;
       return <article className="catalog-event" key={item.key}><header><div><span>{item.event.competition}</span><h2>{label}</h2>
         <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
           {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
-        <small>{comparisonCount > 0 ? `${comparisonCount} vé chấp 2 cửa đang hiển thị` : "Chưa có vé chấp 0.5 phù hợp"}</small></div>
+        <small>{comparisonCount > 0 ? `${comparisonCount} exact two-outcome ticket(s) · top 5 by guaranteed profit` :
+          "No exact two-book ticket shared by the selected providers"}</small>
+        {ranked.bestVerifiedProfit !== null && <strong>Best guaranteed {money(ranked.bestVerifiedProfit)}</strong>}</div>
         <div className="catalog-event-actions"><strong>{item.event.isLive ? formatMatchClock(item.event.liveState) : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
           {item.event.isLive ? <><small>Observed {new Date(observedAtMs).toLocaleString()}</small>
             {estimatedStartAtMs !== null && <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}</>
             : <small>Scheduled {new Date(item.event.startAtUtcMs).toLocaleString()}</small>}
           <button aria-label={`View & watch ${label}`} onClick={() => watch(item)} type="button">View & compare</button></div></header>
-        {comparisonCount > 0 && <details className="catalog-market-details" open><summary>Vé chấp 2 cửa đang theo dõi</summary>
-          <ComparisonTable item={item} baseStake={baseStake} signals={signals} /></details>}</article>;
+        {comparisonCount > 0 && <details className="catalog-market-details" open><summary>Exact tickets being monitored</summary>
+          <RankedTicketTable event={item.event} providers={item.providers} tickets={ranked.tickets} /></details>}</article>;
     })}</div>
   </>;
 }
