@@ -92,4 +92,55 @@ describe("LiveTwoLegCoordinator", () => {
     await expect(service.execute({ ticket, armToken: "bad-arm-token-123" })).rejects.toThrow("LIVE_ARM_INVALID");
     expect(prepare).not.toHaveBeenCalled();
   });
+
+  it("persists committing before either provider commit and then stores the final receipts", async () => {
+    const order: string[] = [];
+    const first = prepared("SABA", "sa"); const second = prepared("SBOBET", "sb");
+    first.commit = vi.fn(async () => { order.push("commit-a"); return { provider: "SABA" as const,
+      providerSelectionId: "sa", status: "ACCEPTED" as const, receiptId: "receipt-a" }; });
+    second.commit = vi.fn(async () => { order.push("commit-b"); return { provider: "SBOBET" as const,
+      providerSelectionId: "sb", status: "ACCEPTED" as const, receiptId: "receipt-b" }; });
+    const journal = { claim: vi.fn(async () => ({ status: "CLAIMED" as const })),
+      markCommitting: vi.fn(async () => { order.push("journal-committing"); }),
+      complete: vi.fn(async () => { order.push("journal-complete"); }) };
+    const service = new LiveTwoLegCoordinator({ adapters: [adapter("SABA", first), adapter("SBOBET", second)],
+      verifyTicket: () => true, consumeArm: () => true, clock: { nowMs: () => 2000 },
+      journal, tripKillSwitch: vi.fn() });
+    await expect(service.execute({ ticket, armToken: "arm-token-123456" })).resolves
+      .toMatchObject({ status: "BOTH_ACCEPTED" });
+    expect(order[0]).toBe("journal-committing");
+    expect(order.at(-1)).toBe("journal-complete");
+    expect(journal.complete).toHaveBeenCalledOnce();
+  });
+
+  it("replays a durable completed result and blocks in-doubt state without touching providers", async () => {
+    const complete = { ticketId: "ticket-live", status: "BOTH_ACCEPTED" as const, legs: [
+      { provider: "SABA" as const, providerSelectionId: "sa", status: "ACCEPTED" as const, receiptId: "receipt-a" },
+      { provider: "SBOBET" as const, providerSelectionId: "sb", status: "ACCEPTED" as const, receiptId: "receipt-b" }
+    ] as const };
+    const prepare = vi.fn();
+    const base = { adapters: [{ provider: "SABA" as const, prepare }, { provider: "SBOBET" as const, prepare }],
+      verifyTicket: () => true, consumeArm: () => true, clock: { nowMs: () => 2000 }, tripKillSwitch: vi.fn() };
+    const replay = new LiveTwoLegCoordinator({ ...base, journal: { claim: async () => ({ status: "COMPLETED", result: complete }),
+      markCommitting: async () => {}, complete: async () => {} } });
+    await expect(replay.execute({ ticket, armToken: "arm-token-123456" })).resolves.toEqual(complete);
+    const inDoubt = new LiveTwoLegCoordinator({ ...base, journal: { claim: async () => ({ status: "IN_DOUBT", phase: "COMMITTING" }),
+      markCommitting: async () => {}, complete: async () => {} } });
+    await expect(inDoubt.execute({ ticket, armToken: "arm-token-123456" })).rejects
+      .toThrow("LIVE_EXECUTION_IN_DOUBT");
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("trips the kill switch if final receipt persistence fails after provider commits", async () => {
+    const trip = vi.fn();
+    const service = new LiveTwoLegCoordinator({ adapters: [adapter("SABA", prepared("SABA", "sa")),
+      adapter("SBOBET", prepared("SBOBET", "sb"))], verifyTicket: () => true, consumeArm: () => true,
+      clock: { nowMs: () => 2000 }, tripKillSwitch: trip, journal: {
+        claim: async () => ({ status: "CLAIMED" }), markCommitting: async () => {},
+        complete: async () => { throw new Error("disk full"); }
+      } });
+    await expect(service.execute({ ticket, armToken: "arm-token-123456" })).rejects
+      .toThrow("LIVE_RECEIPT_PERSISTENCE_FAILED");
+    expect(trip).toHaveBeenCalledOnce();
+  });
 });
