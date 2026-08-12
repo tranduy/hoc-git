@@ -49,6 +49,99 @@ export async function collectSafeControlShapes(page: Page, limit = 400): Promise
   return [...result.values()];
 }
 
+export interface ExactCmdTicketEvidence {
+  readonly matched: boolean;
+  readonly displayedOdds: string | null;
+  readonly inputs: readonly {
+    readonly type: string;
+    readonly placeholder: string | null;
+    readonly min: string | null;
+    readonly max: string | null;
+    readonly step: string | null;
+    readonly labels: readonly string[];
+  }[];
+}
+
+function safeStakeEvidence(value: string | null): string | null {
+  const normalized = value?.normalize("NFKC").replace(/\s+/gu, " ").trim() ?? "";
+  if (normalized.length === 0 || normalized.length > 160) return null;
+  const stakeLabel = /(?:min(?:imum)?|max(?:imum)?|stake|balance|credit|limit|bet amount|tiền|cược|tối thiểu|tối đa)/iu;
+  const numericOnly = /^[\d.,~\-–—/:()\s]+(?:K|VND|UUS|INH)?$/iu;
+  if (!stakeLabel.test(normalized) && !numericOnly.test(normalized)) return null;
+  return normalized.replace(/[^\p{L}\p{N}\s.,~\-–—/:()]/gu, "").slice(0, 160);
+}
+
+export async function inspectExactCmdTicket(page: Page, input: {
+  readonly matchId: string;
+  readonly marketOddsId: string;
+  readonly selection: "HOME" | "AWAY";
+  readonly waitMs?: number;
+}): Promise<ExactCmdTicketEvidence> {
+  if (![input.matchId, input.marketOddsId].every((value) => value.trim().length > 0 && value.length <= 128) ||
+    !Number.isFinite(input.waitMs ?? 500) || (input.waitMs ?? 500) < 0 || (input.waitMs ?? 500) > 3_000) {
+    throw new Error("CMD_TICKET_INSPECTION_INVALID");
+  }
+  let displayedOdds: string | null = null;
+  let matched = false;
+  for (const frame of page.frames()) {
+    const matches = frame.locator(".c-match[data-matchid]");
+    for (let matchIndex = 0; matchIndex < Math.min(await matches.count(), 500); matchIndex += 1) {
+      const match = matches.nth(matchIndex);
+      if (await match.getAttribute("data-matchid") !== input.matchId) continue;
+      const groups = match.locator(".c-match__odds-group");
+      for (let groupIndex = 0; groupIndex < await groups.count(); groupIndex += 1) {
+        const group = groups.nth(groupIndex);
+        const betTypes = await group.locator("[data-bt]").evaluateAll((elements) =>
+          elements.map((element) => element.getAttribute("data-bt")));
+        if (!betTypes.includes("1")) continue;
+        const odds = group.locator(".c-odds[data-moid]");
+        const candidates: number[] = [];
+        for (let oddsIndex = 0; oddsIndex < await odds.count(); oddsIndex += 1) {
+          if (await odds.nth(oddsIndex).getAttribute("data-moid") === input.marketOddsId) candidates.push(oddsIndex);
+        }
+        if (candidates.length !== 2) continue;
+        const target = odds.nth(candidates[input.selection === "HOME" ? 0 : 1]!);
+        const rawOdds = (await target.innerText()).trim();
+        displayedOdds = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(rawOdds) ? rawOdds : null;
+        const button = target.locator("xpath=ancestor-or-self::*[contains(concat(' ', normalize-space(@class), ' '), ' c-odds-button ')][1]");
+        if (await button.count() !== 1 || !(await button.isVisible().catch(() => false))) continue;
+        await button.click({ timeout: 2_000 });
+        matched = true;
+        break;
+      }
+      break;
+    }
+    if (matched) break;
+  }
+  if (!matched) return { matched: false, displayedOdds: null, inputs: [] };
+  if ((input.waitMs ?? 500) > 0) await page.waitForTimeout(input.waitMs ?? 500);
+  const evidence: ExactCmdTicketEvidence["inputs"][number][] = [];
+  for (const frame of page.frames()) {
+    const inputs = frame.locator("input");
+    for (let index = 0; index < Math.min(await inputs.count(), 100); index += 1) {
+      const field = inputs.nth(index);
+      if (!(await field.isVisible().catch(() => false))) continue;
+      const placeholder = safeStakeEvidence(await field.getAttribute("placeholder"));
+      const min = safeStakeEvidence(await field.getAttribute("min"));
+      const max = safeStakeEvidence(await field.getAttribute("max"));
+      const step = safeStakeEvidence(await field.getAttribute("step"));
+      const ancestors = field.locator("xpath=ancestor::*[position() <= 4]");
+      const labels = new Set<string>();
+      for (let ancestorIndex = 0; ancestorIndex < Math.min(await ancestors.count(), 4); ancestorIndex += 1) {
+        const text = await ancestors.nth(ancestorIndex).innerText().catch(() => "");
+        for (const line of text.split(/\r?\n/gu)) {
+          const safe = safeStakeEvidence(line);
+          if (safe !== null) labels.add(safe);
+        }
+      }
+      if (placeholder === null && min === null && max === null && step === null && labels.size === 0) continue;
+      evidence.push({ type: (await field.getAttribute("type") ?? "text").slice(0, 24),
+        placeholder, min, max, step, labels: [...labels].slice(0, 20) });
+    }
+  }
+  return { matched, displayedOdds, inputs: evidence };
+}
+
 export async function clickSafeStructuralCategories(page: Page, delayMs = 2_000): Promise<number> {
   let clicked = 0;
   for (const selector of inspectionStructuralSelectors) {
@@ -330,6 +423,7 @@ export interface CmdCatalogRecord {
       readonly priceText: string;
       readonly status: string | null;
       readonly greyedOut: string | null;
+      readonly lineText?: string | null;
     }[];
   }[];
 }

@@ -8,11 +8,13 @@ import {
   extractCmdCatalogRecords,
   findCmdCatalogPage,
   findProviderRuntimeFrame,
+  inspectExactCmdTicket,
   readProviderAccountStore
 } from "../browser-protocol-inspector.js";
 import type { CmdIdentitySignals } from "../browser-protocol-inspector.js";
 import type { CmdAccountStoreSource } from "./cmd-profile-reader.js";
 import type { CmdCatalogRecordReader } from "./cmd-catalog-source.js";
+import { parseCmdTicketConstraint, type CmdTicketConstraintSnapshot } from "./cmd-ticket-constraint.js";
 
 export function validateCmdLaunchUrl(value: string): string {
   if (value.length === 0 || value.length > 24_000) throw new Error("CMD_LAUNCH_URL_INVALID");
@@ -302,6 +304,21 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
         return records;
       }
     }));
+  }
+
+  async readTicketConstraint(input: { readonly sessionId: string; readonly launchUrl: string;
+    readonly providerEventId: string; readonly providerMarketId: string; readonly providerSelectionId: string;
+    readonly selection: "HOME" | "AWAY" }): Promise<CmdTicketConstraintSnapshot | null> {
+    const expectedSelectionId = `${input.providerMarketId}:${input.selection.toLocaleLowerCase("en")}`;
+    if (input.providerSelectionId !== expectedSelectionId) return null;
+    const session = await this.#get(input);
+    const evidence = await inspectExactCmdTicket(session.page, { matchId: input.providerEventId,
+      marketOddsId: input.providerMarketId, selection: input.selection });
+    const rawProfile = await this.readAccountStore(input);
+    const profile = normalizeCmdAccountStore(rawProfile, Date.now());
+    if (profile === null) return null;
+    return parseCmdTicketConstraint({ evidence, providerSelectionId: input.providerSelectionId,
+      currency: profile.currency, balance: profile.balance, observedAtMs: profile.asOfMs });
   }
 
   async close(): Promise<void> {

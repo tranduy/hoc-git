@@ -16,6 +16,7 @@ import {
   findApiOriginFromPage,
   findAccessTokenFrame,
   findProviderRuntimeFrame,
+  inspectExactCmdTicket,
   probeReadOnlyProfileThroughRuntime,
   readProviderAccountStore
 } from "./browser-protocol-inspector.js";
@@ -368,6 +369,27 @@ describe("browser protocol inspector", () => {
     expect(await waitForCmdIdentitySignals(page, 1_000, 25)).toEqual({
       runtime: true, football: true, esports: true, cmdBundle: true
     });
+    await page.close();
+  });
+
+  it("opens only the exact two-way selection and reads stake evidence without submitting", async () => {
+    const page = await browser.newPage();
+    await page.goto(testOrigin);
+    await page.setContent(`<div class="c-match" data-matchid="event-exact">
+      <div class="c-match__odds-group"><div data-bt="1">
+        <button class="c-odds-button" onclick="window.selected='HOME'"><span class="c-odds" data-moid="market-exact">0.8</span></button>
+        <button class="c-odds-button" onclick="window.selected='AWAY';document.querySelector('#slip').hidden=false"><span class="c-odds" data-moid="market-exact">-0.9</span></button>
+      </div></div></div>
+      <button id="submit" onclick="window.submitted=true">Submit</button>
+      <section id="slip" hidden><div>Minimum 50 K</div><div>Maximum 300 K</div>
+        <input type="text" placeholder="50 ~ 300 K" step="1" /></section>`);
+    const result = await inspectExactCmdTicket(page, { matchId: "event-exact", marketOddsId: "market-exact",
+      selection: "AWAY", waitMs: 0 });
+    expect(result).toMatchObject({ matched: true, displayedOdds: "-0.9",
+      inputs: [{ placeholder: "50 ~ 300 K", step: "1", labels: expect.arrayContaining(["Minimum 50 K", "Maximum 300 K"]) }] });
+    expect(await page.evaluate(() => ({ selected: (globalThis as { selected?: string }).selected,
+      submitted: (globalThis as { submitted?: boolean }).submitted ?? false })))
+      .toEqual({ selected: "AWAY", submitted: false });
     await page.close();
   });
 });

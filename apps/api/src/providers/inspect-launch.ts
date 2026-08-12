@@ -11,6 +11,7 @@ import {
   findCmdCatalogPage,
   collectSafeControlShapes,
   findProviderRuntimeFrame,
+  inspectExactCmdTicket,
   probeReadOnlyProfileThroughRuntime,
   readProviderAccountStore
 } from "./browser-protocol-inspector.js";
@@ -71,6 +72,7 @@ async function main(): Promise<void> {
   const webSocketShapesOnly = argumentsList.includes("--websocket-shapes");
   const controlShapesOnly = argumentsList.includes("--control-shapes");
   const profileShapesOnly = argumentsList.includes("--profile-shapes");
+  const ticketShapeOnly = argumentsList.includes("--ticket-shape");
   const catalogShapesOnly = argumentsList.includes("--catalog-shapes");
   const catalogRecordsOnly = argumentsList.includes("--catalog-records");
   const catalogNavigationOnly = argumentsList.includes("--catalog-navigation");
@@ -144,7 +146,7 @@ async function main(): Promise<void> {
   try {
     let page = context.pages()[0] ?? await context.newPage();
     await page.goto(record.secret.value, { waitUntil: "domcontentloaded", timeout: 30_000 });
-    if (catalogRecordsOnly || catalogShapesOnly || catalogNavigationOnly || controlShapesOnly) {
+    if (catalogRecordsOnly || catalogShapesOnly || catalogNavigationOnly || controlShapesOnly || ticketShapeOnly) {
       await page.waitForTimeout(5_000);
       page = await findCmdCatalogPage(context.pages()) ?? page;
     }
@@ -187,7 +189,7 @@ async function main(): Promise<void> {
       await clickSafeStructuralCategory(page, "1", 2_000).catch(() => false);
       catalogNavigation = [...await collectCmdCatalogNavigation(page)];
     }
-    if (!catalogRecordsOnly && !catalogNavigationOnly) {
+    if (!catalogRecordsOnly && !catalogNavigationOnly && !ticketShapeOnly) {
       const controls = page.locator("a, button, [role='button'], [onclick], [aria-label], [title]");
       const controlCount = Math.min(await controls.count(), 250);
       for (let index = 0, clicked = 0; index < controlCount && clicked < 12; index += 1) {
@@ -209,12 +211,30 @@ async function main(): Promise<void> {
           catalogRecords.push(...await extractCmdCatalogRecords(page, 3, sportId));
         }
       }
-    } else {
+    } else if (!ticketShapeOnly) {
       await clickSafeStructuralCategories(page).catch(() => undefined);
+    }
+    let ticketShape: unknown = null;
+    if (ticketShapeOnly) {
+      await clickSafeStructuralCategory(page, "1", 2_000).catch(() => false);
+      const records = await extractCmdCatalogRecords(page, 100, "1", ["1"]);
+      outer: for (const record of records) {
+        for (const group of record.groups) {
+          if (group.betTypeIds.length !== 1 || group.betTypeIds[0] !== "1" || group.odds.length !== 2) continue;
+          const ids = [...new Set(group.odds.map((odd) => odd.marketOddsId))];
+          const lines = group.odds.map((odd) => odd.lineText).filter((line): line is string => line !== undefined && line !== null);
+          if (ids.length !== 1 || ids[0] === undefined || !lines.some((line) => /^-?\d+\.5$/u.test(line.trim()))) continue;
+          ticketShape = { matchId: record.matchId, marketOddsId: ids[0], selection: "HOME",
+            evidence: await inspectExactCmdTicket(page, { matchId: record.matchId, marketOddsId: ids[0], selection: "HOME" }) };
+          break outer;
+        }
+      }
     }
     await page.waitForTimeout(15_000);
     await Promise.allSettled([...pending]);
-    const output = imCatalogRecordsOnly
+    const output = ticketShapeOnly
+      ? ticketShape
+      : imCatalogRecordsOnly
       ? imCatalogRecords
       : profileShapesOnly
       ? profileShapes

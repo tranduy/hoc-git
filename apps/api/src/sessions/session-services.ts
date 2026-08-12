@@ -45,6 +45,7 @@ import { BtiProfileReader } from "../providers/bti/bti-profile-reader.js";
 import { ProviderPreflightRegistry } from "../preflight/provider-preflight-registry.js";
 import { BtiTicketPreflightReader } from "../providers/bti/bti-ticket-preflight-reader.js";
 import { ApsportTicketPreflightReader } from "../providers/apsport/apsport-ticket-preflight-reader.js";
+import { SabaTicketPreflightReader } from "../providers/saba/saba-ticket-preflight-reader.js";
 
 export interface CreateSessionServicesOptions {
   readonly localAppData: string;
@@ -183,7 +184,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts, source: apsportBrowser });
   const btiCatalogReader = new BtiObservedCatalogReader({ accounts, source: btiBrowser });
   const providerPreflight = new ProviderPreflightRegistry({ accounts,
-    readers: [new BtiTicketPreflightReader({ source: btiBrowser }),
+    readers: [new SabaTicketPreflightReader({ source: sabaBrowser }),
+      new BtiTicketPreflightReader({ source: btiBrowser }),
       new ApsportTicketPreflightReader({ source: apsportBrowser }),
       new SbobetTicketPreflightReader({ source: sbobetBrowser })] });
   return {
