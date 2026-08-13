@@ -26,6 +26,12 @@ class FakeSessionApi implements SessionApiLike {
   async discoverFabet() { return { requestedUrl: "https://fabet.com/", finalUrl: "https://fabet.party/", finalHostname: "fabet.party", trusted: false }; }
   async trustFabet(hostname: string) { return { hostname, trusted: true as const }; }
   async configureFabet(): Promise<RedactedSessionStatus> { return active; }
+  async configureTk88(input: { trustedHostname: string }): Promise<RedactedSessionStatus> {
+    const configured: RedactedSessionStatus = { ...active, id: "tk88", provider: "TK88", source: "TK88_CHROME",
+      trustedHostname: input.trustedHostname, state: "ACTION_REQUIRED", reason: "SCHEMA_CHANGED" };
+    this.sessions = [...this.sessions.filter((session) => session.source !== "TK88_CHROME"), configured];
+    return configured;
+  }
   async configureManual(input: { provider: string; kind: "TOKEN" | "COOKIE_BUNDLE" | "LAUNCH_URL"; secret: string }): Promise<RedactedSessionStatus> {
     if (input.secret !== "ui-secret-canary") throw new Error("bad secret");
     const configured = { ...active, id: "manual-2", provider: input.provider, state: "ACTION_REQUIRED" as const, reason: "SCHEMA_CHANGED" as const };
@@ -35,6 +41,7 @@ class FakeSessionApi implements SessionApiLike {
   async validate(): Promise<RedactedSessionStatus> { return active; }
   async renew(): Promise<RedactedSessionStatus> { return active; }
   async resetFabet(): Promise<void> { this.resetCount += 1; this.sessions = this.sessions.filter((session) => session.source !== "FABET_LOGIN"); }
+  async resetTk88(): Promise<void> { this.sessions = this.sessions.filter((session) => session.source !== "TK88_CHROME"); }
 }
 
 class FakeAccountApi implements AccountApiLike {
@@ -74,6 +81,20 @@ class FakeAccountApi implements AccountApiLike {
 afterEach(() => cleanup());
 
 describe("SessionsPage", () => {
+  it("registers and resets a distinct redacted TK88 Chrome profile", async () => {
+    const api = new FakeSessionApi();
+    render(<SessionsPage api={api} />);
+
+    fireEvent.change(screen.getByLabelText("TK88 trusted hostname"), { target: { value: "tk88.example" } });
+    fireEvent.click(screen.getByRole("button", { name: "Register TK88 Chrome" }));
+    expect(await screen.findByRole("cell", { name: "TK88 Chrome" })).toBeTruthy();
+    expect(document.body.textContent).not.toContain("managed-profile");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset TK88 Chrome" }));
+    expect(screen.getByRole("dialog").textContent).toContain("TK88 browser profile");
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reset TK88 Chrome" }));
+    await waitFor(() => expect(screen.queryByRole("cell", { name: "TK88 Chrome" })).toBeNull());
+  });
   it("registers a second verified session as a distinct provider account", async () => {
     const sessionApi = new FakeSessionApi();
     sessionApi.sessions = [

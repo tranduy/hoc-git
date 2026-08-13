@@ -40,7 +40,7 @@ interface StoredSession {
 
 export interface ConfigureManualInput {
   readonly provider: string;
-  readonly kind: Exclude<ProviderSecretKind, "FABET_CREDENTIALS">;
+  readonly kind: Exclude<ProviderSecretKind, "FABET_CREDENTIALS" | "TK88_PROFILE">;
   readonly secret: string;
 }
 
@@ -48,6 +48,10 @@ export interface ConfigureFabetInput {
   readonly entryUrl: string;
   readonly username: string;
   readonly password: string;
+  readonly trustedHostname: string;
+}
+
+export interface ConfigureTk88Input {
   readonly trustedHostname: string;
 }
 
@@ -63,6 +67,7 @@ export interface SessionManagerOptions {
     resetProfile(): Promise<void>;
   };
   readonly resetFabetState?: () => Promise<void>;
+  readonly resetTk88State?: () => Promise<void>;
 }
 
 function isFiniteTimestamp(value: unknown): value is number | null {
@@ -75,7 +80,7 @@ function parseStoredSession(value: SecretRecord | null): StoredSession | null {
   const state = value.state;
   const reason = value.reason;
   const secret = value.secret;
-  const validSources = new Set<SessionSource>(["FABET_LOGIN", "MANUAL_PROVIDER_SESSION"]);
+  const validSources = new Set<SessionSource>(["FABET_LOGIN", "TK88_CHROME", "MANUAL_PROVIDER_SESSION"]);
   const validStates = new Set<SessionState>(["UNCONFIGURED", "VALIDATING", "ACTIVE", "RENEWING", "ACTION_REQUIRED", "INVALID"]);
   const validReasons = new Set<SessionHealthReason>([
     "UNREACHABLE", "DOMAIN_APPROVAL_REQUIRED", "UNAUTHORIZED", "EXPIRED",
@@ -88,7 +93,7 @@ function parseStoredSession(value: SecretRecord | null): StoredSession | null {
   if (typeof secret !== "object" || secret === null) return null;
   const secretFields = secret as Record<string, unknown>;
   if (
-    !["TOKEN", "COOKIE_BUNDLE", "LAUNCH_URL", "FABET_CREDENTIALS"].includes(String(secretFields.kind)) ||
+    !["TOKEN", "COOKIE_BUNDLE", "LAUNCH_URL", "FABET_CREDENTIALS", "TK88_PROFILE"].includes(String(secretFields.kind)) ||
     typeof secretFields.value !== "string"
   ) return null;
   const category = value.category === "FOOTBALL" || value.category === "LOL" ? value.category : null;
@@ -132,6 +137,7 @@ export class SessionManager {
   readonly #idFactory: () => string;
   readonly #fabetDriver: SessionManagerOptions["fabetDriver"];
   readonly #resetFabetState: () => Promise<void>;
+  readonly #resetTk88State: () => Promise<void>;
   readonly #inflight = new Map<string, Promise<RedactedSessionStatus>>();
   #fabetRehydration: Promise<void> | null = null;
 
@@ -142,6 +148,7 @@ export class SessionManager {
     this.#idFactory = options.idFactory;
     this.#fabetDriver = options.fabetDriver;
     this.#resetFabetState = options.resetFabetState ?? (async () => undefined);
+    this.#resetTk88State = options.resetTk88State ?? (async () => undefined);
   }
 
   async configureManual(input: ConfigureManualInput): Promise<RedactedSessionStatus> {
@@ -202,6 +209,30 @@ export class SessionManager {
     } catch (error) {
       return this.#transition(record, "INVALID", this.#fabetFailureReason(error));
     }
+  }
+
+  async configureTk88(input: ConfigureTk88Input): Promise<RedactedSessionStatus> {
+    const hostname = input.trustedHostname.trim().toLowerCase();
+    if (hostname.length === 0 || this.#hostname(`https://${hostname}/`) !== hostname) {
+      throw new Error("Invalid TK88 profile configuration");
+    }
+    const nowMs = this.#clock.nowMs();
+    const record: StoredSession = {
+      version: 1,
+      id: "tk88",
+      provider: "TK88",
+      category: null,
+      source: "TK88_CHROME",
+      state: "ACTION_REQUIRED",
+      trustedHostname: hostname,
+      acquiredAtMs: nowMs,
+      lastValidatedAtMs: null,
+      renewAfterMs: null,
+      reason: "SCHEMA_CHANGED",
+      secret: { kind: "TK88_PROFILE", value: "managed-profile:tk88:v1" }
+    };
+    await this.#save(record);
+    return publicStatus(record);
   }
 
   validate(id: string): Promise<RedactedSessionStatus> {
@@ -302,6 +333,13 @@ export class SessionManager {
       .map(async (record) => this.#vault.delete(`${recordPrefix}${record.id}`)));
     await this.#fabetDriver?.resetProfile();
     await this.#resetFabetState();
+  }
+
+  async resetTk88(): Promise<void> {
+    const records = await this.#listRecords();
+    await Promise.all(records.filter((record) => record.source === "TK88_CHROME")
+      .map(async (record) => this.#vault.delete(`${recordPrefix}${record.id}`)));
+    await this.#resetTk88State();
   }
 
   async #rehydrateFabet(): Promise<void> {

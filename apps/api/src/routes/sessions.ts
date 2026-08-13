@@ -48,6 +48,7 @@ const fabetBody = z.strictObject({
   username: z.string().min(1).max(256),
   password: z.string().min(1).max(1_024)
 });
+const tk88Body = z.strictObject({ trustedHostname: z.string().trim().min(1).max(253) });
 const manualBody = z.strictObject({
   provider: z.string().trim().min(1).max(64),
   kind: z.enum(["TOKEN", "COOKIE_BUNDLE", "LAUNCH_URL"]),
@@ -55,6 +56,7 @@ const manualBody = z.strictObject({
 });
 const sessionParams = z.strictObject({ id: z.string().trim().min(1).max(128) });
 const resetBody = z.strictObject({ confirmation: z.literal("RESET_FABET") });
+const resetTk88Body = z.strictObject({ confirmation: z.literal("RESET_TK88") });
 const reclassifyBody = z.strictObject({ provider: z.enum(["CMD", "SABA", "SBOBET", "APSPORT", "BTI", "IM"]) });
 
 function invalid(reply: FastifyReply) {
@@ -131,6 +133,14 @@ export function registerSessionRoutes(
     }
   });
 
+  app.post("/api/sessions/tk88/configure", async (request, reply) => {
+    if (!consume(request.ip, reply)) return;
+    const parsed = tk88Body.safeParse(request.body);
+    if (!parsed.success) return invalid(reply);
+    try { return await services.manager.configureTk88(parsed.data); }
+    catch (error) { return safeFailure(reply, error); }
+  });
+
   app.post("/api/sessions/:id/validate", async (request, reply) => {
     if (!consume(request.ip, reply)) return;
     const parsed = sessionParams.safeParse(request.params);
@@ -172,5 +182,13 @@ export function registerSessionRoutes(
     } catch (error) {
       return safeFailure(reply, error);
     }
+  });
+
+  app.post("/api/sessions/tk88/reset", async (request, reply) => {
+    if (!consume(request.ip, reply)) return;
+    const parsed = resetTk88Body.safeParse(request.body);
+    if (!parsed.success) return invalid(reply);
+    try { await services.manager.resetTk88(); return { reset: true }; }
+    catch (error) { return safeFailure(reply, error); }
   });
 }

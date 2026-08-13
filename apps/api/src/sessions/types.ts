@@ -2,7 +2,7 @@ export type SecretRecord = Readonly<Record<string, unknown>>;
 
 import type { Category, SessionHealthReason } from "@tool-chenh/contracts";
 
-export type ProviderSecretKind = "TOKEN" | "COOKIE_BUNDLE" | "LAUNCH_URL" | "FABET_CREDENTIALS";
+export type ProviderSecretKind = "TOKEN" | "COOKIE_BUNDLE" | "LAUNCH_URL" | "FABET_CREDENTIALS" | "TK88_PROFILE";
 
 export interface ProviderSecret {
   readonly kind: ProviderSecretKind;

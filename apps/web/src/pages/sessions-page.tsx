@@ -13,10 +13,12 @@ export interface SessionApiLike {
   discoverFabet(entryUrl: string): Promise<FabetDiscoveryResult>;
   trustFabet(hostname: string): Promise<{ readonly hostname: string; readonly trusted: true }>;
   configureFabet(input: { readonly entryUrl: string; readonly trustedHostname: string; readonly username: string; readonly password: string }): Promise<RedactedSessionStatus>;
+  configureTk88(input: { readonly trustedHostname: string }): Promise<RedactedSessionStatus>;
   configureManual(input: ManualSessionInput): Promise<RedactedSessionStatus>;
   validate(id: string): Promise<RedactedSessionStatus>;
   renew(id: string): Promise<RedactedSessionStatus>;
   resetFabet(): Promise<void>;
+  resetTk88(): Promise<void>;
 }
 
 const defaultApi = new SessionApi();
@@ -63,6 +65,8 @@ export function SessionsPage({
   const [message, setMessage] = useState<string | null>(null);
   const [accountMessage, setAccountMessage] = useState<string | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
+  const [tk88ResetOpen, setTk88ResetOpen] = useState(false);
+  const [tk88Hostname, setTk88Hostname] = useState("tk88.com");
   const cancelRef = useRef<HTMLButtonElement>(null);
 
   const refresh = async (): Promise<void> => {
@@ -197,6 +201,15 @@ export function SessionsPage({
     }, "Fabet reset failed.");
   };
 
+  const registerTk88 = (): void => {
+    void run(async () => { await api.configureTk88({ trustedHostname: tk88Hostname }); await refresh(); },
+      "TK88 Chrome profile could not be registered.");
+  };
+
+  const resetTk88 = (): void => {
+    void run(async () => { await api.resetTk88(); setTk88ResetOpen(false); await refresh(); }, "TK88 reset failed.");
+  };
+
   return (
     <>
       <header className="page-header">
@@ -241,12 +254,20 @@ export function SessionsPage({
             <button disabled={busy || provider.length === 0 || secret.length === 0} type="submit">Save and validate</button>
           </form>
         </section>
+        <section className="session-panel" aria-labelledby="tk88-session-heading">
+          <h2 id="tk88-session-heading">TK88 Chrome</h2>
+          <p>Registers the dedicated encrypted browser profile. Login and lounge binding happen in the read-only browser step.</p>
+          <label>TK88 trusted hostname<input aria-label="TK88 trusted hostname" value={tk88Hostname}
+            onChange={(event) => setTk88Hostname(event.target.value)} /></label>
+          <button disabled={busy || tk88Hostname.trim().length === 0} onClick={registerTk88} type="button">Register TK88 Chrome</button>
+        </section>
       </div>
 
       <section className="session-panel session-status-panel" aria-labelledby="session-status-heading">
         <div className="session-heading-row">
           <h2 id="session-status-heading">Stored session status</h2>
-          <button className="danger-button" disabled={busy} onClick={() => setResetOpen(true)} type="button">Reset Fabet session</button>
+          <div className="session-actions"><button className="danger-button" disabled={busy} onClick={() => setResetOpen(true)} type="button">Reset Fabet session</button>
+            <button className="danger-button" disabled={busy} onClick={() => setTk88ResetOpen(true)} type="button">Reset TK88 Chrome</button></div>
         </div>
         {sessions.length === 0 ? <p className="empty-state">No session is configured.</p> : (
           <div className="table-wrap"><table><thead><tr>
@@ -255,7 +276,7 @@ export function SessionsPage({
             <tr key={session.id}>
               <td>{session.provider}</td>
               <td>{session.category ?? "—"}</td>
-              <td>{session.source === "FABET_LOGIN" ? "Fabet login" : "Direct"}</td>
+              <td>{session.source === "FABET_LOGIN" ? "Fabet login" : session.source === "TK88_CHROME" ? "TK88 Chrome" : "Direct"}</td>
               <td><strong className={`session-state session-state--${session.state.toLowerCase()}`}>{displayState(session.state)}</strong></td>
               <td>{session.trustedHostname ?? "—"}</td>
               <td>{displayTime(session.lastValidatedAtMs)}</td>
@@ -284,7 +305,7 @@ export function SessionsPage({
           <label>Account session<select aria-label="Account session" value={accountSessionId} onChange={(event) => setAccountSessionId(event.target.value)}>
             {eligibleAccountSessions.length === 0 && <option value="">No active verified provider session</option>}
             {eligibleAccountSessions.map((session) => <option key={session.id} value={session.id}>
-              {session.provider} · {session.source === "FABET_LOGIN" ? "Fabet login" : "Direct"} · {session.state}
+              {session.provider} · {session.source === "FABET_LOGIN" ? "Fabet login" : session.source === "TK88_CHROME" ? "TK88 Chrome" : "Direct"} · {session.state}
             </option>)}
           </select></label>
           <label>Account alias<input aria-label="Account alias" maxLength={80} value={accountAlias} onChange={(event) => setAccountAlias(event.target.value)} /></label>
@@ -309,6 +330,12 @@ export function SessionsPage({
           </section>
         </div>
       )}
+      {tk88ResetOpen && <div className="modal-backdrop"><section aria-labelledby="tk88-reset-title" aria-modal="true" className="confirm-dialog" role="dialog">
+        <h2 id="tk88-reset-title">Reset TK88 Chrome?</h2>
+        <p>This deletes the local TK88 browser profile registration. Fabet and direct provider sessions remain untouched.</p>
+        <div className="dialog-actions"><button onClick={() => setTk88ResetOpen(false)} type="button">Cancel</button>
+          <button className="danger-button" disabled={busy} onClick={resetTk88} type="button">Confirm reset TK88 Chrome</button></div>
+      </section></div>}
     </>
   );
 }

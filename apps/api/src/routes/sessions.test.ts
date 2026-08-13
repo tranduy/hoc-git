@@ -50,6 +50,44 @@ afterEach(async () => {
 });
 
 describe("session routes", () => {
+  it("registers and resets TK88 Chrome independently without exposing profile material", async () => {
+    const services = await createServices();
+    const app = buildApp(createFixtureRuntime(100), { sessionServices: services });
+    apps.push(app);
+    await app.ready();
+    const headers = { origin: "http://127.0.0.1:4311" };
+
+    const configured = await app.inject({
+      method: "POST", url: "/api/sessions/tk88/configure", headers,
+      payload: { trustedHostname: "tk88.example" }
+    });
+    expect(configured.statusCode).toBe(200);
+    expect(configured.json()).toMatchObject({
+      id: "tk88", provider: "TK88", source: "TK88_CHROME", trustedHostname: "tk88.example",
+      state: "ACTION_REQUIRED", secretConfigured: true
+    });
+    expect(configured.body).not.toContain("managed-profile");
+    expect(configured.headers["cache-control"]).toBe("no-store");
+
+    expect((await app.inject({
+      method: "POST", url: "/api/sessions/tk88/reset", headers,
+      payload: { confirmation: "NO" }
+    })).statusCode).toBe(400);
+    expect((await services.manager.listStatuses()).sessions).toHaveLength(1);
+
+    expect((await app.inject({
+      method: "POST", url: "/api/sessions/fabet/reset", headers,
+      payload: { confirmation: "RESET_FABET" }
+    })).statusCode).toBe(200);
+    expect((await services.manager.listStatuses()).sessions).toHaveLength(1);
+
+    expect((await app.inject({
+      method: "POST", url: "/api/sessions/tk88/reset", headers,
+      payload: { confirmation: "RESET_TK88" }
+    })).statusCode).toBe(200);
+    expect(await services.manager.listStatuses()).toEqual({ sessions: [] });
+  });
+
   it("discovers, trusts, configures, and resets Fabet without returning secrets", async () => {
     const services = await createServices();
     const app = buildApp(createFixtureRuntime(100), { sessionServices: services });

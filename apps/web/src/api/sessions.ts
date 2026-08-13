@@ -63,6 +63,10 @@ export class SessionApi {
     return this.#statusRequest("/api/sessions/fabet/configure", input);
   }
 
+  configureTk88(input: { readonly trustedHostname: string }): Promise<RedactedSessionStatus> {
+    return this.#statusRequest("/api/sessions/tk88/configure", input);
+  }
+
   configureManual(input: ManualSessionInput): Promise<RedactedSessionStatus> {
     return this.#statusRequest("/api/sessions/manual", input);
   }
@@ -77,6 +81,10 @@ export class SessionApi {
 
   async resetFabet(): Promise<void> {
     await this.#request("/api/sessions/fabet/reset", { confirmation: "RESET_FABET" });
+  }
+
+  async resetTk88(): Promise<void> {
+    await this.#request("/api/sessions/tk88/reset", { confirmation: "RESET_TK88" });
   }
 
   async #statusRequest(url: string, body: object): Promise<RedactedSessionStatus> {

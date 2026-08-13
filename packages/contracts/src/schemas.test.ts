@@ -20,9 +20,21 @@ import {
   RedactedSessionStatusSchema,
   RealtimeMessageSchema,
   SessionStatusListSchema,
+  SessionSourceSchema,
   StakeLegSchema,
   TwoLegExecutionResultSchema
 } from "./schemas.js";
+
+describe("SessionSourceSchema", () => {
+  it("keeps TK88 Chrome distinct from Fabet and manual provider sessions", () => {
+    expect(SessionSourceSchema.parse("TK88_CHROME")).toBe("TK88_CHROME");
+    expect(RedactedSessionStatusSchema.parse({
+      id: "tk88", provider: "TK88", category: null, source: "TK88_CHROME", state: "ACTION_REQUIRED",
+      trustedHostname: "tk88.example", acquiredAtMs: 100, lastValidatedAtMs: null,
+      renewAfterMs: null, secretConfigured: true, reason: "SCHEMA_CHANGED"
+    }).source).toBe("TK88_CHROME");
+  });
+});
 
 describe("CatalogSourceStatusSchema", () => {
   it("accepts one redacted logical source whose id matches its exact provider and category", () => {

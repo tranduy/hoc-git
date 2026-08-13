@@ -1,6 +1,6 @@
 export type Category = "FOOTBALL" | "LOL";
 
-export type SessionSource = "FABET_LOGIN" | "MANUAL_PROVIDER_SESSION";
+export type SessionSource = "FABET_LOGIN" | "TK88_CHROME" | "MANUAL_PROVIDER_SESSION";
 
 export type SessionState =
   | "UNCONFIGURED"

@@ -205,6 +205,24 @@ describe("SessionManager", () => {
     expect((await manager.listStatuses()).sessions[0]?.source).toBe("MANUAL_PROVIDER_SESSION");
   });
 
+  it("stores and resets TK88 Chrome independently from Fabet and manual sessions", async () => {
+    const vault = await createVault();
+    const validator = new FakeValidator();
+    const manager = createManager(vault, validator, { wallClockNowMs: 30 });
+    const direct = await manager.configureManual({ provider: "SABA", kind: "TOKEN", secret: "direct-canary" });
+    await manager.configureTk88({ trustedHostname: "tk88.example" });
+
+    expect((await manager.listStatuses()).sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: direct.id, source: "MANUAL_PROVIDER_SESSION" }),
+      expect.objectContaining({ id: "tk88", provider: "TK88", source: "TK88_CHROME", secretConfigured: true })
+    ]));
+    await manager.resetFabet();
+    expect((await manager.listStatuses()).sessions.some((session) => session.source === "TK88_CHROME")).toBe(true);
+    await manager.resetTk88();
+    expect((await manager.listStatuses()).sessions.some((session) => session.source === "TK88_CHROME")).toBe(false);
+    expect(await manager.getActiveSecretHandle(direct.id)).not.toBeNull();
+  });
+
   it("logs into Fabet and repeats the read-only bootstrap after 24 hours", async () => {
     const vault = await createVault();
     const clock = { wallClockNowMs: 40 };

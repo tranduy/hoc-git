@@ -47,6 +47,7 @@ import type {
 
 export const SessionSourceSchema = z.enum([
   "FABET_LOGIN",
+  "TK88_CHROME",
   "MANUAL_PROVIDER_SESSION"
 ]) satisfies z.ZodType<SessionSource>;
 
