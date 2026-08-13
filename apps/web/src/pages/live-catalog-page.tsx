@@ -559,7 +559,11 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     return () => window.clearInterval(timer);
   }, []);
 
-  const events = useMemo(() => buildComparisonEvents(catalogs).filter((item) => item.event.category === category), [catalogs, category]);
+  const freshCatalogs = useMemo(() => catalogs.filter((catalog) => !staleAccountIds.has(catalog.accountId)),
+    [catalogs, staleAccountIds]);
+  const events = useMemo(() => buildComparisonEvents(freshCatalogs).filter((item) =>
+    item.event.category === category && !(item.event.category === "FOOTBALL" && item.event.isVirtual !== false)),
+  [freshCatalogs, category]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs)), [events, nowMs]);
   const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
     selectedIds.has(source.id) && source.sessionState === "ACTIVE").map((source) => source.provider)),
@@ -635,7 +639,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         hasExactEvent: selectedEvent.providers.includes(provider) };
     });
     return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
-      baseStake={baseStake} books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent}
+      baseStake={baseStake} books={detailBooks} comparisonCatalogs={freshCatalogs} comparisonEvent={selectedEvent}
       highlightTicketKey={highlightTicketKey} rankedTickets={rankedByEvent.get(selectedEvent.key)?.tickets ?? []}
       lagSignals={signals.filter((signal) => signal.event.key === selectedEvent.key)}
       onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); setHighlightTicketKey(null); }}
@@ -651,14 +655,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
         onClick={() => changeCategory("LOL")} type="button">LoL</button></div>}
       <ProviderSelector accounts={categorySources} loaded={accountsLoaded} selected={selectedIds} toggle={toggle} />
-      <label className="stake-config">Base stake for every match (VND)<input aria-label="Base stake for every match (VND)"
-        inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
-          const value = event.currentTarget.value; setBaseStakeInput(value);
-          if (saveBaseStake(window.localStorage, value)) {
-            invalidateVerifiedTickets(); setBaseStake(value); setStakeError(null);
-          }
-          else setStakeError("Use a whole VND amount of at least 30,000 in 1,000 VND steps.");
-        }} />{stakeError === null ? <small>Applied to the lower-odds leg.</small> : <small role="alert">{stakeError}</small>}</label>
       <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true, category)} type="button">
         {busy ? "Loading…" : "Compare selected books"}</button>
     </section>
@@ -674,6 +670,17 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     {catalogs.length > 0 && <LagSignalPanel signals={signals} />}
     {catalogs.length > 0 && <PriceMovementPanel movements={movements} />}
     <ProfitToastStack alerts={profitAlerts} onOpen={openProfitAlert} sound={notificationSound.current} />
+    <section aria-label="Cấu hình tiền cược" className="stake-panel">
+      <div><strong>TIỀN ĐẶT CƠ BẢN</strong><span>Nhập tiền cho cửa odds thấp; cửa đối diện được tự cân để tối đa hóa mức lãi thấp nhất.</span></div>
+      <label className="stake-config">Số tiền mỗi trận (VND)<input aria-label="Base stake for every match (VND)"
+        inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
+          const value = event.currentTarget.value; setBaseStakeInput(value);
+          if (saveBaseStake(window.localStorage, value)) {
+            invalidateVerifiedTickets(); setBaseStake(value); setStakeError(null);
+          }
+          else setStakeError("Số tiền tối thiểu 30.000 VND và phải chia hết cho 1.000 VND.");
+        }} />{stakeError === null ? <small>Đang áp dụng {money(baseStake)} cho cửa odds thấp.</small> : <small role="alert">{stakeError}</small>}</label>
+    </section>
     <section aria-label="Live comparison workspace" className={selectedDetail === null ? "catalog-workspace" : "catalog-workspace catalog-workspace--selected"}>
       <div className="catalog-workspace__list"><h2>Exact two-book matches</h2><div className="catalog-event-list">
       {displayEvents.length === 0 && <div className="catalog-workspace__empty"><h3>No exact two-book comparison is currently available</h3>
@@ -687,8 +694,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const estimatedStartAtMs = estimatedLiveStartAtMs(observedAtMs, item.event.liveState);
       const comparisonCount = ranked.tickets.length;
       return <article className={item.key === selectedKey ? "catalog-event catalog-event--selected" : "catalog-event"} key={item.key}><header><div className="catalog-event__identity"><span>{item.event.competition}</span><h3>{label}</h3>
-        <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
-          {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
+        <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}</div>
         <small>{comparisonCount > 0 ? `${comparisonCount} exact two-outcome ticket(s) · top 5 by guaranteed profit` :
           "No exact two-book ticket shared by the selected providers"}</small>
         {ranked.bestVerifiedProfit !== null && <strong>Best guaranteed {money(ranked.bestVerifiedProfit)}</strong>}</div>

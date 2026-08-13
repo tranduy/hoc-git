@@ -93,6 +93,28 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByText("Alpha vs Beta")).toBeNull();
   });
 
+  it("excludes virtual football even when two providers expose the same ticket", async () => {
+    const source = (provider: "SABA" | "SBOBET"): CatalogSourceStatus => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+    });
+    const providerCatalog = (provider: "SABA" | "SBOBET"): LiveCatalogResponse => ({
+      ...catalog, accountId: `catalog-source:${provider}:FOOTBALL`, provider,
+      events: [{ ...event, provider, providerEventId: `${provider}-event`, isVirtual: true,
+        sportVariant: "VIRTUAL_FOOTBALL" }],
+      markets: [{ ...market, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market` }],
+      quotes: quotes.map((quote) => ({ ...quote, provider, providerEventId: `${provider}-event`,
+        providerMarketId: `${provider}-market`, providerSelectionId: `${provider}-${quote.selection}` }))
+    });
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [source("SABA"), source("SBOBET")] }}
+      catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
+
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+    expect(screen.queryByText("#VIRTUAL")).toBeNull();
+  });
+
   it("keeps stable catalog-source identity separate from the newest eligible betting account", async () => {
     const source: CatalogSourceStatus = { id: "catalog-source:SABA:FOOTBALL", alias: "C-Sports · SABA",
       provider: "SABA", category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN",
@@ -203,6 +225,7 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async (id) => id === sabaAccount.id ? saba : sbobet }} />);
 
     const input = await screen.findByLabelText("Base stake for every match (VND)") as HTMLInputElement;
+    expect(within(screen.getByRole("region", { name: "Cấu hình tiền cược" })).getByDisplayValue("100000")).toBe(input);
     expect(input.value).toBe("100000");
     expect(await screen.findByText(/Waiting for a provider price change/u)).toBeTruthy();
     fireEvent.change(input, { target: { value: "150000" } });
@@ -424,7 +447,7 @@ describe("LiveCatalogPage", () => {
     expect(highlighted.className).toContain("ranked-ticket-row--highlight");
   });
 
-  it("keeps the last verified provider snapshot visible when the next poll fails", async () => {
+  it("retains stale snapshots only as diagnostics and removes their arbitrage rows", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
     const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
@@ -449,8 +472,9 @@ describe("LiveCatalogPage", () => {
     expect(await screen.findByRole("columnheader", { name: "SABA" })).toBeTruthy();
     await act(async () => vi.advanceTimersByTimeAsync(250));
 
-    expect(screen.getByRole("columnheader", { name: "SABA" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
+    expect(screen.queryByRole("columnheader", { name: "SABA" })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "SBOBET" })).toBeNull();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
     expect(screen.getByText(/1 selected provider\(s\) unavailable.*last verified snapshot is retained/iu)).toBeTruthy();
     expect(screen.getByText("1 stale snapshot retained")).toBeTruthy();
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
@@ -479,8 +503,10 @@ describe("LiveCatalogPage", () => {
       throw new Error("provider temporarily unavailable");
     } }} />);
 
-    expect(await screen.findByRole("columnheader", { name: "SABA" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
+    expect(screen.queryByRole("columnheader", { name: "SABA" })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "SBOBET" })).toBeNull();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
     expect(screen.getByText("2 stale snapshots retained")).toBeTruthy();
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
