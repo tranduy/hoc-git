@@ -340,9 +340,11 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const notificationSound = useRef<NotificationSound | null>(null);
   if (notificationSound.current === null) notificationSound.current = new NotificationSound();
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
+  const staleAccountIdsRef = useRef<ReadonlySet<string>>(new Set());
   const accountsRef = useRef<readonly AccountStatus[]>([]);
   const sourcesRef = useRef<readonly CatalogSourceStatus[]>([]);
-  const refreshInFlight = useRef(false);
+  const catalogRefreshesInFlight = useRef(new Set<string>());
+  const profileRefreshInFlight = useRef(false);
   const retryAfterMs = useRef(new Map<string, number>());
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event"),
@@ -360,12 +362,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const loadIds = useCallback(async (
     ids: readonly string[], foreground: boolean, expectedCategory: CatalogCategory
   ): Promise<void> => {
-    const requestedIds = foreground ? ids : ids.filter((id) => (retryAfterMs.current.get(id) ?? 0) <= Date.now());
-    if (requestedIds.length === 0 || refreshInFlight.current) return;
-    refreshInFlight.current = true;
+    const requestedIds = ids.filter((id) => !catalogRefreshesInFlight.current.has(id) &&
+      (foreground || (retryAfterMs.current.get(id) ?? 0) <= Date.now()));
+    if (requestedIds.length === 0) return;
+    for (const id of requestedIds) catalogRefreshesInFlight.current.add(id);
     if (foreground) setBusy(true);
     try {
-      const results = await Promise.allSettled(requestedIds.map(async (id) => {
+      const results = await Promise.allSettled(requestedIds.map((id) => (async () => {
         const requestedSource = sourcesRef.current.find((source) => source.id === id);
         if (requestedSource === undefined) throw new Error("Catalog source is unavailable");
         const legacyFallbackIds = catalogSourceApi === undefined ? accountsRef.current.filter((account) =>
@@ -390,14 +393,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           catalogsRef.current = nextCatalogs;
           saveCatalogCache(window.localStorage, nextCatalogs);
           setCatalogs(nextCatalogs);
-          setStaleAccountIds((current) => {
-            const next = new Set(current);
-            next.delete(id);
-            return next;
-          });
+          const nextStale = new Set(staleAccountIdsRef.current);
+          nextStale.delete(id);
+          staleAccountIdsRef.current = nextStale;
+          setStaleAccountIds(nextStale);
         }
         return value;
-      }));
+      })().finally(() => catalogRefreshesInFlight.current.delete(id))));
       const accepted = results.flatMap((result) => result.status === "fulfilled" &&
         result.value.category === expectedCategory ? [result.value] : []);
       const failedIds = new Set(requestedIds.filter((_id, index) => {
@@ -418,15 +420,22 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       catalogsRef.current = nextCatalogs;
       saveCatalogCache(window.localStorage, nextCatalogs);
       setCatalogs(nextCatalogs);
-      setStaleAccountIds(new Set(preserved.map((catalog) => catalog.accountId)));
-      const nextEvents = buildComparisonEvents(nextCatalogs);
-      const providers = new Set<ProviderId>(accepted.map((catalog) => catalog.provider));
-      const observedAtMs = accepted.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
+      const nextStale = new Set(staleAccountIdsRef.current);
+      for (const catalog of accepted) nextStale.delete(catalog.accountId);
+      for (const id of failedIds) {
+        if (nextCatalogs.some((catalog) => catalog.accountId === id)) nextStale.add(id);
+      }
+      staleAccountIdsRef.current = nextStale;
+      setStaleAccountIds(nextStale);
+      const freshCatalogs = nextCatalogs.filter((catalog) => !nextStale.has(catalog.accountId));
+      const nextEvents = buildComparisonEvents(freshCatalogs);
+      const providers = new Set<ProviderId>(freshCatalogs.map((catalog) => catalog.provider));
+      const observedAtMs = freshCatalogs.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
       const candidates = signalTracker.current.update(nextEvents, providers, executableStakePolicy(baseStakeRef.current), observedAtMs);
-      setSignals(filterAccountBackedSignals(candidates, accepted, accountsRef.current, observedAtMs));
+      setSignals(filterAccountBackedSignals(candidates, freshCatalogs, accountsRef.current, observedAtMs));
       const nextMovements = movementTracker.current.update(nextEvents, observedAtMs);
       setMovements(nextMovements);
-      const selectedAccounts = accepted.flatMap((catalog) => {
+      const selectedAccounts = freshCatalogs.flatMap((catalog) => {
         const bettor = selectBettingAccount(accountsRef.current, catalog.provider, catalog.category);
         return bettor === null ? [] : [bettor];
       });
@@ -441,7 +450,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       else if (accepted.every((catalog) => catalog.events.length === 0)) setMessage("Nguồn hoạt động bình thường nhưng hiện không có trận trong catalog.");
       else setMessage(null);
     } finally {
-      refreshInFlight.current = false;
+      for (const id of requestedIds) catalogRefreshesInFlight.current.delete(id);
       if (foreground) setBusy(false);
     }
   }, [catalogApi, catalogSourceApi]);
@@ -470,7 +479,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const cached = loadCatalogCache(window.localStorage).filter((catalog) => initial.has(catalog.accountId));
       catalogsRef.current = cached;
       setCatalogs(cached);
-      setStaleAccountIds(new Set(cached.map((catalog) => catalog.accountId)));
+      const cachedStale = new Set(cached.map((catalog) => catalog.accountId));
+      staleAccountIdsRef.current = cachedStale;
+      setStaleAccountIds(cachedStale);
       setAccounts(items); setSources(nextSources); setAccountsLoaded(true);
       setSelectedIds(new Set(availableCandidates.map((source) => source.id)));
       setCategory(initialCategory); saveCatalogCategory(window.localStorage, initialCategory);
@@ -499,17 +510,22 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     if (ids.length === 0) return;
     let cancelled = false;
     const refreshProfiles = async (): Promise<void> => {
-      if (refreshInFlight.current) return;
+      if (profileRefreshInFlight.current) return;
+      profileRefreshInFlight.current = true;
       const results = await Promise.allSettled(ids.map((id) => accountApi.refresh(id)));
-      if (cancelled) return;
-      const refreshed = new Map(results.flatMap((result, index) => result.status === "fulfilled" &&
-        result.value.id === ids[index] ? [[result.value.id, result.value] as const] : []));
-      if (refreshed.size === 0) return;
-      setAccounts((current) => {
-        const next = current.map((account) => refreshed.get(account.id) ?? account);
-        accountsRef.current = next;
-        return next;
-      });
+      try {
+        if (cancelled) return;
+        const refreshed = new Map(results.flatMap((result, index) => result.status === "fulfilled" &&
+          result.value.id === ids[index] ? [[result.value.id, result.value] as const] : []));
+        if (refreshed.size === 0) return;
+        setAccounts((current) => {
+          const next = current.map((account) => refreshed.get(account.id) ?? account);
+          accountsRef.current = next;
+          return next;
+        });
+      } finally {
+        profileRefreshInFlight.current = false;
+      }
     };
     void refreshProfiles();
     const timer = window.setInterval(() => void refreshProfiles(), profileRefreshIntervalMs);
@@ -559,7 +575,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     });
   };
   const changeCategory = (next: CatalogCategory): void => {
-    setCategory(next); setCatalogs([]); catalogsRef.current = []; setStaleAccountIds(new Set());
+    setCategory(next); setCatalogs([]); catalogsRef.current = []; staleAccountIdsRef.current = new Set();
+    setStaleAccountIds(new Set());
     saveCatalogCategory(window.localStorage, next);
     setSignals([]); setMovements([]); setMessage(null); setSelectedKey(null); setVerifiedTickets(new Map());
     preflightCoordinator.current.clear();

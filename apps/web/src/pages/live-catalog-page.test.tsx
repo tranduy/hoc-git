@@ -244,6 +244,70 @@ describe("LiveCatalogPage", () => {
     expect(selectedButton.getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("keeps refreshing a fast source while another selected source is still pending", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const sources: readonly CatalogSourceStatus[] = [
+      { id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+        sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null },
+      { id: "catalog-source:IM:FOOTBALL", alias: "IM", provider: "IM", category: "FOOTBALL",
+        sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null }
+    ];
+    let fastReads = 0;
+    const never = new Promise<LiveCatalogResponse>(() => undefined);
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => {
+      if (id === "catalog-source:IM:FOOTBALL") return never;
+      fastReads += 1;
+      return { ...catalog, accountId: id, provider: "SABA", observedAtMs: 100 + fastReads,
+        events: [{ ...event, provider: "SABA", providerEventId: "saba-event" }],
+        markets: [{ ...market, provider: "SABA", providerEventId: "saba-event", providerMarketId: "saba-market" }],
+        quotes: quotes.map((quote) => ({ ...quote, provider: "SABA", providerEventId: "saba-event",
+          providerMarketId: "saba-market", providerSelectionId: `saba-${quote.selection}`, sequence: fastReads })) };
+    });
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sources }} catalogApi={{ read }} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(fastReads).toBe(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(750));
+
+    expect(fastReads).toBeGreaterThan(1);
+    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+  });
+
+  it("keeps the other provider fresh when only one source completes a later poll", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const sources: readonly CatalogSourceStatus[] = [
+      { id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+        sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null },
+      { id: "catalog-source:IM:FOOTBALL", alias: "IM", provider: "IM", category: "FOOTBALL",
+        sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null }
+    ];
+    const counts = new Map<string, number>();
+    const never = new Promise<LiveCatalogResponse>(() => undefined);
+    const read = async (id: string): Promise<LiveCatalogResponse> => {
+      const count = (counts.get(id) ?? 0) + 1;
+      counts.set(id, count);
+      if (id.includes(":IM:") && count > 1) return never;
+      const provider = id.includes(":IM:") ? "IM" as const : "SABA" as const;
+      return { ...catalog, accountId: id, provider, observedAtMs: 100 + count,
+        events: [{ ...event, provider, providerEventId: `${provider}-event` }],
+        markets: [{ ...market, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market` }],
+        quotes: quotes.map((quote) => ({ ...quote, provider, providerEventId: `${provider}-event`,
+          providerMarketId: `${provider}-market`, providerSelectionId: `${provider}-${quote.selection}`, sequence: count })) };
+    };
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sources }} catalogApi={{ read }} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(await screen.findByText("2 fresh provider(s)")).toBeTruthy();
+
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+
+    expect(screen.getByText("2 fresh provider(s)")).toBeTruthy();
+    expect(screen.queryByText(/stale snapshot/u)).toBeNull();
+  });
+
   it("shows exact full-time totals with a clear TÃ i/Xá»‰u label and both provider prices", async () => {
     const providerAccount = (id: string, provider: "SABA" | "SBOBET"): AccountStatus => ({ ...account,
       id, provider, alias: `${provider} main` });
