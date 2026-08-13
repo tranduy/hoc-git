@@ -63,6 +63,7 @@ import { SbobetReceiptProtocolReader } from "../providers/sbobet/sbobet-receipt-
 import { SbobetExecutionReceiptReader } from "../providers/sbobet/sbobet-execution-receipt-reader.js";
 import type { ReceiptReader } from "../execution/receipt-reconciler.js";
 import { CatalogSourceRegistry, type SupportedCatalogPair } from "../catalog/catalog-source-registry.js";
+import { Tk88BrowserAutomation } from "./tk88-browser.js";
 
 export interface CreateSessionServicesOptions {
   readonly localAppData: string;
@@ -84,11 +85,12 @@ export interface ManagedSessionServices extends SessionServices {
   readonly providerPreflight: ProviderPreflightRegistry;
   readonly receiptProtocol: ReceiptProtocolRegistry;
   readonly receiptReaders: readonly ReceiptReader[];
+  readonly tk88Browser: Tk88BrowserAutomation;
   tick(): Promise<void>;
   close(): Promise<void>;
 }
 
-const supportedCatalogPairs = [
+const supportedCatalogPairs = ([
   { provider: "CMD", category: "FOOTBALL", alias: "T-Sports · CMD" },
   { provider: "SABA", category: "FOOTBALL", alias: "C-Sports · SABA" },
   { provider: "SABA", category: "LOL", alias: "SABA Esports" },
@@ -98,7 +100,7 @@ const supportedCatalogPairs = [
   { provider: "IM", category: "FOOTBALL", alias: "I-Sports · IM", anchorProvider: "FABET", anchorCategory: null },
   { provider: "IM", category: "LOL", alias: "IM Esports" },
   { provider: "BTI", category: "LOL", alias: "BTI Esports", anchorProvider: "FABET", anchorCategory: null }
-] as const satisfies readonly SupportedCatalogPair[];
+] as const).map((pair) => ({ ...pair, strategy: "FABET_LOGIN" as const })) satisfies readonly SupportedCatalogPair[];
 
 function isSafeCapturedLaunch(value: string, expectedHost?: string): boolean {
   try {
@@ -154,6 +156,9 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     profilePath: join(profilesRoot, "fabet"),
     headless: false
   });
+  const tk88Browser = new Tk88BrowserAutomation({
+    profilePath: join(profilesRoot, "tk88"), headless: false
+  });
   const idFactory = options.idFactory ?? randomUUID;
   const fabetDriver = new FabetBrowserDriver({
     vault,
@@ -177,7 +182,8 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     clock,
     idFactory,
     fabetDriver,
-    resetFabetState: async () => trustStore.resetFabetHosts()
+    resetFabetState: async () => trustStore.resetFabetHosts(),
+    resetTk88State: async () => tk88Browser.resetProfile()
   });
   const sabaBrowser = new FabetSabaBrowserManager({ fabet: {
     withProviderPage: manager.withFabetProviderPage.bind(manager)
@@ -276,13 +282,14 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     providerPreflight,
     receiptProtocol,
     receiptReaders,
+    tk88Browser,
     async tick(): Promise<void> {
       await manager.tick();
     },
     async close(): Promise<void> {
       await Promise.all([
         automation.close(), cmdBrowser.close(), sabaBrowser.close(), sabaFootballPushBrowser.close(), sabaEsportsBrowser.close(),
-        sbobetBrowser.close(), imEsportsBrowser.close(), apsportBrowser.close(), btiBrowser.close()
+        sbobetBrowser.close(), imEsportsBrowser.close(), apsportBrowser.close(), btiBrowser.close(), tk88Browser.close()
       ]);
     }
   };

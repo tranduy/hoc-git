@@ -127,4 +127,44 @@ describe("CatalogSourceRegistry", () => {
     await expect(value.withActiveHandle("catalog-source:SABA:FOOTBALL", "SBOBET",
       async () => "wrong", "FOOTBALL")).rejects.toThrow("ACCOUNT_PROVIDER_MISMATCH");
   });
+
+  it("binds each logical source to its explicit session strategy without fallback", async () => {
+    const sessions = [
+      session({ id: "fabet-anchor", provider: "FABET", category: null, source: "FABET_LOGIN", acquiredAtMs: 100 }),
+      session({ id: "tk88-anchor", provider: "TK88", category: null, source: "TK88_CHROME", acquiredAtMs: 200 }),
+      session({ id: "manual-saba", provider: "SABA", category: "FOOTBALL", source: "MANUAL_PROVIDER_SESSION", acquiredAtMs: 300 }),
+      session({ id: "wrong-fabet-as-tk88", provider: "TK88", category: null, source: "FABET_LOGIN", acquiredAtMs: 400 }),
+      session({ id: "wrong-tk88-as-fabet", provider: "FABET", category: null, source: "TK88_CHROME", acquiredAtMs: 500 }),
+      session({ id: "wrong-fabet-as-direct", provider: "SABA", category: "FOOTBALL", source: "FABET_LOGIN", acquiredAtMs: 600 })
+    ];
+    const value = new CatalogSourceRegistry({
+      sessions: {
+        listStatuses: async (): Promise<SessionStatusList> => ({ sessions }),
+        getActiveSecretHandle: async () => null
+      },
+      accounts: registry([]).accounts,
+      supportedPairs: [
+        { provider: "IM", category: "LOL", alias: "TK88 IM", strategy: "TK88_CHROME",
+          anchorProvider: "TK88", anchorCategory: null },
+        { provider: "BTI", category: "LOL", alias: "Fabet BTI", strategy: "FABET_LOGIN",
+          anchorProvider: "FABET", anchorCategory: null },
+        { provider: "SABA", category: "FOOTBALL", alias: "Direct SABA", strategy: "DIRECT_SESSION" }
+      ]
+    });
+
+    await expect(value.resolveCatalogSource("catalog-source:IM:LOL")).resolves.toMatchObject({ sessionId: "tk88-anchor" });
+    await expect(value.resolveCatalogSource("catalog-source:BTI:LOL")).resolves.toMatchObject({ sessionId: "fabet-anchor" });
+    await expect(value.resolveCatalogSource("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({ sessionId: "manual-saba" });
+
+    const noTk88 = new CatalogSourceRegistry({
+      sessions: {
+        listStatuses: async (): Promise<SessionStatusList> => ({ sessions: sessions.filter((item) => item.source !== "TK88_CHROME") }),
+        getActiveSecretHandle: async () => null
+      },
+      accounts: registry([]).accounts,
+      supportedPairs: [{ provider: "IM", category: "LOL", alias: "TK88 IM", strategy: "TK88_CHROME",
+        anchorProvider: "TK88", anchorCategory: null }]
+    });
+    await expect(noTk88.resolveCatalogSource("catalog-source:IM:LOL")).rejects.toThrow("CATALOG_SOURCE_UNAVAILABLE");
+  });
 });

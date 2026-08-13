@@ -11,12 +11,14 @@ import type { ActiveAccountAccess } from "../providers/cmd/cmd-observed-catalog.
 import type { ActiveSecretHandle } from "../sessions/types.js";
 
 type CatalogProvider = Exclude<ProviderId, "FABET">;
+export type CatalogSourceStrategy = "TK88_CHROME" | "FABET_LOGIN" | "DIRECT_SESSION";
 
 export interface SupportedCatalogPair {
   readonly provider: CatalogProvider;
   readonly category: Category;
   readonly alias: string;
-  readonly anchorProvider?: ProviderId;
+  readonly strategy?: CatalogSourceStrategy;
+  readonly anchorProvider?: string;
   readonly anchorCategory?: Category | null;
 }
 
@@ -39,7 +41,9 @@ function newest(sessions: readonly RedactedSessionStatus[]): RedactedSessionStat
 }
 
 function isPairAnchor(session: RedactedSessionStatus, pair: SupportedCatalogPair): boolean {
-  return session.provider === (pair.anchorProvider ?? pair.provider) &&
+  const expectedSource = pair.strategy === "TK88_CHROME" ? "TK88_CHROME" :
+    pair.strategy === "DIRECT_SESSION" ? "MANUAL_PROVIDER_SESSION" : "FABET_LOGIN";
+  return session.source === expectedSource && session.provider === (pair.anchorProvider ?? pair.provider) &&
     session.category === (pair.anchorCategory === undefined ? pair.category : pair.anchorCategory);
 }
 
@@ -110,7 +114,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
     }
     if (pair.provider !== expectedProvider) throw new Error("ACCOUNT_PROVIDER_MISMATCH");
     if (expectedCategory !== undefined && pair.category !== expectedCategory) throw new Error("ACCOUNT_CATEGORY_MISMATCH");
-    if (pair.anchorProvider !== undefined || pair.anchorCategory !== undefined) {
+    if (pair.strategy === "TK88_CHROME" || pair.anchorProvider !== undefined || pair.anchorCategory !== undefined) {
       throw new Error("CATALOG_SOURCE_HANDLE_UNAVAILABLE");
     }
     const selected = await this.#resolveActive(pair);
