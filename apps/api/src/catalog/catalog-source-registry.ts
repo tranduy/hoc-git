@@ -52,6 +52,8 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
   readonly #accounts: CatalogAccountDelegate;
   readonly #pairs: readonly SupportedCatalogPair[];
   readonly #pairsById: ReadonlyMap<string, SupportedCatalogPair>;
+  #sessionCache: { readonly sessions: readonly RedactedSessionStatus[]; readonly expiresAtMs: number } | null = null;
+  #sessionRead: Promise<readonly RedactedSessionStatus[]> | null = null;
 
   constructor(options: {
     readonly sessions: CatalogSessionAccess;
@@ -69,7 +71,7 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
   }
 
   async listStatuses(): Promise<readonly CatalogSourceStatus[]> {
-    const sessions = (await this.#sessions.listStatuses()).sessions;
+    const sessions = await this.#sessionStatuses();
     return this.#pairs.map((pair) => {
       const exact = sessions.filter((candidate) => isPairAnchor(candidate, pair));
       const selected = newest(exact.filter((candidate) => candidate.state === "ACTIVE")) ?? newest(exact);
@@ -126,9 +128,23 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
   }
 
   async #resolveActive(pair: SupportedCatalogPair): Promise<RedactedSessionStatus> {
-    const selected = newest((await this.#sessions.listStatuses()).sessions.filter((candidate) =>
+    const selected = newest((await this.#sessionStatuses()).filter((candidate) =>
       isPairAnchor(candidate, pair) && candidate.state === "ACTIVE"));
     if (selected === null) throw new Error("CATALOG_SOURCE_UNAVAILABLE");
     return selected;
+  }
+
+  #sessionStatuses(): Promise<readonly RedactedSessionStatus[]> {
+    const nowMs = performance.now();
+    if (this.#sessionCache !== null && this.#sessionCache.expiresAtMs > nowMs) {
+      return Promise.resolve(this.#sessionCache.sessions);
+    }
+    if (this.#sessionRead !== null) return this.#sessionRead;
+    const operation = this.#sessions.listStatuses().then((result) => {
+      this.#sessionCache = { sessions: result.sessions, expiresAtMs: performance.now() + 250 };
+      return result.sessions;
+    }).finally(() => { if (this.#sessionRead === operation) this.#sessionRead = null; });
+    this.#sessionRead = operation;
+    return operation;
   }
 }

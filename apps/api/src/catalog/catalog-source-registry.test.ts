@@ -167,4 +167,25 @@ describe("CatalogSourceRegistry", () => {
     });
     await expect(noTk88.resolveCatalogSource("catalog-source:IM:LOL")).rejects.toThrow("CATALOG_SOURCE_UNAVAILABLE");
   });
+
+  it("coalesces repeated redacted session scans across source-key and status reads", async () => {
+    let listCalls = 0;
+    const sessions = [session({ id: "saba", provider: "SABA", category: "FOOTBALL" })];
+    const value = new CatalogSourceRegistry({
+      sessions: {
+        listStatuses: async (): Promise<SessionStatusList> => { listCalls += 1; return { sessions }; },
+        getActiveSecretHandle: async () => null
+      },
+      accounts: registry([]).accounts,
+      supportedPairs: [{ provider: "SABA", category: "FOOTBALL", alias: "SABA", strategy: "FABET_LOGIN" }]
+    });
+
+    await Promise.all([
+      value.resolveCatalogSource("catalog-source:SABA:FOOTBALL"),
+      value.resolveCatalogSource("catalog-source:SABA:FOOTBALL"),
+      value.listStatuses()
+    ]);
+    await value.resolveCatalogSource("catalog-source:SABA:FOOTBALL");
+    expect(listCalls).toBe(1);
+  });
 });
