@@ -149,6 +149,38 @@ describe("provider catalog route", () => {
     expect(timeout.json()).toEqual({ error: "CATALOG_TIMEOUT" });
   });
 
+  it("backs off only the failing source without blocking healthy source reads", async () => {
+    const reads = new Map<string, number>();
+    const app = buildApp(createFixtureRuntime(1_000), {
+      catalogReader: {
+        failureRetryBaseMs: 20,
+        failureRetryMaxMs: 40,
+        sourceKey: async (accountId) => accountId,
+        read: async (accountId) => {
+          reads.set(accountId, (reads.get(accountId) ?? 0) + 1);
+          if (accountId === "failing") throw new Error("provider launch failed");
+          return {
+            dataMode: "LIVE", accountId, provider: "IM", category: "LOL",
+            comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100, rejectedMarketCount: 0,
+            events: [], markets: [], quotes: []
+          };
+        }
+      }
+    });
+    apps.push(app);
+
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/failing" })).statusCode).toBe(503);
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/failing" })).statusCode).toBe(503);
+    expect(reads.get("failing")).toBe(1);
+
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/healthy" })).statusCode).toBe(200);
+    expect(reads.get("healthy")).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/failing" })).statusCode).toBe(503);
+    expect(reads.get("failing")).toBe(2);
+  });
+
   it("records safe per-provider timing, count, and source-age telemetry", async () => {
     let wallNowMs = 1_000;
     let monotonicNowMs = 50;

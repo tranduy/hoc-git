@@ -6,6 +6,8 @@ import { CatalogTelemetryRegistry } from "./catalog-telemetry.js";
 export interface CatalogReaderLike {
   readonly requestTimeoutMs?: number;
   readonly responseCacheMaxAgeMs?: number;
+  readonly failureRetryBaseMs?: number;
+  readonly failureRetryMaxMs?: number;
   sourceKey?(accountId: string): Promise<string>;
   read(accountId: string): Promise<ObservedProviderCatalog>;
 }
@@ -24,12 +26,19 @@ export function registerCatalogRoutes(
 ): void {
   const requestTimeoutMs = reader.requestTimeoutMs ?? 3_000;
   const responseCacheMaxAgeMs = reader.responseCacheMaxAgeMs ?? 5_000;
+  const failureRetryBaseMs = reader.failureRetryBaseMs ?? 1_000;
+  const failureRetryMaxMs = reader.failureRetryMaxMs ?? 5_000;
   if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) throw new Error("CATALOG_REQUEST_TIMEOUT_INVALID");
   if (!Number.isFinite(responseCacheMaxAgeMs) || responseCacheMaxAgeMs <= 0) {
     throw new Error("CATALOG_RESPONSE_CACHE_MAX_AGE_INVALID");
   }
+  if (!Number.isFinite(failureRetryBaseMs) || failureRetryBaseMs <= 0 ||
+    !Number.isFinite(failureRetryMaxMs) || failureRetryMaxMs < failureRetryBaseMs) {
+    throw new Error("CATALOG_FAILURE_RETRY_INVALID");
+  }
   const readsInFlight = new Map<string, Promise<ObservedProviderCatalog>>();
   const recentReads = new Map<string, { readonly catalog: ObservedProviderCatalog; readonly completedAtMs: number }>();
+  const sourceFailures = new Map<string, { readonly count: number; readonly retryAtMs: number }>();
   const coalescingWindowMs = 250;
 
   const within = async <T>(operation: Promise<T>, remainingMs: number): Promise<T> => {
@@ -54,10 +63,14 @@ export function registerCatalogRoutes(
       await telemetry.recordSuccess(accountId, catalog, telemetry.complete(started));
       observer?.publish(catalog);
       recentReads.set(sourceKey, { catalog, completedAtMs: performance.now() });
+      sourceFailures.delete(sourceKey);
       return catalog;
     }).catch(async (error: unknown) => {
       const schemaError = error instanceof Error && /(?:^|_)CATALOG_SCHEMA_ERROR$/u.test(error.message);
       await telemetry.recordFailure(accountId, schemaError ? "SCHEMA_ERROR" : "UNAVAILABLE", telemetry.complete(started));
+      const count = (sourceFailures.get(sourceKey)?.count ?? 0) + 1;
+      const retryDelayMs = Math.min(failureRetryMaxMs, failureRetryBaseMs * 2 ** Math.min(count - 1, 16));
+      sourceFailures.set(sourceKey, { count, retryAtMs: performance.now() + retryDelayMs });
       throw error;
     }).finally(() => { if (readsInFlight.get(sourceKey) === operation) readsInFlight.delete(sourceKey); });
     readsInFlight.set(sourceKey, operation);
@@ -81,6 +94,11 @@ export function registerCatalogRoutes(
       const recentAgeMs = recent === undefined ? Number.POSITIVE_INFINITY : performance.now() - recent.completedAtMs;
       if (recent !== undefined && recentAgeMs < Math.min(coalescingWindowMs, responseCacheMaxAgeMs)) {
         return forAccount(recent.catalog, accountId);
+      }
+      const failure = sourceFailures.get(sourceKey);
+      if (failure !== undefined && failure.retryAtMs > performance.now()) {
+        if (recent !== undefined && recentAgeMs < responseCacheMaxAgeMs) return forAccount(recent.catalog, accountId);
+        throw new Error("CATALOG_RETRY_BACKOFF");
       }
       const operation = startRead(sourceKey, accountId);
       if (recent !== undefined && recentAgeMs < responseCacheMaxAgeMs) return forAccount(recent.catalog, accountId);
