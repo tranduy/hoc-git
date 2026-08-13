@@ -69,7 +69,7 @@ describe("provider catalog route", () => {
     expect(reads).toBe(1);
   });
 
-  it("serves the last completed catalog while starting a slower refresh", async () => {
+  it("serves the last completed catalog without restarting a browser read more than once per second", async () => {
     let reads = 0;
     let releaseFirst: ((catalog: ObservedProviderCatalog) => void) | undefined;
     const firstRead = new Promise<ObservedProviderCatalog>((resolve) => { releaseFirst = resolve; });
@@ -96,6 +96,12 @@ describe("provider catalog route", () => {
     const cached = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-2" });
     expect(cached.statusCode).toBe(200);
     expect(cached.json()).toMatchObject({ accountId: "account-2", provider: "SBOBET" });
+    expect(reads).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    const refreshing = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-3" });
+    expect(refreshing.statusCode).toBe(200);
+    expect(refreshing.json()).toMatchObject({ accountId: "account-3", provider: "SBOBET" });
     expect(reads).toBe(2);
   });
 

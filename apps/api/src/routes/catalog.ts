@@ -39,7 +39,10 @@ export function registerCatalogRoutes(
   const readsInFlight = new Map<string, Promise<ObservedProviderCatalog>>();
   const recentReads = new Map<string, { readonly catalog: ObservedProviderCatalog; readonly completedAtMs: number }>();
   const sourceFailures = new Map<string, { readonly count: number; readonly retryAtMs: number }>();
-  const coalescingWindowMs = 250;
+  // Browser-backed providers take seconds to refresh. A one-second source-level
+  // floor prevents several open UI tabs from continuously reopening the same
+  // lounge while still publishing completed snapshots immediately.
+  const coalescingWindowMs = 1_000;
 
   const within = async <T>(operation: Promise<T>, remainingMs: number): Promise<T> => {
     if (remainingMs <= 0) throw new Error("CATALOG_TIMEOUT");
