@@ -15,7 +15,7 @@ import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
 import { PriceMovementTracker, type ObservedPriceMovement } from "../watch/price-movement-tracker.js";
-import { rankedEvent, sortRankedEvents } from "../watch/ranked-tickets.js";
+import { eventEdgeSummary, rankedEvent, sortRankedEvents, type RankedEvent } from "../watch/ranked-tickets.js";
 import { NotificationSound } from "../watch/notification-sound.js";
 import { ProfitAlertTracker, type ProfitAlert } from "../watch/profit-alert-tracker.js";
 import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
@@ -192,6 +192,28 @@ function executableStakePolicy(baseStake: string): FixedBaseStakePolicy {
 
 function money(value: string): string {
   return `${Number(value).toLocaleString("en-US")} VND`;
+}
+
+function SelectedTicketBalance({ ranked }: { readonly ranked: RankedEvent }) {
+  const edge = eventEdgeSummary(ranked);
+  const ticket = edge === null ? null : ranked.tickets.find((item) => item.key === edge.ticketKey);
+  const plan = ticket?.plan ?? null;
+  if (edge === null || ticket === undefined || plan === null) return null;
+  return <section aria-label="Selected ticket balance" className="selected-ticket-balance">
+    <header><div><small>Selected exact two-book ticket</small>
+      <h2>{ranked.event.event.participantA} vs {ranked.event.event.participantB}</h2>
+      <p>{edge.marketType} · {edge.line === null ? "No line" : `Line ${edge.line}`}</p></div>
+      <div className={`selected-ticket-balance__roi ${edge.state === "VERIFIED_PROFIT" ? "selected-ticket-balance__roi--verified" : ""}`}>
+        <strong>ROI {Number(edge.roiPercent).toFixed(2)}%</strong>
+        <small>{edge.state === "OBSERVATION" ? "READ-ONLY ESTIMATE" : "PREFLIGHT VERIFIED"}</small>
+      </div></header>
+    <div className="selected-ticket-balance__legs">{plan.legs.map((leg) => <article key={`${leg.provider}-${leg.selection}`}>
+      <b>#{leg.provider}</b><strong>{selectionLabel(ranked.event.event, leg.selection)} @ {leg.decimalOdds}</strong>
+      <span>Stake {money(leg.stake)}</span><small>If this outcome wins: {money(leg.profit)}</small>
+    </article>)}</div>
+    <footer><span>Total stake {money(plan.totalStake)}</span><strong>Worst-case: {money(plan.worstCaseProfit)}</strong>
+      <small>No order is submitted from this screen.</small></footer>
+  </section>;
 }
 
 function RateGapSummary({ event, row }: { readonly event: ComparisonEvent["event"]; readonly row: ComparisonRow }) {
@@ -542,14 +564,15 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
     selectedIds.has(source.id) && source.sessionState === "ACTIVE").map((source) => source.provider)),
   [categorySources, selectedIds]);
-  const rankedEvents = useMemo(() => sortRankedEvents(visibleEvents.filter((item) => item.observedRows.length > 0)
+  const rankedEvents = useMemo(() => sortRankedEvents(visibleEvents.filter((item) => item.rows.length > 0)
     .map((item) => rankedEvent({ event: item, verified: verifiedTickets, movements,
-      selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake), nowMs }))),
+      selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake), nowMs }))
+    .filter((item) => eventEdgeSummary(item) !== null)),
   [baseStake, movements, nowMs, selectedProviderIds, verifiedTickets, visibleEvents]);
   const displayEvents = rankedEvents.map((item) => item.event);
   const rankedByEvent = new Map(rankedEvents.map((item) => [item.event.key, item]));
   const hiddenNonComparableCount = visibleEvents.length - rankedEvents.length;
-  const crossBookEventCount = rankedEvents.filter((item) => item.tickets.length > 0).length;
+  const crossBookEventCount = rankedEvents.length;
   useEffect(() => {
     const emitted = profitAlertTracker.current.update(rankedEvents, Date.now());
     if (emitted.length > 0) setProfitAlerts((current) => [...current, ...emitted].slice(-20));
@@ -652,19 +675,31 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     {catalogs.length > 0 && <PriceMovementPanel movements={movements} />}
     <ProfitToastStack alerts={profitAlerts} onOpen={openProfitAlert} sound={notificationSound.current} />
     <section aria-label="Live comparison workspace" className={selectedDetail === null ? "catalog-workspace" : "catalog-workspace catalog-workspace--selected"}>
-      <div className="catalog-workspace__list"><h2>Live matches</h2><div className="catalog-event-list">{displayEvents.map((item) => {
+      <div className="catalog-workspace__list"><h2>Exact two-book matches</h2><div className="catalog-event-list">
+      {displayEvents.length === 0 && <div className="catalog-workspace__empty"><h3>No exact two-book comparison is currently available</h3>
+        <p>Single-provider events remain available in Mapping Review and are never presented as arbitrage.</p></div>}
+      {displayEvents.map((item) => {
       const ranked = rankedByEvent.get(item.key)!;
+      const edge = eventEdgeSummary(ranked)!;
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
       const observedAtMs = item.catalogs.find((catalog) => catalog.provider === item.event.provider)?.observedAtMs ??
         item.catalogs[0]!.observedAtMs;
       const estimatedStartAtMs = estimatedLiveStartAtMs(observedAtMs, item.event.liveState);
       const comparisonCount = ranked.tickets.length;
-      return <article className={item.key === selectedKey ? "catalog-event catalog-event--selected" : "catalog-event"} key={item.key}><header><div><span>{item.event.competition}</span><h3>{label}</h3>
+      return <article className={item.key === selectedKey ? "catalog-event catalog-event--selected" : "catalog-event"} key={item.key}><header><div className="catalog-event__identity"><span>{item.event.competition}</span><h3>{label}</h3>
         <div className="provider-tags">{item.providers.map((provider) => <b key={provider}>#{provider}</b>)}
           {item.event.category === "FOOTBALL" && item.event.isVirtual === true && <b>#VIRTUAL</b>}</div>
         <small>{comparisonCount > 0 ? `${comparisonCount} exact two-outcome ticket(s) · top 5 by guaranteed profit` :
           "No exact two-book ticket shared by the selected providers"}</small>
         {ranked.bestVerifiedProfit !== null && <strong>Best guaranteed {money(ranked.bestVerifiedProfit)}</strong>}</div>
+        <div className={`event-edge-summary ${edge.state === "VERIFIED_PROFIT" ? "event-edge-summary--verified" : ""}`}>
+          <strong>{Number(edge.roiPercent).toFixed(2)}%</strong>
+          <small>{edge.state === "OBSERVATION" ? "ESTIMATED ROI" : "VERIFIED ROI"}</small>
+          <span>Estimated balanced profit {money(edge.worstCaseProfit)}</span>
+          <b>#{edge.providers[0]} ↔ #{edge.providers[1]}</b>
+          <span>{edge.marketType} · {edge.line === null ? "No line" : `Line ${edge.line}`}</span>
+          <span>{edge.odds.join(" / ")}</span>
+        </div>
         <div className="catalog-event-actions"><strong>{item.event.isLive ? formatMatchClock(item.event.liveState) : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
           {item.event.isLive ? <><small>Observed {new Date(observedAtMs).toLocaleString()}</small>
             {estimatedStartAtMs !== null && <small>Approx. started {new Date(estimatedStartAtMs).toLocaleString()}</small>}</>
@@ -673,9 +708,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         {comparisonCount > 0 && selectedDetail === null && <details className="catalog-market-details" open><summary>Exact tickets being monitored</summary>
           <RankedTicketTable event={item.event} providers={item.providers} tickets={ranked.tickets} /></details>}</article>;
       })}</div></div>
-      <aside aria-label="Selected match detail" className="catalog-workspace__detail">{selectedDetail ?? <div className="catalog-workspace__empty">
-        <h2>Select a match</h2><p>Click a match on the left to keep the ranked list visible while prices update here.</p>
-      </div>}</aside>
+      <aside aria-label="Selected match detail" className="catalog-workspace__detail">{selectedDetail ??
+        (rankedEvents[0] === undefined ? <div className="catalog-workspace__empty"><h2>Waiting for an exact pair</h2>
+          <p>The balance panel appears only after the same event, market, line and opposing outcomes exist at two books.</p></div>
+          : <SelectedTicketBalance ranked={rankedEvents[0]} />)}</aside>
     </section>
   </>;
 }

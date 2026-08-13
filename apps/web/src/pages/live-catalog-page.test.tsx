@@ -54,6 +54,45 @@ afterEach(() => {
 });
 
 describe("LiveCatalogPage", () => {
+  it("shows a full two-book ROI summary and excludes one-provider events from the arbitrage list", async () => {
+    const source = (provider: "SABA" | "SBOBET"): CatalogSourceStatus => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+    });
+    const providerCatalog = (provider: "SABA" | "SBOBET"): LiveCatalogResponse => ({
+      ...catalog, accountId: `catalog-source:${provider}:FOOTBALL`, provider,
+      events: [{ ...event, provider, providerEventId: `${provider}-event` }],
+      markets: [{ ...market, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market` }],
+      quotes: quotes.map((quote) => ({ ...quote, provider, providerEventId: `${provider}-event`,
+        providerMarketId: `${provider}-market`, providerSelectionId: `${provider}-${quote.selection}`,
+        rawOdds: provider === "SABA"
+          ? (quote.selection === "HOME" ? "2.2" : "1.7")
+          : (quote.selection === "HOME" ? "1.7" : "2.2") }))
+    });
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [source("SABA"), source("SBOBET")] }}
+      catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
+
+    expect(await screen.findByText("10.00%")).toBeTruthy();
+    expect(screen.getByText("Estimated balanced profit 20,000 VND")).toBeTruthy();
+    expect(screen.getByText("#SABA ↔ #SBOBET")).toBeTruthy();
+    expect(screen.getAllByText("FT_AH · Line -0.5")).toHaveLength(2);
+    expect(screen.getByText("2.2 / 2.2")).toBeTruthy();
+    expect(screen.getByLabelText("Selected ticket balance")).toBeTruthy();
+  });
+
+  it("does not list a single-provider match as an arbitrage comparison", async () => {
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [{ id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA",
+        category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null }] }}
+      catalogApi={{ read: async () => ({ ...catalog, accountId: "catalog-source:SABA:FOOTBALL", provider: "SABA",
+        events: [{ ...event, provider: "SABA" }], markets: [{ ...market, provider: "SABA" }],
+        quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" })) }) }} />);
+
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+  });
+
   it("keeps stable catalog-source identity separate from the newest eligible betting account", async () => {
     const source: CatalogSourceStatus = { id: "catalog-source:SABA:FOOTBALL", alias: "C-Sports · SABA",
       provider: "SABA", category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN",
@@ -210,14 +249,14 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
     expect(screen.getByText("2.25 DECIMAL").closest(".ranked-ticket-price")?.className).toContain("--best");
     expect(screen.getByText(/Alpha: Gap 0\.45 · 25\.00%/u)).toBeTruthy();
-    expect(screen.getByText("ROI 18.42%")).toBeTruthy();
+    expect(screen.getAllByText("ROI 18.42%")).toHaveLength(2);
     expect(screen.getByText("Guaranteed 35,000 VND")).toBeTruthy();
     expect(screen.getByText(/If Alpha wins/u).textContent).toContain("35,000 VND");
     expect(screen.getByText(/If Beta wins/u).textContent).toContain("35,000 VND");
     fireEvent.click(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }));
     expect(screen.getByRole("region", { name: "Live comparison workspace" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "View & watch Alpha vs Beta" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("heading", { name: "Live matches" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Exact two-book matches" })).toBeTruthy();
     expect(await screen.findByText("Books shown in this comparison")).toBeTruthy();
     expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
   });
@@ -232,16 +271,14 @@ describe("LiveCatalogPage", () => {
           rawOdds: quote.selection === "HOME" && reads > 1 ? "2.1" : quote.rawOdds,
           sequence: reads })) };
     });
+    window.history.replaceState({}, "", "/live-catalog?account=account-1&event=event-1");
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={{ read }} />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "View & watch Alpha vs Beta" }));
-    const selectedButton = screen.getByRole("button", { name: "View & watch Alpha vs Beta" });
-    expect(selectedButton.getAttribute("aria-pressed")).toBe("true");
+    expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
     await act(async () => vi.advanceTimersByTimeAsync(250));
 
     const detail = screen.getByRole("complementary", { name: "Selected match detail" });
     expect(within(detail).getByText(/Alpha · 2\.1 DECIMAL/u)).toBeTruthy();
-    expect(selectedButton.getAttribute("aria-pressed")).toBe("true");
   });
 
   it("keeps refreshing a fast source while another selected source is still pending", async () => {
@@ -272,7 +309,7 @@ describe("LiveCatalogPage", () => {
     await act(async () => vi.advanceTimersByTimeAsync(750));
 
     expect(fastReads).toBeGreaterThan(1);
-    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("No exact two-book comparison is currently available")).toBeTruthy();
   });
 
   it("keeps the other provider fresh when only one source completes a later poll", async () => {
@@ -452,10 +489,10 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("1 match(es) with supported two-way tickets")).toBeTruthy();
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
+    expect(screen.getByText("0 match(es) with supported two-way tickets")).toBeTruthy();
     expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
-    expect(screen.getByText("No exact two-book ticket shared by the selected providers")).toBeTruthy();
+    expect(screen.getByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(screen.queryByRole("table", { name: /Top exact tickets/u })).toBeNull();
   });
 
@@ -475,10 +512,10 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async (id) => id === sabaAccount.id ? providerCatalog(sabaAccount, "-0.5") :
         providerCatalog(sbobetAccount, "-1.5") }} />);
 
-    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
-    expect(screen.getByText("1 match(es) with supported two-way tickets")).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
+    expect(screen.getByText("0 match(es) with supported two-way tickets")).toBeTruthy();
     expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "View & watch Alpha vs Beta" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "View & watch Alpha vs Beta" })).toBeNull();
   });
 
   it("exposes a single-provider price row as observation but never as an arbitrage", async () => {
@@ -486,7 +523,7 @@ describe("LiveCatalogPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Load live catalog" }));
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
     expect(screen.queryByRole("button", { name: /^(bet|wager|place bet)$/iu })).toBeNull();
@@ -547,7 +584,7 @@ describe("LiveCatalogPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Football" }));
 
     expect(await screen.findByText("Monitoring exact two-book prices")).toBeTruthy();
-    expect(screen.getByText("Alpha vs Beta")).toBeTruthy();
+    expect(screen.getByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(read.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
@@ -579,7 +616,7 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async () => lolCatalog }} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "LoL" }));
-    expect(await screen.findByText("G2 vs TH")).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(screen.getByText("0 exact cross-book match(es)")).toBeTruthy();
   });
 
@@ -611,7 +648,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [lolAccount] }} catalogApi={{ read }} />);
 
     expect((await screen.findByRole("button", { name: "LoL" })).getAttribute("aria-pressed")).toBe("true");
-    expect(await screen.findByText("G2 vs TH")).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(read).toHaveBeenCalledWith(lolAccount.id);
   });
 
@@ -693,7 +730,7 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByText("SABA current")).toBeTruthy();
     expect(screen.queryByText("SABA old")).toBeNull();
-    expect(screen.getAllByText("Alpha vs Beta")).toHaveLength(1);
+    expect(screen.queryByText("Alpha vs Beta")).toBeNull();
     expect(read).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledWith(current.id);
   });
@@ -711,7 +748,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage fixedCategory="FOOTBALL"
       accountApi={{ ...accountApi, list: async () => [fallback, preferred] }} catalogApi={{ read }} />);
 
-    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(read).toHaveBeenNthCalledWith(1, preferred.id);
     expect(read).toHaveBeenNthCalledWith(2, fallback.id);
     expect(screen.getByText("1 fresh provider(s)")).toBeTruthy();
@@ -769,7 +806,7 @@ describe("LiveCatalogPage", () => {
 
     await act(async () => vi.advanceTimersByTimeAsync(2_000));
     expect(await screen.findByText("CMD main")).toBeTruthy();
-    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(list).toHaveBeenCalledTimes(2);
   });
 
@@ -802,7 +839,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, imAccount] }}
       catalogApi={{ read: async (id) => id === sabaAccount.id ? sabaCatalog : never }} />);
 
-    expect(await screen.findByText("Alpha vs Beta")).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect((screen.getByLabelText("Load live catalog") as HTMLButtonElement).disabled).toBe(true);
   });
 });

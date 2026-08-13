@@ -25,6 +25,36 @@ export interface RankedEvent {
   readonly bestVerifiedProfit: string | null;
 }
 
+export interface EventEdgeSummary {
+  readonly ticketKey: string;
+  readonly roiPercent: string;
+  readonly worstCaseProfit: string;
+  readonly providers: readonly ProviderId[];
+  readonly odds: readonly string[];
+  readonly marketType: ComparisonRow["marketType"];
+  readonly line: string | null;
+  readonly state: RankedTicketState;
+}
+
+export function eventEdgeSummary(event: RankedEvent): EventEdgeSummary | null {
+  for (const ticket of event.tickets) {
+    if (ticket.plan === null) continue;
+    const providers = [...new Set(ticket.plan.legs.map((leg) => leg.provider))].sort();
+    if (providers.length < 2) continue;
+    return {
+      ticketKey: ticket.key,
+      roiPercent: new Decimal(ticket.plan.roi).mul(100).toString(),
+      worstCaseProfit: ticket.plan.worstCaseProfit,
+      providers,
+      odds: ticket.plan.legs.map((leg) => leg.decimalOdds),
+      marketType: ticket.row.marketType,
+      line: ticket.row.line,
+      state: ticket.state
+    };
+  }
+  return null;
+}
+
 function movementFor(eventKey: string, rowKey: string, movements: readonly ObservedPriceMovement[]): string {
   return movements.filter((movement) => movement.event.key === eventKey && movement.rowKey === rowKey)
     .reduce((largest, movement) => Decimal.max(largest, movement.magnitude), new Decimal(0)).toString();

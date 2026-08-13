@@ -2,7 +2,7 @@ import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/c
 import { describe, expect, it } from "vitest";
 import type { ComparisonCell, ComparisonEvent, ComparisonRow, ObservedTicketRow } from "../catalog/comparison.js";
 import type { FixedBaseStakePlan, FixedBaseStakePolicy } from "./fixed-base-stake.js";
-import { rankTicketsForEvent } from "./ranked-tickets.js";
+import { eventEdgeSummary, rankTicketsForEvent, type RankedEvent } from "./ranked-tickets.js";
 import type { VerifiedTicketEvidence } from "./ticket-preflight-coordinator.js";
 
 const nowMs = 10_000;
@@ -57,6 +57,30 @@ function comparisonEvent(): ComparisonEvent {
 }
 
 describe("rankTicketsForEvent", () => {
+  it("summarizes the best exact two-book plan using balanced worst-case ROI", () => {
+    const event = comparisonEvent();
+    const tickets = rankTicketsForEvent({ event, verified: new Map([
+      ["event-key::row-1", evidence("event-key", "row-1", "20000", "0.1163")],
+      ["event-key::row-2", evidence("event-key", "row-2", "50000", "0.2")]
+    ]), movements: [], selectedProviders: new Set(["SABA", "SBOBET"]), observationPolicy: policy, nowMs });
+    const summary = eventEdgeSummary({ event, tickets, bestVerifiedProfit: "50000" });
+
+    expect(summary).toMatchObject({ ticketKey: "row-2", roiPercent: "20", worstCaseProfit: "50000",
+      providers: ["SABA", "SBOBET"], marketType: "FT_AH", line: "2.5", state: "VERIFIED_PROFIT" });
+    expect(summary?.odds).toEqual(["2.5", "2.5"]);
+  });
+
+  it("does not invent an edge summary from a one-provider plan or an empty event", () => {
+    const event = comparisonEvent();
+    const ticket = rankTicketsForEvent({ event, verified: new Map([
+      ["event-key::row-1", evidence("event-key", "row-1", "20000", "0.1163")]
+    ]), movements: [], selectedProviders: new Set(["SABA", "SBOBET"]), observationPolicy: policy, nowMs })[0]!;
+    const oneProvider = { ...ticket, plan: { ...ticket.plan!, legs: ticket.plan!.legs.map((leg) => ({ ...leg, provider: "SABA" as const })) } };
+
+    expect(eventEdgeSummary({ event, tickets: [oneProvider], bestVerifiedProfit: "20000" } as RankedEvent)).toBeNull();
+    expect(eventEdgeSummary({ event, tickets: [], bestVerifiedProfit: null })).toBeNull();
+  });
+
   it("uses exact rows only, sorts verified profit descending, and limits the event to five", () => {
     const event = comparisonEvent();
     const verified = new Map<string, VerifiedTicketEvidence>([
