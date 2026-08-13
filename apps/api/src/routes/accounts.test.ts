@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
+import type { AccountStatus } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAccountRoutes } from "./accounts.js";
 
@@ -22,5 +23,27 @@ describe("account routes", () => {
     expect((await Promise.all(reads)).every((response) => response.statusCode === 200)).toBe(true);
     expect((await app.inject({ method: "GET", url: "/api/accounts" })).statusCode).toBe(200);
     expect(listStatuses).toHaveBeenCalledTimes(1);
+  });
+
+  it("coalesces duplicate profile refreshes from multiple UI tabs", async () => {
+    const status: AccountStatus = { id: "account-1", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+      sessionState: "ACTIVE", profileState: "FRESH", redactedLabel: "••••0001", currency: "VND",
+      balance: "100000", balanceAsOfMs: 1_000, capabilities: ["PROFILE", "CATALOG"], reason: null };
+    let release: ((value: typeof status) => void) | undefined;
+    const pending = new Promise<typeof status>((resolve) => { release = resolve; });
+    const refresh = vi.fn(async () => pending);
+    const app = Fastify();
+    registerAccountRoutes(app, { listStatuses: vi.fn(async () => []), register: vi.fn(), refresh });
+    apps.push(app);
+
+    const requests = Array.from({ length: 6 }, () =>
+      app.inject({ method: "POST", url: "/api/accounts/account-1/refresh" }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(refresh).toHaveBeenCalledTimes(1);
+    release?.(status);
+
+    expect((await Promise.all(requests)).every((response) => response.statusCode === 200)).toBe(true);
+    expect((await app.inject({ method: "POST", url: "/api/accounts/account-1/refresh" })).statusCode).toBe(200);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });
