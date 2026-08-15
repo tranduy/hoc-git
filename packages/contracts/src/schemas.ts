@@ -1,4 +1,11 @@
 import { z } from "zod";
+export {
+  ChromeBridgeControlMessageSchema,
+  ChromeBridgeEnvelopeSchema,
+  ChromeBridgeSourceStateSchema,
+  ChromeBridgeTransportSchema,
+  ChromeLobbyIdSchema
+} from "./chrome-bridge.js";
 import type {
   AccountStatus,
   AppSnapshot,
