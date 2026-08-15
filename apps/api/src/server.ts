@@ -11,9 +11,12 @@ import { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { JsonlCatalogJournal } from "./routes/catalog-jsonl-journal.js";
 import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
 import { resolveProviderFees } from "./providers/provider-fees.js";
-import { FileExecutionIdempotencyStore } from "./execution/file-execution-idempotency-store.js";
-import { ProviderPreflightDryRunAdapter } from "./execution/provider-preflight-dry-run-adapter.js";
-import { TwoLegExecutor } from "./execution/two-leg-executor.js";
+import { FileBetHistory } from "./history/file-bet-history.js";
+import { createSessionMaintenanceRunner } from "./session-maintenance.js";
+import { DurableCatalogStore } from "./catalog/durable-catalog-store.js";
+import { bindGracefulShutdown } from "./process-shutdown.js";
+import { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
+import { CaptureStore } from "./chrome-bridge/capture-store.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -182,16 +185,17 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const controller = new AbortController();
   await runtime.start(controller.signal);
   const twoLegPreflight = new TwoLegPreflight({ opportunities: runtime, providers: sessionServices.providerPreflight });
-  const executionDryRun = new TwoLegExecutor({
-    adapters: (["SABA", "SBOBET", "APSPORT", "BTI"] as const).map((provider) =>
-      new ProviderPreflightDryRunAdapter({ provider,
-        preflight: sessionServices.providerPreflight.preflight.bind(sessionServices.providerPreflight) })),
-    verifyTicket: (ticket) => twoLegPreflight.verifyTicket(ticket),
-    idempotencyStore: new FileExecutionIdempotencyStore(
-      join(localAppData, "tool-chenh", "execution-idempotency")
-    ),
-    timeoutMs: 10_000
-  });
+  const betHistory = new FileBetHistory(join(localAppData, "tool-chenh", "history", "bets.jsonl"));
+  const catalogStore = new DurableCatalogStore(join(localAppData, "tool-chenh", "catalog-cache"));
+  const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
+  const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
+  if (chromeBridgeRegistry) {
+    const captureStore = new CaptureStore({
+      enabled: env.CHROME_BRIDGE_CAPTURE === "1",
+      directory: join(localAppData, "tool-chenh", "chrome-bridge-captures")
+    });
+    chromeBridgeRegistry.subscribe((envelope) => { void captureStore.record(envelope); });
+  }
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
@@ -201,15 +205,22 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     catalogReader: sessionServices.catalogReader,
     ...(config.dataMode === "LIVE" ? { catalogObserver: catalogBridge } : {}),
     catalogTelemetry,
+    catalogStore,
     providerPreflight: sessionServices.providerPreflight,
     twoLegPreflight,
-    executionDryRun,
-    receiptProtocol: sessionServices.receiptProtocol
+    receiptProtocol: sessionServices.receiptProtocol,
+    betHistory,
+    ...(chromeBridgeRegistry && chromeBridgeKey
+      ? { chromeBridge: { registry: chromeBridgeRegistry, installationKey: chromeBridgeKey } }
+      : {})
   });
   await app.listen({ host: config.host, port: config.port });
-  const sessionTimer = setInterval(() => {
-    void sessionServices.tick();
-  }, 60_000);
+  const maintainSessions = createSessionMaintenanceRunner(
+    () => sessionServices.tick(),
+    (error) => app.log.error({ error }, "Session maintenance failed; live catalog remains available")
+  );
+  void maintainSessions();
+  const sessionTimer = setInterval(() => { void maintainSessions(); }, 60_000);
   sessionTimer.unref();
   return {
     app,
@@ -226,11 +237,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
 const entryPath = process.argv[1];
 if (entryPath !== undefined && import.meta.url === pathToFileURL(entryPath).href) {
   startServer().then(({ stop }) => {
-    const shutdown = (): void => {
-      void stop().then(() => process.exit(0), () => process.exit(1));
-    };
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
+    bindGracefulShutdown({ lifecycle: process, stop, exit: (code) => process.exit(code) });
   }, () => {
     process.stderr.write("API failed to start\n");
     process.exitCode = 1;

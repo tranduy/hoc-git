@@ -12,8 +12,12 @@ import { registerCatalogSourceRoutes, type CatalogSourceRegistryLike } from "./r
 import type { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { registerProviderPreflightRoutes, type ProviderPreflightLike } from "./routes/provider-preflight.js";
 import { registerTwoLegPreflightRoutes, type TwoLegPreflightLike } from "./routes/two-leg-preflight.js";
-import { registerExecutionDryRunRoute, type ExecutionDryRunLike } from "./routes/execution-dry-run.js";
 import { registerReceiptProtocolRoute, type ReceiptProtocolLike } from "./routes/receipt-protocol.js";
+import { registerBetHistoryRoute, type BetHistoryLike } from "./routes/bet-history.js";
+import type { FileBetHistory } from "./history/file-bet-history.js";
+import type { CatalogStoreLike } from "./catalog/durable-catalog-store.js";
+import { registerChromeBridgeRoute } from "./chrome-bridge/chrome-bridge-route.js";
+import type { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
 
 export interface AppOptions {
   readonly viteOrigin?: string;
@@ -25,10 +29,15 @@ export interface AppOptions {
   readonly catalogSources?: CatalogSourceRegistryLike;
   readonly catalogObserver?: CatalogObserverLike;
   readonly catalogTelemetry?: CatalogTelemetryRegistry;
+  readonly catalogStore?: CatalogStoreLike;
   readonly providerPreflight?: ProviderPreflightLike;
   readonly twoLegPreflight?: TwoLegPreflightLike;
-  readonly executionDryRun?: ExecutionDryRunLike;
   readonly receiptProtocol?: ReceiptProtocolLike;
+  readonly betHistory?: FileBetHistory & BetHistoryLike;
+  readonly chromeBridge?: {
+    readonly registry: ChromeBridgeRegistry;
+    readonly installationKey: string;
+  };
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
@@ -117,7 +126,9 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   });
   app.addHook("onRequest", async (request, reply) => {
     const origin = request.headers.origin;
-    if (origin !== undefined && origin !== viteOrigin) {
+    const chromeBridgeOrigin = request.url.startsWith("/api/chrome-bridge")
+      && origin?.startsWith("chrome-extension://") === true;
+    if (origin !== undefined && origin !== viteOrigin && !chromeBridgeOrigin) {
       await reply.code(403).send({ error: "Origin not allowed" });
     }
   });
@@ -132,12 +143,17 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
   if (options.catalogSources !== undefined) registerCatalogSourceRoutes(app, options.catalogSources);
   if (options.catalogReader !== undefined) registerCatalogRoutes(
-    app, options.catalogReader, options.catalogTelemetry, options.catalogObserver
+    app, options.catalogReader, options.catalogTelemetry, options.catalogObserver, options.catalogStore
   );
   if (options.providerPreflight !== undefined) registerProviderPreflightRoutes(app, options.providerPreflight);
-  if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight);
-  if (options.executionDryRun !== undefined) registerExecutionDryRunRoute(app, options.executionDryRun);
+  if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight, options.betHistory);
   if (options.receiptProtocol !== undefined) registerReceiptProtocolRoute(app, options.receiptProtocol);
+  if (options.betHistory !== undefined) registerBetHistoryRoute(app, options.betHistory);
+  if (options.chromeBridge !== undefined) void app.register(async (instance) => {
+    registerChromeBridgeRoute(instance, options.chromeBridge!.registry, {
+      installationKey: options.chromeBridge!.installationKey
+    });
+  });
   void app.register(async (instance) => {
     registerOpportunityWebsocket(instance, runtime, { heartbeatIntervalMs, maxBufferedBytes });
   });

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Read-only observer for explicitly attached sportsbook tabs.",
   "permissions": ["debugger", "storage", "tabs"],
+  "host_permissions": ["http://127.0.0.1:4310/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
