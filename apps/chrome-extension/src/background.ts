@@ -3,6 +3,9 @@ import { LocalBridge, type BridgeSocket } from "./local-bridge.js";
 import { NetworkObserver, type ObservedSource } from "./network-observer.js";
 import { recognizeLobbyTab } from "./lobby-signatures.js";
 import { TabRegistry } from "./tab-registry.js";
+import { resolveInstallationKey } from "./bridge-key.js";
+
+declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 
 let bridge: LocalBridge | null = null;
 
@@ -35,7 +38,13 @@ const observer = new NetworkObserver({
 
 async function configureBridge(): Promise<boolean> {
   const stored = await chrome.storage.local.get("installationKey");
-  const installationKey = typeof stored.installationKey === "string" ? stored.installationKey.trim() : "";
+  const bundledKey = typeof __CHROME_BRIDGE_DEFAULT_KEY__ === "string"
+    ? __CHROME_BRIDGE_DEFAULT_KEY__
+    : "";
+  const installationKey = resolveInstallationKey(stored.installationKey, bundledKey);
+  if (!stored.installationKey && installationKey) {
+    await chrome.storage.local.set({ installationKey });
+  }
   bridge?.close();
   bridge = installationKey
     ? new LocalBridge({
@@ -106,6 +115,23 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
         sourceId: `chrome:${attached.lobby}:${attached.tabId}`
       };
       await observer.start(source);
+      return sendResponse({ ok: true, attached });
+    }
+    if (request.kind === "ATTACH_ALL") {
+      const tabs = await chrome.tabs.query({});
+      const attached = [];
+      for (const tab of tabs) {
+        if (recognizeLobbyTab(tab) === null) continue;
+        try {
+          const entry = await registry.attachSelected(tab);
+          await observer.start({
+            lobby: entry.lobby as ChromeLobbyId,
+            tabId: entry.tabId,
+            sourceId: `chrome:${entry.lobby}:${entry.tabId}`
+          });
+          attached.push(entry);
+        } catch { /* one unavailable tab must not block the other lobbies */ }
+      }
       return sendResponse({ ok: true, attached });
     }
     return sendResponse({ ok: false });

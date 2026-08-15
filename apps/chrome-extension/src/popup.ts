@@ -15,6 +15,7 @@ const keyInput = document.querySelector<HTMLInputElement>("#installation-key")!;
 const saveButton = document.querySelector<HTMLButtonElement>("#save-key")!;
 const stateNode = document.querySelector<HTMLElement>("#bridge-state")!;
 const tabsNode = document.querySelector<HTMLElement>("#tabs")!;
+const attachAllButton = document.querySelector<HTMLButtonElement>("#attach-all")!;
 
 async function refresh(): Promise<void> {
   const status = await chrome.runtime.sendMessage({ kind: "STATUS" }) as StatusResponse;
@@ -55,6 +56,15 @@ async function refresh(): Promise<void> {
 saveButton.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ kind: "SAVE_KEY", installationKey: keyInput.value });
   keyInput.value = "";
+  await refresh();
+});
+
+attachAllButton.addEventListener("click", async () => {
+  attachAllButton.disabled = true;
+  attachAllButton.textContent = "Attaching…";
+  await chrome.runtime.sendMessage({ kind: "ATTACH_ALL" });
+  attachAllButton.disabled = false;
+  attachAllButton.textContent = "Attach all";
   await refresh();
 });
 
