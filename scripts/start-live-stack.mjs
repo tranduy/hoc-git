@@ -38,7 +38,7 @@ const environment = {
   API_PORT: String(apiPort),
   VITE_ORIGIN: `http://${host}:${webPort}`,
   CHROME_BRIDGE_KEY: chromeBridgeKey,
-  CHROME_BRIDGE_CAPTURE: process.env.CHROME_BRIDGE_CAPTURE ?? "1"
+  CHROME_BRIDGE_CAPTURE: process.env.CHROME_BRIDGE_CAPTURE ?? "0"
 };
 const api = spawn(process.execPath, [apiEntry], {
   cwd: repositoryRoot,

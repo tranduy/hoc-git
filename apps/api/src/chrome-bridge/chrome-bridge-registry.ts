@@ -56,18 +56,6 @@ export class ChromeBridgeRegistry {
         existing.quarantined = true;
         return reject(envelope, "SEQUENCE_GAP");
       }
-    } else if (envelope.sequence !== 0) {
-      this.#sources.set(envelope.sourceId, {
-        lobby: envelope.lobby,
-        sourceId: envelope.sourceId,
-        tabId: envelope.tabId,
-        state: "ERROR",
-        lastSequence: -1,
-        lastAcceptedAtMs: 0,
-        reason: "SEQUENCE_GAP",
-        quarantined: true
-      });
-      return reject(envelope, "SEQUENCE_GAP");
     }
 
     const acceptedAtMs = this.#now();

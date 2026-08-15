@@ -25,6 +25,17 @@ describe("ChromeBridgeRegistry", () => {
     expect(registry.listSources()).toMatchObject([{ lobby: "SABA", sourceId: "chrome:SABA:7", state: "LIVE", lastSequence: 1 }]);
   });
 
+  it("uses the first observed sequence as a baseline after an API restart", () => {
+    const accepted = vi.fn();
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    registry.subscribe(accepted);
+
+    expect(registry.ingest(envelope(41))).toMatchObject({ kind: "ACK", sequence: 41 });
+    expect(registry.ingest(envelope(42))).toMatchObject({ kind: "ACK", sequence: 42 });
+    expect(registry.ingest(envelope(44))).toMatchObject({ kind: "REJECT", reason: "SEQUENCE_GAP" });
+    expect(accepted).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects duplicates, lower sequence, and quarantines a sequence gap without publishing", () => {
     const accepted = vi.fn();
     const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
