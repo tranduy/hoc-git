@@ -4,7 +4,7 @@
     "rootDir": "src",
     "outDir": "dist",
     "lib": ["ES2022", "DOM"],
-    "types": ["vitest/globals"]
+    "types": ["vitest/globals", "chrome"]
   },
   "include": ["src/**/*.ts"]
 }
