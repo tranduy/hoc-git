@@ -45,7 +45,27 @@ export function isVerifiedApsportIdentity(evidence: ApsportIdentityEvidence): bo
 export async function extractApsportRecords(page: Page): Promise<readonly SbobetCatalogInputRecord[]> {
   return page.locator(".match").evaluateAll((nodes) => nodes.flatMap((node) => {
     const text = (element: Element | null): string => element?.textContent?.trim().replace(/\s+/gu, " ") ?? "";
-    const halfLine = (value: string): string | null => /^(?:[ou]\s*)?([+-]?\d+\.5)$/iu.exec(value.trim())?.[1] ?? null;
+    const supportedLine = (value: string): string | null => {
+      const match = /^(?:[ou]\s*)?([+-]?(?:0|[1-9]\d*)(?:\.(?:25|5|75))?(?:\s*[\/-]\s*(?:0|[1-9]\d*)(?:\.(?:25|5|75))?)?)$/iu
+        .exec(value.trim());
+      return match?.[1]?.replace(/\s+/gu, "") ?? null;
+    };
+    const marketTypeFromLabel = (value: string): SbobetCatalogInputRecord["markets"][number]["marketType"] | null => {
+      const label = value.normalize("NFD").replace(/[\u0300-\u036f]/gu, "").toLowerCase();
+      const isHandicap = /(?:handicap|chap|cuoc chap|\bah\b)/u.test(label) || label.includes("cháº¥p");
+      const isTotal = /(?:total|over\s*\/?\s*under|t\s*\/\s*x|tai\s*\/?\s*xiu)/u.test(label);
+      if (isHandicap === isTotal) return null;
+      const firstHalf = /(?:hiep\s*1|first\s*half|\b1h\b)/u.test(label);
+      const secondHalf = /(?:hiep\s*2|second\s*half|\b2h\b)/u.test(label);
+      if (firstHalf && secondHalf) return null;
+      const corner = /(?:phat\s*goc|corner)/u.test(label);
+      const card = /(?:the\s*phat|booking|card)/u.test(label);
+      if ((corner && card) || ((corner || card) && secondHalf)) return null;
+      const kind = isHandicap ? "AH" : "TOTAL";
+      if (corner) return `CORNER_${firstHalf ? "FH" : "FT"}_${kind}` as const;
+      if (card) return `CARD_${firstHalf ? "FH" : "FT"}_${kind}` as const;
+      return `${firstHalf ? "FH" : secondHalf ? "SH" : "FT"}_${kind}` as const;
+    };
     const eventId = node.querySelector(".match-favorite")?.id.match(/eventId-[^-]+-\d+-([0-9]+)$/u)?.[1] ?? "";
     const leagueName = text(node.querySelector(".league-name"));
     const teamNames = [...node.querySelectorAll(".match__team-name")].slice(0, 2).map(text);
@@ -56,22 +76,26 @@ export async function extractApsportRecords(page: Page): Promise<readonly Sbobet
     const markets = [...node.querySelectorAll(".match-odd-pair-list")].flatMap((group) => {
       const label = text(group.querySelector(".match__odd-pair-list__type"));
       const marketType = /chấp/iu.test(label) ? "FT_AH" as const : /t\/x/iu.test(label) ? "FT_TOTAL" as const : null;
-      if (marketType === null) return [];
+      const resolvedMarketType = marketTypeFromLabel(label) ?? marketType;
+      if (resolvedMarketType === null) return [];
       const odds = [...group.querySelectorAll(".match__odd-pair")];
       if (odds.length !== 2) return [];
       const rawTypes = odds.map((odd) => text(odd.querySelector(".match__odd-type")));
-      const lineText = halfLine(rawTypes[0] ?? "");
-      if (lineText === null || rawTypes.some((raw) => halfLine(raw) === null)) return [];
-      const expected = marketType === "FT_AH" ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
+      const lines = rawTypes.map(supportedLine);
+      const lineText = lines[0] ?? null;
+      if (lineText === null || lines.some((line) => line === null)) return [];
+      const isHandicap = resolvedMarketType.endsWith("_AH");
+      if (!isHandicap && new Set(lines).size !== 1) return [];
+      const expected = isHandicap ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
       const selections = odds.map((odd, index) => ({
         selectionId: odd.id.replace(/^odd-item-/u, ""),
         selection: expected[index]!,
         priceText: text(odd.querySelector(".match__odd-value")),
         locked: false,
-        ...(marketType === "FT_AH" ? { lineText: rawTypes[index] } : {})
+        ...(isHandicap ? { lineText: rawTypes[index] } : {})
       }));
       if (selections.some((selection) => selection.selectionId === "" || selection.priceText === "")) return [];
-      return [{ marketId: `${eventId}:${marketType}:${lineText}`, marketType, lineText, selections }];
+      return [{ marketId: `${eventId}:${resolvedMarketType}:${lineText}`, marketType: resolvedMarketType, lineText, selections }];
     });
     return [{ eventId, leagueName, timeText: statusText, scoreText, teamNames, markets }];
   })) as Promise<readonly SbobetCatalogInputRecord[]>;

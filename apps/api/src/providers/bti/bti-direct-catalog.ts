@@ -42,18 +42,20 @@ function markets(value: unknown): readonly SbobetCatalogMarket[] {
     if (item === null) return;
     const metadata = row(item[3]);
     const code = text(metadata?.[0]);
-    if ((code === "HC39" || code === "OU39" || code === "OU1") && Array.isArray(item[7])) found.push(item);
+    if ((code === "HC39" || code === "HC1" || code === "OU39" || code === "OU1") && Array.isArray(item[7])) found.push(item);
     else item.forEach(visit);
   };
   visit(value);
   return found.flatMap((market): SbobetCatalogMarket[] => {
     const code = text(row(market[3])?.[0]);
     const type = code === "HC39" ? "FT_AH" as const
-      : code === "OU1" ? "FH_TOTAL" as const : "FT_TOTAL" as const;
+      : code === "HC1" ? "FH_AH" as const
+        : code === "OU1" ? "FH_TOTAL" as const : "FT_TOTAL" as const;
+    const isHandicap = type === "FT_AH" || type === "FH_AH";
     const candidates = (row(market[7]) ?? []).map(selection).filter((item): item is BtiSelection => item !== null);
     const grouped = new Map<string, BtiSelection[]>();
     for (const item of candidates) {
-      const key = type === "FT_AH" ? String(item.side === 1 ? item.line : -item.line) : String(item.line);
+      const key = isHandicap ? String(item.side === 1 ? item.line : -item.line) : String(item.line);
       grouped.set(key, [...(grouped.get(key) ?? []), item]);
     }
     return [...grouped.entries()].flatMap(([line, pair]) => {
@@ -62,10 +64,10 @@ function markets(value: unknown): readonly SbobetCatalogMarket[] {
       if (home === undefined || away === undefined || pair.length !== 2) return [];
       const selections: SbobetCatalogSelection[] = [home, away].map((item, index) => ({
         selectionId: item.id,
-        selection: type === "FT_AH" ? (index === 0 ? "HOME" : "AWAY") : (index === 0 ? "OVER" : "UNDER"),
+        selection: isHandicap ? (index === 0 ? "HOME" : "AWAY") : (index === 0 ? "OVER" : "UNDER"),
         priceText: item.malay,
         locked: item.locked,
-        ...(type === "FT_AH" ? { lineText: `${item.line >= 0 ? "+" : ""}${item.line}` } : {})
+        ...(isHandicap ? { lineText: `${item.line >= 0 ? "+" : ""}${item.line}` } : {})
       }));
       return [{ marketId: `${text(market[0])}:${line}`, marketType: type, lineText: line, selections }];
     });

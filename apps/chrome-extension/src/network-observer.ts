@@ -50,7 +50,7 @@ const DISCOVERY_EXPRESSION = `(() => {
   return roots.length;
 })()`;
 
-const KEEP_ACTIVE_EXPRESSION = `(() => {
+export const KEEP_ACTIVE_EXPRESSION = `(() => {
   const candidates = [document.scrollingElement, ...document.querySelectorAll('body *')]
     .filter((element) => element && element.scrollHeight - element.clientHeight > 200);
   let moved = 0;
@@ -59,7 +59,29 @@ const KEEP_ACTIVE_EXPRESSION = `(() => {
     const next = element.scrollTop >= maximum - 4 ? 0 : Math.min(maximum, element.scrollTop + Math.max(240, element.clientHeight * 0.8));
     if (next !== element.scrollTop) { element.scrollTop = next; moved += 1; }
   }
-  return moved;
+  const root = document.documentElement;
+  const now = Date.now();
+  const prior = Number(root.dataset.fieldlineMarketExpandedAt || 0);
+  let expanded = 0;
+  if (!Number.isFinite(prior) || now - prior >= 8000) {
+    const normalize = (value) => String(value || '').normalize('NFD')
+      .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+    const unsafeSelector = '[class*=selection], [class*=ticket], [class*=slip], [class*=betslip], form';
+    const controls = [...document.querySelectorAll("button, summary, [role='button'], a")]
+      .filter((element) => element.getClientRects().length > 0 && !element.hasAttribute('disabled') &&
+        !element.closest(unsafeSelector) && !/(?:odd|price|selection)/u.test(normalize(element.className)))
+      .filter((element) => /^(?:\\+\\s*\\d+|[v▼]\\s*\\d+|\\d+\\s*(?:keo|markets?)\\s*(?:khac|more)?|more markets?|show more|all markets?)$/u
+        .test(normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent)))
+      .filter((element) => !element.dataset.fieldlineMarketExpanded)
+      .slice(0, 3);
+    for (const control of controls) {
+      control.dataset.fieldlineMarketExpanded = '1';
+      control.click();
+      expanded += 1;
+    }
+    root.dataset.fieldlineMarketExpandedAt = String(now);
+  }
+  return { moved, expanded };
 })()`;
 
 // CMD renders only a small virtualized window and remembers the last search
@@ -102,7 +124,25 @@ export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
       Math.min(maximum, element.scrollTop + Math.max(240, element.clientHeight * 0.8));
     if (next !== element.scrollTop) { element.scrollTop = next; moved += 1; }
   }
-  return moved;
+  const priorExpand = Number(root.dataset.fieldlineCmdMarketExpandedAt || 0);
+  let expanded = 0;
+  if (!Number.isFinite(priorExpand) || now - priorExpand >= 8000) {
+    const unsafeSelector = '[class*=selection], [class*=ticket], [class*=slip], [class*=betslip], form';
+    const controls = [...document.querySelectorAll("button, summary, [role='button'], a")]
+      .filter((element) => element.getClientRects().length > 0 && !element.hasAttribute('disabled') &&
+        !element.closest(unsafeSelector) && !/(?:odd|price|selection)/u.test(normalize(element.className)))
+      .filter((element) => /^(?:\\+\\s*\\d+|[v▼]\\s*\\d+|\\d+\\s*(?:keo|markets?)\\s*(?:khac|more)?|more markets?|show more|all markets?)$/u
+        .test(normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent)))
+      .filter((element) => !element.dataset.fieldlineMarketExpanded)
+      .slice(0, 3);
+    for (const control of controls) {
+      control.dataset.fieldlineMarketExpanded = '1';
+      control.click();
+      expanded += 1;
+    }
+    root.dataset.fieldlineCmdMarketExpandedAt = String(now);
+  }
+  return { moved, expanded };
 })()`;
 
 // IM does not always request its GetSE catalog when a restored tab is left on

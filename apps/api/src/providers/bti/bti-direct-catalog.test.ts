@@ -3,7 +3,7 @@ import { extractBtiCatalogRecords } from "./bti-direct-catalog.js";
 
 const selection = (id: string, side: 1 | 3, line: number, malay: string, locked = false) =>
   [id, { VI: "team" }, { VI: "team line" }, locked, false, 1.9, ["", "1.90", "", "", "", malay], side, 2, {}, "", "event", "market", line];
-const market = (id: string, code: "HC39" | "OU39" | "OU1", selections: unknown[]) =>
+const market = (id: string, code: "HC39" | "HC1" | "OU39" | "OU1" | "ML39" | "ML1", selections: unknown[]) =>
   [id, "Cược trực tiếp", "Cược trực tiếp", [code, code === "OU1" ? "first half" : "full time", 1],
     "event", "league", "1", selections];
 
@@ -15,7 +15,10 @@ describe("BTI direct catalog", () => {
         market("hc-real", "HC39", [selection("home-real", 1, -0.5, "0.82"), selection("away-real", 3, 0.5, "-0.92")]),
         market("ou-real", "OU39", [selection("over-real", 1, 2.5, "0.90"), selection("under-real", 3, 2.5, "-0.99")]),
         market("quarter", "HC39", [selection("q-home", 1, -0.25, "0.80"), selection("q-away", 3, 0.25, "-0.90")]),
-        market("fh-quarter", "OU1", [selection("fh-over", 1, 1.75, "0.78"), selection("fh-under", 3, 1.75, "-0.88")])
+        market("fh-quarter", "OU1", [selection("fh-over", 1, 1.75, "0.78"), selection("fh-under", 3, 1.75, "-0.88")]),
+        market("fh-handicap", "HC1", [selection("fh-home", 1, -0.25, "0.76"), selection("fh-away", 3, 0.25, "-0.86")]),
+        market("three-way-full-time", "ML39", [selection("ml-home", 1, 0, "0.76"), selection("ml-away", 3, 0, "-0.86")]),
+        market("three-way-first-half", "ML1", [selection("fh-ml-home", 1, 0, "0.74"), selection("fh-ml-away", 3, 0, "-0.84")])
       ]]
     ]], "Bóng đá"]] };
     expect(extractBtiCatalogRecords(payload)).toEqual([expect.objectContaining({
@@ -25,9 +28,13 @@ describe("BTI direct catalog", () => {
           selections: [expect.objectContaining({ selectionId: "home-real", priceText: "0.82" }), expect.objectContaining({ selectionId: "away-real", priceText: "-0.92" })] }),
         expect.objectContaining({ marketId: "ou-real:2.5", marketType: "FT_TOTAL", lineText: "2.5" }),
         expect.objectContaining({ marketId: "quarter:-0.25", marketType: "FT_AH", lineText: "-0.25" }),
-        expect.objectContaining({ marketId: "fh-quarter:1.75", marketType: "FH_TOTAL", lineText: "1.75" })
+        expect.objectContaining({ marketId: "fh-quarter:1.75", marketType: "FH_TOTAL", lineText: "1.75" }),
+        expect.objectContaining({ marketId: "fh-handicap:-0.25", marketType: "FH_AH", lineText: "-0.25",
+          selections: [expect.objectContaining({ selectionId: "fh-home" }), expect.objectContaining({ selectionId: "fh-away" })] })
       ]
     })]);
+    const markets = extractBtiCatalogRecords(payload)[0]!.markets;
+    expect(markets.some(({ marketId }) => marketId.includes("three-way"))).toBe(false);
   });
 
   it("fails closed for prematch, malformed, and three-way data", () => {

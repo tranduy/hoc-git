@@ -99,6 +99,39 @@ describe("normalizeCmdCatalog", () => {
     expect(result.quotes.every((quote) => quote.status === "SUSPENDED")).toBe(true);
   });
 
+  it("normalizes explicit first-half handicap and total groups without relabelling their period", () => {
+    const periodMarkets: CmdCatalogInputRecord = { ...structuredClone(record), groups: [
+      {
+        betTypeIds: ["7"], labels: ["0.5/1"], odds: [
+          { marketOddsId: "fh-ah", priceText: "0.81", status: null, greyedOut: "false", lineText: "0.5/1" },
+          { marketOddsId: "fh-ah", priceText: "-0.91", status: null, greyedOut: "false", lineText: null }
+        ]
+      },
+      {
+        betTypeIds: ["8"], labels: ["1/1.5"], odds: [
+          { marketOddsId: "fh-total", priceText: "0.82", status: null, greyedOut: "false" },
+          { marketOddsId: "fh-total", priceText: "-0.92", status: null, greyedOut: "false" }
+        ]
+      }
+    ] };
+
+    const result = normalizeCmdCatalog([periodMarkets], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 420, sequence: 1
+    });
+
+    expect(result.markets).toEqual([
+      expect.objectContaining({ marketType: "FH_AH", scope: "FIRST_HALF", line: "-0.75",
+        settlementProfile: "football-first-half-including-added-time" }),
+      expect.objectContaining({ marketType: "FH_TOTAL", scope: "FIRST_HALF", line: "1.25",
+        settlementProfile: "football-first-half-including-added-time" })
+    ]);
+    expect(result.quotes.map((quote) => [quote.marketType, quote.scope, quote.selection])).toEqual([
+      ["FH_AH", "FIRST_HALF", "HOME"], ["FH_AH", "FIRST_HALF", "AWAY"],
+      ["FH_TOTAL", "FIRST_HALF", "OVER"], ["FH_TOTAL", "FIRST_HALF", "UNDER"]
+    ]);
+  });
+
   it("normalizes a full-time half-goal handicap from the team row that displays the line", () => {
     const handicap: CmdCatalogInputRecord = { ...structuredClone(record), groups: [{
       betTypeIds: ["1"], labels: ["0.5"], odds: [

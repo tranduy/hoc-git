@@ -87,7 +87,7 @@ const defaultStableFootballCatalogOptions: StableFootballCatalogOptions = {
   stableSampleCount: 2
 };
 
-const focusedTwoWayBetTypes = new Set(["1", "3"]);
+const focusedTwoWayBetTypes = new Set(["1", "3", "7", "8"]);
 
 function focusedTwoWayRecords(records: readonly CmdCatalogInputRecord[]): readonly CmdCatalogInputRecord[] {
   return records.filter((record) => {
@@ -162,7 +162,7 @@ export async function readCmdFootballCatalog(
   trustedStructuralFingerprint?: string
 ): Promise<readonly CmdCatalogInputRecord[]> {
   return readStableFootballCatalog({
-    read: async () => extractCmdCatalogRecords(page, 500, "1", ["1", "3"]),
+    read: async () => extractCmdCatalogRecords(page, 500, "1", ["1", "3", "7", "8"]),
     select: async () => clickSafeStructuralCategory(page, "1", 0),
     wait: async (delayMs) => page.waitForTimeout(delayMs)
   }, {

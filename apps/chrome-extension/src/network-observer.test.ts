@@ -3,7 +3,7 @@ import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { BTI_CATALOG_REFRESH_EXPRESSION, CMD_CATALOG_DISCOVERY_EXPRESSION,
-  IM_CATALOG_DISCOVERY_EXPRESSION, NetworkObserver } from "./network-observer.js";
+  IM_CATALOG_DISCOVERY_EXPRESSION, KEEP_ACTIVE_EXPRESSION, NetworkObserver } from "./network-observer.js";
 
 const source = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
 
@@ -21,7 +21,8 @@ describe("NetworkObserver", () => {
     const evaluations = sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate");
     expect(evaluations).toHaveLength(2);
     expect(String(evaluations[0]?.[2]?.expression)).toContain("scrollHeight");
-    expect(String(evaluations[0]?.[2]?.expression)).not.toContain(".click(");
+    expect(String(evaluations[0]?.[2]?.expression)).toContain("unsafeSelector");
+    expect(String(evaluations[0]?.[2]?.expression)).toContain("slice(0, 3)");
   });
 
   it("refreshes only IM's public football/live navigation without touching an odds cell", async () => {
@@ -194,6 +195,9 @@ describe("NetworkObserver", () => {
   it("captures a complete T-Sports DOM baseline instead of waiting for WebSocket price deltas", async () => {
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain(".match__team-name");
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain("25|5|75");
+    expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain("CORNER_");
+    expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain("CARD_");
+    expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain('secondHalf ? "SH"');
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).not.toMatch(/cookie|localStorage|sessionStorage|password|token/iu);
     expect(() => new Function(`return ${TSPORT_PUBLIC_CATALOG_EXPRESSION}`)).not.toThrow();
     const records = JSON.stringify([{ eventId: "event-1", leagueName: "League", timeText: "LIVE",
@@ -222,6 +226,24 @@ describe("NetworkObserver", () => {
       lobby: "TSPORT", transport: "DOM_SNAPSHOT",
       request: expect.objectContaining({ pathnameClass: "/__fieldline_dom_snapshot__" })
     }));
+  });
+
+  it("expands only bounded structural market controls and excludes odds and bet-slip controls", () => {
+    expect(KEEP_ACTIVE_EXPRESSION).toContain("fieldlineMarketExpandedAt");
+    expect(KEEP_ACTIVE_EXPRESSION).toContain("slice(0, 3)");
+    expect(KEEP_ACTIVE_EXPRESSION).toContain("closest(unsafeSelector)");
+    expect(KEEP_ACTIVE_EXPRESSION).toContain("more markets");
+    expect(KEEP_ACTIVE_EXPRESSION).toContain(".filter((element) => !element.dataset.fieldlineMarketExpanded)");
+    expect(() => new Function(`return ${KEEP_ACTIVE_EXPRESSION}`)).not.toThrow();
+  });
+
+  it("uses the same bounded hidden-market expansion while walking the virtualized CMD catalog", () => {
+    expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("fieldlineCmdMarketExpandedAt");
+    expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("slice(0, 3)");
+    expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("fieldlineMarketExpanded");
+    expect(CMD_CATALOG_DISCOVERY_EXPRESSION)
+      .toContain(".filter((element) => !element.dataset.fieldlineMarketExpanded)");
+    expect(() => new Function(`return ${CMD_CATALOG_DISCOVERY_EXPRESSION}`)).not.toThrow();
   });
 
   it("skips a hung CMD frame before it can delay a valid catalog past freshness", async () => {

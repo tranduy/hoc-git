@@ -32,24 +32,35 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
     const markets = [...node.querySelectorAll(".match-odd-pair-list")].flatMap((group, groupIndex) => {
       const label = text(group, ".match__odd-pair-list__type", 80);
       const normalizedLabel = label.normalize("NFD").replace(/[\\u0300-\\u036f]/gu, "").toLowerCase();
-      const marketType = /(?:handicap|chap|cuoc chap|asian handicap|\\bah\\b)/u.test(normalizedLabel)
-        ? "FT_AH" : /(?:total|over\\s*\\/?\\s*under|t\\s*\\/\\s*x|tai\\s*\\/?\\s*xiu)/u.test(normalizedLabel)
-          ? "FT_TOTAL" : null;
+      const isHandicap = /(?:handicap|chap|cuoc chap|asian handicap|\\bah\\b)/u.test(normalizedLabel) ||
+        normalizedLabel.includes("cháº¥p");
+      const isTotal = /(?:total|over\\s*\\/?\\s*under|t\\s*\\/\\s*x|tai\\s*\\/?\\s*xiu)/u.test(normalizedLabel);
+      const firstHalf = /(?:hiep\\s*1|first\\s*half|\\b1h\\b)/u.test(normalizedLabel);
+      const secondHalf = /(?:hiep\\s*2|second\\s*half|\\b2h\\b)/u.test(normalizedLabel);
+      const corner = /(?:phat\\s*goc|corner)/u.test(normalizedLabel);
+      const card = /(?:the\\s*phat|booking|card)/u.test(normalizedLabel);
+      if (isHandicap === isTotal || (firstHalf && secondHalf) || (corner && card) ||
+        ((corner || card) && secondHalf)) return [];
+      const kind = isHandicap ? "AH" : "TOTAL";
+      const marketType = corner ? "CORNER_" + (firstHalf ? "FH" : "FT") + "_" + kind
+        : card ? "CARD_" + (firstHalf ? "FH" : "FT") + "_" + kind
+          : (firstHalf ? "FH" : secondHalf ? "SH" : "FT") + "_" + kind;
       if (marketType === null) return [];
       const odds = [...group.querySelectorAll(".match__odd-pair")];
       if (odds.length !== 2) return [];
       const rawTypes = odds.map((odd) => text(odd, ".match__odd-type", 32));
       const lines = rawTypes.map(line);
       if (lines.some((value) => value === null)) return [];
+      if (!isHandicap && new Set(lines).size !== 1) return [];
       const selections = odds.map((odd, index) => ({
         selectionId: clean(odd.id.replace(/^odd-item-/u, ""), 128) ||
           eventId + ":" + marketType + ":" + groupIndex + ":" + index,
-        selection: marketType === "FT_AH" ? (index === 0 ? "HOME" : "AWAY")
+        selection: isHandicap ? (index === 0 ? "HOME" : "AWAY")
           : (index === 0 ? "OVER" : "UNDER"),
         priceText: text(odd, ".match__odd-value", 32),
         locked: odd.matches("[disabled], .disabled, .locked") ||
           odd.querySelector("[disabled], .disabled, .locked") !== null,
-        ...(marketType === "FT_AH" ? { lineText: lines[index] } : {})
+        ...(isHandicap ? { lineText: lines[index] } : {})
       }));
       if (selections.some((selection) => !selection.priceText)) return [];
       const lineText = lines[0];

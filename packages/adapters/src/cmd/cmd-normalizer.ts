@@ -39,6 +39,21 @@ export interface NormalizedCmdCatalog {
   readonly diagnostics: readonly string[];
 }
 
+const cmdTwoWayMarketSemantics = {
+  "1": { marketType: "FT_AH", scope: "FULL_TIME", isHandicap: true,
+    settlementProfile: "football-regulation-including-added-time" },
+  "3": { marketType: "FT_TOTAL", scope: "FULL_TIME", isHandicap: false,
+    settlementProfile: "football-regulation-including-added-time" },
+  "7": { marketType: "FH_AH", scope: "FIRST_HALF", isHandicap: true,
+    settlementProfile: "football-first-half-including-added-time" },
+  "8": { marketType: "FH_TOTAL", scope: "FIRST_HALF", isHandicap: false,
+    settlementProfile: "football-first-half-including-added-time" }
+} as const;
+
+function cmdMarketSemantics(betType: string) {
+  return cmdTwoWayMarketSemantics[betType as keyof typeof cmdTwoWayMarketSemantics] ?? null;
+}
+
 function virtualFootballEvidence(competition: string, teams: readonly string[]): boolean {
   const label = competition.normalize("NFKC").toLocaleLowerCase("en");
   if (/(?:soccer marble|e[\s-]?soccer|\bvirtual\b|simulated reality|spinner world cup|\bpes\b|ảo|điện tử)/u.test(label)) return true;
@@ -170,8 +185,9 @@ export function normalizeObservedFootballCatalog(
     const timing = eventTime(record.timeText, options);
     const teams = [...new Map(record.teamNames.map((team) => team.trim().replace(/\s*\(N\)\s*$/iu, "").trim())
       .filter((team) => team.length > 0).map((team) => [team.toLocaleLowerCase("en-US"), team])).values()];
-    const supported = record.groups.filter((group) => group.betTypeIds.length === 1 && ["1", "3"].includes(group.betTypeIds[0]!) &&
-      (group.betTypeIds[0] !== "1" || group.odds.some((odd) => odd.lineText !== undefined)));
+    const supported = record.groups.filter((group) => group.betTypeIds.length === 1 &&
+      cmdMarketSemantics(group.betTypeIds[0]!) !== null &&
+      (!cmdMarketSemantics(group.betTypeIds[0]!)!.isHandicap || group.odds.some((odd) => odd.lineText !== undefined)));
     const invalid = record.sportId !== "1" || record.matchId.trim().length === 0 || record.leagueName.trim().length === 0 ||
       teams.length !== 2 || teams[0] === teams[1] || timing === null;
     const recordMarkets: ProviderMarket[] = [];
@@ -186,25 +202,26 @@ export function normalizeObservedFootballCatalog(
     }
     for (const group of supported) {
       const betType = group.betTypeIds[0]!;
-      const selections = betType === "3" ? ["OVER", "UNDER"] as const : ["HOME", "AWAY"] as const;
+      const semantics = cmdMarketSemantics(betType)!;
+      const selections = semantics.isHandicap ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
       const marketId = exactMarketId(group, selections.length);
-      const marketLine = betType === "3" ? line(group.labels) : betType === "1" ? canonicalHomeHandicap(group.odds) : null;
+      const marketLine = semantics.isHandicap ? canonicalHomeHandicap(group.odds) : line(group.labels);
       const pricesValid = group.odds.every((odd) => validMalay(odd.priceText));
       if (marketId === null || !isSupportedFootballTwoWayLine(marketLine) || !pricesValid) {
         diagnostics.push("CMD_CATALOG_MARKET_REJECTED");
         continue;
       }
-      const marketType = betType === "3" ? "FT_TOTAL" as const : "FT_AH" as const;
+      const { marketType, scope, settlementProfile } = semantics;
       const status = commonMarketStatus(group);
       recordMarkets.push({
         provider, category: "FOOTBALL", providerEventId: record.matchId,
-        providerMarketId: marketId, marketType, scope: "FULL_TIME", line: marketLine,
-        settlementProfile: "football-regulation-including-added-time", status
+        providerMarketId: marketId, marketType, scope, line: marketLine,
+        settlementProfile, status
       });
       recordQuotes.push(...group.odds.map((odd, index): ProviderQuote => ({
         provider, category: "FOOTBALL", providerEventId: record.matchId,
         providerMarketId: marketId, providerSelectionId: `${marketId}:${selections[index]!.toLowerCase()}`,
-        marketType, scope: "FULL_TIME", selection: selections[index]!, line: marketLine,
+        marketType, scope, selection: selections[index]!, line: marketLine,
         rawOdds: odd.priceText, rawFormat: "MALAY",
         status, isLive: timing!.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence

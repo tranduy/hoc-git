@@ -39,7 +39,7 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
             status: button ? clean(button.getAttribute("data-odds-status"), 32) || null : null,
             greyedOut: button ? clean(button.getAttribute("data-grey-out"), 16) || null : null
           };
-          if (!betTypeIds.includes("1")) return base;
+          if (!betTypeIds.some((betTypeId) => betTypeId === "1" || betTypeId === "7")) return base;
           const clone = button?.cloneNode(true);
           clone?.querySelectorAll(".c-odds").forEach((price) => price.remove());
           const evidence = clone ? clean(clone.textContent, 32) : "";
