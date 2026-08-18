@@ -20,10 +20,10 @@ function supportedLine(value: unknown): value is number {
     isSupportedFootballTwoWayLine(String(Math.abs(value)));
 }
 
-type ImFootballMarketType = "FT_AH" | "FT_TOTAL" | "FH_AH" | "FH_TOTAL";
+type ImFootballMarketType = "FT_AH" | "FT_TOTAL" | "FH_AH" | "FH_TOTAL" | "SH_AH" | "SH_TOTAL";
 
 function isHandicapMarket(marketType: ImFootballMarketType): boolean {
-  return marketType === "FT_AH" || marketType === "FH_AH";
+  return marketType === "FT_AH" || marketType === "FH_AH" || marketType === "SH_AH";
 }
 
 function selection(value: unknown, marketType: ImFootballMarketType): SbobetCatalogSelection | null {
@@ -47,12 +47,14 @@ function selection(value: unknown, marketType: ImFootballMarketType): SbobetCata
 
 function market(value: unknown): SbobetCatalogMarket | null {
   const item = record(value);
-  if (item === null || (item.bti !== 1 && item.bti !== 2) || (item.gp !== 1 && item.gp !== 2) ||
+  if (item === null || (item.bti !== 1 && item.bti !== 2) || ![1, 2, 3].includes(Number(item.gp)) ||
     !Array.isArray(item.ws) || item.ws.length !== 2) return null;
   const marketId = identifier(item.mi);
   const marketType: ImFootballMarketType = item.gp === 1
     ? item.bti === 1 ? "FT_AH" : "FT_TOTAL"
-    : item.bti === 1 ? "FH_AH" : "FH_TOTAL";
+    : item.gp === 2
+      ? item.bti === 1 ? "FH_AH" : "FH_TOTAL"
+      : item.bti === 1 ? "SH_AH" : "SH_TOTAL";
   const selections = item.ws.map((value) => selection(value, marketType));
   if (marketId === null || selections.some((item) => item === null)) return null;
   const exact = selections as SbobetCatalogSelection[];

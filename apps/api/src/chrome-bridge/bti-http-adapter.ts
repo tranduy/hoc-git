@@ -5,25 +5,45 @@ import { extractBtiCatalogRecords } from "../providers/bti/bti-direct-catalog.js
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 
 const ACCOUNT_ID = "catalog-source:BTI:FOOTBALL";
+const DETAIL_TTL_MS = 60_000;
+
+interface SourceParts {
+  live?: ObservedProviderCatalog;
+  prematch?: ObservedProviderCatalog;
+  readonly details: Map<string, ObservedProviderCatalog>;
+}
 
 export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "bti-http-catalog-v1";
   readonly lobby = "BTI" as const;
   readonly providerFamily = "BTI";
-  readonly #parts = new Map<string, { live?: ObservedProviderCatalog; prematch?: ObservedProviderCatalog }>();
+  readonly #parts = new Map<string, SourceParts>();
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     return envelope.lobby === "BTI" && envelope.transport === "HTTP_RESPONSE" &&
       envelope.payload.encoding === "UTF8" &&
-      /^\/api\/eventlist\/asia\/leagues\/v2\/1\/(?:live|prematch)(?:\/initial)?$/u.test(envelope.request.pathnameClass);
+      (/^\/api\/eventlist\/asia\/leagues\/v2\/1\/(?:live|prematch)(?:\/initial)?$/u.test(
+        envelope.request.pathnameClass) || /^\/api\/eventpage\/events\/[^/]+$/u.test(envelope.request.pathnameClass));
   }
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
     let payload: unknown;
     try { payload = JSON.parse(envelope.payload.body); } catch { return []; }
+    const isDetail = envelope.request.pathnameClass.startsWith("/api/eventpage/events/");
     const records = extractBtiCatalogRecords(payload);
-    if (records.length === 0) return [];
+    const parts = this.#parts.get(envelope.sourceId) ?? { details: new Map<string, ObservedProviderCatalog>() };
+    for (const [eventId, detail] of parts.details) {
+      if (envelope.observedAtMs - detail.observedAtMs > DETAIL_TTL_MS) parts.details.delete(eventId);
+    }
+    if (records.length === 0) {
+      if (isDetail) {
+        const eventId = decodeURIComponent(envelope.request.pathnameClass.slice("/api/eventpage/events/".length));
+        parts.details.delete(eventId);
+        this.#parts.set(envelope.sourceId, parts);
+      }
+      return [];
+    }
     const normalized = normalizeSbobetCatalog(records, {
       observedAtMs: envelope.observedAtMs,
       receivedMonotonicMs: envelope.receivedMonotonicMs,
@@ -38,11 +58,23 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
       rejectedMarketCount: normalized.diagnostics.length,
       events: normalized.events, markets: normalized.markets, quotes: normalized.quotes
     };
-    const mode = envelope.request.pathnameClass.includes("/prematch") ? "prematch" : "live";
-    const parts = this.#parts.get(envelope.sourceId) ?? {};
-    parts[mode] = part;
+    if (isDetail) {
+      for (const event of part.events) {
+        const detail: ObservedProviderCatalog = {
+          ...part,
+          events: part.events.filter((candidate) => candidate.providerEventId === event.providerEventId),
+          markets: part.markets.filter((candidate) => candidate.providerEventId === event.providerEventId),
+          quotes: part.quotes.filter((candidate) => candidate.providerEventId === event.providerEventId)
+        };
+        parts.details.set(event.providerEventId, detail);
+      }
+    } else {
+      const mode = envelope.request.pathnameClass.includes("/prematch") ? "prematch" : "live";
+      parts[mode] = part;
+    }
     this.#parts.set(envelope.sourceId, parts);
-    const all = [parts.live, parts.prematch].filter((value): value is ObservedProviderCatalog => value !== undefined);
+    const all = [parts.live, parts.prematch, ...parts.details.values()]
+      .filter((value): value is ObservedProviderCatalog => value !== undefined);
     const unique = <T>(items: readonly T[], key: (item: T) => string): readonly T[] =>
       [...new Map(items.map((item) => [key(item), item])).values()];
     const catalog: ObservedProviderCatalog = {

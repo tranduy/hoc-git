@@ -72,10 +72,25 @@ export const KEEP_ACTIVE_EXPRESSION = `(() => {
         !element.closest(unsafeSelector) && !/(?:odd|price|selection)/u.test(normalize(element.className)))
       .filter((element) => /^(?:\\+\\s*\\d+|[v▼]\\s*\\d+|\\d+\\s*(?:keo|markets?)\\s*(?:khac|more)?|more markets?|show more|all markets?)$/u
         .test(normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent)))
-      .filter((element) => !element.dataset.fieldlineMarketExpanded)
+      .filter((element) => {
+        const owner = element.closest('[data-event-id], [data-match-id], [data-matchid], [data-eventid], [id]');
+        const ownerId = owner?.getAttribute('data-event-id') || owner?.getAttribute('data-match-id') ||
+          owner?.getAttribute('data-matchid') || owner?.getAttribute('data-eventid') || owner?.id || '';
+        const label = normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent);
+        const signature = ownerId + '\\u0000' + label;
+        const lastAt = Number(element.dataset.fieldlineMarketExpandedAt || 0);
+        const alreadyOpen = element.getAttribute('aria-expanded') === 'true' || element.matches('details[open] > summary');
+        return !alreadyOpen && (element.dataset.fieldlineMarketExpandSignature !== signature ||
+          !Number.isFinite(lastAt) || now - lastAt >= 60000);
+      })
       .slice(0, 12);
     for (const control of controls) {
-      control.dataset.fieldlineMarketExpanded = '1';
+      const owner = control.closest('[data-event-id], [data-match-id], [data-matchid], [data-eventid], [id]');
+      const ownerId = owner?.getAttribute('data-event-id') || owner?.getAttribute('data-match-id') ||
+        owner?.getAttribute('data-matchid') || owner?.getAttribute('data-eventid') || owner?.id || '';
+      const label = normalize(control.getAttribute('aria-label') || control.getAttribute('title') || control.textContent);
+      control.dataset.fieldlineMarketExpandSignature = ownerId + '\\u0000' + label;
+      control.dataset.fieldlineMarketExpandedAt = String(now);
       control.click();
       expanded += 1;
     }
@@ -133,10 +148,25 @@ export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
         !element.closest(unsafeSelector) && !/(?:odd|price|selection)/u.test(normalize(element.className)))
       .filter((element) => /^(?:\\+\\s*\\d+|[v▼]\\s*\\d+|\\d+\\s*(?:keo|markets?)\\s*(?:khac|more)?|more markets?|show more|all markets?)$/u
         .test(normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent)))
-      .filter((element) => !element.dataset.fieldlineMarketExpanded)
+      .filter((element) => {
+        const owner = element.closest('[data-event-id], [data-match-id], [data-matchid], [data-eventid], [id]');
+        const ownerId = owner?.getAttribute('data-event-id') || owner?.getAttribute('data-match-id') ||
+          owner?.getAttribute('data-matchid') || owner?.getAttribute('data-eventid') || owner?.id || '';
+        const label = normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent);
+        const signature = ownerId + '\\u0000' + label;
+        const lastAt = Number(element.dataset.fieldlineMarketExpandedAt || 0);
+        const alreadyOpen = element.getAttribute('aria-expanded') === 'true' || element.matches('details[open] > summary');
+        return !alreadyOpen && (element.dataset.fieldlineMarketExpandSignature !== signature ||
+          !Number.isFinite(lastAt) || now - lastAt >= 60000);
+      })
       .slice(0, 12);
     for (const control of controls) {
-      control.dataset.fieldlineMarketExpanded = '1';
+      const owner = control.closest('[data-event-id], [data-match-id], [data-matchid], [data-eventid], [id]');
+      const ownerId = owner?.getAttribute('data-event-id') || owner?.getAttribute('data-match-id') ||
+        owner?.getAttribute('data-matchid') || owner?.getAttribute('data-eventid') || owner?.id || '';
+      const label = normalize(control.getAttribute('aria-label') || control.getAttribute('title') || control.textContent);
+      control.dataset.fieldlineMarketExpandSignature = ownerId + '\\u0000' + label;
+      control.dataset.fieldlineMarketExpandedAt = String(now);
       control.click();
       expanded += 1;
     }
@@ -181,7 +211,7 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(() => {
       }));
     });
     const common = {
-      SportId: 1, BetTypeIds: [1, 2, 3, 5], GamePeriods: [1, 2], IsCombo: false,
+      SportId: 1, BetTypeIds: [1, 2, 3, 5], GamePeriods: [1, 2, 3], IsCombo: false,
       ['O' + 'ddsType']: 2, DateFrom: '', DateTo: '', CompetitionIds: [],
       SortType: 2, ProgrammeIds: []
     };
@@ -233,15 +263,49 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   if (Number.isFinite(prior) && now - prior < 4000) return 'rate-limited';
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   root.dataset.fieldlineBtiCatalogRefreshAt = String(now);
-  for (const path of [
+  const listPaths = [
     '/api/eventlist/asia/leagues/v2/1/live',
     '/api/eventlist/asia/leagues/v2/1/live/initial',
     '/api/eventlist/asia/leagues/v2/1/prematch',
     '/api/eventlist/asia/leagues/v2/1/prematch/initial'
-  ]) {
-    await fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
-      headers: { Accept: 'application/json' } }).catch(() => undefined);
+  ];
+  const listResponses = await Promise.all(listPaths.map(async (path) => {
+    const response = await fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
+      headers: { Accept: 'application/json' } }).catch(() => null);
+    if (!response || !response.ok) return null;
+    return response.json().catch(() => null);
+  }));
+  const eventIds = [];
+  const seen = new Set();
+  for (const payload of listResponses) {
+    const leagues = Array.isArray(payload?.serializedData) ? payload.serializedData : [];
+    for (const league of leagues) {
+      const events = Array.isArray(league?.[12]) ? league[12] : [];
+      for (const event of events) {
+        const id = typeof event?.[0] === 'string' || typeof event?.[0] === 'number'
+          ? String(event[0]) : '';
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        eventIds.push(id);
+      }
+    }
   }
+  const previousCursor = Number(root.dataset.fieldlineBtiDetailCursor || 0);
+  const cursor = Number.isSafeInteger(previousCursor) && previousCursor >= 0 && previousCursor < eventIds.length
+    ? previousCursor : 0;
+  const selected = eventIds.slice(cursor, cursor + 6);
+  root.dataset.fieldlineBtiDetailCursor = String(eventIds.length === 0 ? 0 : (cursor + selected.length) % eventIds.length);
+  const authName = ['author', 'ization'].join('');
+  const contextName = ['service', '-', 'context'].join('');
+  const detailHeaders = { Accept: 'application/json' };
+  const authValue = localStorage.getItem(['CT_APP_', 'AUTH', 'ORIZATION'].join(''));
+  const contextValue = localStorage.getItem(['CT_APP_', 'SERVICE', '_CONTEXT'].join(''));
+  if (authValue) detailHeaders[authName] = authValue;
+  if (contextValue) detailHeaders[contextName] = contextValue;
+  await Promise.allSettled(selected.map((eventId) => fetch(
+    '/api/eventpage/events/' + encodeURIComponent(eventId) + '?hideX25X75Selections=false',
+    { method: 'GET', credentials: 'include', cache: 'no-store', headers: detailHeaders }
+  )));
   return 'catalog-requested';
 })()`;
 

@@ -52,7 +52,7 @@ describe("NetworkObserver", () => {
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("credentials: 'omit'");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SportId: 1");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("BetTypeIds: [1, 2, 3, 5]");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("GamePeriods: [1, 2]");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("GamePeriods: [1, 2, 3]");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("IsCombo: false");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SortType: 2");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("CompetitionIds: []");
@@ -101,6 +101,10 @@ describe("NetworkObserver", () => {
       params?.awaitPromise === true)).toBe(true);
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventlist/asia/leagues/v2/1/live");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventlist/asia/leagues/v2/1/prematch");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventpage/events/");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("hideX25X75Selections=false");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("fieldlineBtiDetailCursor");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("slice(cursor, cursor + 6)");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("credentials: 'include'");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("cache: 'no-store'");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).not.toMatch(/cookie|authorization|password/iu);
@@ -230,19 +234,19 @@ describe("NetworkObserver", () => {
 
   it("expands only bounded structural market controls and excludes odds and bet-slip controls", () => {
     expect(KEEP_ACTIVE_EXPRESSION).toContain("fieldlineMarketExpandedAt");
+    expect(KEEP_ACTIVE_EXPRESSION).toContain("fieldlineMarketExpandSignature");
     expect(KEEP_ACTIVE_EXPRESSION).toContain("slice(0, 12)");
     expect(KEEP_ACTIVE_EXPRESSION).toContain("closest(unsafeSelector)");
     expect(KEEP_ACTIVE_EXPRESSION).toContain("more markets");
-    expect(KEEP_ACTIVE_EXPRESSION).toContain(".filter((element) => !element.dataset.fieldlineMarketExpanded)");
+    expect(KEEP_ACTIVE_EXPRESSION).not.toContain("fieldlineMarketExpanded = '1'");
     expect(() => new Function(`return ${KEEP_ACTIVE_EXPRESSION}`)).not.toThrow();
   });
 
   it("uses the same bounded hidden-market expansion while walking the virtualized CMD catalog", () => {
     expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("fieldlineCmdMarketExpandedAt");
     expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("slice(0, 12)");
-    expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("fieldlineMarketExpanded");
-    expect(CMD_CATALOG_DISCOVERY_EXPRESSION)
-      .toContain(".filter((element) => !element.dataset.fieldlineMarketExpanded)");
+    expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("fieldlineMarketExpandSignature");
+    expect(CMD_CATALOG_DISCOVERY_EXPRESSION).not.toContain("fieldlineMarketExpanded = '1'");
     expect(() => new Function(`return ${CMD_CATALOG_DISCOVERY_EXPRESSION}`)).not.toThrow();
   });
 

@@ -52,18 +52,26 @@ const cmdTwoWayMarketSemantics = {
 
 type CmdEventFamily = "GOALS" | "CORNERS" | "CARDS";
 
-const specialFullTimeSemantics = {
+const specialTwoWaySemantics = {
   CORNERS: {
     "1": { marketType: "CORNER_FT_AH", scope: "FULL_TIME", isHandicap: true,
       settlementProfile: "football-corners-regulation" },
     "3": { marketType: "CORNER_FT_TOTAL", scope: "FULL_TIME", isHandicap: false,
-      settlementProfile: "football-corners-regulation" }
+      settlementProfile: "football-corners-regulation" },
+    "7": { marketType: "CORNER_FH_AH", scope: "FIRST_HALF", isHandicap: true,
+      settlementProfile: "football-corners-first-half" },
+    "8": { marketType: "CORNER_FH_TOTAL", scope: "FIRST_HALF", isHandicap: false,
+      settlementProfile: "football-corners-first-half" }
   },
   CARDS: {
     "1": { marketType: "CARD_FT_AH", scope: "FULL_TIME", isHandicap: true,
       settlementProfile: "football-cards-regulation" },
     "3": { marketType: "CARD_FT_TOTAL", scope: "FULL_TIME", isHandicap: false,
-      settlementProfile: "football-cards-regulation" }
+      settlementProfile: "football-cards-regulation" },
+    "7": { marketType: "CARD_FH_AH", scope: "FIRST_HALF", isHandicap: true,
+      settlementProfile: "football-cards-first-half" },
+    "8": { marketType: "CARD_FH_TOTAL", scope: "FIRST_HALF", isHandicap: false,
+      settlementProfile: "football-cards-first-half" }
   }
 } as const;
 
@@ -71,7 +79,7 @@ function cmdMarketSemantics(betType: string, family: CmdEventFamily) {
   if (family === "GOALS") {
     return cmdTwoWayMarketSemantics[betType as keyof typeof cmdTwoWayMarketSemantics] ?? null;
   }
-  return specialFullTimeSemantics[family][betType as "1" | "3"] ?? null;
+  return specialTwoWaySemantics[family][betType as keyof typeof specialTwoWaySemantics[typeof family]] ?? null;
 }
 
 function removeLoadingSuffix(value: string): string {

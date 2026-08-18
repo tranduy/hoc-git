@@ -41,6 +41,29 @@ describe("ImHttpCatalogAdapter", () => {
       .toEqual([["101", "0.8"], ["102", "-0.9"]]);
   });
 
+  it("publishes exact second-half tickets from provider game period 3 deltas", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1));
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{
+      mi: 30, bti: 1, gp: 3, ws: [
+        { wsi: 301, si: 1, hdp: -0.75, dih: "+0.75", o: 0.82, ot: 1 },
+        { wsi: 302, si: 2, hdp: -0.75, dih: "-0.75", o: -0.94, ot: 1 }
+      ]
+    }, {
+      mi: 31, bti: 2, gp: 3, ws: [
+        { wsi: 311, si: 3, hdp: 1.75, dih: "1.5/2", o: 0.81, ot: 1 },
+        { wsi: 312, si: 4, hdp: 1.75, dih: "1.5/2", o: -0.93, ot: 1 }
+      ]
+    }] }] };
+    const update = adapter.decode(envelope(delta, 2, "/api/EventV6/GetSEDelta"))[0]?.value as {
+      markets: readonly { providerMarketId: string; marketType: string; scope: string }[];
+    };
+    expect(update.markets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: "30", marketType: "SH_AH", scope: "SECOND_HALF" }),
+      expect.objectContaining({ providerMarketId: "31", marketType: "SH_TOTAL", scope: "SECOND_HALF" })
+    ]));
+  });
+
   it("rejects lookalike hosts, paths, and failed provider envelopes", () => {
     const adapter = new ImHttpCatalogAdapter();
     expect(adapter.fingerprint({ ...envelope({ StatusCode: 100, sel: [event] }),

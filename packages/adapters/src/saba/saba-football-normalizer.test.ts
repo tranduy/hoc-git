@@ -144,4 +144,53 @@ describe("normalizeSabaFootballRecords", () => {
       { marketType: "FH_AH", scope: "FIRST_HALF", line: "0.5" }
     ]);
   });
+
+  it("classifies SABA corner and booking pseudo-events as their exact market families", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "RUSSIA CUP - CORNERS", sporttype: 1 },
+      { type: "l", leagueid: 2, leaguenameen: "RUSSIA CUP - BOOKING", sporttype: 1 },
+      { type: "m", matchid: 10, leagueid: 1, hteamnameen: "CSKA Moscow No.of Corners",
+        ateamnameen: "FK Akron Togliatti No.of Corners", kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "m", matchid: 20, leagueid: 2, hteamnameen: "CSKA Moscow Total Bookings",
+        ateamnameen: "FK Akron Togliatti Total Bookings", kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "o", oddsid: 11, matchid: 10, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", odds1a: 0.82, odds2a: -0.96, hdp1: 0.5, hdp2: 0 },
+      { type: "o", oddsid: 12, matchid: 10, bettype: 8, parenttypeid: 8,
+        oddsstatus: "running", odds1a: -0.74, odds2a: 0.62, hdp1: 4.5, hdp2: 0 },
+      { type: "o", oddsid: 21, matchid: 20, bettype: 3, parenttypeid: 3,
+        oddsstatus: "running", odds1a: 0.72, odds2a: -0.88, hdp1: 3.5, hdp2: 0 },
+      { type: "o", oddsid: 22, matchid: 20, bettype: 7, parenttypeid: 7,
+        oddsstatus: "running", odds1a: -0.68, odds2a: 0.52, hdp1: 0, hdp2: 0.5 }
+    ], options);
+
+    expect(normalized.events.map(({ competition, participantA, participantB }) =>
+      ({ competition, participantA, participantB }))).toEqual([
+        { competition: "RUSSIA CUP", participantA: "CSKA Moscow", participantB: "FK Akron Togliatti" },
+        { competition: "RUSSIA CUP", participantA: "CSKA Moscow", participantB: "FK Akron Togliatti" }
+      ]);
+    expect(normalized.markets.map(({ marketType, settlementProfile }) =>
+      ({ marketType, settlementProfile }))).toEqual([
+        { marketType: "CORNER_FT_AH", settlementProfile: "football-corners-regulation" },
+        { marketType: "CORNER_FH_TOTAL", settlementProfile: "football-corners-first-half" },
+        { marketType: "CARD_FT_TOTAL", settlementProfile: "football-cards-regulation" },
+        { marketType: "CARD_FH_AH", settlementProfile: "football-cards-first-half" }
+      ]);
+  });
+
+  it("rejects non-total corner and booking derivative pseudo-events", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "RUSSIA CUP - CORNERS", sporttype: 1 },
+      { type: "l", leagueid: 2, leaguenameen: "RUSSIA CUP - BOOKING", sporttype: 1 },
+      { type: "m", matchid: 10, leagueid: 1, hteamnameen: "CSKA Moscow 1st Corner",
+        ateamnameen: "FK Akron Togliatti 1st Corner", kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "m", matchid: 20, leagueid: 2, hteamnameen: "CSKA Moscow 3rd Booking",
+        ateamnameen: "FK Akron Togliatti 3rd Booking", kickofftime: 10, marketid: "L", sporttype: 1 }
+    ], options);
+
+    expect(normalized.events).toEqual([]);
+    expect(normalized.markets).toEqual([]);
+    expect(normalized.diagnostics).toEqual([
+      "SABA_FOOTBALL_EVENT_UNSUPPORTED", "SABA_FOOTBALL_EVENT_UNSUPPORTED"
+    ]);
+  });
 });

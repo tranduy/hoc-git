@@ -18,7 +18,66 @@ function envelope(body = JSON.stringify(payload)): ChromeBridgeEnvelope {
     payload: { encoding: "UTF8", body } };
 }
 
+function detailPayload(): unknown {
+  const detailSelection = (id: string, side: 1 | 3, points: number, malay: string) => {
+    const value = Array<unknown>(30).fill(null);
+    value[0] = id; value[2] = id.includes("over") ? { VI: "Over" } : id.includes("under") ? { VI: "Under" } :
+      side === 1 ? { VI: "Home" } : { VI: "Away" };
+    value[5] = false; value[8] = ["", "1.90", "", "", "", malay];
+    value[9] = side; value[13] = false; value[16] = points;
+    return value;
+  };
+  const detailMarket = Array<unknown>(30).fill(null);
+  detailMarket[0] = "detail-ou"; detailMarket[1] = "OU1"; detailMarket[5] = ["OU1", "OU1"];
+  detailMarket[6] = "event"; detailMarket[13] = [
+    detailSelection("detail-over", 1, 2.75, "0.90"), detailSelection("detail-under", 3, 2.75, "-0.99")
+  ];
+  const detailEvent = Array<unknown>(39).fill(null);
+  detailEvent[0] = "event"; detailEvent[1] = "league"; detailEvent[2] = "Champions League";
+  detailEvent[3] = "1"; detailEvent[8] = [["h", { VI: "Home" }, "Home"], ["a", { VI: "Away" }, "Away"]];
+  detailEvent[11] = "2026-08-19T00:15:00.000Z"; detailEvent[13] = true; detailEvent[20] = [detailMarket];
+  return { data: [detailEvent] };
+}
+
+function detailEnvelope(body: unknown = detailPayload(), observedAtMs = envelope().observedAtMs): ChromeBridgeEnvelope {
+  return { ...envelope(JSON.stringify(body)), sequence: 10, observedAtMs,
+    request: { ...envelope().request, pathnameClass: "/api/eventpage/events/event" } };
+}
+
 describe("BtiHttpCatalogAdapter", () => {
+  it("merges bounded event-page detail markets into the current BTI catalog", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    adapter.decode(envelope());
+    expect(adapter.fingerprint(detailEnvelope())).toBe(true);
+    const combined = adapter.decode(detailEnvelope())[0]!.value as {
+      events: unknown[]; markets: { marketType: string }[]; quotes: unknown[];
+    };
+    expect(combined.events).toHaveLength(1);
+    expect(combined.markets.map(({ marketType }) => marketType)).toEqual(
+      expect.arrayContaining(["FT_AH", "FH_TOTAL"]));
+    expect(combined.quotes).toHaveLength(4);
+  });
+
+  it("evicts expired detail markets and removes a valid empty event detail", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    adapter.decode(envelope());
+    const withDetail = adapter.decode(detailEnvelope())[0]!.value as { markets: { marketType: string }[] };
+    expect(withDetail.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(true);
+
+    const expiredAt = envelope().observedAtMs + 60_001;
+    const expired = adapter.decode({ ...envelope(), sequence: 11, observedAtMs: expiredAt })[0]!.value as {
+      markets: { marketType: string }[];
+    };
+    expect(expired.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(false);
+
+    adapter.decode(detailEnvelope(detailPayload(), expiredAt + 1));
+    expect(adapter.decode(detailEnvelope({ data: [] }, expiredAt + 2))).toEqual([]);
+    const afterEmpty = adapter.decode({ ...envelope(), sequence: 12, observedAtMs: expiredAt + 3 })[0]!.value as {
+      markets: { marketType: string }[];
+    };
+    expect(afterEmpty.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(false);
+  });
+
   it("decodes the live football event-list response", () => {
     const adapter = new BtiHttpCatalogAdapter();
     expect(adapter.fingerprint(envelope())).toBe(true);

@@ -45,10 +45,10 @@
 **Interfaces:**
 - Produces: sanitized structural evidence and exact provider market/selection IDs for hidden markets.
 
-- [ ] Add RED fixtures for hidden detail responses while proving exact-score payloads are excluded.
-- [ ] Hydrate detail endpoints with bounded concurrency and no odds interaction.
-- [ ] Record only structural evidence needed to bind provider codes to semantics.
-- [ ] Run extension/API tests and verify no unbounded tab or request growth.
+- [x] Add RED fixtures for hidden detail responses while proving exact-score payloads are excluded.
+- [x] Hydrate BTI event detail in a six-event rotating window and expand only bounded structural controls elsewhere; never interact with odds.
+- [x] Record only exact event/market/selection IDs whose period, statistic, line, opposing domain, and team labels are structurally proven.
+- [x] Cover detail expiry, empty-detail deletion, virtualized-control reuse, request bounds, and forbidden odds/bet-slip interaction.
 
 ### Task 3: Corners, cards, and other evidenced binary families
 
@@ -82,9 +82,9 @@
 
 ### Verified provider coverage (2026-08-18)
 
-- SABA: full-time and first-half Asian handicap/total (`1/3/7/8`).
-- IM: full-time and first-half Asian handicap/total (`bti=1/2`, `gp=1/2`).
+- SABA: full-time and first-half Asian handicap/total (`1/3/7/8`); exact `- CORNERS` and `- BOOKING(S)` pseudo-events are normalized to distinct corner/card settlement families, while ordinal derivatives such as `1st Corner` remain rejected.
+- IM: full-time, first-half, and second-half Asian handicap/total (`bti=1/2`, `gp=1/2/3`).
 - SBOBET/K-Sports and APSPORT/T-Sports: full-time, first-half, second-half, corner and card Asian handicap/total groups whose numeric semantics are covered by decoder regressions.
-- BTI: full-time handicap/total and first-half total codes currently evidenced by fixtures.
-- CMD: only proven full-time handicap/total DOM groups (`1/3`); unknown groups remain fail-closed.
+- BTI: full-time/first-half handicap and total from list/detail codes; detail labels also admit evidenced second-half, corner, and card families only when both exact opposing outcomes are present.
+- CMD: full-time/first-half handicap and total plus full-time/first-half pseudo-event corner/card groups (`1/3/7/8`) proven by the DOM normalizer; the reader now revisits reused virtual rows instead of permanently skipping their hidden controls.
 - Exact score, 1X2/draw, integer push-capable lines, incomplete domains, and unknown provider codes remain excluded.

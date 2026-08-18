@@ -15,6 +15,13 @@ export interface NormalizedSabaFootballCatalog {
 }
 
 type RawRecord = Readonly<Record<string, unknown>>;
+type SabaEventFamily = "GOALS" | "CORNERS" | "CARDS";
+
+interface ClassifiedSabaEvent {
+  readonly competition: string;
+  readonly participants: readonly [string, string];
+  readonly family: SabaEventFamily;
+}
 
 function id(value: unknown): string | null {
   if ((typeof value !== "string" && typeof value !== "number") || String(value).trim().length === 0) return null;
@@ -39,6 +46,50 @@ function malay(value: unknown): string | null {
 function isVirtualFootball(competition: string, participants: readonly string[]): boolean {
   const evidence = `${competition} ${participants.join(" ")}`.normalize("NFKC").toLocaleLowerCase("en");
   return /(?:soccer marble|e[\s-]?soccer|\bvirtual\b|simulated reality|spinner world cup|\bpes\b|\(pg\)|\(et\))/u.test(evidence);
+}
+
+function classifySabaEvent(competition: string, participants: readonly [string, string]): ClassifiedSabaEvent | null {
+  const cornerCompetition = /\s*-\s*CORNERS\s*$/iu.test(competition);
+  const bookingCompetition = /\s*-\s*BOOKINGS?\s*$/iu.test(competition);
+  const cornerSuffix = /\s*(?:\(\s*)?No\.?\s*of\s+Corners(?:\s*\))?\s*$/iu;
+  const bookingSuffix = /\s*(?:\(\s*)?Total\s+Bookings?(?:\s*\))?\s*$/iu;
+  if (cornerCompetition || bookingCompetition) {
+    const suffix = cornerCompetition ? cornerSuffix : bookingSuffix;
+    if (!participants.every((participant) => suffix.test(participant))) return null;
+    const normalized = participants.map((participant) => participant.replace(suffix, "").trim());
+    if (normalized.some((participant) => participant.length === 0) || normalized[0] === normalized[1]) return null;
+    return {
+      competition: competition.replace(cornerCompetition ? /\s*-\s*CORNERS\s*$/iu : /\s*-\s*BOOKINGS?\s*$/iu, "").trim(),
+      participants: normalized as [string, string],
+      family: cornerCompetition ? "CORNERS" : "CARDS"
+    };
+  }
+  if (participants.some((participant) => /\b(?:Corners?|Bookings?|Cards?)\s*$/iu.test(participant))) return null;
+  return { competition, participants, family: "GOALS" };
+}
+
+function marketSemantics(family: SabaEventFamily, betType: number): {
+  readonly marketType: "FT_AH" | "FT_TOTAL" | "FH_AH" | "FH_TOTAL" |
+    "CORNER_FT_AH" | "CORNER_FT_TOTAL" | "CORNER_FH_AH" | "CORNER_FH_TOTAL" |
+    "CARD_FT_AH" | "CARD_FT_TOTAL" | "CARD_FH_AH" | "CARD_FH_TOTAL";
+  readonly isHandicap: boolean;
+  readonly isFirstHalf: boolean;
+  readonly settlementProfile: string;
+} | null {
+  if (![1, 3, 7, 8].includes(betType)) return null;
+  const isHandicap = betType === 1 || betType === 7;
+  const isFirstHalf = betType === 7 || betType === 8;
+  const prefix = family === "GOALS" ? "" : family === "CORNERS" ? "CORNER_" : "CARD_";
+  const marketType = `${prefix}${isFirstHalf ? "FH" : "FT"}_${isHandicap ? "AH" : "TOTAL"}` as
+    "FT_AH" | "FT_TOTAL" | "FH_AH" | "FH_TOTAL" |
+    "CORNER_FT_AH" | "CORNER_FT_TOTAL" | "CORNER_FH_AH" | "CORNER_FH_TOTAL" |
+    "CARD_FT_AH" | "CARD_FT_TOTAL" | "CARD_FH_AH" | "CARD_FH_TOTAL";
+  const settlementProfile = family === "CORNERS"
+    ? isFirstHalf ? "football-corners-first-half" : "football-corners-regulation"
+    : family === "CARDS"
+      ? isFirstHalf ? "football-cards-first-half" : "football-cards-regulation"
+      : isFirstHalf ? "football-first-half-including-added-time" : "football-regulation-including-added-time";
+  return { marketType, isHandicap, isFirstHalf, settlementProfile };
 }
 
 function canonicalHomeHandicap(record: RawRecord): string | null {
@@ -91,6 +142,7 @@ export function normalizeSabaFootballRecords(
   }
 
   const acceptedMatches = new Set<string>();
+  const classifiedMatches = new Map<string, ClassifiedSabaEvent>();
   for (const [matchId, match] of matches) {
     const leagueId = id(match.leagueid);
     const participantA = text(match.hteamnameen);
@@ -102,22 +154,25 @@ export function normalizeSabaFootballRecords(
       diagnostics.push("SABA_FOOTBALL_EVENT_REJECTED");
       continue;
     }
+    const classified = classifySabaEvent(competition, [participantA, participantB]);
     const isVirtual = isVirtualFootball(competition, [participantA, participantB]);
     // ET/PEN are separately settled derivative events on SABA, not the same
     // regulation-time ticket. Virtual events are outside this Football feed.
-    if (isVirtual || participantsHaveDerivativeSuffix([participantA, participantB])) {
+    if (isVirtual || classified === null || participantsHaveDerivativeSuffix([participantA, participantB])) {
       diagnostics.push("SABA_FOOTBALL_EVENT_UNSUPPORTED");
       continue;
     }
     const isLive = match.marketid === "L";
     events.push({
-      provider: "SABA", category: "FOOTBALL", providerEventId: matchId, competition,
-      seasonStage: null, startAtUtcMs: kickoffSeconds * 1_000, participantA, participantB,
+      provider: "SABA", category: "FOOTBALL", providerEventId: matchId, competition: classified.competition,
+      seasonStage: null, startAtUtcMs: kickoffSeconds * 1_000,
+      participantA: classified.participants[0], participantB: classified.participants[1],
       eventScope: "REGULATION", bestOf: null, isLive, rematchCandidate: isLive,
       fixtureDiscriminator: null, isVirtual: false, sportVariant: "FOOTBALL",
       liveState: isLive ? { period: null, scoreHome: null, scoreAway: null, clockMs: null } : null
     });
     acceptedMatches.add(matchId);
+    classifiedMatches.set(matchId, classified);
   }
 
   const seenMarkets = new Set<string>();
@@ -127,11 +182,10 @@ export function normalizeSabaFootballRecords(
     const matchId = id(record.matchid);
     const oddsId = id(record.oddsid);
     if (matchId === null || !acceptedMatches.has(matchId)) continue;
-    const marketType = record.bettype === 1 ? "FT_AH" as const
-      : record.bettype === 3 ? "FT_TOTAL" as const
-        : record.bettype === 7 ? "FH_AH" as const : "FH_TOTAL" as const;
-    const isHandicap = marketType === "FT_AH" || marketType === "FH_AH";
-    const isFirstHalf = marketType === "FH_AH" || marketType === "FH_TOTAL";
+    const classified = classifiedMatches.get(matchId);
+    const semantics = classified === undefined ? null : marketSemantics(classified.family, Number(record.bettype));
+    if (semantics === null) continue;
+    const { marketType, isHandicap, isFirstHalf, settlementProfile } = semantics;
     const scope = isFirstHalf ? "FIRST_HALF" as const : "FULL_TIME" as const;
     const line = isHandicap ? canonicalHomeHandicap(record) : canonicalTotalLine(record);
     const firstPrice = malay(record.odds1a);
@@ -146,8 +200,7 @@ export function normalizeSabaFootballRecords(
     markets.push({
       provider: "SABA", category: "FOOTBALL", providerEventId: matchId, providerMarketId: oddsId,
       marketType, scope, line,
-      settlementProfile: isFirstHalf ? "football-first-half-including-added-time"
-        : "football-regulation-including-added-time", status
+      settlementProfile, status
     });
     const selections = isHandicap ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
     quotes.push(...selections.map((selection, index): ProviderQuote => ({

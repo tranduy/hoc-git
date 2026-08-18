@@ -150,6 +150,12 @@ describe("normalizeCmdCatalog", () => {
               { marketOddsId: "corner-total", priceText: "0.82", status: null, greyedOut: "false" },
               { marketOddsId: "corner-total", priceText: "-0.92", status: null, greyedOut: "false" }
             ]
+          },
+          {
+            betTypeIds: ["7"], labels: ["0.5"], odds: [
+              { marketOddsId: "corner-fh-ah", priceText: "0.83", status: null, greyedOut: "false", lineText: "0.5" },
+              { marketOddsId: "corner-fh-ah", priceText: "-0.93", status: null, greyedOut: "false", lineText: null }
+            ]
           }
         ]
       },
@@ -161,6 +167,11 @@ describe("normalizeCmdCatalog", () => {
           betTypeIds: ["3"], labels: ["4.5"], odds: [
             { marketOddsId: "card-total", priceText: "0.85", status: null, greyedOut: "false" },
             { marketOddsId: "card-total", priceText: "-0.95", status: null, greyedOut: "false" }
+          ]
+        }, {
+          betTypeIds: ["8"], labels: ["2.5"], odds: [
+            { marketOddsId: "card-fh-total", priceText: "0.84", status: null, greyedOut: "false" },
+            { marketOddsId: "card-fh-total", priceText: "-0.94", status: null, greyedOut: "false" }
           ]
         }]
       }
@@ -181,7 +192,9 @@ describe("normalizeCmdCatalog", () => {
       [marketType, scope, line, settlementProfile])).toEqual([
       ["CORNER_FT_AH", "FULL_TIME", "-0.5", "football-corners-regulation"],
       ["CORNER_FT_TOTAL", "FULL_TIME", "9.5", "football-corners-regulation"],
-      ["CARD_FT_TOTAL", "FULL_TIME", "4.5", "football-cards-regulation"]
+      ["CORNER_FH_AH", "FIRST_HALF", "-0.5", "football-corners-first-half"],
+      ["CARD_FT_TOTAL", "FULL_TIME", "4.5", "football-cards-regulation"],
+      ["CARD_FH_TOTAL", "FIRST_HALF", "2.5", "football-cards-first-half"]
     ]);
   });
 

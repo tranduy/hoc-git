@@ -18,6 +18,7 @@ function halfLine(value: unknown): value is number {
 
 interface BtiSelection {
   readonly id: string;
+  readonly name: string;
   readonly side: number;
   readonly line: number;
   readonly malay: string;
@@ -32,7 +33,89 @@ function selection(value: unknown): BtiSelection | null {
   const line = item?.[13];
   const malay = text(formats?.[5]);
   if (id === "" || (side !== 1 && side !== 3) || !halfLine(line) || !/^-?(?:0|1)(?:\.\d+)?$/u.test(malay) || Number(malay) === 0) return null;
-  return { id, side, line, malay, locked: item?.[3] === true };
+  return { id, name: localized(item?.[1]) || localized(item?.[2]) || text(item?.[2]),
+    side, line, malay, locked: item?.[3] === true };
+}
+
+function detailSelection(value: unknown): BtiSelection | null {
+  const item = row(value);
+  const formats = row(item?.[8]);
+  const id = text(item?.[0]);
+  const name = localized(item?.[2]) || text(item?.[2]);
+  const side = item?.[9];
+  const line = item?.[16];
+  const malay = text(formats?.[5]);
+  if (id === "" || name === "" || (side !== 1 && side !== 3) || !halfLine(line) ||
+    !/^-?(?:0|1)(?:\.\d+)?$/u.test(malay) || Number(malay) === 0 ||
+    item?.[13] === true) return null;
+  return { id, name, side, line, malay, locked: item?.[5] === true };
+}
+
+function normalizedLabel(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/gu, "").toLocaleLowerCase("en")
+    .replace(/[^a-z0-9]+/gu, " ").trim();
+}
+
+function marketType(code: string, label = ""): SbobetCatalogMarket["marketType"] | null {
+  const evidence = normalizedLabel(label);
+  const handicap = /^HC(?:39|0|1)$/u.test(code) || /\b(?:asian handicap|handicap|ah)\b/u.test(evidence);
+  const total = /^OU(?:39|0|1)$/u.test(code) || /\b(?:total|over under|ou)\b/u.test(evidence);
+  if (handicap === total) return null;
+  const firstHalf = code === "HC1" || code === "OU1" || /\b(?:first half|1st half|1h)\b/u.test(evidence);
+  const secondHalf = /\b(?:second half|2nd half|2h)\b/u.test(evidence);
+  if (firstHalf && secondHalf) return null;
+  const corner = /\bcorners?\b/u.test(evidence);
+  const card = /\b(?:cards?|bookings?)\b/u.test(evidence);
+  if ((corner && card) || ((corner || card) && secondHalf)) return null;
+  const kind = handicap ? "AH" : "TOTAL";
+  if (corner) return `CORNER_${firstHalf ? "FH" : "FT"}_${kind}`;
+  if (card) return `CARD_${firstHalf ? "FH" : "FT"}_${kind}`;
+  if (secondHalf) return `SH_${kind}`;
+  return firstHalf ? `FH_${kind}` : `FT_${kind}`;
+}
+
+function normalizedMarket(
+  marketId: string,
+  code: string,
+  values: readonly unknown[],
+  parseSelection: (value: unknown) => BtiSelection | null,
+  label = "",
+  expectedTeams?: readonly [string, string]
+): readonly SbobetCatalogMarket[] {
+  const type = marketType(code, label);
+  if (marketId === "" || type === null) return [];
+  const isHandicap = type.endsWith("_AH");
+  const candidates = values.map(parseSelection).filter((item): item is BtiSelection => item !== null);
+  const grouped = new Map<string, BtiSelection[]>();
+  for (const item of candidates) {
+    const key = isHandicap ? String(item.side === 1 ? item.line : -item.line) : String(item.line);
+    grouped.set(key, [...(grouped.get(key) ?? []), item]);
+  }
+  return [...grouped.entries()].flatMap(([line, pair]) => {
+    const home = pair.find((item) => item.side === 1);
+    const away = pair.find((item) => item.side === 3);
+    if (home === undefined || away === undefined || pair.length !== 2 || home.id === away.id) return [];
+    if (expectedTeams !== undefined) {
+      const homeName = normalizedLabel(home.name);
+      const awayName = normalizedLabel(away.name);
+      if (isHandicap) {
+        const expectedHome = normalizedLabel(expectedTeams[0]);
+        const expectedAway = normalizedLabel(expectedTeams[1]);
+        const sameTeam = (actual: string, expected: string): boolean => actual === expected ||
+          (actual.length >= 4 && expected.length >= 4 && (actual.includes(expected) || expected.includes(actual)));
+        if (!sameTeam(homeName, expectedHome) || !sameTeam(awayName, expectedAway)) return [];
+      } else if (!/^(?:over|tai|tren)(?:\b|\d)/u.test(homeName) ||
+        !/^(?:under|xiu|duoi)(?:\b|\d)/u.test(awayName)) return [];
+    }
+    const selections: SbobetCatalogSelection[] = [home, away].map((item, index) => ({
+      selectionId: item.id,
+      selection: isHandicap ? (index === 0 ? "HOME" : "AWAY") : (index === 0 ? "OVER" : "UNDER"),
+      priceText: item.malay,
+      locked: item.locked,
+      ...(isHandicap ? { lineText: `${item.line >= 0 ? "+" : ""}${item.line}` } : {})
+    }));
+    return [{ marketId: `${marketId}:${line}`, marketType: type, lineText: line, selections }];
+  });
 }
 
 function markets(value: unknown): readonly SbobetCatalogMarket[] {
@@ -49,35 +132,53 @@ function markets(value: unknown): readonly SbobetCatalogMarket[] {
   visit(value);
   return found.flatMap((market): SbobetCatalogMarket[] => {
     const code = text(row(market[3])?.[0]);
-    const type = code === "HC39" || code === "HC0" ? "FT_AH" as const
-      : code === "HC1" ? "FH_AH" as const
-        : code === "OU1" ? "FH_TOTAL" as const : "FT_TOTAL" as const;
-    const isHandicap = type === "FT_AH" || type === "FH_AH";
-    const candidates = (row(market[7]) ?? []).map(selection).filter((item): item is BtiSelection => item !== null);
-    const grouped = new Map<string, BtiSelection[]>();
-    for (const item of candidates) {
-      const key = isHandicap ? String(item.side === 1 ? item.line : -item.line) : String(item.line);
-      grouped.set(key, [...(grouped.get(key) ?? []), item]);
-    }
-    return [...grouped.entries()].flatMap(([line, pair]) => {
-      const home = pair.find((item) => item.side === 1);
-      const away = pair.find((item) => item.side === 3);
-      if (home === undefined || away === undefined || pair.length !== 2) return [];
-      const selections: SbobetCatalogSelection[] = [home, away].map((item, index) => ({
-        selectionId: item.id,
-        selection: isHandicap ? (index === 0 ? "HOME" : "AWAY") : (index === 0 ? "OVER" : "UNDER"),
-        priceText: item.malay,
-        locked: item.locked,
-        ...(isHandicap ? { lineText: `${item.line >= 0 ? "+" : ""}${item.line}` } : {})
-      }));
-      return [{ marketId: `${text(market[0])}:${line}`, marketType: type, lineText: line, selections }];
+    return [...normalizedMarket(text(market[0]), code, row(market[7]) ?? [], selection)];
+  });
+}
+
+function detailMarkets(value: unknown, teamNames: readonly [string, string]): readonly SbobetCatalogMarket[] {
+  const candidates = row(value) ?? [];
+  return candidates.flatMap((value): SbobetCatalogMarket[] => {
+    const market = row(value);
+    if (market === null || market[15] === true || market[23] === true) return [];
+    const marketTypeValue = row(market[5]);
+    const code = text(marketTypeValue?.[0]) || text(marketTypeValue?.[1]) || text(market[1]);
+    const label = `${text(market[1])} ${text(marketTypeValue?.[1])}`;
+    return [...normalizedMarket(text(market[0]), code, row(market[13]) ?? [], detailSelection, label, teamNames)];
+  });
+}
+
+function detailRecords(payload: Record<string, unknown>): readonly SbobetCatalogInputRecord[] {
+  const events = row(payload.data) ?? [];
+  return events.flatMap((eventValue): SbobetCatalogInputRecord[] => {
+    const event = row(eventValue);
+    if (event === null || event[32] === true) return [];
+    const eventId = text(event[0]);
+    const leagueName = text(event[2]);
+    const participants = row(event[8]) ?? [];
+    const names = participants.slice(0, 2).map((participant) => {
+      const item = row(participant);
+      return localized(item?.[1]) || text(item?.[2]);
     });
+    const isLive = event[13];
+    const startAtUtcMs = Date.parse(text(event[11]));
+    if (names.length !== 2 || names.some((name) => name === "")) return [];
+    const teamNames = names as [string, string];
+    const combined = [...detailMarkets(event[20], teamNames), ...detailMarkets(event[33], teamNames)];
+    const unique = new Map(combined.map((market) => [market.marketId, market]));
+    if (eventId === "" || leagueName === "" || (isLive !== true && isLive !== false) ||
+      !Number.isFinite(startAtUtcMs) || names.length !== 2 || names.some((name) => name === "") ||
+      unique.size === 0) return [];
+    return [{ eventId, leagueName, timeText: isLive ? "LIVE" : "PREMATCH", scoreText: null,
+      ...(isLive ? {} : { startAtUtcMs }), teamNames: names, markets: [...unique.values()] }];
   });
 }
 
 export function extractBtiCatalogRecords(payload: unknown): readonly SbobetCatalogInputRecord[] {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return [];
-  const leagues = row((payload as Record<string, unknown>).serializedData) ?? [];
+  const record = payload as Record<string, unknown>;
+  if (Array.isArray(record.data)) return detailRecords(record);
+  const leagues = row(record.serializedData) ?? [];
   return leagues.flatMap((leagueValue): SbobetCatalogInputRecord[] => {
     const league = row(leagueValue);
     const leagueName = text(league?.[1]);

@@ -64,9 +64,28 @@ describe("extractImFootballCatalog", () => {
     ]);
   });
 
+  it("maps provider game period 3 to exact second-half handicap and total tickets", () => {
+    const secondHalf = { ...event, mls: [
+      { mi: 30, bti: 1, gp: 3, il: false, ws: [
+        { wsi: 301, si: 1, hdp: -0.75, dih: "+0.5/1", o: 0.78, ot: 1 },
+        { wsi: 302, si: 2, hdp: -0.75, dih: "-0.5/1", o: -0.9, ot: 1 }
+      ] },
+      { mi: 31, bti: 2, gp: 3, il: false, ws: [
+        { wsi: 311, si: 3, hdp: 1.25, dih: "1/1.5", o: 0.81, ot: 1 },
+        { wsi: 312, si: 4, hdp: 1.25, dih: "1/1.5", o: -0.93, ot: 1 }
+      ] }
+    ] };
+
+    expect(extractImFootballCatalog({ StatusCode: 100, sel: [secondHalf] })[0]?.markets
+      .map(({ marketId, marketType }) => ({ marketId, marketType }))).toEqual([
+        { marketId: "30", marketType: "SH_AH" },
+        { marketId: "31", marketType: "SH_TOTAL" }
+      ]);
+  });
+
   it("fails closed for an unproved game period or non-opposing first-half domain", () => {
     const wrongPeriod = { ...event, mls: [{
-      mi: 30, bti: 1, gp: 3, ws: [
+      mi: 30, bti: 1, gp: 4, ws: [
         { wsi: 301, si: 1, hdp: -0.5, dih: "+0.5", o: 0.8 },
         { wsi: 302, si: 2, hdp: -0.5, dih: "-0.5", o: -0.9 }
       ]
