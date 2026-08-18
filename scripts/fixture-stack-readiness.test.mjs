@@ -78,3 +78,19 @@ test("does not report ready when a child exits during endpoint checks", async ()
     /child exited before API and web readiness/u
   );
 });
+
+test("can accept an observe-only degraded API for a live provider stack", async () => {
+  await waitForFixtureStack({
+    children: liveChildren,
+    apiHealthUrl,
+    webUrl,
+    acceptDegraded: true,
+    fetchImpl: async (url) => url === apiHealthUrl
+      ? new Response(JSON.stringify({ status: "degraded", mode: "OBSERVE", executionReady: false }), {
+          status: 200, headers: { "content-type": "application/json" }
+        })
+      : new Response("ready"),
+    timeoutMs: 100,
+    pollIntervalMs: 0
+  });
+});

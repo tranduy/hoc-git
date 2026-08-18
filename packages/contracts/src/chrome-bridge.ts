@@ -19,6 +19,7 @@ export const ChromeLobbyIdSchema = z.enum([
 export const ChromeBridgeTransportSchema = z.enum([
   "WS_FRAME",
   "HTTP_RESPONSE",
+  "DOM_SNAPSHOT",
   "TAB_STATE"
 ]);
 
@@ -51,6 +52,35 @@ export const ChromeBridgeEnvelopeSchema = z.strictObject({
   payload: BridgePayloadSchema
 });
 
+export const CmdSnapshotChunkSchema = z.strictObject({
+  schemaVersion: z.literal(2),
+  snapshotId: z.string().trim().min(16).max(128).regex(/^[a-z0-9._:-]+$/iu),
+  chunkIndex: SafeIntegerSchema,
+  chunkCount: z.number().int().min(1).max(64),
+  records: z.array(z.unknown()).min(1).max(5_000)
+}).superRefine((value, context) => {
+  if (value.chunkIndex >= value.chunkCount) {
+    context.addIssue({ code: "custom", path: ["chunkIndex"], message: "chunkIndex must be below chunkCount" });
+  }
+});
+
+export const ChromeNetworkBodyChunkSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  snapshotId: z.string().trim().min(16).max(128).regex(/^[a-z0-9._:-]+$/iu),
+  chunkIndex: SafeIntegerSchema,
+  chunkCount: z.number().int().min(1).max(256),
+  bodyEncoding: z.literal("UTF8"),
+  bodyFragment: z.string().min(1).superRefine((value, context) => {
+    if (new TextEncoder().encode(value).byteLength > 128 * 1024) {
+      context.addIssue({ code: "custom", message: "BRIDGE_CHUNK_TOO_LARGE" });
+    }
+  })
+}).superRefine((value, context) => {
+  if (value.chunkIndex >= value.chunkCount) {
+    context.addIssue({ code: "custom", path: ["chunkIndex"], message: "chunkIndex must be below chunkCount" });
+  }
+});
+
 const HelloMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("HELLO"),
@@ -62,6 +92,43 @@ const AckMessageSchema = z.strictObject({
   kind: z.literal("ACK"),
   sourceId: SourceIdSchema,
   sequence: SafeIntegerSchema
+});
+
+const SnapshotRequestMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("REQUEST_SNAPSHOT"),
+  sourceId: SourceIdSchema
+});
+
+const ReloadSourceMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("RELOAD_SOURCE"),
+  sourceId: SourceIdSchema
+});
+
+const FreshLaunchUrlSchema = z.string().trim().min(1).max(8192).url().superRefine((value, context) => {
+  const parsed = new URL(value);
+  if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A credential-free HTTPS launch URL is required" });
+  }
+});
+
+const NavigateSourceMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("NAVIGATE_SOURCE"),
+  sourceId: SourceIdSchema,
+  url: FreshLaunchUrlSchema
+});
+
+const OpaqueProviderIdSchema = z.string().trim().min(1).max(512);
+
+const FocusSelectionMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("FOCUS_SELECTION"),
+  sourceId: SourceIdSchema,
+  providerEventId: OpaqueProviderIdSchema,
+  providerMarketId: OpaqueProviderIdSchema,
+  providerSelectionId: OpaqueProviderIdSchema
 });
 
 const RejectMessageSchema = z.strictObject({
@@ -100,6 +167,10 @@ const SourceStateMessageSchema = z.strictObject({
 export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
   HelloMessageSchema,
   AckMessageSchema,
+  SnapshotRequestMessageSchema,
+  ReloadSourceMessageSchema,
+  NavigateSourceMessageSchema,
+  FocusSelectionMessageSchema,
   RejectMessageSchema,
   SourceStateMessageSchema
 ]);
@@ -107,5 +178,7 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
 export type ChromeLobbyId = z.infer<typeof ChromeLobbyIdSchema>;
 export type ChromeBridgeTransport = z.infer<typeof ChromeBridgeTransportSchema>;
 export type ChromeBridgeEnvelope = z.infer<typeof ChromeBridgeEnvelopeSchema>;
+export type CmdSnapshotChunk = z.infer<typeof CmdSnapshotChunkSchema>;
+export type ChromeNetworkBodyChunk = z.infer<typeof ChromeNetworkBodyChunkSchema>;
 export type ChromeBridgeSourceState = z.infer<typeof ChromeBridgeSourceStateSchema>;
 export type ChromeBridgeControlMessage = z.infer<typeof ChromeBridgeControlMessageSchema>;

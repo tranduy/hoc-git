@@ -18,6 +18,7 @@ export interface LiveCatalogResponse {
   readonly category: Category;
   readonly comparisonState: "AWAITING_SECOND_PROVIDER";
   readonly observedAtMs: number;
+  readonly snapshotState?: "FRESH" | "STALE";
   readonly rejectedMarketCount: number;
   readonly events: readonly ProviderEvent[];
   readonly markets: readonly ProviderMarket[];
@@ -65,6 +66,7 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
     record.dataMode !== "LIVE" || typeof record.accountId !== "string" || record.accountId !== expectedAccountId ||
     !ProviderIdSchema.safeParse(record.provider).success || record.provider === "FABET" || !category.success ||
     record.comparisonState !== "AWAITING_SECOND_PROVIDER" ||
+    (record.snapshotState !== undefined && record.snapshotState !== "FRESH" && record.snapshotState !== "STALE") ||
     typeof record.observedAtMs !== "number" || !Number.isFinite(record.observedAtMs) ||
     typeof record.rejectedMarketCount !== "number" || !Number.isSafeInteger(record.rejectedMarketCount) || record.rejectedMarketCount < 0 ||
     !events.success || !markets.success || !quotes.success ||
@@ -75,6 +77,7 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
   return {
     dataMode: "LIVE", accountId: expectedAccountId, provider: record.provider as ProviderId, category: category.data,
     comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: record.observedAtMs,
+    snapshotState: record.snapshotState === "STALE" ? "STALE" : "FRESH",
     rejectedMarketCount: record.rejectedMarketCount,
     events: events.data, markets: markets.data, quotes: quotes.data
   };
@@ -83,8 +86,9 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
 export class CatalogApi implements CatalogApiLike {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
+  readonly #cache = new Map<string, { readonly etag: string; readonly catalog: LiveCatalogResponse }>();
 
-  constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 5_000) {
+  constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 10_000) {
     this.#fetch = fetcher;
     this.#timeoutMs = timeoutMs;
   }
@@ -93,9 +97,15 @@ export class CatalogApi implements CatalogApiLike {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
+      const cached = this.#cache.get(accountId);
       const response = await this.#fetch(`/api/catalog/accounts/${encodeURIComponent(accountId)}`, {
-        method: "GET", cache: "no-store", signal: controller.signal
+        method: "GET", cache: "no-store", signal: controller.signal,
+        ...(cached === undefined ? {} : { headers: { "if-none-match": cached.etag } })
       });
+      if (response.status === 304) {
+        if (cached === undefined) throw new Error("Invalid live catalog response");
+        return cached.catalog;
+      }
       if (!response.ok) {
         let errorBody: unknown = null;
         try { errorBody = await response.json(); } catch { /* fixed safe fallback below */ }
@@ -108,7 +118,10 @@ export class CatalogApi implements CatalogApiLike {
         if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
         throw new Error("Invalid live catalog response");
       }
-      return parseLiveCatalogResponse(value, accountId);
+      const catalog = parseLiveCatalogResponse(value, accountId);
+      const etag = response.headers.get("etag");
+      if (etag !== null && etag.length > 0) this.#cache.set(accountId, { etag, catalog });
+      return catalog;
     } catch (error) {
       if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
       throw error;

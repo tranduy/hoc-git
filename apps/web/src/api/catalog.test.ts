@@ -7,6 +7,7 @@ const response = {
   provider: "CMD",
   category: "FOOTBALL",
   comparisonState: "AWAITING_SECOND_PROVIDER",
+  snapshotState: "FRESH",
   observedAtMs: 100,
   rejectedMarketCount: 0,
   events: [], markets: [], quotes: []
@@ -24,6 +25,22 @@ describe("CatalogApi", () => {
 
     await expect(api.read("account-1")).resolves.toEqual(response);
     expect(calls).toEqual(["/api/catalog/accounts/account-1"]);
+  });
+
+  it("reuses the validated catalog when the server reports an unchanged ETag", async () => {
+    const requestHeaders: Array<HeadersInit | undefined> = [];
+    let calls = 0;
+    const api = new CatalogApi(async (_input, init) => {
+      requestHeaders.push(init?.headers);
+      calls += 1;
+      return calls === 1
+        ? new Response(JSON.stringify(response), { status: 200, headers: { etag: '"catalog-100"' } })
+        : new Response(null, { status: 304 });
+    });
+
+    await expect(api.read("account-1")).resolves.toEqual(response);
+    await expect(api.read("account-1")).resolves.toEqual(response);
+    expect(new Headers(requestHeaders[1]).get("if-none-match")).toBe('"catalog-100"');
   });
 
   it("rejects a fixture or malformed response at the UI boundary", async () => {

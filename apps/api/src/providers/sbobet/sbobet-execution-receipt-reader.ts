@@ -1,5 +1,5 @@
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
-import type { PreflightLeg } from "@tool-chenh/contracts";
+import type { MarketType, PreflightLeg } from "@tool-chenh/contracts";
 import { Decimal, toDecimal } from "@tool-chenh/core";
 import type { ReceiptObservation, ReceiptReader } from "../../execution/receipt-reconciler.js";
 import type { LiveLegResult } from "../../execution/live-two-leg-coordinator.js";
@@ -32,7 +32,7 @@ function exactEvent(value: string, teams: readonly string[]): boolean {
 }
 
 function exactMarket(receipt: DecodedSbobetReceipt,
-  marketType: "FT_AH" | "FT_TOTAL" | "FT_1X2" | "FH_AH" | "FH_TOTAL"): boolean {
+  marketType: MarketType): boolean {
   const name = normalized(receipt.marketDisplayName);
   const period = normalized(receipt.timePeriod).replaceAll(" ", "");
   if (!/^(?:ft|fulltime|toantran)$/u.test(period) && !/(?:full time|toan tran)/u.test(name)) return false;

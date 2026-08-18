@@ -1,4 +1,6 @@
-import type { SbobetCatalogInputRecord, SbobetCatalogMarket, SbobetCatalogSelection } from "@tool-chenh/adapters";
+import { isSupportedFootballTwoWayLine,
+  type SbobetCatalogInputRecord, type SbobetCatalogMarket,
+  type SbobetCatalogSelection } from "@tool-chenh/adapters";
 
 type Row = readonly unknown[];
 
@@ -11,7 +13,7 @@ function localized(value: unknown): string {
 }
 function halfLine(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 100 &&
-    Math.abs(value * 2) % 2 === 1;
+    isSupportedFootballTwoWayLine(String(value));
 }
 
 interface BtiSelection {
@@ -40,13 +42,14 @@ function markets(value: unknown): readonly SbobetCatalogMarket[] {
     if (item === null) return;
     const metadata = row(item[3]);
     const code = text(metadata?.[0]);
-    if ((code === "HC39" || code === "OU39") && Array.isArray(item[7])) found.push(item);
+    if ((code === "HC39" || code === "OU39" || code === "OU1") && Array.isArray(item[7])) found.push(item);
     else item.forEach(visit);
   };
   visit(value);
   return found.flatMap((market): SbobetCatalogMarket[] => {
     const code = text(row(market[3])?.[0]);
-    const type = code === "HC39" ? "FT_AH" as const : "FT_TOTAL" as const;
+    const type = code === "HC39" ? "FT_AH" as const
+      : code === "OU1" ? "FH_TOTAL" as const : "FT_TOTAL" as const;
     const candidates = (row(market[7]) ?? []).map(selection).filter((item): item is BtiSelection => item !== null);
     const grouped = new Map<string, BtiSelection[]>();
     for (const item of candidates) {

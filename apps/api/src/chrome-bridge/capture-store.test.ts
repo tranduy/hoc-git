@@ -9,9 +9,9 @@ import { replayCapture } from "./replay.js";
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
-function envelope(sequence: number, body: string): ChromeBridgeEnvelope {
+function envelope(sequence: number, body: string, lobby: ChromeBridgeEnvelope["lobby"] = "SABA"): ChromeBridgeEnvelope {
   return {
-    version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7, sequence,
+    version: 1, kind: "NETWORK", lobby, sourceId: `chrome:${lobby}:7`, tabId: 7, sequence,
     observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence, transport: "WS_FRAME",
     request: { hostname: "sports.example", pathnameClass: "/feed", resourceType: "WebSocket" },
     payload: { encoding: "UTF8", body }
@@ -53,5 +53,15 @@ describe("CaptureStore", () => {
       await store.record(envelope(sequence, JSON.stringify({ odds: 1.9, value: "x".repeat(100) })));
     }
     expect(await store.files()).toHaveLength(2);
+  });
+
+  it("filters recon capture before parsing unrelated high-volume lobbies", async () => {
+    const writeLine = vi.fn(async () => undefined);
+    const store = new CaptureStore({ enabled: true, directory: "ignored", allowedLobbies: ["CMD"], writeLine });
+    await store.record(envelope(0, JSON.stringify({ token: "must-never-be-read" }), "IM"));
+    await store.record(envelope(1, JSON.stringify({ odds: 1.9 }), "CMD"));
+
+    expect(writeLine).toHaveBeenCalledTimes(1);
+    expect(store.recent()).toMatchObject([{ lobby: "CMD", sequence: 1 }]);
   });
 });

@@ -57,6 +57,105 @@ describe("LocalBridge", () => {
     expect(sockets[1]!.sent.map((value) => JSON.parse(value).sequence)).toEqual([1]);
   });
 
+  it("drops a source's gapped backlog and requests a fresh snapshot instead of reconnecting forever", () => {
+    const socket = new FakeSocket();
+    const onSnapshotRequest = vi.fn();
+    const bridge = new LocalBridge({
+      socketFactory: () => socket, installationKey: "local-key", onSnapshotRequest
+    });
+    bridge.enqueue(envelope(12, "old", "chrome:SABA:7"));
+    bridge.enqueue(envelope(4, "healthy", "chrome:IM:8"));
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "REJECT", sourceId: "chrome:SABA:7", sequence: 12, reason: "SEQUENCE_GAP"
+    }) });
+
+    expect(bridge.pendingSequences()).toEqual([4]);
+    expect(onSnapshotRequest).toHaveBeenCalledOnce();
+    expect(onSnapshotRequest).toHaveBeenCalledWith("chrome:SABA:7");
+  });
+
+  it("notifies the collector after every successful socket generation so snapshots can be replayed", () => {
+    const sockets = [new FakeSocket(), new FakeSocket()];
+    let socketIndex = 0;
+    const scheduled: Array<() => void> = [];
+    const onOpen = vi.fn();
+    const bridge = new LocalBridge({
+      socketFactory: () => sockets[socketIndex++]!, installationKey: "local-key", onOpen,
+      setTimer: (callback) => { scheduled.push(callback); return scheduled.length; }, clearTimer: () => undefined
+    });
+
+    bridge.connect();
+    sockets[0]!.open();
+    sockets[0]!.close();
+    scheduled[0]!();
+    sockets[1]!.open();
+
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+
+  it("handles an authenticated server snapshot request without acknowledging or dropping queued data", () => {
+    const socket = new FakeSocket();
+    const onSnapshotRequest = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSnapshotRequest });
+    bridge.enqueue(envelope(0));
+    bridge.connect();
+    socket.open();
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:SABA:7" }) });
+
+    expect(onSnapshotRequest).toHaveBeenCalledWith("chrome:SABA:7");
+    expect(bridge.pendingSequences()).toEqual([0]);
+  });
+
+  it("forwards an explicit source reload command to the attached-tab controller", () => {
+    const socket = new FakeSocket();
+    const onSourceReload = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceReload });
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:7"
+    }) });
+
+    expect(onSourceReload).toHaveBeenCalledWith("chrome:SABA:7");
+  });
+
+  it("forwards a fresh launch navigation to the attached-tab controller", () => {
+    const socket = new FakeSocket();
+    const onSourceNavigate = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceNavigate });
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "NAVIGATE_SOURCE",
+      sourceId: "chrome:SABA:7", url: "https://c0z0ob.bpd3a3fn.com/sports?token=opaque" }) });
+
+    expect(onSourceNavigate).toHaveBeenCalledWith("chrome:SABA:7",
+      "https://c0z0ob.bpd3a3fn.com/sports?token=opaque");
+  });
+
+  it("forwards a strict read-only focus command without mutating queued data", () => {
+    const socket = new FakeSocket();
+    const onFocusSelection = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onFocusSelection });
+    bridge.enqueue(envelope(0));
+    bridge.connect();
+    socket.open();
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "FOCUS_SELECTION", sourceId: "chrome:CMD:7",
+      providerEventId: "event-1", providerMarketId: "market-1", providerSelectionId: "market-1:home"
+    }) });
+    expect(onFocusSelection).toHaveBeenCalledWith({
+      sourceId: "chrome:CMD:7", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "market-1:home"
+    });
+    expect(bridge.pendingSequences()).toEqual([0]);
+  });
+
   it("evicts oldest diagnostics before quote frames when the queue reaches its bound", () => {
     const bridge = new LocalBridge({
       socketFactory: () => new FakeSocket(), installationKey: "local-key", maxQueueBytes: 900
@@ -76,5 +175,34 @@ describe("LocalBridge", () => {
     socket.open();
     socket.onmessage?.({ data: JSON.stringify({ kind: "ACK", sourceId: "chrome:SABA:7", sequence: 0, token: "bad" }) });
     expect(bridge.pendingSequences()).toEqual([0]);
+  });
+
+  it("holds one bounded all-market snapshot until loopback acknowledgements arrive", () => {
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key" });
+    bridge.connect();
+    socket.open();
+    expect(() => {
+      for (let index = 0; index < 54; index++) {
+        bridge.enqueue(envelope(index, "x".repeat(110_000), "chrome:IM:8"));
+      }
+    }).not.toThrow();
+    expect(bridge.queueBytes).toBeGreaterThan(5 * 1024 * 1024);
+    expect(bridge.queueBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+  });
+
+  it("coalesces old quote frames without blocking producers when loopback is unavailable", async () => {
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({
+      socketFactory: () => socket, installationKey: "local-key", maxQueueBytes: 700
+    });
+    bridge.connect();
+    socket.open();
+
+    await bridge.enqueue(envelope(0, "x".repeat(200)));
+    await expect(bridge.enqueue(envelope(1, "y".repeat(200)))).resolves.toBeUndefined();
+
+    expect(bridge.pendingSequences()).toEqual([1]);
+    expect(bridge.queueBytes).toBeLessThanOrEqual(700);
   });
 });

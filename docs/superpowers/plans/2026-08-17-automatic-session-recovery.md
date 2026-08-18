@@ -517,3 +517,16 @@ git add tests/integration/automatic-session-recovery.test.ts .env.example procce
 git add -p apps/api/src/process-shutdown.test.ts scripts/automation-browser-cleanup.test.mjs
 git commit -m "test: verify automatic session recovery"
 ```
+
+---
+
+## Inline execution record — 17/08/2026
+
+- [x] Tasks 1–6 implemented and covered by focused contract/API/web tests.
+- [x] Automatic maintenance is enabled by default; `SESSION_MAINTENANCE_ENABLED=0` is the explicit opt-out.
+- [x] WARP `WarpProxy` status/port readiness and restoration are verified against the real Windows client.
+- [x] In-flight renewal versus credential replacement race is covered; the newer encrypted credential always wins.
+- [x] Authorized read-only live acceptance succeeded from canonical `fabet.com`: Fabet became `ACTIVE`, all six Football catalog sources registered `ACTIVE`, WARP returned to `Disconnected`, and no lease remained.
+- [x] Full workspace typecheck, tests, integration tests, production build, managed-stack tests, and diff check passed.
+- [x] Live recovery observed BTI expire and automatically restored all 6/6 Football sources; duplicate responsive lobby cards are now clicked once per provider and no longer logged individually.
+- [ ] A second credential source remains intentionally pending until the operator supplies that account; the recovery model is already keyed by `credentialSourceId`.

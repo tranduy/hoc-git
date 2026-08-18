@@ -7,11 +7,16 @@ import { stopManagedChildren } from "./managed-stack.mjs";
 import { resolveStackEntries } from "./stack-paths.mjs";
 import { cleanupStaleStack, removeStackState, writeStackState } from "./stack-state.mjs";
 import { ensureChromeBridgeKey } from "./chrome-bridge-key.mjs";
+import { resolveLiveStackEnvironment } from "./live-stack-config.mjs";
+import { cleanupOrphanedAutomationBrowsers } from "./automation-browser-cleanup.mjs";
+import { enforceToolResourceRetention } from "./resource-retention.mjs";
 
 const host = "127.0.0.1";
 const apiPort = 4310;
 const webPort = 4311;
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const localEnvFile = resolve(repositoryRoot, ".env");
+if (existsSync(localEnvFile)) process.loadEnvFile(localEnvFile);
 const { apiEntry, viteEntry, webRoot } = resolveStackEntries(repositoryRoot);
 const statePath = resolve(repositoryRoot, ".auth", "run", "live-stack.json");
 const chromeBridgeKey = process.env.CHROME_BRIDGE_KEY?.trim() ||
@@ -27,16 +32,20 @@ try {
   throw error;
 }
 
+// A previous forced shutdown can leave Playwright's private Chromium tree
+// alive on Windows. Remove only those private profiles before creating a new
+// stack; the user's regular Chrome browser is never touched.
+await cleanupOrphanedAutomationBrowsers();
+const localToolRoot = resolve(process.env.LOCALAPPDATA ?? repositoryRoot, "tool-chenh");
+const retention = await enforceToolResourceRetention({ repositoryRoot, localToolRoot });
+if (retention.removedFiles > 0) process.stdout.write(`[live-stack] resource cleanup removed ${retention.removedFiles} item(s), reclaimed ${Math.round(retention.reclaimedBytes / 1024 / 1024)} MB.\n`);
+
 for (const entry of [apiEntry, viteEntry]) {
   if (!existsSync(entry)) throw new Error(`Missing built entrypoint: ${entry}`);
 }
 
 const environment = {
-  ...process.env,
-  NODE_ENV: "development",
-  API_HOST: host,
-  API_PORT: String(apiPort),
-  VITE_ORIGIN: `http://${host}:${webPort}`,
+  ...resolveLiveStackEnvironment(process.env, host, webPort),
   CHROME_BRIDGE_KEY: chromeBridgeKey,
   CHROME_BRIDGE_CAPTURE: process.env.CHROME_BRIDGE_CAPTURE ?? "0"
 };

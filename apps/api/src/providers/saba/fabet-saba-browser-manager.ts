@@ -99,10 +99,12 @@ export class FabetSabaBrowserManager {
   }
 
   readRawCatalog(input: Input): Promise<readonly Readonly<Record<string, unknown>>[]> {
-    if (!isFabetSabaFootballSession(input.sessionId)) return this.#catalogFallback.readCatalog(input);
     if (this.#rawCatalogRead !== null) return this.#rawCatalogRead;
-    const operation = observedJitRead(async () => this.#fabet.withProviderPage("SABA", "FOOTBALL",
-      async (page) => this.#pageReader.readRawCatalog(page)));
+    // Catalog monitoring does not need an interactive Fabet popup. The
+    // isolated push reader consumes the captured provider launch and keeps the
+    // main lobby context out of the hot path. Interactive page access remains
+    // available only for account/ticket evidence.
+    const operation = observedJitRead(async () => this.#catalogFallback.readCatalog(input));
     this.#rawCatalogRead = operation;
     void operation.finally(() => { if (this.#rawCatalogRead === operation) this.#rawCatalogRead = null; }).catch(() => undefined);
     return operation;

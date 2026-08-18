@@ -2,11 +2,12 @@ function childExited(children) {
   return children.some((child) => child.exitCode !== null || child.signalCode !== null);
 }
 
-async function observeOnlyApiReady(fetchImpl, apiHealthUrl, requestTimeoutMs) {
+async function observeOnlyApiReady(fetchImpl, apiHealthUrl, requestTimeoutMs, acceptDegraded) {
   const response = await fetchImpl(apiHealthUrl, { signal: AbortSignal.timeout(requestTimeoutMs) });
   if (!response.ok) return false;
   const body = await response.json();
-  return body?.status === "ok" && body?.mode === "OBSERVE" && body?.executionReady === false;
+  return (body?.status === "ok" || (acceptDegraded && body?.status === "degraded")) &&
+    body?.mode === "OBSERVE" && body?.executionReady === false;
 }
 
 async function webRootReady(fetchImpl, webUrl, requestTimeoutMs) {
@@ -19,6 +20,7 @@ export async function waitForFixtureStack({
   apiHealthUrl,
   webUrl,
   fetchImpl = globalThis.fetch,
+  acceptDegraded = false,
   timeoutMs = 30_000,
   pollIntervalMs = 200
 }) {
@@ -30,7 +32,7 @@ export async function waitForFixtureStack({
     const requestTimeoutMs = Math.max(1, Math.min(1_000, deadline - Date.now()));
     try {
       const [apiReady, webReady] = await Promise.all([
-        observeOnlyApiReady(fetchImpl, apiHealthUrl, requestTimeoutMs),
+        observeOnlyApiReady(fetchImpl, apiHealthUrl, requestTimeoutMs, acceptDegraded),
         webRootReady(fetchImpl, webUrl, requestTimeoutMs)
       ]);
       if (childExited(children)) {

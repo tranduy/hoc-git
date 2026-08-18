@@ -7,6 +7,7 @@ const config = {
     host: "127.0.0.1",
     port: 4311,
     strictPort: true,
+    allowedHosts: ["live.babiesbo.uk"],
     hmr: process.env.FIXTURE_MODE === "1" ? false : undefined,
     proxy: {
       "/api": {

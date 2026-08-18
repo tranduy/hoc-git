@@ -9,6 +9,22 @@ const handle: ActiveSecretHandle = {
 };
 
 describe("CmdObservedCatalogReader", () => {
+  it("reads CMD from the current Fabet page without requiring a stale one-time launch handle", async () => {
+    const reader = new CmdObservedCatalogReader({
+      jitSource: { readCatalogFromFabet: async () => ({ records: [{
+        sportId: "1", leagueId: "l", leagueName: "League", matchId: "m", timeText: "1H27'",
+        teamNames: ["Alpha", "Beta"], groups: []
+      }], observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 500 }) },
+      clock: { now: () => ({ wallClockNowMs: 9, monotonicNowMs: 9 }) },
+      timezoneOffsetMinutes: 420
+    });
+
+    await expect(reader.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({
+      provider: "CMD", category: "FOOTBALL", observedAtMs: 1_788_000_000_000,
+      events: [expect.objectContaining({ participantA: "Alpha", participantB: "Beta" })]
+    });
+  });
+
   it("binds account access and normalized output to the configured provider", async () => {
     let requestedProvider = "";
     const sabaHandle: ActiveSecretHandle = { ...handle, provider: "SABA" };
@@ -72,13 +88,13 @@ describe("CmdObservedCatalogReader", () => {
     await expect(reader.read("account-1")).rejects.toThrow("CMD_CATALOG_SCHEMA_ERROR");
   });
 
-  it("drops totals, 1X2, and quarter-goal handicaps while retaining an exact half-goal handicap", async () => {
+  it("retains exact full-time totals and quarter, half, and three-quarter handicaps while excluding 1X2", async () => {
     const reader = new CmdObservedCatalogReader({
       accounts: { withActiveHandle: async (_id, _provider, consume) => consume(handle) },
       source: { readCatalog: async () => [{
         sportId: "1", leagueId: "l", leagueName: "League", matchId: "m", timeText: "1H27'",
         teamNames: ["A", "B"], groups: [
-          { betTypeIds: ["3"], labels: [], odds: [
+          { betTypeIds: ["3"], labels: ["2.5"], odds: [
             { marketOddsId: "total", priceText: "0.8", status: null, greyedOut: null },
             { marketOddsId: "total", priceText: "-0.9", status: null, greyedOut: null }
           ] },
@@ -94,6 +110,10 @@ describe("CmdObservedCatalogReader", () => {
           { betTypeIds: ["1"], labels: ["0.5"], odds: [
             { marketOddsId: "half", priceText: "0.8", status: null, greyedOut: null, lineText: "0.5" },
             { marketOddsId: "half", priceText: "-0.9", status: null, greyedOut: null, lineText: null }
+          ] },
+          { betTypeIds: ["1"], labels: ["0.5/1"], odds: [
+            { marketOddsId: "three-quarter", priceText: "0.76", status: null, greyedOut: null, lineText: "0.5/1" },
+            { marketOddsId: "three-quarter", priceText: "-0.86", status: null, greyedOut: null, lineText: null }
           ] }
         ]
       }] },
@@ -102,8 +122,13 @@ describe("CmdObservedCatalogReader", () => {
     });
 
     const result = await reader.read("account-1");
-    expect(result.markets).toEqual([expect.objectContaining({ providerMarketId: "half", marketType: "FT_AH", line: "-0.5" })]);
-    expect(result.quotes).toHaveLength(2);
+    expect(result.markets).toEqual([
+      expect.objectContaining({ providerMarketId: "total", marketType: "FT_TOTAL", line: "2.5" }),
+      expect.objectContaining({ providerMarketId: "quarter", marketType: "FT_AH", line: "-0.25" }),
+      expect.objectContaining({ providerMarketId: "half", marketType: "FT_AH", line: "-0.5" }),
+      expect.objectContaining({ providerMarketId: "three-quarter", marketType: "FT_AH", line: "-0.75" })
+    ]);
+    expect(result.quotes).toHaveLength(8);
     expect(result.rejectedMarketCount).toBe(0);
   });
 

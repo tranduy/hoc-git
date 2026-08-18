@@ -2,7 +2,8 @@ import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/c
 import { describe, expect, it } from "vitest";
 import type { ComparisonCell, ComparisonEvent, ComparisonRow, ObservedTicketRow } from "../catalog/comparison.js";
 import type { FixedBaseStakePlan, FixedBaseStakePolicy } from "./fixed-base-stake.js";
-import { eventEdgeSummary, rankTicketsForEvent, type RankedEvent } from "./ranked-tickets.js";
+import { eventEdgeSummary, rankTicketsForEvent, sortRankedEvents, topRankedTicketItems,
+  type RankedEvent } from "./ranked-tickets.js";
 import type { VerifiedTicketEvidence } from "./ticket-preflight-coordinator.js";
 
 const nowMs = 10_000;
@@ -57,6 +58,47 @@ function comparisonEvent(): ComparisonEvent {
 }
 
 describe("rankTicketsForEvent", () => {
+  it("globally ranks up to 25 real two-book tickets instead of collapsing them by event", () => {
+    const event = comparisonEvent();
+    const tickets = Array.from({ length: 27 }, (_, index) => {
+      const rank = index + 1;
+      return { key: `ticket-${rank}`, eventKey: event.key, row: row(rank),
+        plan: plan(`ticket-${rank}`, String(rank * 1_000), String(rank / 100)),
+        state: "OBSERVATION" as const, reason: "Provider preflight required", movementMagnitude: String(rank),
+        gapsBySelection: {} };
+    });
+    const withoutPlan = { ...tickets[0]!, key: "without-plan", plan: null };
+    const oneProvider = { ...tickets[1]!, key: "one-provider",
+      plan: { ...tickets[1]!.plan!, legs: tickets[1]!.plan!.legs.map((leg) => ({ ...leg, provider: "SABA" as const })) } };
+
+    const result = topRankedTicketItems([{ event, tickets: [...tickets, withoutPlan, oneProvider],
+      bestVerifiedProfit: null }], 25);
+
+    expect(result).toHaveLength(25);
+    expect(result.map((item) => item.ticket.key)).toEqual(
+      Array.from({ length: 25 }, (_, index) => `ticket-${27 - index}`));
+    expect(new Set(result.map((item) => item.event.event.key))).toEqual(new Set([event.key]));
+    expect(result.every((item) => new Set(item.ticket.plan?.legs.map((leg) => leg.provider)).size === 2)).toBe(true);
+  });
+
+  it("does not rank display-only observation events as opportunities by estimated ROI", () => {
+    const earlierNegative = comparisonEvent();
+    const laterPositive = { ...comparisonEvent(), key: "positive-event",
+      event: { ...comparisonEvent().event, providerEventId: "positive", startAtUtcMs: 30_000 } };
+    const ranked = sortRankedEvents([
+      { event: earlierNegative, bestVerifiedProfit: null,
+        tickets: [{ key: "negative", eventKey: earlierNegative.key, row: earlierNegative.rows[0]!,
+          plan: plan("negative", "-28000", "-0.0284"), state: "OBSERVATION" as const,
+          reason: "Provider preflight required", movementMagnitude: "0", gapsBySelection: {} }] },
+      { event: laterPositive, bestVerifiedProfit: null,
+        tickets: [{ key: "positive", eventKey: laterPositive.key, row: laterPositive.rows[0]!,
+          plan: plan("positive", "220000", "0.2479"), state: "OBSERVATION" as const,
+          reason: "Provider preflight required", movementMagnitude: "0", gapsBySelection: {} }] }
+    ]);
+
+    expect(ranked.map((item) => item.event.key)).toEqual(["event-key", "positive-event"]);
+  });
+
   it("summarizes the best exact two-book plan using balanced worst-case ROI", () => {
     const event = comparisonEvent();
     const tickets = rankTicketsForEvent({ event, verified: new Map([

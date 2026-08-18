@@ -60,4 +60,37 @@ describe("ChromeBridgeRegistry", () => {
       expect.objectContaining({ sourceId: "chrome:IM:8", state: "STALE" })
     ]));
   });
+
+  it("re-baselines a source on a new authenticated bridge connection", () => {
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const firstConnection = {};
+    const replacementConnection = {};
+    expect(registry.ingest(envelope(40), firstConnection)).toMatchObject({ kind: "ACK", sequence: 40 });
+    expect(registry.ingest(envelope(42), firstConnection)).toMatchObject({ kind: "REJECT", reason: "SEQUENCE_GAP" });
+    expect(registry.ingest(envelope(0), replacementConnection)).toMatchObject({ kind: "ACK", sequence: 0 });
+    expect(registry.ingest(envelope(1), replacementConnection)).toMatchObject({ kind: "ACK", sequence: 1 });
+    expect(registry.listSources()).toMatchObject([{ state: "LIVE", lastSequence: 1, reason: null }]);
+  });
+
+  it("evicts retired tab sources instead of retaining their server state forever", () => {
+    let now = 1_000;
+    const registry = new ChromeBridgeRegistry({
+      now: () => now, staleAfterMs: 20_000, retireAfterMs: 300_000
+    });
+    registry.ingest(envelope(0, "chrome:SABA:old-tab"));
+    now = 301_001;
+
+    expect(registry.listSources()).toEqual([]);
+  });
+
+  it("releases every source owned by a closed bridge connection", () => {
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const connection = {};
+    registry.ingest(envelope(0, "chrome:SABA:7"), connection);
+    registry.ingest({ ...envelope(0, "chrome:IM:8"), lobby: "IM", tabId: 8 }, connection);
+
+    registry.releaseConnection(connection);
+
+    expect(registry.listSources()).toEqual([]);
+  });
 });

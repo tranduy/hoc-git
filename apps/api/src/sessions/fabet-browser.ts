@@ -1,10 +1,21 @@
 import { rm } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import { chromium, type BrowserContext, type Page, type Request, type Response, type Route } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page, type Request, type Response, type Route } from "playwright";
 import type { Category } from "@tool-chenh/contracts";
 import { SecretVault } from "./secret-vault.js";
 import { TrustedDomainStore } from "./trusted-domain-store.js";
 import { observeProtocolMetadata } from "../providers/protocol-inspector.js";
+import type { AuthEgress } from "./auth-egress.js";
+import { attestFabetOrigin, type FabetOriginEvidence } from "./fabet-origin-attestation.js";
+
+const FABET_ROOT_URL = "https://fabet.com/" as const;
+
+export interface FabetAuthenticationResult {
+  readonly finalUrl: string;
+  readonly finalHostname: string;
+  readonly encryptedStateId: string;
+  readonly capturedNavigations?: readonly CapturedNavigation[];
+}
 
 export interface CapturedNavigation {
   readonly url: string;
@@ -21,6 +32,17 @@ export interface FabetBrowserAutomation {
   withProviderPage?<T>(input: { readonly lobbyUrl: string; readonly provider: FabetJitProvider;
     readonly category: Category }, consume: (page: Page) => Promise<T>): Promise<T>;
   close(): Promise<void>;
+  authenticate?(input: {
+    readonly rootUrl: typeof FABET_ROOT_URL;
+    readonly username: string;
+    readonly password: string;
+    readonly egress: AuthEgress;
+    readonly signal: AbortSignal;
+  }): Promise<FabetAuthenticationResult>;
+  openDirectAuthenticatedLobby?(input: {
+    readonly authentication: FabetAuthenticationResult;
+    readonly signal: AbortSignal;
+  }): Promise<void>;
 }
 
 export interface LaunchCandidate {
@@ -57,10 +79,13 @@ export function launcherTextIsSafe(label: string): boolean {
 
 export function launcherLabelFromCard(name: string, thumbnailSource: string | null): string {
   const normalized = name.trim().replace(/\s+/gu, " ");
+  const normalizedUpper = normalized.toLocaleUpperCase("en");
   const source = (thumbnailSource ?? "").toLowerCase();
+  if (normalizedUpper === "SABA SPORTS") return "SABA-SPORTS";
+  if (normalizedUpper === "BTI SPORTS") return "BTI";
   if (source.includes("tpsports_")) return "APSPORT";
   if (source.includes("tsports_")) return "BTI";
-  if (normalized.toUpperCase() !== "ESPORTS") return normalized;
+  if (normalizedUpper !== "ESPORTS") return normalized;
   if (source.includes("saba_esport")) return "SABA-SPORTS";
   if (source.includes("betradar_esport")) return "I-SPORTS";
   if (source.includes("bti_esport")) return "BTI";
@@ -181,6 +206,13 @@ function sabaLauncherPriority(rawName: string, label: string, thumbnailSource: s
 
 function safeBrowserFailureReason(error: unknown): string {
   if (!(error instanceof Error)) return "UNKNOWN";
+  if (error instanceof FabetBrowserError) return error.code;
+  const safeCode = error.message.match(/^(?:FABET|AUTH|WARP)_[A-Z0-9_]+$/u)?.[0];
+  if (safeCode !== undefined) return safeCode;
+  if (/ERR_NAME_NOT_RESOLVED/iu.test(error.message)) return "DNS_FAILED";
+  if (/ERR_CONNECTION_(?:REFUSED|RESET|CLOSED)/iu.test(error.message)) return "CONNECTION_FAILED";
+  if (/ERR_(?:SOCKS_CONNECTION_FAILED|PROXY_CONNECTION_FAILED)/iu.test(error.message)) return "PROXY_FAILED";
+  if (/ERR_(?:TIMED_OUT|CONNECTION_TIMED_OUT)/iu.test(error.message)) return "NETWORK_TIMEOUT";
   if (/target page|context.*closed|page.*closed/iu.test(error.message)) return "PAGE_CLOSED";
   if (/intercepts pointer events/iu.test(error.message)) return "POINTER_INTERCEPTED";
   if (/not visible/iu.test(error.message)) return "NOT_VISIBLE";
@@ -222,6 +254,7 @@ export class FabetBrowserDriver {
   readonly #idFactory: () => string;
   #baseOrigin: string | null = null;
   #diagnostics: LaunchCandidate[] = [];
+  #pendingAuthenticatedNavigations: readonly CapturedNavigation[] = [];
 
   constructor(options: FabetBrowserDriverOptions) {
     this.#vault = options.vault;
@@ -231,6 +264,55 @@ export class FabetBrowserDriver {
     this.#profilePath = resolve(join(this.#profilesRoot, "fabet"));
     this.#clock = options.clock;
     this.#idFactory = options.idFactory;
+  }
+
+  async authenticateWithEgresses(input: {
+    readonly username: string;
+    readonly password: string;
+    readonly egresses: readonly AuthEgress[];
+    readonly timeoutMs?: number;
+  }): Promise<void> {
+    if (this.#automation.authenticate === undefined ||
+      this.#automation.openDirectAuthenticatedLobby === undefined || input.egresses.length === 0) {
+      throw new Error("AUTH_EGRESS_UNAVAILABLE");
+    }
+    const timeoutMs = input.timeoutMs ?? 60_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("AUTH_TIMEOUT_INVALID");
+    for (const egress of input.egresses) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error("AUTH_TIMEOUT")), timeoutMs);
+      timer.unref?.();
+      try {
+        const authentication = await this.#automation.authenticate({
+          rootUrl: FABET_ROOT_URL,
+          username: input.username,
+          password: input.password,
+          egress,
+          signal: controller.signal,
+        });
+        await this.#trustStore.approve(authentication.finalHostname);
+        this.#pendingAuthenticatedNavigations = authentication.capturedNavigations ?? [];
+        try {
+          await this.#automation.openDirectAuthenticatedLobby({ authentication, signal: controller.signal });
+        } catch {
+          // Some Fabet deployments bind the authenticated lobby to the WARP
+          // egress IP. Launch URLs captured inside that authenticated browser
+          // remain usable directly, so do not discard them merely because the
+          // cookie state cannot be replayed from the machine's normal egress.
+          if (this.#pendingAuthenticatedNavigations.length === 0) {
+            throw new Error("FABET_AUTH_DIRECT_HANDOFF_FAILED");
+          }
+        }
+        this.#baseOrigin = new URL(authentication.finalUrl).origin;
+        return;
+      } catch (error) {
+        process.stderr.write(`[fabet-auth] ${egress.name}: ${safeBrowserFailureReason(error)}\n`);
+        await this.#automation.close().catch(() => undefined);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    throw new Error("AUTH_EGRESS_UNAVAILABLE");
   }
 
   async login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void> {
@@ -249,8 +331,9 @@ export class FabetBrowserDriver {
     this.#baseOrigin = authenticated.origin;
   }
 
-  async captureLobbyLaunches(): Promise<readonly LaunchCandidate[]> {
+  async captureLobbyLaunches(categories: readonly Category[] = ["FOOTBALL", "LOL"]): Promise<readonly LaunchCandidate[]> {
     await this.#resumePersistedProfile();
+    const enabled = new Set(categories);
     const lobbies: ReadonlyArray<{ category: Category; url: string }> = [
       { category: "FOOTBALL", url: `${this.#baseOrigin}/lobby-the-thao?type=livesports` },
       { category: "LOL", url: `${this.#baseOrigin}/lobby-the-thao?type=esports` }
@@ -258,7 +341,11 @@ export class FabetBrowserDriver {
     const candidates: LaunchCandidate[] = [];
     const seen = new Set<string>();
     for (const lobby of lobbies) {
-      const navigations = await this.#automation.captureNavigations(lobby.url);
+      if (!enabled.has(lobby.category)) continue;
+      const pending = lobby.category === "FOOTBALL" ? this.#pendingAuthenticatedNavigations : [];
+      const navigations = pending.length > 0
+        ? pending
+        : await this.#automation.captureNavigations(lobby.url);
       for (const navigation of navigations) {
         if (!launcherMatchesCategory(lobby.category, navigation.label)) continue;
         if (seen.has(navigation.url)) continue;
@@ -287,6 +374,7 @@ export class FabetBrowserDriver {
         })}\n`);
       }
     }
+    this.#pendingAuthenticatedNavigations = [];
     this.#diagnostics = candidates;
     return candidates;
   }
@@ -326,32 +414,221 @@ export class FabetBrowserDriver {
     await rm(this.#profilePath, { recursive: true, force: true });
     this.#baseOrigin = null;
     this.#diagnostics = [];
+    this.#pendingAuthenticatedNavigations = [];
   }
 }
 
 export interface PlaywrightFabetAutomationOptions {
   readonly profilePath: string;
   readonly headless?: boolean;
+  readonly providerPageMaxAgeMs?: number;
+  readonly providerPageIdleMs?: number;
+  readonly nowMs?: () => number;
+  readonly vault?: SecretVault;
+  readonly authenticationStateId?: string;
 }
 
 export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   readonly #profilePath: string;
   readonly #headless: boolean;
+  readonly #providerPageMaxAgeMs: number;
+  readonly #providerPageIdleMs: number;
+  readonly #nowMs: () => number;
+  readonly #vault: SecretVault | null;
+  readonly #authenticationStateId: string;
+  #browser: Browser | null = null;
   #context: BrowserContext | null = null;
   #page: Page | null = null;
   readonly #providerPages = new Map<string, Page>();
+  readonly #providerPageOpenedAtMs = new Map<string, number>();
   readonly #providerOpenings = new Map<string, Promise<Page>>();
   readonly #providerUses = new Map<string, Promise<void>>();
+  readonly #providerFailureCounts = new Map<string, number>();
+  readonly #providerIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   #providerOpeningTail: Promise<void> = Promise.resolve();
 
   constructor(options: PlaywrightFabetAutomationOptions) {
     this.#profilePath = options.profilePath;
     this.#headless = options.headless ?? false;
+    this.#providerPageMaxAgeMs = options.providerPageMaxAgeMs ?? 300_000;
+    this.#providerPageIdleMs = options.providerPageIdleMs ?? 10_000;
+    this.#nowMs = options.nowMs ?? (() => performance.now());
+    this.#vault = options.vault ?? null;
+    this.#authenticationStateId = options.authenticationStateId ?? "fabet-browser-state";
+    if (!Number.isFinite(this.#providerPageMaxAgeMs) || this.#providerPageMaxAgeMs <= 0) {
+      throw new Error("FABET_PROVIDER_PAGE_MAX_AGE_INVALID");
+    }
+    if (!Number.isFinite(this.#providerPageIdleMs) || this.#providerPageIdleMs <= 0) {
+      throw new Error("FABET_PROVIDER_PAGE_IDLE_INVALID");
+    }
   }
 
   async login(input: { readonly entryUrl: string; readonly username: string; readonly password: string }): Promise<void> {
     const page = await this.#getPage();
     await page.goto(input.entryUrl, { waitUntil: "domcontentloaded" });
+    await this.#submitLogin(page, input.username, input.password);
+  }
+
+  async authenticate(input: {
+    readonly rootUrl: typeof FABET_ROOT_URL;
+    readonly username: string;
+    readonly password: string;
+    readonly egress: AuthEgress;
+    readonly signal: AbortSignal;
+  }): Promise<FabetAuthenticationResult> {
+    if (input.rootUrl !== FABET_ROOT_URL) throw new Error("FABET_ROOT_URL_REQUIRED");
+    if (this.#vault === null) throw new Error("FABET_AUTH_VAULT_REQUIRED");
+    if (input.signal.aborted) throw input.signal.reason ?? new Error("Operation aborted");
+
+    const lease = await input.egress.acquire(input.signal).catch(() => {
+      throw new Error("FABET_AUTH_EGRESS_ACQUIRE_FAILED");
+    });
+    let authBrowser: Browser | null = null;
+    let authContext: BrowserContext | null = null;
+    let stage = "BROWSER_LAUNCH";
+    try {
+      authBrowser = await chromium.launch({ headless: this.#headless });
+      stage = "CONTEXT_CREATE";
+      authContext = await authBrowser.newContext({
+        acceptDownloads: false,
+        viewport: { width: 1_920, height: 1_080 },
+        ...(lease.playwrightProxy === null ? {} : { proxy: lease.playwrightProxy }),
+      });
+      stage = "PAGE_CREATE";
+      const page = await authContext.newPage();
+      const observedResponseUrls: string[] = [];
+      page.on("response", (response) => {
+        if (observedResponseUrls.length < 500) observedResponseUrls.push(response.url());
+      });
+      stage = "ROOT_NAVIGATION";
+      await page.goto(FABET_ROOT_URL, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      stage = "LOGIN_SUBMIT";
+      await this.#submitLogin(page, input.username, input.password);
+      stage = "LOGIN_SETTLE";
+      await Promise.race([
+        page.locator("input[type='password']").first().waitFor({ state: "hidden", timeout: 15_000 }),
+        page.locator("button").filter({ hasText: /nạp\s*tiền|deposit/iu }).first()
+          .waitFor({ state: "visible", timeout: 15_000 }),
+      ]).catch(() => undefined);
+      await page.waitForTimeout(250);
+      if (input.signal.aborted) throw input.signal.reason ?? new Error("Operation aborted");
+
+      const finalUrl = page.url();
+      const final = new URL(finalUrl);
+      stage = "ORIGIN_ATTESTATION";
+      const loginFormPresent = await page.locator("input[type='password']").first().isVisible().catch(() => false) ||
+        await page.getByRole("button", { name: /đăng\s*nhập|login/iu }).first().isVisible().catch(() => false);
+      const authenticatedControlPresent = await page.getByRole("button", { name: /nạp\s*tiền|deposit/iu })
+        .first().isVisible().catch(() => false);
+      const lobbyPresent = await page.locator(".game-item.lobby").first().isVisible().catch(() => false) ||
+        authenticatedControlPresent;
+      const sameOriginApiObserved = observedResponseUrls.some((value) => {
+        try {
+          const responseUrl = new URL(value);
+          return responseUrl.origin === final.origin && responseUrl.pathname.startsWith("/api/");
+        } catch {
+          return false;
+        }
+      });
+      const localizedLoginVisible = await page.locator("button")
+        .filter({ hasText: /đăng\s*nhập|login/iu }).first().isVisible().catch(() => false);
+      const localizedLobbyVisible = await page.locator("button")
+        .filter({ hasText: /nạp\s*tiền|deposit/iu }).first().isVisible().catch(() => false);
+      const originEvidence = {
+        entryUrl: FABET_ROOT_URL,
+        finalUrl,
+        finalHostname: final.hostname,
+        loginFormPresent: loginFormPresent || localizedLoginVisible,
+        lobbyPresent: lobbyPresent || localizedLobbyVisible,
+        authenticatedControlPresent: authenticatedControlPresent || localizedLobbyVisible,
+        sameOriginApiObserved,
+      } satisfies FabetOriginEvidence;
+      if (!originEvidence.authenticatedControlPresent) throw new FabetBrowserError("UNAUTHORIZED");
+      let attested: ReturnType<typeof attestFabetOrigin>;
+      try {
+        attested = attestFabetOrigin(originEvidence);
+      } catch {
+        if (!originEvidence.loginFormPresent && !originEvidence.lobbyPresent) {
+          throw new Error("FABET_AUTH_CONTROLS_NOT_FOUND");
+        }
+        if (!originEvidence.sameOriginApiObserved) {
+          throw new Error("FABET_AUTH_API_EVIDENCE_NOT_FOUND");
+        }
+        throw new Error("FABET_AUTH_ORIGIN_ATTESTATION_FAILED");
+      }
+      const storageState = await authContext.storageState();
+      stage = "STATE_PERSIST";
+      await this.#vault.save(this.#authenticationStateId, {
+        kind: "FABET_BROWSER_STATE",
+        value: JSON.stringify(storageState),
+        finalUrl: attested.finalUrl,
+        finalHostname: attested.finalHostname,
+      });
+      stage = "PROVIDER_LAUNCH_CAPTURE";
+      const capturedNavigations = await this.#captureNavigationsFrom(
+        authContext,
+        page,
+        `${final.origin}/lobby-the-thao?type=livesports`,
+      );
+      return {
+        ...attested,
+        encryptedStateId: this.#authenticationStateId,
+        capturedNavigations,
+      };
+    } catch (error) {
+      if (error instanceof Error && (error.message === "UNAUTHORIZED" ||
+        /^(?:FABET|AUTH|WARP)_[A-Z0-9_]+$/u.test(error.message))) throw error;
+      throw new Error(`FABET_AUTH_${stage}_FAILED`);
+    } finally {
+      await authContext?.close().catch(() => undefined);
+      await authBrowser?.close().catch(() => undefined);
+      await lease.release();
+    }
+  }
+
+  async openDirectAuthenticatedLobby(input: {
+    readonly authentication: FabetAuthenticationResult;
+    readonly signal: AbortSignal;
+  }): Promise<void> {
+    if (this.#vault === null) throw new Error("FABET_AUTH_VAULT_REQUIRED");
+    if (input.signal.aborted) throw input.signal.reason ?? new Error("Operation aborted");
+    const secret = await this.#vault.load(input.authentication.encryptedStateId);
+    if (secret?.kind !== "FABET_BROWSER_STATE" || typeof secret.value !== "string") {
+      throw new Error("FABET_AUTH_STATE_UNAVAILABLE");
+    }
+    if (secret.finalUrl !== input.authentication.finalUrl ||
+      secret.finalHostname !== input.authentication.finalHostname) {
+      throw new Error("FABET_AUTH_STATE_IDENTITY_MISMATCH");
+    }
+    let storageState: Awaited<ReturnType<BrowserContext["storageState"]>>;
+    try {
+      storageState = JSON.parse(secret.value) as Awaited<ReturnType<BrowserContext["storageState"]>>;
+    } catch {
+      throw new Error("FABET_AUTH_STATE_INVALID");
+    }
+    await this.close();
+    this.#browser = await chromium.launch({ headless: this.#headless });
+    try {
+      this.#context = await this.#browser.newContext({
+        acceptDownloads: false,
+        viewport: { width: 1_920, height: 1_080 },
+        storageState,
+      });
+      this.#page = await this.#context.newPage();
+      await this.#page.goto(new URL(input.authentication.finalUrl).origin, {
+        waitUntil: "domcontentloaded",
+        timeout: 30_000,
+      });
+      const authenticated = await this.#page.getByRole("button", { name: /nạp\s*tiền|deposit/iu })
+        .first().isVisible().catch(() => false);
+      if (!authenticated) throw new Error("FABET_AUTH_DIRECT_SESSION_LOST");
+    } catch (error) {
+      await this.close();
+      throw error;
+    }
+  }
+
+  async #submitLogin(page: Page, usernameValue: string, passwordValue: string): Promise<void> {
     const username = page.locator([
       "input[placeholder*='Tên đăng nhập' i]",
       "input[placeholder*='username' i]",
@@ -381,8 +658,8 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       !(await username.isVisible().catch(() => false)) ||
       !(await password.isVisible().catch(() => false))
     ) return;
-    await username.fill(input.username);
-    await password.fill(input.password);
+    await username.fill(usernameValue);
+    await password.fill(passwordValue);
     await loginButtons.last().click();
     await page.waitForLoadState("domcontentloaded").catch(() => undefined);
   }
@@ -390,6 +667,11 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   async captureNavigations(lobbyUrl: string): Promise<readonly CapturedNavigation[]> {
     const context = await this.#getContext();
     const page = await this.#getPage();
+    return this.#captureNavigationsFrom(context, page, lobbyUrl);
+  }
+
+  async #captureNavigationsFrom(context: BrowserContext, page: Page,
+    lobbyUrl: string): Promise<readonly CapturedNavigation[]> {
     const lobbyOrigin = new URL(lobbyUrl).origin;
     const captured = new Map<string, CapturedNavigation>();
     const record = (url: string, label: string): void => {
@@ -397,27 +679,38 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       if (navigation !== null) captured.set(navigation.url, navigation);
     };
     await page.goto(lobbyUrl, { waitUntil: "domcontentloaded" });
+    await this.#dismissBlockingPromotions(page);
     const lobbyCards = page.locator(".game-item.lobby");
-    await lobbyCards.first().waitFor({ state: "visible", timeout: 10_000 }).catch(() => undefined);
+    const responsiveProviderLabel = page.getByText(
+      /C-SPORTS|SABA-SPORTS|I-SPORTS|K-SPORTS|T-SPORTS|AP\s*SPORTS|BTI/iu).first();
+    await Promise.race([
+      lobbyCards.first().waitFor({ state: "visible", timeout: 10_000 }),
+      responsiveProviderLabel.waitFor({ state: "visible", timeout: 10_000 })
+    ]).catch(() => undefined);
     const controls = await lobbyCards.count() > 0
       ? lobbyCards
-      : page.locator("a, button, [role='button'], [onclick]");
-    const count = Math.min(await controls.count(), 200);
-    for (let index = 0; index < count; index += 1) {
-        const control = controls.nth(index);
-        const nameElement = control.locator(".game-item__name").first();
-        const thumbnail = control.locator("img.game-item__thumb").first();
-        const cardName = await nameElement.count() > 0 ? await nameElement.innerText().catch(() => "") : "";
-        const thumbnailSource = await thumbnail.count() > 0
-          ? await thumbnail.getAttribute("src").catch(() => null)
-          : null;
-        const fallbackName = await control.innerText().catch(() => "");
+      : page.locator("[class*='game-item' i], [class*='lobby' i], [onclick], a, button, [role='button']");
+    // Provider cards can appear after hundreds of navigation/filter controls on
+    // the current responsive Fabet lobby. The old 200-node cap silently missed
+    // C-Sports/SABA and returned an empty launch set.
+    const summaries = await controls.evaluateAll((elements) => elements.slice(0, 1_000).map((element, index) => {
+      const control = element as HTMLElement;
+      return {
+        index,
+        visible: control.getClientRects().length > 0,
+        cardName: control.querySelector<HTMLElement>(".game-item__name, [class*='name' i]")?.innerText ?? "",
+        thumbnailSource: control.querySelector<HTMLImageElement>("img.game-item__thumb, img")?.getAttribute("src") ?? null,
+        fallbackName: control.innerText
+      };
+    }));
+    const seenLabels = new Set<string>();
+    for (const summary of summaries) {
+        const control = controls.nth(summary.index);
+        const { cardName, thumbnailSource, fallbackName } = summary;
         const label = launcherLabelFromCard(cardName === "" ? fallbackName : cardName, thumbnailSource);
-        if (!launcherTextIsSafe(label) || !(await control.isVisible().catch(() => false))) continue;
-        process.stderr.write(`Fabet lobby card: ${JSON.stringify({
-          label,
-          asset: safeLauncherAssetName(thumbnailSource)
-        })}\n`);
+        if (!launcherTextIsSafe(label) || !summary.visible) continue;
+        if (seenLabels.has(label)) continue;
+        seenLabels.add(label);
         const popups: Page[] = [];
         const existingPages = new Set(context.pages());
         const launchBodies: Array<Promise<string | null>> = [];
@@ -453,12 +746,23 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         await context.route("**/*", blockExternalProviderNavigation);
         try {
           const play = control.locator(".game-item__play-btn button").first();
-          if (await play.count() > 0) {
-            await control.hover({ timeout: 2_000 }).catch(() => undefined);
-            await play.click({ timeout: 2_000 }).catch(() => undefined);
-          } else {
-            await control.click({ timeout: 2_000 }).catch(() => undefined);
+          let clicked = false;
+          for (let attempt = 0; attempt < 3 && !clicked; attempt += 1) {
+            await this.#dismissBlockingPromotions(page);
+            try {
+              if (await play.count() > 0) {
+                await control.hover({ timeout: 2_000 });
+                await play.click({ timeout: 2_000 });
+              } else {
+                await control.click({ timeout: 2_000 });
+              }
+              clicked = true;
+            } catch {
+              // The promotion SPA can remount its modal between discovery and
+              // click. Retry only this exact verified provider card.
+            }
           }
+          if (!clicked) process.stderr.write(`[fabet-launch] ${label}: CARD_CLICK_BLOCKED\n`);
           await page.waitForTimeout(1_500);
         } finally {
           await context.unroute("**/*", blockExternalProviderNavigation);
@@ -491,6 +795,9 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   async withProviderPage<T>(input: { readonly lobbyUrl: string; readonly provider: FabetJitProvider;
     readonly category: Category }, consume: (page: Page) => Promise<T>): Promise<T> {
     const key = `${input.provider}\u0000${input.category}`;
+    const idleTimer = this.#providerIdleTimers.get(key);
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    this.#providerIdleTimers.delete(key);
     const previousUse = this.#providerUses.get(key) ?? Promise.resolve();
     let releaseUse = (): void => undefined;
     const currentUse = new Promise<void>((resolveUse) => { releaseUse = resolveUse; });
@@ -498,8 +805,17 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
     await previousUse.catch(() => undefined);
     try {
       let providerPage = this.#providerPages.get(key) ?? null;
+      const openedAtMs = this.#providerPageOpenedAtMs.get(key);
+      if (providerPage !== null && openedAtMs !== undefined &&
+        this.#nowMs() - openedAtMs >= this.#providerPageMaxAgeMs) {
+        this.#providerPages.delete(key);
+        this.#providerPageOpenedAtMs.delete(key);
+        await providerPage.close().catch(() => undefined);
+        providerPage = null;
+      }
       if (providerPage === null || providerPage.isClosed()) {
         this.#providerPages.delete(key);
+        this.#providerPageOpenedAtMs.delete(key);
         let opening = this.#providerOpenings.get(key);
         if (opening === undefined) {
           const previousOpening = this.#providerOpeningTail;
@@ -517,16 +833,52 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         providerPage = await opening;
       }
       try {
-        return await consume(providerPage);
+        const result = await consume(providerPage);
+        this.#providerFailureCounts.delete(key);
+        return result;
       } catch (error) {
-        this.#providerPages.delete(key);
-        await providerPage.close().catch(() => undefined);
+        const failures = (this.#providerFailureCounts.get(key) ?? 0) + 1;
+        this.#providerFailureCounts.set(key, failures);
+        if (this.#shouldDiscardProviderPage(providerPage, error) || failures >= 2) {
+          this.#providerFailureCounts.delete(key);
+          this.#providerPages.delete(key);
+          this.#providerPageOpenedAtMs.delete(key);
+          await providerPage.close().catch(() => undefined);
+        }
         throw error;
       }
     } finally {
       releaseUse();
       if (this.#providerUses.get(key) === currentUse) this.#providerUses.delete(key);
+      const expectedPage = this.#providerPages.get(key);
+      if (expectedPage !== undefined) {
+        const timer = setTimeout(() => {
+          if (this.#providerPages.get(key) !== expectedPage || this.#providerUses.has(key)) return;
+          this.#providerPages.delete(key);
+          this.#providerPageOpenedAtMs.delete(key);
+          this.#providerFailureCounts.delete(key);
+          this.#providerIdleTimers.delete(key);
+          void expectedPage.close().catch(() => undefined);
+        }, this.#providerPageIdleMs);
+        timer.unref?.();
+        this.#providerIdleTimers.set(key, timer);
+      }
     }
+  }
+
+  #shouldDiscardProviderPage(page: Page, error: unknown): boolean {
+    if (page.isClosed()) return true;
+    let current = error;
+    for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+      if (/(?:SOURCE_EXPIRED|NOT_AUTHENTICATED|UNAUTHORIZED|LAUNCH_(?:FAILED|EXPIRED)|PAGE_CLOSED|TARGET_CLOSED)/u
+        .test(current.message.toUpperCase())) return true;
+      if (/(?:page|context|browser|target).*closed/iu.test(current.message)) return true;
+      current = current.cause;
+    }
+    // Catalog timeouts, temporarily empty frames and schema diagnostics do not
+    // prove the authenticated provider page is bad. Retain it so the next
+    // collector tick does not reopen the Fabet lobby and launch popup.
+    return false;
   }
 
   async isAuthenticated(): Promise<boolean> {
@@ -548,12 +900,18 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   }
 
   async close(): Promise<void> {
+    for (const timer of this.#providerIdleTimers.values()) clearTimeout(timer);
     await this.#context?.close();
+    await this.#browser?.close();
+    this.#browser = null;
     this.#context = null;
     this.#page = null;
     this.#providerPages.clear();
+    this.#providerPageOpenedAtMs.clear();
     this.#providerOpenings.clear();
     this.#providerUses.clear();
+    this.#providerFailureCounts.clear();
+    this.#providerIdleTimers.clear();
     this.#providerOpeningTail = Promise.resolve();
   }
 
@@ -588,24 +946,25 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       let control = null as ReturnType<Page["locator"]> | null;
       let controlSignature: string | null = null;
       let controlPriority = Number.POSITIVE_INFINITY;
-      for (let index = 0; index < Math.min(await lobbyCards.count(), 200); index += 1) {
-        const candidate = lobbyCards.nth(index);
-        const nameElement = candidate.locator(".game-item__name").first();
-        const thumbnail = candidate.locator("img.game-item__thumb").first();
-        const cardName = await nameElement.count() > 0 ? await nameElement.innerText().catch(() => "") : "";
-        const thumbnailSource = await thumbnail.count() > 0
-          ? await thumbnail.getAttribute("src").catch(() => null)
-          : null;
-        const fallbackName = await candidate.innerText().catch(() => "");
+      const cardSummaries = await lobbyPage.evaluate(() =>
+        [...document.querySelectorAll<HTMLElement>(".game-item.lobby")].slice(0, 200).map((candidate, index) => ({
+          index,
+          visible: candidate.getClientRects().length > 0,
+          cardName: candidate.querySelector<HTMLElement>(".game-item__name")?.innerText ?? "",
+          thumbnailSource: candidate.querySelector<HTMLImageElement>("img.game-item__thumb")?.getAttribute("src") ?? null,
+          fallbackName: candidate.innerText
+        })));
+      for (const summary of cardSummaries) {
+        const { cardName, thumbnailSource, fallbackName } = summary;
         const rawName = cardName === "" ? fallbackName : cardName;
         const label = launcherLabelFromCard(rawName, thumbnailSource);
         if (providerHint(label, "") === input.provider &&
           launcherMatchesProviderCategory(input.provider, input.category, label, thumbnailSource) &&
-          await candidate.isVisible().catch(() => false)) {
+          summary.visible) {
           const signature = `${label.trim().toLocaleUpperCase("en")}\u0000${safeLauncherAssetName(thumbnailSource) ?? ""}`;
           const priority = sabaLauncherPriority(rawName, label, thumbnailSource);
           if (priority < controlPriority) {
-            control = candidate;
+            control = lobbyCards.nth(summary.index);
             controlSignature = signature;
             controlPriority = priority;
           } else if (priority === controlPriority && controlSignature !== signature) {
@@ -785,6 +1144,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       stage = "POPUP_LOAD";
       await providerPage.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => undefined);
       this.#providerPages.set(key, providerPage);
+      this.#providerPageOpenedAtMs.set(key, this.#nowMs());
       return providerPage;
     } catch (error) {
       if (error instanceof FabetBrowserError ||
@@ -797,6 +1157,9 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
 
   async #dismissBlockingPromotions(page: Page): Promise<void> {
     const dynamicCloses = page.locator([
+      "#s4-dynamic-popup-modal:visible .icon-close-btn",
+      "#s4-dynamic-popup-modal:visible [aria-label*='close' i]",
+      "#s4-dynamic-popup-modal:visible [class*='close' i]",
       ".dynamic__modal:visible .icon-close-btn",
       ".dynamic-popup:visible .icon-close-btn",
       ".modal:visible .icon-close-btn"
@@ -811,6 +1174,10 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
       if (!(await dialog.isVisible().catch(() => false))) continue;
       const close = dialog.getByRole("button", { name: /close|đóng/iu }).first();
       if (await close.isVisible().catch(() => false)) await close.click({ timeout: 2_000 }).catch(() => undefined);
+    }
+    const blockingPromotion = page.locator("#s4-dynamic-popup-modal:visible").first();
+    if (await blockingPromotion.isVisible().catch(() => false)) {
+      await page.keyboard.press("Escape").catch(() => undefined);
     }
   }
 
@@ -830,11 +1197,15 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
   }
 
   async #getContext(): Promise<BrowserContext> {
-    this.#context ??= await chromium.launchPersistentContext(this.#profilePath, {
-      headless: this.#headless,
-      acceptDownloads: false,
-      viewport: { width: 1_920, height: 1_080 }
-    });
+    if (this.#context === null) {
+      const context = await chromium.launchPersistentContext(this.#profilePath, {
+        headless: this.#headless,
+        acceptDownloads: false,
+        viewport: { width: 1_920, height: 1_080 },
+        args: ["--blink-settings=imagesEnabled=false"]
+      });
+      this.#context = context;
+    }
     return this.#context;
   }
 

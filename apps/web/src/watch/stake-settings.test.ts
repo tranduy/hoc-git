@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { loadBaseStake, saveBaseStake, WATCH_BASE_STAKE_STORAGE_KEY } from "./stake-settings.js";
 
+const unavailableStorage = {
+  getItem: () => { throw new DOMException("Storage unavailable", "SecurityError"); },
+  setItem: () => { throw new DOMException("Quota exceeded", "QuotaExceededError"); }
+} as unknown as Storage;
+
 describe("global base stake settings", () => {
   beforeEach(() => window.localStorage.clear());
 
@@ -15,5 +20,10 @@ describe("global base stake settings", () => {
     window.localStorage.setItem(WATCH_BASE_STAKE_STORAGE_KEY, "100000");
     expect(saveBaseStake(window.localStorage, value)).toBe(false);
     expect(loadBaseStake(window.localStorage)).toBe("100000");
+  });
+
+  it("falls back without crashing when browser storage is unavailable or full", () => {
+    expect(loadBaseStake(unavailableStorage)).toBe("100000");
+    expect(saveBaseStake(unavailableStorage, "150000")).toBe(false);
   });
 });

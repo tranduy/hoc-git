@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createSessionServices } from "./session-services.js";
+import { createFabetAuthEgresses, createSessionServices } from "./session-services.js";
 import type { FabetBrowserAutomation } from "./fabet-browser.js";
 import type { SecretProtector } from "./types.js";
 
@@ -17,6 +17,25 @@ afterEach(async () => {
 });
 
 describe("createSessionServices", () => {
+  it("orders portable auth paths without requiring WARP on a server", () => {
+    expect(createFabetAuthEgresses({
+      authRoot: "C:\\safe-auth-root",
+      proxyUrl: "socks5://127.0.0.1:1080",
+      enableLocalWarp: true,
+      warpCliPath: "C:\\missing\\warp-cli.exe",
+      fileExists: () => false,
+    }).map((egress) => egress.name)).toEqual(["DIRECT", "CONFIGURED_PROXY"]);
+  });
+
+  it("adds local WARP last so it cannot proxy provider collection", () => {
+    expect(createFabetAuthEgresses({
+      authRoot: "C:\\safe-auth-root",
+      proxyUrl: "http://127.0.0.1:8080",
+      enableLocalWarp: true,
+      warpCliPath: "C:\\Cloudflare\\warp-cli.exe",
+      fileExists: () => true,
+    }).map((egress) => egress.name)).toEqual(["DIRECT", "CONFIGURED_PROXY", "WARP_SOCKS"]);
+  });
   it("persists encrypted state below local app data and closes browser resources", async () => {
     const localAppData = await mkdtemp(join(tmpdir(), "tool-chenh-services-"));
     directories.push(localAppData);
@@ -48,7 +67,7 @@ describe("createSessionServices", () => {
     expect(() => createSessionServices({ localAppData: "", protector })).toThrowError("LOCAL_APP_DATA_REQUIRED");
   });
 
-  it("exposes one stable catalog-only source for every registered reader pair", async () => {
+  it("exposes only Football catalog sources while LoL collection is disabled", async () => {
     const localAppData = await mkdtemp(join(tmpdir(), "tool-chenh-catalog-sources-"));
     directories.push(localAppData);
     const services = createSessionServices({
@@ -68,13 +87,10 @@ describe("createSessionServices", () => {
     expect(await services.catalogSources.listStatuses()).toEqual([
       expect.objectContaining({ id: "catalog-source:CMD:FOOTBALL", provider: "CMD", category: "FOOTBALL" }),
       expect.objectContaining({ id: "catalog-source:SABA:FOOTBALL", provider: "SABA", category: "FOOTBALL" }),
-      expect.objectContaining({ id: "catalog-source:SABA:LOL", provider: "SABA", category: "LOL" }),
       expect.objectContaining({ id: "catalog-source:SBOBET:FOOTBALL", provider: "SBOBET", category: "FOOTBALL" }),
       expect.objectContaining({ id: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT", category: "FOOTBALL" }),
       expect.objectContaining({ id: "catalog-source:BTI:FOOTBALL", provider: "BTI", category: "FOOTBALL" }),
-      expect.objectContaining({ id: "catalog-source:IM:FOOTBALL", provider: "IM", category: "FOOTBALL" }),
-      expect.objectContaining({ id: "catalog-source:IM:LOL", provider: "IM", category: "LOL" }),
-      expect.objectContaining({ id: "catalog-source:BTI:LOL", provider: "BTI", category: "LOL" })
+      expect.objectContaining({ id: "catalog-source:IM:FOOTBALL", provider: "IM", category: "FOOTBALL" })
     ]);
     await expect(services.catalogReader.sourceKey("catalog-source:BTI:LOL"))
       .rejects.toThrow("CATALOG_SOURCE_UNAVAILABLE");

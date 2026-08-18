@@ -139,11 +139,27 @@ describe("CMD browser manager safety", () => {
               <div class="c-odds-button"><span>0.5</span><div class="c-odds" data-moid="o1">0.8</div></div>
               <div class="c-odds-button"><div class="c-odds" data-moid="o1">-0.9</div></div>
             </div></div>
+            <div class="c-match__odds-group"><div data-bt="3">
+              <div class="c-odds-button"><span>2.5</span><div class="c-odds" data-moid="total-over">0.82</div></div>
+              <div class="c-odds-button"><div class="c-odds" data-moid="total-under">-0.92</div></div>
+            </div></div>
+            <div class="c-match__odds-group"><div data-bt="5">
+              <div class="c-odds-button"><span>other</span><div class="c-odds" data-moid="unsupported-a">0.7</div></div>
+              <div class="c-odds-button"><div class="c-odds" data-moid="unsupported-b">-0.8</div></div>
+            </div></div>
           </div>
         </div></section>
       `);
       await expect(readCmdFootballCatalog(page)).resolves.toEqual([
-        expect.objectContaining({ sportId: "1", matchId: "m1", teamNames: ["A", "B"] })
+        expect.objectContaining({
+          sportId: "1",
+          matchId: "m1",
+          teamNames: ["A", "B"],
+          groups: [
+            expect.objectContaining({ betTypeIds: ["1"] }),
+            expect.objectContaining({ betTypeIds: ["3"] })
+          ]
+        })
       ]);
       await page.close();
     } finally {

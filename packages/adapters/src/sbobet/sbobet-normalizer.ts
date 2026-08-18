@@ -1,4 +1,5 @@
-import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import type { MarketType, ProviderEvent, ProviderMarket, ProviderQuote, Scope } from "@tool-chenh/contracts";
+import { isSupportedFootballTwoWayLine } from "../football-market-policy.js";
 
 export interface SbobetCatalogSelection {
   readonly selectionId: string;
@@ -10,7 +11,10 @@ export interface SbobetCatalogSelection {
 
 export interface SbobetCatalogMarket {
   readonly marketId: string;
-  readonly marketType: "FT_TOTAL" | "FT_1X2" | "FT_AH" | "FH_TOTAL" | "FH_AH";
+  readonly marketType: "FT_TOTAL" | "FT_1X2" | "FT_AH" | "FH_TOTAL" | "FH_AH" |
+    "SH_TOTAL" | "SH_AH" |
+    "CORNER_FT_TOTAL" | "CORNER_FT_AH" | "CORNER_FH_TOTAL" | "CORNER_FH_AH" |
+    "CARD_FT_TOTAL" | "CARD_FT_AH" | "CARD_FH_TOTAL" | "CARD_FH_AH";
   readonly lineText: string | null;
   readonly selections: readonly SbobetCatalogSelection[];
 }
@@ -47,7 +51,39 @@ function virtualFootballEvidence(competition: string, teams: readonly string[]):
 }
 
 const signedDecimal = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u;
-const decimal = /^(?:0|[1-9]\d*)(?:\.\d+)?$/u;
+
+const footballTotalMarketTypes = new Set<MarketType>([
+  "FT_TOTAL", "FH_TOTAL", "SH_TOTAL", "CORNER_FT_TOTAL", "CORNER_FH_TOTAL",
+  "CARD_FT_TOTAL", "CARD_FH_TOTAL"
+]);
+const footballHandicapMarketTypes = new Set<MarketType>([
+  "FT_AH", "FH_AH", "SH_AH", "CORNER_FT_AH", "CORNER_FH_AH", "CARD_FT_AH", "CARD_FH_AH"
+]);
+
+function exactFootballMarketSemantics(marketType: MarketType, fallbackProfile?: string): {
+  readonly isTotal: boolean; readonly isHandicap: boolean; readonly scope: Scope; readonly settlementProfile: string;
+} | null {
+  const isTotal = footballTotalMarketTypes.has(marketType);
+  const isHandicap = footballHandicapMarketTypes.has(marketType);
+  if (!isTotal && !isHandicap) return null;
+  if (marketType === "SH_TOTAL" || marketType === "SH_AH") return {
+    isTotal, isHandicap, scope: "SECOND_HALF", settlementProfile: "football-second-half-including-added-time"
+  };
+  if (marketType.startsWith("CORNER_")) return {
+    isTotal, isHandicap, scope: marketType.includes("_FH_") ? "FIRST_HALF" : "FULL_TIME",
+    settlementProfile: marketType.includes("_FH_") ? "football-corners-first-half" : "football-corners-regulation"
+  };
+  if (marketType.startsWith("CARD_")) return {
+    isTotal, isHandicap, scope: marketType.includes("_FH_") ? "FIRST_HALF" : "FULL_TIME",
+    settlementProfile: marketType.includes("_FH_") ? "football-cards-first-half" : "football-cards-regulation"
+  };
+  const firstHalf = marketType === "FH_TOTAL" || marketType === "FH_AH";
+  return {
+    isTotal, isHandicap, scope: firstHalf ? "FIRST_HALF" : "FULL_TIME",
+    settlementProfile: firstHalf ? "football-first-half-including-added-time"
+      : fallbackProfile ?? "football-regulation-including-added-time"
+  };
+}
 
 function canonicalLine(value: string | null): string | null {
   if (value === null) return null;
@@ -131,22 +167,24 @@ export function normalizeSbobetCatalog(
       diagnostics.push("SBOBET_CATALOG_RECORD_REJECTED");
       continue;
     }
+    if (virtualFootballEvidence(record.leagueName, teams)) {
+      diagnostics.push("SBOBET_CATALOG_EVENT_UNSUPPORTED");
+      continue;
+    }
     let invalid = false;
     for (const market of record.markets) {
-      const isTotal = market.marketType === "FT_TOTAL" || market.marketType === "FH_TOTAL";
-      const isHandicap = market.marketType === "FT_AH" || market.marketType === "FH_AH";
-      const scope = market.marketType === "FH_TOTAL" || market.marketType === "FH_AH" ? "FIRST_HALF" as const : "FULL_TIME" as const;
-      const settlementProfile = options.settlementProfile ?? (scope === "FIRST_HALF"
-        ? "football-first-half-including-added-time" : "football-regulation-including-added-time");
+      const semantics = exactFootballMarketSemantics(market.marketType, options.settlementProfile);
+      if (semantics === null) continue;
+      const { isTotal, isHandicap, scope, settlementProfile } = semantics;
       const outcomes = isTotal ? ["OVER", "UNDER"] : isHandicap
         ? ["HOME", "AWAY"] : ["HOME", "DRAW", "AWAY"];
       const actual = market.selections.map((selection) => selection.selection);
       const ids = new Set(market.selections.map((selection) => selection.selectionId));
       const line = isTotal ? canonicalLine(market.lineText) : isHandicap
         ? canonicalHomeHandicap(market.selections) : null;
-      const pricesValid = market.selections.every((selection) => market.marketType !== "FT_1X2"
-        ? signedDecimal.test(selection.priceText) && Number(selection.priceText) !== 0 && Math.abs(Number(selection.priceText)) <= 1
-        : decimal.test(selection.priceText) && Number(selection.priceText) > 1);
+      if (!isSupportedFootballTwoWayLine(line)) continue;
+      const pricesValid = market.selections.every((selection) => signedDecimal.test(selection.priceText) &&
+        Number(selection.priceText) !== 0 && Math.abs(Number(selection.priceText)) <= 1);
       if (market.marketId.trim() === "" || ids.size !== outcomes.length || actual.length !== outcomes.length ||
         outcomes.some((outcome) => !actual.includes(outcome as never)) ||
         ((isTotal || isHandicap) && line === null) || !pricesValid) {
@@ -163,7 +201,7 @@ export function normalizeSbobetCatalog(
         provider, category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, providerSelectionId: selection.selectionId,
         marketType: market.marketType, scope, selection: selection.selection, line,
-        rawOdds: selection.priceText, rawFormat: market.marketType === "FT_1X2" ? "DECIMAL" : "MALAY",
+        rawOdds: selection.priceText, rawFormat: "MALAY",
         status, isLive: timing.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
       })));
@@ -173,13 +211,12 @@ export function normalizeSbobetCatalog(
       continue;
     }
     const currentScore = score(record.scoreText);
-    const isVirtual = virtualFootballEvidence(record.leagueName, teams);
     events.push({
       provider, category: "FOOTBALL", providerEventId: record.eventId,
       competition: record.leagueName.trim(), seasonStage: null, startAtUtcMs: timing.startAtUtcMs,
       participantA: teams[0]!, participantB: teams[1]!, eventScope: "REGULATION", bestOf: null,
       isLive: timing.isLive, rematchCandidate: timing.isLive, fixtureDiscriminator: null,
-      isVirtual, sportVariant: isVirtual ? "VIRTUAL_FOOTBALL" : "FOOTBALL",
+      isVirtual: false, sportVariant: "FOOTBALL",
       liveState: timing.isLive ? { period: timing.period, ...currentScore, clockMs: timing.clockMs } : null
     });
     markets.push(...recordMarkets);

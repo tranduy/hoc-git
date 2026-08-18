@@ -1,6 +1,6 @@
 import { appendFile, mkdir, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { ChromeBridgeEnvelopeSchema, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
+import { ChromeBridgeEnvelopeSchema, type ChromeBridgeEnvelope, type ChromeLobbyId } from "@tool-chenh/contracts";
 
 export interface CaptureStoreOptions {
   readonly enabled: boolean;
@@ -10,6 +10,7 @@ export interface CaptureStoreOptions {
   readonly maxFiles?: number;
   readonly writeLine?: (path: string, line: string) => Promise<void>;
   readonly now?: () => number;
+  readonly allowedLobbies?: readonly ChromeLobbyId[];
 }
 
 export class CaptureStore {
@@ -21,6 +22,7 @@ export class CaptureStore {
   readonly #maxFileBytes: number;
   readonly #maxFiles: number;
   readonly #ring: ChromeBridgeEnvelope[] = [];
+  readonly #allowedLobbies: ReadonlySet<ChromeLobbyId> | null;
   #fileIndex = 0;
   #fileBytes = 0;
 
@@ -31,6 +33,7 @@ export class CaptureStore {
     this.#captureEpoch = (options.now ?? Date.now)();
     this.#maxFileBytes = options.maxFileBytes ?? 10 * 1024 * 1024;
     this.#maxFiles = options.maxFiles ?? 5;
+    this.#allowedLobbies = options.allowedLobbies === undefined ? null : new Set(options.allowedLobbies);
     this.#writeLine = options.writeLine ?? (async (path, line) => {
       await mkdir(this.#directory, { recursive: true });
       await appendFile(path, line, { encoding: "utf8" });
@@ -38,6 +41,7 @@ export class CaptureStore {
   }
 
   async record(envelope: ChromeBridgeEnvelope): Promise<void> {
+    if (this.#allowedLobbies !== null && !this.#allowedLobbies.has(envelope.lobby)) return;
     const sanitized = sanitizeEnvelope(envelope);
     this.#ring.push(sanitized);
     while (this.#ring.length > this.#maxEntries) this.#ring.shift();

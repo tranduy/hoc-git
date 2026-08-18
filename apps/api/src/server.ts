@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { TwoLegPreflight } from "./preflight/two-leg-preflight.js";
 import { FixtureAdapter, type FixtureSnapshot } from "@tool-chenh/adapters";
-import type { Category, DataMode } from "@tool-chenh/contracts";
+import type { Category, ChromeLobbyId, DataMode } from "@tool-chenh/contracts";
 import { buildApp, validateViteOrigin } from "./app.js";
 import { Runtime, type RuntimeOptions } from "./runtime.js";
 import { createSessionServices } from "./sessions/session-services.js";
@@ -12,11 +12,18 @@ import { JsonlCatalogJournal } from "./routes/catalog-jsonl-journal.js";
 import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
 import { resolveProviderFees } from "./providers/provider-fees.js";
 import { FileBetHistory } from "./history/file-bet-history.js";
-import { createSessionMaintenanceRunner } from "./session-maintenance.js";
+import { createDailyMaintenanceScheduler, createSessionMaintenanceRunner,
+  MaintenanceJournal, SessionRefreshControl } from "./session-maintenance.js";
 import { DurableCatalogStore } from "./catalog/durable-catalog-store.js";
 import { bindGracefulShutdown } from "./process-shutdown.js";
 import { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
 import { CaptureStore } from "./chrome-bridge/capture-store.js";
+import { ChromeCatalogDataPlane } from "./chrome-bridge/chrome-catalog-data-plane.js";
+import { createChromeCatalogOverlay } from "./chrome-bridge/chrome-catalog-overlay.js";
+import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-feature-flags.js";
+import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
+import { refreshBridgeProviderSources } from "./chrome-bridge/provider-source-refresh.js";
+import { refreshCatalogSources } from "./catalog-refresh.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -32,6 +39,30 @@ const fixtureSources = [
   ["lol/saba-snapshot.json", "SABA", "LOL"],
   ["lol/im-snapshot.json", "IM", "LOL"]
 ] as const;
+
+const chromeLobbyIds = new Set<ChromeLobbyId>(["IM", "BTI", "TSPORT", "KSPORT", "SABA", "CMD", "SBO"]);
+
+function captureLobbies(value: string | undefined): readonly ChromeLobbyId[] | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  return value.split(",").map((item) => item.trim().toUpperCase())
+    .filter((item): item is ChromeLobbyId => chromeLobbyIds.has(item as ChromeLobbyId));
+}
+
+export function shouldRunLegacySessionMaintenance(
+  env: Readonly<Record<string, string | undefined>>
+): boolean {
+  const value = env.SESSION_MAINTENANCE_ENABLED?.trim();
+  if (value === undefined || value === "") return true;
+  if (value === "0") return false;
+  if (value === "1") return true;
+  throw new Error("SESSION_MAINTENANCE_ENABLED must be 0, 1 or unset");
+}
+
+export function shouldPersistCatalogJournal(
+  env: Readonly<Record<string, string | undefined>>
+): boolean {
+  return env.TOOL_CHENH_CATALOG_JOURNAL_ENABLED?.trim() === "1";
+}
 
 const fixtureMappingPolicy = {
   prematchToleranceMs: 120_000,
@@ -173,11 +204,21 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   }
   const sessionServices = createSessionServices({
     localAppData,
-    providerFees: resolveProviderFees(env)
+    providerFees: resolveProviderFees(env),
+    ...(env.FABET_AUTH_PROXY_URL?.trim() ? { fabetAuthProxyUrl: env.FABET_AUTH_PROXY_URL.trim() } : {}),
+    enableLocalWarpAuth: env.FABET_LOCAL_WARP_AUTH === undefined
+      ? process.platform === "win32"
+      : env.FABET_LOCAL_WARP_AUTH === "1",
+    ...(env.FABET_WARP_CLI_PATH?.trim() ? { warpCliPath: env.FABET_WARP_CLI_PATH.trim() } : {}),
+    ...(env.FABET_WARP_PROXY_PORT?.trim()
+      ? { warpProxyPort: positiveNumber(env.FABET_WARP_PROXY_PORT, 40_000, "FABET_WARP_PROXY_PORT") }
+      : {}),
   });
-  const catalogTelemetry = new CatalogTelemetryRegistry(undefined, new JsonlCatalogJournal(
-    join(localAppData, "tool-chenh", "logs", "catalog-changes.jsonl")
-  ));
+  const catalogTelemetry = shouldPersistCatalogJournal(env)
+    ? new CatalogTelemetryRegistry(undefined, new JsonlCatalogJournal(
+      join(localAppData, "tool-chenh", "logs", "catalog-changes.jsonl")
+    ))
+    : new CatalogTelemetryRegistry();
   const catalogBridge = new LiveCatalogBridge();
   const runtime = config.dataMode === "FIXTURE"
     ? createFixtureRuntime(config.fixtureReplaySpeed)
@@ -189,44 +230,93 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const catalogStore = new DurableCatalogStore(join(localAppData, "tool-chenh", "catalog-cache"));
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
+  const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane() : null;
+  const chromeCatalogDataPlane = chromeBridgeRegistry
+    ? new ChromeCatalogDataPlane()
+    : null;
   if (chromeBridgeRegistry) {
+    const allowedCaptureLobbies = captureLobbies(env.CHROME_BRIDGE_CAPTURE_LOBBIES);
     const captureStore = new CaptureStore({
       enabled: env.CHROME_BRIDGE_CAPTURE === "1",
-      directory: join(localAppData, "tool-chenh", "chrome-bridge-captures")
+      directory: join(localAppData, "tool-chenh", "chrome-bridge-captures"),
+      ...(allowedCaptureLobbies === undefined ? {} : { allowedLobbies: allowedCaptureLobbies })
     });
     chromeBridgeRegistry.subscribe((envelope) => { void captureStore.record(envelope); });
+    chromeBridgeRegistry.subscribe((envelope) => { chromeCatalogDataPlane?.ingest(envelope); });
   }
+  const catalogAccess = chromeCatalogDataPlane === null
+    ? { sources: sessionServices.catalogSources, reader: sessionServices.catalogReader }
+    : createChromeCatalogOverlay({
+      sources: sessionServices.catalogSources,
+      reader: sessionServices.catalogReader,
+      chrome: chromeCatalogDataPlane
+    });
+  const maintenance = new SessionRefreshControl({ refresh: () => refreshCatalogSources({
+    legacyRefresh: () => sessionServices.refreshAll(),
+    ...(chromeBridgeControlPlane === null ? {} : {
+      prepareSources: async () => {
+        await sessionServices.renewAll();
+      }
+    }),
+    ...(chromeBridgeControlPlane === null
+      ? {}
+      : { requestBridgeSnapshots: async (freshAfterMs) => {
+        return refreshBridgeProviderSources({
+          controlPlane: chromeBridgeControlPlane,
+          withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
+          minAcquiredAtMs: freshAfterMs
+        });
+      } }),
+    statuses: () => catalogAccess.sources.listStatuses()
+  }),
+    journal: new MaintenanceJournal({ nowMs: Date.now },
+      join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
     sessionServices,
     accountRegistry: sessionServices.accounts,
-    catalogSources: sessionServices.catalogSources,
-    catalogReader: sessionServices.catalogReader,
-    ...(config.dataMode === "LIVE" ? { catalogObserver: catalogBridge } : {}),
+    catalogSources: catalogAccess.sources,
+    catalogReader: catalogAccess.reader,
+    // The live comparison page consumes the bounded catalog read model
+    // directly. Feeding every large provider catalog through the legacy
+    // AppSnapshot mapper duplicates all mapping work and can block HTTP/WS.
+    // Fixture mode keeps its deterministic observer path for integration tests.
     catalogTelemetry,
     catalogStore,
     providerPreflight: sessionServices.providerPreflight,
     twoLegPreflight,
     receiptProtocol: sessionServices.receiptProtocol,
     betHistory,
+    maintenance,
     ...(chromeBridgeRegistry && chromeBridgeKey
-      ? { chromeBridge: { registry: chromeBridgeRegistry, installationKey: chromeBridgeKey } }
+      ? { chromeBridge: {
+        registry: chromeBridgeRegistry,
+        ...(chromeBridgeControlPlane === null ? {} : { controlPlane: chromeBridgeControlPlane }),
+        installationKey: chromeBridgeKey,
+        openProviderTicket: isOpenProviderTicketEnabled(env.ENABLE_OPEN_PROVIDER_TICKET)
+      } }
       : {})
   });
   await app.listen({ host: config.host, port: config.port });
-  const maintainSessions = createSessionMaintenanceRunner(
-    () => sessionServices.tick(),
-    (error) => app.log.error({ error }, "Session maintenance failed; live catalog remains available")
-  );
-  void maintainSessions();
-  const sessionTimer = setInterval(() => { void maintainSessions(); }, 60_000);
-  sessionTimer.unref();
+  const dailyMaintenance = createDailyMaintenanceScheduler(() => maintenance.runScheduled());
+  dailyMaintenance.start();
+  let sessionTimer: ReturnType<typeof setInterval> | null = null;
+  if (shouldRunLegacySessionMaintenance(env)) {
+    const maintainSessions = createSessionMaintenanceRunner(
+      () => sessionServices.tick(),
+      (error) => app.log.error({ error }, "Session maintenance failed; live catalog remains available")
+    );
+    void maintainSessions();
+    sessionTimer = setInterval(() => { void maintainSessions(); }, 60_000);
+    sessionTimer.unref();
+  }
   return {
     app,
     runtime,
     async stop(): Promise<void> {
-      clearInterval(sessionTimer);
+      dailyMaintenance.stop();
+      if (sessionTimer !== null) clearInterval(sessionTimer);
       controller.abort();
       await app.close();
       await sessionServices.close();

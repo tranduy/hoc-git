@@ -25,6 +25,14 @@ describe("redactNetworkEnvelope", () => {
     expect(() => module.redactNetworkEnvelope({ body: "x".repeat(262_145) })).toThrow("BRIDGE_PAYLOAD_TOO_LARGE");
   });
 
+  it("accepts an all-market network body above the old 4 MiB ceiling but keeps a hard cap", async () => {
+    const module = await import("./redactor.js");
+    const accepted = JSON.stringify({ StatusCode: 100, sel: [{ pad: "x".repeat(5 * 1024 * 1024) }] });
+    expect(() => module.redactNetworkBody(accepted)).not.toThrow();
+    const rejected = JSON.stringify({ StatusCode: 100, sel: [{ pad: "x".repeat(24 * 1024 * 1024) }] });
+    expect(() => module.redactNetworkBody(rejected)).toThrow("BRIDGE_PAYLOAD_TOO_LARGE");
+  });
+
   it("redacts secret fields embedded in a JSON network body", async () => {
     const module = await import("./redactor.js");
     const redacted = module.redactNetworkEnvelope({
@@ -32,6 +40,15 @@ describe("redactNetworkEnvelope", () => {
     });
     expect(JSON.stringify(redacted)).not.toContain("super-secret");
     expect(JSON.parse(redacted.body as string)).toEqual({ eventId: 42, nested: { odds: 1.95 } });
+  });
+
+  it("redacts IM's abbreviated token field without removing ordinary short fields", async () => {
+    const module = await import("./redactor.js");
+    const redacted = module.redactNetworkBody(JSON.stringify({
+      t: "4-9624568035b2dfa5fba2acce8d1df497", s: 1, o: 0.82
+    }));
+    expect(redacted).not.toContain("9624568035b2dfa5fba2acce8d1df497");
+    expect(JSON.parse(redacted)).toEqual({ s: 1, o: 0.82 });
   });
 
   it("replaces URL-valued fields with hostname and pathname metadata", async () => {

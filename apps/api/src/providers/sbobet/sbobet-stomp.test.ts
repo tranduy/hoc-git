@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   appendBoundedSbobetSocketPayload, correlateSbobetPublicIds, decodeSbobetJsonBody,
-  decodeSbobetStompBodies, isSbobetPublicFeedUrl, isSbobetResponseCandidate
+  decodeSbobetStompBodies, extractSbobetSnapshotPublicIds, hasSbobetSocketCatalogCorrelation,
+  isSbobetPublicFeedUrl, isSbobetResponseCandidate,
+  isSbobetSocketUrl, nextSbobetSocketDirtyAtMs
 } from "./sbobet-stomp.js";
 
 describe("SBOBET SockJS/STOMP decoding", () => {
@@ -18,6 +20,24 @@ describe("SBOBET SockJS/STOMP decoding", () => {
     expect(evidence).toEqual([{ target: "5603585", path: "$[0].1[0].2", keys: ["2", "3"] }]);
     expect(JSON.stringify(evidence)).not.toContain("must-not-return");
     expect(JSON.stringify(evidence)).not.toContain("secret");
+  });
+
+  it("extracts bounded public event and selection IDs from an SBOBET snapshot", () => {
+    const body = { wrapper: [{ "2": "Alpha", "3": "Beta", "7": {
+      "5": ["0.5 0.80*56035850050001h -0.90*56035850050001a h 730078508161105"]
+    }, "8": 5603585, token: "must-not-return" }] };
+    expect(extractSbobetSnapshotPublicIds(body)).toEqual([
+      "5603585", "56035850050001", "730078508161105"
+    ]);
+  });
+
+  it("correlates a socket frame by public event ID without decoding a full catalog", () => {
+    const matching = { wrapper: [{ "2": "Alpha", "3": "Beta", "7": {
+      "5": ["0.5 0.80*56035850050001h -0.90*56035850050001a h 730078508161105"]
+    }, "8": 5603585 }] };
+    expect(hasSbobetSocketCatalogCorrelation([matching], ["5603585", "777"])).toBe(true);
+    expect(hasSbobetSocketCatalogCorrelation([matching], ["999"])).toBe(false);
+    expect(hasSbobetSocketCatalogCorrelation([], ["5603585"])).toBe(false);
   });
 
   it("rejects arbitrary text targets so correlation cannot become a secret search primitive", () => {
@@ -48,5 +68,19 @@ describe("SBOBET SockJS/STOMP decoding", () => {
     expect(isSbobetResponseCandidate("https://sports.example/events", "xhr")).toBe(true);
     expect(isSbobetResponseCandidate("https://sports.example/events", "document")).toBe(false);
     expect(isSbobetResponseCandidate("http://sports.example/events", "fetch")).toBe(false);
+  });
+
+  it("accepts only the observed SBOBET secure socket hosts", () => {
+    expect(isSbobetSocketUrl("wss://novoga.sb21.net/opaque")).toBe(true);
+    expect(isSbobetSocketUrl("wss://sb21.net/opaque")).toBe(true);
+    expect(isSbobetSocketUrl("ws://novoga.sb21.net/opaque")).toBe(false);
+    expect(isSbobetSocketUrl("wss://sb21.net.evil.test/opaque")).toBe(false);
+  });
+
+  it("coalesces high-frequency socket frames before scheduling an authoritative refresh", () => {
+    expect(nextSbobetSocketDirtyAtMs(null, null, 1_000)).toBe(1_000);
+    expect(nextSbobetSocketDirtyAtMs(1_000, 1_000, 1_001)).toBe(1_000);
+    expect(nextSbobetSocketDirtyAtMs(null, 1_000, 1_100)).toBeNull();
+    expect(nextSbobetSocketDirtyAtMs(null, 1_000, 1_250)).toBe(1_250);
   });
 });

@@ -6,6 +6,10 @@ import { build } from "esbuild";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = resolve(root, "dist");
 const repositoryRoot = resolve(root, "../..");
+const cmdSnapshotSource = await readFile(resolve(root, "src/cmd-dom-snapshot.ts"), "utf8");
+const cmdExpressionMatch = /export const CMD_PUBLIC_CATALOG_EXPRESSION = `([\s\S]*?)`;\s*$/u.exec(cmdSnapshotSource);
+if (!cmdExpressionMatch) throw new Error("CMD capture expression not found");
+const cmdExpression = Function(`"use strict"; return \`${cmdExpressionMatch[1]}\`;`)();
 let installationKey = "";
 try {
   installationKey = (await readFile(resolve(repositoryRoot, ".auth/chrome-bridge.key"), "utf8")).trim();
@@ -23,6 +27,18 @@ await build({
   sourcemap: false,
   minify: true,
   legalComments: "none",
+  plugins: [{
+    name: "inline-cmd-capture",
+    setup(pluginBuild) {
+      pluginBuild.onLoad({ filter: /page-observer\.ts$/ }, async (args) => ({
+        contents: (await readFile(args.path, "utf8")).replace(
+          "return __FIELDLINE_CMD_CAPTURE_EXPRESSION__;",
+          `return (${cmdExpression});`
+        ),
+        loader: "ts"
+      }));
+    }
+  }],
   define: { __CHROME_BRIDGE_DEFAULT_KEY__: JSON.stringify(installationKey) }
 });
 await cp(resolve(root, "public"), output, { recursive: true });

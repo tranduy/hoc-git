@@ -17,7 +17,11 @@ export type SessionHealthReason =
   | "EXPIRED"
   | "SCHEMA_CHANGED"
   | "VAULT_UNAVAILABLE"
-  | "RESET_FAILED";
+  | "RESET_FAILED"
+  | "AUTH_EGRESS_UNAVAILABLE"
+  | "INTERACTIVE_AUTH_REQUIRED"
+  | "AUTH_BACKOFF"
+  | "PROVIDER_VALIDATION_FAILED";
 
 export interface RedactedSessionStatus {
   readonly id: string;
@@ -29,6 +33,7 @@ export interface RedactedSessionStatus {
   readonly acquiredAtMs: number | null;
   readonly lastValidatedAtMs: number | null;
   readonly renewAfterMs: number | null;
+  readonly nextRetryAtMs: number | null;
   readonly secretConfigured: boolean;
   readonly reason: SessionHealthReason | null;
 }
@@ -207,6 +212,16 @@ export type MarketType =
   | "FH_1X2"
   | "FH_AH"
   | "FH_TOTAL"
+  | "SH_AH"
+  | "SH_TOTAL"
+  | "CORNER_FT_AH"
+  | "CORNER_FT_TOTAL"
+  | "CORNER_FH_AH"
+  | "CORNER_FH_TOTAL"
+  | "CARD_FT_AH"
+  | "CARD_FT_TOTAL"
+  | "CARD_FH_AH"
+  | "CARD_FH_TOTAL"
   | "SERIES_WINNER"
   | "MAP_WINNER"
   | "MAP_TOTAL_KILLS"
@@ -217,6 +232,7 @@ export type MarketType =
 export type Scope =
   | "FULL_TIME"
   | "FIRST_HALF"
+  | "SECOND_HALF"
   | "SERIES"
   | "MAP_1"
   | "MAP_2"

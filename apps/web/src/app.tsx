@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AppSnapshot } from "@tool-chenh/contracts";
 import { SnapshotClient, type ConnectionState } from "./api/client.js";
 import { DashboardPage } from "./pages/dashboard-page.js";
@@ -8,23 +8,25 @@ import { MappingsPage } from "./pages/mappings-page.js";
 import { SessionsPage } from "./pages/sessions-page.js";
 import { LiveCatalogPage } from "./pages/live-catalog-page.js";
 import { CatalogSourceApi } from "./api/catalog-sources.js";
+import { BetHistoryPage } from "./pages/bet-history-page.js";
 
-type Route = "/" | "/football-live" | "/lol-live" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions";
+type Route = "/" | "/football-live" | "/lol-live" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions" | "/bet-history";
 
 const routes: ReadonlyArray<{ readonly path: Route; readonly label: string }> = [
-  { path: "/", label: "Dashboard" },
   { path: "/football-live", label: "Football Live" },
   { path: "/lol-live", label: "LoL Live" },
   { path: "/football", label: "Football Overview" },
   { path: "/lol", label: "LoL Overview" },
   { path: "/opportunities", label: "Opportunities" },
   { path: "/mappings", label: "Mapping Review" },
-  { path: "/sessions", label: "Sessions" }
+  { path: "/sessions", label: "Sessions" },
+  { path: "/bet-history", label: "Lịch sử vé" }
 ];
 
 const catalogSourceApi = new CatalogSourceApi();
 
 function routeFor(pathname: string): Route {
+  if (pathname === "/") return "/football-live";
   if (pathname === "/live-catalog") {
     try {
       return window.localStorage.getItem("tool-chenh.live-catalog.category.v1") === "LOL" ? "/lol-live" : "/football-live";
@@ -32,7 +34,7 @@ function routeFor(pathname: string): Route {
       return "/football-live";
     }
   }
-  return routes.some((route) => route.path === pathname) ? pathname as Route : "/";
+  return routes.some((route) => route.path === pathname) ? pathname as Route : "/football-live";
 }
 
 export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapshot }) {
@@ -50,7 +52,9 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
   }, [initialSnapshot]);
 
   useEffect(() => {
-    if (window.location.pathname === "/live-catalog") window.history.replaceState({}, "", route);
+    if (window.location.pathname === "/live-catalog" || window.location.pathname === "/") {
+      window.history.replaceState({}, "", route);
+    }
   }, [route]);
 
   useEffect(() => {
@@ -63,14 +67,11 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
     mainRef.current?.focus();
   }, [route]);
 
-  const navigate = (path: Route) => (event: MouseEvent<HTMLAnchorElement>) => {
-    event.preventDefault();
-    window.history.pushState({}, "", path);
-    setRoute(path);
-  };
   const content = route === "/sessions" ? <SessionsPage />
+    : route === "/bet-history" ? <BetHistoryPage />
     : route === "/football-live" ? <LiveCatalogPage catalogSourceApi={catalogSourceApi} fixedCategory="FOOTBALL" key="FOOTBALL-LIVE" />
-    : route === "/lol-live" ? <LiveCatalogPage catalogSourceApi={catalogSourceApi} fixedCategory="LOL" key="LOL-LIVE" />
+    : route === "/lol-live" ? <header className="page-header"><p className="eyebrow">League of Legends</p>
+      <h1>LoL is temporarily disabled</h1><p>Football realtime detection is the only active data flow.</p></header>
     : snapshot === undefined
     ? <header className="page-header"><h1>Loading {routeLabel}</h1><p>Waiting for a fresh local snapshot. No opportunity or mapping decision is available yet.</p></header>
     : route === "/" ? <DashboardPage snapshot={snapshot} connectionState={connectionState} />
@@ -82,10 +83,6 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main">Skip to content</a>
-      <nav aria-label="Primary navigation" className="primary-nav">
-        <span className="brand">Fieldline</span>
-        {routes.map((item) => <a aria-current={route === item.path ? "page" : undefined} href={item.path} key={item.path} onClick={navigate(item.path)}>{item.label}</a>)}
-      </nav>
       <p className="visually-hidden" role="status" aria-live="polite">Now viewing {routeLabel}</p>
       <main id="main" ref={mainRef} tabIndex={-1}>{content}</main>
     </div>

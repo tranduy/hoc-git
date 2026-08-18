@@ -74,7 +74,11 @@ export const SessionHealthReasonSchema = z.enum([
   "EXPIRED",
   "SCHEMA_CHANGED",
   "VAULT_UNAVAILABLE",
-  "RESET_FAILED"
+  "RESET_FAILED",
+  "AUTH_EGRESS_UNAVAILABLE",
+  "INTERACTIVE_AUTH_REQUIRED",
+  "AUTH_BACKOFF",
+  "PROVIDER_VALIDATION_FAILED"
 ]) satisfies z.ZodType<SessionHealthReason>;
 
 export const RedactedSessionStatusSchema = z.strictObject({
@@ -87,6 +91,7 @@ export const RedactedSessionStatusSchema = z.strictObject({
   acquiredAtMs: z.number().finite().nonnegative().nullable(),
   lastValidatedAtMs: z.number().finite().nonnegative().nullable(),
   renewAfterMs: z.number().finite().nonnegative().nullable(),
+  nextRetryAtMs: z.number().finite().nonnegative().nullable(),
   secretConfigured: z.boolean(),
   reason: SessionHealthReasonSchema.nullable()
 }).superRefine((status, context) => {
@@ -136,6 +141,16 @@ export const MarketTypeSchema = z.enum([
   "FH_1X2",
   "FH_AH",
   "FH_TOTAL",
+  "SH_AH",
+  "SH_TOTAL",
+  "CORNER_FT_AH",
+  "CORNER_FT_TOTAL",
+  "CORNER_FH_AH",
+  "CORNER_FH_TOTAL",
+  "CARD_FT_AH",
+  "CARD_FT_TOTAL",
+  "CARD_FH_AH",
+  "CARD_FH_TOTAL",
   "SERIES_WINNER",
   "MAP_WINNER",
   "MAP_TOTAL_KILLS",
@@ -147,6 +162,7 @@ export const MarketTypeSchema = z.enum([
 export const ScopeSchema = z.enum([
   "FULL_TIME",
   "FIRST_HALF",
+  "SECOND_HALF",
   "SERIES",
   "MAP_1",
   "MAP_2",
@@ -402,7 +418,11 @@ export const TwoLegExecutionResultSchema = z.strictObject({
   }
 }) satisfies z.ZodType<TwoLegExecutionResult>;
 
-const footballMarketTypes = new Set<MarketType>(["FT_1X2", "FT_AH", "FT_TOTAL", "FH_1X2", "FH_AH", "FH_TOTAL"]);
+const footballMarketTypes = new Set<MarketType>([
+  "FT_1X2", "FT_AH", "FT_TOTAL", "FH_1X2", "FH_AH", "FH_TOTAL", "SH_AH", "SH_TOTAL",
+  "CORNER_FT_AH", "CORNER_FT_TOTAL", "CORNER_FH_AH", "CORNER_FH_TOTAL",
+  "CARD_FT_AH", "CARD_FT_TOTAL", "CARD_FH_AH", "CARD_FH_TOTAL"
+]);
 const lolMarketTypes = new Set<MarketType>([
   "SERIES_WINNER",
   "MAP_WINNER",
@@ -410,8 +430,17 @@ const lolMarketTypes = new Set<MarketType>([
   "MAP_KILL_HANDICAP",
   "MAP_DURATION"
 ]);
-const footballScopes = new Set<Scope>(["FULL_TIME", "FIRST_HALF"]);
+const footballScopes = new Set<Scope>(["FULL_TIME", "FIRST_HALF", "SECOND_HALF"]);
 const lolScopes = new Set<Scope>(["SERIES", "MAP_1", "MAP_2", "MAP_3", "MAP_4", "MAP_5"]);
+const footballMarketScopes = new Map<MarketType, Scope>([
+  ["FT_1X2", "FULL_TIME"], ["FT_AH", "FULL_TIME"], ["FT_TOTAL", "FULL_TIME"],
+  ["FH_1X2", "FIRST_HALF"], ["FH_AH", "FIRST_HALF"], ["FH_TOTAL", "FIRST_HALF"],
+  ["SH_AH", "SECOND_HALF"], ["SH_TOTAL", "SECOND_HALF"],
+  ["CORNER_FT_AH", "FULL_TIME"], ["CORNER_FT_TOTAL", "FULL_TIME"],
+  ["CORNER_FH_AH", "FIRST_HALF"], ["CORNER_FH_TOTAL", "FIRST_HALF"],
+  ["CARD_FT_AH", "FULL_TIME"], ["CARD_FT_TOTAL", "FULL_TIME"],
+  ["CARD_FH_AH", "FIRST_HALF"], ["CARD_FH_TOTAL", "FIRST_HALF"]
+]);
 
 function validateCategoryCompatibility(
   value: { category: Category; marketType: MarketType; scope: Scope },
@@ -433,6 +462,17 @@ function validateCategoryCompatibility(
       code: "custom",
       path: ["scope"],
       message: "scope is incompatible with category"
+    });
+  }
+
+  const expectedFootballScope = value.category === "FOOTBALL"
+    ? footballMarketScopes.get(value.marketType)
+    : undefined;
+  if (expectedFootballScope !== undefined && value.scope !== expectedFootballScope) {
+    context.addIssue({
+      code: "custom",
+      path: ["scope"],
+      message: "scope is incompatible with football market type"
     });
   }
 }

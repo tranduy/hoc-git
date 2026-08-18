@@ -13,13 +13,31 @@ const valid = {
 };
 
 describe("CatalogSourceApi", () => {
+  it("aborts a hung control-plane request so source discovery can retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }));
+      const request = new CatalogSourceApi(fetcher as typeof fetch, 1_000).list();
+      const outcome = expect(request).rejects.toThrow("Catalog source request timed out");
+      await vi.advanceTimersByTimeAsync(1_000);
+      await outcome;
+      expect(fetcher.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("loads a strict redacted source list without browser cache", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ sources: [valid] }), {
       status: 200, headers: { "content-type": "application/json" }
     }));
     const sources = await new CatalogSourceApi(fetcher as typeof fetch).list();
     expect(sources).toEqual([expect.objectContaining({ id: valid.id, sessionState: "ACTIVE" })]);
-    expect(fetcher).toHaveBeenCalledWith("/api/catalog/sources", { method: "GET", cache: "no-store" });
+    expect(fetcher).toHaveBeenCalledWith("/api/catalog/sources", expect.objectContaining({
+      method: "GET", cache: "no-store", signal: expect.any(AbortSignal)
+    }));
   });
 
   it.each([

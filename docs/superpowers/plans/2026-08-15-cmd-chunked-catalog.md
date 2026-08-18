@@ -13,7 +13,9 @@
 - Read-only; never click or place a bet.
 - Never read or transmit credentials, cookies, storage, headers, URLs, or form values.
 - Include full-time Asian handicap and totals; exclude exact score and 1X2.
-- Each message must remain below 256 KiB; target maximum is 240,000 bytes.
+- Each complete WebSocket message must remain below 256 KiB. Because the JSON
+  chunk is serialized again inside `payload.body`, cap its body at a conservative
+  110,000 bytes so quote-heavy content remains wire-safe after escaping.
 - Incomplete data must fail closed and must not replace the last complete catalog.
 
 ---
@@ -27,10 +29,10 @@
 **Interfaces:**
 - Produces: `CmdSnapshotChunkSchema` and `CmdSnapshotChunk`.
 
-- [ ] Write failing schema tests for valid chunks and invalid index/count/extra fields.
-- [ ] Run `npm.cmd test --workspace @tool-chenh/contracts -- --run src/chrome-bridge.test.ts` and confirm RED.
-- [ ] Add the strict version-2 chunk schema with `chunkCount <= 64` and `chunkIndex < chunkCount`.
-- [ ] Rerun the focused contract test and confirm GREEN.
+- [x] Write failing schema tests for valid chunks and invalid index/count/extra fields.
+- [x] Run `npm.cmd test --workspace @tool-chenh/contracts -- --run src/chrome-bridge.test.ts` and confirm RED.
+- [x] Add the strict version-2 chunk schema with `chunkCount <= 64` and `chunkIndex < chunkCount`.
+- [x] Rerun the focused contract test and confirm GREEN.
 
 ### Task 2: Complete extraction and bounded partitioning
 
@@ -43,14 +45,14 @@
 
 **Interfaces:**
 - Consumes: sanitized `CmdCatalogInputRecord[]` JSON from every CMD frame.
-- Produces: `chunkCmdSnapshot(records, snapshotId, 240000): CmdSnapshotChunk[]`.
+- Produces: `chunkCmdSnapshot(records, snapshotId, 110000): CmdSnapshotChunk[]`.
 
-- [ ] Write failing tests proving 783 representative records survive partitioning and every serialized chunk is at most 240,000 bytes.
-- [ ] Run the focused extension tests and confirm RED.
-- [ ] Implement deterministic byte-bounded partitioning without truncation.
-- [ ] Restore all AH and total lines in the legacy CMD extractor while leaving 1X2/exact score excluded.
-- [ ] Send every chunk sequentially as `DOM_SNAPSHOT`; deduplicate an unchanged full observation.
-- [ ] Rerun focused extension tests and confirm GREEN.
+- [x] Write failing tests proving 783 representative records survive partitioning and every serialized chunk remains wire-safe.
+- [x] Run the focused extension tests and confirm RED.
+- [x] Implement deterministic byte-bounded partitioning without truncation.
+- [x] Restore all AH and total lines in the legacy CMD extractor while leaving 1X2/exact score excluded.
+- [x] Send every chunk sequentially as `DOM_SNAPSHOT`; deduplicate an unchanged full observation.
+- [x] Rerun focused extension tests and confirm GREEN.
 
 ### Task 3: Atomic API assembly
 
@@ -64,11 +66,11 @@
 - Consumes: `CmdSnapshotChunk` plus source identity and receive time.
 - Produces: a complete ordered `CmdCatalogInputRecord[]` or no value until complete.
 
-- [ ] Write failing tests for out-of-order completion, identical replay, conflicting duplicate, missing chunk timeout, and atomic publication.
-- [ ] Run the focused API tests and confirm RED.
-- [ ] Implement the bounded 10-second assembler and wire it into `CmdDomCatalogAdapter.decode`.
-- [ ] Ensure incomplete/invalid assemblies emit no catalog update and never clear the accepted catalog.
-- [ ] Rerun focused API tests and confirm GREEN.
+- [x] Write failing tests for out-of-order completion, identical replay, conflicting duplicate, missing chunk timeout, and atomic publication.
+- [x] Run the focused API tests and confirm RED.
+- [x] Implement the bounded 10-second assembler and wire it into `CmdDomCatalogAdapter.decode`.
+- [x] Ensure incomplete/invalid assemblies emit no catalog update and never clear the accepted catalog.
+- [x] Rerun focused API tests and confirm GREEN.
 
 ### Task 4: Integration and live proof
 
@@ -79,7 +81,7 @@
 - Consumes: complete adapter update.
 - Produces: `catalog-source:CMD:FOOTBALL` through the existing catalog endpoint.
 
-- [ ] Add a failing integration test with a multi-chunk CMD snapshot and assert no publish before the final chunk.
-- [ ] Make the minimal integration correction and confirm GREEN.
-- [ ] Run contract, extension, API bridge tests, typechecks, and builds.
-- [ ] Reload the unpacked extension once, then verify bridge state, payload sizes, event count, market count, and a public sample event through API endpoints.
+- [x] Add a failing integration test with a multi-chunk CMD snapshot and assert no publish before the final chunk.
+- [x] Make the minimal integration correction and confirm GREEN.
+- [x] Run contract, extension, API bridge tests, typechecks, and builds.
+- [x] Reload the unpacked extension once, then verify bridge state, payload sizes, event count, market count, and selection domains through API endpoints.

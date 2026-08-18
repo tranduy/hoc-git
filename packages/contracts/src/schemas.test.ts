@@ -5,6 +5,7 @@ import {
   CatalogSourceStatusSchema,
   CanonicalMarketSchema,
   ExecutionRequestSchema,
+  MarketTypeSchema,
   OpportunitySchema,
   OddsFormatSchema,
   PreflightRequestSchema,
@@ -20,7 +21,9 @@ import {
   RedactedSessionStatusSchema,
   RealtimeMessageSchema,
   SessionStatusListSchema,
+  SessionHealthReasonSchema,
   SessionSourceSchema,
+  ScopeSchema,
   StakeLegSchema,
   TwoLegExecutionResultSchema
 } from "./schemas.js";
@@ -31,8 +34,32 @@ describe("SessionSourceSchema", () => {
     expect(RedactedSessionStatusSchema.parse({
       id: "tk88", provider: "TK88", category: null, source: "TK88_CHROME", state: "ACTION_REQUIRED",
       trustedHostname: "tk88.example", acquiredAtMs: 100, lastValidatedAtMs: null,
-      renewAfterMs: null, secretConfigured: true, reason: "SCHEMA_CHANGED"
+      renewAfterMs: null, nextRetryAtMs: null, secretConfigured: true, reason: "SCHEMA_CHANGED"
     }).source).toBe("TK88_CHROME");
+  });
+});
+
+describe("expanded exact two-way Football market taxonomy", () => {
+  it.each([
+    ["SH_AH", "SECOND_HALF"], ["SH_TOTAL", "SECOND_HALF"],
+    ["CORNER_FT_AH", "FULL_TIME"], ["CORNER_FT_TOTAL", "FULL_TIME"],
+    ["CORNER_FH_AH", "FIRST_HALF"], ["CORNER_FH_TOTAL", "FIRST_HALF"],
+    ["CARD_FT_AH", "FULL_TIME"], ["CARD_FT_TOTAL", "FULL_TIME"],
+    ["CARD_FH_AH", "FIRST_HALF"], ["CARD_FH_TOTAL", "FIRST_HALF"]
+  ] as const)("accepts %s only as a distinct Football market in %s", (marketType, scope) => {
+    expect(MarketTypeSchema.parse(marketType)).toBe(marketType);
+    expect(ScopeSchema.parse(scope)).toBe(scope);
+    expect(ProviderMarketSchema.safeParse({ provider: "SBOBET", category: "FOOTBALL",
+      providerEventId: "event", providerMarketId: "market", marketType, scope, line: "0.5",
+      settlementProfile: `verified-${marketType}`, status: "OPEN" }).success).toBe(true);
+  });
+
+  it("rejects a goal, corner or card market placed in a different period", () => {
+    const base = { provider: "SBOBET", category: "FOOTBALL", providerEventId: "event",
+      providerMarketId: "market", line: "0.5", settlementProfile: "verified", status: "OPEN" };
+    expect(ProviderMarketSchema.safeParse({ ...base, marketType: "SH_TOTAL", scope: "FULL_TIME" }).success).toBe(false);
+    expect(ProviderMarketSchema.safeParse({ ...base, marketType: "CORNER_FH_TOTAL", scope: "FULL_TIME" }).success).toBe(false);
+    expect(ProviderMarketSchema.safeParse({ ...base, marketType: "CARD_FT_AH", scope: "FIRST_HALF" }).success).toBe(false);
   });
 });
 
@@ -221,6 +248,7 @@ describe("RedactedSessionStatusSchema", () => {
     acquiredAtMs: 1_000,
     lastValidatedAtMs: 2_000,
     renewAfterMs: 86_401_000,
+    nextRetryAtMs: null,
     secretConfigured: true,
     reason: null
   });
@@ -243,6 +271,26 @@ describe("RedactedSessionStatusSchema", () => {
       ...completeStatus(),
       renewAfterMs: 999
     }).success).toBe(false);
+  });
+
+  it.each([
+    "AUTH_EGRESS_UNAVAILABLE",
+    "INTERACTIVE_AUTH_REQUIRED",
+    "AUTH_BACKOFF",
+    "PROVIDER_VALIDATION_FAILED"
+  ] as const)("accepts automatic recovery reason %s", (reason) => {
+    expect(SessionHealthReasonSchema.parse(reason)).toBe(reason);
+    expect(RedactedSessionStatusSchema.parse({
+      ...completeStatus(),
+      state: "ACTION_REQUIRED",
+      reason,
+      nextRetryAtMs: 3_000
+    }).nextRetryAtMs).toBe(3_000);
+  });
+
+  it("requires an explicit nullable retry timestamp", () => {
+    const { nextRetryAtMs: _missing, ...withoutRetry } = completeStatus();
+    expect(RedactedSessionStatusSchema.safeParse(withoutRetry).success).toBe(false);
   });
 });
 

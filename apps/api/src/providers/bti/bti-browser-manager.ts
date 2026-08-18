@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
 import { chromium, type BrowserContext, type Page } from "playwright";
+import { installCatalogResourcePolicy } from "../browser-resource-policy.js";
 import { extractBtiCatalogRecords } from "./bti-direct-catalog.js";
 import { parseBtiTicketConstraint, type BtiTicketConstraintSnapshot } from "./bti-ticket-constraint.js";
+import { exactBtiStakeStep } from "./bti-stake-step.js";
 
 interface OpenSession {
   readonly context: BrowserContext;
@@ -119,7 +121,7 @@ export class PlaywrightBtiBrowserManager {
     marketType: string; selection: string; line: string | null; rawOdds: string;
     decimalOdds: string }): Promise<BtiTicketConstraintSnapshot | null> {
     const session = await this.#get(input);
-    const clicked = await session.page.evaluate((identity) => {
+    const opened = await session.page.evaluate((identity) => {
       const candidates = [...document.querySelectorAll<HTMLElement>("*")].filter((element) =>
         [...element.attributes].some((attribute) => attribute.value === identity.providerSelectionId));
       const exact = candidates.sort((left, right) => left.outerHTML.length - right.outerHTML.length)[0];
@@ -128,61 +130,65 @@ export class PlaywrightBtiBrowserManager {
         clickable.click();
         return true;
       }
-      const normalize = (value: string) => value.normalize("NFKD").replace(/[\u0300-\u036f]/gu, "")
-        .replace(/\s+/gu, " ").trim().toLocaleLowerCase("en");
-      const selectionNeedles = identity.selection === "HOME" ? [normalize(identity.participantA)]
-        : identity.selection === "AWAY" ? [normalize(identity.participantB)]
-        : identity.selection === "OVER" ? ["over", "tren", "tai"]
-        : identity.selection === "UNDER" ? ["under", "duoi", "xiu"] : [];
-      if (selectionNeedles.length === 0 || identity.line === null) return false;
-      const participantAText = normalize(identity.participantA);
-      const participantBText = normalize(identity.participantB);
-      const lineNumber = Number(identity.line);
-      const lines = new Set([normalize(identity.line), Number.isFinite(lineNumber) ? normalize(String(Math.abs(lineNumber))) : ""]);
-      const odds = new Set([normalize(identity.rawOdds), normalize(identity.decimalOdds)]);
-      const eventRoots = [...document.querySelectorAll<HTMLElement>("*")].filter((element) => {
-        const text = normalize(element.innerText);
-        return text.includes(participantAText) && text.includes(participantBText);
-      }).sort((left, right) => left.innerText.length - right.innerText.length);
-      const eventRoot = eventRoots[0];
-      if (eventRoot === undefined) return false;
-      const matches: { clickable: HTMLElement; score: number }[] = [];
-      for (const leaf of [...eventRoot.querySelectorAll<HTMLElement>("*")].filter((element) =>
-        odds.has(normalize(element.innerText)))) {
-        let container: HTMLElement | null = leaf;
-        while (container !== null) {
-          const text = normalize(container.innerText);
-          if (selectionNeedles.some((needle) => text.includes(needle)) &&
-            [...lines].some((line) => line !== "" && text.includes(line))) {
-            matches.push({ clickable: leaf.closest<HTMLElement>("button,[role=button],a,[tabindex]") ?? leaf,
-              score: text.length });
-            break;
-          }
-          if (container === eventRoot) break;
-          container = container.parentElement;
-        }
-      }
-      matches.sort((left, right) => left.score - right.score);
-      if (matches.length === 0 || (matches[1] !== undefined && matches[1].score === matches[0]!.score &&
-        matches[1].clickable !== matches[0]!.clickable)) return false;
-      matches[0]!.clickable.click();
+      window.postMessage(JSON.stringify({ eventType: "selectionId",
+        eventData: { value: identity.providerSelectionId } }), "*");
       return true;
-    }, { providerSelectionId: input.providerSelectionId, participantA: input.participantA,
-      participantB: input.participantB, selection: input.selection, rawOdds: input.rawOdds,
-      decimalOdds: input.decimalOdds, line: input.line }).catch(() => false);
-    if (!clicked) return null;
+    }, { providerSelectionId: input.providerSelectionId }).catch(() => false);
+    if (!opened) return null;
 
     const deadline = Date.now() + 1_500;
     while (Date.now() < deadline) {
       const raw = await session.page.evaluate((identity) => {
-        const bodyText = document.body.innerText;
-        const limitLine = bodyText.split(/\r?\n/u).find((line) =>
-          /Tối\s*thiểu\s*-\s*Tối\s*đa/iu.test(line)) ?? "";
-        const input = [...document.querySelectorAll<HTMLInputElement>("input")].find((candidate) => {
+        const normalize = (value: string) => value.normalize("NFKD").replace(/[\u0300-\u036f]/gu, "")
+          .replace(/\s+/gu, " ").trim().toLocaleLowerCase("en");
+        const inputs = [...document.querySelectorAll<HTMLInputElement>("input")].filter((candidate) => {
           const style = getComputedStyle(candidate);
           return !candidate.disabled && style.display !== "none" && style.visibility !== "hidden" &&
             candidate.getBoundingClientRect().width > 0 && candidate.getBoundingClientRect().height > 0;
         });
+        const selectionNeedles = identity.selection === "HOME" ? [normalize(identity.participantA)]
+          : identity.selection === "AWAY" ? [normalize(identity.participantB)]
+          : identity.selection === "OVER" ? ["over", "tren", "tai"]
+          : identity.selection === "UNDER" ? ["under", "duoi", "xiu"] : [];
+        const lineNumber = identity.line === null ? Number.NaN : Math.abs(Number(identity.line));
+        const lineNeedles = Number.isFinite(lineNumber) ? new Set([normalize(String(lineNumber)),
+          normalize(identity.line ?? "")]) : new Set<string>();
+        const oddsNeedles = new Set([normalize(identity.rawOdds), normalize(identity.decimalOdds)]);
+        const matches = inputs.flatMap((stakeInput) => {
+          let root: HTMLElement | null = stakeInput.parentElement;
+          while (root !== null) {
+            const text = root.innerText;
+            const normalized = normalize(text);
+            const limitLine = text.split(/\r?\n/u).find((line) =>
+              /T\u1ed1i\s*thi\u1ec3u\s*-\s*T\u1ed1i\s*\u0111a/iu.test(line)) ?? "";
+            if (limitLine !== "" && selectionNeedles.some((needle) => normalized.includes(needle)) &&
+              [...lineNeedles].some((needle) => needle !== "" && normalized.includes(needle)) &&
+              [...oddsNeedles].some((needle) => needle !== "" && normalized.includes(needle))) {
+              return [{ stakeInput, limitLine, size: text.length }];
+            }
+            root = root.parentElement;
+          }
+          return [];
+        }).sort((left, right) => left.size - right.size);
+        const exact = matches[0];
+        if (exact === undefined || (matches[1] !== undefined && matches[1].size === exact.size &&
+          matches[1].stakeInput !== exact.stakeInput)) return null;
+        const stepEvidence: { key: string; value: string }[] = [];
+        for (const attribute of exact.stakeInput.attributes) stepEvidence.push({ key: attribute.name, value: attribute.value });
+        const visited = new Set<unknown>();
+        const visit = (value: unknown, depth: number): void => {
+          if (depth > 4 || value === null || (typeof value !== "object" && typeof value !== "function") || visited.has(value)) return;
+          visited.add(value);
+          for (const key of Object.getOwnPropertyNames(value)) {
+            let child: unknown;
+            try { child = (value as Record<string, unknown>)[key]; } catch { continue; }
+            if (/^(?:step|stake[-_]?step|amount[-_]?step|increment)$/iu.test(key) &&
+              (typeof child === "string" || typeof child === "number")) stepEvidence.push({ key, value: String(child) });
+            if (key.startsWith("__react") || key === "props" || key === "memoizedProps" || key === "pendingProps")
+              visit(child, depth + 1);
+          }
+        };
+        visit(exact.stakeInput, 0);
         const token = localStorage.getItem("CT_APP_AUTHORIZATION");
         let balanceText = "";
         let currencyCode = "";
@@ -190,28 +196,19 @@ export class PlaywrightBtiBrowserManager {
           try {
             const encoded = token.split(".")[1] ?? "";
             const normalized = encoded.replace(/-/gu, "+").replace(/_/gu, "/");
-            const claims = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="))) as
-              Record<string, unknown>;
+            const claims = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="))) as Record<string, unknown>;
             if (typeof claims.balance === "number" && Number.isFinite(claims.balance)) balanceText = `${claims.balance} K`;
             if (typeof claims.currencyCode === "string") currencyCode = claims.currencyCode;
-          } catch { /* Invalid auth evidence is handled fail-closed by the parser. */ }
+          } catch { /* Invalid auth evidence is handled fail-closed. */ }
         }
-        const normalize = (value: string) => value.normalize("NFKD").replace(/[\u0300-\u036f]/gu, "")
-          .replace(/\s+/gu, " ").trim().toLocaleLowerCase("en");
-        const normalizedBody = normalize(bodyText);
-        const selectionNeedles = identity.selection === "HOME" ? [normalize(identity.participantA)]
-          : identity.selection === "AWAY" ? [normalize(identity.participantB)]
-          : identity.selection === "OVER" ? ["over", "tren", "tai"]
-          : identity.selection === "UNDER" ? ["under", "duoi", "xiu"] : [];
-        const line = identity.line === null ? "" : String(Math.abs(Number(identity.line)));
-        const selectionMatched = limitLine !== "" && selectionNeedles.length > 0 && line !== "" &&
-          selectionNeedles.some((needle) => normalizedBody.includes(needle)) && normalizedBody.includes(line);
-        return { providerSelectionId: identity.providerSelectionId, selectionMatched, limitText: limitLine,
-          stakeStepText: input?.step ?? "", balanceText, currencyCode, observedAtMs: Date.now() };
+        return { providerSelectionId: identity.providerSelectionId, selectionMatched: true, limitText: exact.limitLine,
+          stepEvidence, balanceText, currencyCode, observedAtMs: Date.now() };
       }, { providerSelectionId: input.providerSelectionId, participantA: input.participantA,
-        participantB: input.participantB, selection: input.selection, line: input.line }).catch(() => null);
+        participantB: input.participantB, selection: input.selection, line: input.line,
+        rawOdds: input.rawOdds, decimalOdds: input.decimalOdds }).catch(() => null);
       if (raw !== null) {
-        const parsed = parseBtiTicketConstraint(raw);
+        const stakeStepText = exactBtiStakeStep(raw.stepEvidence);
+        const parsed = parseBtiTicketConstraint({ ...raw, stakeStepText: stakeStepText ?? "" });
         if (parsed !== null) return parsed;
       }
       await session.page.waitForTimeout(50);
@@ -250,6 +247,7 @@ export class PlaywrightBtiBrowserManager {
         `bti-${key}`), {
         headless: this.#headless, acceptDownloads: false
       });
+      await installCatalogResourcePolicy(context);
       const page = context.pages()[0] ?? await context.newPage();
       let initialUrl = "";
       page.on("response", (response) => {
@@ -265,7 +263,7 @@ export class PlaywrightBtiBrowserManager {
         evidence = {
           hostname: new URL(page.url()).hostname.toLowerCase(),
           title: await page.title(),
-          hasFootball: await page.locator(".navigation_asia_fe_Sport_sportName").filter({ hasText: /^Bóng đá$/u }).first().isVisible().catch(() => false),
+          hasFootball: await page.locator(".navigation_asia_fe_Sport_sportName").first().isVisible().catch(() => false),
           hasLiveInitial: initialUrl !== ""
         };
         if (!isVerifiedBtiIdentity(evidence)) await page.waitForTimeout(100);

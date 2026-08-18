@@ -11,13 +11,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as WebSocketClient, type WebSocket } from "ws";
 import {
   buildApp,
+  resolveApiLogLevel,
   safeRequestSerializer,
   safeResponseSerializer,
   validateViteOrigin
 } from "./app.js";
 import { sendBoundedMessage } from "./realtime/opportunity-ws.js";
 import { Runtime, type RuntimeClock } from "./runtime.js";
-import { createFixtureRuntime, createLiveRuntime, resolveServerConfig } from "./server.js";
+import { createFixtureRuntime, createLiveRuntime, resolveServerConfig, shouldPersistCatalogJournal,
+  shouldRunLegacySessionMaintenance } from "./server.js";
 
 const immediateScheduler: ReplayScheduler = {
   async wait(): Promise<void> {}
@@ -163,6 +165,25 @@ function collectMessages(): {
 }
 
 describe("Fastify snapshot API", () => {
+  it("keeps routine polling logs quiet unless an explicit valid level is configured", () => {
+    expect(resolveApiLogLevel(undefined, "production")).toBe("warn");
+    expect(resolveApiLogLevel(undefined, "test")).toBe("silent");
+    expect(resolveApiLogLevel("debug", "production")).toBe("debug");
+    expect(resolveApiLogLevel("not-a-level", "production")).toBe("warn");
+  });
+  it("keeps provider preflight available but never mounts the execution route", async () => {
+    const options = {
+      providerPreflight: { preflight: async () => { throw new Error("not invoked"); } },
+      executionDryRun: { execute: async () => { throw new Error("not invoked"); } }
+    } as unknown as Parameters<typeof buildApp>[1];
+    const app = buildApp(createFixtureRuntime(1_000), options);
+    await app.ready();
+
+    expect(app.hasRoute({ method: "POST", url: "/api/preflight/provider" })).toBe(true);
+    expect(app.hasRoute({ method: "POST", url: "/api/execution/dry-run" })).toBe(false);
+    await app.close();
+  });
+
   it("builds an inspectable fixture snapshot with verified opportunities", async () => {
     const runtime = createFixtureRuntime(1_000);
     await runtime.start(new AbortController().signal);
@@ -211,11 +232,25 @@ describe("Fastify snapshot API", () => {
       dataMode: "FIXTURE",
       fixtureReplaySpeed: 2
     });
+    expect(resolveServerConfig({ VITE_ORIGIN: "https://live.babiesbo.uk" }).viteOrigin)
+      .toBe("https://live.babiesbo.uk");
     expect(() => resolveServerConfig({ API_HOST: "0.0.0.0" })).toThrow(/loopback/u);
-    expect(() => resolveServerConfig({ VITE_ORIGIN: "https://attacker.example" })).toThrow(
-      /local HTTP origin/u
-    );
+    expect(() => resolveServerConfig({ VITE_ORIGIN: "https://attacker.example" })).toThrow(/allowed/u);
     expect(() => resolveServerConfig({ FIXTURE_MODE: "true" })).toThrow("FIXTURE_MODE must be 1 or unset");
+  });
+
+  it("runs automatic session recovery by default with an explicit kill switch", () => {
+    expect(shouldRunLegacySessionMaintenance({})).toBe(true);
+    expect(shouldRunLegacySessionMaintenance({ SESSION_MAINTENANCE_ENABLED: "0" })).toBe(false);
+    expect(shouldRunLegacySessionMaintenance({ SESSION_MAINTENANCE_ENABLED: "1" })).toBe(true);
+    expect(() => shouldRunLegacySessionMaintenance({ SESSION_MAINTENANCE_ENABLED: "yes" }))
+      .toThrow("SESSION_MAINTENANCE_ENABLED must be 0, 1 or unset");
+  });
+
+  it("keeps the high-volume catalog JSONL journal opt-in", () => {
+    expect(shouldPersistCatalogJournal({})).toBe(false);
+    expect(shouldPersistCatalogJournal({ TOOL_CHENH_CATALOG_JOURNAL_ENABLED: "0" })).toBe(false);
+    expect(shouldPersistCatalogJournal({ TOOL_CHENH_CATALOG_JOURNAL_ENABLED: "1" })).toBe(true);
   });
 
   it("starts live mode empty instead of publishing fixture opportunities", async () => {

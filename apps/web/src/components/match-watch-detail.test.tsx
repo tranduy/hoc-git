@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
-import { MatchWatchDetail } from "./match-watch-detail.js";
+import { MatchWatchDetail, type ComparisonBook } from "./match-watch-detail.js";
 import { buildComparisonEvents } from "../catalog/comparison.js";
 import { buildFixedBaseStakePlan } from "../watch/fixed-base-stake.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
@@ -72,6 +72,70 @@ afterEach(() => {
 });
 
 describe("MatchWatchDetail", () => {
+  it("uses the compact selected-match layout inside the comparison workspace", () => {
+    const { container } = render(<MatchWatchDetail accountId="private-account" catalogApi={{ read: vi.fn() }}
+      initialCatalog={catalog(1_000)} onBack={() => undefined} providerEventId="event-1" />);
+
+    expect(container.querySelector(".match-watch--compact")).toBeTruthy();
+    expect(container.querySelector(".match-watch__header--compact")).toBeTruthy();
+  });
+
+  it("renders only calculable exact pairs in the compact grid and omits unmatched observed rows", () => {
+    const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
+    const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
+    const baseComparison = buildComparisonEvents([saba, sbobet])[0]!;
+    const unmatched = { ...baseComparison.observedRows[0]!, key: "unmatched-total", marketType: "FT_TOTAL",
+      line: "9.5", cells: [baseComparison.observedRows[0]!.cells[0]!] };
+    const comparison = { ...baseComparison, observedRows: [...baseComparison.observedRows, unmatched] };
+    const books: readonly ComparisonBook[] = (["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"] as const)
+      .map((provider) => ({ provider, connected: true, selected: true,
+        hasExactEvent: provider === "SABA" || provider === "SBOBET" }));
+    const { container } = render(<MatchWatchDetail accountId="saba-account" books={books}
+      catalogApi={{ read: vi.fn() }} comparisonCatalogs={[saba, sbobet]} comparisonEvent={comparison}
+      initialCatalog={saba} onBack={() => undefined} providerEventId="SABA-total-event" />);
+
+    const section = screen.getByRole("heading", { name: "Vé chấp 2 cửa giữa các sàn" }).closest("section")!;
+    expect(section.querySelector(".table-wrap")).toBeNull();
+    expect(section.querySelector("table")).toBeNull();
+    expect(section.querySelector(".watch-odds-grid")).toBeTruthy();
+    expect(section.querySelectorAll(".watch-odds-ticket")).toHaveLength(1);
+    expect(section.querySelectorAll(".watch-odds-provider")).toHaveLength(2);
+    expect(section.textContent).not.toContain("9.5");
+    expect(section.textContent).not.toContain("Chưa đủ hai giá");
+    expect(section.textContent).toContain("ROI 10.00%");
+    expect(container.querySelector(".watch-prices--compact-grid")).toBeTruthy();
+  });
+
+  it("does not start a duplicate detail poll when realtime catalogs are controlled by the parent", async () => {
+    const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
+    const sbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
+    const comparison = buildComparisonEvents([saba, sbobet])[0]!;
+    const read = vi.fn().mockRejectedValue(new Error("duplicate detail read failed"));
+
+    render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read }} comparisonCatalogs={[saba, sbobet]} externallyRefreshed
+      comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined}
+      providerEventId="SABA-total-event" pollDelayMs={250} />);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(read).not.toHaveBeenCalled();
+    expect(screen.queryByText("ERROR")).toBeNull();
+    expect(screen.getByText("WATCHING")).toBeTruthy();
+  });
+
+  it("hides the observed-ticket section when no exact two-provider pair can be calculated", () => {
+    const saba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
+    const baseComparison = buildComparisonEvents([saba])[0]!;
+    const comparison = { ...baseComparison, rows: [], observedRows: baseComparison.observedRows.map((row) => ({
+      ...row, cells: [row.cells[0]!]
+    })) };
+    render(<MatchWatchDetail accountId="saba-account" catalogApi={{ read: vi.fn() }} comparisonCatalogs={[saba]}
+      comparisonEvent={comparison} initialCatalog={saba} onBack={() => undefined}
+      providerEventId="SABA-total-event" />);
+
+    expect(screen.queryByRole("heading", { name: "Vé chấp 2 cửa giữa các sàn" })).toBeNull();
+    expect(document.querySelector(".watch-odds-ticket")).toBeNull();
+  });
+
   it("shows the provider match clock and approximate live start in detail", () => {
     const liveCatalog = catalog(200_000);
     render(<MatchWatchDetail accountId="private-account" catalogApi={{ read: vi.fn() }} initialCatalog={liveCatalog}
@@ -109,12 +173,12 @@ describe("MatchWatchDetail", () => {
     expect(read).toHaveBeenCalledTimes(1);
 
     await act(async () => { resolveFirst?.(catalog(2_000, "2.05")); await Promise.resolve(); });
-    expect(screen.getByText("2.1 DECIMAL → 2.05 DECIMAL")).toBeTruthy();
+    expect(screen.getByText("2 accepted sample(s)")).toBeTruthy();
     await act(async () => { vi.advanceTimersByTime(999); });
     expect(read).toHaveBeenCalledTimes(1);
     await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve(); });
     expect(read).toHaveBeenCalledTimes(2);
-    expect(screen.getAllByText("OPEN → SUSPENDED").length).toBeGreaterThan(0);
+    expect(screen.getByText("3 accepted sample(s)")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Stop watching" }));
     await act(async () => { vi.advanceTimersByTime(5_000); });
@@ -122,21 +186,21 @@ describe("MatchWatchDetail", () => {
     expect(screen.getByText("STOPPED")).toBeTruthy();
   });
 
-  it("keeps prior evidence on poll failure and can clear it", async () => {
+  it("keeps the last accepted prices visible on poll failure without rendering a change log", async () => {
     const read = vi.fn()
       .mockResolvedValueOnce(catalog(2_000, "2.05"))
       .mockRejectedValueOnce(new Error("secret provider failure"));
     render(<MatchWatchDetail accountId="private-account" catalogApi={{ read }} initialCatalog={catalog(1_000)} onBack={() => undefined} providerEventId="event-1" />);
 
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
-    expect(screen.getByText("2.1 DECIMAL → 2.05 DECIMAL")).toBeTruthy();
+    expect(screen.getByText("2 accepted sample(s)")).toBeTruthy();
     await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
-    expect(screen.getByText("Provider catalog read failed")).toBeTruthy();
-    expect(screen.getByText("2.1 DECIMAL → 2.05 DECIMAL")).toBeTruthy();
+    expect(screen.getByText("ERROR")).toBeTruthy();
+    expect(screen.getByText("2 accepted sample(s)")).toBeTruthy();
     expect(screen.queryByText("secret provider failure")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Clear log" }));
-    expect(screen.getByText("No changes detected yet.")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Change log" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Clear log" })).toBeNull();
   });
 
   it("fails visibly stale when no accepted provider sample arrives in time", () => {
@@ -148,8 +212,7 @@ describe("MatchWatchDetail", () => {
     expect(read).toHaveBeenCalledTimes(1);
     act(() => { vi.advanceTimersByTime(2_000); });
     expect(screen.getByText("STALE")).toBeTruthy();
-    expect(screen.getByText("#CMD · STALE")).toBeTruthy();
-    expect(screen.getByText("No accepted provider sample within 3000 ms")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Change log" })).toBeNull();
   });
 
   it("shows one calculated ten-second preflight alert and does not repeat the same fingerprint", () => {
@@ -194,6 +257,7 @@ describe("MatchWatchDetail", () => {
       providerEventId="SABA-total-event" />);
 
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Exact ranked tickets" })).toBeNull();
   });
 
   it("does not invent an alert from a polled price without a movement-qualified signal", async () => {
@@ -230,6 +294,6 @@ describe("MatchWatchDetail", () => {
 
     expect(read).toHaveBeenCalledTimes(2);
     expect(screen.getAllByText(/Alpha.*2\.45/u).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("#SBOBET · ODDS CHANGED").length).toBeGreaterThan(0);
+    expect(screen.getByText("2 accepted sample(s)")).toBeTruthy();
   });
 });

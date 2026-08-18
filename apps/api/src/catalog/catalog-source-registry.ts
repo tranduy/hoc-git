@@ -88,6 +88,10 @@ export class CatalogSourceRegistry implements ActiveAccountAccess {
     });
   }
 
+  invalidateSessionCache(): void {
+    this.#sessionCache = null;
+  }
+
   async resolveCatalogSource(id: string): Promise<CatalogSourceIdentity> {
     const pair = this.#pairsById.get(id);
     if (pair === undefined) {

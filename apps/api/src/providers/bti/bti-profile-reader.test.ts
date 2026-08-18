@@ -11,13 +11,13 @@ describe("BTI profile", () => {
   });
   it("returns only redacted identity and verified VND balance claims", async () => {
     const reader = new BtiProfileReader({ clock: { nowMs: () => 2_000 }, source: { readProfile: async () => ({
-      displayName: "development-user", balanceText: "29.61 K", currencyCode: "VND", observedAtMs: 1_900
+      displayName: "test-user", balanceText: "29.61 K", currencyCode: "VND", observedAtMs: 1_900
     }) } });
-    await expect(reader.readProfile(handle)).resolves.toEqual({ redactedLabel: "••••0890", currency: "VND", balance: "29610", asOfMs: 1_900 });
+    await expect(reader.readProfile(handle)).resolves.toEqual({ redactedLabel: "••••user", currency: "VND", balance: "29610", asOfMs: 1_900 });
   });
   it("fails closed for unsupported currency", async () => {
     const reader = new BtiProfileReader({ clock: { nowMs: () => 2_000 }, source: { readProfile: async () => ({
-      displayName: "development-user", balanceText: "29.61 K", currencyCode: "UNKNOWN", observedAtMs: 1_900
+      displayName: "test-user", balanceText: "29.61 K", currencyCode: "UNKNOWN", observedAtMs: 1_900
     }) } });
     await expect(reader.readProfile(handle)).rejects.toThrow("BTI_PROFILE_UNAVAILABLE");
   });

@@ -14,6 +14,7 @@ export interface FabetDiscoveryResult {
 
 export type ManualSessionInput = {
   readonly provider: string;
+  readonly category?: "FOOTBALL" | "LOL";
   readonly kind: "TOKEN" | "COOKIE_BUNDLE" | "LAUNCH_URL";
   readonly secret: string;
 };
@@ -55,8 +56,6 @@ export class SessionApi {
   }
 
   configureFabet(input: {
-    readonly entryUrl: string;
-    readonly trustedHostname: string;
     readonly username: string;
     readonly password: string;
   }): Promise<RedactedSessionStatus> {

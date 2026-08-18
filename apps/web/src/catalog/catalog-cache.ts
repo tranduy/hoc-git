@@ -1,6 +1,9 @@
 import { parseLiveCatalogResponse, type LiveCatalogResponse } from "../api/catalog.js";
 
-export const LIVE_CATALOG_CACHE_KEY = "tool-chenh.live-catalog-cache.v1";
+// v1 may contain event-only snapshots produced by the old football parser.
+// Never resurrect those after reload because they make a healthy source look
+// like it has no supported tickets.
+export const LIVE_CATALOG_CACHE_KEY = "tool-chenh.live-catalog-cache.v2";
 
 export function loadCatalogCache(storage: Storage): readonly LiveCatalogResponse[] {
   try {

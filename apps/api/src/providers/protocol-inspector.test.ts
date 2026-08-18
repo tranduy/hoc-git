@@ -97,6 +97,13 @@ describe("protocol inspector", () => {
     })?.pathTemplate).toBe("/:session/LoginCheckin/Index");
   });
 
+  it("redacts opaque websocket user and session path values", () => {
+    expect(observeProtocolMetadata({
+      url: "wss://stream.provider.test/ln/en/u/Oz3f6j4kMYiz7WJ1b6rp4g%3D%3D/s/short-session/mg/42",
+      method: "GET", transport: "WEBSOCKET", status: 101, contentType: null
+    })?.pathTemplate).toBe("/ln/en/u/:secret/s/:secret/mg/:id");
+  });
+
   it.each([
     ["Show Balance", true], ["Hiển thị số dư", true], ["Football", true], ["Esports", true],
     ["Upcoming", true], ["Live", true], ["Place Bet", false], ["Đặt cược", false],

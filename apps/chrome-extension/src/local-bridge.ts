@@ -1,6 +1,7 @@
 import {
   ChromeBridgeControlMessageSchema,
-  type ChromeBridgeEnvelope
+  type ChromeBridgeEnvelope,
+  type ChromeBridgeControlMessage
 } from "@tool-chenh/contracts";
 
 const LOOPBACK_URL = "ws://127.0.0.1:4310/api/chrome-bridge";
@@ -29,6 +30,12 @@ export interface LocalBridgeOptions {
   readonly maxQueueBytes?: number;
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer?: (handle: unknown) => void;
+  readonly onOpen?: () => void | Promise<void>;
+  readonly onSnapshotRequest?: (sourceId: string) => void | Promise<void>;
+  readonly onSourceReload?: (sourceId: string) => void | Promise<void>;
+  readonly onSourceNavigate?: (sourceId: string, url: string) => void | Promise<void>;
+  readonly onFocusSelection?: (request: Omit<Extract<ChromeBridgeControlMessage,
+    { readonly kind: "FOCUS_SELECTION" }>, "version" | "kind">) => void | Promise<void>;
 }
 
 export class LocalBridge {
@@ -37,6 +44,11 @@ export class LocalBridge {
   readonly #maxQueueBytes: number;
   readonly #setTimer: (callback: () => void, delayMs: number) => unknown;
   readonly #clearTimer: (handle: unknown) => void;
+  readonly #onOpen: () => void | Promise<void>;
+  readonly #onSnapshotRequest: (sourceId: string) => void | Promise<void>;
+  readonly #onSourceReload: (sourceId: string) => void | Promise<void>;
+  readonly #onSourceNavigate: NonNullable<LocalBridgeOptions["onSourceNavigate"]>;
+  readonly #onFocusSelection: NonNullable<LocalBridgeOptions["onFocusSelection"]>;
   readonly #queue: QueueEntry[] = [];
   #socket: BridgeSocket | null = null;
   #timer: unknown = null;
@@ -48,9 +60,14 @@ export class LocalBridge {
     if (!options.installationKey.trim()) throw new Error("INSTALLATION_KEY_REQUIRED");
     this.#socketFactory = options.socketFactory;
     this.#installationKey = options.installationKey;
-    this.#maxQueueBytes = options.maxQueueBytes ?? 1_048_576;
+    this.#maxQueueBytes = options.maxQueueBytes ?? 16 * 1024 * 1024;
     this.#setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+    this.#onOpen = options.onOpen ?? (() => undefined);
+    this.#onSnapshotRequest = options.onSnapshotRequest ?? (() => undefined);
+    this.#onSourceReload = options.onSourceReload ?? (() => undefined);
+    this.#onSourceNavigate = options.onSourceNavigate ?? (() => undefined);
+    this.#onFocusSelection = options.onFocusSelection ?? (() => undefined);
   }
 
   get queueBytes(): number {
@@ -61,7 +78,7 @@ export class LocalBridge {
     return this.#ordered().map((entry) => entry.envelope.sequence);
   }
 
-  enqueue(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): void {
+  async enqueue(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): Promise<void> {
     const serialized = JSON.stringify(envelope);
     const entry: QueueEntry = {
       envelope,
@@ -72,8 +89,21 @@ export class LocalBridge {
       sentGeneration: null
     };
     if (entry.bytes > this.#maxQueueBytes) throw new Error("BRIDGE_QUEUE_ITEM_TOO_LARGE");
+    while (this.queueBytes + entry.bytes > this.#maxQueueBytes) {
+      const diagnosticIndex = this.#queue.findIndex((queued) => queued.priority === "DIAGNOSTIC");
+      if (diagnosticIndex >= 0) {
+        this.#queue.splice(diagnosticIndex, 1);
+        continue;
+      }
+      if (priority === "DIAGNOSTIC") return;
+      const sameSourceIndex = this.#queue.findIndex((queued) => queued.priority === "QUOTE" &&
+        queued.envelope.sourceId === envelope.sourceId);
+      const quoteIndex = sameSourceIndex >= 0 ? sameSourceIndex :
+        this.#queue.findIndex((queued) => queued.priority === "QUOTE");
+      if (quoteIndex < 0) return;
+      this.#queue.splice(quoteIndex, 1);
+    }
     this.#queue.push(entry);
-    this.#enforceBound(entry);
     this.#flush();
   }
 
@@ -91,6 +121,8 @@ export class LocalBridge {
       this.#reconnectAttempts = 0;
       for (const entry of this.#queue) entry.sentGeneration = null;
       this.#flush(generation);
+      try { void Promise.resolve(this.#onOpen()).catch(() => undefined); }
+      catch { /* replay failure must not close the bridge */ }
     };
     socket.onmessage = (event) => this.#handleMessage(event.data);
     socket.onclose = () => {
@@ -132,26 +164,63 @@ export class LocalBridge {
     if (typeof raw !== "string") return;
     try {
       const parsed = ChromeBridgeControlMessageSchema.safeParse(JSON.parse(raw));
-      if (!parsed.success || parsed.data.kind !== "ACK") return;
+      if (!parsed.success) return;
+      if (parsed.data.kind === "REQUEST_SNAPSHOT") {
+        try { void Promise.resolve(this.#onSnapshotRequest(parsed.data.sourceId)).catch(() => undefined); }
+        catch { /* source recovery must not disrupt the bridge */ }
+        return;
+      }
+      if (parsed.data.kind === "RELOAD_SOURCE") {
+        try { void Promise.resolve(this.#onSourceReload(parsed.data.sourceId)).catch(() => undefined); }
+        catch { /* tab recovery must not disrupt the bridge */ }
+        return;
+      }
+      if (parsed.data.kind === "NAVIGATE_SOURCE") {
+        try { void Promise.resolve(this.#onSourceNavigate(parsed.data.sourceId, parsed.data.url)).catch(() => undefined); }
+        catch { /* fresh launch recovery must not disrupt the bridge */ }
+        return;
+      }
+      if (parsed.data.kind === "FOCUS_SELECTION") {
+        const { sourceId, providerEventId, providerMarketId, providerSelectionId } = parsed.data;
+        try { void Promise.resolve(this.#onFocusSelection({ sourceId, providerEventId,
+          providerMarketId, providerSelectionId })).catch(() => undefined); }
+        catch { /* focus failure must not disrupt realtime collection */ }
+        return;
+      }
+      if (parsed.data.kind === "REJECT") {
+        const rejection = parsed.data;
+        if (rejection.sourceId === null) return;
+        if (rejection.reason === "SEQUENCE_GAP") {
+          // A bounded/offline queue can legitimately coalesce old frames. If
+          // the API restarts while such a hole exists, replaying that same
+          // backlog would make the server close every new socket forever.
+          // Drop only the rejected source and republish its authoritative
+          // snapshot; healthy sources remain queued and connected.
+          for (let index = this.#queue.length - 1; index >= 0; index--) {
+            if (this.#queue[index]?.envelope.sourceId === rejection.sourceId) this.#queue.splice(index, 1);
+          }
+          try { void Promise.resolve(this.#onSnapshotRequest(rejection.sourceId)).catch(() => undefined); }
+          catch { /* source recovery must not disrupt the bridge */ }
+          return;
+        }
+        if (rejection.sequence !== null) {
+          const index = this.#queue.findIndex((entry) => entry.envelope.sourceId === rejection.sourceId
+            && entry.envelope.sequence === rejection.sequence);
+          if (index >= 0) this.#queue.splice(index, 1);
+        }
+        return;
+      }
+      if (parsed.data.kind !== "ACK") return;
       const acknowledgement = parsed.data;
       const index = this.#queue.findIndex((entry) =>
         entry.envelope.sourceId === acknowledgement.sourceId
         && entry.envelope.sequence === acknowledgement.sequence);
-      if (index >= 0) this.#queue.splice(index, 1);
+      if (index >= 0) {
+        this.#queue.splice(index, 1);
+      }
     } catch {
       // Invalid control traffic cannot mutate the send queue.
     }
   }
 
-  #enforceBound(justAdded: QueueEntry): void {
-    while (this.queueBytes > this.#maxQueueBytes) {
-      const diagnosticIndex = this.#queue.findIndex((entry) => entry.priority === "DIAGNOSTIC");
-      if (diagnosticIndex < 0) {
-        const addedIndex = this.#queue.indexOf(justAdded);
-        if (addedIndex >= 0) this.#queue.splice(addedIndex, 1);
-        throw new Error("BRIDGE_QUEUE_FULL");
-      }
-      this.#queue.splice(diagnosticIndex, 1);
-    }
-  }
 }

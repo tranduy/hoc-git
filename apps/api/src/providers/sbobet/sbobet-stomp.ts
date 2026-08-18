@@ -26,10 +26,68 @@ export function decodeSbobetJsonBody(payload: string): readonly unknown[] {
   try { return [JSON.parse(payload) as unknown]; } catch { return []; }
 }
 
+export function extractSbobetSnapshotPublicIds(body: unknown): readonly string[] {
+  const ids = new Set<string>();
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 20 || ids.size >= 5_000 || value === null || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.slice(0, 10_000).forEach((child) => visit(child, depth + 1));
+      return;
+    }
+    const record = value as Record<string, unknown>;
+    const groups = record["7"];
+    const eventId = record["8"];
+    if ((typeof eventId === "string" || typeof eventId === "number") &&
+      /^\d{1,30}$/u.test(String(eventId)) && typeof record["2"] === "string" &&
+      typeof record["3"] === "string" && groups !== null && typeof groups === "object" && !Array.isArray(groups)) {
+      ids.add(String(eventId));
+      for (const rows of Object.values(groups as Record<string, unknown>)) {
+        if (!Array.isArray(rows)) continue;
+        for (const row of rows.slice(0, 100)) {
+          if (typeof row !== "string") continue;
+          for (const match of row.matchAll(/\*(\d{1,40})[had]\b/gu)) ids.add(match[1]!);
+          for (const token of row.trim().split(/\s+/u)) if (/^\d{4,30}$/u.test(token)) ids.add(token);
+        }
+      }
+    }
+    Object.values(record).slice(0, 10_000).forEach((child) => visit(child, depth + 1));
+  };
+  visit(body, 0);
+  return [...ids];
+}
+
+export function hasSbobetSocketCatalogCorrelation(
+  bodies: readonly unknown[], publicEventIds: readonly string[]
+): boolean {
+  const targets = new Set(publicEventIds.filter((value) => /^\d{1,30}$/u.test(value)));
+  if (targets.size === 0) return false;
+  return bodies.some((body) => extractSbobetSnapshotPublicIds(body).some((id) => targets.has(id)));
+}
+
+export function nextSbobetSocketDirtyAtMs(
+  currentDirtyAtMs: number | null,
+  lastSignalAtMs: number | null,
+  nowMs: number,
+  minimumIntervalMs = 250
+): number | null {
+  if (currentDirtyAtMs !== null) return currentDirtyAtMs;
+  if (lastSignalAtMs !== null && nowMs - lastSignalAtMs < minimumIntervalMs) return null;
+  return nowMs;
+}
+
 export function isSbobetPublicFeedUrl(value: string): boolean {
   try {
     const url = new URL(value);
     return url.protocol === "https:" && !url.username && !url.password && /\/sport\/info\/?$/u.test(url.pathname);
+  } catch { return false; }
+}
+
+export function isSbobetSocketUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    return url.protocol === "wss:" && !url.username && !url.password &&
+      (hostname === "sb21.net" || hostname.endsWith(".sb21.net"));
   } catch { return false; }
 }
 

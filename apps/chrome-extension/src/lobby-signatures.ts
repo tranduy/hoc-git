@@ -4,6 +4,7 @@ const HOST_TO_LOBBY = new Map<string, ChromeLobbyId>([
   ["imsports.directsb.net", "IM"],
   ["prod20091.fxf774.com", "BTI"],
   ["pacific.agenate.com", "TSPORT"],
+  ["sport.asportsb.com", "TSPORT"],
   ["zenandfe.com", "KSPORT"],
   ["c0z0oa.bpd3a3fn.com", "SABA"],
   ["cgnew.fts368.com", "CMD"],
@@ -32,7 +33,9 @@ export function recognizeLobbyTab(tab: TabDescriptor): LobbyTabCandidate | null 
   if (!Number.isSafeInteger(tab.id) || (tab.id ?? -1) < 0 || !tab.url) return null;
   try {
     const hostname = new URL(tab.url).hostname.toLowerCase();
-    const lobby = HOST_TO_LOBBY.get(hostname);
+    const lobby = HOST_TO_LOBBY.get(hostname) ??
+      (/^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/iu.test(hostname) ? "SABA" :
+        /^pacific\.(?:agenate|racern)\.com$/iu.test(hostname) ? "TSPORT" : undefined);
     if (!lobby) return null;
     return { lobby, tabId: tab.id!, hostname, confidence: "CANDIDATE" };
   } catch {

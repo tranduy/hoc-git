@@ -6,12 +6,20 @@ export function isValidBaseStake(value: string): boolean {
 }
 
 export function loadBaseStake(storage: Storage): string {
-  const stored = storage.getItem(WATCH_BASE_STAKE_STORAGE_KEY);
-  return stored !== null && isValidBaseStake(stored) ? stored : DEFAULT_BASE_STAKE;
+  try {
+    const stored = storage.getItem(WATCH_BASE_STAKE_STORAGE_KEY);
+    return stored !== null && isValidBaseStake(stored) ? stored : DEFAULT_BASE_STAKE;
+  } catch {
+    return DEFAULT_BASE_STAKE;
+  }
 }
 
 export function saveBaseStake(storage: Storage, value: string): boolean {
   if (!isValidBaseStake(value)) return false;
-  storage.setItem(WATCH_BASE_STAKE_STORAGE_KEY, value);
-  return true;
+  try {
+    storage.setItem(WATCH_BASE_STAKE_STORAGE_KEY, value);
+    return true;
+  } catch {
+    return false;
+  }
 }

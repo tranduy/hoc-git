@@ -1,4 +1,4 @@
-import type { AccountStatus, ProviderId } from "@tool-chenh/contracts";
+import { AccountStatusSchema, type AccountStatus, type ProviderId } from "@tool-chenh/contracts";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
@@ -15,26 +15,62 @@ const registerBody = z.strictObject({
 });
 const accountParams = z.strictObject({ id: z.string().trim().min(1).max(128) });
 
-export function registerAccountRoutes(app: FastifyInstance, accounts: AccountRegistryLike): void {
+export interface AccountRouteOptions {
+  readonly cacheTtlMs?: number;
+  readonly initialTimeoutMs?: number;
+}
+
+export function registerAccountRoutes(app: FastifyInstance, accounts: AccountRegistryLike,
+  options: AccountRouteOptions = {}): void {
   let listInFlight: Promise<readonly AccountStatus[]> | null = null;
   let recent: { readonly accounts: readonly AccountStatus[]; readonly completedAtMs: number } | null = null;
+  let listGeneration = 0;
   const refreshesInFlight = new Map<string, Promise<AccountStatus>>();
   const recentRefreshes = new Map<string, { readonly status: AccountStatus; readonly completedAtMs: number }>();
-  const coalescingWindowMs = 250;
+  const coalescingWindowMs = options.cacheTtlMs ?? 250;
+  const initialTimeoutMs = options.initialTimeoutMs ?? 1_000;
   const refreshCoalescingWindowMs = 5_000;
-  const list = (): Promise<readonly AccountStatus[]> => {
-    if (recent !== null && performance.now() - recent.completedAtMs < coalescingWindowMs) {
-      return Promise.resolve(recent.accounts);
-    }
+  const refreshList = (): Promise<readonly AccountStatus[]> => {
     if (listInFlight !== null) return listInFlight;
+    const operationGeneration = ++listGeneration;
     const operation = accounts.listStatuses().then((statuses) => {
-      recent = { accounts: statuses, completedAtMs: performance.now() };
-      return statuses;
+      const parsed = AccountStatusSchema.array().parse(statuses);
+      if (operationGeneration === listGeneration) {
+        recent = { accounts: parsed, completedAtMs: performance.now() };
+      }
+      return parsed;
     }).finally(() => { if (listInFlight === operation) listInFlight = null; });
     listInFlight = operation;
     return operation;
   };
-  const invalidate = (): void => { recent = null; };
+  const list = async (): Promise<readonly AccountStatus[]> => {
+    if (recent !== null) {
+      if (performance.now() - recent.completedAtMs >= coalescingWindowMs) void refreshList().catch(() => undefined);
+      return recent.accounts;
+    }
+    const operation = refreshList();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("ACCOUNT_STATUS_TIMEOUT")), initialTimeoutMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([operation, timeout]);
+    } catch (error) {
+      if (listInFlight === operation) {
+        listGeneration += 1;
+        listInFlight = null;
+      }
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+  const invalidate = (): void => {
+    recent = null;
+    listGeneration += 1;
+    listInFlight = null;
+  };
   const refresh = (id: string): Promise<AccountStatus> => {
     const cached = recentRefreshes.get(id);
     if (cached !== undefined && performance.now() - cached.completedAtMs < refreshCoalescingWindowMs) {
@@ -51,7 +87,10 @@ export function registerAccountRoutes(app: FastifyInstance, accounts: AccountReg
     return operation;
   };
 
-  app.get("/api/accounts", async () => ({ accounts: await list() }));
+  app.get("/api/accounts", async (_request, reply) => {
+    try { return { accounts: await list() }; }
+    catch { return reply.code(503).send({ error: "ACCOUNT_STATUS_UNAVAILABLE" }); }
+  });
   app.post("/api/accounts", async (request, reply) => {
     const parsed = registerBody.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });

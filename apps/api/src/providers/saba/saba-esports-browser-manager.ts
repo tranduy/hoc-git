@@ -63,6 +63,10 @@ export class PlaywrightSabaEsportsBrowserManager {
       try { target = exactSabaLolUrl(page.url()); } catch { await page.waitForTimeout(100); }
     }
     if (target === null) throw new Error("SABA_ESPORTS_BROWSER_UNAVAILABLE");
+    // The Fabet popup has already loaded the provider before this reader can
+    // subscribe to page websocket events. A same-URL goto may reuse the SPA
+    // connection and emit no new snapshot, so force a clean document first.
+    await page.goto("about:blank", { waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
     await page.goto(target, { waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
     return this.#waitForCatalog(session);
   }

@@ -7,6 +7,7 @@ interface FabetImPageAccess {
 
 interface ImFootballPageReader {
   readCatalogFromPage(page: Page): Promise<ImFootballCatalogSnapshot>;
+  readCatalogDirect(): Promise<ImFootballCatalogSnapshot>;
 }
 
 export class JitImFootballCatalogSource {
@@ -18,7 +19,11 @@ export class JitImFootballCatalogSource {
     this.#browser = options.browser;
   }
 
-  readCatalogFromFabet(): Promise<ImFootballCatalogSnapshot> {
-    return this.#fabet.withProviderPage("IM", "FOOTBALL", async (page) => this.#browser.readCatalogFromPage(page));
+  async readCatalogFromFabet(): Promise<ImFootballCatalogSnapshot> {
+    try {
+      return await this.#browser.readCatalogDirect();
+    } catch {
+      return this.#fabet.withProviderPage("IM", "FOOTBALL", async (page) => this.#browser.readCatalogFromPage(page));
+    }
   }
 }

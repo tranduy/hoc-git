@@ -3,35 +3,38 @@ import type { RankedEvent, RankedTicket } from "./ranked-tickets.js";
 import { ProfitAlertTracker } from "./profit-alert-tracker.js";
 
 function ranked(profit: string, state: RankedTicket["state"] = "VERIFIED_PROFIT",
-  key = "ticket-1"): RankedEvent {
+  key = "ticket-1", roi = "0.06"): RankedEvent {
   const ticket = { key, eventKey: "event-1", state, plan: { worstCaseProfit: profit,
-    legs: [{ provider: "SABA", selection: "HOME" }, { provider: "SBOBET", selection: "AWAY" }] } } as unknown as RankedTicket;
-  return { event: { key: "event-1", event: { participantA: "Alpha", participantB: "Beta" } },
+    roi, legs: [{ provider: "SABA", selection: "HOME" }, { provider: "SBOBET", selection: "AWAY" }] } } as unknown as RankedTicket;
+  return { event: { key: "event-1", event: { participantA: "Alpha", participantB: "Beta" },
+    catalogs: [{ accountId: "saba", provider: "SABA" }, { accountId: "sbobet", provider: "SBOBET" }] },
     tickets: [ticket], bestVerifiedProfit: state === "OBSERVATION" ? null : profit } as unknown as RankedEvent;
 }
 
 describe("ProfitAlertTracker", () => {
-  it("emits once on entry and only repeats after a 5,000 VND profit increase", () => {
+  it("never emits an unverified observation even when its estimated ROI is above five percent", () => {
     const tracker = new ProfitAlertTracker();
-    expect(tracker.update([ranked("20000")], 100)).toHaveLength(1);
-    expect(tracker.update([ranked("20000")], 101)).toEqual([]);
-    expect(tracker.update([ranked("24999")], 102)).toEqual([]);
-    expect(tracker.update([ranked("25000")], 103)).toHaveLength(1);
+    expect(tracker.update([ranked("50000", "OBSERVATION", "ticket-1", "0.05")], 100)).toEqual([]);
+    expect(tracker.update([ranked("50001", "OBSERVATION", "ticket-1", "0.050001")], 101)).toEqual([]);
+    expect(tracker.update([ranked("50001", "VERIFIED_NO_PROFIT", "ticket-1", "0.2")], 102)).toEqual([]);
+    expect(tracker.update([ranked("50001", "VERIFIED_PROFIT", "ticket-1", "0.050001")], 103)).toHaveLength(1);
   });
 
-  it("re-arms after falling below threshold or disappearing", () => {
+  it("emits each exact ticket only once for the mounted dashboard session", () => {
     const tracker = new ProfitAlertTracker();
-    tracker.update([ranked("22000")], 100);
-    expect(tracker.update([ranked("19000", "VERIFIED_NO_PROFIT")], 101)).toEqual([]);
-    expect(tracker.update([ranked("22000")], 102)).toHaveLength(1);
+    expect(tracker.update([ranked("22000")], 100)).toHaveLength(1);
+    expect(tracker.update([ranked("90000", "VERIFIED_PROFIT", "ticket-1", "0.2")], 101)).toEqual([]);
+    expect(tracker.update([ranked("1000", "VERIFIED_NO_PROFIT", "ticket-1", "0.01")], 102)).toEqual([]);
     expect(tracker.update([], 103)).toEqual([]);
-    expect(tracker.update([ranked("22000")], 104)).toHaveLength(1);
+    expect(tracker.update([ranked("22000")], 104)).toEqual([]);
+    expect(tracker.update([ranked("22000", "VERIFIED_PROFIT", "ticket-2")], 105)).toHaveLength(1);
   });
 
-  it("uses exact sorted legs in identity and never alerts observations", () => {
+  it("alerts only when every provider leg belongs to a fresh catalog", () => {
     const tracker = new ProfitAlertTracker();
-    expect(tracker.update([ranked("50000", "OBSERVATION")], 100)).toEqual([]);
-    const [alert] = tracker.update([ranked("50000")], 101);
-    expect(alert?.id).toContain("event-1::ticket-1::SABA:HOME|SBOBET:AWAY");
+    expect(tracker.update([ranked("50000")], 101, new Set(["saba"]))).toEqual([]);
+    const [fresh] = tracker.update([ranked("50000")], 102, new Set(["saba", "sbobet"]));
+    expect(fresh?.id).toContain("event-1::ticket-1::SABA:HOME|SBOBET:AWAY");
+    expect(fresh?.freshness).toBe("FRESH");
   });
 });

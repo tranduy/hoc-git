@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { WatchArbitrageAlert } from "../watch/arbitrage-alert.js";
+import { formatDisplayDecimal } from "../catalog/display-format.js";
 
 function money(value: string, currency: string): string {
   return `${Number(value).toLocaleString("en-US")} ${currency}`;
@@ -35,7 +36,7 @@ export function ArbitrageAlertToast({
     <h2>{matchLabel}</h2>
     <p>{visibleAlert.marketType} · {visibleAlert.scope}{visibleAlert.line === null ? "" : ` · Line ${visibleAlert.line}`}</p>
     <ol>{visibleAlert.legs.map((leg) => <li key={`${leg.provider}-${leg.selection}`}>
-      <b>{leg.role}</b> · <b>#{leg.provider}</b> · {leg.selection} · odds {leg.decimalOdds} · stake {money(leg.stake, visibleAlert.currency)}
+      <b>{leg.role}</b> · <b>#{leg.provider}</b> · {leg.selection} · odds {formatDisplayDecimal(leg.decimalOdds)} · stake {money(leg.stake, visibleAlert.currency)}
       <span> · Profit {money(leg.profit, visibleAlert.currency)}</span>
     </li>)}</ol>
     <p><b>Total stake {money(visibleAlert.totalStake, visibleAlert.currency)}</b> · Worst-case profit {money(visibleAlert.worstCaseProfit, visibleAlert.currency)} · ROI {(Number(visibleAlert.roi) * 100).toFixed(2)}%</p>

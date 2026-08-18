@@ -7,6 +7,28 @@ const apps: FastifyInstance[] = [];
 afterEach(async () => Promise.all(apps.splice(0).map(async (app) => app.close())));
 
 describe("account routes", () => {
+  it("times out a poisoned cold status read and permits the next read to recover", async () => {
+    const active: AccountStatus = { id: "account-1", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+      sessionState: "ACTIVE", profileState: "FRESH", redactedLabel: "masked", currency: "VND",
+      balance: "100000", balanceAsOfMs: 1_000, capabilities: ["PROFILE", "CATALOG"], reason: null };
+    let calls = 0;
+    const listStatuses = vi.fn(async () => {
+      calls += 1;
+      return calls === 1 ? new Promise<readonly AccountStatus[]>(() => undefined) : [active];
+    });
+    const app = Fastify();
+    registerAccountRoutes(app, { listStatuses, register: vi.fn(), refresh: vi.fn() }, { initialTimeoutMs: 5 });
+    apps.push(app);
+
+    const failed = await app.inject({ method: "GET", url: "/api/accounts" });
+    expect(failed.statusCode).toBe(503);
+    expect(failed.json()).toEqual({ error: "ACCOUNT_STATUS_UNAVAILABLE" });
+    const recovered = await app.inject({ method: "GET", url: "/api/accounts" });
+    expect(recovered.statusCode).toBe(200);
+    expect(recovered.json()).toEqual({ accounts: [active] });
+    expect(listStatuses).toHaveBeenCalledTimes(2);
+  });
+
   it("coalesces concurrent account-list reads from multiple UI tabs", async () => {
     let release: ((value: readonly []) => void) | undefined;
     const pending = new Promise<readonly []>((resolve) => { release = resolve; });

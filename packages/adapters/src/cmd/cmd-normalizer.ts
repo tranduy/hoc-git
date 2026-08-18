@@ -1,4 +1,5 @@
 import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import { isSupportedFootballTwoWayLine } from "../football-market-policy.js";
 
 export interface CmdCatalogOdd {
   readonly marketOddsId: string;
@@ -44,7 +45,6 @@ function virtualFootballEvidence(competition: string, teams: readonly string[]):
   return teams.length === 2 && teams.every((team) => /(?:\((?:pg|e|pes|v|s)\)(?:\s*\([^)]*\))*|\([a-z0-9_]{4,}\))\s*$/iu.test(team));
 }
 
-const decimalPattern = /^(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 const signedDecimalPattern = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 
 function line(labels: readonly string[]): string | null {
@@ -98,7 +98,7 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
       clockMs: Number(stoppageClock[2]) * 60_000
     };
   }
-  if (normalized === "TRỰC TIẾP" || /^\dH\d+'$/u.test(normalized)) {
+  if (normalized === "TRỰC TIẾP" || normalized === "LIVE" || /^\dH\d+'$/u.test(normalized)) {
     const clock = /^(\d)H(\d+)'$/u.exec(normalized);
     return {
       startAtUtcMs: options.observedAtMs,
@@ -106,6 +106,16 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
       period: clock === null ? null : `${clock[1]}H`,
       clockMs: clock === null ? null : Number(clock[2]) * 60_000
     };
+  }
+  const todayClock = /^(\d{1,2}):(\d{2})(?:LIVE)?$/u.exec(normalized);
+  if (todayClock !== null) {
+    const hour = Number(todayClock[1]);
+    const minute = Number(todayClock[2]);
+    if (hour > 23 || minute > 59) return null;
+    const providerNow = new Date(options.observedAtMs + options.timezoneOffsetMinutes * 60_000);
+    const timestamp = Date.UTC(providerNow.getUTCFullYear(), providerNow.getUTCMonth(),
+      providerNow.getUTCDate(), hour, minute) - options.timezoneOffsetMinutes * 60_000;
+    return { startAtUtcMs: timestamp, isLive: false, period: null, clockMs: null };
   }
   const match = /^(\d{2})\/(\d{2})\s+(\d{1,2}):(\d{2})(AM|PM)$/u.exec(normalized);
   if (match === null) return null;
@@ -142,10 +152,6 @@ function validMalay(value: string): boolean {
   return Number.isFinite(numeric) && numeric !== 0 && Math.abs(numeric) <= 1;
 }
 
-function validDecimal(value: string): boolean {
-  return decimalPattern.test(value) && Number(value) > 1;
-}
-
 export function normalizeObservedFootballCatalog(
   provider: ProviderId,
   records: readonly CmdCatalogInputRecord[],
@@ -164,9 +170,9 @@ export function normalizeObservedFootballCatalog(
     const timing = eventTime(record.timeText, options);
     const teams = [...new Map(record.teamNames.map((team) => team.trim().replace(/\s*\(N\)\s*$/iu, "").trim())
       .filter((team) => team.length > 0).map((team) => [team.toLocaleLowerCase("en-US"), team])).values()];
-    const supported = record.groups.filter((group) => group.betTypeIds.length === 1 && ["1", "3", "5"].includes(group.betTypeIds[0]!) &&
+    const supported = record.groups.filter((group) => group.betTypeIds.length === 1 && ["1", "3"].includes(group.betTypeIds[0]!) &&
       (group.betTypeIds[0] !== "1" || group.odds.some((odd) => odd.lineText !== undefined)));
-    let invalid = record.sportId !== "1" || record.matchId.trim().length === 0 || record.leagueName.trim().length === 0 ||
+    const invalid = record.sportId !== "1" || record.matchId.trim().length === 0 || record.leagueName.trim().length === 0 ||
       teams.length !== 2 || teams[0] === teams[1] || timing === null;
     const recordMarkets: ProviderMarket[] = [];
     const recordQuotes: ProviderQuote[] = [];
@@ -174,18 +180,21 @@ export function normalizeObservedFootballCatalog(
       diagnostics.push("CMD_CATALOG_RECORD_REJECTED");
       continue;
     }
+    if (virtualFootballEvidence(record.leagueName, teams)) {
+      diagnostics.push("CMD_CATALOG_EVENT_UNSUPPORTED");
+      continue;
+    }
     for (const group of supported) {
       const betType = group.betTypeIds[0]!;
-      const selections = betType === "3" ? ["OVER", "UNDER"] as const : betType === "1"
-        ? ["HOME", "AWAY"] as const : ["HOME", "DRAW", "AWAY"] as const;
+      const selections = betType === "3" ? ["OVER", "UNDER"] as const : ["HOME", "AWAY"] as const;
       const marketId = exactMarketId(group, selections.length);
       const marketLine = betType === "3" ? line(group.labels) : betType === "1" ? canonicalHomeHandicap(group.odds) : null;
-      const pricesValid = group.odds.every((odd) => betType === "5" ? validDecimal(odd.priceText) : validMalay(odd.priceText));
-      if (marketId === null || ((betType === "3" || betType === "1") && marketLine === null) || !pricesValid) {
-        invalid = true;
-        break;
+      const pricesValid = group.odds.every((odd) => validMalay(odd.priceText));
+      if (marketId === null || !isSupportedFootballTwoWayLine(marketLine) || !pricesValid) {
+        diagnostics.push("CMD_CATALOG_MARKET_REJECTED");
+        continue;
       }
-      const marketType = betType === "3" ? "FT_TOTAL" as const : betType === "1" ? "FT_AH" as const : "FT_1X2" as const;
+      const marketType = betType === "3" ? "FT_TOTAL" as const : "FT_AH" as const;
       const status = commonMarketStatus(group);
       recordMarkets.push({
         provider, category: "FOOTBALL", providerEventId: record.matchId,
@@ -196,22 +205,18 @@ export function normalizeObservedFootballCatalog(
         provider, category: "FOOTBALL", providerEventId: record.matchId,
         providerMarketId: marketId, providerSelectionId: `${marketId}:${selections[index]!.toLowerCase()}`,
         marketType, scope: "FULL_TIME", selection: selections[index]!, line: marketLine,
-        rawOdds: odd.priceText, rawFormat: betType === "5" ? "DECIMAL" : "MALAY",
+        rawOdds: odd.priceText, rawFormat: "MALAY",
         status, isLive: timing!.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
       })));
     }
-    if (invalid) {
-      diagnostics.push("CMD_CATALOG_RECORD_REJECTED");
-      continue;
-    }
-    const isVirtual = virtualFootballEvidence(record.leagueName, teams);
+    if (supported.length > 0 && recordMarkets.length === 0) continue;
     events.push({
       provider, category: "FOOTBALL", providerEventId: record.matchId,
       competition: record.leagueName.trim(), seasonStage: null, startAtUtcMs: timing!.startAtUtcMs,
       participantA: teams[0]!, participantB: teams[1]!, eventScope: "REGULATION", bestOf: null,
       isLive: timing!.isLive, rematchCandidate: timing!.isLive, fixtureDiscriminator: null,
-      isVirtual, sportVariant: isVirtual ? "VIRTUAL_FOOTBALL" : "FOOTBALL",
+      isVirtual: false, sportVariant: "FOOTBALL",
       liveState: timing!.isLive ? { period: timing!.period, scoreHome: null, scoreAway: null, clockMs: timing!.clockMs } : null
     });
     markets.push(...recordMarkets);

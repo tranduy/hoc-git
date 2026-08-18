@@ -43,6 +43,7 @@ describe("LiveCatalogBridge", () => {
 
     bridge.publish(catalog());
 
+    await expect.poll(() => statuses.length).toBe(1);
     expect(events.map((value) => value.providerEventId)).toEqual(["SABA-event"]);
     expect(markets.map((value) => value.providerMarketId)).toEqual(["SABA-market"]);
     expect(updates).toEqual([expect.objectContaining({
@@ -63,7 +64,43 @@ describe("LiveCatalogBridge", () => {
       .start(sink, new AbortController().signal);
     const source = catalog();
     bridge.publish({ ...source, quotes: source.quotes.map((quote, index) => ({ ...quote, sequence: index + 1 })) });
+    await expect.poll(() => updates.length).toBe(0);
     expect(updates).toEqual([]);
+  });
+
+  it("yields before publishing catalog items so HTTP traffic is not blocked by runtime work", async () => {
+    const events: ProviderEvent[] = [];
+    const sink: ProviderSink = { onEvent: (value) => events.push(value), onMarket: () => undefined,
+      onQuoteUpdate: () => undefined, onStatus: () => undefined, onSchemaError: () => undefined };
+    const bridge = new LiveCatalogBridge();
+    await bridge.adapters.find((value) => value.id === "SABA-catalog-bridge-FOOTBALL")!
+      .start(sink, new AbortController().signal);
+
+    bridge.publish(catalog());
+
+    expect(events).toEqual([]);
+    await expect.poll(() => events.length).toBe(1);
+  });
+
+  it("publishes each complete catalog inside one runtime batch", async () => {
+    const calls: string[] = [];
+    const sink: ProviderSink = {
+      beginBatch: () => calls.push("begin"),
+      onEvent: () => calls.push("event"),
+      onMarket: () => calls.push("market"),
+      onQuoteUpdate: () => calls.push("quotes"),
+      onStatus: () => calls.push("status"),
+      onSchemaError: () => undefined,
+      endBatch: () => calls.push("end")
+    };
+    const bridge = new LiveCatalogBridge();
+    await bridge.adapters.find((value) => value.id === "SABA-catalog-bridge-FOOTBALL")!
+      .start(sink, new AbortController().signal);
+
+    bridge.publish(catalog());
+
+    await expect.poll(() => calls.at(-1)).toBe("end");
+    expect(calls).toEqual(["begin", "event", "market", "quotes", "status", "end"]);
   });
 
   it("feeds two real-catalog shapes into backend exact event and market mapping", async () => {
@@ -73,7 +110,9 @@ describe("LiveCatalogBridge", () => {
 
     bridge.publish(catalog("SABA"));
     bridge.publish(catalog("SBOBET"));
+    await expect.poll(() => runtime.getSnapshot().events.length).toBe(1);
     const snapshot = runtime.getSnapshot();
+    expect(snapshot.revision).toBeLessThanOrEqual(2);
     expect(runtime.getDiagnostics()).toEqual([]);
 
     expect(snapshot.events).toEqual([expect.objectContaining({

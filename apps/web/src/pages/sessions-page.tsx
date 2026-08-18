@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ProviderIdSchema, type AccountStatus, type ProviderId, type RedactedSessionStatus, type SessionStatusList } from "@tool-chenh/contracts";
 import {
   SessionApi,
-  type FabetDiscoveryResult,
   type ManualSessionInput
 } from "../api/sessions.js";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
@@ -10,9 +9,7 @@ import { AccountCard } from "../components/account-card.js";
 
 export interface SessionApiLike {
   list(): Promise<SessionStatusList>;
-  discoverFabet(entryUrl: string): Promise<FabetDiscoveryResult>;
-  trustFabet(hostname: string): Promise<{ readonly hostname: string; readonly trusted: true }>;
-  configureFabet(input: { readonly entryUrl: string; readonly trustedHostname: string; readonly username: string; readonly password: string }): Promise<RedactedSessionStatus>;
+  configureFabet(input: { readonly username: string; readonly password: string }): Promise<RedactedSessionStatus>;
   configureTk88(input: { readonly trustedHostname: string }): Promise<RedactedSessionStatus>;
   configureManual(input: ManualSessionInput): Promise<RedactedSessionStatus>;
   validate(id: string): Promise<RedactedSessionStatus>;
@@ -32,6 +29,10 @@ function healthExplanation(session: RedactedSessionStatus): string {
   if (session.reason === "DOMAIN_APPROVAL_REQUIRED") return "Approve the exact redirected hostname before login.";
   if (session.reason === "VAULT_UNAVAILABLE") return "Windows could not unlock the local credential vault.";
   if (session.reason === "RESET_FAILED") return "Some local session data could not be removed.";
+  if (session.reason === "AUTH_EGRESS_UNAVAILABLE") return "Cannot reach fabet.com through direct, configured proxy, or local WARP authentication.";
+  if (session.reason === "INTERACTIVE_AUTH_REQUIRED") return "Fabet requires an interactive login step.";
+  if (session.reason === "AUTH_BACKOFF") return "Automatic login is waiting for its retry window.";
+  if (session.reason === "PROVIDER_VALIDATION_FAILED") return "Login succeeded, but the requested provider launcher was not validated.";
   return session.state === "ACTIVE" ? "Validated and available to read-only adapters." : "No additional diagnostic.";
 }
 
@@ -54,11 +55,10 @@ export function SessionsPage({
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
   const [accountAlias, setAccountAlias] = useState("");
   const [accountSessionId, setAccountSessionId] = useState("");
-  const [entryUrl, setEntryUrl] = useState("https://fabet.com/");
-  const [discovery, setDiscovery] = useState<FabetDiscoveryResult | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [provider, setProvider] = useState("SABA");
+  const [manualCategory, setManualCategory] = useState<"FOOTBALL" | "LOL">("FOOTBALL");
   const [kind, setKind] = useState<ManualSessionInput["kind"]>("TOKEN");
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
@@ -111,31 +111,11 @@ export function SessionsPage({
     }
   };
 
-  const discover = (): void => {
-    void run(async () => {
-      setDiscovery(await api.discoverFabet(entryUrl));
-    }, "Fabet is unreachable. You can still enter a provider session directly.");
-  };
-
-  const trust = (): void => {
-    if (discovery === null) return;
-    void run(async () => {
-      await api.trustFabet(discovery.finalHostname);
-      setDiscovery({ ...discovery, trusted: true });
-    }, "The redirected hostname could not be trusted.");
-  };
-
   const submitFabet = (event: FormEvent): void => {
     event.preventDefault();
-    if (discovery === null || !discovery.trusted) {
-      setMessage("Discover and trust the current hostname before sending credentials.");
-      return;
-    }
     void run(async () => {
       try {
         await api.configureFabet({
-          entryUrl: discovery.finalUrl,
-          trustedHostname: discovery.finalHostname,
           username,
           password
         });
@@ -151,7 +131,7 @@ export function SessionsPage({
     event.preventDefault();
     void run(async () => {
       try {
-        await api.configureManual({ provider, kind, secret });
+      await api.configureManual({ provider, category: manualCategory, kind, secret });
       } finally {
         setSecret("");
       }
@@ -196,7 +176,6 @@ export function SessionsPage({
     void run(async () => {
       await api.resetFabet();
       setResetOpen(false);
-      setDiscovery(null);
       await refresh();
     }, "Fabet reset failed.");
   };
@@ -223,16 +202,7 @@ export function SessionsPage({
       <div className="session-config-grid">
         <section className="session-panel" aria-labelledby="fabet-session-heading">
           <h2 id="fabet-session-heading">Fabet login</h2>
-          <label>Reachable Fabet URL<input value={entryUrl} onChange={(event) => { setEntryUrl(event.target.value); setDiscovery(null); }} /></label>
-          <button disabled={busy} onClick={discover} type="button">Discover current domain</button>
-          {discovery !== null && (
-            <div className="domain-approval">
-              <span>Redirected hostname</span><strong>{discovery.finalHostname}</strong>
-              {discovery.trusted
-                ? <span className="session-good">Trusted on this machine</span>
-                : <button disabled={busy} onClick={trust} type="button">Trust {discovery.finalHostname}</button>}
-            </div>
-          )}
+          <p>Always starts at fabet.com, follows the attested current mirror, then reopens provider pages without VPN/proxy.</p>
           <form onSubmit={submitFabet}>
             <label>Username<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></label>
             <label>Password<input autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
@@ -245,6 +215,11 @@ export function SessionsPage({
           <p>Use this when Fabet is blocked or when another portal supplied the provider session.</p>
           <form onSubmit={submitManual}>
             <label>Provider<input value={provider} onChange={(event) => setProvider(event.target.value.toUpperCase())} /></label>
+            <label>Category<select value={manualCategory}
+              onChange={(event) => setManualCategory(event.target.value as "FOOTBALL" | "LOL")}>
+              <option value="FOOTBALL">Football</option>
+              <option value="LOL">LoL (disabled)</option>
+            </select></label>
             <label>Session type<select value={kind} onChange={(event) => setKind(event.target.value as ManualSessionInput["kind"])}>
               <option value="TOKEN">Token</option>
               <option value="LAUNCH_URL">Launch URL</option>
@@ -271,7 +246,7 @@ export function SessionsPage({
         </div>
         {sessions.length === 0 ? <p className="empty-state">No session is configured.</p> : (
           <div className="table-wrap"><table><thead><tr>
-            <th>Provider</th><th>Category</th><th>Source</th><th>State</th><th>Trusted host</th><th>Last checked</th><th>Forced renewal</th><th>Diagnostic</th><th>Actions</th>
+            <th>Provider</th><th>Category</th><th>Source</th><th>State</th><th>Trusted host</th><th>Last checked</th><th>Forced renewal</th><th>Next retry</th><th>Diagnostic</th><th>Actions</th>
           </tr></thead><tbody>{sessions.map((session) => (
             <tr key={session.id}>
               <td>{session.provider}</td>
@@ -281,6 +256,7 @@ export function SessionsPage({
               <td>{session.trustedHostname ?? "—"}</td>
               <td>{displayTime(session.lastValidatedAtMs)}</td>
               <td>{displayTime(session.renewAfterMs)}</td>
+              <td>{displayTime(session.nextRetryAtMs)}</td>
               <td>{healthExplanation(session)}</td>
               <td className="session-actions">
                 <button disabled={busy} onClick={() => sessionAction(session.id, "validate")} type="button">Validate</button>

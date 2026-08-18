@@ -14,6 +14,7 @@ const active: RedactedSessionStatus = {
   acquiredAtMs: 100,
   lastValidatedAtMs: 100,
   renewAfterMs: 86_400_100,
+  nextRetryAtMs: null,
   secretConfigured: true,
   reason: null
 };
@@ -145,12 +146,10 @@ describe("SessionsPage", () => {
     expect(screen.getByText("Provider protocol is not validated yet.")).toBeTruthy();
   });
 
-  it("shows the exact discovered hostname before trust", async () => {
+  it("uses the canonical Fabet root without requiring a mirror hostname", async () => {
     render(<SessionsPage api={new FakeSessionApi()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Discover current domain" }));
-
-    expect(await screen.findByText("fabet.party")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Trust fabet.party" })).toBeTruthy();
+    expect(screen.getByText(/Always starts at fabet.com/u)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Discover current domain/u })).toBeNull();
   });
 
   it("keeps state after cancel and resets only after destructive confirmation", async () => {
@@ -172,28 +171,15 @@ describe("SessionsPage", () => {
     expect(api.resetCount).toBe(1);
   });
 
-  it("leaves manual entry available when Fabet discovery fails", async () => {
-    const api = new FakeSessionApi();
-    api.discoverFabet = async () => { throw new Error("unreachable-secret-canary"); };
-    render(<SessionsPage api={api} />);
-    fireEvent.click(screen.getByRole("button", { name: "Discover current domain" }));
-    expect(await screen.findByText("Fabet is unreachable. You can still enter a provider session directly.")).toBeTruthy();
+  it("keeps manual provider entry available beside automatic Fabet login", async () => {
+    render(<SessionsPage api={new FakeSessionApi()} />);
     expect(screen.getByRole("button", { name: "Save and validate" })).toBeTruthy();
-    expect(screen.queryByText("unreachable-secret-canary")).toBeNull();
   });
 
   it("clears Fabet credentials even when login fails", async () => {
     const api = new FakeSessionApi();
-    api.discoverFabet = async () => ({
-      requestedUrl: "https://fabet.party/",
-      finalUrl: "https://fabet.party/",
-      finalHostname: "fabet.party",
-      trusted: true
-    });
     api.configureFabet = async () => { throw new Error("login-secret-canary"); };
     render(<SessionsPage api={api} />);
-    fireEvent.click(screen.getByRole("button", { name: "Discover current domain" }));
-    await screen.findByText("Trusted on this machine");
     fireEvent.change(screen.getByLabelText("Username"), { target: { value: "failed-user-canary" } });
     fireEvent.change(screen.getByLabelText("Password"), { target: { value: "failed-password-canary" } });
     fireEvent.click(screen.getByRole("button", { name: "Save and login" }));

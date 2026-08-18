@@ -27,9 +27,8 @@
 - Consumes: existing `MaintenanceControls` props and `MaintenanceApiLike`.
 - Produces: `.maintenance-actions` in normal flow and `.maintenance-notification-layer` fixed to the viewport.
 
-- [ ] **Step 1: Add a failing component assertion** requiring a fixed notification layer separate from the refresh action.
-- [ ] **Step 2: Run `npm.cmd test --workspace @tool-chenh/web -- --run src/components/maintenance-controls.test.tsx` and confirm RED because the layer is absent.**
-- [ ] **Step 3: Split the component markup and add stable top-right/popover CSS with a narrow-screen rule.**
-- [ ] **Step 4: Re-run the focused test and confirm GREEN.**
-- [ ] **Step 5: Run the full web test suite, typecheck, production build, and `git diff --check`.**
-
+- [x] **Step 1: Add a failing component assertion** requiring a fixed notification layer separate from the refresh action.
+- [x] **Step 2: Run `npm.cmd test --workspace @tool-chenh/web -- --run src/components/maintenance-controls.test.tsx` and confirm RED because the layer is absent.**
+- [x] **Step 3: Split the component markup and add stable top-right/popover CSS with a narrow-screen rule.**
+- [x] **Step 4: Re-run the focused test and confirm GREEN.**
+- [x] **Step 5: Run the full web test suite, typecheck, production build, and `git diff --check`.**

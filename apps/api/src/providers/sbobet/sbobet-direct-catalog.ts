@@ -1,4 +1,6 @@
-import type { SbobetCatalogInputRecord, SbobetCatalogMarket, SbobetCatalogSelection } from "@tool-chenh/adapters";
+import { isSupportedFootballTwoWayLine,
+  type SbobetCatalogInputRecord, type SbobetCatalogMarket,
+  type SbobetCatalogSelection } from "@tool-chenh/adapters";
 
 export interface SbobetMarketGroupShape {
   readonly groupKey: string;
@@ -23,11 +25,6 @@ export interface SbobetMarketDomCandidate {
 }
 
 const pairPattern = /^(-?(?:0|1)(?:\.\d+)?)\*(\d+[had])$/u;
-
-function halfGoalLine(value: string): boolean {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 && Number.isInteger(parsed * 2) && !Number.isInteger(parsed);
-}
 
 function pair(value: unknown, selection: SbobetCatalogSelection["selection"]): SbobetCatalogSelection | null {
   if (typeof value !== "string") return null;
@@ -146,13 +143,28 @@ export function inspectSbobetMarketLabelEvidence(source: string): readonly Sbobe
   return evidence;
 }
 
-function market(value: unknown, type: "FT_TOTAL" | "FT_AH" | "FH_TOTAL" | "FH_AH"): SbobetCatalogMarket | null {
+type SbobetTwoWayMarketType = Exclude<SbobetCatalogMarket["marketType"], "FT_1X2">;
+
+const totalMarketTypes = new Set<SbobetTwoWayMarketType>([
+  "FT_TOTAL", "FH_TOTAL", "SH_TOTAL", "CORNER_FT_TOTAL", "CORNER_FH_TOTAL",
+  "CARD_FT_TOTAL", "CARD_FH_TOTAL"
+]);
+const sbobetMarketTypeByGroup: Readonly<Record<string, SbobetTwoWayMarketType>> = {
+  "3": "FT_TOTAL", "4": "FH_TOTAL", "5": "FT_AH", "6": "FH_AH",
+  "19": "CORNER_FT_AH", "20": "CORNER_FH_AH",
+  "21": "CORNER_FT_TOTAL", "22": "CORNER_FH_TOTAL",
+  "31": "CARD_FT_TOTAL", "32": "CARD_FH_TOTAL",
+  "33": "CARD_FT_AH", "34": "CARD_FH_AH",
+  "80": "SH_TOTAL", "85": "SH_AH"
+};
+
+function market(value: unknown, type: SbobetTwoWayMarketType): SbobetCatalogMarket | null {
   if (typeof value !== "string") return null;
   const tokens = value.trim().split(/\s+/u);
   const line = tokens[0];
-  if (line === undefined || !halfGoalLine(line)) return null;
-  const isTotal = type === "FT_TOTAL" || type === "FH_TOTAL";
-  const isHandicap = type === "FT_AH" || type === "FH_AH";
+  if (line === undefined || !isSupportedFootballTwoWayLine(line)) return null;
+  const isTotal = totalMarketTypes.has(type);
+  const isHandicap = !isTotal;
   const first = pair(tokens[1], isTotal ? "OVER" : "HOME");
   const second = pair(tokens[2], isTotal ? "UNDER" : "AWAY");
   if (first === null || second === null) return null;
@@ -194,8 +206,7 @@ export function extractSbobetDirectCatalogRecords(
     if (eventId !== null && existing !== undefined && teams.every((team) => typeof team === "string") &&
       typeof markets === "object" && markets !== null && !Array.isArray(markets)) {
       const parsed = Object.entries(markets as Record<string, unknown>).flatMap(([key, rows]) => {
-        const marketType = key === "3" ? "FT_TOTAL" as const : key === "4" ? "FH_TOTAL" as const
-          : key === "5" ? "FT_AH" as const : key === "6" ? "FH_AH" as const : null;
+        const marketType = sbobetMarketTypeByGroup[key] ?? null;
         if (marketType === null || !Array.isArray(rows)) return [];
         return rows.flatMap((row) => {
           const candidate = market(row, marketType);
@@ -215,6 +226,18 @@ export function extractSbobetDirectCatalogRecords(
     for (let index = children.length - 1; index >= 0; index -= 1) {
       stack.push({ value: children[index], depth: current.depth + 1 });
     }
+  }
+  return [...records.values()];
+}
+
+export function mergeSbobetSocketCatalogRecords(
+  bootstrap: readonly SbobetCatalogInputRecord[],
+  bodies: readonly unknown[]
+): readonly SbobetCatalogInputRecord[] {
+  const records = new Map(bootstrap.map((record) => [record.eventId, record]));
+  for (const body of bodies.slice(-500)) {
+    const updates = extractSbobetDirectCatalogRecords(body, [...records.values()]);
+    updates.forEach((record) => records.set(record.eventId, record));
   }
   return [...records.values()];
 }

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { normalizeSabaFootballRecords } from "@tool-chenh/adapters";
 import { chromium, type BrowserContext, type Page, type WebSocket } from "playwright";
+import { installCatalogResourcePolicy } from "../browser-resource-policy.js";
 import { clickSafeLiveCatalog, clickSafeStructuralCategory, findCmdCatalogPage } from "../browser-protocol-inspector.js";
 import { validateCmdLaunchUrl } from "../cmd/cmd-browser-manager.js";
 import { SabaPushDecoder, type SabaPushFrame } from "./saba-push-decoder.js";
@@ -210,6 +211,7 @@ export class PlaywrightSabaFootballPushBrowserManager {
     const context = await chromium.launchPersistentContext(join(this.#profilesRoot, profile), {
       headless: this.#headless, acceptDownloads: false
     });
+    await installCatalogResourcePolicy(context);
     const snapshots = new SabaSocketSnapshots();
     let viewGeneration = 0;
     const attachSocket = (socket: WebSocket): void => {

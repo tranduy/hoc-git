@@ -16,6 +16,8 @@ interface Tk88BrowserOptions {
   readonly headless?: boolean;
   readonly navigationTimeoutMs?: number;
   readonly launch?: (profilePath: string, headless: boolean) => Promise<BrowserContext>;
+  readonly verifyProviderPage?: (provider: Exclude<ProviderId, "FABET">, category: Category,
+    page: Page) => Promise<boolean>;
 }
 
 class AsyncLock {
@@ -54,9 +56,11 @@ export class Tk88BrowserAutomation {
   readonly #headless: boolean;
   readonly #navigationTimeoutMs: number;
   readonly #launch: NonNullable<Tk88BrowserOptions["launch"]>;
+  readonly #verifyProviderPage: Tk88BrowserOptions["verifyProviderPage"];
   readonly #pages = new Map<string, Page>();
   readonly #locks = new Map<string, AsyncLock>();
   #context: Promise<BrowserContext> | null = null;
+  readonly #providerScanLock = new AsyncLock();
 
   constructor(options: Tk88BrowserOptions) {
     this.#profilePath = resolve(options.profilePath);
@@ -69,6 +73,30 @@ export class Tk88BrowserAutomation {
     this.#launch = options.launch ?? (async (profilePath, headless) => chromium.launchPersistentContext(profilePath, {
       headless, viewport: null
     }));
+    this.#verifyProviderPage = options.verifyProviderPage;
+  }
+
+  async withVerifiedProviderPage<T>(provider: Exclude<ProviderId, "FABET">, category: Category,
+    consume: (page: Page) => Promise<T>): Promise<T> {
+    const verifier = this.#verifyProviderPage;
+    if (verifier === undefined) throw new Error("TK88_PROVIDER_PAGE_UNAVAILABLE");
+    return this.#providerScanLock.run(async () => {
+      let context: BrowserContext;
+      try { context = await this.#contextForUse(); }
+      catch { throw new Error("TK88_PROVIDER_PAGE_UNAVAILABLE"); }
+      const matches: Page[] = [];
+      for (const page of context.pages()) {
+        if (page.isClosed()) continue;
+        try {
+          if (await verifier(provider, category, page)) matches.push(page);
+        } catch {
+          // One malformed or navigating tab cannot make another verified tab usable.
+        }
+      }
+      if (matches.length === 0) throw new Error("TK88_PROVIDER_PAGE_UNAVAILABLE");
+      if (matches.length !== 1) throw new Error("TK88_PROVIDER_PAGE_AMBIGUOUS");
+      return consume(matches[0]!);
+    });
   }
 
   async withLoungePage<T>(identityInput: Tk88LoungeIdentity, consume: (page: Page) => Promise<T>): Promise<T> {
@@ -94,6 +122,21 @@ export class Tk88BrowserAutomation {
       }
       return consume(page);
     });
+  }
+
+  async openPortal(hostnameInput: string): Promise<void> {
+    const hostname = hostnameInput.trim().toLowerCase();
+    let root: URL;
+    try { root = new URL(`https://${hostname}/`); }
+    catch { throw new Error("TK88_PORTAL_CONFIG_INVALID"); }
+    if (hostname.length === 0 || root.hostname !== hostname || root.pathname !== "/" || root.search !== "" ||
+      root.hash !== "" || root.username !== "" || root.password !== "") {
+      throw new Error("TK88_PORTAL_CONFIG_INVALID");
+    }
+    await this.withLoungePage({
+      provider: "CMD", category: "FOOTBALL", portalUrl: root.href,
+      trustedHostname: hostname, launcherLabel: "CMD"
+    }, async () => undefined);
   }
 
   async close(): Promise<void> {

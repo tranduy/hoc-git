@@ -39,11 +39,13 @@ export interface ProviderQuoteUpdate {
 }
 
 export interface ProviderSink {
+  beginBatch?(): void;
   onEvent(event: ProviderEvent): void;
   onMarket(market: ProviderMarket): void;
   onQuoteUpdate(update: ProviderQuoteUpdate): void;
   onStatus(status: ProviderConnectionStatus): void;
   onSchemaError(error: AdapterSchemaError): void;
+  endBatch?(): void;
 }
 
 export interface ProviderAdapter {

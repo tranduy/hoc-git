@@ -12,6 +12,15 @@ class MemoryStorage implements Storage {
   setItem(key: string, value: string): void { this.#values.set(key, value); }
 }
 
+class FailingStorage implements Storage {
+  get length(): number { throw new DOMException("Storage unavailable", "SecurityError"); }
+  clear(): void { throw new DOMException("Storage unavailable", "SecurityError"); }
+  getItem(): string | null { throw new DOMException("Storage unavailable", "SecurityError"); }
+  key(): string | null { throw new DOMException("Storage unavailable", "SecurityError"); }
+  removeItem(): void { throw new DOMException("Storage unavailable", "SecurityError"); }
+  setItem(): void { throw new DOMException("Quota exceeded", "QuotaExceededError"); }
+}
+
 function entry(index: number): MatchWatchEntry {
   return {
     id: `entry-${index}`, kind: "ODDS_CHANGED", provider: "CMD", providerEventId: "event-1",
@@ -65,5 +74,13 @@ describe("match watch storage", () => {
     expect(loadWatchEntries(storage, "CMD", "event-1")).toEqual([]);
     storage.setItem(watchStorageKey("CMD", "event-1"), JSON.stringify([{ ...entry(1), providerEventId: "event-2" }]));
     expect(loadWatchEntries(storage, "CMD", "event-1")).toEqual([]);
+  });
+
+  it("never lets unavailable or full browser storage interrupt live monitoring", () => {
+    const storage = new FailingStorage();
+
+    expect(loadWatchEntries(storage, "CMD", "event-1")).toEqual([]);
+    expect(() => saveWatchEntries(storage, "CMD", "event-1", [entry(1)])).not.toThrow();
+    expect(() => clearWatchEntries(storage, "CMD", "event-1")).not.toThrow();
   });
 });

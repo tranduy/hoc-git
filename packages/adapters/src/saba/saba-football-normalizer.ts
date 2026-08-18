@@ -1,4 +1,5 @@
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import { isSupportedFootballTwoWayLine } from "../football-market-policy.js";
 
 export interface SabaFootballNormalizeOptions {
   readonly observedAtMs: number;
@@ -46,20 +47,17 @@ function canonicalHomeHandicap(record: RawRecord): string | null {
   if (homeMagnitude === null || awayMagnitude === null || homeMagnitude < 0 || awayMagnitude < 0 ||
     (homeMagnitude > 0 && awayMagnitude > 0)) return null;
   const value = awayMagnitude - homeMagnitude;
-  // The product intentionally supports only exact half-goal two-way tickets.
-  if (!Number.isFinite(value) || !Number.isInteger(Math.abs(value) * 2) || Number.isInteger(value)) return null;
-  return String(value);
+  if (!Number.isFinite(value)) return null;
+  const canonical = String(value);
+  return isSupportedFootballTwoWayLine(canonical) ? canonical : null;
 }
 
 function canonicalTotalLine(record: RawRecord): string | null {
   const total = finite(record.hdp1);
   const secondary = finite(record.hdp2);
-  // Live SABA Football metadata identifies bettype 3 as Over/Under and
-  // carries the total in hdp1 with a zero hdp2. Keep only x.5 lines so
-  // neither outcome can settle as a push or half-win/half-loss.
-  if (total === null || secondary !== 0 || total <= 0 || Number.isInteger(total) ||
-    !Number.isInteger(total * 2)) return null;
-  return String(total);
+  if (total === null || secondary !== 0 || total <= 0) return null;
+  const canonical = String(total);
+  return isSupportedFootballTwoWayLine(canonical) ? canonical : null;
 }
 
 export function normalizeSabaFootballRecords(
@@ -129,10 +127,12 @@ export function normalizeSabaFootballRecords(
     const matchId = id(record.matchid);
     const oddsId = id(record.oddsid);
     if (matchId === null || !acceptedMatches.has(matchId)) continue;
-    const marketType = record.bettype === 1 ? "FT_AH" as const : record.bettype === 3 ? "FT_TOTAL" as const
-      : record.bettype === 7 ? "FH_AH" as const : "FH_TOTAL" as const;
+    const marketType = record.bettype === 1 ? "FT_AH" as const
+      : record.bettype === 3 ? "FT_TOTAL" as const
+        : record.bettype === 7 ? "FH_AH" as const : "FH_TOTAL" as const;
     const isHandicap = marketType === "FT_AH" || marketType === "FH_AH";
-    const scope = marketType === "FH_AH" || marketType === "FH_TOTAL" ? "FIRST_HALF" as const : "FULL_TIME" as const;
+    const isFirstHalf = marketType === "FH_AH" || marketType === "FH_TOTAL";
+    const scope = isFirstHalf ? "FIRST_HALF" as const : "FULL_TIME" as const;
     const line = isHandicap ? canonicalHomeHandicap(record) : canonicalTotalLine(record);
     const firstPrice = malay(record.odds1a);
     const secondPrice = malay(record.odds2a);
@@ -146,7 +146,7 @@ export function normalizeSabaFootballRecords(
     markets.push({
       provider: "SABA", category: "FOOTBALL", providerEventId: matchId, providerMarketId: oddsId,
       marketType, scope, line,
-      settlementProfile: scope === "FIRST_HALF" ? "football-first-half-including-added-time"
+      settlementProfile: isFirstHalf ? "football-first-half-including-added-time"
         : "football-regulation-including-added-time", status
     });
     const selections = isHandicap ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;

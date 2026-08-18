@@ -11,6 +11,7 @@ const status = {
   acquiredAtMs: 100,
   lastValidatedAtMs: 100,
   renewAfterMs: 86_400_100,
+  nextRetryAtMs: null,
   secretConfigured: true,
   reason: null
 } as const;

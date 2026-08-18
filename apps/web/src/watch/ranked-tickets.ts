@@ -25,6 +25,11 @@ export interface RankedEvent {
   readonly bestVerifiedProfit: string | null;
 }
 
+export interface RankedTicketItem {
+  readonly event: RankedEvent;
+  readonly ticket: RankedTicket;
+}
+
 export interface EventEdgeSummary {
   readonly ticketKey: string;
   readonly roiPercent: string;
@@ -36,21 +41,26 @@ export interface EventEdgeSummary {
   readonly state: RankedTicketState;
 }
 
+export function ticketEdgeSummary(ticket: RankedTicket): EventEdgeSummary | null {
+  if (ticket.plan === null) return null;
+  const providers = [...new Set(ticket.plan.legs.map((leg) => leg.provider))].sort();
+  if (providers.length !== 2) return null;
+  return {
+    ticketKey: ticket.key,
+    roiPercent: new Decimal(ticket.plan.roi).mul(100).toString(),
+    worstCaseProfit: ticket.plan.worstCaseProfit,
+    providers,
+    odds: ticket.plan.legs.map((leg) => leg.decimalOdds),
+    marketType: ticket.row.marketType,
+    line: ticket.row.line,
+    state: ticket.state
+  };
+}
+
 export function eventEdgeSummary(event: RankedEvent): EventEdgeSummary | null {
   for (const ticket of event.tickets) {
-    if (ticket.plan === null) continue;
-    const providers = [...new Set(ticket.plan.legs.map((leg) => leg.provider))].sort();
-    if (providers.length < 2) continue;
-    return {
-      ticketKey: ticket.key,
-      roiPercent: new Decimal(ticket.plan.roi).mul(100).toString(),
-      worstCaseProfit: ticket.plan.worstCaseProfit,
-      providers,
-      odds: ticket.plan.legs.map((leg) => leg.decimalOdds),
-      marketType: ticket.row.marketType,
-      line: ticket.row.line,
-      state: ticket.state
-    };
+    const summary = ticketEdgeSummary(ticket);
+    if (summary !== null) return summary;
   }
   return null;
 }
@@ -115,10 +125,8 @@ export function rankTicketsForEvent(input: {
   });
 
   return tickets.sort((left, right) => verifiedRank(left.state) - verifiedRank(right.state) ||
-    (left.state === "OBSERVATION" && right.state === "OBSERVATION" ? 0
-      : numberOf(right.plan?.worstCaseProfit).comparedTo(numberOf(left.plan?.worstCaseProfit))) ||
-    (left.state === "OBSERVATION" && right.state === "OBSERVATION" ? 0
-      : numberOf(right.plan?.roi).comparedTo(numberOf(left.plan?.roi))) ||
+    numberOf(right.plan?.worstCaseProfit).comparedTo(numberOf(left.plan?.worstCaseProfit)) ||
+    numberOf(right.plan?.roi).comparedTo(numberOf(left.plan?.roi)) ||
     numberOf(right.movementMagnitude).comparedTo(numberOf(left.movementMagnitude)) || left.key.localeCompare(right.key))
     .slice(0, input.limit ?? 5);
 }
@@ -143,4 +151,23 @@ export function sortRankedEvents(events: readonly RankedEvent[]): readonly Ranke
     if (left.event.event.isLive !== right.event.event.isLive) return left.event.event.isLive ? 1 : -1;
     return left.event.event.startAtUtcMs - right.event.event.startAtUtcMs || left.event.key.localeCompare(right.event.key);
   });
+}
+
+export function topRankedTicketItems(events: readonly RankedEvent[], limit = 25): readonly RankedTicketItem[] {
+  const safeLimit = Number.isSafeInteger(limit) && limit > 0 ? limit : 25;
+  const seen = new Set<string>();
+  return events.flatMap((event) => event.tickets.map((ticket) => ({ event, ticket })))
+    .filter((item) => {
+      if (item.ticket.plan === null || new Set(item.ticket.plan.legs.map((leg) => leg.provider)).size !== 2) return false;
+      const key = `${item.event.event.key}::${item.ticket.key}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => numberOf(right.ticket.plan?.roi).comparedTo(numberOf(left.ticket.plan?.roi)) ||
+      numberOf(right.ticket.plan?.worstCaseProfit).comparedTo(numberOf(left.ticket.plan?.worstCaseProfit)) ||
+      numberOf(right.ticket.movementMagnitude).comparedTo(numberOf(left.ticket.movementMagnitude)) ||
+      left.event.event.event.startAtUtcMs - right.event.event.event.startAtUtcMs ||
+      left.event.event.key.localeCompare(right.event.event.key) || left.ticket.key.localeCompare(right.ticket.key))
+    .slice(0, safeLimit);
 }

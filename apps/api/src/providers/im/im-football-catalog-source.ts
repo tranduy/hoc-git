@@ -1,4 +1,5 @@
-import type { SbobetCatalogInputRecord, SbobetCatalogMarket, SbobetCatalogSelection } from "@tool-chenh/adapters";
+import { isSupportedFootballTwoWayLine,
+  type SbobetCatalogInputRecord, type SbobetCatalogMarket, type SbobetCatalogSelection } from "@tool-chenh/adapters";
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -14,21 +15,30 @@ function identifier(value: unknown): string | null {
     : typeof value === "string" && /^\d+$/u.test(value) && value !== "0" ? value : null;
 }
 
-function halfGoal(value: unknown): value is number {
+function supportedLine(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 100 &&
-    Math.abs(Math.abs(value * 2) % 2 - 1) < 1e-9;
+    isSupportedFootballTwoWayLine(String(Math.abs(value)));
 }
 
-function selection(value: unknown): SbobetCatalogSelection | null {
+type ImFootballMarketType = "FT_AH" | "FT_TOTAL" | "FH_AH" | "FH_TOTAL";
+
+function isHandicapMarket(marketType: ImFootballMarketType): boolean {
+  return marketType === "FT_AH" || marketType === "FH_AH";
+}
+
+function selection(value: unknown, marketType: ImFootballMarketType): SbobetCatalogSelection | null {
   const item = record(value);
-  if (item === null || (item.si !== 1 && item.si !== 2) || !halfGoal(item.hdp) ||
+  const isHandicap = isHandicapMarket(marketType);
+  const expected = isHandicap ? [1, 2] : [3, 4];
+  if (item === null || !expected.includes(Number(item.si)) || !supportedLine(item.hdp) ||
     typeof item.o !== "number" || !Number.isFinite(item.o) || item.o === 0 || Math.abs(item.o) > 1) return null;
   const selectionId = identifier(item.wsi);
   const lineText = text(item.dih);
   if (selectionId === null || lineText === null) return null;
   return {
     selectionId,
-    selection: item.si === 1 ? "HOME" : "AWAY",
+    selection: isHandicap ? (item.si === 1 ? "HOME" : "AWAY")
+      : (item.si === 3 ? "OVER" : "UNDER"),
     priceText: String(item.o),
     locked: false,
     lineText
@@ -37,13 +47,18 @@ function selection(value: unknown): SbobetCatalogSelection | null {
 
 function market(value: unknown): SbobetCatalogMarket | null {
   const item = record(value);
-  if (item === null || item.bti !== 1 || item.gp !== 1 || !Array.isArray(item.ws) || item.ws.length !== 2) return null;
+  if (item === null || (item.bti !== 1 && item.bti !== 2) || (item.gp !== 1 && item.gp !== 2) ||
+    !Array.isArray(item.ws) || item.ws.length !== 2) return null;
   const marketId = identifier(item.mi);
-  const selections = item.ws.map(selection);
+  const marketType: ImFootballMarketType = item.gp === 1
+    ? item.bti === 1 ? "FT_AH" : "FT_TOTAL"
+    : item.bti === 1 ? "FH_AH" : "FH_TOTAL";
+  const selections = item.ws.map((value) => selection(value, marketType));
   if (marketId === null || selections.some((item) => item === null)) return null;
   const exact = selections as SbobetCatalogSelection[];
   if (new Set(exact.map((item) => item.selection)).size !== 2) return null;
-  return { marketId, marketType: "FT_AH", lineText: null, selections: exact };
+  return { marketId, marketType,
+    lineText: isHandicapMarket(marketType) ? null : exact[0]?.lineText ?? null, selections: exact };
 }
 
 function markets(value: unknown): readonly SbobetCatalogMarket[] {
@@ -97,10 +112,11 @@ export function mergeImFootballDelta(
     const eventId = change === null ? null : identifier(change.eid);
     const current = eventId === null ? undefined : next.get(eventId);
     if (eventId === null || current === undefined) continue;
-    if (change?.a !== 3 || !Array.isArray(change.v)) {
+    if (change?.a === 1) {
       next.delete(eventId);
       continue;
     }
+    if (change?.a !== 3 || !Array.isArray(change.v)) continue;
     const changedIds = new Set(change.v.flatMap((item) => {
       const id = identifier(record(item)?.mi);
       return id === null ? [] : [id];

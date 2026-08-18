@@ -85,19 +85,27 @@ export class TabRegistry {
   }
 
   async restore(tabs: readonly TabDescriptor[]): Promise<readonly AttachedLobbyTab[]> {
-    if (!this.#store) return this.list();
-    const stored = await this.#store.load();
-    for (const [tabIdText, lobbyValue] of Object.entries(stored)) {
-      const tabId = Number(tabIdText);
-      const parsedLobby = ChromeLobbyIdSchema.safeParse(lobbyValue);
-      if (Number.isSafeInteger(tabId) && tabId >= 0 && parsedLobby.success) {
-        this.#preferred.set(tabId, parsedLobby.data);
+    if (this.#store) {
+      const stored = await this.#store.load();
+      for (const [tabIdText, lobbyValue] of Object.entries(stored)) {
+        const tabId = Number(tabIdText);
+        const parsedLobby = ChromeLobbyIdSchema.safeParse(lobbyValue);
+        if (Number.isSafeInteger(tabId) && tabId >= 0 && parsedLobby.success) {
+          this.#preferred.set(tabId, parsedLobby.data);
+        }
       }
     }
     for (const tab of tabs) {
-      const candidate = recognizeLobbyTab(tab);
-      if (candidate && this.#preferred.get(candidate.tabId) === candidate.lobby) {
+      if (!recognizeLobbyTab(tab)) continue;
+      try {
+        // Chrome assigns a new tab id after a provider redirect or restored
+        // session. Adopt every recognized current tab so a stale old id never
+        // leaves that provider permanently disconnected.
         await this.attachSelected(tab);
+      } catch {
+        // One tab can temporarily be owned by DevTools or be navigating.
+        // Keep restoring the remaining recognized provider tabs; the Chrome
+        // alarm will retry this one on the next recovery pass.
       }
     }
     return this.list();

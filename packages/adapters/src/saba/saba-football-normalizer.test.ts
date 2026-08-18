@@ -53,7 +53,7 @@ describe("normalizeSabaFootballRecords", () => {
     ]);
   });
 
-  it("maps evidenced SABA first-half handicap and total groups with first-half settlement", () => {
+  it("normalizes exact first-half handicap and total groups", () => {
     const normalized = normalizeSabaFootballRecords([
       { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
       { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
@@ -64,20 +64,19 @@ describe("normalizeSabaFootballRecords", () => {
         oddsstatus: "running", enable: 1, odds1a: -0.74, odds2a: 0.62, hdp1: 1.5, hdp2: 0 }
     ], options);
 
-    expect(normalized.markets.map(({ marketType, scope, line, settlementProfile }) =>
-      ({ marketType, scope, line, settlementProfile }))).toEqual([
-      { marketType: "FH_AH", scope: "FIRST_HALF", line: "0.5",
-        settlementProfile: "football-first-half-including-added-time" },
-      { marketType: "FH_TOTAL", scope: "FIRST_HALF", line: "1.5",
-        settlementProfile: "football-first-half-including-added-time" }
+    expect(normalized.markets.map(({ marketType, scope, line }) => ({ marketType, scope, line }))).toEqual([
+      { marketType: "FH_AH", scope: "FIRST_HALF", line: "0.5" },
+      { marketType: "FH_TOTAL", scope: "FIRST_HALF", line: "1.5" }
     ]);
-    expect(normalized.quotes.map(({ marketType, scope, selection }) => [marketType, scope, selection])).toEqual([
-      ["FH_AH", "FIRST_HALF", "HOME"], ["FH_AH", "FIRST_HALF", "AWAY"],
-      ["FH_TOTAL", "FIRST_HALF", "OVER"], ["FH_TOTAL", "FIRST_HALF", "UNDER"]
+    expect(normalized.quotes.map(({ marketType, scope, selection }) => ({ marketType, scope, selection }))).toEqual([
+      { marketType: "FH_AH", scope: "FIRST_HALF", selection: "HOME" },
+      { marketType: "FH_AH", scope: "FIRST_HALF", selection: "AWAY" },
+      { marketType: "FH_TOTAL", scope: "FIRST_HALF", selection: "OVER" },
+      { marketType: "FH_TOTAL", scope: "FIRST_HALF", selection: "UNDER" }
     ]);
   });
 
-  it("rejects non-half-goal and structurally inconsistent SABA totals", () => {
+  it("accepts quarter totals and rejects integer or structurally inconsistent totals", () => {
     const base = { type: "o", matchid: 2, bettype: 3, parenttypeid: 3,
       oddsstatus: "running", enable: 1, odds1a: 0.9, odds2a: -0.9, hdp2: 0 };
     const normalized = normalizeSabaFootballRecords([
@@ -90,11 +89,11 @@ describe("normalizeSabaFootballRecords", () => {
       { ...base, oddsid: 6, hdp1: 2.5, parenttypeid: 8 }
     ], options);
 
-    expect(normalized.markets).toEqual([]);
-    expect(normalized.quotes).toEqual([]);
+    expect(normalized.markets).toEqual([expect.objectContaining({ marketType: "FT_TOTAL", line: "2.25" })]);
+    expect(normalized.quotes).toHaveLength(2);
   });
 
-  it("rejects quarter lines, three-way markets, invalid prices and non-football matches", () => {
+  it("accepts quarter handicap but rejects three-way markets, invalid prices and non-football matches", () => {
     const base = { type: "o", matchid: 2, parenttypeid: 1, oddsstatus: "running", odds1a: 0.9, odds2a: -0.9 };
     const normalized = normalizeSabaFootballRecords([
       { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
@@ -107,7 +106,7 @@ describe("normalizeSabaFootballRecords", () => {
         kickofftime: 10, marketid: "T", sporttype: 43 }
     ], options);
     expect(normalized.events).toHaveLength(1);
-    expect(normalized.markets).toEqual([]);
+    expect(normalized.markets).toEqual([expect.objectContaining({ marketType: "FT_AH", line: "-0.25" })]);
     expect(normalized.diagnostics).toContain("SABA_FOOTBALL_MARKET_REJECTED");
   });
 
@@ -123,6 +122,26 @@ describe("normalizeSabaFootballRecords", () => {
     expect(normalized.events).toEqual([]);
     expect(normalized.diagnostics).toEqual([
       "SABA_FOOTBALL_EVENT_UNSUPPORTED", "SABA_FOOTBALL_EVENT_UNSUPPORTED"
+    ]);
+  });
+
+  it("keeps full-time and first-half quarter or three-quarter two-way lines", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "o", oddsid: 10, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.82, odds2a: -0.96, hdp1: 0.25, hdp2: 0 },
+      { type: "o", oddsid: 11, matchid: 2, bettype: 3, parenttypeid: 3,
+        oddsstatus: "running", enable: 1, odds1a: -0.74, odds2a: 0.62, hdp1: 2.75, hdp2: 0 },
+      { type: "o", oddsid: 12, matchid: 2, bettype: 7, parenttypeid: 7,
+        oddsstatus: "running", enable: 1, odds1a: 0.72, odds2a: -0.88, hdp1: 0, hdp2: 0.5 }
+    ], options);
+
+    expect(normalized.markets.map(({ marketType, scope, line }) => ({ marketType, scope, line }))).toEqual([
+      { marketType: "FT_AH", scope: "FULL_TIME", line: "-0.25" },
+      { marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.75" },
+      { marketType: "FH_AH", scope: "FIRST_HALF", line: "0.5" }
     ]);
   });
 });

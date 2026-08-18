@@ -1,6 +1,7 @@
 export * from "./fixture-adapter.js";
 export * from "./provider-adapter.js";
 export * from "./redaction.js";
+export * from "./football-market-policy.js";
 export * from "./cmd/cmd-profile.js";
 export * from "./cmd/cmd-normalizer.js";
 export * from "./cmd/cmd-adapter.js";

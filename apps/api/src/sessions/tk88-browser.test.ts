@@ -7,6 +7,7 @@ class FakePage {
   closed = false;
   currentUrl = "about:blank";
   failNavigation = false;
+  providerIdentity: string | null = null;
 
   isClosed(): boolean { return this.closed; }
   url(): string { return this.currentUrl; }
@@ -26,6 +27,7 @@ class FakeContext {
     this.pagesCreated.push(page);
     return page as unknown as Page;
   }
+  pages(): Page[] { return this.pagesCreated as unknown as Page[]; }
   async close(): Promise<void> { this.closed = true; }
 }
 
@@ -108,5 +110,60 @@ describe("Tk88BrowserAutomation", () => {
     });
     await expect(browser.withLoungePage(football, async () => { throw new Error("PROVIDER_SCHEMA_CHANGED"); }))
       .rejects.toThrowError("PROVIDER_SCHEMA_CHANGED");
+  });
+
+  it("uses only one uniquely verified existing provider page and never navigates it", async () => {
+    const context = new FakeContext();
+    const unrelated = await context.newPage() as unknown as FakePage;
+    unrelated.currentUrl = "https://tk88.example/sports";
+    const cmd = await context.newPage() as unknown as FakePage;
+    cmd.currentUrl = "https://provider.example/opaque-launch";
+    cmd.providerIdentity = "CMD|FOOTBALL";
+    const browser = new Tk88BrowserAutomation({
+      profilePath: "C:/local/tool-chenh/.auth/browser-profiles/tk88",
+      launch: async () => context as unknown as BrowserContext,
+      verifyProviderPage: async (provider, category, page) =>
+        (page as unknown as FakePage).providerIdentity === `${provider}|${category}`
+    });
+
+    await expect(browser.withVerifiedProviderPage("CMD", "FOOTBALL", async (page) => page.url()))
+      .resolves.toBe("https://provider.example/opaque-launch");
+    expect(unrelated.navigations).toEqual([]);
+    expect(cmd.navigations).toEqual([]);
+  });
+
+  it("fails closed when no page or multiple pages claim the same provider identity", async () => {
+    const context = new FakeContext();
+    const browser = new Tk88BrowserAutomation({
+      profilePath: "C:/local/tool-chenh/.auth/browser-profiles/tk88",
+      launch: async () => context as unknown as BrowserContext,
+      verifyProviderPage: async (provider, category, page) =>
+        (page as unknown as FakePage).providerIdentity === `${provider}|${category}`
+    });
+
+    await context.newPage();
+    await expect(browser.withVerifiedProviderPage("CMD", "FOOTBALL", async () => "wrong"))
+      .rejects.toThrowError("TK88_PROVIDER_PAGE_UNAVAILABLE");
+
+    const first = context.pagesCreated[0]!;
+    first.providerIdentity = "CMD|FOOTBALL";
+    const second = await context.newPage() as unknown as FakePage;
+    second.providerIdentity = "CMD|FOOTBALL";
+    await expect(browser.withVerifiedProviderPage("CMD", "FOOTBALL", async () => "wrong"))
+      .rejects.toThrowError("TK88_PROVIDER_PAGE_AMBIGUOUS");
+  });
+
+  it("opens only the exact trusted TK88 root in the managed profile", async () => {
+    const context = new FakeContext();
+    const browser = new Tk88BrowserAutomation({
+      profilePath: "C:/local/tool-chenh/.auth/browser-profiles/tk88",
+      launch: async () => context as unknown as BrowserContext
+    });
+
+    await expect(browser.openPortal("TK88.Example")).resolves.toBeUndefined();
+    expect(context.pagesCreated).toHaveLength(1);
+    expect(context.pagesCreated[0]?.navigations).toEqual(["https://tk88.example/"]);
+    await expect(browser.openPortal("tk88.example/path"))
+      .rejects.toThrowError("TK88_PORTAL_CONFIG_INVALID");
   });
 });

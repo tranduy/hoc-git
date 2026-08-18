@@ -34,6 +34,9 @@ import {
   inspectSbobetMarketGroups,
   inspectSbobetMarketLabelEvidence
 } from "./sbobet/sbobet-direct-catalog.js";
+import {
+  correlateSbobetPublicIds, decodeSbobetStompBodies, extractSbobetSnapshotPublicIds
+} from "./sbobet/sbobet-stomp.js";
 
 interface InspectableSessionRecord {
   readonly secret: { readonly kind: "LAUNCH_URL"; readonly value: string };
@@ -86,6 +89,7 @@ async function main(): Promise<void> {
   const sbobetMarketShapesOnly = argumentsList.includes("--sbobet-market-shapes");
   const sbobetMarketLabelsOnly = argumentsList.includes("--sbobet-market-labels");
   const sbobetMarketDomCorrelationOnly = argumentsList.includes("--sbobet-market-dom-correlation");
+  const sbobetSocketCorrelationOnly = argumentsList.includes("--sbobet-socket-correlation");
   const localAppData = process.env.LOCALAPPDATA;
   if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || !localAppData) {
     throw new Error("Usage: npm run inspect:launch -- <redacted-session-id>");
@@ -107,6 +111,8 @@ async function main(): Promise<void> {
   const sbobetMarketShapes = new Map<string, ReturnType<typeof inspectSbobetMarketGroups>[number]>();
   const sbobetMarketLabels = new Map<string, unknown>();
   const sbobetMarketDomCandidates = new Map<string, ReturnType<typeof extractSbobetMarketDomCandidates>[number]>();
+  const sbobetSocketBodies: unknown[] = [];
+  const sbobetSocketTargets = new Set<string>();
   let catalogNavigation: unknown[] = [];
   const pending = new Set<Promise<void>>();
   const recordResponse = async (response: Response): Promise<void> => {
@@ -148,8 +154,16 @@ async function main(): Promise<void> {
         if (sbobetMarketShapesOnly) for (const shape of inspectSbobetMarketGroups(body)) {
           sbobetMarketShapes.set(JSON.stringify(shape), shape);
         }
-        if (sbobetMarketDomCorrelationOnly) for (const candidate of extractSbobetMarketDomCandidates(body, ["25", "27"])) {
+        if (sbobetMarketDomCorrelationOnly) for (const candidate of extractSbobetMarketDomCandidates(body, ["80", "85"])) {
           sbobetMarketDomCandidates.set(JSON.stringify(candidate), candidate);
+        }
+        if (sbobetSocketCorrelationOnly && observation.pathTemplate === "/api/v2/getEvent") {
+          extractSbobetSnapshotPublicIds(body).forEach((id) => sbobetSocketTargets.add(id));
+          for (const candidate of extractSbobetMarketDomCandidates(body,
+            ["3", "4", "5", "6", "19", "20", "21", "22", "31", "32", "33", "34", "80", "85"])) {
+            sbobetSocketTargets.add(candidate.eventId);
+            candidate.selectionIds.forEach((id) => sbobetSocketTargets.add(id.replace(/[had]$/u, "")));
+          }
         }
         bodyShapeHash = structuralBodyHash(body);
         bodyShape = imCatalogShapeOnly ? structuralBodyShapeAtDepth(body, 16) : structuralBodyShape(body);
@@ -170,6 +184,12 @@ async function main(): Promise<void> {
       };
       socket.on("framereceived", (frame) => recordFrame("IN", frame.payload));
       socket.on("framesent", (frame) => recordFrame("OUT", frame.payload));
+    });
+    if (sbobetSocketCorrelationOnly) page.on("websocket", (socket) => {
+      socket.on("framereceived", (frame) => {
+        if (typeof frame.payload !== "string" || sbobetSocketBodies.length >= 2_000) return;
+        sbobetSocketBodies.push(...decodeSbobetStompBodies(frame.payload).slice(0, 64));
+      });
     });
   };
   for (const page of context.pages()) attachPage(page);
@@ -246,6 +266,19 @@ async function main(): Promise<void> {
     } else if (!ticketShapeOnly) {
       await clickSafeStructuralCategories(page).catch(() => undefined);
     }
+    if (sbobetSocketCorrelationOnly) {
+      await page.waitForTimeout(3_000);
+      for (const candidatePage of context.pages()) for (const frame of candidatePage.frames()) {
+        const publicIds = await frame.evaluate(() => [...document.querySelectorAll<HTMLElement>(
+          "[id^='wrapper-match-component-'], [id^='odd-item-']"
+        )].slice(0, 2_000).flatMap((node) => {
+          const value = node.id.replace(/^(?:wrapper-match-component-|odd-item-)/u, "");
+          const numeric = value.match(/^\d{1,40}/u)?.[0];
+          return numeric === undefined ? [] : [numeric];
+        })).catch(() => [] as string[]);
+        publicIds.forEach((id) => sbobetSocketTargets.add(id));
+      }
+    }
     let ticketShape: unknown = null;
     if (ticketShapeOnly) {
       await clickSafeStructuralCategory(page, "1", 2_000).catch(() => false);
@@ -316,6 +349,9 @@ async function main(): Promise<void> {
         return { eventId: candidate.eventId, groupKey: candidate.groupKey,
           expectedSelectionCount: candidate.selectionIds.length, foundSelectionCount, semantic };
       })) : [];
+    const sbobetSocketPublicIds = sbobetSocketCorrelationOnly
+      ? new Set(sbobetSocketBodies.flatMap((body) => extractSbobetSnapshotPublicIds(body)))
+      : new Set<string>();
     const output = ticketShapeOnly
       ? ticketShape
       : imCatalogRecordsOnly
@@ -326,6 +362,11 @@ async function main(): Promise<void> {
       ? [...sbobetMarketLabels.values()]
       : sbobetMarketDomCorrelationOnly
       ? sbobetMarketDomCorrelation
+      : sbobetSocketCorrelationOnly
+      ? { bodyCount: sbobetSocketBodies.length, targetCount: sbobetSocketTargets.size,
+        socketPublicIdCount: sbobetSocketPublicIds.size,
+        sharedSnapshotSocketIdCount: [...sbobetSocketPublicIds].filter((id) => sbobetSocketTargets.has(id)).length,
+        correlations: correlateSbobetPublicIds(sbobetSocketBodies, [...sbobetSocketTargets]) }
       : profileShapesOnly
       ? profileShapes
       : catalogNavigationOnly

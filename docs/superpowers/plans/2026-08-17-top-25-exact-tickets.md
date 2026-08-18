@@ -28,10 +28,10 @@
 - Consumes: `readonly RankedEvent[]`
 - Produces: `topRankedTicketItems(events, limit)` returning `{ event: RankedEvent; ticket: RankedTicket }[]`
 
-- [ ] **Step 1: Write the failing test** proving multiple tickets from one event are retained, ROI is descending, null/one-provider plans are excluded and the result is capped at 25.
-- [ ] **Step 2: Run `npm.cmd test --workspace @tool-chenh/web -- --run src/watch/ranked-tickets.test.ts` and verify RED because `topRankedTicketItems` is absent.**
-- [ ] **Step 3: Implement the pure flatten/filter/deduplicate/sort/slice function using `Decimal`.**
-- [ ] **Step 4: Re-run the focused test and verify GREEN.**
+- [x] **Step 1: Write the failing test** proving multiple tickets from one event are retained, ROI is descending, null/one-provider plans are excluded and the result is capped at 25.
+- [x] **Step 2: Run `npm.cmd test --workspace @tool-chenh/web -- --run src/watch/ranked-tickets.test.ts` and verify RED because `topRankedTicketItems` is absent.**
+- [x] **Step 3: Implement the pure flatten/filter/deduplicate/sort/slice function using `Decimal`.**
+- [x] **Step 4: Re-run the focused test and verify GREEN.**
 
 ### Task 2: Render ticket rows and preserve selection
 
@@ -43,19 +43,18 @@
 - Consumes: `topRankedTicketItems(rankedEvents, 25)`
 - Produces: 0–25 ticket cards; click pins the parent event and sets `highlightTicketKey` to the selected ticket.
 
-- [ ] **Step 1: Write failing page tests** proving one event can render two ticket cards, ROI order is global, only 25 cards render, and click selects the exact ticket.
-- [ ] **Step 2: Run the focused page test and verify RED under the current one-card-per-event rendering.**
-- [ ] **Step 3: Replace `displayEvents` with ticket items, derive each card summary from its exact ticket, and pass the ticket key through `watch`.**
-- [ ] **Step 4: Re-run page and ranking tests and verify GREEN.**
+- [x] **Step 1: Write failing page tests** proving one event can render two ticket cards, ROI order is global, only 25 cards render, and click selects the exact ticket.
+- [x] **Step 2: Run the focused page test and verify RED under the current one-card-per-event rendering.**
+- [x] **Step 3: Replace `displayEvents` with ticket items, derive each card summary from its exact ticket, and pass the ticket key through `watch`.**
+- [x] **Step 4: Re-run page and ranking tests and verify GREEN.**
 
 ### Task 3: Verify local and deploy
 
 **Files:**
 - No production source changes unless verification exposes a regression.
 
-- [ ] **Step 1: Run all web tests, web typecheck and web production build.**
-- [ ] **Step 2: Restart only the managed local stack required to load the new build and verify `/football-live` returns HTTP 200.**
-- [ ] **Step 3: Inspect the rendered local page for up to 25 ROI-descending exact ticket rows without invented one-book entries.**
-- [ ] **Step 4: Deploy through the existing Cloudflare Tunnel workflow and verify the public football URL returns HTTP 200.**
-- [ ] **Step 5: Record exact test counts, local/public URLs and any real-source limitation in the handoff.**
-
+- [x] **Step 1: Run all web tests, web typecheck and web production build.**
+- [x] **Step 2: Restart only the managed local stack required to load the new build and verify `/football-live` returns HTTP 200.**
+- [x] **Step 3: Inspect the rendered local page for up to 25 ROI-descending exact ticket rows without invented one-book entries.**
+- [x] **Step 4: Deploy through the existing Cloudflare Tunnel workflow and verify the public football URL returns HTTP 200.**
+- [x] **Step 5: Record exact test counts, local/public URLs and any real-source limitation in the handoff.**

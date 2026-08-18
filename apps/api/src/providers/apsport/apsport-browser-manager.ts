@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import { collectSafeControlShapes } from "../browser-protocol-inspector.js";
+import { installCatalogResourcePolicy } from "../browser-resource-policy.js";
 import { parseApsportTicketConstraint, type ApsportTicketConstraintSnapshot } from "./apsport-ticket-constraint.js";
 
 export interface ApsportIdentityEvidence {
@@ -200,6 +201,7 @@ export class PlaywrightApsportBrowserManager {
         headless: this.#headless,
         acceptDownloads: false
       });
+      await installCatalogResourcePolicy(context);
       const launcher = context.pages()[0] ?? await context.newPage();
       await launcher.goto(parsed.toString(), { waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
       const deadline = Date.now() + this.#timeoutMs;

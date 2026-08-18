@@ -50,6 +50,22 @@ afterEach(async () => {
 });
 
 describe("session routes", () => {
+  it("rejects session administration from non-loopback clients", async () => {
+    const services = await createServices();
+    const app = buildApp(createFixtureRuntime(100), { sessionServices: services });
+    apps.push(app);
+    await app.ready();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/sessions",
+      remoteAddress: "203.0.113.10",
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: "LOCAL_ACCESS_ONLY" });
+  });
+
   it("registers and resets TK88 Chrome independently without exposing profile material", async () => {
     const services = await createServices();
     const app = buildApp(createFixtureRuntime(100), { sessionServices: services });

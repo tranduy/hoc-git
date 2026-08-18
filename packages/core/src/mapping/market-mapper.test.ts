@@ -153,11 +153,31 @@ describe("mapMarkets hard gates", () => {
     expect(result.evidence.every((item) => item.passed)).toBe(true);
   });
 
+  it("verifies the exact OVER/UNDER domain for corner totals without crossing into goal totals", () => {
+    const left = footballMarket({ marketType: "CORNER_FT_TOTAL",
+      settlementProfile: "football-corners-regulation" });
+    const right = imFootballMarket({ marketType: "CORNER_FT_TOTAL",
+      settlementProfile: "football-corners-regulation" });
+    expect(mapMarkets(footballMapping, left, right).status).toBe("VERIFIED");
+    const crossed = mapMarkets(footballMapping, left,
+      imFootballMarket({ marketType: "FT_TOTAL", settlementProfile: "football-regulation-including-added-time" }));
+    expect(crossed.status).toBe("REJECTED");
+    expect(crossed.evidence.find((item) => item.gate === "sameMarketType")?.passed).toBe(false);
+  });
+
   it.each([
     [
       "full-time versus first-half",
       footballMarket({ marketType: "FT_TOTAL", scope: "FULL_TIME" }),
       imFootballMarket({ marketType: "FH_TOTAL", scope: "FIRST_HALF" }),
+      "sameScope"
+    ],
+    [
+      "second-half versus first-half",
+      footballMarket({ marketType: "SH_TOTAL", scope: "SECOND_HALF",
+        settlementProfile: "football-second-half-including-added-time" }),
+      imFootballMarket({ marketType: "FH_TOTAL", scope: "FIRST_HALF",
+        settlementProfile: "football-first-half-including-added-time" }),
       "sameScope"
     ],
     [

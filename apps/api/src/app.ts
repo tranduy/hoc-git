@@ -18,6 +18,9 @@ import type { FileBetHistory } from "./history/file-bet-history.js";
 import type { CatalogStoreLike } from "./catalog/durable-catalog-store.js";
 import { registerChromeBridgeRoute } from "./chrome-bridge/chrome-bridge-route.js";
 import type { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
+import type { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
+import { registerMaintenanceRoutes } from "./routes/maintenance.js";
+import type { SessionRefreshControl } from "./session-maintenance.js";
 
 export interface AppOptions {
   readonly viteOrigin?: string;
@@ -37,12 +40,23 @@ export interface AppOptions {
   readonly chromeBridge?: {
     readonly registry: ChromeBridgeRegistry;
     readonly installationKey: string;
+    readonly openProviderTicket?: boolean;
+    readonly controlPlane?: ChromeBridgeControlPlane;
   };
+  readonly maintenance?: SessionRefreshControl;
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
 const defaultHeartbeatIntervalMs = 15_000;
 const defaultMaxBufferedBytes = 1024 * 1024;
+const cloudflareDashboardOrigin = "https://live.babiesbo.uk";
+const logLevels = new Set(["fatal", "error", "warn", "info", "debug", "trace", "silent"]);
+
+export function resolveApiLogLevel(value: string | undefined, nodeEnvironment: string | undefined): string {
+  const normalized = value?.trim().toLocaleLowerCase("en");
+  if (normalized !== undefined && logLevels.has(normalized)) return normalized;
+  return nodeEnvironment === "test" ? "silent" : "warn";
+}
 
 export function validateViteOrigin(origin: string): string {
   let url: URL;
@@ -51,12 +65,10 @@ export function validateViteOrigin(origin: string): string {
   } catch {
     throw new Error("viteOrigin must be a local HTTP origin");
   }
-  if (
-    url.protocol !== "http:" ||
-    !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ||
-    url.origin !== origin
-  ) {
-    throw new Error("viteOrigin must be a local HTTP origin");
+  const isLoopbackOrigin = url.protocol === "http:" &&
+    ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  if (url.origin !== origin || (!isLoopbackOrigin && origin !== cloudflareDashboardOrigin)) {
+    throw new Error("viteOrigin must be a local HTTP origin or allowed dashboard origin");
   }
   return origin;
 }
@@ -92,8 +104,9 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   }
   const app = Fastify({
     bodyLimit: 32 * 1024,
+    disableRequestLogging: true,
     logger: {
-      level: process.env.NODE_ENV === "test" ? "silent" : "info",
+      level: resolveApiLogLevel(process.env.TOOL_CHENH_LOG_LEVEL, process.env.NODE_ENV),
       serializers: {
         req: safeRequestSerializer,
         res: safeResponseSerializer
@@ -149,9 +162,14 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight, options.betHistory);
   if (options.receiptProtocol !== undefined) registerReceiptProtocolRoute(app, options.receiptProtocol);
   if (options.betHistory !== undefined) registerBetHistoryRoute(app, options.betHistory);
+  if (options.maintenance !== undefined) registerMaintenanceRoutes(app, options.maintenance);
   if (options.chromeBridge !== undefined) void app.register(async (instance) => {
     registerChromeBridgeRoute(instance, options.chromeBridge!.registry, {
-      installationKey: options.chromeBridge!.installationKey
+      installationKey: options.chromeBridge!.installationKey,
+      ...(options.chromeBridge!.controlPlane === undefined ? {} : { controlPlane: options.chromeBridge!.controlPlane }),
+      ...(options.chromeBridge!.openProviderTicket === undefined
+        ? {}
+        : { openProviderTicket: options.chromeBridge!.openProviderTicket })
     });
   });
   void app.register(async (instance) => {

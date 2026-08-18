@@ -50,18 +50,17 @@ export function watchStorageKey(provider: string, providerEventId: string): stri
 }
 
 export function loadWatchEntries(storage: Storage, provider: string, providerEventId: string): readonly MatchWatchEntry[] {
-  const raw = storage.getItem(watchStorageKey(provider, providerEventId));
-  if (raw === null) return [];
-  let value: unknown;
   try {
-    value = JSON.parse(raw);
+    const raw = storage.getItem(watchStorageKey(provider, providerEventId));
+    if (raw === null) return [];
+    const value: unknown = JSON.parse(raw);
+    if (!Array.isArray(value)) return [];
+    const parsed = value.map((candidate) => parseEntry(candidate, provider, providerEventId));
+    if (parsed.some((candidate) => candidate === null)) return [];
+    return boundWatchEntries(parsed as MatchWatchEntry[]);
   } catch {
     return [];
   }
-  if (!Array.isArray(value)) return [];
-  const parsed = value.map((candidate) => parseEntry(candidate, provider, providerEventId));
-  if (parsed.some((candidate) => candidate === null)) return [];
-  return boundWatchEntries(parsed as MatchWatchEntry[]);
 }
 
 export function saveWatchEntries(
@@ -70,12 +69,20 @@ export function saveWatchEntries(
   providerEventId: string,
   entries: readonly MatchWatchEntry[]
 ): void {
-  const safe = boundWatchEntries(entries)
-    .filter((entry) => entry.provider === provider && entry.providerEventId === providerEventId)
-    .map(safeEntry);
-  storage.setItem(watchStorageKey(provider, providerEventId), JSON.stringify(safe));
+  try {
+    const safe = boundWatchEntries(entries)
+      .filter((entry) => entry.provider === provider && entry.providerEventId === providerEventId)
+      .map(safeEntry);
+    storage.setItem(watchStorageKey(provider, providerEventId), JSON.stringify(safe));
+  } catch {
+    // Monitoring must continue even when optional browser history cannot be persisted.
+  }
 }
 
 export function clearWatchEntries(storage: Storage, provider: string, providerEventId: string): void {
-  storage.removeItem(watchStorageKey(provider, providerEventId));
+  try {
+    storage.removeItem(watchStorageKey(provider, providerEventId));
+  } catch {
+    // Clearing optional history must never interrupt the live feed.
+  }
 }

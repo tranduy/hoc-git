@@ -43,14 +43,15 @@ export class SessionRateLimiter {
 const entryUrlBody = z.strictObject({ entryUrl: z.string().trim().min(1).max(2_048) });
 const trustBody = z.strictObject({ hostname: z.string().trim().min(1).max(253) });
 const fabetBody = z.strictObject({
-  entryUrl: z.string().trim().min(1).max(2_048),
-  trustedHostname: z.string().trim().min(1).max(253),
+  entryUrl: z.string().trim().min(1).max(2_048).optional(),
+  trustedHostname: z.string().trim().min(1).max(253).optional(),
   username: z.string().min(1).max(256),
   password: z.string().min(1).max(1_024)
 });
 const tk88Body = z.strictObject({ trustedHostname: z.string().trim().min(1).max(253) });
 const manualBody = z.strictObject({
   provider: z.string().trim().min(1).max(64),
+  category: z.enum(["FOOTBALL", "LOL"]).optional(),
   kind: z.enum(["TOKEN", "COOKIE_BUNDLE", "LAUNCH_URL"]),
   secret: z.string().min(1).max(24_000)
 });
@@ -86,6 +87,12 @@ export function registerSessionRoutes(
     return false;
   };
 
+  app.addHook("preHandler", async (request, reply) => {
+    if (!request.url.startsWith("/api/sessions")) return;
+    const ip = request.ip.replace(/^::ffff:/u, "");
+    if (ip !== "127.0.0.1" && ip !== "::1") await reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
+  });
+
   app.get("/api/sessions", async () => services.manager.listStatuses());
 
   app.post("/api/sessions/fabet/discover", async (request, reply) => {
@@ -116,7 +123,12 @@ export function registerSessionRoutes(
     const parsed = fabetBody.safeParse(request.body);
     if (!parsed.success) return invalid(reply);
     try {
-      return await services.manager.configureFabet(parsed.data);
+      return await services.manager.configureFabet({
+        entryUrl: "https://fabet.com/",
+        trustedHostname: "fabet.com",
+        username: parsed.data.username,
+        password: parsed.data.password,
+      });
     } catch (error) {
       return safeFailure(reply, error);
     }
@@ -127,7 +139,12 @@ export function registerSessionRoutes(
     const parsed = manualBody.safeParse(request.body);
     if (!parsed.success) return invalid(reply);
     try {
-      return await services.manager.configureManual(parsed.data);
+      return await services.manager.configureManual({
+        provider: parsed.data.provider,
+        kind: parsed.data.kind,
+        secret: parsed.data.secret,
+        ...(parsed.data.category === undefined ? {} : { category: parsed.data.category })
+      });
     } catch (error) {
       return safeFailure(reply, error);
     }

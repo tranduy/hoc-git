@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
 import { chromium, type BrowserContext, type Page, type Response } from "playwright";
+import { installCatalogResourcePolicy } from "../browser-resource-policy.js";
 import {
-  appendBoundedSbobetSocketPayload, decodeSbobetJsonBody, isSbobetResponseCandidate
+  appendBoundedSbobetSocketPayload, decodeSbobetJsonBody,
+  isSbobetResponseCandidate, isSbobetSocketUrl, nextSbobetSocketDirtyAtMs
 } from "./sbobet-stomp.js";
 import { extractSbobetDirectCatalogRecords } from "./sbobet-direct-catalog.js";
 import { parseSbobetTicketConstraint, type SbobetTicketConstraintSnapshot } from "./sbobet-ticket-constraint.js";
@@ -18,6 +20,9 @@ interface OpenSession {
   readonly eventPayloads: string[];
   readonly eventClock: { value: { readonly observedAtMs: number; readonly receivedMonotonicMs: number } | null };
   readonly eventRequest: { value: { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null };
+  readonly socketDirtyAtMs: { value: number | null };
+  readonly socketSignalAtMs: { value: number | null };
+  readonly catalog: { value: SbobetCatalogSnapshot | null };
 }
 
 export interface SbobetCatalogSnapshot {
@@ -241,12 +246,32 @@ export class PlaywrightSbobetBrowserManager {
     const context = await chromium.launchPersistentContext(join(this.#profilesRoot,
       `sbobet-${createHash("sha256").update(input.sessionId).digest("hex").slice(0, 24)}`),
     { headless: this.#headless, acceptDownloads: false });
+    await installCatalogResourcePolicy(context);
     const responseTasks = new Set<Promise<void>>();
     const eventPayloads: string[] = [];
     const eventClock = { value: null as { readonly observedAtMs: number; readonly receivedMonotonicMs: number } | null };
     const eventRequest = {
       value: null as { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null
     };
+    const socketDirtyAtMs: OpenSession["socketDirtyAtMs"] = { value: null };
+    const socketSignalAtMs: OpenSession["socketSignalAtMs"] = { value: null };
+    const catalog: OpenSession["catalog"] = { value: null };
+    const attachSocket = (page: Page): void => {
+      page.on("websocket", (socket) => {
+        if (!isSbobetSocketUrl(socket.url())) return;
+        socket.on("framereceived", () => {
+        const current = catalog.value;
+        if (current === null) return;
+        const nowMs = Date.now();
+        const next = nextSbobetSocketDirtyAtMs(socketDirtyAtMs.value, socketSignalAtMs.value, nowMs);
+        if (next === null) return;
+        socketSignalAtMs.value = nowMs;
+        socketDirtyAtMs.value = next;
+        });
+      });
+    };
+    context.pages().forEach(attachSocket);
+    context.on("page", attachSocket);
     const captureResponse = async (response: Response): Promise<void> => {
       if (response.status() !== 200 ||
         !isSbobetResponseCandidate(response.url(), response.request().resourceType())) return;
@@ -276,7 +301,7 @@ export class PlaywrightSbobetBrowserManager {
       if (found === null) throw new Error("SBOBET_CATALOG_UNAVAILABLE");
       const session = {
         context, page: found, responseTasks, eventPayloads, eventClock,
-        eventRequest
+        eventRequest, socketDirtyAtMs, socketSignalAtMs, catalog
       };
       this.#sessions.set(input.sessionId, session); return session;
     } catch { await context.close().catch(() => undefined); throw new Error("SBOBET_BROWSER_UNAVAILABLE"); }
@@ -285,7 +310,10 @@ export class PlaywrightSbobetBrowserManager {
   async #refreshDirectEvent(session: OpenSession): Promise<void> {
     const request = session.eventRequest.value;
     const clock = session.eventClock.value;
-    if (request === null || clock === null || Date.now() - clock.observedAtMs < 500) return;
+    if (request === null || clock === null || (session.socketDirtyAtMs.value === null &&
+      (Date.now() - clock.observedAtMs < 500 ||
+        (session.catalog.value !== null && Date.now() - session.catalog.value.observedAtMs < 5_000)))) return;
+    const refreshStartedAtMs = Date.now();
     try {
       const headers = Object.fromEntries(Object.entries(request.headers).filter(([name]) =>
         !/^(?:cookie|host|content-length|accept-encoding|connection|origin|referer|user-agent|sec-|:)/iu.test(name)));
@@ -304,11 +332,18 @@ export class PlaywrightSbobetBrowserManager {
         maxFrameChars: 4_000_000, maxTotalChars: 8_000_000, maxFrames: 2
       });
       session.eventClock.value = { observedAtMs: Date.now(), receivedMonotonicMs: performance.now() };
+      if (session.socketDirtyAtMs.value !== null && session.socketDirtyAtMs.value <= refreshStartedAtMs) {
+        session.socketDirtyAtMs.value = null;
+      }
     } catch { throw new Error("SBOBET_DIRECT_REFRESH_UNAVAILABLE"); }
   }
 
   async #readDirectCatalog(session: OpenSession): Promise<SbobetCatalogSnapshot> {
     await Promise.allSettled([...session.responseTasks]);
+    if (session.catalog.value !== null && session.socketDirtyAtMs.value === null &&
+      Date.now() - session.catalog.value.observedAtMs < 5_000) {
+      return session.catalog.value;
+    }
     await this.#refreshDirectEvent(session);
     const fallbackRecords = await extractSbobetRecords(session.page);
     const latest = session.eventPayloads.at(-1);
@@ -318,7 +353,9 @@ export class PlaywrightSbobetBrowserManager {
     if (body === undefined) throw new Error("SBOBET_DIRECT_CATALOG_SCHEMA_ERROR");
     const records = extractSbobetDirectCatalogRecords(body, fallbackRecords);
     if (records.length === 0) throw new Error("SBOBET_DIRECT_CATALOG_EMPTY");
-    return { records, ...clock };
+    const snapshot = { records, ...clock };
+    session.catalog.value = snapshot;
+    return snapshot;
   }
 
 }

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -37,5 +37,31 @@ describe("JsonlCatalogJournal", () => {
   it("rejects relative or non-jsonl destinations", () => {
     expect(() => new JsonlCatalogJournal("relative.jsonl")).toThrow("CATALOG_JOURNAL_PATH_INVALID");
     expect(() => new JsonlCatalogJournal(join(tmpdir(), "catalog.log"))).toThrow("CATALOG_JOURNAL_PATH_INVALID");
+  });
+
+  it("rotates at a hard size bound instead of growing forever", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tool-chenh-journal-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "logs", "catalog-changes.jsonl");
+    const journal = new JsonlCatalogJournal(path, { maxBytes: 900, maxArchives: 2 });
+
+    for (let index = 0; index < 8; index++) await journal.append([entry("ODDS_CHANGED", `0.${index}`)]);
+
+    expect((await stat(path)).size).toBeLessThanOrEqual(900);
+    expect((await stat(`${path}.1`)).size).toBeLessThanOrEqual(900);
+    expect((await stat(`${path}.2`)).size).toBeLessThanOrEqual(900);
+  });
+
+  it("deletes a legacy oversized journal instead of preserving it as a huge archive", async () => {
+    const root = await mkdtemp(join(tmpdir(), "tool-chenh-journal-"));
+    temporaryDirectories.push(root);
+    const path = join(root, "catalog-changes.jsonl");
+    await writeFile(path, "x".repeat(4_096));
+    const journal = new JsonlCatalogJournal(path, { maxBytes: 900, maxArchives: 2 });
+
+    await journal.append([entry("SNAPSHOT_ACCEPTED", null)]);
+
+    expect((await stat(path)).size).toBeLessThanOrEqual(900);
+    await expect(stat(`${path}.1`)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

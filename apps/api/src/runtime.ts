@@ -156,6 +156,11 @@ function requiredOutcomeDomain(
   if (
     marketType === "FT_TOTAL" ||
     marketType === "FH_TOTAL" ||
+    marketType === "SH_TOTAL" ||
+    marketType === "CORNER_FT_TOTAL" ||
+    marketType === "CORNER_FH_TOTAL" ||
+    marketType === "CARD_FT_TOTAL" ||
+    marketType === "CARD_FH_TOTAL" ||
     marketType === "MAP_TOTAL_KILLS" ||
     marketType === "MAP_DURATION"
   ) {
@@ -294,6 +299,8 @@ export class Runtime {
   #snapshot: AppSnapshot;
   #revision = 0;
   #started = false;
+  #batchDepth = 0;
+  readonly #batchedCategories = new Set<Category>();
 
   constructor(options: RuntimeOptions) {
     this.#adapters = [...options.adapters];
@@ -366,12 +373,115 @@ export class Runtime {
 
   #sink(adapterId: string): ProviderSink {
     return {
+      beginBatch: () => this.#beginBatch(),
       onEvent: (event) => this.#onEvent(adapterId, event),
       onMarket: (market) => this.#onMarket(adapterId, market),
       onQuoteUpdate: (update) => this.#onQuoteUpdate(adapterId, update),
       onStatus: (status) => this.#onStatus(adapterId, status),
-      onSchemaError: (error) => this.#onSchemaError(error, adapterId)
+      onSchemaError: (error) => this.#onSchemaError(error, adapterId),
+      endBatch: () => this.#endBatch()
     };
+  }
+
+  #beginBatch(): void {
+    this.#batchDepth += 1;
+  }
+
+  #endBatch(): void {
+    if (this.#batchDepth === 0) return;
+    this.#batchDepth -= 1;
+    if (this.#batchDepth > 0) return;
+    for (const category of this.#batchedCategories) {
+      this.#rebuildActiveCategory(category);
+      this.#rebuildCategory(category);
+    }
+    this.#batchedCategories.clear();
+    this.#evaluateMarkets();
+    this.#publish();
+  }
+
+  #deferBatch(identity: Pick<ProviderEvent, "provider" | "category" | "providerEventId">): boolean {
+    if (this.#batchDepth === 0) return false;
+    this.#batchedCategories.add(identity.category);
+    return true;
+  }
+
+  #rebuildActiveCategory(category: Category): void {
+    const candidatesByEvent = new Map<string, Array<{
+      readonly owner: string;
+      readonly event: ProviderEvent;
+      readonly completeMarketCount: number;
+      readonly markets: readonly ProviderMarket[];
+    }>>();
+
+    for (const [owner, events] of this.#eventsByAdapter) {
+      if (this.#isQuarantined(owner, category)) continue;
+      const markets = [...(this.#marketsByAdapter.get(owner)?.values() ?? [])]
+        .filter((market) => market.category === category);
+      const marketsByEvent = new Map<string, ProviderMarket[]>();
+      for (const market of markets) {
+        const key = providerEventKey(market);
+        const values = marketsByEvent.get(key) ?? [];
+        values.push(market);
+        marketsByEvent.set(key, values);
+      }
+      const quotesByMarket = new Map<string, ProviderQuote[]>();
+      for (const quote of this.#quotesByAdapter.get(owner)?.values() ?? []) {
+        if (quote.category !== category) continue;
+        const key = providerMarketKey(quote);
+        const values = quotesByMarket.get(key) ?? [];
+        values.push(quote);
+        quotesByMarket.set(key, values);
+      }
+      for (const event of events.values()) {
+        if (event.category !== category) continue;
+        const normalized = normalizedEvent(event, this.#mappingPolicy);
+        const eventMarkets = marketsByEvent.get(providerEventKey(event)) ?? [];
+        let completeMarketCount = 0;
+        for (const market of eventMarkets) {
+          const required = requiredOutcomeDomain(market.marketType, normalized);
+          if (required === null || market.status !== "OPEN") continue;
+          const marketQuotes = quotesByMarket.get(providerMarketKey(market)) ?? [];
+          const outcomes = marketQuotes
+            .filter((quote) => quote.marketType === market.marketType && quote.scope === market.scope &&
+              quote.line === market.line && quote.status === "OPEN" && quote.isLive === event.isLive)
+            .map((quote) => canonicalOutcome(quote, normalized));
+          const uniqueOutcomes = new Set(outcomes);
+          if (outcomes.length === required.length && !outcomes.includes(null) &&
+            uniqueOutcomes.size === outcomes.length && required.every((outcome) => uniqueOutcomes.has(outcome))) {
+            completeMarketCount += 1;
+          }
+        }
+        const key = providerEventKey(event);
+        const values = candidatesByEvent.get(key) ?? [];
+        values.push({ owner, event, completeMarketCount, markets: eventMarkets });
+        candidatesByEvent.set(key, values);
+      }
+    }
+
+    for (const [key, event] of this.#events) {
+      if (event.category === category) {
+        this.#events.delete(key);
+        this.#activeEventAdapters.delete(key);
+      }
+    }
+    for (const [key, market] of this.#markets) {
+      if (market.category === category) {
+        this.#markets.delete(key);
+        this.#activeMarketAdapters.delete(key);
+      }
+    }
+    for (const [eventKey, candidates] of candidatesByEvent) {
+      const selected = candidates.sort((left, right) =>
+        right.completeMarketCount - left.completeMarketCount || compareText(left.owner, right.owner))[0]!;
+      this.#events.set(eventKey, selected.event);
+      this.#activeEventAdapters.set(eventKey, selected.owner);
+      for (const market of selected.markets) {
+        const marketKey = providerMarketKey(market);
+        this.#markets.set(marketKey, market);
+        this.#activeMarketAdapters.set(marketKey, selected.owner);
+      }
+    }
   }
 
   #onEvent(adapterId: string, event: ProviderEvent): void {
@@ -379,6 +489,7 @@ export class Runtime {
     const adapterEvents = this.#eventsByAdapter.get(adapterId) ?? new Map<string, ProviderEvent>();
     adapterEvents.set(providerEventKey(event), event);
     this.#eventsByAdapter.set(adapterId, adapterEvents);
+    if (this.#deferBatch(event)) return;
     this.#reconcileEvent(event, adapterId);
     this.#publish();
   }
@@ -389,6 +500,7 @@ export class Runtime {
     const adapterMarkets = this.#marketsByAdapter.get(adapterId) ?? new Map<string, ProviderMarket>();
     adapterMarkets.set(key, market);
     this.#marketsByAdapter.set(adapterId, adapterMarkets);
+    if (this.#deferBatch(market)) return;
     this.#reconcileEvent(market, adapterId, key);
     this.#publish();
   }
@@ -407,6 +519,10 @@ export class Runtime {
         canonicalMarketId: null,
         reason: "quote update was rejected"
       });
+      if (this.#batchDepth > 0) {
+        this.#batchedCategories.add(update.source.category);
+        return;
+      }
       this.#evaluateMarkets();
       this.#publish();
       return;
@@ -424,6 +540,7 @@ export class Runtime {
       adapterQuotes.set(key, quote);
     }
     this.#quotesByAdapter.set(adapterId, adapterQuotes);
+    if (this.#deferBatch(first)) return;
     this.#reconcileEvent(first, adapterId, marketKey);
     this.#publish();
   }
@@ -435,6 +552,7 @@ export class Runtime {
       adapterId,
       detail: status.detail === null ? null : "provider status update"
     });
+    if (this.#batchDepth > 0) return;
     this.#publish();
   }
 
@@ -590,10 +708,14 @@ export class Runtime {
       .map((event) => normalizedEvent(event, this.#mappingPolicy));
     const eventCandidates: EventCandidate[] = [];
     const sourcePairs = new Set<string>();
-    for (const left of normalized) {
-      for (const right of normalized) {
-        if (left.category !== right.category || compareText(left.provider, right.provider) >= 0) continue;
-        sourcePairs.add(composite([left.category, left.provider, right.provider]));
+    const providers = [...new Set(normalized.map((event) => event.provider))].sort(compareText);
+    for (let leftIndex = 0; leftIndex < providers.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < providers.length; rightIndex += 1) {
+        sourcePairs.add(composite([
+          categoryToRebuild,
+          providers[leftIndex]!,
+          providers[rightIndex]!
+        ]));
       }
     }
     for (const sourcePair of [...sourcePairs].sort(compareText)) {

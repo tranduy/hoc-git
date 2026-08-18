@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AccountApi } from "./accounts.js";
 
 const account = {
@@ -17,6 +17,21 @@ const account = {
 };
 
 describe("AccountApi", () => {
+  it("aborts a hung account status request without blocking catalog monitoring", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }));
+      const request = new AccountApi(fetcher as typeof fetch, 1_000).list();
+      const outcome = expect(request).rejects.toThrow("Account request timed out");
+      await vi.advanceTimersByTimeAsync(1_000);
+      await outcome;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("validates account lists and refresh responses at the HTTP boundary", async () => {
     const calls: string[] = [];
     const api = new AccountApi(async (input) => {

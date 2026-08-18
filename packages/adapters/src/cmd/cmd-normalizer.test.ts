@@ -3,6 +3,14 @@ import { describe, expect, it } from "vitest";
 import { normalizeCmdCatalog, normalizeObservedFootballCatalog, type CmdCatalogInputRecord } from "./cmd-normalizer.js";
 
 describe("normalizeCmdCatalog", () => {
+  it("accepts correctly decoded live labels from provider DOM snapshots", () => {
+    for (const timeText of ["TRỰC TIẾP", "LIVE"]) {
+      const result = normalizeCmdCatalog([{ ...record, timeText }], {
+        observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 1, timezoneOffsetMinutes: 480, sequence: 1
+      });
+      expect(result.events[0]).toMatchObject({ isLive: true });
+    }
+  });
   const record = {
     sportId: "1" as const,
     leagueId: "league-1",
@@ -36,7 +44,7 @@ describe("normalizeCmdCatalog", () => {
     ]
   };
 
-  it("normalizes only exact full-time total and 1X2 markets", () => {
+  it("normalizes only exact full-time two-way markets and excludes 1X2", () => {
     const result = normalizeCmdCatalog([record], {
       observedAtMs: Date.UTC(2026, 7, 9),
       receivedMonotonicMs: 500,
@@ -50,14 +58,11 @@ describe("normalizeCmdCatalog", () => {
       startAtUtcMs: Date.UTC(2026, 7, 16, 19, 30)
     }));
     expect(result.markets.map((market) => [market.marketType, market.line])).toEqual([
-      ["FT_TOTAL", "2.5"], ["FT_1X2", null]
+      ["FT_TOTAL", "2.5"]
     ]);
     expect(result.quotes.map((quote) => [quote.marketType, quote.selection, quote.rawOdds, quote.rawFormat])).toEqual([
       ["FT_TOTAL", "OVER", "0.84", "MALAY"],
-      ["FT_TOTAL", "UNDER", "-0.92", "MALAY"],
-      ["FT_1X2", "HOME", "2.10", "DECIMAL"],
-      ["FT_1X2", "DRAW", "3.20", "DECIMAL"],
-      ["FT_1X2", "AWAY", "3.40", "DECIMAL"]
+      ["FT_TOTAL", "UNDER", "-0.92", "MALAY"]
     ]);
     expect(result.events.every((event) => ProviderEventSchema.safeParse(event).success)).toBe(true);
     expect(result.markets.every((market) => ProviderMarketSchema.safeParse(market).success)).toBe(true);
@@ -74,12 +79,12 @@ describe("normalizeCmdCatalog", () => {
     expect(new Set(result.quotes.map((quote) => quote.provider))).toEqual(new Set(["SABA"]));
   });
 
-  it("marks obvious Soccer Marble/PG feeds as virtual instead of real football", () => {
+  it("excludes obvious Soccer Marble/PG feeds", () => {
     const result = normalizeCmdCatalog([{ ...record, leagueName: "SABA INTERNATIONAL FRIENDLY Virtual PES 23 - PENALTY SHOOTOUTS",
       teamNames: ["Hy Lạp (V) (Luân Lưu)", "Trung Quốc (V) (Luân Lưu)"] }], {
       observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 500, timezoneOffsetMinutes: 420, sequence: 7
     });
-    expect(result.events[0]).toMatchObject({ isVirtual: true, sportVariant: "VIRTUAL_FOOTBALL" });
+    expect(result).toEqual({ events: [], markets: [], quotes: [], diagnostics: ["CMD_CATALOG_EVENT_UNSUPPORTED"] });
   });
 
   it("converts split totals to a canonical quarter line and suspends greyed markets", () => {
@@ -142,6 +147,38 @@ describe("normalizeCmdCatalog", () => {
     }));
   });
 
+  it("accepts the current CMD today-list 24-hour time with its Live badge text", () => {
+    const today = { ...record, timeText: "22:00Live", groups: [record.groups[1]!] };
+    const result = normalizeCmdCatalog([today], {
+      observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 1
+    });
+    expect(result.events[0]).toEqual(expect.objectContaining({
+      isLive: false,
+      startAtUtcMs: Date.UTC(2026, 7, 15, 14)
+    }));
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  it("keeps valid markets when another market in the same event is invalid", () => {
+    const mixed: CmdCatalogInputRecord = { ...structuredClone(record), groups: [
+      {
+        betTypeIds: ["1"], labels: ["0"], odds: [
+          { marketOddsId: "invalid-ah", priceText: "0.80", status: null, greyedOut: "false", lineText: "0" },
+          { marketOddsId: "invalid-ah", priceText: "-0.90", status: null, greyedOut: "false", lineText: null }
+        ]
+      },
+      structuredClone(record.groups[1]!)
+    ] };
+    const result = normalizeCmdCatalog([mixed], {
+      observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 1
+    });
+    expect(result.events).toHaveLength(1);
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_TOTAL", line: "2.5" })]);
+    expect(result.diagnostics).toContain("CMD_CATALOG_MARKET_REJECTED");
+  });
+
   it("fails closed on missing participants, invalid times, mismatched IDs, or malformed odds", () => {
     const cases = [
       { ...record, teamNames: ["Alpha FC"] },
@@ -158,5 +195,24 @@ describe("normalizeCmdCatalog", () => {
         observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
       })).toEqual({ events: [], markets: [], quotes: [], diagnostics: [expect.any(String)] });
     }
+  });
+
+  it("publishes only non-virtual full-time two-way quarter, half, or three-quarter lines", () => {
+    const filtered = structuredClone(record);
+    filtered.groups.push({
+      betTypeIds: ["3"], labels: ["3"], odds: [
+        { marketOddsId: "integer", priceText: "0.8", status: null, greyedOut: "false" },
+        { marketOddsId: "integer", priceText: "-0.9", status: null, greyedOut: "false" }
+      ]
+    });
+    const result = normalizeCmdCatalog([filtered], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
+    });
+    expect(result.markets.map(({ marketType, line }) => [marketType, line])).toEqual([["FT_TOTAL", "2.5"]]);
+
+    const virtual = normalizeCmdCatalog([{ ...filtered, leagueName: "Virtual Football", teamNames: ["A (V)", "B (V)"] }], {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 2
+    });
+    expect(virtual).toEqual({ events: [], markets: [], quotes: [], diagnostics: ["CMD_CATALOG_EVENT_UNSUPPORTED"] });
   });
 });

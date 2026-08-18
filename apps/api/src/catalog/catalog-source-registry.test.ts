@@ -12,6 +12,7 @@ function session(input: Partial<RedactedSessionStatus> & Pick<RedactedSessionSta
     acquiredAtMs: 100,
     lastValidatedAtMs: 100,
     renewAfterMs: 1_000,
+    nextRetryAtMs: null,
     secretConfigured: true,
     reason: null,
     ...input
@@ -187,5 +188,24 @@ describe("CatalogSourceRegistry", () => {
     ]);
     await value.resolveCatalogSource("catalog-source:SABA:FOOTBALL");
     expect(listCalls).toBe(1);
+  });
+
+  it("can invalidate cached session state before maintenance verifies refreshed sources", async () => {
+    let sessions = [session({ id: "saba", provider: "SABA", category: "FOOTBALL" })];
+    const value = new CatalogSourceRegistry({
+      sessions: {
+        listStatuses: async (): Promise<SessionStatusList> => ({ sessions }),
+        getActiveSecretHandle: async () => null
+      },
+      accounts: registry([]).accounts,
+      supportedPairs: [{ provider: "SABA", category: "FOOTBALL", alias: "SABA" }]
+    });
+    expect((await value.listStatuses())[0]?.sessionState).toBe("ACTIVE");
+    sessions = [session({ id: "saba", provider: "SABA", category: "FOOTBALL",
+      state: "ACTION_REQUIRED", reason: "EXPIRED" })];
+
+    value.invalidateSessionCache();
+
+    expect((await value.listStatuses())[0]).toMatchObject({ sessionState: "ACTION_REQUIRED", reason: "EXPIRED" });
   });
 });

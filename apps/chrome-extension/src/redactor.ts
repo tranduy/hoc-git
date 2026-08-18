@@ -1,7 +1,9 @@
 const MAX_PAYLOAD_BYTES = 256 * 1024;
+const MAX_NETWORK_BODY_BYTES = 24 * 1024 * 1024;
 
 const SECRET_KEY = /(?:authorization|cookie|loginname|operator.?token|password|secret|session|token|api.?key)/iu;
 const DROP_CONTAINER = /^(?:headers?|cookies?)$/iu;
+const ABBREVIATED_IM_TOKEN = /^\d+-[a-f\d]{24,}$/iu;
 
 export type RedactedNetworkEnvelope = Record<string, unknown>;
 
@@ -43,7 +45,8 @@ function redactValue(value: unknown, seen: WeakSet<object>): unknown {
 
   const result: Record<string, unknown> = {};
   for (const [key, nestedValue] of Object.entries(value)) {
-    if (SECRET_KEY.test(key) || DROP_CONTAINER.test(key)) continue;
+    if (SECRET_KEY.test(key) || DROP_CONTAINER.test(key) ||
+      (key === "t" && typeof nestedValue === "string" && ABBREVIATED_IM_TOKEN.test(nestedValue))) continue;
     if (/url$/iu.test(key) && typeof nestedValue === "string") {
       const sanitized = sanitizeUrl(nestedValue);
       if (sanitized) {
@@ -76,4 +79,16 @@ export function redactNetworkEnvelope(value: unknown): RedactedNetworkEnvelope {
   }
   if (serializedBytes(redacted) > MAX_PAYLOAD_BYTES) throw new Error("BRIDGE_PAYLOAD_TOO_LARGE");
   return redacted as RedactedNetworkEnvelope;
+}
+
+export function redactNetworkBody(body: string): string {
+  if (new TextEncoder().encode(body).byteLength > MAX_NETWORK_BODY_BYTES) {
+    throw new Error("BRIDGE_PAYLOAD_TOO_LARGE");
+  }
+  try {
+    return JSON.stringify(redactValue(JSON.parse(body) as unknown, new WeakSet<object>()));
+  } catch (error) {
+    if (error instanceof Error && error.message === "BRIDGE_PAYLOAD_INVALID") throw error;
+    return body.replace(/([?&](?:token|session|operatorToken|loginname)=)[^&#\s]*/giu, "$1[REDACTED]");
+  }
 }

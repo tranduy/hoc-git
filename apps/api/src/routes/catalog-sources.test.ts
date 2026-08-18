@@ -4,6 +4,73 @@ import type { CatalogSourceStatus } from "@tool-chenh/contracts";
 import { registerCatalogSourceRoutes } from "./catalog-sources.js";
 
 describe("catalog source routes", () => {
+  it("drops a permanently hung refresh so a later status read can recover", async () => {
+    const app = Fastify();
+    const active: CatalogSourceStatus = {
+      id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 200, reason: null
+    };
+    let calls = 0;
+    const listStatuses = async (): Promise<readonly CatalogSourceStatus[]> => {
+      calls += 1;
+      return calls === 1 ? new Promise(() => undefined) : [active];
+    };
+    registerCatalogSourceRoutes(app, { listStatuses }, { initialTimeoutMs: 5, refreshTimeoutMs: 10 });
+
+    expect((await app.inject({ method: "GET", url: "/api/catalog/sources" })).statusCode).toBe(503);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const recovered = await app.inject({ method: "GET", url: "/api/catalog/sources" });
+    expect(recovered.statusCode).toBe(200);
+    expect(recovered.json()).toEqual({ sources: [active] });
+    expect(calls).toBe(2);
+    await app.close();
+  });
+
+  it("serves the last verified source list immediately while a slow refresh runs", async () => {
+    const app = Fastify();
+    let calls = 0;
+    let releaseRefresh!: (value: readonly CatalogSourceStatus[]) => void;
+    const active: CatalogSourceStatus = {
+      id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 200, reason: null
+    };
+    registerCatalogSourceRoutes(app, {
+      listStatuses: async () => {
+        calls += 1;
+        if (calls === 1) return [active];
+        return new Promise((resolve) => { releaseRefresh = resolve; });
+      }
+    }, { cacheTtlMs: 0, initialTimeoutMs: 20 });
+
+    expect((await app.inject({ method: "GET", url: "/api/catalog/sources" })).statusCode).toBe(200);
+    const startedAt = performance.now();
+    const response = await app.inject({ method: "GET", url: "/api/catalog/sources" });
+    expect(performance.now() - startedAt).toBeLessThan(20);
+    expect(response.json()).toEqual({ sources: [active] });
+    expect(calls).toBe(2);
+    releaseRefresh!([active]);
+    await app.close();
+  });
+
+  it("bounds the cold-start wait without cancelling the shared refresh", async () => {
+    const app = Fastify();
+    let release!: (value: readonly CatalogSourceStatus[]) => void;
+    const active: CatalogSourceStatus = {
+      id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 200, reason: null
+    };
+    registerCatalogSourceRoutes(app, {
+      listStatuses: async () => new Promise((resolve) => { release = resolve; })
+    }, { initialTimeoutMs: 5 });
+
+    const response = await app.inject({ method: "GET", url: "/api/catalog/sources" });
+    expect(response.statusCode).toBe(503);
+    release!([active]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((await app.inject({ method: "GET", url: "/api/catalog/sources" })).json()).toEqual({ sources: [active] });
+    await app.close();
+  });
+
   it("returns only strict redacted logical source statuses", async () => {
     const app = Fastify();
     registerCatalogSourceRoutes(app, { listStatuses: async () => [{

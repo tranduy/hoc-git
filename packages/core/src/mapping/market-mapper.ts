@@ -212,12 +212,24 @@ function validScopeFor(category: NormalizedMarket["category"], marketType: Marke
       : ["SERIES", "MAP_1", "MAP_2", "MAP_3", "MAP_4", "MAP_5"];
   }
 
-  if (marketType.startsWith("FT_")) {
+  if (
+    marketType.startsWith("FT_") ||
+    marketType.startsWith("CORNER_FT_") ||
+    marketType.startsWith("CARD_FT_")
+  ) {
     return category === "FOOTBALL" ? ["FULL_TIME"] : [];
   }
 
-  if (marketType.startsWith("FH_")) {
+  if (
+    marketType.startsWith("FH_") ||
+    marketType.startsWith("CORNER_FH_") ||
+    marketType.startsWith("CARD_FH_")
+  ) {
     return category === "FOOTBALL" ? ["FIRST_HALF"] : [];
+  }
+
+  if (marketType === "SH_AH" || marketType === "SH_TOTAL") {
+    return category === "FOOTBALL" ? ["SECOND_HALF"] : [];
   }
 
   if (marketType === "SERIES_WINNER") {
@@ -410,6 +422,11 @@ function expectedOutcomeDomain(
   if (
     marketType === "FT_TOTAL" ||
     marketType === "FH_TOTAL" ||
+    marketType === "SH_TOTAL" ||
+    marketType === "CORNER_FT_TOTAL" ||
+    marketType === "CORNER_FH_TOTAL" ||
+    marketType === "CARD_FT_TOTAL" ||
+    marketType === "CARD_FH_TOTAL" ||
     marketType === "MAP_TOTAL_KILLS" ||
     marketType === "MAP_DURATION"
   ) {

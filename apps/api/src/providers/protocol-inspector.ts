@@ -189,9 +189,12 @@ export function extractReadOnlyApiPathTemplates(source: string): readonly string
 }
 
 function pathTemplate(pathname: string): string {
-  return pathname.split("/").map((segment) => {
+  const segments = pathname.split("/");
+  return segments.map((segment, index) => {
     let decoded: string;
     try { decoded = decodeURIComponent(segment); } catch { decoded = segment; }
+    const parent = segments[index - 1]?.toLowerCase();
+    if (["u", "user", "s", "session", "token", "auth"].includes(parent ?? "") && decoded.length > 0) return ":secret";
     if (/^\(S\([^)]{8,}\)\)$/u.test(decoded)) return ":session";
     if (/^\d+$/u.test(decoded) || /^[a-f0-9-]{16,}$/iu.test(decoded) || /^[A-Za-z0-9_-]{24,}$/u.test(decoded)) return ":id";
     return encodeURIComponent(decoded).replace(/%2F/giu, "%252F");

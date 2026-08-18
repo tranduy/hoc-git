@@ -19,7 +19,9 @@ const ticket: PreflightTicket = { ticketId: "ticket-1", opportunityId: "opp-1",
 describe("two-leg preflight route", () => {
   it("returns READY_BOTH only with a valid signed ticket", async () => {
     const app = Fastify();
-    registerTwoLegPreflightRoutes(app, { preflight: async () => ticket });
+    registerTwoLegPreflightRoutes(app, { preflight: async () => ticket }, {
+      recordPreflight: async () => { throw new Error("disk unavailable"); }
+    });
     const response = await app.inject({ method: "POST", url: "/api/preflight", payload: request });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ status: "READY_BOTH", ticket });

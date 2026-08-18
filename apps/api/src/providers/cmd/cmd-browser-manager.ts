@@ -13,6 +13,7 @@ import {
   readProviderAccountStore
 } from "../browser-protocol-inspector.js";
 import type { CmdIdentitySignals } from "../browser-protocol-inspector.js";
+import { installCatalogResourcePolicy } from "../browser-resource-policy.js";
 import type { CmdAccountStoreSource } from "./cmd-profile-reader.js";
 import type { CmdCatalogRecordReader } from "./cmd-catalog-source.js";
 import { parseCmdTicketConstraint, type CmdTicketConstraintSnapshot } from "./cmd-ticket-constraint.js";
@@ -48,6 +49,12 @@ export interface StableFootballCatalogProbe {
   wait(delayMs: number): Promise<void>;
 }
 
+export interface CmdFootballCatalogSnapshot {
+  readonly records: readonly CmdCatalogInputRecord[];
+  readonly observedAtMs: number;
+  readonly receivedMonotonicMs: number;
+}
+
 export async function readStableCmdAccountStore(probe: {
   read(): Promise<unknown>;
   wait(delayMs: number): Promise<void>;
@@ -80,17 +87,20 @@ const defaultStableFootballCatalogOptions: StableFootballCatalogOptions = {
   stableSampleCount: 2
 };
 
-function focusedHandicapRecords(records: readonly CmdCatalogInputRecord[]): readonly CmdCatalogInputRecord[] {
+const focusedTwoWayBetTypes = new Set(["1", "3"]);
+
+function focusedTwoWayRecords(records: readonly CmdCatalogInputRecord[]): readonly CmdCatalogInputRecord[] {
   return records.filter((record) => {
     const evidence = `${record.leagueName} ${record.teamNames.join(" ")}`.normalize("NFKC").toLocaleLowerCase("en");
     return !/(?:soccer marble|e[\s-]?soccer|\bvirtual\b|simulated reality|spinner world cup|\bpes\b|áº£o|Ä‘iá»‡n tá»­)/u.test(evidence);
   }).map((record) => ({
     ...record,
-    groups: record.groups.filter((group) => group.betTypeIds.length === 1 && group.betTypeIds[0] === "1")
+    groups: record.groups.filter((group) =>
+      group.betTypeIds.length === 1 && focusedTwoWayBetTypes.has(group.betTypeIds[0] ?? ""))
   }));
 }
 
-function hasUsableHandicap(records: readonly CmdCatalogInputRecord[]): boolean {
+function hasUsableTwoWayMarket(records: readonly CmdCatalogInputRecord[]): boolean {
   return records.some((record) => record.matchId.length > 0 && record.teamNames.length === 2 &&
     record.groups.some((group) => group.odds.length === 2 && group.odds.every((odd) =>
       odd.marketOddsId.length > 0 && odd.priceText.length > 0)));
@@ -121,15 +131,15 @@ export async function readStableFootballCatalog(
     !Number.isSafeInteger(options.stableSampleCount) || options.stableSampleCount < 2) {
     throw new Error("CMD_CATALOG_OPTIONS_INVALID");
   }
-  let records = focusedHandicapRecords(await probe.read());
-  if (!hasUsableHandicap(records)) await probe.select();
+  let records = focusedTwoWayRecords(await probe.read());
+  if (!hasUsableTwoWayMarket(records)) await probe.select();
   let previousFingerprint: string | null = options.trustedStructuralFingerprint ?? null;
   let stableSamples = previousFingerprint === null ? 0 : options.stableSampleCount - 1;
   let fallback: readonly CmdCatalogInputRecord[] = [];
   const attempts = Math.ceil(options.maxWaitMs / options.pollingIntervalMs) + 1;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (records.length > 0) fallback = records;
-    if (hasUsableHandicap(records)) {
+    if (hasUsableTwoWayMarket(records)) {
       const fingerprint = catalogStructuralFingerprint(records);
       stableSamples = fingerprint === previousFingerprint ? stableSamples + 1 : 1;
       previousFingerprint = fingerprint;
@@ -140,7 +150,7 @@ export async function readStableFootballCatalog(
     }
     if (attempt + 1 < attempts) {
       await probe.wait(options.pollingIntervalMs);
-      records = focusedHandicapRecords(await probe.read());
+      records = focusedTwoWayRecords(await probe.read());
     }
   }
   if (fallback.length > 0) return fallback;
@@ -152,7 +162,7 @@ export async function readCmdFootballCatalog(
   trustedStructuralFingerprint?: string
 ): Promise<readonly CmdCatalogInputRecord[]> {
   return readStableFootballCatalog({
-    read: async () => extractCmdCatalogRecords(page, 500, "1", ["1"]),
+    read: async () => extractCmdCatalogRecords(page, 500, "1", ["1", "3"]),
     select: async () => clickSafeStructuralCategory(page, "1", 0),
     wait: async (delayMs) => page.waitForTimeout(delayMs)
   }, {
@@ -253,6 +263,19 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
     return isVerifiedCmdFootballIdentity(signals);
   }
 
+  async readCatalogFromPage(page: Page): Promise<CmdFootballCatalogSnapshot> {
+    if (page.isClosed()) throw new Error("CMD_CATALOG_UNAVAILABLE");
+    const deadline = Date.now() + this.#startupTimeoutMs;
+    let signals: CmdIdentitySignals = { runtime: false, football: false, esports: false, cmdBundle: false };
+    while (!isVerifiedCmdFootballIdentity(signals) && Date.now() < deadline) {
+      signals = mergeIdentitySignals(signals, await collectCmdIdentitySignals(page));
+      if (!isVerifiedCmdFootballIdentity(signals)) await page.waitForTimeout(100);
+    }
+    if (!isVerifiedCmdFootballIdentity(signals)) throw new Error("CMD_CATALOG_SCHEMA_ERROR");
+    const records = await readCmdFootballCatalog(page);
+    return { records, observedAtMs: Date.now(), receivedMonotonicMs: performance.now() };
+  }
+
   async inspectLaunchIdentity(launchUrl: string): Promise<CmdIdentitySignals> {
     const sessionId = `identity-${createHash("sha256").update(launchUrl).digest("hex").slice(0, 24)}`;
     const safeUrl = validateCmdLaunchUrl(launchUrl);
@@ -262,6 +285,7 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
         join(this.#profilesRoot, cmdProfileDirectoryName(sessionId)),
         { headless: this.#headless, acceptDownloads: false }
       );
+      await installCatalogResourcePolicy(context);
       const launcher = context.pages()[0] ?? await context.newPage();
       await launcher.goto(safeUrl, { waitUntil: "domcontentloaded", timeout: this.#startupTimeoutMs });
       const deadline = Date.now() + this.#startupTimeoutMs;
@@ -371,6 +395,7 @@ export class PlaywrightCmdBrowserManager implements CmdAccountStoreSource, CmdCa
         join(this.#profilesRoot, cmdProfileDirectoryName(input.sessionId)),
         { headless: this.#headless, acceptDownloads: false }
       );
+      await installCatalogResourcePolicy(context);
       const launcher = context.pages()[0] ?? await context.newPage();
       await launcher.goto(launchUrl, { waitUntil: "domcontentloaded", timeout: this.#startupTimeoutMs });
       const deadline = Date.now() + this.#startupTimeoutMs;

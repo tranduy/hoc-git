@@ -27,6 +27,22 @@ describe("lobby tab recognition", () => {
     expect(recognizeLobbyTab({ id: 2, url: "https://imsports.directsb.net.evil.test/", title: "Sports" })).toBeNull();
   });
 
+  it("recognizes a rotated SABA launch host without accepting a suffix lookalike", () => {
+    expect(recognizeLobbyTab({ id: 3, url: "https://c0z0ob.bpd3a3fn.com/sports?token=opaque" })?.lobby).toBe("SABA");
+    expect(recognizeLobbyTab({ id: 5, url: "https://c0z0ob.bp7xvs95.com/sports?token=opaque" })?.lobby).toBe("SABA");
+    expect(recognizeLobbyTab({ id: 4, url: "https://c0z0ob.bpd3a3fn.com.evil.test/" })).toBeNull();
+    expect(recognizeLobbyTab({ id: 6, url: "https://c0z0ob.bp7xvs95.com.evil.test/" })).toBeNull();
+  });
+
+  it("recognizes the current APSPORT launch host", () => {
+    expect(recognizeLobbyTab({ id: 7, url: "https://sport.asportsb.com/sports?token=opaque" })?.lobby)
+      .toBe("TSPORT");
+    expect(recognizeLobbyTab({ id: 8, url: "https://pacific.racern.com/sports?token=opaque" })?.lobby)
+      .toBe("TSPORT");
+    expect(recognizeLobbyTab({ id: 9, url: "https://pacific.racern.com.evil.test/sports" }))
+      .toBeNull();
+  });
+
   it("requires traffic markers before a domain candidate becomes trusted", () => {
     const candidate = recognizeLobbyTab({ id: 17, url: "https://imsports.directsb.net/", title: "Sports" });
     expect(candidate?.confidence).toBe("CANDIDATE");

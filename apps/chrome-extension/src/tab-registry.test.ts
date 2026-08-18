@@ -56,4 +56,30 @@ describe("TabRegistry", () => {
     expect(attach).toHaveBeenCalledWith(7);
     expect(JSON.stringify(save.mock.calls)).not.toContain("secret");
   });
+
+  it("adopts a recognized provider tab on startup even when Chrome assigned it a new tab id", async () => {
+    const { registry, attach } = createRegistry();
+
+    await registry.restore([{ id: 99, url: "https://prod20091.fxf774.com/live" }]);
+
+    expect(registry.list()).toMatchObject([{ lobby: "BTI", tabId: 99 }]);
+    expect(attach).toHaveBeenCalledWith(99);
+  });
+
+  it("continues restoring healthy preferred tabs when one debugger attachment fails", async () => {
+    const attach = vi.fn(async (tabId: number) => {
+      if (tabId === 7) throw new Error("Another debugger is already attached");
+    });
+    const registry = new TabRegistry(
+      { attach, detach: vi.fn(async () => undefined) },
+      { load: async () => ({ "7": "IM", "8": "CMD" }), save: vi.fn(async () => undefined) }
+    );
+
+    await expect(registry.restore([
+      { id: 7, url: "https://imsports.directsb.net/live" },
+      { id: 8, url: "https://cgnew.fts368.com/" }
+    ])).resolves.toMatchObject([{ lobby: "CMD", tabId: 8 }]);
+    expect(attach).toHaveBeenCalledWith(7);
+    expect(attach).toHaveBeenCalledWith(8);
+  });
 });

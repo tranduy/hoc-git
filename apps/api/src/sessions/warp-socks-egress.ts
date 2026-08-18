@@ -36,6 +36,8 @@ interface WarpSocksAuthEgressOptions {
   readonly leasePath: string;
   readonly ownerPid?: number;
   readonly isProcessAlive?: (pid: number) => boolean;
+  readonly readinessPollMs?: number;
+  readonly readinessTimeoutMs?: number;
 }
 
 function defaultIsProcessAlive(pid: number): boolean {
@@ -74,6 +76,8 @@ export class WarpSocksAuthEgress implements AuthEgress {
   readonly #leasePath: string;
   readonly #ownerPid: number;
   readonly #isProcessAlive: (pid: number) => boolean;
+  readonly #readinessPollMs: number;
+  readonly #readinessTimeoutMs: number;
   #activeLeases = 0;
   #original: WarpStatus | null = null;
   #operation: Promise<void> = Promise.resolve();
@@ -87,13 +91,22 @@ export class WarpSocksAuthEgress implements AuthEgress {
     this.#leasePath = options.leasePath;
     this.#ownerPid = options.ownerPid ?? process.pid;
     this.#isProcessAlive = options.isProcessAlive ?? defaultIsProcessAlive;
+    this.#readinessPollMs = options.readinessPollMs ?? 250;
+    this.#readinessTimeoutMs = options.readinessTimeoutMs ?? 15_000;
   }
 
   async acquire(signal: AbortSignal): Promise<AuthEgressLease> {
     throwIfAborted(signal);
     await this.#serialized(async () => {
       throwIfAborted(signal);
-      if (this.#activeLeases === 0) await this.#activate();
+      if (this.#activeLeases === 0) {
+        try {
+          await this.#activate();
+        } catch (error) {
+          await this.#restore().catch(() => undefined);
+          throw error;
+        }
+      }
       this.#activeLeases += 1;
       await this.#persist();
     });
@@ -145,10 +158,27 @@ export class WarpSocksAuthEgress implements AuthEgress {
 
     const original = await this.#cli.status();
     this.#original = original;
+    // Persist ownership before mutating the global WARP client. A crash or a
+    // readiness failure can then be recovered on the next acquisition.
+    await this.#persist();
     if (original.connected && original.mode !== "proxy") await this.#cli.disconnect();
     if (original.mode !== "proxy") await this.#cli.setMode("proxy");
     if (original.proxyPort !== this.#port) await this.#cli.setProxyPort(this.#port);
     if (!original.connected || original.mode !== "proxy") await this.#cli.connect();
+    await this.#waitUntilReady();
+  }
+
+  async #waitUntilReady(): Promise<void> {
+    const deadline = Date.now() + this.#readinessTimeoutMs;
+    for (;;) {
+      const status = await this.#cli.status();
+      if (status.connected && status.mode === "proxy" && status.proxyPort === this.#port) return;
+      if (Date.now() >= deadline) throw new Error("WARP SOCKS proxy did not become ready");
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, this.#readinessPollMs);
+        timer.unref?.();
+      });
+    }
   }
 
   async #persist(): Promise<void> {
@@ -176,21 +206,20 @@ export class WarpSocksAuthEgress implements AuthEgress {
   async #restore(): Promise<void> {
     const original = this.#original;
     if (!original) return;
-    try {
-      if (!original.connected) {
-        await this.#cli.disconnect();
-        if (original.mode !== "proxy") await this.#cli.setMode(original.mode);
-      } else if (original.mode !== "proxy") {
-        await this.#cli.disconnect();
-        await this.#cli.setMode(original.mode);
-        if (original.proxyPort !== null) await this.#cli.setProxyPort(original.proxyPort);
-        await this.#cli.connect();
-        await this.#cli.status();
-      }
-    } finally {
-      this.#original = null;
-      await rm(this.#leasePath, { force: true });
+    if (!original.connected) {
+      await this.#cli.disconnect();
+      if (original.mode !== "proxy") await this.#cli.setMode(original.mode);
+    } else if (original.mode !== "proxy") {
+      await this.#cli.disconnect();
+      await this.#cli.setMode(original.mode);
+      if (original.proxyPort !== null) await this.#cli.setProxyPort(original.proxyPort);
+      await this.#cli.connect();
+      await this.#cli.status();
+    } else if (original.proxyPort !== null && original.proxyPort !== this.#port) {
+      await this.#cli.setProxyPort(original.proxyPort);
     }
+    this.#original = null;
+    await rm(this.#leasePath, { force: true });
   }
 }
 
@@ -216,14 +245,7 @@ export class ProcessWarpCli implements WarpCli {
       this.#run(["status"]),
       this.#run(["settings"]),
     ]);
-    const connected = /\bconnected\b/i.test(statusOutput) && !/\bdisconnected\b/i.test(statusOutput);
-    const mode = settingsOutput.match(/(?:Mode|mode)\s*[:=]\s*([+\w-]+)/)?.[1]?.toLowerCase() ?? "unknown";
-    const portText = settingsOutput.match(/(?:proxy[^\n]*port|port)\s*[:=]\s*(\d+)/i)?.[1];
-    return {
-      connected,
-      mode,
-      proxyPort: portText ? Number(portText) : null,
-    };
+    return parseWarpStatusOutputs(statusOutput, settingsOutput);
   }
 
   async setMode(mode: string): Promise<void> {
@@ -281,4 +303,12 @@ export class ProcessWarpCli implements WarpCli {
       });
     });
   }
+}
+
+export function parseWarpStatusOutputs(statusOutput: string, settingsOutput: string): WarpStatus {
+  const connected = /\bconnected\b/iu.test(statusOutput) && !/\bdisconnected\b/iu.test(statusOutput);
+  const rawMode = settingsOutput.match(/(?:Mode|mode)\s*[:=]\s*([+\w-]+)/u)?.[1]?.toLowerCase() ?? "unknown";
+  const mode = rawMode === "warpproxy" ? "proxy" : rawMode;
+  const portText = settingsOutput.match(/(?:proxy[^\n]*port|port)(?:\s*[:=])?\s*(\d+)/iu)?.[1];
+  return { connected, mode, proxyPort: portText ? Number(portText) : null };
 }

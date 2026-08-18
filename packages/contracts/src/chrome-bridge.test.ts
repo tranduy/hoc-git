@@ -53,6 +53,20 @@ describe("ChromeBridgeEnvelopeSchema", () => {
       { ...validEnvelope, payload: { encoding: "UTF8", body: "x".repeat(262_145) } }
     ]) expect(schema.safeParse(invalid).success).toBe(false);
   });
+
+  it("accepts a bounded public DOM snapshot transport without URL credentials", () => {
+    const schema = (contracts as Record<string, unknown>).ChromeBridgeEnvelopeSchema as {
+      safeParse(value: unknown): { success: boolean };
+    };
+    expect(schema.safeParse({
+      ...validEnvelope,
+      lobby: "CMD",
+      sourceId: "chrome:CMD:42",
+      transport: "DOM_SNAPSHOT",
+      request: { hostname: "cgnew.fts368.com", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: "[]" }
+    }).success).toBe(true);
+  });
 });
 
 describe("ChromeBridgeControlMessageSchema", () => {
@@ -64,5 +78,80 @@ describe("ChromeBridgeControlMessageSchema", () => {
     expect(schema.safeParse({ version: 1, kind: "ACK", sourceId: "chrome:SABA:42", sequence: 7 }).success).toBe(true);
     expect(schema.safeParse({ version: 1, kind: "ACK", sourceId: "chrome:SABA:42", sequence: 7,
       token: "super-secret" }).success).toBe(false);
+    expect(schema.safeParse({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:IM:42" }).success).toBe(true);
+    expect(schema.safeParse({ version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:7" }).success).toBe(true);
+    expect(schema.safeParse({ version: 1, kind: "NAVIGATE_SOURCE", sourceId: "chrome:SABA:7",
+      url: "https://c0z0ob.bpd3a3fn.com/sports?token=opaque" }).success).toBe(true);
+    expect(schema.safeParse({ version: 1, kind: "NAVIGATE_SOURCE", sourceId: "chrome:SABA:7",
+      url: "http://c0z0ob.bpd3a3fn.com/sports" }).success).toBe(false);
+    expect(schema.safeParse({ version: 1, kind: "NAVIGATE_SOURCE", sourceId: "chrome:SABA:7",
+      url: "https://user:password@c0z0ob.bpd3a3fn.com/sports" }).success).toBe(false);
+    expect(schema.safeParse({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:IM:42",
+      token: "super-secret" }).success).toBe(false);
+  });
+
+  it("accepts only a strict bounded read-only selection focus command", () => {
+    const schema = contracts.ChromeBridgeControlMessageSchema;
+    const valid = {
+      version: 1,
+      kind: "FOCUS_SELECTION",
+      sourceId: "chrome:CMD:42",
+      providerEventId: "event-opaque-1",
+      providerMarketId: "market-opaque-1",
+      providerSelectionId: "selection-opaque-1"
+    } as const;
+    expect(schema.safeParse(valid).success).toBe(true);
+    expect(schema.safeParse({ ...valid, click: true }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, providerSelectionId: "x".repeat(513) }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, providerMarketId: "" }).success).toBe(false);
+  });
+});
+
+describe("CmdSnapshotChunkSchema", () => {
+  const valid = {
+    schemaVersion: 2,
+    snapshotId: "cmd-1786776000000-abcdef",
+    chunkIndex: 1,
+    chunkCount: 3,
+    records: [{ matchId: "m-1" }]
+  } as const;
+
+  it("accepts a strict bounded chunk", () => {
+    expect(contracts.CmdSnapshotChunkSchema.safeParse(valid).success).toBe(true);
+  });
+
+  it("rejects invalid indexes, excessive counts, empty records, and extra fields", () => {
+    for (const invalid of [
+      { ...valid, chunkIndex: 3 },
+      { ...valid, chunkIndex: -1 },
+      { ...valid, chunkCount: 65 },
+      { ...valid, records: [] },
+      { ...valid, credential: "secret" }
+    ]) expect(contracts.CmdSnapshotChunkSchema.safeParse(invalid).success).toBe(false);
+  });
+});
+
+describe("ChromeNetworkBodyChunkSchema", () => {
+  const valid = {
+    schemaVersion: 1,
+    snapshotId: "network-42-request-abcdef",
+    chunkIndex: 0,
+    chunkCount: 2,
+    bodyEncoding: "UTF8",
+    bodyFragment: "{\"StatusCode\":100,"
+  } as const;
+
+  it("accepts strict bounded HTTP response chunks", () => {
+    expect(contracts.ChromeNetworkBodyChunkSchema.safeParse(valid).success).toBe(true);
+    expect(contracts.ChromeNetworkBodyChunkSchema.safeParse({ ...valid, chunkCount: 256 }).success).toBe(true);
+  });
+
+  it("rejects invalid indexes, excessive counts, and extra fields", () => {
+    for (const invalid of [
+      { ...valid, chunkIndex: 2 },
+      { ...valid, chunkCount: 257 },
+      { ...valid, bodyFragment: "x".repeat(131_073) },
+      { ...valid, token: "secret" }
+    ]) expect(contracts.ChromeNetworkBodyChunkSchema.safeParse(invalid).success).toBe(false);
   });
 });

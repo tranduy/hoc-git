@@ -12,9 +12,13 @@ export interface AccountApiLike {
 
 export class AccountApi implements AccountApiLike {
   readonly #fetch: typeof fetch;
+  readonly #listTimeoutMs: number;
+  readonly #mutationTimeoutMs: number;
 
-  constructor(fetcher: typeof fetch = window.fetch.bind(window)) {
+  constructor(fetcher: typeof fetch = window.fetch.bind(window), listTimeoutMs = 2_500, mutationTimeoutMs = 15_000) {
     this.#fetch = fetcher;
+    this.#listTimeoutMs = listTimeoutMs;
+    this.#mutationTimeoutMs = mutationTimeoutMs;
   }
 
   async list(): Promise<readonly AccountStatus[]> {
@@ -42,20 +46,28 @@ export class AccountApi implements AccountApiLike {
   }
 
   async #request(url: string, body?: object): Promise<unknown> {
-    const response = await this.#fetch(url, body === undefined ? {
-      method: "GET",
-      cache: "no-store"
-    } : {
-      method: "POST",
-      cache: "no-store",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    if (!response.ok) throw new Error(`Account request failed (${response.status})`);
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), body === undefined
+      ? this.#listTimeoutMs : this.#mutationTimeoutMs);
     try {
-      return await response.json();
-    } catch {
-      throw new Error("Invalid account response");
+      const response = await this.#fetch(url, body === undefined ? {
+        method: "GET", cache: "no-store", signal: controller.signal
+      } : {
+        method: "POST", cache: "no-store", signal: controller.signal,
+        headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+      });
+      if (!response.ok) throw new Error(`Account request failed (${response.status})`);
+      try {
+        return await response.json();
+      } catch {
+        if (controller.signal.aborted) throw new Error("Account request timed out");
+        throw new Error("Invalid account response");
+      }
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error("Account request timed out");
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
     }
   }
 }

@@ -7,40 +7,36 @@ export interface ProfitAlert {
   readonly ticket: RankedTicket;
   readonly event: RankedEvent["event"];
   readonly createdAtMs: number;
+  readonly freshness: "FRESH" | "STALE_DISPLAY_ONLY";
 }
 
 function identityOf(ticket: RankedTicket): string | null {
   if (ticket.plan === null) return null;
+  if (new Set(ticket.plan.legs.map((leg) => leg.provider)).size < 2) return null;
   const legs = ticket.plan.legs.map((leg) => `${leg.provider}:${leg.selection}`).sort().join("|");
   return `${ticket.eventKey}::${ticket.key}::${legs}`;
 }
 
 export class ProfitAlertTracker {
-  private readonly states = new Map<string, { above: boolean; lastAlertedProfit: Decimal }>();
+  private readonly alerted = new Set<string>();
 
-  update(events: readonly RankedEvent[], nowMs: number): readonly ProfitAlert[] {
-    const present = new Set<string>();
+  update(events: readonly RankedEvent[], nowMs: number,
+    freshAccountIds?: ReadonlySet<string>): readonly ProfitAlert[] {
     const alerts: ProfitAlert[] = [];
     for (const rankedEvent of events) {
       for (const ticket of rankedEvent.tickets) {
+        if (ticket.state !== "VERIFIED_PROFIT") continue;
         const identity = identityOf(ticket);
         if (identity === null) continue;
-        present.add(identity);
-        const profit = new Decimal(ticket.plan!.worstCaseProfit);
-        const above = ticket.state === "VERIFIED_PROFIT" && profit.gte(20_000);
-        const previous = this.states.get(identity);
-        const shouldAlert = above && (previous === undefined || !previous.above ||
-          profit.minus(previous.lastAlertedProfit).gte(5_000));
-        if (shouldAlert) {
-          alerts.push({ id: `${identity}::${nowMs}`, identity, ticket, event: rankedEvent.event, createdAtMs: nowMs });
-          this.states.set(identity, { above: true, lastAlertedProfit: profit });
-        } else if (previous !== undefined) {
-          this.states.set(identity, { ...previous, above });
-        }
+        if (this.alerted.has(identity) || !new Decimal(ticket.plan!.roi).gt("0.05")) continue;
+        const fresh = freshAccountIds === undefined || ticket.plan!.legs.every((leg) =>
+          rankedEvent.event.catalogs.some((catalog) => catalog.provider === leg.provider &&
+            freshAccountIds.has(catalog.accountId)));
+        if (!fresh) continue;
+        this.alerted.add(identity);
+        alerts.push({ id: `${identity}::${nowMs}`, identity, ticket, event: rankedEvent.event, createdAtMs: nowMs,
+          freshness: "FRESH" });
       }
-    }
-    for (const identity of [...this.states.keys()]) {
-      if (!present.has(identity)) this.states.delete(identity);
     }
     return alerts;
   }

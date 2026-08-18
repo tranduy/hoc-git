@@ -7,7 +7,7 @@ import {
   type MatchSample,
   type MatchWatchEntry
 } from "../watch/match-watch.js";
-import { clearWatchEntries, loadWatchEntries, saveWatchEntries } from "../watch/watch-storage.js";
+import { loadWatchEntries, saveWatchEntries } from "../watch/watch-storage.js";
 import {
   buildComparisonEvents,
   decimalOdds,
@@ -19,13 +19,16 @@ import {
   ticketMarketLabel,
   type ComparisonEvent
 } from "../catalog/comparison.js";
+import { formatDisplayDecimal } from "../catalog/display-format.js";
 import type { ProviderId } from "@tool-chenh/contracts";
 import { ArbitrageAlertToast } from "./arbitrage-alert-toast.js";
 import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
 import type { RankedTicket } from "../watch/ranked-tickets.js";
-import { RankedTicketTable } from "./ranked-ticket-table.js";
+import { RankedTicketTable, renderableRankedTickets } from "./ranked-ticket-table.js";
+import { ProviderBrand } from "./provider-brand.js";
+import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
@@ -35,6 +38,53 @@ export interface ComparisonBook {
   readonly connected: boolean;
   readonly selected: boolean;
   readonly hasExactEvent: boolean;
+}
+
+function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stakePolicy }: {
+  readonly comparison: ComparisonEvent;
+  readonly selectedProviders: ReadonlySet<ProviderId>;
+  readonly lagSignals: readonly LagSignal[];
+  readonly stakePolicy: FixedBaseStakePolicy;
+}) {
+  const money = (value: string): string => `${Number(value).toLocaleString("en-US")} VND`;
+  const pairedTickets = comparison.observedRows.flatMap((observedRow) => {
+    const verifiedRow = comparison.rows.find((candidate) => candidate.key === observedRow.key);
+    const displayRow = verifiedRow ?? observedTicketAsComparisonRow(observedRow);
+    const signal = lagSignals.find((candidate) => candidate.row.key === observedRow.key);
+    const plan = signal?.plan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy);
+    if (plan === null || plan.legs.length !== 2 || plan.legs[0]!.provider === plan.legs[1]!.provider ||
+      plan.legs[0]!.selection === plan.legs[1]!.selection) return [];
+    return [{ observedRow, displayRow, signal, plan }];
+  });
+  if (pairedTickets.length === 0) return null;
+  return <><h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
+    <div className="watch-odds-tickets">{pairedTickets.map(({ observedRow, displayRow, signal, plan }) => {
+    return <article className={signal === undefined ? "watch-odds-ticket" : "watch-odds-ticket watch-odds-ticket--profitable"}
+      key={observedRow.key}>
+      <header className="watch-odds-ticket__header">
+        <div><strong>{ticketMarketLabel(observedRow.marketType)}</strong>
+          <small>{observedRow.line === null ? "Không line" : `Kèo ${observedRow.line}`}</small></div>
+        <div className="watch-odds-ticket__edge"><b>ROI {(Number(plan.roi) * 100).toFixed(2)}%</b>
+          <small>{signal === undefined ? "Đang theo dõi" : "Đủ điều kiện · lãi ≥ 20.000 VND"}</small></div>
+      </header>
+      <div className="watch-odds-grid">{plan.legs.map((leg) => {
+        const cell = observedRow.cells.find((candidate) => candidate.provider === leg.provider);
+        const quotes = cell?.quotes.filter((quote) => quote.selection === leg.selection) ?? [];
+        return <section className="watch-odds-provider" key={leg.provider}>
+          <header><ProviderBrand compact provider={leg.provider} /></header>
+          <div className="rate-cell">{quotes.map((quote) => <span
+              className={displayRow.bestBySelection[quote.selection] === leg.provider ? "rate-quote rate-quote--best" : "rate-quote"}
+              key={quote.providerSelectionId}><b>{selectionLabel(comparison.event, quote.selection)}</b>
+              <span>{formatDisplayDecimal(quote.rawOdds)} {quote.rawFormat}</span>
+              <small>{decimalOdds(quote) === null ? quote.status : `decimal ${decimalOdds(quote)!.toFixed(3)} · ${quote.status}`}</small></span>)}</div>
+        </section>;
+      })}</div>
+      <footer className="watch-odds-ticket__plan" aria-label={`Gross preflight ${observedRow.marketType}${observedRow.line === null ? "" : ` line ${observedRow.line}`}`}>
+        <><div>{plan.legs.map((leg) => <span key={leg.selection}><small>#{leg.provider} · {selectionLabel(comparison.event, leg.selection)} @ {formatDisplayDecimal(leg.decimalOdds)}</small>
+          <b>{money(leg.stake)} {leg.role.toLowerCase()}</b></span>)}</div><strong>Worst {money(plan.worstCaseProfit)} · ROI {(Number(plan.roi) * 100).toFixed(2)}%</strong></>
+      </footer>
+    </article>;
+  })}</div></>;
 }
 
 function safeFailureEntry(sample: MatchSample, detectedAtMs: number): MatchWatchEntry {
@@ -63,13 +113,6 @@ function safeStaleEntry(sample: MatchSample, detectedAtMs: number, staleAfterMs:
   };
 }
 
-function entryLabel(entry: MatchWatchEntry): string {
-  if (entry.kind === "POLL_FAILED") return "Provider catalog read failed";
-  if (entry.kind === "STALE") return entry.currentValue ?? "Provider sample is stale";
-  if (entry.kind === "EVENT_MISSING") return "Event disappeared from the accepted catalog";
-  return `${entry.previousValue ?? "—"} → ${entry.currentValue ?? "—"}`;
-}
-
 export function MatchWatchDetail({
   accountId,
   catalogApi,
@@ -85,6 +128,8 @@ export function MatchWatchDetail({
   baseStake = "100000",
   rankedTickets = [],
   highlightTicketKey = null,
+  onOpenProviderTicket,
+  externallyRefreshed = false,
   storage = window.localStorage,
   clock = systemClock
 }: {
@@ -102,6 +147,8 @@ export function MatchWatchDetail({
   readonly baseStake?: string;
   readonly rankedTickets?: readonly RankedTicket[];
   readonly highlightTicketKey?: string | null;
+  readonly onOpenProviderTicket?: ((identity: ProviderTicketIdentity) => void) | undefined;
+  readonly externallyRefreshed?: boolean;
   readonly storage?: Storage;
   readonly clock?: () => number;
 }) {
@@ -155,6 +202,14 @@ export function MatchWatchDetail({
   useEffect(() => {
     if (!watching) {
       setWatcherState("STOPPED");
+      return;
+    }
+    // The catalog page already owns the high-frequency refresh loop and passes
+    // fresh snapshots through comparisonCatalogs. Polling again here doubles
+    // provider traffic and can show a false ERROR from a transient secondary
+    // read even while the parent stream is healthy.
+    if (externallyRefreshed) {
+      setWatcherState("WATCHING");
       return;
     }
     let active = true;
@@ -218,15 +273,21 @@ export function MatchWatchDetail({
       if (timer !== undefined) window.clearTimeout(timer);
       if (staleTimer !== undefined) window.clearTimeout(staleTimer);
     };
-  }, [accountId, catalogApi, catalogSources, clock, initialCatalog.provider, pollDelayMs, providerEventId, staleAfterMs, storage, watching]);
+  }, [accountId, catalogApi, catalogSources, clock, externallyRefreshed, initialCatalog.provider, pollDelayMs,
+    providerEventId, staleAfterMs, storage, watching]);
 
   const event = currentSample.event ?? initialSample.event;
   const matchLabel = event === null ? "Selected event unavailable" : `${event.participantA} vs ${event.participantB}`;
   const estimatedStartAtMs = event?.isLive
     ? estimatedLiveStartAtMs(currentSample.observedAtMs, event.liveState)
     : null;
-  const stakePolicy: FixedBaseStakePolicy = { currency: "VND", baseStake, minStake: "30000",
-    maxStake: baseStake, stakeStep: "1000", balance: baseStake };
+  // Read-only stake estimates must remain calculable when the balanced leg is
+  // below a bookmaker's unverified/assumed minimum. Real provider limits are
+  // enforced separately by preflight before anything can be executable.
+  const stakePolicy: FixedBaseStakePolicy = { currency: "VND", baseStake, minStake: "1000",
+    maxStake: "1000000000000", stakeStep: "1", balance: "1000000000000" };
+  const selectedTicketProviders = currentComparison?.providers.filter((provider) => selectedProviders.has(provider)) ?? [];
+  const visibleRankedTickets = renderableRankedTickets(rankedTickets, selectedTicketProviders);
   const currentAlert = useMemo(() => {
     const observationAgeMs = clock() - currentSample.observedAtMs;
     if (!watching || watcherState !== "WATCHING" || currentComparison === undefined || lagSignals.length === 0 ||
@@ -238,17 +299,11 @@ export function MatchWatchDetail({
       worstCasePayout: String(Math.min(...signal.plan.legs.map((leg) => Number(leg.payout)))),
       worstCaseProfit: signal.plan.worstCaseProfit, roi: signal.plan.roi };
   }, [clock, currentComparison, currentSample.observedAtMs, lagSignals, staleAfterMs, watcherState, watching]);
-  const newestEntries = [...entries].reverse();
-  const clearLog = (): void => {
-    clearWatchEntries(storage, initialCatalog.provider, providerEventId);
-    setEntries([]);
-  };
-
   return (
-    <section className="match-watch" aria-label={`Watching ${matchLabel}`}>
+    <section className="match-watch match-watch--compact" aria-label={`Watching ${matchLabel}`}>
       <ArbitrageAlertToast alert={currentAlert} matchLabel={matchLabel} />
       <button className="watch-back" onClick={onBack} type="button">Back to matches</button>
-      <header className="match-watch__header">
+      <header className="match-watch__header match-watch__header--compact">
         <div><p className="eyebrow">{event?.competition ?? "Provider event"}</p><h1>{matchLabel}</h1>
           {event === null ? <p>Event unavailable</p> : event.isLive ? <div className="match-timing">
             <p>{formatMatchClock(event.liveState)}</p>
@@ -270,7 +325,7 @@ export function MatchWatchDetail({
             const next = new Set(current);
             if (next.has(book.provider)) next.delete(book.provider); else next.add(book.provider);
             return next;
-          })} type="checkbox" /><b>#{book.provider}</b><small>{!book.connected ? "not connected" : book.hasExactEvent ? "matched" : "event not found"}</small>
+          })} type="checkbox" /><ProviderBrand compact provider={book.provider} /><small>{!book.connected ? "not connected" : book.hasExactEvent ? "matched" : "event not found"}</small>
         </label>)}
       </fieldset>
       <p className="watch-latency-note">{currentComparison !== undefined && currentComparison.providers.filter((provider) => selectedProviders.has(provider)).length > 1
@@ -280,50 +335,24 @@ export function MatchWatchDetail({
       <div className="watch-controls">
         {watching ? <button onClick={() => setWatching(false)} type="button">Stop watching</button>
           : <button onClick={() => setWatching(true)} type="button">Resume watching</button>}
-        <button onClick={clearLog} type="button">Clear log</button>
       </div>
 
-      {currentComparison !== undefined && event !== null && <section className="watch-ranked-tickets"
+      {currentComparison !== undefined && event !== null && visibleRankedTickets.length > 0 && <section className="watch-ranked-tickets"
         aria-label="Exact ranked tickets">
         <h2>Top exact two-book tickets</h2>
         {highlightTicketKey !== null && !rankedTickets.some((ticket) => ticket.key === highlightTicketKey) &&
           <p className="connection-warning" role="status">The exact ticket expired before it could be opened.</p>}
-        {rankedTickets.length === 0 ? <p>No exact verified ticket is currently available.</p> :
-          <RankedTicketTable event={event} providers={currentComparison.providers.filter((provider) => selectedProviders.has(provider))}
-            tickets={rankedTickets} highlightTicketKey={highlightTicketKey} />}
+        <RankedTicketTable event={event} providers={selectedTicketProviders}
+          compact tickets={visibleRankedTickets} highlightTicketKey={highlightTicketKey} stakePolicy={stakePolicy}
+          onOpenProviderTicket={onOpenProviderTicket} />
       </section>}
 
       <div className="match-watch__layout">
-        <section className="watch-prices" aria-labelledby="current-prices-heading">
-          <h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
-          {currentComparison !== undefined && effectiveBooks.some((book) => book.connected && selectedProviders.has(book.provider)) ? <div className="table-wrap comparison-table"><table>
-            <thead><tr><th>Loại vé / kèo</th>{effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => <th key={book.provider}>{book.provider}<small>{book.hasExactEvent ? "đúng trận" : "không tìm thấy trận"}</small></th>)}<th>Cân tiền / lợi nhuận</th></tr></thead>
-            <tbody>{currentComparison.observedRows.map((observedRow) => {
-              const verifiedRow = currentComparison.rows.find((candidate) => candidate.key === observedRow.key);
-              const displayRow = verifiedRow ?? observedTicketAsComparisonRow(observedRow);
-              const signal = lagSignals.find((candidate) => candidate.row.key === observedRow.key);
-              const verifiedPlan = signal?.plan ?? null;
-              const plan = verifiedPlan ?? buildObservedFixedBaseStakeEstimate(displayRow, selectedProviders, stakePolicy);
-              const money = (value: string): string => `${Number(value).toLocaleString("en-US")} VND`;
-              return <tr className={signal === undefined ? "ticket-row" : "ticket-row ticket-row--profitable"} key={observedRow.key}>
-              <th>{ticketMarketLabel(observedRow.marketType)}<small>{observedRow.line === null ? "" : `Kèo ${observedRow.line}`}</small>
-                <b className={signal === undefined ? "edge-badge" : "edge-badge edge-badge--positive"}>
-                  {signal === undefined ? "ĐANG THEO DÕI" : "ĐỦ ĐIỀU KIỆN · LÃI ≥ 20.000 VND"}</b></th>
-              {effectiveBooks.filter((book) => book.connected && selectedProviders.has(book.provider)).map((book) => {
-                const cell = observedRow.cells.find((candidate) => candidate.provider === book.provider);
-                return <td key={book.provider}>{cell === undefined ? <span className="rate-missing">{book.hasExactEvent ? "Market unavailable" : "No exact event match"}</span> : <div className="rate-cell">{cell.quotes.map((quote) => <span
-                  className={displayRow.bestBySelection[quote.selection] === book.provider ? "rate-quote rate-quote--best" : "rate-quote"}
-                  key={quote.providerSelectionId}>{selectionLabel(currentComparison.event, quote.selection)} · {quote.rawOdds} {quote.rawFormat}
-                    {decimalOdds(quote) === null ? "" : ` · decimal ${decimalOdds(quote)!.toFixed(3)}`} · {quote.status}</span>)}</div>}</td>;
-              })}<td aria-label={`Gross preflight ${observedRow.marketType}${observedRow.line === null ? "" : ` line ${observedRow.line}`}`}>
-                <div className="rate-gap-summary"><b>Biên cân hiện tại: {displayRow.margin === null ? "không có cặp chéo" : `${(displayRow.margin * 100).toFixed(2)}%`}</b></div>
-                {plan === null ? <span className="rate-missing">Chưa đủ hai giá đối nghịch từ hai sàn để tính tiền</span> : <div className={verifiedPlan === null ? "balanced-plan balanced-plan--estimate" : "balanced-plan"}>
-                  <strong>{verifiedPlan === null ? "ƯỚC TÍNH QUAN SÁT · SETTLEMENT CHƯA XÁC MINH" :
-                    signal === undefined ? "GIÁ HIỆN TẠI" : "SẴN SÀNG (READ-ONLY)"}</strong>{plan.legs.map((leg) => <span key={leg.selection}><small>#{leg.provider} · {selectionLabel(currentComparison.event, leg.selection)} @ {leg.decimalOdds}</small>
-                    <b>{money(leg.stake)} {leg.role.toLowerCase()}</b><b>Profit {money(leg.profit)}</b></span>)}
-                  <span>Total {money(plan.totalStake)}</span><b>Worst {money(plan.worstCaseProfit)} · ROI {(Number(plan.roi) * 100).toFixed(2)}%</b>
-                </div>}</td></tr>;
-            })}</tbody></table></div> : <div className="provider-columns">
+        <section className="watch-prices watch-prices--compact-grid" aria-labelledby="current-prices-heading">
+          {currentComparison !== undefined && effectiveBooks.some((book) => book.connected && selectedProviders.has(book.provider))
+            ? <CompactComparisonGrid comparison={currentComparison} lagSignals={lagSignals}
+              selectedProviders={selectedProviders} stakePolicy={stakePolicy} /> : <><h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
+            <div className="provider-columns">
             <article className="provider-column">
               <header><strong>{initialCatalog.provider} live feed</strong><span>Read-only</span></header>
               {currentSample.markets.length === 0 ? <p>No accepted markets for this event.</p> : currentSample.markets.map((market) => {
@@ -331,26 +360,16 @@ export function MatchWatchDetail({
                 return <section className={`watch-market watch-market--${market.status.toLowerCase()}`} key={market.providerMarketId}>
                   <header><strong>{market.marketType}</strong><span>Line {market.line ?? "—"}</span><span>{market.status}</span></header>
                   <div className="watch-quote-grid">{quotes.map((quote) => <div className={`watch-quote watch-quote--${quote.status.toLowerCase()}`} key={quote.providerSelectionId}>
-                    <span>{quote.selection}</span><strong>{quote.rawOdds}</strong><small>{quote.rawFormat} · {quote.status}</small>
+                    <span>{quote.selection}</span><strong>{formatDisplayDecimal(quote.rawOdds)}</strong><small>{quote.rawFormat} · {quote.status}</small>
                   </div>)}</div>
                 </section>;
               })}
             </article>
             <article className="provider-column provider-column--empty"><strong>Awaiting verified second provider</strong>
               <p>No values are copied or estimated. Exact event and market mapping is required.</p></article>
-          </div>}
+          </div></>}
         </section>
 
-        <section className="watch-timeline" aria-labelledby="change-log-heading">
-          <header><div><h2 id="change-log-heading">Change log</h2><p>Newest first · maximum 200 rows</p></div></header>
-          <div aria-live="polite">{newestEntries.length === 0 ? <p className="empty-state">No changes detected yet.</p> : <ol>
-            {newestEntries.map((entry) => <li className={`watch-entry watch-entry--${entry.kind.toLowerCase()}`} key={entry.id}>
-              <div><strong>#{entry.provider} · {entry.kind.replaceAll("_", " ")}</strong><time dateTime={new Date(entry.detectedAtMs).toISOString()}>{new Date(entry.detectedAtMs).toLocaleTimeString()}</time></div>
-              <p>{entry.marketType ?? "Event"}{entry.line === null ? "" : ` · line ${entry.line}`}{entry.selection === null ? "" : ` · ${entry.selection}`}</p>
-              <b>{entryLabel(entry)}</b><small>Provider sample interval: {entry.sampleIntervalMs} ms</small>
-            </li>)}
-          </ol>}</div>
-        </section>
       </div>
     </section>
   );

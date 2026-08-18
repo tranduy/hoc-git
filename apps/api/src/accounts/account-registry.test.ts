@@ -30,7 +30,7 @@ async function setup(options: {
     id, provider: "CMD", source: "MANUAL_PROVIDER_SESSION" as const, state: "ACTIVE" as const,
     category: "FOOTBALL" as const,
     trustedHostname: null, acquiredAtMs: 1, lastValidatedAtMs: 1, renewAfterMs: 99_999,
-    secretConfigured: true, reason: null
+    nextRetryAtMs: null, secretConfigured: true, reason: null
   }));
   const handles = new Map<string, ActiveSecretHandle>(statuses.map((status) => [status.id, {
     sessionId: status.id,
@@ -167,7 +167,7 @@ describe("AccountRegistry", () => {
           id: "session-a", provider: "CMD", source: "MANUAL_PROVIDER_SESSION", state: "INVALID",
           category: null,
           trustedHostname: null, acquiredAtMs: 1, lastValidatedAtMs: 1, renewAfterMs: 2,
-          secretConfigured: true, reason: "EXPIRED"
+          nextRetryAtMs: null, secretConfigured: true, reason: "EXPIRED"
         }] }),
         getActiveSecretHandle: async () => null
       },

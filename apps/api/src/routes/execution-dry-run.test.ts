@@ -29,7 +29,9 @@ const result: TwoLegExecutionResult = { ticketId: "ticket-1", idempotencyKey: "r
 describe("execution dry-run route", () => {
   it("accepts only strict DRY_RUN requests and validates the service response", async () => {
     const app = Fastify();
-    registerExecutionDryRunRoute(app, { execute: async () => result });
+    registerExecutionDryRunRoute(app, { execute: async () => result }, {
+      recordExecution: async () => { throw new Error("disk unavailable"); }
+    });
     const response = await app.inject({ method: "POST", url: "/api/execution/dry-run", payload: request });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual(result);

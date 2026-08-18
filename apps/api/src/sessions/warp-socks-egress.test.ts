@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  parseWarpStatusOutputs,
   type WarpCli,
   WarpSocksAuthEgress,
 } from "./warp-socks-egress.js";
 
 class FakeWarpCli implements WarpCli {
   readonly calls: string[] = [];
+  private pendingConnectionPolls = 0;
 
   constructor(
     private readonly initial: {
@@ -18,10 +20,15 @@ class FakeWarpCli implements WarpCli {
       mode: string;
       proxyPort: number | null;
     },
+    private readonly connectionDelayPolls = 0,
   ) {}
 
   async status() {
     this.calls.push("status");
+    if (this.pendingConnectionPolls > 0) {
+      this.pendingConnectionPolls -= 1;
+      if (this.pendingConnectionPolls === 0) this.initial.connected = true;
+    }
     return { ...this.initial };
   }
 
@@ -37,7 +44,8 @@ class FakeWarpCli implements WarpCli {
 
   async connect() {
     this.calls.push("connect");
-    this.initial.connected = true;
+    this.pendingConnectionPolls = this.connectionDelayPolls;
+    if (this.pendingConnectionPolls === 0) this.initial.connected = true;
   }
 
   async disconnect() {
@@ -63,6 +71,13 @@ afterEach(async () => {
 });
 
 describe("WarpSocksAuthEgress", () => {
+  it("normalizes the current Windows WarpProxy settings output", () => {
+    expect(parseWarpStatusOutputs(
+      "Status update: Connected\nNetwork: healthy",
+      "(user set) Mode: WarpProxy on port 40000"
+    )).toEqual({ connected: true, mode: "proxy", proxyPort: 40_000 });
+  });
+
   it("temporarily switches disconnected WARP to SOCKS proxy and restores it", async () => {
     const leasePath = await temporaryLeasePath();
     const cli = new FakeWarpCli({ connected: false, mode: "warp", proxyPort: null });
@@ -77,7 +92,7 @@ describe("WarpSocksAuthEgress", () => {
 
     expect(lease.name).toBe("WARP_SOCKS");
     expect(lease.playwrightProxy).toEqual({ server: "socks5://127.0.0.1:40000" });
-    expect(cli.calls).toEqual(["status", "mode:proxy", "port:40000", "connect"]);
+    expect(cli.calls).toEqual(["status", "mode:proxy", "port:40000", "connect", "status"]);
     expect(JSON.parse(await readFile(leasePath, "utf8"))).toMatchObject({
       ownerPid: 1234,
       originalConnected: false,
@@ -91,6 +106,7 @@ describe("WarpSocksAuthEgress", () => {
       "mode:proxy",
       "port:40000",
       "connect",
+      "status",
       "disconnect",
       "mode:warp",
     ]);
@@ -106,13 +122,28 @@ describe("WarpSocksAuthEgress", () => {
 
     const first = await egress.acquire(new AbortController().signal);
     const second = await egress.acquire(new AbortController().signal);
-    expect(cli.calls).toEqual(["status", "disconnect", "mode:proxy", "port:40001", "connect"]);
+    expect(cli.calls).toEqual(["status", "disconnect", "mode:proxy", "port:40001", "connect", "status"]);
 
     await first.release();
-    expect(cli.calls.at(-1)).toBe("connect");
+    expect(cli.calls.at(-1)).toBe("status");
 
     await second.release();
     expect(cli.calls.slice(-4)).toEqual(["disconnect", "mode:warp", "connect", "status"]);
+  });
+
+  it("restores the previous proxy port when WARP was already connected in proxy mode", async () => {
+    const cli = new FakeWarpCli({ connected: true, mode: "proxy", proxyPort: 41_111 });
+    const egress = new WarpSocksAuthEgress({
+      cli,
+      port: 40_000,
+      leasePath: await temporaryLeasePath(),
+    });
+
+    const lease = await egress.acquire(new AbortController().signal);
+    expect(cli.calls).toEqual(["status", "port:40000", "status"]);
+
+    await lease.release();
+    expect(cli.calls).toEqual(["status", "port:40000", "status", "port:41111"]);
   });
 
   it("does not mutate WARP when acquisition was already aborted", async () => {
@@ -190,7 +221,38 @@ describe("WarpSocksAuthEgress", () => {
       "mode:proxy",
       "port:40001",
       "connect",
+      "status",
     ]);
     await lease.release();
+  });
+
+  it("does not expose the SOCKS lease until WARP reports proxy connectivity", async () => {
+    const cli = new FakeWarpCli({ connected: false, mode: "warp", proxyPort: null }, 2);
+    const egress = new WarpSocksAuthEgress({
+      cli,
+      port: 40_002,
+      leasePath: await temporaryLeasePath(),
+      readinessPollMs: 1,
+      readinessTimeoutMs: 100,
+    });
+
+    await egress.acquire(new AbortController().signal);
+
+    expect(cli.calls).toEqual([
+      "status", "mode:proxy", "port:40002", "connect", "status", "status"
+    ]);
+  });
+
+  it("restores the original WARP state when proxy readiness fails", async () => {
+    const leasePath = await temporaryLeasePath();
+    const cli = new FakeWarpCli({ connected: false, mode: "warp", proxyPort: null }, 1_000);
+    const egress = new WarpSocksAuthEgress({
+      cli, port: 40_003, leasePath, readinessPollMs: 1, readinessTimeoutMs: 2
+    });
+
+    await expect(egress.acquire(new AbortController().signal)).rejects.toThrow("did not become ready");
+
+    expect(cli.calls.slice(-2)).toEqual(["disconnect", "mode:warp"]);
+    expect(await readFile(leasePath, "utf8").catch(() => null)).toBeNull();
   });
 });

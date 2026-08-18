@@ -1,0 +1,51 @@
+import { describe, expect, it } from "vitest";
+import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
+import { ImHttpCatalogAdapter } from "./im-http-adapter.js";
+
+const event = { eid: 112516390, htn: "Monterrey Rayados", atn: "Nashville SC", cn: "Leagues Cup",
+  edt: "2026-08-16T20:00:00-04:00", isrbt: false, iscyb: false, mls: [{ mi: 10, bti: 1, gp: 1, ws: [
+    { wsi: 101, si: 1, hdp: -0.5, dih: "+0.5", o: 0.67, ot: 1 },
+    { wsi: 102, si: 2, hdp: -0.5, dih: "-0.5", o: -0.79, ot: 1 }
+  ] }] };
+
+function envelope(body: unknown, sequence = 1, path = "/api/EventV6/GetSE"): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence,
+    observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
+    request: { hostname: "imsports.directsb.net", pathnameClass: path, resourceType: "XHR" },
+    payload: { encoding: "UTF8", body: JSON.stringify(body) } };
+}
+
+describe("ImHttpCatalogAdapter", () => {
+  it("publishes a normalized IM catalog from a strict GetSE snapshot", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    expect(adapter.fingerprint(envelope({ StatusCode: 100, sel: [event] }))).toBe(true);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }))[0]?.value).toMatchObject({
+      accountId: "catalog-source:IM:FOOTBALL", provider: "IM",
+      events: [{ providerEventId: "112516390" }],
+      markets: [{ providerMarketId: "10", marketType: "FT_AH", line: "0.5" }]
+    });
+  });
+
+  it("applies GetSEDelta only after a baseline and keeps provider IDs stable", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ mi: 10, bti: 1, gp: 1, ws: [
+      { wsi: 101, si: 1, hdp: -0.5, dih: "+0.5", o: 0.8, ot: 1 },
+      { wsi: 102, si: 2, hdp: -0.5, dih: "-0.5", o: -0.9, ot: 1 }
+    ] }] }] };
+    expect(adapter.decode(envelope(delta, 1, "/api/EventV6/GetSEDelta"))).toEqual([]);
+    adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 2));
+    const update = adapter.decode(envelope(delta, 3, "/api/EventV6/GetSEDelta"))[0]?.value as {
+      quotes: readonly { providerSelectionId: string; rawOdds: string }[];
+    };
+    expect(update.quotes.map((quote) => [quote.providerSelectionId, quote.rawOdds]))
+      .toEqual([["101", "0.8"], ["102", "-0.9"]]);
+  });
+
+  it("rejects lookalike hosts, paths, and failed provider envelopes", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    expect(adapter.fingerprint({ ...envelope({ StatusCode: 100, sel: [event] }),
+      request: { hostname: "evil.example", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR" } })).toBe(false);
+    expect(adapter.fingerprint(envelope({ StatusCode: 500, sel: [event] }))).toBe(false);
+    expect(adapter.fingerprint(envelope({ StatusCode: 100, sel: [event] }, 1, "/api/EventV6/GetESI"))).toBe(false);
+  });
+});

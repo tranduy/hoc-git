@@ -12,6 +12,8 @@ class CatalogBridgeAdapter implements ProviderAdapter {
   readonly provider: ProviderId;
   readonly category: Category;
   #sink: ProviderSink | null = null;
+  #pendingCatalog: ObservedProviderCatalog | null = null;
+  #publishing = false;
 
   constructor(provider: ProviderId, category: Category) {
     this.provider = provider; this.category = category;
@@ -26,25 +28,52 @@ class CatalogBridgeAdapter implements ProviderAdapter {
   }
 
   publish(catalog: ObservedProviderCatalog): void {
+    if (this.#sink === null || catalog.provider !== this.provider || catalog.category !== this.category) return;
+    this.#pendingCatalog = catalog;
+    if (this.#publishing) return;
+    this.#publishing = true;
+    setImmediate(() => this.#publishPending());
+  }
+
+  #publishPending(): void {
+    const catalog = this.#pendingCatalog;
     const sink = this.#sink;
-    if (sink === null || catalog.provider !== this.provider || catalog.category !== this.category) return;
-    for (const event of catalog.events) sink.onEvent(event);
-    for (const market of catalog.markets) sink.onMarket(market);
+    this.#pendingCatalog = null;
+    if (catalog === null || sink === null) { this.#publishing = false; return; }
+    const operations: Array<() => void> = [];
+    for (const event of catalog.events) operations.push(() => sink.onEvent(event));
+    for (const market of catalog.markets) operations.push(() => sink.onMarket(market));
     let degraded = false;
+    const quotesByMarket = new Map<string, ProviderQuote[]>();
+    for (const quote of catalog.quotes) {
+      const key = `${quote.provider}|${quote.category}|${quote.providerEventId}|${quote.providerMarketId}`;
+      const values = quotesByMarket.get(key) ?? [];
+      values.push(quote);
+      quotesByMarket.set(key, values);
+    }
     for (const market of catalog.markets) {
-      const quotes = catalog.quotes.filter((quote) => quote.provider === market.provider &&
-        quote.category === market.category && quote.providerEventId === market.providerEventId &&
-        quote.providerMarketId === market.providerMarketId);
+      const quotes = quotesByMarket.get(
+        `${market.provider}|${market.category}|${market.providerEventId}|${market.providerMarketId}`) ?? [];
       if (quotes.length === 0) continue;
       const sequences = new Set(quotes.map((quote) => quote.sequence));
       if (sequences.size !== 1) { degraded = true; continue; }
       const sequence = quotes[0]!.sequence;
-      sink.onQuoteUpdate({ source: { provider: catalog.provider, category: catalog.category },
+      operations.push(() => sink.onQuoteUpdate({ source: { provider: catalog.provider, category: catalog.category },
         kind: "FULL_SNAPSHOT", transport: "POLLING", sequence,
-        clock: { monotonicNowMs: newestReceivedClock(quotes), wallClockNowMs: catalog.observedAtMs }, quotes });
+        clock: { monotonicNowMs: newestReceivedClock(quotes), wallClockNowMs: catalog.observedAtMs }, quotes }));
     }
-    sink.onStatus({ adapterId: this.id, provider: catalog.provider, category: catalog.category,
-      status: degraded ? "DEGRADED" : "LIVE", detail: null, updatedAtMs: catalog.observedAtMs });
+    operations.push(() => sink.onStatus({ adapterId: this.id, provider: catalog.provider, category: catalog.category,
+      status: degraded ? "DEGRADED" : "LIVE", detail: null, updatedAtMs: catalog.observedAtMs }));
+    try {
+      sink.beginBatch?.();
+      for (const operation of operations) {
+        try { operation(); } catch { /* one runtime callback must not lock the bridge queue */ }
+      }
+    } finally {
+      sink.endBatch?.();
+    }
+    if (this.#pendingCatalog !== null) { setImmediate(() => this.#publishPending()); return; }
+    this.#publishing = false;
   }
 }
 

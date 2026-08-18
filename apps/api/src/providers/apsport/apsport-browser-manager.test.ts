@@ -39,6 +39,27 @@ describe("APSPORT DOM catalog", () => {
     await page.close();
   });
 
+  it("extracts live handicap markets from correctly encoded Vietnamese labels", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`<section class="match"><div class="league-name">V-League</div>
+      <div class="match-favorite" id="eventId-live-354-778899"></div>
+      <div class="match__status">Trực tiếp Hiệp 2 67'</div>
+      <span class="match__team-name">Hà Nội</span><span class="match__team-score">1</span>
+      <span class="match__team-name">Nam Định</span><span class="match__team-score">0</span>
+      <div class="match-odd-pair-list"><div class="match__odd-pair-list__type">TT Chấp</div>
+        <div class="match__odd-pair" id="odd-item-home"><span class="match__odd-type">-0.5</span><span class="match__odd-value">0.91</span></div>
+        <div class="match__odd-pair" id="odd-item-away"><span class="match__odd-type">+0.5</span><span class="match__odd-value">0.97</span></div>
+      </div>
+    </section>`);
+
+    await expect(extractApsportRecords(page)).resolves.toEqual([expect.objectContaining({
+      eventId: "778899", teamNames: ["Hà Nội", "Nam Định"], markets: [expect.objectContaining({
+        marketType: "FT_AH", lineText: "-0.5"
+      })]
+    })]);
+    await page.close();
+  });
+
   it("extracts the authenticated profile from the read-only account header", async () => {
     const page = await browser.newPage();
     await page.setContent(`<p class="user-name">development-user-3333</p><span class="user-balance">29 K</span>`);

@@ -21,22 +21,26 @@ interface SourceRecord extends ChromeBridgeSourceSnapshot {
   lastAcceptedAtMs: number;
   reason: string | null;
   quarantined: boolean;
+  connection: object | null;
 }
 
 export interface ChromeBridgeRegistryOptions {
   readonly now?: () => number;
   readonly staleAfterMs?: number;
+  readonly retireAfterMs?: number;
 }
 
 export class ChromeBridgeRegistry {
   readonly #now: () => number;
   readonly #staleAfterMs: number;
+  readonly #retireAfterMs: number;
   readonly #sources = new Map<string, SourceRecord>();
   readonly #listeners = new Set<(envelope: ChromeBridgeEnvelope) => void>();
 
   constructor(options: ChromeBridgeRegistryOptions = {}) {
     this.#now = options.now ?? Date.now;
     this.#staleAfterMs = options.staleAfterMs ?? 20_000;
+    this.#retireAfterMs = options.retireAfterMs ?? 300_000;
   }
 
   subscribe(listener: (envelope: ChromeBridgeEnvelope) => void): () => void {
@@ -44,8 +48,18 @@ export class ChromeBridgeRegistry {
     return () => this.#listeners.delete(listener);
   }
 
-  ingest(envelope: ChromeBridgeEnvelope): ChromeBridgeControlMessage {
-    const existing = this.#sources.get(envelope.sourceId);
+  releaseConnection(connection: object): void {
+    for (const [sourceId, source] of this.#sources) {
+      if (source.connection === connection) this.#sources.delete(sourceId);
+    }
+  }
+
+  ingest(envelope: ChromeBridgeEnvelope, connection: object | null = null): ChromeBridgeControlMessage {
+    let existing = this.#sources.get(envelope.sourceId);
+    if (existing !== undefined && connection !== null && existing.connection !== connection) {
+      this.#sources.delete(envelope.sourceId);
+      existing = undefined;
+    }
     if (existing?.quarantined) return reject(envelope, "OUT_OF_ORDER");
     if (existing) {
       if (envelope.sequence === existing.lastSequence) return reject(envelope, "DUPLICATE");
@@ -67,12 +81,14 @@ export class ChromeBridgeRegistry {
       lastSequence: envelope.sequence,
       lastAcceptedAtMs: acceptedAtMs,
       reason: null,
-      quarantined: false
+      quarantined: false,
+      connection
     };
     record.state = "LIVE";
     record.lastSequence = envelope.sequence;
     record.lastAcceptedAtMs = acceptedAtMs;
     record.reason = null;
+    if (connection !== null) record.connection = connection;
     this.#sources.set(envelope.sourceId, record);
     for (const listener of this.#listeners) listener(envelope);
     return { version: 1, kind: "ACK", sourceId: envelope.sourceId, sequence: envelope.sequence };
@@ -80,6 +96,9 @@ export class ChromeBridgeRegistry {
 
   listSources(): readonly ChromeBridgeSourceSnapshot[] {
     const now = this.#now();
+    for (const [sourceId, source] of this.#sources) {
+      if (now - source.lastAcceptedAtMs > this.#retireAfterMs) this.#sources.delete(sourceId);
+    }
     return [...this.#sources.values()].map((source) => ({
       lobby: source.lobby,
       sourceId: source.sourceId,
