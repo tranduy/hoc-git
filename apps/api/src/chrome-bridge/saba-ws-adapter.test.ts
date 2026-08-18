@@ -8,8 +8,8 @@ const fields = ["type", "leagueid", "leaguenameen", "sporttype", "matchid", "hte
 const encoded = (record: Record<string, unknown>): unknown[] => Object.entries(record)
   .flatMap(([key, value]) => [fields.indexOf(key), value]);
 
-function envelope(body: string): ChromeBridgeEnvelope {
-  return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
+function envelope(body: string, sourceId = "chrome:SABA:7"): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId, tabId: 7,
     sequence: 4, observedAtMs: 1_786_449_540_000, receivedMonotonicMs: 50, transport: "WS_FRAME",
     request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket" },
     payload: { encoding: "UTF8", body } };
@@ -59,6 +59,28 @@ describe("SabaWsCatalogAdapter", () => {
 
     expect(first.events.map((event) => event.providerEventId)).toEqual(["101"]);
     expect(second.events.map((event) => event.providerEventId).sort()).toEqual(["101", "202"]);
+  });
+
+  it("keeps decoder field tables and revisions isolated between attached SABA tabs", () => {
+    const snapshot = (sourceId: string, matchId: number): ChromeBridgeEnvelope => {
+      const rows = [["f", 0, fields], [0, "reset"],
+        encoded({ type: "l", leagueid: matchId, leaguenameen: `League ${matchId}`, sporttype: 1 }),
+        encoded({ type: "m", matchid: matchId, leagueid: matchId, hteamnameen: `Home ${matchId}`,
+          ateamnameen: `Away ${matchId}`, kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+        encoded({ type: "o", oddsid: matchId * 10, matchid: matchId, bettype: 1, parenttypeid: 1,
+          oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+        [0, "done"]];
+      return envelope(`42${JSON.stringify(["m", "b1", rows, 1])}`, sourceId);
+    };
+    const adapter = new SabaWsCatalogAdapter();
+
+    const first = adapter.decode(snapshot("chrome:SABA:7", 101));
+    const second = adapter.decode(snapshot("chrome:SABA:8", 202));
+
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect((second[0]!.value as { events: Array<{ providerEventId: string }> }).events)
+      .toEqual([expect.objectContaining({ providerEventId: "202" })]);
   });
 
   it("decodes the SABA public DOM when the socket field table predates attachment", () => {

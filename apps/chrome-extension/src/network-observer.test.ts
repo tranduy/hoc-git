@@ -22,7 +22,7 @@ describe("NetworkObserver", () => {
     expect(evaluations).toHaveLength(2);
     expect(String(evaluations[0]?.[2]?.expression)).toContain("scrollHeight");
     expect(String(evaluations[0]?.[2]?.expression)).toContain("unsafeSelector");
-    expect(String(evaluations[0]?.[2]?.expression)).toContain("slice(0, 3)");
+    expect(String(evaluations[0]?.[2]?.expression)).toContain("slice(0, 12)");
   });
 
   it("refreshes only IM's public football/live navigation without touching an odds cell", async () => {
@@ -230,7 +230,7 @@ describe("NetworkObserver", () => {
 
   it("expands only bounded structural market controls and excludes odds and bet-slip controls", () => {
     expect(KEEP_ACTIVE_EXPRESSION).toContain("fieldlineMarketExpandedAt");
-    expect(KEEP_ACTIVE_EXPRESSION).toContain("slice(0, 3)");
+    expect(KEEP_ACTIVE_EXPRESSION).toContain("slice(0, 12)");
     expect(KEEP_ACTIVE_EXPRESSION).toContain("closest(unsafeSelector)");
     expect(KEEP_ACTIVE_EXPRESSION).toContain("more markets");
     expect(KEEP_ACTIVE_EXPRESSION).toContain(".filter((element) => !element.dataset.fieldlineMarketExpanded)");
@@ -239,7 +239,7 @@ describe("NetworkObserver", () => {
 
   it("uses the same bounded hidden-market expansion while walking the virtualized CMD catalog", () => {
     expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("fieldlineCmdMarketExpandedAt");
-    expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("slice(0, 3)");
+    expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("slice(0, 12)");
     expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("fieldlineMarketExpanded");
     expect(CMD_CATALOG_DISCOVERY_EXPRESSION)
       .toContain(".filter((element) => !element.dataset.fieldlineMarketExpanded)");

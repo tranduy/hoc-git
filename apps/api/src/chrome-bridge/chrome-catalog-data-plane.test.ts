@@ -31,6 +31,27 @@ function imEnvelope(): ChromeBridgeEnvelope {
   };
 }
 
+const sabaFields = ["type", "leagueid", "leaguenameen", "sporttype", "matchid", "hteamnameen",
+  "ateamnameen", "kickofftime", "marketid", "oddsid", "bettype", "parenttypeid", "oddsstatus",
+  "enable", "odds1a", "odds2a", "hdp1", "hdp2"];
+const encodeSaba = (value: Record<string, unknown>): unknown[] => Object.entries(value)
+  .flatMap(([key, fieldValue]) => [sabaFields.indexOf(key), fieldValue]);
+function sabaEnvelope(sequence: number, matchIds: readonly number[]): ChromeBridgeEnvelope {
+  const rows: unknown[] = [["f", 0, sabaFields], [0, "reset"]];
+  for (const matchId of matchIds) {
+    rows.push(encodeSaba({ type: "l", leagueid: matchId, leaguenameen: `League ${matchId}`, sporttype: 1 }));
+    rows.push(encodeSaba({ type: "m", matchid: matchId, leagueid: matchId, hteamnameen: `Home ${matchId}`,
+      ateamnameen: `Away ${matchId}`, kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }));
+    rows.push(encodeSaba({ type: "o", oddsid: matchId * 10, matchid: matchId, bettype: 1, parenttypeid: 1,
+      oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }));
+  }
+  rows.push([0, "done"]);
+  return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
+    sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence, transport: "WS_FRAME",
+    request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket" },
+    payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", "b1", rows, sequence])}` } };
+}
+
 const fallbackStatus: CatalogSourceStatus = { id: "catalog-source:CMD:FOOTBALL", alias: "T-Sports · CMD",
   provider: "CMD", category: "FOOTBALL", sessionState: "UNCONFIGURED", acquiredAtMs: null, reason: null };
 
@@ -136,6 +157,21 @@ describe("ChromeCatalogDataPlane", () => {
     expect(publish).toHaveBeenCalledTimes(1);
     await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({
       events: [{ providerEventId: "event-1" }], markets: [{ providerMarketId: "market-1" }]
+    });
+  });
+
+  it("retains a complete catalog when a transient snapshot loses most events", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    expect(plane.ingest(sabaEnvelope(1, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))).toBe(true);
+
+    expect(plane.ingest(sabaEnvelope(2, [1]))).toBe(false);
+    expect(publish).toHaveBeenCalledTimes(1);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
+      events: expect.arrayContaining([
+        expect.objectContaining({ providerEventId: "1" }),
+        expect.objectContaining({ providerEventId: "10" })
+      ])
     });
   });
 

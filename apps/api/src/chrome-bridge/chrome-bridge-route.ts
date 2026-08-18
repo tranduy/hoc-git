@@ -100,7 +100,12 @@ export function registerChromeBridgeRoute(
         if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") { socket.close(); return; }
         if (control.kind === "ACK" && !requestedSnapshots.has(parsed.data.sourceId)) {
           requestedSnapshots.add(parsed.data.sourceId);
-          socket.send(JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: parsed.data.sourceId }));
+          // SABA's rendered DOM contains only the current viewport. Reloading
+          // the attached tab makes the provider socket replay its complete
+          // reset/done catalog, and also works with older installed extension
+          // builds that would otherwise answer REQUEST_SNAPSHOT from the DOM.
+          const kind = parsed.data.lobby === "SABA" ? "RELOAD_SOURCE" : "REQUEST_SNAPSHOT";
+          socket.send(JSON.stringify({ version: 1, kind, sourceId: parsed.data.sourceId }));
         }
       });
     });

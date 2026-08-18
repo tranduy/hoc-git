@@ -42,13 +42,14 @@ function markets(value: unknown): readonly SbobetCatalogMarket[] {
     if (item === null) return;
     const metadata = row(item[3]);
     const code = text(metadata?.[0]);
-    if ((code === "HC39" || code === "HC1" || code === "OU39" || code === "OU1") && Array.isArray(item[7])) found.push(item);
+    if ((code === "HC39" || code === "HC0" || code === "HC1" ||
+      code === "OU39" || code === "OU0" || code === "OU1") && Array.isArray(item[7])) found.push(item);
     else item.forEach(visit);
   };
   visit(value);
   return found.flatMap((market): SbobetCatalogMarket[] => {
     const code = text(row(market[3])?.[0]);
-    const type = code === "HC39" ? "FT_AH" as const
+    const type = code === "HC39" || code === "HC0" ? "FT_AH" as const
       : code === "HC1" ? "FH_AH" as const
         : code === "OU1" ? "FH_TOTAL" as const : "FT_TOTAL" as const;
     const isHandicap = type === "FT_AH" || type === "FH_AH";
@@ -89,9 +90,15 @@ export function extractBtiCatalogRecords(payload: unknown): readonly SbobetCatal
       const names = participants.slice(0, 2).map((participant) => localized(row(participant)?.[1]));
       const scores = row(event?.[4]);
       const eventMarkets = markets(event?.[8]);
-      if (eventId === "" || event?.[5] !== true || names.length !== 2 || names.some((name) => name === "") || eventMarkets.length === 0) return [];
-      const scoreText = typeof scores?.[0] === "string" && typeof scores?.[1] === "string" ? `${scores[0]} - ${scores[1]}` : null;
-      return [{ eventId, leagueName, timeText: "LIVE", scoreText, teamNames: names, markets: eventMarkets }];
+      const isLive = event?.[5] === true;
+      const startAtUtcMs = isLive ? null : Date.parse(text(event?.[3]));
+      if (eventId === "" || (event?.[5] !== true && event?.[5] !== false) ||
+        (!isLive && !Number.isFinite(startAtUtcMs)) || names.length !== 2 ||
+        names.some((name) => name === "") || eventMarkets.length === 0) return [];
+      const scoreText = isLive && typeof scores?.[0] === "string" && typeof scores?.[1] === "string"
+        ? `${scores[0]} - ${scores[1]}` : null;
+      return [{ eventId, leagueName, timeText: isLive ? "LIVE" : "PREMATCH", scoreText,
+        ...(isLive ? {} : { startAtUtcMs }), teamNames: names, markets: eventMarkets }];
     });
   });
 }

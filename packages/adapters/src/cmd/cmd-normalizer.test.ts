@@ -132,6 +132,81 @@ describe("normalizeCmdCatalog", () => {
     ]);
   });
 
+  it("normalizes CMD corner and booking pseudo-events onto the underlying football fixture", () => {
+    const specialGroupRecords: CmdCatalogInputRecord[] = [
+      {
+        ...structuredClone(record),
+        leagueName: "COPA LIBERTADORES - CORNERS",
+        teamNames: ["Independiente Rivadavia (No.of Corners)", "Fluminense RJ (No.of Corners)"],
+        groups: [
+          {
+            betTypeIds: ["1"], labels: ["0.5"], odds: [
+              { marketOddsId: "corner-ah", priceText: "0.81", status: null, greyedOut: "false", lineText: "0.5" },
+              { marketOddsId: "corner-ah", priceText: "-0.91", status: null, greyedOut: "false", lineText: null }
+            ]
+          },
+          {
+            betTypeIds: ["3"], labels: ["9.5"], odds: [
+              { marketOddsId: "corner-total", priceText: "0.82", status: null, greyedOut: "false" },
+              { marketOddsId: "corner-total", priceText: "-0.92", status: null, greyedOut: "false" }
+            ]
+          }
+        ]
+      },
+      {
+        ...structuredClone(record), matchId: "booking-event",
+        leagueName: "CHINA FOOTBALL SUPER LEAGUE - BOOKINGS Ä‘ang táº£i...",
+        teamNames: ["Shanghai Shenhua (Total Bookings)", "Beijing Guoan (Total Bookings)"],
+        groups: [{
+          betTypeIds: ["3"], labels: ["4.5"], odds: [
+            { marketOddsId: "card-total", priceText: "0.85", status: null, greyedOut: "false" },
+            { marketOddsId: "card-total", priceText: "-0.95", status: null, greyedOut: "false" }
+          ]
+        }]
+      }
+    ];
+
+    const result = normalizeCmdCatalog(specialGroupRecords, {
+      observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 420, sequence: 1
+    });
+
+    expect(result.events).toEqual([
+      expect.objectContaining({ competition: "COPA LIBERTADORES", participantA: "Independiente Rivadavia",
+        participantB: "Fluminense RJ" }),
+      expect.objectContaining({ competition: "CHINA FOOTBALL SUPER LEAGUE", participantA: "Shanghai Shenhua",
+        participantB: "Beijing Guoan" })
+    ]);
+    expect(result.markets.map(({ marketType, scope, line, settlementProfile }) =>
+      [marketType, scope, line, settlementProfile])).toEqual([
+      ["CORNER_FT_AH", "FULL_TIME", "-0.5", "football-corners-regulation"],
+      ["CORNER_FT_TOTAL", "FULL_TIME", "9.5", "football-corners-regulation"],
+      ["CARD_FT_TOTAL", "FULL_TIME", "4.5", "football-cards-regulation"]
+    ]);
+  });
+
+  it("fails closed on unsupported CMD pseudo-events instead of relabelling them as goal markets", () => {
+    const unsupported = [
+      { leagueName: "CHINA FOOTBALL SUPER LEAGUE - CORNERS",
+        teamNames: ["Shanghai Shenhua (11th Corner)", "Beijing Guoan (11th Corner)"] },
+      { leagueName: "CHINA FOOTBALL SUPER LEAGUE - BOOKINGS",
+        teamNames: ["Shanghai Shenhua (4th Booking)", "Beijing Guoan (4th Booking)"] },
+      { leagueName: "SPECIFIC 15 MINS", teamNames: ["Alpha FC (00:00-15:00)", "Beta FC (00:00-15:00)"] },
+      { leagueName: "WHICH TEAM WILL ADVANCE", teamNames: ["Alpha FC", "Beta FC"] },
+      { leagueName: "SINGLE TEAM OVER/UNDER", teamNames: ["Alpha FC", "Beta FC"] },
+      { leagueName: "FANTASY MATCHES", teamNames: ["Alpha FC", "Beta FC"] }
+    ];
+
+    for (const candidate of unsupported) {
+      const result = normalizeCmdCatalog([{ ...structuredClone(record), ...candidate }], {
+        observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1,
+        timezoneOffsetMinutes: 420, sequence: 1
+      });
+      expect(result).toEqual({ events: [], markets: [], quotes: [],
+        diagnostics: ["CMD_CATALOG_EVENT_UNSUPPORTED"] });
+    }
+  });
+
   it("normalizes a full-time half-goal handicap from the team row that displays the line", () => {
     const handicap: CmdCatalogInputRecord = { ...structuredClone(record), groups: [{
       betTypeIds: ["1"], labels: ["0.5"], odds: [

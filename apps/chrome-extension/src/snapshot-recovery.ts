@@ -3,7 +3,10 @@ import type { ChromeLobbyId } from "@tool-chenh/contracts";
 export type SnapshotRecoveryMode = "DOM_CAPTURE" | "TAB_RELOAD";
 
 export function snapshotRecoveryMode(lobby: ChromeLobbyId): SnapshotRecoveryMode {
-  return lobby === "CMD" || lobby === "SABA" ? "DOM_CAPTURE" : "TAB_RELOAD";
+  // CMD's table is authoritative in the rendered DOM. SABA's DOM is only the
+  // currently visible viewport; a tab reload is required to make its socket
+  // replay the complete reset/done snapshot after bridge state is lost.
+  return lobby === "CMD" ? "DOM_CAPTURE" : "TAB_RELOAD";
 }
 
 export interface RecoverableSource {

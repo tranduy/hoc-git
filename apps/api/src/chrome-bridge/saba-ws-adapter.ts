@@ -19,7 +19,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "saba-ws-catalog-v1";
   readonly lobby = "SABA" as const;
   readonly providerFamily = "SABA";
-  readonly #decoder = new SabaPushDecoder();
+  readonly #decoders = new Map<string, SabaPushDecoder>();
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #parts = new Map<string, NormalizedCatalogPart>();
   readonly #wsSources = new Set<string>();
@@ -49,7 +49,12 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     try {
       const frame = parseSabaSocketFrame(envelope.payload.body);
       if (frame === null) return [];
-      const applied = this.#decoder.apply(frame);
+      let decoder = this.#decoders.get(envelope.sourceId);
+      if (decoder === undefined) {
+        decoder = new SabaPushDecoder();
+        this.#decoders.set(envelope.sourceId, decoder);
+      }
+      const applied = decoder.apply(frame);
       if (applied.duplicate || applied.records.length === 0) return [];
       const normalized = normalizeSabaFootballRecords(markSabaLiveContextRecords(applied.records), {
         observedAtMs: envelope.observedAtMs,

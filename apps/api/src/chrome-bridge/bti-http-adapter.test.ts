@@ -29,6 +29,46 @@ describe("BtiHttpCatalogAdapter", () => {
     expect(catalog.quotes).toHaveLength(2);
   });
 
+  it("accepts prematch event-list responses and retains live plus prematch catalogs", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const live = adapter.decode(envelope())[0]!.value as { events: { providerEventId: string }[] };
+    expect(live.events.map(({ providerEventId }) => providerEventId)).toEqual(["event"]);
+
+    const prematchPayload = { serializedData: [["league-p", "Prematch League", 0, "", false, "", "", "", "", "", "1", "Football", [[
+      "event-p", [["h", { VI: "Alpha" }], ["a", { VI: "Beta" }]], "Alpha vs Beta", "2026-08-19T00:15:00.000Z",
+      ["", "", null, {}], false, false, [false, 0, null, null, null], ["event-p", 0, [], [[
+        "hc-p", "Prematch", "Prematch", ["HC0", "full time", 1], "event-p", "league-p", "1",
+        [selection("home-p", 1, -0.5, "0.82"), selection("away-p", 3, 0.5, "-0.92")]
+      ]]]
+    ]]]]} ;
+    const prematchEnvelope = { ...envelope(JSON.stringify(prematchPayload)), sequence: 10,
+      request: { ...envelope().request, pathnameClass: "/api/eventlist/asia/leagues/v2/1/prematch/initial" } };
+    expect(adapter.fingerprint(prematchEnvelope)).toBe(true);
+    const combined = adapter.decode(prematchEnvelope)[0]!.value as { events: { providerEventId: string; isLive: boolean }[] };
+    expect(combined.events.map(({ providerEventId, isLive }) => [providerEventId, isLive])).toEqual([
+      ["event", true], ["event-p", false]
+    ]);
+  });
+
+  it("keeps market and quote identities isolated when BTI reuses ids across events", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    adapter.decode(envelope());
+    const reusedIds = { serializedData: [["league-p", "Prematch League", 0, "", false, "", "", "", "", "", "1", "Football", [[
+      "event-p", [["h", { VI: "Alpha" }], ["a", { VI: "Beta" }]], "Alpha vs Beta", "2026-08-19T00:15:00.000Z",
+      ["", "", null, {}], false, false, [false, 0, null, null, null], ["event-p", 0, [], [[
+        "hc", "Prematch", "Prematch", ["HC0", "full time", 1], "event-p", "league-p", "1",
+        [selection("home", 1, -0.5, "0.82"), selection("away", 3, 0.5, "-0.92")]
+      ]]]
+    ]]]]} ;
+    const update = adapter.decode({ ...envelope(JSON.stringify(reusedIds)), sequence: 10,
+      request: { ...envelope().request, pathnameClass: "/api/eventlist/asia/leagues/v2/1/prematch/initial" } })[0]!.value as {
+        events: unknown[]; markets: unknown[]; quotes: unknown[];
+      };
+    expect(update.events).toHaveLength(2);
+    expect(update.markets).toHaveLength(2);
+    expect(update.quotes).toHaveLength(4);
+  });
+
   it("rejects unrelated paths and malformed bodies", () => {
     const adapter = new BtiHttpCatalogAdapter();
     expect(adapter.decode({ ...envelope(), request: { ...envelope().request, pathnameClass: "/api/profile" } })).toEqual([]);

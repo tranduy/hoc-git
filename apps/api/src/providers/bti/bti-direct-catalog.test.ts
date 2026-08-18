@@ -3,7 +3,7 @@ import { extractBtiCatalogRecords } from "./bti-direct-catalog.js";
 
 const selection = (id: string, side: 1 | 3, line: number, malay: string, locked = false) =>
   [id, { VI: "team" }, { VI: "team line" }, locked, false, 1.9, ["", "1.90", "", "", "", malay], side, 2, {}, "", "event", "market", line];
-const market = (id: string, code: "HC39" | "HC1" | "OU39" | "OU1" | "ML39" | "ML1", selections: unknown[]) =>
+const market = (id: string, code: "HC39" | "HC0" | "HC1" | "OU39" | "OU0" | "OU1" | "ML39" | "ML1", selections: unknown[]) =>
   [id, "Cược trực tiếp", "Cược trực tiếp", [code, code === "OU1" ? "first half" : "full time", 1],
     "event", "league", "1", selections];
 
@@ -37,7 +37,23 @@ describe("BTI direct catalog", () => {
     expect(markets.some(({ marketId }) => marketId.includes("three-way"))).toBe(false);
   });
 
-  it("fails closed for prematch, malformed, and three-way data", () => {
+  it("extracts exact prematch HC0/OU0 markets with their scheduled start", () => {
+    const payload = { serializedData: [["id", "League", 0, "", false, "", "", "", "", "", "1", "Football", [[
+      "event-p", [["h", { VI: "A" }], ["a", { VI: "B" }]], "A vs B", "2026-08-19T00:15:00.000Z",
+      ["", "", null, {}], false, false, [false, 0, null, null, null], ["event-p", 0, [], [
+        market("hc-p", "HC0", [selection("home-p", 1, -0.75, "0.82"), selection("away-p", 3, 0.75, "-0.92")]),
+        market("ou-p", "OU0", [selection("over-p", 1, 2.75, "0.90"), selection("under-p", 3, 2.75, "-0.99")])
+      ]]
+    ]]]]} ;
+    expect(extractBtiCatalogRecords(payload)).toEqual([expect.objectContaining({
+      eventId: "event-p", timeText: "PREMATCH", scoreText: null,
+      startAtUtcMs: Date.parse("2026-08-19T00:15:00.000Z"),
+      markets: [expect.objectContaining({ marketType: "FT_AH", lineText: "-0.75" }),
+        expect.objectContaining({ marketType: "FT_TOTAL", lineText: "2.75" })]
+    })]);
+  });
+
+  it("fails closed for malformed and three-way-only data", () => {
     expect(extractBtiCatalogRecords({ serializedData: [["id", "League", 0, "", false, "", "", "", "", "", "1", "Football", [[
       "event", [["h", { VI: "A" }], ["a", { VI: "B" }]], "A vs B", "", ["0", "0"], false, false, [], []
     ]]]]})).toEqual([]);

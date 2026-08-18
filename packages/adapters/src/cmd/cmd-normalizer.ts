@@ -50,8 +50,67 @@ const cmdTwoWayMarketSemantics = {
     settlementProfile: "football-first-half-including-added-time" }
 } as const;
 
-function cmdMarketSemantics(betType: string) {
-  return cmdTwoWayMarketSemantics[betType as keyof typeof cmdTwoWayMarketSemantics] ?? null;
+type CmdEventFamily = "GOALS" | "CORNERS" | "CARDS";
+
+const specialFullTimeSemantics = {
+  CORNERS: {
+    "1": { marketType: "CORNER_FT_AH", scope: "FULL_TIME", isHandicap: true,
+      settlementProfile: "football-corners-regulation" },
+    "3": { marketType: "CORNER_FT_TOTAL", scope: "FULL_TIME", isHandicap: false,
+      settlementProfile: "football-corners-regulation" }
+  },
+  CARDS: {
+    "1": { marketType: "CARD_FT_AH", scope: "FULL_TIME", isHandicap: true,
+      settlementProfile: "football-cards-regulation" },
+    "3": { marketType: "CARD_FT_TOTAL", scope: "FULL_TIME", isHandicap: false,
+      settlementProfile: "football-cards-regulation" }
+  }
+} as const;
+
+function cmdMarketSemantics(betType: string, family: CmdEventFamily) {
+  if (family === "GOALS") {
+    return cmdTwoWayMarketSemantics[betType as keyof typeof cmdTwoWayMarketSemantics] ?? null;
+  }
+  return specialFullTimeSemantics[family][betType as "1" | "3"] ?? null;
+}
+
+function removeLoadingSuffix(value: string): string {
+  return value.trim().replace(/\s*(?:Ä‘ang\s+táº£i|đang\s+tải)\.\.\.\s*$/iu, "").trim();
+}
+
+function normalizedDistinctTeams(rawTeams: readonly string[], suffix?: RegExp): string[] {
+  return [...new Map(rawTeams.map((team) => {
+    let normalized = team.trim().replace(/\s*\(N\)\s*$/iu, "").trim();
+    if (suffix !== undefined) normalized = normalized.replace(suffix, "").trim();
+    return normalized;
+  }).filter((team) => team.length > 0).map((team) => [team.toLocaleLowerCase("en-US"), team])).values()];
+}
+
+function classifyCmdEvent(rawCompetition: string, rawTeams: readonly string[]): {
+  readonly competition: string;
+  readonly teams: readonly string[];
+  readonly family: CmdEventFamily;
+} | null {
+  const competition = removeLoadingSuffix(rawCompetition);
+  const cornerCompetition = /\s*-\s*CORNERS\s*$/iu.test(competition);
+  const bookingCompetition = /\s*-\s*BOOKINGS\s*$/iu.test(competition);
+  if (cornerCompetition) {
+    const suffix = /\s*\(\s*No\.?\s*of\s+Corners\s*\)\s*$/iu;
+    if (!rawTeams.every((team) => suffix.test(team))) return null;
+    return { competition: competition.replace(/\s*-\s*CORNERS\s*$/iu, "").trim(),
+      teams: normalizedDistinctTeams(rawTeams, suffix), family: "CORNERS" };
+  }
+  if (bookingCompetition) {
+    const suffix = /\s*\(\s*Total\s+Bookings\s*\)\s*$/iu;
+    if (!rawTeams.every((team) => suffix.test(team))) return null;
+    return { competition: competition.replace(/\s*-\s*BOOKINGS\s*$/iu, "").trim(),
+      teams: normalizedDistinctTeams(rawTeams, suffix), family: "CARDS" };
+  }
+  const unsupported = /(?:SPECIFIC\s+\d+\s+MINS|WHICH\s+TEAM\s+WILL\s+ADVANCE|SINGLE\s+TEAM\s+OVER\s*\/\s*UNDER|FANTASY\s+MATCHES)/iu;
+  if (unsupported.test(competition) || rawTeams.some((team) => unsupported.test(team)) ||
+    /\b(?:CORNERS?|BOOKINGS?|CARDS?)\b/iu.test(competition) ||
+    rawTeams.some((team) => /\((?:\d+(?:ST|ND|RD|TH)\s+)?(?:CORNER|BOOKING|CARD)S?\)\s*$/iu.test(team))) return null;
+  return { competition, teams: normalizedDistinctTeams(rawTeams), family: "GOALS" };
 }
 
 function virtualFootballEvidence(competition: string, teams: readonly string[]): boolean {
@@ -183,26 +242,31 @@ export function normalizeObservedFootballCatalog(
 
   for (const record of records) {
     const timing = eventTime(record.timeText, options);
-    const teams = [...new Map(record.teamNames.map((team) => team.trim().replace(/\s*\(N\)\s*$/iu, "").trim())
-      .filter((team) => team.length > 0).map((team) => [team.toLocaleLowerCase("en-US"), team])).values()];
+    const classified = classifyCmdEvent(record.leagueName, record.teamNames);
+    const teams = classified?.teams ?? [];
     const supported = record.groups.filter((group) => group.betTypeIds.length === 1 &&
-      cmdMarketSemantics(group.betTypeIds[0]!) !== null &&
-      (!cmdMarketSemantics(group.betTypeIds[0]!)!.isHandicap || group.odds.some((odd) => odd.lineText !== undefined)));
+      classified !== null && cmdMarketSemantics(group.betTypeIds[0]!, classified.family) !== null &&
+      (!cmdMarketSemantics(group.betTypeIds[0]!, classified.family)!.isHandicap ||
+        group.odds.some((odd) => odd.lineText !== undefined)));
     const invalid = record.sportId !== "1" || record.matchId.trim().length === 0 || record.leagueName.trim().length === 0 ||
       teams.length !== 2 || teams[0] === teams[1] || timing === null;
     const recordMarkets: ProviderMarket[] = [];
     const recordQuotes: ProviderQuote[] = [];
+    if (classified === null) {
+      diagnostics.push("CMD_CATALOG_EVENT_UNSUPPORTED");
+      continue;
+    }
     if (invalid) {
       diagnostics.push("CMD_CATALOG_RECORD_REJECTED");
       continue;
     }
-    if (virtualFootballEvidence(record.leagueName, teams)) {
+    if (virtualFootballEvidence(classified.competition, teams)) {
       diagnostics.push("CMD_CATALOG_EVENT_UNSUPPORTED");
       continue;
     }
     for (const group of supported) {
       const betType = group.betTypeIds[0]!;
-      const semantics = cmdMarketSemantics(betType)!;
+      const semantics = cmdMarketSemantics(betType, classified.family)!;
       const selections = semantics.isHandicap ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
       const marketId = exactMarketId(group, selections.length);
       const marketLine = semantics.isHandicap ? canonicalHomeHandicap(group.odds) : line(group.labels);
@@ -230,7 +294,7 @@ export function normalizeObservedFootballCatalog(
     if (supported.length > 0 && recordMarkets.length === 0) continue;
     events.push({
       provider, category: "FOOTBALL", providerEventId: record.matchId,
-      competition: record.leagueName.trim(), seasonStage: null, startAtUtcMs: timing!.startAtUtcMs,
+      competition: classified.competition, seasonStage: null, startAtUtcMs: timing!.startAtUtcMs,
       participantA: teams[0]!, participantB: teams[1]!, eventScope: "REGULATION", bestOf: null,
       isLive: timing!.isLive, rematchCandidate: timing!.isLive, fixtureDiscriminator: null,
       isVirtual: false, sportVariant: "FOOTBALL",

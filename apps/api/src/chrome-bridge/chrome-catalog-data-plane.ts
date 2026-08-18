@@ -1,5 +1,6 @@
 import { CatalogSourceStatusSchema, type CatalogSourceStatus, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
+import { CatalogCoverageGuard } from "../catalog/catalog-coverage-guard.js";
 import { AdapterRouter } from "./adapter-router.js";
 import { CmdDomCatalogAdapter } from "./cmd-dom-adapter.js";
 import { ImHttpCatalogAdapter } from "./im-http-adapter.js";
@@ -26,6 +27,7 @@ export class ChromeCatalogDataPlane {
     new BtiHttpCatalogAdapter()],
     { confirmationsRequired: 1 });
   readonly #networkBodies = new NetworkBodyAssembler();
+  readonly #coverage = new CatalogCoverageGuard();
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
   readonly #lastTransportAtMs = new Map<string, number>();
 
@@ -63,6 +65,13 @@ export class ChromeCatalogDataPlane {
     // publishing it would erase the last complete catalog on every refresh.
     if (update.value.events.length > 0 &&
       (update.value.markets.length === 0 || update.value.quotes.length === 0)) return false;
+    // A reconnecting delta-only feed can briefly publish a small viewport or
+    // one channel before its full reset/done snapshot. Retain the last
+    // complete catalog until the smaller event set is stable across three
+    // identical reads; this prevents a transient partial update erasing most
+    // of a provider's prices.
+    if (!this.#coverage.accept(update.value.accountId,
+      update.value.events.map((event) => event.providerEventId))) return false;
     this.#catalogs.set(update.value.accountId, update.value);
     this.#publish?.(update.value);
     return true;

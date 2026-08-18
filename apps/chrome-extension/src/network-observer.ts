@@ -73,7 +73,7 @@ export const KEEP_ACTIVE_EXPRESSION = `(() => {
       .filter((element) => /^(?:\\+\\s*\\d+|[v▼]\\s*\\d+|\\d+\\s*(?:keo|markets?)\\s*(?:khac|more)?|more markets?|show more|all markets?)$/u
         .test(normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent)))
       .filter((element) => !element.dataset.fieldlineMarketExpanded)
-      .slice(0, 3);
+      .slice(0, 12);
     for (const control of controls) {
       control.dataset.fieldlineMarketExpanded = '1';
       control.click();
@@ -134,7 +134,7 @@ export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
       .filter((element) => /^(?:\\+\\s*\\d+|[v▼]\\s*\\d+|\\d+\\s*(?:keo|markets?)\\s*(?:khac|more)?|more markets?|show more|all markets?)$/u
         .test(normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent)))
       .filter((element) => !element.dataset.fieldlineMarketExpanded)
-      .slice(0, 3);
+      .slice(0, 12);
     for (const control of controls) {
       control.dataset.fieldlineMarketExpanded = '1';
       control.click();

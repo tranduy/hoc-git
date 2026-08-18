@@ -42,7 +42,7 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
-  it("requests one full snapshot per source on a new bridge connection", async () => {
+  it("reloads SABA so its socket replays a full catalog on a new bridge connection", async () => {
     const { app, registry } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
       headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
@@ -58,10 +58,32 @@ describe("Chrome bridge route", () => {
     socket.send(JSON.stringify(validEnvelope));
     await expect(firstControls).resolves.toEqual([
       expect.objectContaining({ kind: "ACK", sourceId: "chrome:SABA:7" }),
-      { version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:7" }
+      { version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:7" }
     ]);
     socket.send(JSON.stringify({ ...validEnvelope, sequence: 1 }));
     await expect(nextMessage(socket)).resolves.toMatchObject({ kind: "ACK", sequence: 1 });
+    socket.terminate();
+    await app.close();
+  });
+
+  it("requests an in-page snapshot for a non-SABA source on a new bridge connection", async () => {
+    const { app } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const controls = new Promise<unknown[]>((resolve) => {
+      const received: unknown[] = [];
+      socket.on("message", (data) => {
+        received.push(JSON.parse(data.toString("utf8")));
+        if (received.length === 2) resolve(received);
+      });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "CMD", sourceId: "chrome:CMD:7" }));
+    await expect(controls).resolves.toEqual([
+      expect.objectContaining({ kind: "ACK", sourceId: "chrome:CMD:7" }),
+      { version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:CMD:7" }
+    ]);
     socket.terminate();
     await app.close();
   });
