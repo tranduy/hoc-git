@@ -160,6 +160,7 @@ describe("NetworkObserver", () => {
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("hideX25X75Selections=false");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("credentials: 'include'");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("cache: 'no-store'");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("slice(0, 12)");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).not.toMatch(/cookie|authorization|password/iu);
     expect(() => new Function(`return ${BTI_CATALOG_REFRESH_EXPRESSION}`)).not.toThrow();
   });
@@ -201,7 +202,7 @@ describe("NetworkObserver", () => {
     }
 
     expect([...requested].sort()).toEqual(["a", "b", "c", "d", "e", "f", "g"]);
-    expect(requestCounts).toEqual([6, 6, 6]);
+    expect(requestCounts).toEqual([7, 7, 7]);
   });
 
   it("remembers BTI detail visits when prematch pages temporarily disappear from the list", async () => {

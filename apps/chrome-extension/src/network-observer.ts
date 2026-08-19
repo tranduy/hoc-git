@@ -343,7 +343,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   const root = document.documentElement;
   const now = Date.now();
   const prior = Number(root.dataset.fieldlineBtiCatalogRefreshAt || 0);
-  if (Number.isFinite(prior) && now - prior < 4000) return 'rate-limited';
+  if (Number.isFinite(prior) && now - prior < 1800) return 'rate-limited';
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   root.dataset.fieldlineBtiCatalogRefreshAt = String(now);
   const listPaths = [
@@ -382,7 +382,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
     const visitedAt = Number(priorVisits[eventId]);
     return { eventId, index, visitedAt: Number.isFinite(visitedAt) && visitedAt > 0 ? visitedAt : 0 };
   }).sort((left, right) => left.visitedAt - right.visitedAt || left.index - right.index);
-  const selected = ranked.slice(0, 6).map(({ eventId }) => eventId);
+  const selected = ranked.slice(0, 12).map(({ eventId }) => eventId);
   const nextVisits = {};
   for (const [eventId, value] of Object.entries(priorVisits)) {
     const visitedAt = Number(value);

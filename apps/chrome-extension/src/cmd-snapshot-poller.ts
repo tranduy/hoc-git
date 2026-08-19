@@ -86,7 +86,7 @@ export class CmdSnapshotPoller {
     for (const tab of tabs) {
       if (tab.lobby === "BTI" && this.#dependencies.refreshCatalog !== undefined &&
         !this.#catalogRefreshInFlight.has(tab.tabId) &&
-        now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >= 5_000) {
+        now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >= 2_000) {
         this.#lastCatalogRefreshAtMs.set(tab.tabId, now);
         this.#catalogRefreshInFlight.add(tab.tabId);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;

@@ -133,7 +133,7 @@ describe("CmdSnapshotPoller", () => {
     ]);
   });
 
-  it("requests genuine provider catalogs every five seconds without overlapping a tab", async () => {
+  it("requests genuine provider catalogs every two seconds without overlapping a tab", async () => {
     let callback: (() => void) | undefined;
     let now = 1_000;
     let release: (() => void) | undefined;
@@ -150,7 +150,7 @@ describe("CmdSnapshotPoller", () => {
     callback?.();
     await Promise.resolve();
     expect(refreshCatalog).toHaveBeenCalledTimes(1);
-    now = 7_000;
+    now = 3_000;
     callback?.();
     await Promise.resolve();
     expect(refreshCatalog).toHaveBeenCalledTimes(1);

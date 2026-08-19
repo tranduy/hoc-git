@@ -64,18 +64,36 @@ describe("BtiHttpCatalogAdapter", () => {
     const withDetail = adapter.decode(detailEnvelope())[0]!.value as { markets: { marketType: string }[] };
     expect(withDetail.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(true);
 
-    const expiredAt = envelope().observedAtMs + 60_001;
+    const expiredAt = envelope().observedAtMs + 10_001;
     const expired = adapter.decode({ ...envelope(), sequence: 11, observedAtMs: expiredAt })[0]!.value as {
       markets: { marketType: string }[];
     };
     expect(expired.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(false);
 
     adapter.decode(detailEnvelope(detailPayload(), expiredAt + 1));
-    expect(adapter.decode(detailEnvelope({ data: [] }, expiredAt + 2))).toEqual([]);
+    expect(adapter.decode(detailEnvelope({ data: [] }, expiredAt + 2))).toHaveLength(1);
     const afterEmpty = adapter.decode({ ...envelope(), sequence: 12, observedAtMs: expiredAt + 3 })[0]!.value as {
       markets: { marketType: string }[];
     };
     expect(afterEmpty.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(false);
+  });
+
+  it("publishes removal immediately when a valid event detail becomes empty", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    adapter.decode(envelope());
+    adapter.decode(detailEnvelope());
+    const removed = adapter.decode(detailEnvelope({ data: [] }, envelope().observedAtMs + 1));
+    expect(removed).toHaveLength(1);
+    expect((removed[0]!.value as { markets: Array<{ marketType: string }> }).markets
+      .some(({ marketType }) => marketType === "FH_TOTAL")).toBe(false);
+  });
+
+  it("replaces a valid empty BTI list partition instead of retaining stale events", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    adapter.decode(envelope());
+    const empty = adapter.decode(envelope(JSON.stringify({ serializedData: [] })))[0]!.value as {
+      events: unknown[]; markets: unknown[]; quotes: unknown[] };
+    expect(empty).toMatchObject({ events: [], markets: [], quotes: [] });
   });
 
   it("decodes the live football event-list response", () => {
