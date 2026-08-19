@@ -24,6 +24,7 @@ import { createChromeCatalogOverlay } from "./chrome-bridge/chrome-catalog-overl
 import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-feature-flags.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
 import { refreshBridgeProviderSources } from "./chrome-bridge/provider-source-refresh.js";
+import { AutomaticSourceRecovery } from "./chrome-bridge/automatic-source-recovery.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 
@@ -284,30 +285,16 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   }),
     journal: new MaintenanceJournal({ nowMs: Date.now },
       join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
-  const automaticSourceRecoveries = new Map<string, Promise<void>>();
-  requestAutomaticSourceRecovery = (accountId) => {
-    if (automaticSourceRecoveries.has(accountId)) return;
-    const match = /^catalog-source:(SABA|IM|SBOBET|APSPORT|BTI):FOOTBALL$/u.exec(accountId);
-    if (match === null) {
-      maintenance.start("MANUAL");
-      return;
-    }
-    const provider = match[1] as "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
-    const recoveryStartedAtMs = Date.now();
-    const operation = (async () => {
-      // Refresh Fabet's launch set, but navigate only the stalled provider.
-      // Healthy Chrome tabs keep their current streams and one-time sessions.
-      await sessionServices.renewAll();
-      await refreshBridgeProviderSources({
-        controlPlane: chromeBridgeControlPlane!,
-        withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
-        minAcquiredAtMs: recoveryStartedAtMs,
-        providers: [provider],
-        restoreCmd: false
-      });
-    })().catch(() => undefined).finally(() => automaticSourceRecoveries.delete(accountId));
-    automaticSourceRecoveries.set(accountId, operation);
-  };
+  if (chromeBridgeControlPlane !== null) {
+    const automaticSourceRecovery = new AutomaticSourceRecovery({
+      controlPlane: chromeBridgeControlPlane,
+      refreshFabetLaunches: () => sessionServices.refreshFabetLaunches(),
+      withLatestFabetLaunch: sessionServices.withLatestFabetLaunch
+    });
+    requestAutomaticSourceRecovery = (accountId) => {
+      void automaticSourceRecovery.recover(accountId);
+    };
+  }
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,

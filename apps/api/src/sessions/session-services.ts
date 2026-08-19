@@ -89,6 +89,7 @@ export interface ManagedSessionServices extends SessionServices {
   readonly tk88Browser: Tk88BrowserAutomation;
   tick(): Promise<void>;
   renewAll(): Promise<void>;
+  refreshFabetLaunches(): Promise<void>;
   withLatestFabetLaunch<T>(provider: "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI",
     category: "FOOTBALL" | "LOL", consume: (url: string) => Promise<T>, minAcquiredAtMs?: number): Promise<T>;
   refreshAll(): Promise<void>;
@@ -321,6 +322,12 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       if (results.some((result) => result.status === "rejected" || result.value.state !== "ACTIVE")) {
         throw new Error("SESSION_REFRESH_FAILED");
       }
+      catalogSources.invalidateSessionCache();
+    },
+    async refreshFabetLaunches(): Promise<void> {
+      if (maintenanceWarpCli !== null) await ensureWarpTunnelConnected(maintenanceWarpCli);
+      const refreshed = await manager.refreshFabetLaunches();
+      if (refreshed.state !== "ACTIVE") throw new Error("SESSION_REFRESH_FAILED");
       catalogSources.invalidateSessionCache();
     },
     withLatestFabetLaunch: manager.withLatestFabetLaunch.bind(manager),

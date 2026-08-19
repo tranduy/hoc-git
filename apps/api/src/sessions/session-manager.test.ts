@@ -51,6 +51,30 @@ afterEach(async () => {
 });
 
 describe("SessionManager", () => {
+  it("preserves the active Fabet session when a background launch refresh fails", async () => {
+    const vault = await createVault();
+    let failLogin = false;
+    const manager = new SessionManager({
+      vault,
+      validators: new SessionValidatorRegistry([]),
+      clock: { nowMs: () => 100 },
+      idFactory: () => "unused",
+      fabetDriver: {
+        login: async () => { if (failLogin) throw new Error("network unavailable"); },
+        captureLobbyLaunches: async () => [],
+        resetProfile: async () => undefined,
+      },
+    });
+    await manager.configureFabet({ entryUrl: "https://fabet.com/", trustedHostname: "fabet.com",
+      username: "development-user", password: "development-pass" });
+    failLogin = true;
+
+    await expect(manager.refreshFabetLaunches()).rejects.toThrow("network unavailable");
+
+    expect((await manager.listStatuses()).sessions.find((session) => session.id === "fabet"))
+      .toMatchObject({ state: "ACTIVE", reason: null });
+  });
+
   it("shares one canonical-root authentication across simultaneous provider auth failures", async () => {
     const vault = await createVault();
     const roots: string[] = [];

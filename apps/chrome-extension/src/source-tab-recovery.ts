@@ -48,10 +48,16 @@ export class SourceTabRecovery {
       throw new Error("SOURCE_TAB_CLEANUP_UNAVAILABLE");
     }
 
-    const pending = await this.#options.create(url, false);
+    const pending = await this.#options.create("about:blank", false);
     try {
-      const recovered = await this.#waitForLobby(pending, lobby);
-      await this.#options.attach(recovered);
+      if (pending.id === undefined) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
+      // Attach Network/Runtime observers before consuming a one-time launch.
+      // BTI can issue its authenticated bootstrap request during the first
+      // navigation; attaching after chrome.tabs.create(url) can miss it and
+      // leave a heartbeating tab with no decoded catalog.
+      await this.#options.attach({ ...pending, url });
+      const navigated = await this.#options.update(pending.id, url);
+      await this.#waitForLobby(navigated, lobby);
     } catch (error) {
       if (pending.id !== undefined) await this.#options.remove?.(pending.id).catch(() => undefined);
       throw error;

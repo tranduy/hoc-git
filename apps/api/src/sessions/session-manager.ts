@@ -314,6 +314,33 @@ export class SessionManager {
     return this.#exclusive(id, async () => this.#renewRecord(await this.#loadRequired(id), "EXPIRED"));
   }
 
+  refreshFabetLaunches(id = "fabet"): Promise<RedactedSessionStatus> {
+    return this.#exclusive(id, async () => {
+      const current = await this.#loadRequired(id);
+      if (current.source !== "FABET_LOGIN" || current.secret.kind !== "FABET_CREDENTIALS" ||
+        this.#fabetDriver === undefined) throw new Error("FABET_SESSION_UNAVAILABLE");
+
+      // This is background source repair, not credential renewal. Do not put
+      // the saved parent into RENEWING/INVALID before the replacement launch
+      // set has been captured successfully; a transient login failure must
+      // leave the currently working catalogs and session identities intact.
+      await this.#rehydrateFabet(id);
+      await this.#ingestFabetLaunches(await this.#fabetDriver.captureLobbyLaunches(["FOOTBALL"]));
+      const nowMs = this.#clock.nowMs();
+      const active: StoredSession = {
+        ...current,
+        state: "ACTIVE",
+        acquiredAtMs: nowMs,
+        lastValidatedAtMs: nowMs,
+        renewAfterMs: nowMs + renewalIntervalMs,
+        reason: null,
+        nextRetryAtMs: null
+      };
+      await this.#save(active);
+      return publicStatus(active);
+    });
+  }
+
   reclassify(id: string, targetProvider: string): Promise<RedactedSessionStatus> {
     return this.#exclusive(id, async () => {
       const current = await this.#loadRequired(id);
