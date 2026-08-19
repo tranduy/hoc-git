@@ -158,12 +158,87 @@ describe("NetworkObserver", () => {
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventlist/asia/leagues/v2/1/prematch");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventpage/events/");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("hideX25X75Selections=false");
-    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("fieldlineBtiDetailCursor");
-    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("slice(cursor, cursor + 6)");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("credentials: 'include'");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("cache: 'no-store'");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).not.toMatch(/cookie|authorization|password/iu);
     expect(() => new Function(`return ${BTI_CATALOG_REFRESH_EXPRESSION}`)).not.toThrow();
+  });
+
+  it("does not starve a BTI event when the provider reorders the event list between detail batches", async () => {
+    const orders = [
+      ["a", "b", "c", "d", "e", "f", "g"],
+      ["g", "a", "b", "c", "d", "e", "f"],
+      ["a", "b", "c", "d", "e", "f", "g"]
+    ];
+    const requested = new Set<string>();
+    const requestCounts = [0, 0, 0];
+    const root = { dataset: {} as Record<string, string> };
+    let round = 0;
+    const fetcher = async (path: string) => {
+      if (path.startsWith("/api/eventpage/events/")) {
+        requestCounts[round]! += 1;
+        requested.add(decodeURIComponent(path.slice("/api/eventpage/events/".length).split("?")[0]!));
+        return { ok: true, json: async () => ({ data: [] }) };
+      }
+      const league = Array.from({ length: 13 }, () => null) as unknown[];
+      league[12] = path.endsWith("/live")
+        ? orders[Math.min(round, orders.length - 1)]!.map((id) => [id])
+        : [];
+      return { ok: true, json: async () => ({ serializedData: [league] }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (
+        document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string },
+        fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }
+      ) => Promise<string>;
+
+    for (round = 0; round < orders.length; round += 1) {
+      root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+      await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
+        { getItem: () => null });
+    }
+
+    expect([...requested].sort()).toEqual(["a", "b", "c", "d", "e", "f", "g"]);
+    expect(requestCounts).toEqual([6, 6, 6]);
+  });
+
+  it("remembers BTI detail visits when prematch pages temporarily disappear from the list", async () => {
+    const orders = [
+      ["a", "b", "c", "d", "e", "f", "g"],
+      ["h", "i", "j", "k", "l", "m", "n"],
+      ["a", "b", "c", "d", "e", "f", "g"],
+      ["h", "i", "j", "k", "l", "m", "n"]
+    ];
+    const requested = new Set<string>();
+    const root = { dataset: {} as Record<string, string> };
+    let round = 0;
+    const fetcher = async (path: string) => {
+      if (path.startsWith("/api/eventpage/events/")) {
+        requested.add(decodeURIComponent(path.slice("/api/eventpage/events/".length).split("?")[0]!));
+        return { ok: true, json: async () => ({ data: [] }) };
+      }
+      const league = Array.from({ length: 13 }, () => null) as unknown[];
+      league[12] = path.endsWith("/live") ? orders[round]!.map((id) => [id]) : [];
+      return { ok: true, json: async () => ({ serializedData: [league] }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (
+        document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string },
+        fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }
+      ) => Promise<string>;
+
+    for (round = 0; round < orders.length; round += 1) {
+      root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+      await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
+        { getItem: () => null });
+    }
+
+    expect([...requested].sort()).toEqual(["a", "b", "c", "d", "e", "f", "g",
+      "h", "i", "j", "k", "l", "m", "n"]);
   });
 
   it("refreshes BTI in each frame main world so page auth and origin are preserved", async () => {

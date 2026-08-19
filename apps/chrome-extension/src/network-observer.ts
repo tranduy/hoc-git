@@ -363,11 +363,25 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
       }
     }
   }
-  const previousCursor = Number(root.dataset.fieldlineBtiDetailCursor || 0);
-  const cursor = Number.isSafeInteger(previousCursor) && previousCursor >= 0 && previousCursor < eventIds.length
-    ? previousCursor : 0;
-  const selected = eventIds.slice(cursor, cursor + 6);
-  root.dataset.fieldlineBtiDetailCursor = String(eventIds.length === 0 ? 0 : (cursor + selected.length) % eventIds.length);
+  let priorVisits = {};
+  try {
+    const parsed = JSON.parse(root.dataset.fieldlineBtiDetailVisits || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) priorVisits = parsed;
+  } catch { /* A malformed page-owned dataset must not stop catalog refresh. */ }
+  const ranked = eventIds.map((eventId, index) => {
+    const visitedAt = Number(priorVisits[eventId]);
+    return { eventId, index, visitedAt: Number.isFinite(visitedAt) && visitedAt > 0 ? visitedAt : 0 };
+  }).sort((left, right) => left.visitedAt - right.visitedAt || left.index - right.index);
+  const selected = ranked.slice(0, 6).map(({ eventId }) => eventId);
+  const nextVisits = {};
+  for (const [eventId, value] of Object.entries(priorVisits)) {
+    const visitedAt = Number(value);
+    if (Number.isFinite(visitedAt) && visitedAt > 0 && now - visitedAt <= 10 * 60 * 1000) {
+      nextVisits[eventId] = visitedAt;
+    }
+  }
+  for (const eventId of selected) nextVisits[eventId] = now;
+  root.dataset.fieldlineBtiDetailVisits = JSON.stringify(nextVisits);
   const authName = ['author', 'ization'].join('');
   const contextName = ['service', '-', 'context'].join('');
   const detailHeaders = { Accept: 'application/json' };

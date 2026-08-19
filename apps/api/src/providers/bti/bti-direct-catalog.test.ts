@@ -88,6 +88,62 @@ describe("BTI direct catalog", () => {
       .toBe(false);
   });
 
+  it("extracts BTI's hidden alternate goal totals but excludes unsupported handicap families", () => {
+    const detailSelection = (id: string, name: string, side: 1 | 3, points: number, malay: string) => {
+      const value = Array<unknown>(30).fill(null);
+      value[0] = id;
+      value[2] = { VI: name };
+      value[5] = false;
+      value[8] = ["", "1.90", "", "", "", malay];
+      value[9] = side;
+      value[13] = false;
+      value[16] = points;
+      return value;
+    };
+    const detailMarket = (id: string, code: string, label: string, selections: unknown[]) => {
+      const value = Array<unknown>(30).fill(null);
+      value[0] = id;
+      value[1] = label;
+      value[5] = [code, label];
+      value[13] = selections;
+      value[15] = false;
+      value[23] = false;
+      return value;
+    };
+    const event = Array<unknown>(39).fill(null);
+    event[0] = "hidden-event";
+    event[2] = "Hidden League";
+    event[8] = [["home", { VI: "Alpha" }], ["away", { VI: "Beta" }]];
+    event[11] = "2026-08-19T00:15:00.000Z";
+    event[13] = false;
+    event[20] = [
+      detailMarket("draw-no-bet", "HC157", "Hòa được hoàn tiền", [
+        detailSelection("dnb-home", "Alpha", 1, 0, "-0.51"),
+        detailSelection("dnb-away", "Beta", 3, 0, "0.31")
+      ]),
+      detailMarket("alternate-total", "OU249", "Cược Tài/Xỉu tổng số bàn thắng", [
+        detailSelection("alt-over", "Tài", 1, 2.5, "0.30"),
+        detailSelection("alt-under", "Xỉu", 3, 2.5, "-0.46")
+      ]),
+      detailMarket("first-half-alternate-total", "OU201", "Cược Tài/Xỉu tổng số bàn thắng hiệp 1", [
+        detailSelection("fh-alt-over", "Tài", 1, 1.5, "-0.65"),
+        detailSelection("fh-alt-under", "Xỉu", 3, 1.5, "0.45")
+      ]),
+      detailMarket("european-handicap", "HC2220", "Kèo cược chấp châu Âu thay thế", [
+        detailSelection("eu-home", "Alpha", 1, 1.5, "-0.45"),
+        detailSelection("eu-away", "Beta", 3, -1.5, "0.26")
+      ])
+    ];
+
+    const markets = extractBtiCatalogRecords({ data: [event] })[0]!.markets;
+    expect(markets).toEqual([
+      expect.objectContaining({ marketId: "alternate-total:2.5", marketType: "FT_TOTAL", lineText: "2.5" }),
+      expect.objectContaining({ marketId: "first-half-alternate-total:1.5", marketType: "FH_TOTAL", lineText: "1.5" })
+    ]);
+    expect(markets.some(({ marketId }) => marketId.startsWith("draw-no-bet:"))).toBe(false);
+    expect(markets.some(({ marketId }) => marketId.startsWith("european-handicap:"))).toBe(false);
+  });
+
   it("extracts exact live full-time half-lines and public provider IDs", () => {
     const payload = { serializedData: [["league", "Champions League", 0, "", false, "", "", "", "", "", "1", "Football", [[
       "event-1", [["home-id", { VI: "NEC Nijmegen" }, "Home"], ["away-id", { VI: "Olympiakos" }, "Away"]],

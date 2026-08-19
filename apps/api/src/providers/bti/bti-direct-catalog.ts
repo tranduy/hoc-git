@@ -59,9 +59,10 @@ function normalizedLabel(value: string): string {
 function marketType(code: string, label = ""): SbobetCatalogMarket["marketType"] | null {
   const evidence = normalizedLabel(label);
   const handicap = /^HC(?:39|0|1)$/u.test(code) || /\b(?:asian handicap|handicap|ah)\b/u.test(evidence);
-  const total = /^OU(?:39|0|1)$/u.test(code) || /\b(?:total|over under|ou)\b/u.test(evidence);
+  const total = /^OU(?:39|0|1|201|249)$/u.test(code) || /\b(?:total|over under|ou)\b/u.test(evidence);
   if (handicap === total) return null;
-  const firstHalf = code === "HC1" || code === "OU1" || /\b(?:first half|1st half|1h)\b/u.test(evidence);
+  const firstHalf = code === "HC1" || code === "OU1" || code === "OU201" ||
+    /\b(?:first half|1st half|1h)\b/u.test(evidence);
   const secondHalf = /\b(?:second half|2nd half|2h)\b/u.test(evidence);
   if (firstHalf && secondHalf) return null;
   const corner = /\bcorners?\b/u.test(evidence);
