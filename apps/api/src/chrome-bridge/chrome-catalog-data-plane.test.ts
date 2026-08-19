@@ -108,6 +108,34 @@ describe("ChromeCatalogDataPlane", () => {
     }]);
   });
 
+  it("requests one bounded recovery when IM transport stays live but its decoded catalog stops", async () => {
+    let now = 1_500;
+    const onSourceRecoveryNeeded = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
+      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+    const authenticated: CatalogSourceStatus = {
+      ...fallbackStatus,
+      id: "catalog-source:IM:FOOTBALL",
+      provider: "IM",
+      sessionState: "ACTIVE",
+      acquiredAtMs: 900,
+      reason: null
+    };
+    expect(plane.ingest(imEnvelope())).toBe(true);
+
+    now = 61_201;
+    expect(plane.ingest({ ...imEnvelope(), sequence: 2, observedAtMs: now,
+      request: { hostname: "imsports.directsb.net", pathnameClass: "/__fieldline_heartbeat__",
+        resourceType: "Other" },
+      payload: { encoding: "UTF8", body: "{}" } })).toBe(false);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
+    await plane.overlayStatuses([authenticated]);
+    await plane.overlayStatuses([authenticated]);
+
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledWith("catalog-source:IM:FOOTBALL");
+  });
+
   it("owns every configured Football source while the Chrome bridge is enabled", () => {
     const plane = new ChromeCatalogDataPlane();
     expect(plane.owns("catalog-source:CMD:FOOTBALL")).toBe(true);

@@ -15,6 +15,9 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly freshnessMs?: number;
   readonly maxEnvelopeAgeMs?: number;
   readonly publish?: (catalog: ObservedProviderCatalog) => void;
+  readonly recoveryAfterMs?: number;
+  readonly recoveryCooldownMs?: number;
+  readonly onSourceRecoveryNeeded?: (accountId: string) => void;
 }
 
 export class ChromeCatalogDataPlane {
@@ -22,6 +25,9 @@ export class ChromeCatalogDataPlane {
   readonly #freshnessMs: number;
   readonly #maxEnvelopeAgeMs: number;
   readonly #publish: ((catalog: ObservedProviderCatalog) => void) | null;
+  readonly #recoveryAfterMs: number;
+  readonly #recoveryCooldownMs: number;
+  readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
   readonly #router = new AdapterRouter([new CmdDomCatalogAdapter(), new ImHttpCatalogAdapter(),
     new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(), new TsportWsCatalogAdapter(),
     new BtiHttpCatalogAdapter()],
@@ -30,6 +36,7 @@ export class ChromeCatalogDataPlane {
   readonly #coverage = new CatalogCoverageGuard();
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
   readonly #lastTransportAtMs = new Map<string, number>();
+  readonly #lastRecoveryAtMs = new Map<string, number>();
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -39,6 +46,9 @@ export class ChromeCatalogDataPlane {
     this.#freshnessMs = options.freshnessMs ?? 20_000;
     this.#maxEnvelopeAgeMs = options.maxEnvelopeAgeMs ?? 30_000;
     this.#publish = options.publish ?? null;
+    this.#recoveryAfterMs = options.recoveryAfterMs ?? 60_000;
+    this.#recoveryCooldownMs = options.recoveryCooldownMs ?? 300_000;
+    this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
   }
 
   owns(accountId: string): boolean {
@@ -52,7 +62,12 @@ export class ChromeCatalogDataPlane {
     const ageMs = this.#now() - envelope.observedAtMs;
     if (!Number.isFinite(ageMs) || ageMs > this.#maxEnvelopeAgeMs) return false;
     const transportAccountId = accountIdForLobby(envelope.lobby);
-    if (transportAccountId !== null) this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
+    if (transportAccountId !== null) {
+      this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
+      if (envelope.request.pathnameClass === "/__fieldline_heartbeat__") {
+        this.#requestRecoveryIfStalled(transportAccountId);
+      }
+    }
     const assembled = this.#networkBodies.ingest(envelope);
     if (assembled === null) return false;
     const route = this.#router.route(assembled);
@@ -90,6 +105,10 @@ export class ChromeCatalogDataPlane {
       const fresh = catalog !== undefined && this.#now() - catalog.observedAtMs <= this.#freshnessMs;
       const transportAtMs = this.#lastTransportAtMs.get(status.id);
       const transportFresh = transportAtMs !== undefined && this.#now() - transportAtMs <= this.#freshnessMs;
+      if (!fresh && catalog !== undefined && transportFresh && status.sessionState === "ACTIVE" &&
+        this.#now() - catalog.observedAtMs >= this.#recoveryAfterMs) {
+        this.#requestRecoveryIfStalled(status.id);
+      }
       if (fresh || (catalog !== undefined && transportFresh)) {
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTIVE",
           acquiredAtMs: catalog.observedAtMs, reason: null });
@@ -104,6 +123,15 @@ export class ChromeCatalogDataPlane {
       }
       return status;
     });
+  }
+
+  #requestRecoveryIfStalled(accountId: string): void {
+    const catalog = this.#catalogs.get(accountId);
+    if (catalog === undefined || this.#now() - catalog.observedAtMs < this.#recoveryAfterMs) return;
+    const lastRecoveryAtMs = this.#lastRecoveryAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY;
+    if (this.#now() - lastRecoveryAtMs < this.#recoveryCooldownMs) return;
+    this.#lastRecoveryAtMs.set(accountId, this.#now());
+    try { this.#onSourceRecoveryNeeded?.(accountId); } catch { /* recovery is best-effort */ }
   }
 }
 

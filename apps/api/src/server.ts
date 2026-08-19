@@ -234,6 +234,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
   const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane() : null;
+  let requestAutomaticSourceRecovery = (_accountId: string): void => undefined;
   const cmdHiddenMarketProbe = chromeBridgeRegistry && chromeBridgeControlPlane
     ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
       controlPlane: chromeBridgeControlPlane })
@@ -241,7 +242,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog) => {
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState: "FRESH", freshnessMs: 20_000 });
-    } })
+    }, onSourceRecoveryNeeded: (accountId) => requestAutomaticSourceRecovery(accountId) })
     : null;
   if (chromeBridgeRegistry) {
     const allowedCaptureLobbies = captureLobbies(env.CHROME_BRIDGE_CAPTURE_LOBBIES);
@@ -283,6 +284,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   }),
     journal: new MaintenanceJournal({ nowMs: Date.now },
       join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
+  requestAutomaticSourceRecovery = () => { maintenance.start("MANUAL"); };
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
