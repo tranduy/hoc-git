@@ -51,9 +51,15 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
       onSnapshot: setSnapshot,
       onConnectionState: (state) => {
         setConnectionState(state);
-        if (state !== "LIVE") setCatalogBaseline(null);
+        if (state !== "LIVE") {
+          setCatalogBaseline(null);
+          setCatalogRevision(null);
+        }
       },
-      onCatalogBaseline: (entries, sequence) => setCatalogBaseline({ entries, sequence }),
+      onCatalogBaseline: (entries, sequence) => {
+        setCatalogRevision(null);
+        setCatalogBaseline({ entries, sequence });
+      },
       onCatalogRevision: (entry, sequence) => setCatalogRevision({ entry, sequence }) });
     void client.start();
     return () => client.stop();

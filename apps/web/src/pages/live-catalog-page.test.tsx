@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import type { AccountStatus, CatalogSourceStatus, ProviderEvent, ProviderMarket, ProviderQuote,
   ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -824,6 +825,49 @@ describe("LiveCatalogPage", () => {
 
     expect(read.mock.calls.length).toBeGreaterThan(1);
     expect(screen.queryByText("STALE")).toBeNull();
+  });
+
+  it("keeps fallback catalog refreshes alive through the StrictMode effect replay", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const source: CatalogSourceStatus = { id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA",
+      category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null };
+    const read = vi.fn(async (): Promise<LiveCatalogResponse> => ({
+      ...catalog, accountId: source.id, provider: source.provider, observedAtMs: Date.now()
+    }));
+
+    render(<StrictMode><LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [source] }} catalogApi={{ read }} /></StrictMode>);
+    await vi.waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(0));
+    const initialReads = read.mock.calls.length;
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+
+    expect(read.mock.calls.length).toBeGreaterThan(initialReads);
+  });
+
+  it("preserves realtime coordinator state when Fast Refresh replaces the catalog API", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const source: CatalogSourceStatus = { id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA",
+      category: "FOOTBALL", sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null };
+    const sourceApi: CatalogSourceApiLike = { list: async () => [source] };
+    const firstRead = vi.fn(async (): Promise<LiveCatalogResponse> => ({
+      ...catalog, accountId: source.id, provider: source.provider, observedAtMs: 100
+    }));
+    const secondRead = vi.fn(async (): Promise<LiveCatalogResponse> => ({
+      ...catalog, accountId: source.id, provider: source.provider, observedAtMs: 200
+    }));
+    const view = render(<StrictMode><LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [] }} catalogSourceApi={sourceApi}
+      catalogApi={{ read: firstRead }} /></StrictMode>);
+    await vi.waitFor(() => expect(firstRead.mock.calls.length).toBeGreaterThan(0));
+
+    view.rerender(<StrictMode><LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [] }} catalogSourceApi={sourceApi}
+      catalogApi={{ read: secondRead }} /></StrictMode>);
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+
+    expect(secondRead.mock.calls.length).toBeGreaterThan(0);
   });
 
   it("does not rewrite catalog state when a poll returns the same catalog revision", async () => {

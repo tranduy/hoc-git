@@ -432,6 +432,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const foregroundLoadsInFlight = useRef(0);
   const retryAfterMs = useRef(new Map<string, number>());
   const comparisonWorkerRef = useRef<ComparisonWorkerClient | null>(null);
+  const revisionCoordinatorRef = useRef<CatalogRevisionCoordinator | null>(null);
   const latestPreflightGeneration = useRef(0);
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event"),
@@ -515,15 +516,24 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     setStaleAccountIds(nextStale);
     comparisonWorkerRef.current?.upsert(catalog, nextStale.has(catalog.accountId));
   }, []);
+  const readCatalogRef = useRef(readCatalog);
+  const acceptRealtimeCatalogRef = useRef(acceptRealtimeCatalog);
+  readCatalogRef.current = readCatalog;
+  acceptRealtimeCatalogRef.current = acceptRealtimeCatalog;
 
-  const revisionCoordinator = useMemo(() => new CatalogRevisionCoordinator({
-    read: readCatalog,
-    onCatalog: acceptRealtimeCatalog,
-    onError: (accountId, error) => retryAfterMs.current.set(accountId,
-      Date.now() + catalogRetryDelayMs(error))
-  }), [acceptRealtimeCatalog, readCatalog]);
-
-  useEffect(() => () => revisionCoordinator.stop(), [revisionCoordinator]);
+  useEffect(() => {
+    const coordinator = new CatalogRevisionCoordinator({
+      read: (accountId) => readCatalogRef.current(accountId),
+      onCatalog: (result) => acceptRealtimeCatalogRef.current(result),
+      onError: (accountId, error) => retryAfterMs.current.set(accountId,
+        Date.now() + catalogRetryDelayMs(error))
+    });
+    revisionCoordinatorRef.current = coordinator;
+    return () => {
+      if (revisionCoordinatorRef.current === coordinator) revisionCoordinatorRef.current = null;
+      coordinator.stop();
+    };
+  }, []);
 
   const loadIds = useCallback(async (
     ids: readonly string[], foreground: boolean, expectedCategory: CatalogCategory
@@ -564,7 +574,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const completedResults = results.flatMap((result) => result.status === "fulfilled" &&
         result.value.catalog.category === expectedCategory ? [result.value] : []);
       for (const result of completedResults) {
-        revisionCoordinator.setHeldRevision(result.catalog.accountId, result.revision);
+        revisionCoordinatorRef.current?.setHeldRevision(result.catalog.accountId, result.revision);
       }
       const completed = completedResults.map((result) => result.catalog);
       const previousByAccount = new Map(catalogsRef.current.map((catalog) => [catalog.accountId, catalog]));
@@ -629,7 +639,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         setBusy(foregroundLoadsInFlight.current > 0);
       }
     }
-  }, [catalogSourceApi, readCatalog, revisionCoordinator]);
+  }, [catalogSourceApi, readCatalog]);
 
   useEffect(() => {
     let cancelled = false;
@@ -712,25 +722,25 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, [accountApi, catalogSourceApi, fixedCategory, loadIds]);
 
   useEffect(() => {
-    const updateSelection = (): void => revisionCoordinator.setSelected(
+    const updateSelection = (): void => revisionCoordinatorRef.current?.setSelected(
       document.visibilityState === "visible" ? categorySelectedIds : []);
     updateSelection();
     document.addEventListener("visibilitychange", updateSelection);
     return () => document.removeEventListener("visibilitychange", updateSelection);
-  }, [categorySelectedIds, revisionCoordinator]);
+  }, [categorySelectedIds]);
 
   useEffect(() => {
     if (catalogRealtime?.connectionState === "LIVE" && catalogRealtime.baseline !== null) {
-      revisionCoordinator.acceptBaseline(catalogRealtime.baseline.entries, catalogRealtime.baseline.sequence);
-    } else revisionCoordinator.setRealtimeUnavailable();
-  }, [catalogRealtime?.baseline, catalogRealtime?.connectionState, revisionCoordinator]);
+      revisionCoordinatorRef.current?.acceptBaseline(catalogRealtime.baseline.entries, catalogRealtime.baseline.sequence);
+    } else revisionCoordinatorRef.current?.setRealtimeUnavailable();
+  }, [catalogRealtime?.baseline, catalogRealtime?.connectionState]);
 
   useEffect(() => {
     const revision = catalogRealtime?.revision;
     if (revision !== null && revision !== undefined) {
-      revisionCoordinator.acceptRevision(revision.entry, revision.sequence);
+      revisionCoordinatorRef.current?.acceptRevision(revision.entry, revision.sequence);
     }
-  }, [catalogRealtime?.revision, revisionCoordinator]);
+  }, [catalogRealtime?.revision]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);

@@ -1,5 +1,16 @@
-import { defineConfig, type UserConfig } from "vite";
+import { defineConfig, type ProxyOptions, type UserConfig } from "vite";
 import react from "@vitejs/plugin-react";
+
+const trustedDashboardOrigin = process.env.VITE_ORIGIN?.trim() || "http://127.0.0.1:4311";
+const apiProxy: ProxyOptions = {
+  target: "http://127.0.0.1:4310",
+  ws: true,
+  configure(proxy) {
+    proxy.on("proxyReqWs", (proxyRequest) => {
+      if (!proxyRequest.headersSent) proxyRequest.setHeader("origin", trustedDashboardOrigin);
+    });
+  }
+};
 
 const config = {
   plugins: [react()],
@@ -10,10 +21,7 @@ const config = {
     allowedHosts: ["live.babiesbo.uk"],
     hmr: process.env.FIXTURE_MODE === "1" ? false : undefined,
     proxy: {
-      "/api": {
-        target: "http://127.0.0.1:4310",
-        ws: true
-      }
+      "/api": apiProxy
     }
   },
   test: {
