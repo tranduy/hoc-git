@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { AdapterRouter, canCompareSources, type ChromeTrafficAdapter } from "./adapter-router.js";
 
@@ -58,5 +58,20 @@ describe("AdapterRouter", () => {
       { sourceId: "chrome:SABA:3", providerFamily: "SABA" },
       { sourceId: "chrome:SBO:4", providerFamily: "SBOBET" }
     )).toBe(true);
+  });
+
+  it("clears fingerprint quarantine and adapter state for a new source epoch", () => {
+    const resetSource = vi.fn();
+    const adapter = { ...sabaAdapter, resetSource };
+    const conflicting: ChromeTrafficAdapter = {
+      ...sabaAdapter, id: "other-v1", fingerprint: (value) => value.payload.body.includes("otherMarker")
+    };
+    const router = new AdapterRouter([adapter, conflicting], { confirmationsRequired: 1 });
+    expect(router.route(envelope('{"marketId":1,"otherMarker":true}'))).toMatchObject({ status: "QUARANTINED" });
+
+    router.resetSource("chrome:SABA:7");
+
+    expect(resetSource).toHaveBeenCalledWith("chrome:SABA:7");
+    expect(router.route(envelope('{"marketId":1}'))).toMatchObject({ status: "TRUSTED", adapter });
   });
 });

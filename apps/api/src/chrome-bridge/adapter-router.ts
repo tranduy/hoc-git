@@ -61,6 +61,11 @@ export class AdapterRouter {
     }
     return result("TRUSTED", envelope.sourceId, matched.providerFamily, matched, null);
   }
+
+  resetSource(sourceId: string): void {
+    this.#states.delete(sourceId);
+    for (const adapter of this.#adapters) adapter.resetSource?.(sourceId);
+  }
 }
 
 function result(

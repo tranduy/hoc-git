@@ -41,4 +41,10 @@ export class NetworkBodyAssembler {
     return { ...envelope, observedAtMs: state.firstObservedAtMs,
       payload: { encoding: "UTF8", body: fragments.join("") } };
   }
+
+  resetSource(sourceId: string): void {
+    for (const [snapshotId, pending] of this.#pending) {
+      if (pending.sourceId === sourceId) this.#pending.delete(snapshotId);
+    }
+  }
 }

@@ -168,6 +168,31 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
   });
 
+  it("marks the old catalog stale immediately when the source epoch changes before a new baseline", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    const priorOnly = { ...record, matchId: "event-old",
+      groups: record.groups.map((group) => ({ ...group, odds: group.odds.map((odd) => ({ ...odd,
+        marketOddsId: "market-old" })) })) };
+    expect(plane.ingest({ ...envelope(1, [record, priorOnly]), sourceEpoch: "observer-a:0" })).toBe(true);
+
+    const heartbeat: ChromeBridgeEnvelope = {
+      ...envelope(2), sourceEpoch: "observer-b:0", observedAtMs: 1_100, transport: "TAB_STATE",
+      request: { hostname: "cgnew.fts368.com", pathnameClass: "/__fieldline_heartbeat__", resourceType: "Tab" },
+      payload: { encoding: "UTF8", body: "{}" }
+    };
+    expect(plane.ingest(heartbeat)).toBe(true);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
+
+    expect(plane.ingest({ ...envelope(3, [record], 0, 1, "cmd:9:dataplane-epoch-0002"),
+      sourceEpoch: "observer-b:0", observedAtMs: 1_200 })).toBe(true);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH"]);
+    const current = await plane.read("catalog-source:CMD:FOOTBALL");
+    expect(current).toMatchObject({ observedAtMs: 1_200 });
+    expect(current.events.map((event) => event.providerEventId)).toEqual(["event-1"]);
+  });
+
   it("does not replace the latest verified catalog with malformed data", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
     plane.ingest(envelope());

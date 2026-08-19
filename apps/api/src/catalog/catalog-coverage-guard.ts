@@ -26,4 +26,8 @@ export class CatalogCoverageGuard {
     this.#states.set(sourceKey, { ...current, pendingSignature: signature, pendingCount });
     return false;
   }
+
+  reset(sourceKey: string): void {
+    this.#states.delete(sourceKey);
+  }
 }

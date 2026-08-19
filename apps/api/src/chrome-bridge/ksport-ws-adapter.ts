@@ -37,6 +37,10 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly providerFamily = "SBOBET";
   readonly #records = new Map<string, Map<string, { record: SbobetCatalogInputRecord; seenAtMs: number }>>();
 
+  resetSource(sourceId: string): void {
+    this.#records.delete(sourceId);
+  }
+
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     return envelope.lobby === "KSPORT" && envelope.transport === "WS_FRAME" &&
       envelope.payload.encoding === "UTF8" && envelope.request.pathnameClass.startsWith("/sport/") &&

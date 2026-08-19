@@ -16,4 +16,15 @@ describe("CatalogCoverageGuard", () => {
     expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(false);
     expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(true);
   });
+
+  it("forgets prior coverage when a source generation is reset", () => {
+    const guard = new CatalogCoverageGuard();
+    const ids = (count: number) => Array.from({ length: count }, (_, index) => `event-${index}`);
+    expect(guard.accept("catalog-source:SABA:FOOTBALL", ids(10))).toBe(true);
+    expect(guard.accept("catalog-source:SABA:FOOTBALL", ids(1))).toBe(false);
+
+    guard.reset("catalog-source:SABA:FOOTBALL");
+
+    expect(guard.accept("catalog-source:SABA:FOOTBALL", ids(1))).toBe(true);
+  });
 });

@@ -17,6 +17,10 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
   readonly #records = new Map<string, ReturnType<typeof extractImFootballCatalog>>();
   readonly #parsedBodies = new WeakMap<ChromeBridgeEnvelope, Record<string, unknown> | null>();
 
+  resetSource(sourceId: string): void {
+    this.#records.delete(sourceId);
+  }
+
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "IM" || envelope.transport !== "HTTP_RESPONSE" ||
       envelope.request.hostname !== HOST || envelope.payload.encoding !== "UTF8" ||

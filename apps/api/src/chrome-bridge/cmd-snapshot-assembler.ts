@@ -66,6 +66,12 @@ export class CmdSnapshotAssembler {
     return records;
   }
 
+  resetSource(sourceId: string): void {
+    const prefix = `${sourceId}\u0000`;
+    for (const key of this.#pending.keys()) if (key.startsWith(prefix)) this.#pending.delete(key);
+    for (const key of this.#closedUntil.keys()) if (key.startsWith(prefix)) this.#closedUntil.delete(key);
+  }
+
   #reject(key: string, nowMs: number): void {
     this.#pending.delete(key);
     this.#closedUntil.set(key, nowMs + this.#ttlMs);

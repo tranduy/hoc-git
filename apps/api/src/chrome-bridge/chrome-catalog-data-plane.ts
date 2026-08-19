@@ -14,7 +14,7 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly now?: () => number;
   readonly freshnessMs?: number;
   readonly maxEnvelopeAgeMs?: number;
-  readonly publish?: (catalog: ObservedProviderCatalog) => void;
+  readonly publish?: (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void;
   readonly recoveryAfterMs?: number;
   readonly recoveryCooldownMs?: number;
   readonly onSourceRecoveryNeeded?: (accountId: string) => void;
@@ -24,7 +24,7 @@ export class ChromeCatalogDataPlane {
   readonly #now: () => number;
   readonly #freshnessMs: number;
   readonly #maxEnvelopeAgeMs: number;
-  readonly #publish: ((catalog: ObservedProviderCatalog) => void) | null;
+  readonly #publish: ((catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void) | null;
   readonly #recoveryAfterMs: number;
   readonly #recoveryCooldownMs: number;
   readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
@@ -37,6 +37,8 @@ export class ChromeCatalogDataPlane {
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
   readonly #lastTransportAtMs = new Map<string, number>();
   readonly #lastRecoveryAtMs = new Map<string, number>();
+  readonly #sourceEpochs = new Map<string, string>();
+  readonly #invalidatedAccounts = new Set<string>();
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -62,6 +64,19 @@ export class ChromeCatalogDataPlane {
     const ageMs = this.#now() - envelope.observedAtMs;
     if (!Number.isFinite(ageMs) || ageMs > this.#maxEnvelopeAgeMs) return false;
     const transportAccountId = accountIdForLobby(envelope.lobby);
+    let stateChanged = false;
+    if (envelope.sourceEpoch !== undefined) {
+      const priorEpoch = this.#sourceEpochs.get(envelope.sourceId);
+      if (priorEpoch !== undefined && priorEpoch !== envelope.sourceEpoch) {
+        this.#router.resetSource(envelope.sourceId);
+        this.#networkBodies.resetSource(envelope.sourceId);
+        if (transportAccountId !== null) {
+          this.#coverage.reset(transportAccountId);
+          stateChanged = this.#invalidate(transportAccountId) || stateChanged;
+        }
+      }
+      this.#sourceEpochs.set(envelope.sourceId, envelope.sourceEpoch);
+    }
     if (transportAccountId !== null) {
       this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
       if (envelope.request.pathnameClass === "/__fieldline_heartbeat__") {
@@ -69,47 +84,51 @@ export class ChromeCatalogDataPlane {
       }
     }
     const assembled = this.#networkBodies.ingest(envelope);
-    if (assembled === null) return false;
+    if (assembled === null) return stateChanged;
     const route = this.#router.route(assembled);
-    if (route.status !== "TRUSTED" || route.adapter === null) return false;
+    if (route.status !== "TRUSTED" || route.adapter === null) return stateChanged;
     const update = route.adapter.decode(assembled).at(-1);
-    if (update === undefined || !isObservedCatalog(update.value)) return false;
-    if (update.value.category !== "FOOTBALL") return false;
+    if (update === undefined || !isObservedCatalog(update.value)) return stateChanged;
+    if (update.value.category !== "FOOTBALL") return stateChanged;
     // A provider page can briefly render the event shell before its market
     // rows. Such a snapshot is transport-valid but unusable for comparison;
     // publishing it would erase the last complete catalog on every refresh.
     if (update.value.events.length > 0 &&
-      (update.value.markets.length === 0 || update.value.quotes.length === 0)) return false;
+      (update.value.markets.length === 0 || update.value.quotes.length === 0)) return stateChanged;
     // A reconnecting delta-only feed can briefly publish a small viewport or
     // one channel before its full reset/done snapshot. Retain the last
     // complete catalog until the smaller event set is stable across three
     // identical reads; this prevents a transient partial update erasing most
     // of a provider's prices.
     if (!this.#coverage.accept(update.value.accountId,
-      update.value.events.map((event) => event.providerEventId))) return false;
+      update.value.events.map((event) => event.providerEventId))) return stateChanged;
     this.#catalogs.set(update.value.accountId, update.value);
-    this.#publish?.(update.value);
+    this.#invalidatedAccounts.delete(update.value.accountId);
+    this.#publish?.(update.value, "FRESH");
     return true;
   }
 
   async read(accountId: string): Promise<ObservedProviderCatalog> {
     const catalog = this.#catalogs.get(accountId);
     if (catalog === undefined) throw new Error("CHROME_CATALOG_NOT_FOUND");
-    if (this.#now() - catalog.observedAtMs > this.#freshnessMs) throw new Error("CHROME_CATALOG_STALE");
+    if (this.#invalidatedAccounts.has(accountId) || this.#now() - catalog.observedAtMs > this.#freshnessMs) {
+      throw new Error("CHROME_CATALOG_STALE");
+    }
     return catalog;
   }
 
   async overlayStatuses(statuses: readonly CatalogSourceStatus[]): Promise<readonly CatalogSourceStatus[]> {
     return statuses.map((status) => {
       const catalog = this.#catalogs.get(status.id);
-      const fresh = catalog !== undefined && this.#now() - catalog.observedAtMs <= this.#freshnessMs;
+      const invalidated = this.#invalidatedAccounts.has(status.id);
+      const fresh = !invalidated && catalog !== undefined && this.#now() - catalog.observedAtMs <= this.#freshnessMs;
       const transportAtMs = this.#lastTransportAtMs.get(status.id);
       const transportFresh = transportAtMs !== undefined && this.#now() - transportAtMs <= this.#freshnessMs;
       if (!fresh && catalog !== undefined && transportFresh && status.sessionState === "ACTIVE" &&
         this.#now() - catalog.observedAtMs >= this.#recoveryAfterMs) {
         this.#requestRecoveryIfStalled(status.id);
       }
-      if (fresh || (catalog !== undefined && transportFresh)) {
+      if (fresh || (!invalidated && catalog !== undefined && transportFresh)) {
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTIVE",
           acquiredAtMs: catalog.observedAtMs, reason: null });
       }
@@ -132,6 +151,14 @@ export class ChromeCatalogDataPlane {
     if (this.#now() - lastRecoveryAtMs < this.#recoveryCooldownMs) return;
     this.#lastRecoveryAtMs.set(accountId, this.#now());
     try { this.#onSourceRecoveryNeeded?.(accountId); } catch { /* recovery is best-effort */ }
+  }
+
+  #invalidate(accountId: string): boolean {
+    const catalog = this.#catalogs.get(accountId);
+    if (catalog === undefined || this.#invalidatedAccounts.has(accountId)) return false;
+    this.#invalidatedAccounts.add(accountId);
+    this.#publish?.(catalog, "STALE");
+    return true;
   }
 }
 

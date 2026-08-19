@@ -64,6 +64,11 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
       envelope.payload.encoding === "UTF8";
   }
 
+  resetSource(sourceId: string): void {
+    this.#assembler.resetSource(sourceId);
+    this.#recordsBySource.delete(sourceId);
+  }
+
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
     const records = decodePublicDomRecords(this.#assembler, envelope);

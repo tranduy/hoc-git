@@ -240,8 +240,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       controlPlane: chromeBridgeControlPlane })
     : null;
   const chromeCatalogDataPlane = chromeBridgeRegistry
-    ? new ChromeCatalogDataPlane({ publish: (catalog) => {
-      catalogRevisions.publish(catalog.accountId, catalog, { snapshotState: "FRESH", freshnessMs: 20_000 });
+    ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
+      catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs: 20_000 });
     }, onSourceRecoveryNeeded: (accountId) => requestAutomaticSourceRecovery(accountId) })
     : null;
   if (chromeBridgeRegistry) {

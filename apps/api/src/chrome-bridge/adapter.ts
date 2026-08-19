@@ -13,4 +13,5 @@ export interface ChromeTrafficAdapter {
   readonly providerFamily: string;
   fingerprint(envelope: ChromeBridgeEnvelope): boolean;
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[];
+  resetSource?(sourceId: string): void;
 }

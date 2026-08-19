@@ -23,6 +23,12 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #parts = new Map<string, NormalizedCatalogPart>();
 
+  resetSource(sourceId: string): void {
+    this.#decoders.delete(sourceId);
+    this.#assembler.resetSource(sourceId);
+    for (const key of this.#parts.keys()) if (key.startsWith(`${sourceId}|`)) this.#parts.delete(key);
+  }
+
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "SABA" || envelope.payload.encoding !== "UTF8") return false;
     if (envelope.transport === "DOM_SNAPSHOT" && envelope.request.resourceType === "DOM" &&

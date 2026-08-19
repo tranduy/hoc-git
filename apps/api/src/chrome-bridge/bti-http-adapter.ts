@@ -19,6 +19,10 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
   readonly providerFamily = "BTI";
   readonly #parts = new Map<string, SourceParts>();
 
+  resetSource(sourceId: string): void {
+    this.#parts.delete(sourceId);
+  }
+
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     return envelope.lobby === "BTI" && envelope.transport === "HTTP_RESPONSE" &&
       envelope.payload.encoding === "UTF8" &&

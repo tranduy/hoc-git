@@ -128,6 +128,11 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #parsed = new WeakMap<ChromeBridgeEnvelope, JsonRecord | null>();
   readonly #assembler = new CmdSnapshotAssembler();
 
+  resetSource(sourceId: string): void {
+    this.#records.delete(sourceId);
+    this.#assembler.resetSource(sourceId);
+  }
+
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "TSPORT" || envelope.payload.encoding !== "UTF8") return false;
     if (envelope.transport === "DOM_SNAPSHOT") return envelope.request.resourceType === "DOM" &&
