@@ -95,8 +95,11 @@ export class CatalogRevisionCoordinator {
 
   async #fetch(accountId: string, fallback: boolean): Promise<void> {
     if (this.#stopped || !this.#selected.has(accountId) || this.#inFlight.has(accountId)) return;
+    const desiredBeforeRead = this.#desired.get(accountId);
+    if (!fallback && desiredBeforeRead !== undefined &&
+      desiredBeforeRead.revision === this.#held.get(accountId)) return;
     this.#inFlight.add(accountId);
-    const target = this.#desired.get(accountId);
+    const target = desiredBeforeRead;
     try {
       const result = await this.#read(accountId);
       if (this.#stopped || !this.#selected.has(accountId)) return;

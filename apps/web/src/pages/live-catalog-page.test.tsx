@@ -497,7 +497,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
 
     expect(await screen.findByRole("region", { name: "Live comparison workspace" })).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(250));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     expect(screen.queryByText("Best live lag signal")).toBeNull();
     expect(screen.queryByRole("region", { name: "Recent observed price movements" })).toBeNull();
@@ -660,7 +660,7 @@ describe("LiveCatalogPage", () => {
       accountApi={{ ...accountApi, list: async () => [account, sabaAccount] }} catalogApi={{ read }} />);
 
     expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(250));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     const detail = screen.getByRole("complementary", { name: "Selected match detail" });
     expect(within(detail).getByText("Alpha")).toBeTruthy();
@@ -681,7 +681,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={{ read }} />);
 
     expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(250));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     const detail = screen.getByRole("complementary", { name: "Selected match detail" });
     expect(within(detail).getByText("Alpha vs Beta")).toBeTruthy();
@@ -713,7 +713,7 @@ describe("LiveCatalogPage", () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(fastReads).toBe(1);
 
-    await act(async () => vi.advanceTimersByTimeAsync(750));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     expect(fastReads).toBeGreaterThan(1);
     expect(screen.getByText("No exact two-book comparison is currently available")).toBeTruthy();
@@ -757,9 +757,9 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => sources }} catalogApi={{ read }} />);
     expect(await screen.findByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
 
-    await act(async () => vi.advanceTimersByTimeAsync(250));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    await act(async () => vi.advanceTimersByTimeAsync(250));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
     expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
 
     await act(async () => {
@@ -804,7 +804,7 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
   });
 
-  it("keeps a just-verified catalog fresh across a transient poll failure", async () => {
+  it("keeps a just-verified catalog fresh across a transient fallback failure", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(10_000);
     const source: CatalogSourceStatus = { id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA",
@@ -820,7 +820,7 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => [source] }} catalogApi={{ read }} />);
     await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
 
-    await act(async () => vi.advanceTimersByTimeAsync(500));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     expect(read.mock.calls.length).toBeGreaterThan(1);
     expect(screen.queryByText("STALE")).toBeNull();
@@ -863,13 +863,14 @@ describe("LiveCatalogPage", () => {
     expect(storageWrites).toHaveBeenCalledTimes(initialWrites);
   });
 
-  it("pauses background polling while the page is hidden", async () => {
+  it("pauses fallback reads while the page is hidden", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const read = vi.fn(async () => catalog);
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={{ read }} />);
     await screen.findByRole("region", { name: "Live comparison workspace" });
     const initialReads = read.mock.calls.length;
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
     await act(async () => vi.advanceTimersByTimeAsync(2_000));
     expect(read).toHaveBeenCalledTimes(initialReads);
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
@@ -922,7 +923,7 @@ describe("LiveCatalogPage", () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect((await screen.findAllByText("Alpha vs Beta")).length).toBeGreaterThan(0);
 
-    await act(async () => vi.advanceTimersByTimeAsync(500));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     expect(screen.getAllByText("Alpha vs Beta").length).toBeGreaterThan(0);
     expect(screen.queryByText("STALE")).toBeNull();
@@ -1030,7 +1031,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
     fireEvent.click(await screen.findByRole("button", { name: "Compare Alpha vs Beta" }));
     expect(await screen.findByRole("columnheader", { name: "SABA" })).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(250));
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     expect(screen.getByRole("columnheader", { name: "SABA" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();

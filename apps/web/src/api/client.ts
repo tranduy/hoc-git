@@ -8,6 +8,12 @@ import {
 
 export type ConnectionState = "CONNECTING" | "LIVE" | "DISCONNECTED";
 
+export interface CatalogRealtimeFeed {
+  readonly connectionState: ConnectionState;
+  readonly baseline: { readonly entries: readonly CatalogRevisionEntry[]; readonly sequence: number } | null;
+  readonly revision: { readonly entry: CatalogRevisionEntry; readonly sequence: number } | null;
+}
+
 export interface SnapshotClientOptions {
   readonly initialSnapshot?: AppSnapshot;
   readonly onSnapshot: (snapshot: AppSnapshot) => void;

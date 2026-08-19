@@ -27,6 +27,7 @@ export interface LiveCatalogResponse {
 
 export interface CatalogApiLike {
   read(accountId: string): Promise<LiveCatalogResponse>;
+  readRevision?(accountId: string): Promise<CatalogReadResult>;
 }
 
 export interface CatalogReadResult {

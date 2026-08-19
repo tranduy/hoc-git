@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AppSnapshot } from "@tool-chenh/contracts";
-import { SnapshotClient, type ConnectionState } from "./api/client.js";
+import { SnapshotClient, type CatalogRealtimeFeed, type ConnectionState } from "./api/client.js";
 import { DashboardPage } from "./pages/dashboard-page.js";
 import { CategoryPage } from "./pages/category-page.js";
 import { OpportunitiesPage } from "./pages/opportunities-page.js";
@@ -40,16 +40,28 @@ function routeFor(pathname: string): Route {
 export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapshot }) {
   const [snapshot, setSnapshot] = useState<AppSnapshot | undefined>(initialSnapshot);
   const [connectionState, setConnectionState] = useState<ConnectionState>(initialSnapshot === undefined ? "CONNECTING" : "LIVE");
+  const [catalogBaseline, setCatalogBaseline] = useState<CatalogRealtimeFeed["baseline"]>(null);
+  const [catalogRevision, setCatalogRevision] = useState<CatalogRealtimeFeed["revision"]>(null);
   const [route, setRoute] = useState<Route>(() => routeFor(window.location.pathname));
   const mainRef = useRef<HTMLElement>(null);
   const routeLabel = routes.find((item) => item.path === route)?.label ?? "Dashboard";
 
   useEffect(() => {
-    if (initialSnapshot !== undefined) return;
-    const client = new SnapshotClient({ onSnapshot: setSnapshot, onConnectionState: setConnectionState });
+    const client = new SnapshotClient({ ...(initialSnapshot === undefined ? {} : { initialSnapshot }),
+      onSnapshot: setSnapshot,
+      onConnectionState: (state) => {
+        setConnectionState(state);
+        if (state !== "LIVE") setCatalogBaseline(null);
+      },
+      onCatalogBaseline: (entries, sequence) => setCatalogBaseline({ entries, sequence }),
+      onCatalogRevision: (entry, sequence) => setCatalogRevision({ entry, sequence }) });
     void client.start();
     return () => client.stop();
   }, [initialSnapshot]);
+
+  const catalogRealtime: CatalogRealtimeFeed = {
+    connectionState, baseline: catalogBaseline, revision: catalogRevision
+  };
 
   useEffect(() => {
     if (window.location.pathname === "/live-catalog" || window.location.pathname === "/") {
@@ -69,7 +81,8 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
 
   const content = route === "/sessions" ? <SessionsPage />
     : route === "/bet-history" ? <BetHistoryPage />
-    : route === "/football-live" ? <LiveCatalogPage catalogSourceApi={catalogSourceApi} fixedCategory="FOOTBALL" key="FOOTBALL-LIVE" />
+    : route === "/football-live" ? <LiveCatalogPage catalogRealtime={catalogRealtime}
+      catalogSourceApi={catalogSourceApi} fixedCategory="FOOTBALL" key="FOOTBALL-LIVE" />
     : route === "/lol-live" ? <header className="page-header"><p className="eyebrow">League of Legends</p>
       <h1>LoL is temporarily disabled</h1><p>Football realtime detection is the only active data flow.</p></header>
     : snapshot === undefined

@@ -44,6 +44,26 @@ describe("CatalogRevisionCoordinator", () => {
     coordinator.stop();
   });
 
+  it("cancels a queued baseline reconciliation when the initial read already holds that revision", async () => {
+    vi.useFakeTimers();
+    const accepted: CatalogReadResult[] = [];
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    let reads = 0;
+    const coordinator = new CatalogRevisionCoordinator({
+      read: async () => { reads += 1; return result(accountId, "r1"); },
+      onCatalog: (value) => accepted.push(value)
+    });
+    coordinator.setSelected([accountId]);
+    coordinator.acceptBaseline([entry(accountId, "r1")], 1);
+    coordinator.setHeldRevision(accountId, "r1");
+
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(reads).toBe(0);
+    expect(accepted).toEqual([]);
+    coordinator.stop();
+  });
+
   it("coalesces a revision burst and converges after a revision arrives in flight", async () => {
     vi.useFakeTimers();
     const accepted: CatalogReadResult[] = [];

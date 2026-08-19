@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AccountStatus, CatalogSourceStatus, Category, ProviderId } from "@tool-chenh/contracts";
 import { AccountApi, type AccountApiLike } from "../api/accounts.js";
-import { CatalogApi, catalogRetryDelayMs, type CatalogApiLike, type LiveCatalogResponse } from "../api/catalog.js";
+import { CatalogApi, catalogRetryDelayMs, type CatalogApiLike, type CatalogReadResult,
+  type LiveCatalogResponse } from "../api/catalog.js";
+import type { CatalogRealtimeFeed } from "../api/client.js";
 import type { CatalogSourceApiLike } from "../api/catalog-sources.js";
 import { defaultProviderPreflightApi, type ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import { loadCatalogCache, saveCatalogCache } from "../catalog/catalog-cache.js";
-import { buildComparisonEvents, decimalOdds, formatCountdown, formatMatchClock,
+import { decimalOdds, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, observedTicketAsComparisonRow, selectionLabel, ticketMarketLabel,
   type ComparisonEvent, type ComparisonRow, type EventPhase } from "../catalog/comparison.js";
 import { formatDisplayDecimal } from "../catalog/display-format.js";
@@ -29,12 +31,13 @@ import { loadSoundEnabled, saveSoundEnabled } from "../watch/sound-settings.js";
 import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from "../watch/stable-scroll-anchor.js";
 import { TicketPreflightCoordinator, type VerifiedTicketEvidence } from "../watch/ticket-preflight-coordinator.js";
 import { ProviderTicketApi, type ProviderTicketApiLike, type ProviderTicketIdentity } from "../api/provider-ticket.js";
+import { CatalogRevisionCoordinator } from "../catalog/catalog-revision-coordinator.js";
+import { ComparisonWorkerClient, type HydratedComparisonWorkerOutput } from "../catalog/comparison-worker-client.js";
 
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
 const defaultProviderTicketApi = new ProviderTicketApi();
 const comparisonProviders: readonly ProviderId[] = PROVIDER_DISPLAY_ORDER.filter((provider) => provider !== "FABET");
-const catalogRefreshIntervalMs = 250;
 const catalogFailureGraceMs = 5_000;
 const executableProfileMaxAgeMs = 30_000;
 const catalogCategoryStorageKey = "tool-chenh.live-catalog.category.v1";
@@ -62,7 +65,8 @@ function catalogRevision(catalog: LiveCatalogResponse): string {
   const markets = catalog.markets.map((market) => [market.providerMarketId, market.status, market.line].join(":"));
   const quotes = catalog.quotes.map((quote) => [quote.providerMarketId, quote.providerSelectionId, quote.rawOdds,
     quote.status, quote.sequence, quote.sourceTimestampMs].join(":"));
-  return [catalog.observedAtMs, catalog.rejectedMarketCount, ...events, ...markets, ...quotes].join("|");
+  return [catalog.observedAtMs, catalog.snapshotState ?? "FRESH", catalog.rejectedMarketCount,
+    ...events, ...markets, ...quotes].join("|");
 }
 
 function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -377,13 +381,14 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
 
 export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi,
   catalogSourceApi, providerPreflightApi = defaultProviderPreflightApi,
-  providerTicketApi = defaultProviderTicketApi, fixedCategory }: {
+  providerTicketApi = defaultProviderTicketApi, fixedCategory, catalogRealtime }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
   readonly catalogSourceApi?: CatalogSourceApiLike;
   readonly providerPreflightApi?: ProviderPreflightApiLike;
   readonly providerTicketApi?: ProviderTicketApiLike;
   readonly fixedCategory?: CatalogCategory;
+  readonly catalogRealtime?: CatalogRealtimeFeed;
 }) {
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
   const [sources, setSources] = useState<readonly CatalogSourceStatus[]>([]);
@@ -392,6 +397,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [category, setCategory] = useState<CatalogCategory>(() => fixedCategory ?? loadCatalogCategory(window.localStorage));
   const [eventPhases, setEventPhases] = useState<ReadonlySet<EventPhase>>(() => loadEventPhases(window.localStorage));
   const [catalogs, setCatalogs] = useState<readonly LiveCatalogResponse[]>([]);
+  const [comparisonEvents, setComparisonEvents] = useState<readonly ComparisonEvent[]>([]);
   const [staleAccountIds, setStaleAccountIds] = useState<ReadonlySet<string>>(new Set());
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
   const [movements, setMovements] = useState<readonly ObservedPriceMovement[]>([]);
@@ -423,7 +429,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const accountsRef = useRef<readonly AccountStatus[]>([]);
   const sourcesRef = useRef<readonly CatalogSourceStatus[]>([]);
   const catalogRefreshesInFlight = useRef(new Set<string>());
+  const foregroundLoadsInFlight = useRef(0);
   const retryAfterMs = useRef(new Map<string, number>());
+  const comparisonWorkerRef = useRef<ComparisonWorkerClient | null>(null);
+  const latestPreflightGeneration = useRef(0);
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event"),
     ticket: new URLSearchParams(window.location.search).get("ticket") });
@@ -432,6 +441,39 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const categorySources = useMemo(() => sources.filter((source) => source.category === category), [sources, category]);
   const categorySelectedIds = useMemo(() => categorySources.filter((source) => selectedIds.has(source.id))
     .map((source) => source.id), [categorySources, selectedIds]);
+
+  useEffect(() => {
+    const worker = new ComparisonWorkerClient({
+      onResult: (output: HydratedComparisonWorkerOutput) => {
+        setComparisonEvents(output.displayEvents);
+        latestPreflightGeneration.current = output.generation;
+        const freshCatalogs = catalogsRef.current.filter((catalog) =>
+          !staleAccountIdsRef.current.has(catalog.accountId));
+        const providers = new Set<ProviderId>(freshCatalogs.map((catalog) => catalog.provider));
+        const observedAtMs = freshCatalogs.reduce((latest, catalog) =>
+          Math.max(latest, catalog.observedAtMs), 0) || Date.now();
+        const candidates = signalTracker.current.update(output.freshEvents, providers,
+          executableStakePolicy(baseStakeRef.current), observedAtMs);
+        setSignals(filterAccountBackedSignals(candidates, freshCatalogs, accountsRef.current, observedAtMs));
+        setMovements(movementTracker.current.update(output.freshEvents, observedAtMs));
+        const selectedAccounts = freshCatalogs.flatMap((catalog) => {
+          const bettor = selectBettingAccount(accountsRef.current, catalog.provider, catalog.category);
+          return bettor === null ? [] : [bettor];
+        });
+        void preflightCoordinator.current.refresh({ events: output.freshEvents,
+          selectedAccounts, selectedProviders: providers,
+          policy: observedStakePolicy(baseStakeRef.current) }).then((verified) => {
+          if (latestPreflightGeneration.current === output.generation) setVerifiedTickets(verified);
+        });
+      }
+    });
+    comparisonWorkerRef.current = worker;
+    worker.reset(catalogsRef.current, [...staleAccountIdsRef.current]);
+    return () => {
+      comparisonWorkerRef.current = null;
+      worker.stop();
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -445,6 +487,44 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     void providerTicketApi.focus(identity).catch(() => undefined);
   };
 
+  const readCatalog = useCallback(async (accountId: string): Promise<CatalogReadResult> => {
+    if (catalogApi.readRevision !== undefined) return catalogApi.readRevision(accountId);
+    const catalog = await catalogApi.read(accountId);
+    return { catalog, revision: catalogRevision(catalog) };
+  }, [catalogApi]);
+
+  const acceptRealtimeCatalog = useCallback((result: CatalogReadResult): void => {
+    const catalog = result.catalog;
+    const source = sourcesRef.current.find((candidate) => candidate.id === catalog.accountId);
+    if (source === undefined || source.category !== catalog.category || source.provider !== catalog.provider) return;
+    const previous = catalogsRef.current.find((candidate) => candidate.accountId === catalog.accountId);
+    if (previous !== undefined && catalog.observedAtMs < previous.observedAtMs) return;
+    const nextCatalogs = [catalog, ...catalogsRef.current.filter((candidate) =>
+      candidate.accountId !== catalog.accountId)];
+    const nextStale = new Set(staleAccountIdsRef.current);
+    if (catalog.snapshotState === "STALE") nextStale.add(catalog.accountId);
+    else nextStale.delete(catalog.accountId);
+    const changed = previous === undefined || catalogRevision(previous) !== catalogRevision(catalog) ||
+      !sameStringSet(staleAccountIdsRef.current, nextStale);
+    if (!changed) return;
+    catalogsRef.current = nextCatalogs;
+    staleAccountIdsRef.current = nextStale;
+    retryAfterMs.current.delete(catalog.accountId);
+    saveCatalogCache(window.localStorage, nextCatalogs);
+    setCatalogs(nextCatalogs);
+    setStaleAccountIds(nextStale);
+    comparisonWorkerRef.current?.upsert(catalog, nextStale.has(catalog.accountId));
+  }, []);
+
+  const revisionCoordinator = useMemo(() => new CatalogRevisionCoordinator({
+    read: readCatalog,
+    onCatalog: acceptRealtimeCatalog,
+    onError: (accountId, error) => retryAfterMs.current.set(accountId,
+      Date.now() + catalogRetryDelayMs(error))
+  }), [acceptRealtimeCatalog, readCatalog]);
+
+  useEffect(() => () => revisionCoordinator.stop(), [revisionCoordinator]);
+
   const loadIds = useCallback(async (
     ids: readonly string[], foreground: boolean, expectedCategory: CatalogCategory
   ): Promise<void> => {
@@ -453,7 +533,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       .sort((left, right) => catalogReadPriority(left) - catalogReadPriority(right));
     if (requestedIds.length === 0) return;
     for (const id of requestedIds) catalogRefreshesInFlight.current.add(id);
-    if (foreground) setBusy(true);
+    if (foreground) {
+      foregroundLoadsInFlight.current += 1;
+      setBusy(true);
+    }
     try {
       const results = await Promise.allSettled(requestedIds.map((id) => (async () => {
         const requestedSource = sourcesRef.current.find((source) => source.id === id);
@@ -461,14 +544,15 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         const legacyFallbackIds = catalogSourceApi === undefined ? accountsRef.current.filter((account) =>
           account.id !== id && account.provider === requestedSource.provider && account.category === expectedCategory &&
           account.sessionState === "ACTIVE" && account.capabilities.includes("CATALOG")).map((account) => account.id) : [];
-        let value: LiveCatalogResponse | null = null;
+        let value: CatalogReadResult | null = null;
         let lastError: unknown = new Error("Catalog source is unavailable");
         for (const candidateId of [id, ...legacyFallbackIds].slice(0, 3)) {
           try {
-            const candidate = await catalogApi.read(candidateId);
+            const candidateResult = await readCatalog(candidateId);
+            const candidate = candidateResult.catalog;
             if (candidate.category !== expectedCategory || candidate.provider !== requestedSource.provider ||
               (catalogSourceApi !== undefined && candidate.accountId !== id)) throw new Error("Catalog identity mismatch");
-            value = candidate;
+            value = candidateResult;
             break;
           } catch (error) {
             lastError = error;
@@ -477,8 +561,12 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         if (value === null) throw lastError;
         return value;
       })().finally(() => catalogRefreshesInFlight.current.delete(id))));
-      const completed = results.flatMap((result) => result.status === "fulfilled" &&
-        result.value.category === expectedCategory ? [result.value] : []);
+      const completedResults = results.flatMap((result) => result.status === "fulfilled" &&
+        result.value.catalog.category === expectedCategory ? [result.value] : []);
+      for (const result of completedResults) {
+        revisionCoordinator.setHeldRevision(result.catalog.accountId, result.revision);
+      }
+      const completed = completedResults.map((result) => result.catalog);
       const previousByAccount = new Map(catalogsRef.current.map((catalog) => [catalog.accountId, catalog]));
       // Provider reads overlap intentionally so a fast book is not blocked by a
       // slow one. A slower, older batch must never roll an account back after a
@@ -494,7 +582,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         .map((candidate) => candidate.accountId));
       const failedIds = new Set(requestedIds.filter((_id, index) => {
         const result = results[index];
-        return result?.status !== "fulfilled" || result.value.category !== expectedCategory;
+        return result?.status !== "fulfilled" || result.value.catalog.category !== expectedCategory;
       }));
       for (const [index, id] of requestedIds.entries()) {
         if (failedIds.has(id)) {
@@ -531,26 +619,17 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       setCatalogs(nextCatalogs);
       staleAccountIdsRef.current = nextStale;
       setStaleAccountIds(nextStale);
-      const freshCatalogs = nextCatalogs.filter((catalog) => !nextStale.has(catalog.accountId));
-      const nextEvents = buildComparisonEvents(freshCatalogs);
-      const providers = new Set<ProviderId>(freshCatalogs.map((catalog) => catalog.provider));
-      const observedAtMs = freshCatalogs.reduce((latest, catalog) => Math.max(latest, catalog.observedAtMs), 0) || Date.now();
-      const candidates = signalTracker.current.update(nextEvents, providers, executableStakePolicy(baseStakeRef.current), observedAtMs);
-      setSignals(filterAccountBackedSignals(candidates, freshCatalogs, accountsRef.current, observedAtMs));
-      const nextMovements = movementTracker.current.update(nextEvents, observedAtMs);
-      setMovements(nextMovements);
-      const selectedAccounts = freshCatalogs.flatMap((catalog) => {
-        const bettor = selectBettingAccount(accountsRef.current, catalog.provider, catalog.category);
-        return bettor === null ? [] : [bettor];
-      });
-      const nextVerified = await preflightCoordinator.current.refresh({ events: nextEvents,
-        selectedAccounts, selectedProviders: providers, policy: observedStakePolicy(baseStakeRef.current) });
-      setVerifiedTickets(nextVerified);
+      if (accepted.length === 1 && requestedIds.length === 1) {
+        comparisonWorkerRef.current?.upsert(accepted[0]!, nextStale.has(accepted[0]!.accountId));
+      } else comparisonWorkerRef.current?.reset(nextCatalogs, [...nextStale]);
     } finally {
       for (const id of requestedIds) catalogRefreshesInFlight.current.delete(id);
-      if (foreground) setBusy(false);
+      if (foreground) {
+        foregroundLoadsInFlight.current = Math.max(0, foregroundLoadsInFlight.current - 1);
+        setBusy(foregroundLoadsInFlight.current > 0);
+      }
     }
-  }, [catalogApi, catalogSourceApi]);
+  }, [catalogSourceApi, readCatalog, revisionCoordinator]);
 
   useEffect(() => {
     let cancelled = false;
@@ -588,11 +667,15 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const cachedStale = new Set(cached.map((catalog) => catalog.accountId));
       staleAccountIdsRef.current = cachedStale;
       setStaleAccountIds(cachedStale);
+      comparisonWorkerRef.current?.reset(cached, [...cachedStale]);
       setSelectedIds(new Set(availableCandidates.map((source) => source.id)));
       setCategory(initialCategory); saveCatalogCategory(window.localStorage, initialCategory);
       if (!autoLoaded.current && initial.size > 0) {
         autoLoaded.current = true;
-        void loadIds([...initial], true, initialCategory);
+        for (const id of [...initial].sort((left, right) =>
+          catalogReadPriority(left) - catalogReadPriority(right))) {
+          void loadIds([id], true, initialCategory);
+        }
       }
     };
     const discoverSources = (): void => {
@@ -629,17 +712,25 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   }, [accountApi, catalogSourceApi, fixedCategory, loadIds]);
 
   useEffect(() => {
-    if (categorySelectedIds.length === 0) return;
-    const refreshVisibleCatalog = (): void => {
-      if (document.visibilityState === "visible") void loadIds(categorySelectedIds, false, category);
-    };
-    const timer = window.setInterval(refreshVisibleCatalog, catalogRefreshIntervalMs);
-    document.addEventListener("visibilitychange", refreshVisibleCatalog);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", refreshVisibleCatalog);
-    };
-  }, [categorySelectedIds, loadIds]);
+    const updateSelection = (): void => revisionCoordinator.setSelected(
+      document.visibilityState === "visible" ? categorySelectedIds : []);
+    updateSelection();
+    document.addEventListener("visibilitychange", updateSelection);
+    return () => document.removeEventListener("visibilitychange", updateSelection);
+  }, [categorySelectedIds, revisionCoordinator]);
+
+  useEffect(() => {
+    if (catalogRealtime?.connectionState === "LIVE" && catalogRealtime.baseline !== null) {
+      revisionCoordinator.acceptBaseline(catalogRealtime.baseline.entries, catalogRealtime.baseline.sequence);
+    } else revisionCoordinator.setRealtimeUnavailable();
+  }, [catalogRealtime?.baseline, catalogRealtime?.connectionState, revisionCoordinator]);
+
+  useEffect(() => {
+    const revision = catalogRealtime?.revision;
+    if (revision !== null && revision !== undefined) {
+      revisionCoordinator.acceptRevision(revision.entry, revision.sequence);
+    }
+  }, [catalogRealtime?.revision, revisionCoordinator]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
@@ -656,9 +747,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   // Keep the last verified comparison visible through a provider refresh or
   // restart. Stale rows are display-only: signals and preflight above continue
   // to use freshCatalogs exclusively.
-  const events = useMemo(() => buildComparisonEvents(catalogs).filter((item) =>
+  const events = useMemo(() => comparisonEvents.filter((item) =>
     item.event.category === category && !(item.event.category === "FOOTBALL" && item.event.isVirtual !== false)),
-  [catalogs, category]);
+  [comparisonEvents, category]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs) &&
     matchesEventPhase(item.event, eventPhases)), [events, eventPhases, nowMs]);
   const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
