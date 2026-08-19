@@ -14,6 +14,20 @@ function catalog(observedAtMs: number, accountId = "catalog-source:SABA:FOOTBALL
   };
 }
 
+function pricedCatalog(observedAtMs: number, receivedMonotonicMs: number,
+  sequence: number): ObservedProviderCatalog {
+  return {
+    ...catalog(observedAtMs),
+    quotes: [{
+      provider: "SABA", category: "FOOTBALL", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "2.5",
+      rawOdds: "0.95", rawFormat: "MALAY", status: "OPEN", isLive: true,
+      sourceTimestampMs: null, receivedMonotonicMs, sequence
+    }]
+  };
+}
+
 describe("CatalogRevisionStore", () => {
   it("publishes a fresh catalog and a new stale revision after its freshness deadline", () => {
     let now = 100;
@@ -57,6 +71,29 @@ describe("CatalogRevisionStore", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("renews freshness without broadcasting when only observation clocks advance", () => {
+    let now = 100;
+    const store = new CatalogRevisionStore({ now: () => now });
+    stores.push(store);
+    const seen: CatalogRevisionEntry[] = [];
+    store.subscribe((entry) => seen.push(entry));
+    const first = store.publish("catalog-source:SABA:FOOTBALL", pricedCatalog(100, 10, 1), {
+      snapshotState: "FRESH", freshnessMs: 20
+    });
+
+    now = 110;
+    const renewed = store.publish("catalog-source:SABA:FOOTBALL", pricedCatalog(110, 20, 2), {
+      snapshotState: "FRESH", freshnessMs: 20
+    });
+
+    expect(renewed.revision).toBe(first.revision);
+    expect(renewed.sequence).toBe(first.sequence);
+    expect(renewed.catalog.observedAtMs).toBe(110);
+    expect(renewed.catalog.quotes[0]).toMatchObject({ receivedMonotonicMs: 20, sequence: 2 });
+    expect(renewed.freshUntilMs).toBe(130);
+    expect(seen).toHaveLength(1);
+  });
+
   it("keeps one latest catalog per account and returns a sorted baseline", () => {
     const store = new CatalogRevisionStore({ now: () => 300 });
     stores.push(store);
@@ -71,7 +108,7 @@ describe("CatalogRevisionStore", () => {
     });
 
     expect(store.baseline()).toMatchObject({
-      sequence: 3,
+      sequence: 2,
       entries: [
         { accountId: "catalog-source:SABA:FOOTBALL", observedAtMs: 301 },
         { accountId: "catalog-source:SBOBET:FOOTBALL", observedAtMs: 299 }

@@ -16,7 +16,12 @@ export interface CatalogRevisionBaseline {
 type Listener = (entry: StoredCatalogRevision) => void;
 
 function revisionFor(catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE"): string {
-  return createHash("sha256").update(JSON.stringify({ catalog, snapshotState })).digest("base64url");
+  const { observedAtMs: _observedAtMs, quotes, ...semanticCatalog } = catalog;
+  const semanticQuotes = quotes.map(({ receivedMonotonicMs: _receivedMonotonicMs,
+    sequence: _sequence, sourceTimestampMs: _sourceTimestampMs, ...quote }) => quote);
+  return createHash("sha256").update(JSON.stringify({
+    catalog: { ...semanticCatalog, quotes: semanticQuotes }, snapshotState
+  })).digest("base64url");
 }
 
 function publicEntry(entry: StoredCatalogRevision): CatalogRevisionEntry {
@@ -47,9 +52,18 @@ export class CatalogRevisionStore {
     const current = this.#entries.get(accountId);
     if (current !== undefined && catalog.observedAtMs < current.observedAtMs) return current;
     const revision = revisionFor(catalog, options.snapshotState);
+    if (current?.revision === revision && catalog.observedAtMs === current.observedAtMs) return current;
     if (current?.revision === revision) {
+      const renewed: StoredCatalogRevision = {
+        ...current,
+        catalog,
+        observedAtMs: catalog.observedAtMs,
+        snapshotState: options.snapshotState,
+        freshUntilMs: options.snapshotState === "FRESH" ? this.#now() + options.freshnessMs : null
+      };
+      this.#entries.set(accountId, renewed);
       this.#scheduleExpiry();
-      return current;
+      return renewed;
     }
     const entry: StoredCatalogRevision = {
       accountId, catalog, revision, observedAtMs: catalog.observedAtMs,
