@@ -49,7 +49,7 @@ describe("CmdDomCatalogAdapter", () => {
       accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD", category: "FOOTBALL",
       events: [{ providerEventId: "event-1", participantA: "Alpha FC", participantB: "Beta FC",
         startAtUtcMs: Date.UTC(2026, 7, 16, 18, 30) }],
-      markets: [{ marketType: "FT_AH", line: "-0.5" }]
+      markets: [{ marketType: "FT_AH", line: "0.5" }]
     });
   });
 
