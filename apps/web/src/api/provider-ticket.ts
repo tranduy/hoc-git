@@ -39,8 +39,9 @@ export class ProviderTicketApi implements ProviderTicketApiLike {
       Array.isArray((payload as Record<string, unknown>).sources)
       ? (payload as { sources: SourceRow[] }).sources : [];
     const lobbies = providerLobbies[identity.provider] ?? [];
-    const source = sources.find((item) => lobbies.includes(item.lobby) &&
-      !["ERROR", "DISCONNECTED"].includes(item.state));
+    const providerSources = sources.filter((item) => lobbies.includes(item.lobby));
+    const source = providerSources.find((item) => item.state === "LIVE") ??
+      providerSources.find((item) => !["ERROR", "DISCONNECTED"].includes(item.state));
     if (!source) throw new Error(`Tab ${identity.provider} chưa được attach hoặc đã ngắt kết nối.`);
     const response = await this.#fetch("/api/chrome-bridge/focus-selection", {
       method: "POST", headers: { "content-type": "application/json" },

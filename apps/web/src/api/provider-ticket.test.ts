@@ -29,6 +29,20 @@ describe("ProviderTicketApi", () => {
       providerEventId: "e", providerMarketId: "m", providerSelectionId: "s" });
   });
 
+  it("prefers the live provider tab when a stale source is still registered", async () => {
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/sources")) return new Response(JSON.stringify({ sources: [
+        { lobby: "SABA", sourceId: "chrome:SABA:old", state: "STALE" },
+        { lobby: "SABA", sourceId: "chrome:SABA:live", state: "LIVE" }
+      ] }), { status: 200 });
+      expect(JSON.parse(String(init?.body))).toMatchObject({ sourceId: "chrome:SABA:live" });
+      return new Response(JSON.stringify({ accepted: true }), { status: 202 });
+    });
+
+    await new ProviderTicketApi(fetcher as typeof fetch).focus({ provider: "SABA",
+      providerEventId: "e", providerMarketId: "m", providerSelectionId: "s" });
+  });
+
   it("fails closed when the requested provider tab is not attached", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ sources: [] }), { status: 200 }));
     await expect(new ProviderTicketApi(fetcher as typeof fetch).focus({ provider: "SABA",
