@@ -460,7 +460,7 @@ describe("NetworkObserver", () => {
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({
       sendCommand: vi.fn(async () => ({})), forward,
-      now: () => 1_000, monotonicNow: () => 50
+      now: () => 1_000, monotonicNow: () => 50, observerSessionId: "observer-a"
     });
     await observer.handleEvent(source, "Network.webSocketCreated", {
       requestId: "ws-1", url: "wss://sports.example/feed?token=secret"
@@ -469,10 +469,20 @@ describe("NetworkObserver", () => {
       requestId: "ws-1", response: { opcode: 1, payloadData: "{\"eventId\":1}" }
     });
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({
-      sequence: 0,
+      sourceEpoch: "observer-a:0", sequence: 0, transport: "WS_STATE",
+      request: expect.objectContaining({ streamId: "1" }),
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' }
+    }));
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      sourceEpoch: "observer-a:0", sequence: 1,
       transport: "WS_FRAME",
-      request: expect.objectContaining({ hostname: "sports.example", pathnameClass: "/feed" }),
+      request: expect.objectContaining({ hostname: "sports.example", pathnameClass: "/feed", streamId: "1" }),
       payload: { encoding: "UTF8", body: "{\"eventId\":1}" }
+    }));
+    await observer.handleEvent(source, "Network.webSocketClosed", { requestId: "ws-1" });
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      sequence: 2, transport: "WS_STATE", request: expect.objectContaining({ streamId: "1" }),
+      payload: { encoding: "UTF8", body: '{"state":"CLOSED"}' }
     }));
     expect(JSON.stringify(forward.mock.calls)).not.toContain("secret");
   });
@@ -519,6 +529,28 @@ describe("NetworkObserver", () => {
     });
     await expect(observer.handleEvent(source, "Network.loadingFinished", { requestId: "xhr-2" })).resolves.toBeUndefined();
     expect(forward).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains only the safe IM Market partition from request post data", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
+      ? { body: JSON.stringify({ StatusCode: 100, sel: [] }), base64Encoded: false }
+      : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000,
+      monotonicNow: () => 50, observerSessionId: "observer-im" });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "xhr-im",
+      request: { url: "https://imsports.directsb.net/api/EventV6/GetSE",
+        postData: JSON.stringify({ SportId: 1, Market: 2, token: "must-not-leak" }) } });
+    await observer.handleEvent(im, "Network.responseReceived", { requestId: "xhr-im", type: "XHR",
+      response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.loadingFinished", { requestId: "xhr-im" });
+
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      sourceEpoch: "observer-im:0",
+      request: expect.objectContaining({ providerPartition: "IM_MARKET_2" })
+    }));
+    expect(JSON.stringify(forward.mock.calls)).not.toContain("must-not-leak");
   });
 
   it("redacts and forwards a large UTF8 HTTP response as ordered wire-safe chunks", async () => {
@@ -645,8 +677,9 @@ describe("NetworkObserver", () => {
     await observer.handleEvent(source, "Network.webSocketFrameReceived", {
       requestId: "ws-1", response: { opcode: 2, payloadData: "YWJj" }
     });
-    expect(forward).toHaveBeenCalledTimes(1);
-    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ sequence: 0, payload: { encoding: "BASE64", body: "YWJj" } }));
+    expect(forward).toHaveBeenCalledTimes(2);
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ sequence: 1,
+      transport: "WS_FRAME", payload: { encoding: "BASE64", body: "YWJj" } }));
   });
 
   it("serializes concurrent frames from one source without duplicating sequence numbers", async () => {
@@ -657,7 +690,7 @@ describe("NetworkObserver", () => {
       sendCommand: vi.fn(async () => ({})),
       forward: async (envelope) => {
         forwarded.push(envelope.sequence);
-        if (envelope.sequence === 0) await firstForwarded;
+        if (envelope.sequence === 1) await firstForwarded;
       }
     });
     await observer.handleEvent(source, "Network.webSocketCreated", {
@@ -674,7 +707,7 @@ describe("NetworkObserver", () => {
     await Promise.resolve();
     releaseFirst?.();
     await Promise.all([first, second]);
-    expect(forwarded).toEqual([0, 1]);
+    expect(forwarded).toEqual([0, 1, 2]);
   });
 
   it("renews an unchanged CMD catalog before backend freshness expires", async () => {
@@ -726,7 +759,8 @@ describe("NetworkObserver", () => {
 
     expect(forward).toHaveBeenCalledTimes(1);
     expect(forward.mock.calls[0]![0]).toMatchObject({
-      sourceId: "chrome:CMD:9", sequence: 1, observedAtMs: 2_000, transport: "DOM_SNAPSHOT"
+      sourceId: "chrome:CMD:9", sequence: 1, observedAtMs: 1_000, transport: "DOM_SNAPSHOT",
+      request: expect.objectContaining({ replayed: true })
     });
     expect(JSON.parse(forward.mock.calls[0]![0].payload.body).records).toEqual(records);
   });
@@ -776,8 +810,9 @@ describe("NetworkObserver", () => {
 
     expect(forward).toHaveBeenCalledTimes(1);
     expect(forward.mock.calls[0]![0]).toMatchObject({ sourceId: "chrome:IM:8", sequence: 1,
-      observedAtMs: 2_000, transport: "HTTP_RESPONSE",
-      request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR" } });
+      observedAtMs: 1_000, transport: "HTTP_RESPONSE",
+      request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR",
+        replayed: true } });
     expect(forward.mock.calls[0]![0].payload.body).toBe(snapshot);
   });
 
@@ -800,7 +835,8 @@ describe("NetworkObserver", () => {
 
     expect(forward).toHaveBeenCalledTimes(1);
     expect(forward.mock.calls[0]![0]).toMatchObject({ lobby: "TSPORT", sourceId: tsport.sourceId,
-      observedAtMs: 2_000, transport: "WS_FRAME", payload: { encoding: "UTF8", body } });
+      observedAtMs: 1_000, transport: "WS_FRAME", request: expect.objectContaining({ replayed: true }),
+      payload: { encoding: "UTF8", body } });
   });
 
   it("replays retained T-Sports frames after the provider rotates to racern.com", async () => {

@@ -5,6 +5,7 @@ export const CHROME_BRIDGE_MAX_PAYLOAD_BYTES = 256 * 1024;
 const SafeIntegerSchema = z.number().int().safe().nonnegative();
 const TimestampSchema = z.number().finite().nonnegative();
 const SourceIdSchema = z.string().trim().min(1).max(128);
+const PublicGenerationIdSchema = z.string().trim().min(1).max(128).regex(/^[a-z0-9._:-]+$/iu);
 
 export const ChromeLobbyIdSchema = z.enum([
   "IM",
@@ -18,6 +19,7 @@ export const ChromeLobbyIdSchema = z.enum([
 
 export const ChromeBridgeTransportSchema = z.enum([
   "WS_FRAME",
+  "WS_STATE",
   "HTTP_RESPONSE",
   "DOM_SNAPSHOT",
   "TAB_STATE"
@@ -26,7 +28,10 @@ export const ChromeBridgeTransportSchema = z.enum([
 const SanitizedRequestSchema = z.strictObject({
   hostname: z.string().trim().min(1).max(253).regex(/^[a-z0-9.-]+$/iu),
   pathnameClass: z.string().trim().min(1).max(512).startsWith("/"),
-  resourceType: z.string().trim().min(1).max(64)
+  resourceType: z.string().trim().min(1).max(64),
+  streamId: PublicGenerationIdSchema.optional(),
+  providerPartition: z.enum(["IM_MARKET_1", "IM_MARKET_2"]).optional(),
+  replayed: z.boolean().optional()
 });
 
 const BridgePayloadSchema = z.strictObject({
@@ -43,6 +48,7 @@ export const ChromeBridgeEnvelopeSchema = z.strictObject({
   kind: z.literal("NETWORK"),
   lobby: ChromeLobbyIdSchema,
   sourceId: SourceIdSchema,
+  sourceEpoch: PublicGenerationIdSchema.optional(),
   tabId: SafeIntegerSchema,
   sequence: SafeIntegerSchema,
   observedAtMs: TimestampSchema,

@@ -24,12 +24,16 @@ export interface NetworkObserverDependencies {
   readonly monotonicNow?: () => number;
   readonly recoverImBaseline?: (source: ObservedSource) => Promise<void>;
   readonly frameCommandTimeoutMs?: number;
+  readonly observerSessionId?: string;
 }
+
+type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
 
 interface PendingRequest {
   readonly source: ObservedSource;
   readonly url: string;
   readonly resourceType: string;
+  readonly providerPartition?: ImProviderPartition;
 }
 
 interface ReplayableHttpSnapshot {
@@ -37,12 +41,18 @@ interface ReplayableHttpSnapshot {
   readonly url: string;
   readonly resourceType: string;
   readonly body: string;
+  readonly providerPartition?: ImProviderPartition;
+  readonly observedAtMs: number;
+  readonly receivedMonotonicMs: number;
 }
 
 interface ReplayableWsEvent {
   readonly source: ObservedSource;
   readonly url: string;
   readonly body: string;
+  readonly streamId: string;
+  readonly observedAtMs: number;
+  readonly receivedMonotonicMs: number;
 }
 
 interface ActiveCmdHiddenProbe {
@@ -403,11 +413,16 @@ export class NetworkObserver {
   readonly #monotonicNow: () => number;
   readonly #recoverImBaseline: ((source: ObservedSource) => Promise<void>) | null;
   readonly #frameCommandTimeoutMs: number;
+  readonly #observerSessionId: string;
   readonly #sequences = new Map<string, number>();
+  readonly #sourceGenerations = new Map<string, number>();
+  readonly #streamOrdinals = new Map<string, number>();
   readonly #emissionTails = new Map<string, Promise<void>>();
-  readonly #webSockets = new Map<string, { source: ObservedSource; url: string }>();
+  readonly #webSockets = new Map<string, { source: ObservedSource; url: string; streamId: string }>();
+  readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #pending = new Map<string, PendingRequest>();
-  readonly #cmdSnapshots = new Map<string, { readonly body: string; readonly sentAtMs: number }>();
+  readonly #cmdSnapshots = new Map<string, { readonly body: string; readonly sentAtMs: number;
+    readonly receivedMonotonicMs: number }>();
   readonly #cmdLastBodies = new Map<string, string>();
   readonly #cmdLastSentAtMs = new Map<string, number>();
   readonly #cmdSnapshotHosts = new Map<string, string>();
@@ -426,6 +441,10 @@ export class NetworkObserver {
     this.#monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.#recoverImBaseline = dependencies.recoverImBaseline ?? null;
     this.#frameCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 2_500;
+    this.#observerSessionId = dependencies.observerSessionId ?? crypto.randomUUID();
+    if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
+      throw new Error("OBSERVER_SESSION_ID_INVALID");
+    }
   }
 
   async start(source: ObservedSource): Promise<void> {
@@ -464,6 +483,7 @@ export class NetworkObserver {
     for (const sourceId of this.#httpSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#tsportSnapshots.keys()) remember(sourceId);
     for (const sourceId of sourceIds) {
+      this.#sourceGenerations.set(sourceId, (this.#sourceGenerations.get(sourceId) ?? 0) + 1);
       this.#sequences.delete(sourceId);
       this.#emissionTails.delete(sourceId);
       this.#cmdSnapshots.delete(sourceId);
@@ -481,6 +501,9 @@ export class NetworkObserver {
     }
     for (const [key, pending] of this.#pending) {
       if (pending.source.tabId === tabId) this.#pending.delete(key);
+    }
+    for (const key of this.#requestPartitions.keys()) {
+      if (key.startsWith(`${tabId}:`)) this.#requestPartitions.delete(key);
     }
   }
 
@@ -581,6 +604,7 @@ export class NetworkObserver {
     }
     if (method === "Runtime.executionContextsCleared") {
       this.#mainWorldContexts.delete(source.tabId);
+      this.#sourceGenerations.set(source.sourceId, (this.#sourceGenerations.get(source.sourceId) ?? 0) + 1);
       return;
     }
     if (method === "Runtime.executionContextDestroyed" && typeof params.executionContextId === "number") {
@@ -594,6 +618,13 @@ export class NetworkObserver {
     }
     const requestId = typeof params.requestId === "string" ? params.requestId : null;
     const key = requestId ? `${source.tabId}:${requestId}` : null;
+
+    if (method === "Network.requestWillBeSent" && key) {
+      const request = isRecord(params.request) ? params.request : null;
+      const partition = request === null ? null : imPartitionFromRequest(source, request);
+      if (partition === null) this.#requestPartitions.delete(key);
+      else this.#requestPartitions.set(key, partition);
+    }
 
     const activeProbe = source.lobby === "CMD" ? this.#activeCmdHiddenProbes.get(source.sourceId) : undefined;
     if (activeProbe && method === "Network.requestWillBeSent") {
@@ -617,10 +648,21 @@ export class NetworkObserver {
     }
 
     if (method === "Network.webSocketCreated" && key && typeof params.url === "string") {
-      this.#webSockets.set(key, { source, url: params.url });
+      const streamId = String((this.#streamOrdinals.get(source.sourceId) ?? 0) + 1);
+      this.#streamOrdinals.set(source.sourceId, Number(streamId));
+      this.#webSockets.set(key, { source, url: params.url, streamId });
+      await this.#emit(source, params.url, "WebSocket", "WS_STATE", {
+        encoding: "UTF8", body: '{"state":"OPEN"}'
+      }, { request: { streamId } });
       return;
     }
     if (method === "Network.webSocketClosed" && key) {
+      const socket = this.#webSockets.get(key);
+      if (socket !== undefined) {
+        await this.#emit(socket.source, socket.url, "WebSocket", "WS_STATE", {
+          encoding: "UTF8", body: '{"state":"CLOSED"}'
+        }, { request: { streamId: socket.streamId } });
+      }
       this.#webSockets.delete(key);
       return;
     }
@@ -629,27 +671,33 @@ export class NetworkObserver {
       const response = isRecord(params.response) ? params.response : null;
       if (!socket || !response || typeof response.payloadData !== "string") return;
       const opcode = typeof response.opcode === "number" ? response.opcode : 1;
-      if (opcode !== 2) this.#rememberTsportWsEvent(socket.source, socket.url, response.payloadData);
+      const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
+      if (opcode !== 2) this.#rememberTsportWsEvent(socket.source, socket.url, response.payloadData,
+        socket.streamId, clocks);
       await this.#emit(socket.source, socket.url, "WebSocket", "WS_FRAME", {
         encoding: opcode === 2 ? "BASE64" : "UTF8",
         body: response.payloadData
-      });
+      }, { request: { streamId: socket.streamId }, ...clocks });
       return;
     }
     if (method === "Network.responseReceived" && key) {
       const response = isRecord(params.response) ? params.response : null;
       const resourceType = typeof params.type === "string" ? params.type : "";
       if (!response || !/^(?:XHR|Fetch)$/u.test(resourceType) || typeof response.url !== "string") return;
-      this.#pending.set(key, { source, url: response.url, resourceType });
+      const providerPartition = this.#requestPartitions.get(key);
+      this.#pending.set(key, { source, url: response.url, resourceType,
+        ...(providerPartition === undefined ? {} : { providerPartition }) });
       return;
     }
     if (method === "Network.loadingFailed" && key) {
       this.#pending.delete(key);
+      this.#requestPartitions.delete(key);
       return;
     }
     if (method === "Network.loadingFinished" && key) {
       const pending = this.#pending.get(key);
       this.#pending.delete(key);
+      this.#requestPartitions.delete(key);
       if (!pending) return;
       try {
         const response = await this.#sendCommand(source.tabId, "Network.getResponseBody", { requestId });
@@ -662,12 +710,13 @@ export class NetworkObserver {
         }
         const safeBody = redactNetworkBody(response.body);
         await this.#recoverMissingImBaseline(pending);
-        this.#rememberHttpSnapshot(pending, safeBody);
+        const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
+        this.#rememberHttpSnapshot(pending, safeBody, clocks);
         const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
         if (fragments.length === 1) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: safeBody
-          });
+          }, { request: { providerPartition: pending.providerPartition }, ...clocks });
           return;
         }
         const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
@@ -675,7 +724,7 @@ export class NetworkObserver {
           this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
               chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-          }));
+          }, { request: { providerPartition: pending.providerPartition }, ...clocks }));
         await Promise.all(emissions);
       } catch {
         // A response body can be evicted by Chrome; isolate it from the stream.
@@ -686,11 +735,13 @@ export class NetworkObserver {
   async ingestWebSocketFrame(source: ObservedSource, url: string, payloadData: string,
     opcode = 1): Promise<void> {
     if (!/^wss?:\/\//iu.test(url) || !Number.isInteger(opcode) || (opcode !== 1 && opcode !== 2)) return;
-    if (opcode !== 2) this.#rememberTsportWsEvent(source, url, payloadData);
+    const streamId = "manual";
+    const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
+    if (opcode !== 2) this.#rememberTsportWsEvent(source, url, payloadData, streamId, clocks);
     await this.#emit(source, url, "WebSocket", "WS_FRAME", {
       encoding: opcode === 2 ? "BASE64" : "UTF8",
       body: payloadData
-    });
+    }, { request: { streamId }, ...clocks });
   }
 
   async ingestHttpResponse(source: ObservedSource, url: string, resourceType: "XHR" | "Fetch",
@@ -699,10 +750,11 @@ export class NetworkObserver {
     const pending: PendingRequest = { source, url, resourceType };
     const safeBody = redactNetworkBody(body);
     await this.#recoverMissingImBaseline(pending);
-    this.#rememberHttpSnapshot(pending, safeBody);
+    const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
+    this.#rememberHttpSnapshot(pending, safeBody, clocks);
     const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
     if (fragments.length === 1) {
-      await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody });
+      await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody }, clocks);
       return;
     }
     const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
@@ -711,7 +763,7 @@ export class NetworkObserver {
         encoding: "UTF8",
         body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex, chunkCount: fragments.length,
           bodyEncoding: "UTF8", bodyFragment })
-      });
+      }, clocks);
     }
   }
 
@@ -721,14 +773,15 @@ export class NetworkObserver {
     try { records = JSON.parse(body); } catch { return; }
     if (!Array.isArray(records) || records.length === 0) return;
     const nowMs = this.#now();
+    const receivedMonotonicMs = this.#monotonicNow();
     const snapshotId = `dom:${source.tabId}:${nowMs}`;
     for (const chunk of chunkCmdSnapshot(records, snapshotId)) {
       await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
         encoding: "UTF8", body: JSON.stringify(chunk)
-      });
+      }, { observedAtMs: nowMs, receivedMonotonicMs });
     }
     if (isReplayableCmdCatalog(records)) {
-      this.#cmdSnapshots.set(source.sourceId, { body, sentAtMs: nowMs });
+      this.#cmdSnapshots.set(source.sourceId, { body, sentAtMs: nowMs, receivedMonotonicMs });
       this.#cmdSnapshotHosts.set(source.sourceId, hostname);
     }
   }
@@ -770,6 +823,7 @@ export class NetworkObserver {
       if (records.length === 0) return;
       const catalogBody = JSON.stringify(records);
       const nowMs = this.#now();
+      const receivedMonotonicMs = this.#monotonicNow();
       const previous = this.#cmdLastBodies.get(source.sourceId);
       // Transport heartbeats only prove that the tab is attached. Renew the
       // unchanged catalog before the API freshness TTL expires so a quiet
@@ -781,12 +835,12 @@ export class NetworkObserver {
       for (const chunk of chunks) {
         await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
           encoding: "UTF8", body: JSON.stringify(chunk)
-        });
+        }, { observedAtMs: nowMs, receivedMonotonicMs });
       }
       this.#cmdLastBodies.set(source.sourceId, catalogBody);
       this.#cmdLastSentAtMs.set(source.sourceId, nowMs);
       if (isReplayableCmdCatalog(records)) {
-        this.#cmdSnapshots.set(source.sourceId, { body: catalogBody, sentAtMs: nowMs });
+        this.#cmdSnapshots.set(source.sourceId, { body: catalogBody, sentAtMs: nowMs, receivedMonotonicMs });
         this.#cmdSnapshotHosts.set(source.sourceId, hostname);
       }
     } finally {
@@ -897,7 +951,8 @@ export class NetworkObserver {
       for (const chunk of chunkCmdSnapshot(records, snapshotId)) {
         await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
           encoding: "UTF8", body: JSON.stringify(chunk)
-        });
+        }, { request: { replayed: true }, observedAtMs: snapshot.sentAtMs,
+          receivedMonotonicMs: snapshot.receivedMonotonicMs });
       }
       replayed = true;
     }
@@ -908,14 +963,16 @@ export class NetworkObserver {
         if (fragments.length === 1) {
           await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: snapshot.body
-          });
+          }, { request: { providerPartition: snapshot.providerPartition, replayed: true },
+            observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
         } else {
           const snapshotId = `network-replay:${snapshot.source.tabId}:${this.#now()}:${this.#sequences.get(sourceId) ?? 0}`;
           for (const [chunkIndex, bodyFragment] of fragments.entries()) {
             await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
               encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
                 chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-            });
+            }, { request: { providerPartition: snapshot.providerPartition, replayed: true },
+              observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
           }
         }
         replayed = true;
@@ -926,14 +983,16 @@ export class NetworkObserver {
       for (const snapshot of snapshots.values()) {
         await this.#emit(snapshot.source, snapshot.url, "WebSocket", "WS_FRAME", {
           encoding: "UTF8", body: snapshot.body
-        });
+        }, { request: { streamId: snapshot.streamId, replayed: true },
+          observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
         replayed = true;
       }
     }
     return replayed;
   }
 
-  #rememberTsportWsEvent(source: ObservedSource, url: string, body: string): void {
+  #rememberTsportWsEvent(source: ObservedSource, url: string, body: string, streamId: string,
+    clocks: { readonly observedAtMs: number; readonly receivedMonotonicMs: number }): void {
     if (source.lobby !== "TSPORT") return;
     let parsedUrl: URL;
     try { parsedUrl = new URL(url); } catch { return; }
@@ -945,13 +1004,14 @@ export class NetworkObserver {
       const event: unknown = JSON.parse(outer.d);
       if (!isRecord(event) || (typeof event["2"] !== "number" && typeof event["2"] !== "string")) return;
       const retained = this.#tsportSnapshots.get(source.sourceId) ?? new Map<string, ReplayableWsEvent>();
-      retained.set(String(event["2"]), { source, url, body });
+      retained.set(String(event["2"]), { source, url, body, streamId, ...clocks });
       while (retained.size > 1_000) retained.delete(retained.keys().next().value as string);
       this.#tsportSnapshots.set(source.sourceId, retained);
     } catch { /* Non-event frames are not replayable catalog state. */ }
   }
 
-  #rememberHttpSnapshot(pending: PendingRequest, body: string): void {
+  #rememberHttpSnapshot(pending: PendingRequest, body: string,
+    clocks: { readonly observedAtMs: number; readonly receivedMonotonicMs: number }): void {
     let url: URL;
     try { url = new URL(pending.url); } catch { return; }
     if (pending.source.lobby !== "IM" || url.hostname !== "imsports.directsb.net" ||
@@ -961,7 +1021,8 @@ export class NetworkObserver {
     if (!isRecord(parsed) || parsed.StatusCode !== 100 || !Array.isArray(parsed.sel)) return;
     const existing = this.#httpSnapshots.get(pending.source.sourceId) ?? [];
     const deduplicated = existing.filter((entry) => entry.body !== body);
-    deduplicated.push({ source: pending.source, url: pending.url, resourceType: pending.resourceType, body });
+    deduplicated.push({ source: pending.source, url: pending.url, resourceType: pending.resourceType, body,
+      ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }), ...clocks });
     while (deduplicated.length > 4 || deduplicated.reduce((sum, entry) => sum + entry.body.length, 0) > 12_000_000) {
       deduplicated.shift();
     }
@@ -992,7 +1053,12 @@ export class NetworkObserver {
     url: string,
     resourceType: string,
     transport: ChromeBridgeEnvelope["transport"],
-    payload: ChromeBridgeEnvelope["payload"]
+    payload: ChromeBridgeEnvelope["payload"],
+    metadata: {
+      readonly request?: Pick<ChromeBridgeEnvelope["request"], "streamId" | "providerPartition" | "replayed">;
+      readonly observedAtMs?: number;
+      readonly receivedMonotonicMs?: number;
+    } = {}
   ): Promise<void> {
     const previous = this.#emissionTails.get(source.sourceId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(async () => {
@@ -1002,11 +1068,12 @@ export class NetworkObserver {
           version: 1,
           kind: "NETWORK",
           ...source,
+          sourceEpoch: `${this.#observerSessionId}:${this.#sourceGenerations.get(source.sourceId) ?? 0}`,
           sequence,
-          observedAtMs: this.#now(),
-          receivedMonotonicMs: this.#monotonicNow(),
+          observedAtMs: metadata.observedAtMs ?? this.#now(),
+          receivedMonotonicMs: metadata.receivedMonotonicMs ?? this.#monotonicNow(),
           transport,
-          request: { url, resourceType },
+          request: { url, resourceType, ...metadata.request },
           payload
         }) as ChromeBridgeEnvelope;
         await this.#forward(redacted);
@@ -1021,6 +1088,21 @@ export class NetworkObserver {
     } finally {
       if (this.#emissionTails.get(source.sourceId) === current) this.#emissionTails.delete(source.sourceId);
     }
+  }
+}
+
+function imPartitionFromRequest(source: ObservedSource,
+  request: Record<string, unknown>): ImProviderPartition | null {
+  if (source.lobby !== "IM" || typeof request.url !== "string" || typeof request.postData !== "string") return null;
+  let url: URL;
+  try { url = new URL(request.url); } catch { return null; }
+  if (url.hostname !== "imsports.directsb.net" || url.pathname !== "/api/EventV6/GetSE") return null;
+  try {
+    const body: unknown = JSON.parse(request.postData);
+    if (!isRecord(body)) return null;
+    return body.Market === 1 ? "IM_MARKET_1" : body.Market === 2 ? "IM_MARKET_2" : null;
+  } catch {
+    return null;
   }
 }
 

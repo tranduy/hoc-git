@@ -67,6 +67,23 @@ describe("ChromeBridgeEnvelopeSchema", () => {
       payload: { encoding: "UTF8", body: "[]" }
     }).success).toBe(true);
   });
+
+  it("accepts only bounded credential-free source, stream, partition, and replay metadata", () => {
+    const schema = contracts.ChromeBridgeEnvelopeSchema;
+    const lifecycle = {
+      ...validEnvelope,
+      sourceEpoch: "observer-a:3",
+      transport: "WS_STATE",
+      request: { ...validEnvelope.request, streamId: "7", providerPartition: "IM_MARKET_2", replayed: false },
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' }
+    } as const;
+    expect(schema.safeParse(lifecycle).success).toBe(true);
+    expect(schema.safeParse({ ...lifecycle, sourceEpoch: "x".repeat(129) }).success).toBe(false);
+    expect(schema.safeParse({ ...lifecycle,
+      request: { ...lifecycle.request, providerPartition: "IM_MARKET_3" } }).success).toBe(false);
+    expect(schema.safeParse({ ...lifecycle,
+      request: { ...lifecycle.request, streamId: "socket?token=secret" } }).success).toBe(false);
+  });
 });
 
 describe("ChromeBridgeControlMessageSchema", () => {
