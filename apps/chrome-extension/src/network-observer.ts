@@ -109,6 +109,69 @@ export const KEEP_ACTIVE_EXPRESSION = `(() => {
   return { moved, expanded };
 })()`;
 
+// T-Sports/APSPORT exposes hidden event markets behind provider-specific
+// structural controls whose labels are a market count (for example "27") or
+// a localized "view more" message. Keep this whitelist deliberately narrow:
+// odds, ticket and form descendants are rejected before any click.
+export const TSPORT_CATALOG_DISCOVERY_EXPRESSION = `(() => {
+  const candidates = [document.scrollingElement, ...document.querySelectorAll('body *')]
+    .filter((element) => element && element.scrollHeight - element.clientHeight > 200);
+  let moved = 0;
+  for (const element of candidates) {
+    const maximum = element.scrollHeight - element.clientHeight;
+    const next = element.scrollTop >= maximum - 4 ? 0 :
+      Math.min(maximum, element.scrollTop + Math.max(240, element.clientHeight * 0.8));
+    if (next !== element.scrollTop) { element.scrollTop = next; moved += 1; }
+  }
+  const root = document.documentElement;
+  const now = Date.now();
+  const prior = Number(root.dataset.fieldlineTsportMarketExpandedAt || 0);
+  let expanded = 0;
+  if (!Number.isFinite(prior) || now - prior >= 8000) {
+    const normalize = (value) => String(value || '').normalize('NFD')
+      .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+    const unsafeSelector = '[class*=selection], [class*=ticket], [class*=slip], [class*=betslip], form, [id^=odd-item-]';
+    const controls = [...document.querySelectorAll(
+      '.match a.c-btn--more.c-is-close, .match button.c-btn--more.c-is-close, ' +
+      '.match a.c-btn--more-lines.c-is-close, .match button.c-btn--more-lines.c-is-close, ' +
+      '.match a.view-more.center-absolute, .match button.view-more.center-absolute')]
+      .filter((element) => element.getClientRects().length > 0 && !element.hasAttribute('disabled') &&
+        element.closest('.match') && !element.closest(unsafeSelector) &&
+        !/(?:odd|price|selection)/u.test(normalize(element.className)))
+      .filter((element) => {
+        const className = normalize(element.className);
+        const label = normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent);
+        if (/(?:^| )c-btn--more(?: |$)/u.test(className)) return /^\\d+(?:\\s*[^\\p{L}\\p{N}]*)?$/u.test(label);
+        if (/(?:^| )c-btn--more-lines(?: |$)/u.test(className)) return /^cac loai cuoc chau a khac(?:\\s*[^\\p{L}\\p{N}]*)?$/u.test(label);
+        return /^(?:xem them|view more)\\s*\\(\\+\\d+\\)\\s*(?:cac loai cuoc khac|other markets)$/u.test(label);
+      })
+      .filter((element) => {
+        const owner = element.closest('.match');
+        const ownerId = owner?.getAttribute('data-event-id') || owner?.getAttribute('data-match-id') ||
+          owner?.querySelector('.match-favorite')?.id || owner?.id || '';
+        const label = normalize(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent);
+        const signature = ownerId + '\\u0000' + label;
+        const lastAt = Number(element.dataset.fieldlineTsportMarketExpandedAt || 0);
+        const alreadyOpen = element.getAttribute('aria-expanded') === 'true';
+        return !alreadyOpen && (element.dataset.fieldlineTsportMarketExpandSignature !== signature ||
+          !Number.isFinite(lastAt) || now - lastAt >= 60000);
+      })
+      .slice(0, 6);
+    for (const control of controls) {
+      const owner = control.closest('.match');
+      const ownerId = owner?.getAttribute('data-event-id') || owner?.getAttribute('data-match-id') ||
+        owner?.querySelector('.match-favorite')?.id || owner?.id || '';
+      const label = normalize(control.getAttribute('aria-label') || control.getAttribute('title') || control.textContent);
+      control.dataset.fieldlineTsportMarketExpandSignature = ownerId + '\\u0000' + label;
+      control.dataset.fieldlineTsportMarketExpandedAt = String(now);
+      control.click();
+      expanded += 1;
+    }
+    root.dataset.fieldlineTsportMarketExpandedAt = String(now);
+  }
+  return { moved, expanded };
+})()`;
+
 // CMD renders only a small virtualized window and remembers the last search
 // query/category in the page. Keep the attached read-only tab on Football with
 // an empty team search, then advance every scroll container so the backend can
@@ -411,7 +474,8 @@ export class NetworkObserver {
     await this.#sendCommand(source.tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => ({}));
     await this.#sendCommand(source.tabId, "Page.setWebLifecycleState", { state: "active" }).catch(() => ({}));
     const expression = source.lobby === "IM" ? IM_CATALOG_DISCOVERY_EXPRESSION :
-      source.lobby === "CMD" ? CMD_CATALOG_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
+      source.lobby === "CMD" ? CMD_CATALOG_DISCOVERY_EXPRESSION :
+        source.lobby === "TSPORT" ? TSPORT_CATALOG_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
     if (source.lobby === "IM") {
       // GetSE is signed by IM's page-owned helo/halo_ event handler and uses
       // page globals. Evaluating in an isolated world can still read the DOM,

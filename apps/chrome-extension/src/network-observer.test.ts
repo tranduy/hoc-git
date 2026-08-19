@@ -297,6 +297,48 @@ describe("NetworkObserver", () => {
     expect(() => new Function(`return ${KEEP_ACTIVE_EXPRESSION}`)).not.toThrow();
   });
 
+  it("opens APSPORT's numeric and view-more detail controls without touching an odds-like control", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, _params?: Record<string, unknown>) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "top" } } }
+      : method === "Page.createIsolatedWorld" ? { executionContextId: 19 } : {});
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+
+    await observer.maintain({ lobby: "TSPORT", sourceId: "chrome:TSPORT:19", tabId: 19 });
+
+    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate");
+    const expression = String(evaluation?.[2]?.expression ?? "");
+    const clicks: string[] = [];
+    const owner = {
+      id: "match-778899",
+      getAttribute: (name: string) => name === "data-event-id" ? "778899" : null,
+      querySelector: () => null
+    };
+    const control = (className: string, label: string, unsafe = false) => ({
+      className, textContent: label, dataset: {} as Record<string, string>,
+      getClientRects: () => [{}], hasAttribute: () => false,
+      getAttribute: (name: string) => name === "aria-expanded" ? "false" : null,
+      matches: () => false,
+      closest: (selector: string) => selector.includes("selection") ? (unsafe ? {} : null)
+        : selector === ".match" || selector.startsWith("[data-event-id]") ? owner : null,
+      click: () => { clicks.push(label); }
+    });
+    const numericDetail = control("c-btn c-btn--more c-is-close", "27");
+    const otherAsian = control("c-btn c-btn--more-lines c-is-close", "Các loại cược Châu Á khác");
+    const viewMore = control("view-more center-absolute", "Xem thêm (+1) các loại cược khác");
+    const oddsLike = control("c-btn c-btn--more c-is-close selection-price", "1.92", true);
+    const controls = [numericDetail, otherAsian, viewMore, oddsLike];
+    const document = {
+      scrollingElement: { scrollTop: 0, scrollHeight: 100, clientHeight: 100 },
+      documentElement: { dataset: {} as Record<string, string> },
+      querySelectorAll: (selector: string) => selector === "body *" ? [] : controls
+    };
+
+    const result = new Function("document", "Date", `return ${expression}`)(document, { now: () => 100_000 });
+
+    expect(result).toMatchObject({ expanded: 3 });
+    expect(clicks).toEqual(["27", "Các loại cược Châu Á khác", "Xem thêm (+1) các loại cược khác"]);
+  });
+
   it("uses the same bounded hidden-market expansion while walking the virtualized CMD catalog", () => {
     expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("fieldlineCmdMarketExpandedAt");
     expect(CMD_CATALOG_DISCOVERY_EXPRESSION).toContain("slice(0, 12)");
