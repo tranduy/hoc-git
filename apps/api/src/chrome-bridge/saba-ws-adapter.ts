@@ -8,6 +8,7 @@ import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 import { decodePublicDomRecords } from "./cmd-dom-adapter.js";
+import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:SABA:FOOTBALL";
 
@@ -34,7 +35,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     if ((envelope.transport !== "WS_FRAME" && envelope.transport !== "WS_STATE") ||
       envelope.request.pathnameClass !== "/socket.io/") return false;
     if (envelope.transport === "WS_STATE") return envelope.request.streamId !== undefined &&
-      (envelope.payload.body === "OPEN" || envelope.payload.body === "CLOSED");
+      websocketLifecycleState(envelope) !== null;
     try { return parseSabaSocketFrame(envelope.payload.body) !== null; } catch { return false; }
   }
 
@@ -57,8 +58,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     const streamId = envelope.request.streamId ?? "legacy";
     const decoderKey = `${envelope.sourceId}|${streamId}`;
     if (envelope.transport === "WS_STATE") {
+      const state = websocketLifecycleState(envelope);
+      if (state === null) return [];
       this.#dropStream(envelope.sourceId, streamId);
-      if (envelope.payload.body === "OPEN") return [];
+      if (state === "OPEN") return [];
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }

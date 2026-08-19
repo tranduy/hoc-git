@@ -71,7 +71,7 @@ describe("KsportWsCatalogAdapter", () => {
   it("invalidates SBOBET immediately when its active socket closes", () => {
     const adapter = new KsportWsCatalogAdapter();
     const closed: ChromeBridgeEnvelope = { ...envelope([]), transport: "WS_STATE",
-      payload: { encoding: "UTF8", body: "CLOSED" } };
+      payload: { encoding: "UTF8", body: JSON.stringify({ state: "CLOSED" }) } };
     expect(adapter.fingerprint(closed)).toBe(true);
     expect(adapter.decode(closed)).toEqual([expect.objectContaining({
       invalidateAccountId: "catalog-source:SBOBET:FOOTBALL", reason: "PROVIDER_STREAM_CLOSED"

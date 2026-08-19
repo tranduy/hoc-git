@@ -4,6 +4,7 @@ import { extractSbobetDirectCatalogRecords } from "../providers/sbobet/sbobet-di
 import { decodeSbobetStompBodies } from "../providers/sbobet/sbobet-stomp.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
+import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const RETENTION_MS = 15_000;
 const ACCOUNT_ID = "catalog-source:SBOBET:FOOTBALL";
@@ -54,7 +55,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "KSPORT" || envelope.payload.encoding !== "UTF8" ||
       !envelope.request.pathnameClass.startsWith("/sport/") || envelope.request.streamId === undefined) return false;
-    if (envelope.transport === "WS_STATE") return envelope.payload.body === "OPEN" || envelope.payload.body === "CLOSED";
+    if (envelope.transport === "WS_STATE") return websocketLifecycleState(envelope) !== null;
     return envelope.transport === "WS_FRAME" &&
       envelope.payload.body.includes("destination:/topic/sports/") &&
       decodeSbobetStompBodies(envelope.payload.body).length > 0;
@@ -64,8 +65,10 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (!this.fingerprint(envelope)) return [];
     const streamKey = `${envelope.sourceId}|${envelope.request.streamId ?? "legacy"}`;
     if (envelope.transport === "WS_STATE") {
+      const state = websocketLifecycleState(envelope);
+      if (state === null) return [];
       this.#records.delete(streamKey);
-      if (envelope.payload.body === "OPEN") return [];
+      if (state === "OPEN") return [];
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }

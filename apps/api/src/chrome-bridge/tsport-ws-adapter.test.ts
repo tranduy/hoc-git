@@ -210,7 +210,7 @@ describe("TsportWsCatalogAdapter", () => {
   it("invalidates APSPORT immediately when its active socket closes", () => {
     const adapter = new TsportWsCatalogAdapter();
     const closed: ChromeBridgeEnvelope = { ...envelope(event(1, "Home")), transport: "WS_STATE",
-      payload: { encoding: "UTF8", body: "CLOSED" } };
+      payload: { encoding: "UTF8", body: JSON.stringify({ state: "CLOSED" }) } };
     expect(adapter.fingerprint(closed)).toBe(true);
     expect(adapter.decode(closed)).toEqual([expect.objectContaining({
       invalidateAccountId: "catalog-source:APSPORT:FOOTBALL", reason: "PROVIDER_STREAM_CLOSED"

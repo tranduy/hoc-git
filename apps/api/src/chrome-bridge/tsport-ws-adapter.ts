@@ -5,6 +5,7 @@ import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-cata
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
+import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:APSPORT:FOOTBALL";
 const DOM_RETENTION_MS = 15_000;
@@ -152,7 +153,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       !/^\/ln\/[^/]+\/(?:p\/1\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/0\/tr\/0$/u.test(
         envelope.request.pathnameClass)) return false;
     if (envelope.transport === "WS_STATE") return envelope.request.streamId !== undefined &&
-      (envelope.payload.body === "OPEN" || envelope.payload.body === "CLOSED");
+      websocketLifecycleState(envelope) !== null;
     const parsed = parseOuter(envelope.payload.body)?.event ?? null;
     this.#parsed.set(envelope, parsed);
     return parsed !== null && extractTsportFootballRecord(parsed) !== null;
@@ -162,8 +163,10 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (!this.fingerprint(envelope)) return [];
     const streamKey = `${envelope.sourceId}|${envelope.request.streamId ?? "legacy"}`;
     if (envelope.transport === "WS_STATE") {
+      const state = websocketLifecycleState(envelope);
+      if (state === null) return [];
       this.#wsRecords.delete(streamKey);
-      if (envelope.payload.body === "OPEN") return [];
+      if (state === "OPEN") return [];
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }

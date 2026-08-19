@@ -235,7 +235,8 @@ describe("ChromeCatalogDataPlane", () => {
     const baseline = sabaEnvelope(1, [1]);
     expect(plane.ingest(baseline)).toBe(true);
     const closed: ChromeBridgeEnvelope = { ...baseline, sequence: 2, observedAtMs: 1_100,
-      receivedMonotonicMs: 60, transport: "WS_STATE", payload: { encoding: "UTF8", body: "CLOSED" } };
+      receivedMonotonicMs: 60, transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: JSON.stringify({ state: "CLOSED" }) } };
     expect(plane.ingest(closed)).toBe(true);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
