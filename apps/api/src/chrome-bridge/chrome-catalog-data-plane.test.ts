@@ -163,6 +163,71 @@ describe("ChromeCatalogDataPlane", () => {
     expect(onSourceRecoveryNeeded).toHaveBeenCalledWith("catalog-source:BTI:FOOTBALL");
   });
 
+  it("requests recovery when an authenticated BTI source loses its tab and all transport", async () => {
+    const onSourceRecoveryNeeded = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 61_001, freshnessMs: 20_000,
+      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, missingTransportStartupGraceMs: 0,
+      onSourceRecoveryNeeded });
+    const authenticated: CatalogSourceStatus = {
+      ...fallbackStatus,
+      id: "catalog-source:BTI:FOOTBALL",
+      alias: "BTI Football",
+      provider: "BTI",
+      sessionState: "ACTIVE",
+      acquiredAtMs: 1_000,
+      reason: null
+    };
+
+    await expect(plane.overlayStatuses([authenticated])).resolves.toMatchObject([{
+      sessionState: "ACTION_REQUIRED",
+      reason: "PROVIDER_VALIDATION_FAILED"
+    }]);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledWith("catalog-source:BTI:FOOTBALL");
+  });
+
+  it("does not replace another provider tab only because the API has not received its first transport yet", async () => {
+    const onSourceRecoveryNeeded = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 61_001, freshnessMs: 20_000,
+      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+    const authenticated: CatalogSourceStatus = {
+      ...fallbackStatus,
+      id: "catalog-source:IM:FOOTBALL",
+      alias: "I-Sports · IM",
+      provider: "IM",
+      sessionState: "ACTIVE",
+      acquiredAtMs: 1_000,
+      reason: null
+    };
+
+    await plane.overlayStatuses([authenticated]);
+
+    expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+  });
+
+  it("gives an existing BTI tab time to reconnect after an API restart before replacing it", async () => {
+    let now = 61_001;
+    const onSourceRecoveryNeeded = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
+      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+    const authenticated: CatalogSourceStatus = {
+      ...fallbackStatus,
+      id: "catalog-source:BTI:FOOTBALL",
+      alias: "BTI Football",
+      provider: "BTI",
+      sessionState: "ACTIVE",
+      acquiredAtMs: 1_000,
+      reason: null
+    };
+
+    await plane.overlayStatuses([authenticated]);
+    expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+
+    now += 10_001;
+    await plane.overlayStatuses([authenticated]);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
+  });
+
   it("owns every configured Football source while the Chrome bridge is enabled", () => {
     const plane = new ChromeCatalogDataPlane();
     expect(plane.owns("catalog-source:CMD:FOOTBALL")).toBe(true);

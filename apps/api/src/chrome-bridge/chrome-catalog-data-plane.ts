@@ -17,6 +17,7 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly publish?: (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void;
   readonly recoveryAfterMs?: number;
   readonly recoveryCooldownMs?: number;
+  readonly missingTransportStartupGraceMs?: number;
   readonly onSourceRecoveryNeeded?: (accountId: string) => void;
 }
 
@@ -27,6 +28,8 @@ export class ChromeCatalogDataPlane {
   readonly #publish: ((catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void) | null;
   readonly #recoveryAfterMs: number;
   readonly #recoveryCooldownMs: number;
+  readonly #missingTransportStartupGraceMs: number;
+  readonly #startedAtMs: number;
   readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
   readonly #router = new AdapterRouter([new CmdDomCatalogAdapter(), new ImHttpCatalogAdapter(),
     new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(), new TsportWsCatalogAdapter(),
@@ -51,6 +54,8 @@ export class ChromeCatalogDataPlane {
     this.#publish = options.publish ?? null;
     this.#recoveryAfterMs = options.recoveryAfterMs ?? 60_000;
     this.#recoveryCooldownMs = options.recoveryCooldownMs ?? 300_000;
+    this.#missingTransportStartupGraceMs = options.missingTransportStartupGraceMs ?? 10_000;
+    this.#startedAtMs = this.#now();
     this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
   }
 
@@ -132,9 +137,12 @@ export class ChromeCatalogDataPlane {
       const fresh = !invalidated && catalog !== undefined && this.#now() - catalog.observedAtMs <= this.#freshnessMs;
       const transportAtMs = this.#lastTransportAtMs.get(status.id);
       const transportFresh = transportAtMs !== undefined && this.#now() - transportAtMs <= this.#freshnessMs;
-      if (!fresh && catalog !== undefined && transportFresh && status.sessionState === "ACTIVE" &&
-        this.#now() - catalog.observedAtMs >= this.#recoveryAfterMs) {
-        this.#requestRecoveryIfStalled(status.id);
+      if (!fresh && status.sessionState === "ACTIVE") {
+        const startupGraceElapsed = this.#now() - this.#startedAtMs >= this.#missingTransportStartupGraceMs;
+        const missingTransportFallback = status.id === "catalog-source:BTI:FOOTBALL" && startupGraceElapsed
+          ? status.acquiredAtMs ?? undefined
+          : undefined;
+        this.#requestRecoveryIfStalled(status.id, missingTransportFallback);
       }
       if (fresh || (!invalidated && catalog !== undefined && transportFresh)) {
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTIVE",
@@ -152,9 +160,10 @@ export class ChromeCatalogDataPlane {
     });
   }
 
-  #requestRecoveryIfStalled(accountId: string): void {
+  #requestRecoveryIfStalled(accountId: string, fallbackStalledSinceMs?: number): void {
     const catalog = this.#catalogs.get(accountId);
-    const stalledSinceMs = catalog?.observedAtMs ?? this.#transportStartedAtMs.get(accountId);
+    const stalledSinceMs = catalog?.observedAtMs ?? this.#transportStartedAtMs.get(accountId) ??
+      fallbackStalledSinceMs;
     if (stalledSinceMs === undefined || this.#now() - stalledSinceMs < this.#recoveryAfterMs) return;
     const lastRecoveryAtMs = this.#lastRecoveryAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY;
     if (this.#now() - lastRecoveryAtMs < this.#recoveryCooldownMs) return;
