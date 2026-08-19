@@ -22,6 +22,7 @@ import type { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-con
 import { registerMaintenanceRoutes } from "./routes/maintenance.js";
 import type { SessionRefreshControl } from "./session-maintenance.js";
 import type { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
+import { registerCmdHiddenMarketProbeRoute, type CmdHiddenMarketProbeLike } from "./routes/cmd-hidden-market-probe.js";
 
 export interface AppOptions {
   readonly viteOrigin?: string;
@@ -46,6 +47,7 @@ export interface AppOptions {
     readonly controlPlane?: ChromeBridgeControlPlane;
   };
   readonly maintenance?: SessionRefreshControl;
+  readonly cmdHiddenMarketProbe?: CmdHiddenMarketProbeLike;
 }
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
@@ -166,6 +168,9 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.receiptProtocol !== undefined) registerReceiptProtocolRoute(app, options.receiptProtocol);
   if (options.betHistory !== undefined) registerBetHistoryRoute(app, options.betHistory);
   if (options.maintenance !== undefined) registerMaintenanceRoutes(app, options.maintenance);
+  if (options.cmdHiddenMarketProbe !== undefined) {
+    registerCmdHiddenMarketProbeRoute(app, options.cmdHiddenMarketProbe);
+  }
   if (options.chromeBridge !== undefined) void app.register(async (instance) => {
     registerChromeBridgeRoute(instance, options.chromeBridge!.registry, {
       installationKey: options.chromeBridge!.installationKey,

@@ -166,6 +166,22 @@ function collectMessages(): {
 }
 
 describe("Fastify snapshot API", () => {
+  it("registers the local CMD hidden-market probe when provided", async () => {
+    const runtime = await readyRuntime();
+    const probe = vi.fn(async (providerEventId: string) => ({
+      providerEventId,
+      status: "NO_SAFE_CONTROL" as const
+    }));
+    const app = buildApp(runtime, { cmdHiddenMarketProbe: { probe } });
+    apps.push(app);
+
+    const response = await app.inject({ method: "POST", url: "/api/catalog/cmd-hidden-probe",
+      headers: { host: "127.0.0.1:4310" }, payload: { providerEventId: "25250586" } });
+
+    expect(response.statusCode).toBe(200);
+    expect(probe).toHaveBeenCalledWith("25250586");
+  });
+
   it("keeps routine polling logs quiet unless an explicit valid level is configured", () => {
     expect(resolveApiLogLevel(undefined, "production")).toBe("warn");
     expect(resolveApiLogLevel(undefined, "test")).toBe("silent");

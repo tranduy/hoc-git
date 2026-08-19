@@ -19,6 +19,7 @@ import { bindGracefulShutdown } from "./process-shutdown.js";
 import { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
 import { CaptureStore } from "./chrome-bridge/capture-store.js";
 import { ChromeCatalogDataPlane } from "./chrome-bridge/chrome-catalog-data-plane.js";
+import { CmdHiddenMarketProbeCoordinator } from "./chrome-bridge/cmd-hidden-market-probe-coordinator.js";
 import { createChromeCatalogOverlay } from "./chrome-bridge/chrome-catalog-overlay.js";
 import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-feature-flags.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
@@ -233,6 +234,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
   const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane() : null;
+  const cmdHiddenMarketProbe = chromeBridgeRegistry && chromeBridgeControlPlane
+    ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
+      controlPlane: chromeBridgeControlPlane })
+    : null;
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog) => {
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState: "FRESH", freshnessMs: 20_000 });
@@ -247,6 +252,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     });
     chromeBridgeRegistry.subscribe((envelope) => { void captureStore.record(envelope); });
     chromeBridgeRegistry.subscribe((envelope) => { chromeCatalogDataPlane?.ingest(envelope); });
+    if (cmdHiddenMarketProbe !== null) {
+      chromeBridgeRegistry.subscribe((envelope) => { cmdHiddenMarketProbe.ingest(envelope); });
+    }
   }
   const catalogAccess = chromeCatalogDataPlane === null
     ? { sources: sessionServices.catalogSources, reader: sessionServices.catalogReader }
@@ -294,6 +302,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     receiptProtocol: sessionServices.receiptProtocol,
     betHistory,
     maintenance,
+    ...(cmdHiddenMarketProbe === null ? {} : { cmdHiddenMarketProbe }),
     ...(chromeBridgeRegistry && chromeBridgeKey
       ? { chromeBridge: {
         registry: chromeBridgeRegistry,

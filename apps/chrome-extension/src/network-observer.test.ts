@@ -81,6 +81,61 @@ describe("NetworkObserver", () => {
     expect(() => new Function(`return ${CMD_CATALOG_DISCOVERY_EXPRESSION}`)).not.toThrow();
   });
 
+  it("probes one exact CMD event and emits sanitized sent-frame evidence", async () => {
+    let releaseEvaluation: ((value: unknown) => void) | undefined;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 21 };
+      if (method === "Runtime.evaluate") return new Promise((resolve) => { releaseEvaluation = resolve; });
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+
+    const probing = observer.probeCmdHiddenMarkets(cmd, { requestId: "probe-1", providerEventId: "25250586" });
+    await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledWith(9, "Runtime.evaluate", expect.any(Object)));
+    await observer.handleEvent(cmd, "Network.webSocketFrameSent", { requestId: "socket-1",
+      response: { opcode: 1, payloadData: JSON.stringify({ command: "subscribe",
+        channel: "/event/25250586/markets", token: "secret" }) } });
+    releaseEvaluation?.({ result: { value: { found: true, beforeMarketIds: ["visible:1"],
+      afterMarketIds: ["hidden:1", "visible:1"], clickedControls: ["View details"],
+      candidateControls: ["button.detail View details"], marketStructures: [], visibleEventIds: ["25250586"], stablePasses: 2 } } });
+    await probing;
+
+    expect(forward).toHaveBeenCalledOnce();
+    const envelope = forward.mock.calls[0]?.[0] as ChromeBridgeEnvelope;
+    expect(envelope.request.pathnameClass).toBe("/__fieldline_cmd_hidden_probe__");
+    const result = JSON.parse(envelope.payload.body) as Record<string, unknown>;
+    expect(result).toMatchObject({ requestId: "probe-1", providerEventId: "25250586", status: "EXPANDED" });
+    expect(JSON.stringify(result)).toContain("/event/25250586/markets");
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it("prefers the visible CMD event frame with market evidence over an empty hidden duplicate", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "hidden" },
+        childFrames: [{ frame: { id: "visible" } }] } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: params?.frameId === "hidden" ? 21 : 22 };
+      if (method === "Runtime.evaluate") return params?.contextId === 21
+        ? { result: { value: { found: true, beforeMarketIds: [], afterMarketIds: [],
+          clickedControls: [], candidateControls: [], marketStructures: [], visibleEventIds: [], stablePasses: 2 } } }
+        : { result: { value: { found: true, beforeMarketIds: ["visible:1"], afterMarketIds: ["visible:1"],
+          clickedControls: [], candidateControls: ["button.c-match__detail View details"], marketStructures: [],
+          visibleEventIds: ["25250586"], stablePasses: 2 } } };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, forward: async (envelope) => { forwarded.push(envelope); } });
+
+    await observer.probeCmdHiddenMarkets({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      { requestId: "probe-visible", providerEventId: "25250586" });
+
+    const result = JSON.parse(forwarded[0]!.payload.body) as Record<string, unknown>;
+    expect(result.beforeMarketIds).toEqual(["visible:1"]);
+    expect(result.candidateControls).toEqual(["button.c-match__detail View details"]);
+  });
+
   it("requests a fresh BTI football catalog in the attached authenticated tab", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },

@@ -203,6 +203,22 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([0]);
   });
 
+  it("forwards an event-scoped CMD hidden-market probe without mutating queued data", () => {
+    const socket = new FakeSocket();
+    const onCmdHiddenMarketProbe = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key",
+      onCmdHiddenMarketProbe });
+    bridge.enqueue(envelope(0));
+    bridge.connect();
+    socket.open();
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "PROBE_CMD_HIDDEN_MARKETS",
+      sourceId: "chrome:CMD:7", requestId: "probe-1", providerEventId: "25250586" }) });
+
+    expect(onCmdHiddenMarketProbe).toHaveBeenCalledWith({ sourceId: "chrome:CMD:7",
+      requestId: "probe-1", providerEventId: "25250586" });
+    expect(bridge.pendingSequences()).toEqual([0]);
+  });
+
   it("evicts oldest diagnostics before quote frames when the queue reaches its bound", () => {
     const bridge = new LocalBridge({
       socketFactory: () => new FakeSocket(), installationKey: "local-key", maxQueueBytes: 900

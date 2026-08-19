@@ -39,6 +39,8 @@ export interface LocalBridgeOptions {
   readonly onSourceRestore?: (lobby: ChromeBridgeEnvelope["lobby"]) => void | Promise<void>;
   readonly onFocusSelection?: (request: Omit<Extract<ChromeBridgeControlMessage,
     { readonly kind: "FOCUS_SELECTION" }>, "version" | "kind">) => void | Promise<void>;
+  readonly onCmdHiddenMarketProbe?: (request: Omit<Extract<ChromeBridgeControlMessage,
+    { readonly kind: "PROBE_CMD_HIDDEN_MARKETS" }>, "version" | "kind">) => void | Promise<void>;
 }
 
 export class LocalBridge {
@@ -55,6 +57,7 @@ export class LocalBridge {
   readonly #onSourceEnsure: NonNullable<LocalBridgeOptions["onSourceEnsure"]>;
   readonly #onSourceRestore: NonNullable<LocalBridgeOptions["onSourceRestore"]>;
   readonly #onFocusSelection: NonNullable<LocalBridgeOptions["onFocusSelection"]>;
+  readonly #onCmdHiddenMarketProbe: NonNullable<LocalBridgeOptions["onCmdHiddenMarketProbe"]>;
   readonly #queue: QueueEntry[] = [];
   #socket: BridgeSocket | null = null;
   #timer: unknown = null;
@@ -79,6 +82,7 @@ export class LocalBridge {
     this.#onSourceEnsure = options.onSourceEnsure ?? (() => undefined);
     this.#onSourceRestore = options.onSourceRestore ?? (() => undefined);
     this.#onFocusSelection = options.onFocusSelection ?? (() => undefined);
+    this.#onCmdHiddenMarketProbe = options.onCmdHiddenMarketProbe ?? (() => undefined);
   }
 
   get queueBytes(): number {
@@ -250,6 +254,13 @@ export class LocalBridge {
         try { void Promise.resolve(this.#onFocusSelection({ sourceId, providerEventId,
           providerMarketId, providerSelectionId })).catch(() => undefined); }
         catch { /* focus failure must not disrupt realtime collection */ }
+        return;
+      }
+      if (parsed.data.kind === "PROBE_CMD_HIDDEN_MARKETS") {
+        const { sourceId, requestId, providerEventId } = parsed.data;
+        try { void Promise.resolve(this.#onCmdHiddenMarketProbe({ sourceId, requestId, providerEventId }))
+          .catch(() => undefined); }
+        catch { /* probe failure must not disrupt realtime collection */ }
         return;
       }
       if (parsed.data.kind === "REJECT") {

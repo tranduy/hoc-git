@@ -113,6 +113,16 @@ describe("ChromeBridgeControlMessageSchema", () => {
     expect(schema.safeParse({ ...valid, providerSelectionId: "x".repeat(513) }).success).toBe(false);
     expect(schema.safeParse({ ...valid, providerMarketId: "" }).success).toBe(false);
   });
+
+  it("accepts only a strict event-scoped CMD hidden-market probe command", () => {
+    const schema = contracts.ChromeBridgeControlMessageSchema;
+    const valid = { version: 1, kind: "PROBE_CMD_HIDDEN_MARKETS", sourceId: "chrome:CMD:42",
+      requestId: "probe-4f90a2", providerEventId: "25250586" } as const;
+    expect(schema.safeParse(valid).success).toBe(true);
+    expect(schema.safeParse({ ...valid, clickOdds: true }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, providerEventId: "" }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, requestId: "x".repeat(129) }).success).toBe(false);
+  });
 });
 
 describe("CmdSnapshotChunkSchema", () => {

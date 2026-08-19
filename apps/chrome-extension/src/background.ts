@@ -227,6 +227,12 @@ async function configureBridgeOnce(): Promise<boolean> {
         // providers exposing an exact DOM identity also scroll/highlight the
         // selection; an opaque network-only ID remains read-only and unclicked.
         if (!focused && attached.lobby === "CMD") throw new Error("EXACT_SELECTION_NOT_FOUND");
+      },
+      onCmdHiddenMarketProbe: async (request) => {
+        const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === request.sourceId);
+        if (!attached || attached.lobby !== "CMD") throw new Error("SOURCE_NOT_ATTACHED");
+        await observer.probeCmdHiddenMarkets({ lobby: "CMD", sourceId: request.sourceId,
+          tabId: attached.tabId }, { requestId: request.requestId, providerEventId: request.providerEventId });
       }
     })
     : null;

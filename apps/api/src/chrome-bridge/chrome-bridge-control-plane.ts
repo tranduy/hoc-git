@@ -77,6 +77,16 @@ export class ChromeBridgeControlPlane {
     return 0;
   }
 
+  probeCmdHiddenMarkets(sourceId: string, requestId: string, providerEventId: string): boolean {
+    if (!sourceId.startsWith("chrome:CMD:")) return false;
+    const socket = this.#socketsBySource.get(sourceId);
+    if (!socket || socket.readyState !== 1) return false;
+    const control: ChromeBridgeControlMessage = { version: 1, kind: "PROBE_CMD_HIDDEN_MARKETS",
+      sourceId, requestId, providerEventId };
+    socket.send(JSON.stringify(control));
+    return true;
+  }
+
   #broadcast(kind: "REQUEST_SNAPSHOT" | "RELOAD_SOURCE"): number {
     let requested = 0;
     for (const [sourceId, socket] of this.#socketsBySource) {

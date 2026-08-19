@@ -92,11 +92,19 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
       const liveClock = /(\\d)H\\s*(\\d+)/iu.exec(rawTime);
       const timeText = liveClock ? liveClock[1] + "H" + liveClock[2] + "'" : rawTime;
       const groups = [];
-      const marketContainers = [
-        { element: node.querySelector(".Dbox_b2"), betType: "1" },
-        { element: [...node.querySelectorAll(".Dbox_b3")]
-          .find((element) => element.querySelectorAll(".odds").length === 2), betType: "3" }
-      ];
+      const marketContainers = [];
+      let firstHalfStarted = false;
+      for (const element of node.querySelectorAll(".Dbox_b2, .Dbox_b3, .Dbox_b5")) {
+        if (element.querySelectorAll(".odds").length !== 2) continue;
+        if (element.classList.contains("Dbox_b5")) {
+          firstHalfStarted = true;
+          marketContainers.push({ element, betType: "7", isHandicap: true });
+        } else if (element.classList.contains("Dbox_b2")) {
+          marketContainers.push({ element, betType: "1", isHandicap: true });
+        } else {
+          marketContainers.push({ element, betType: firstHalfStarted ? "8" : "3", isHandicap: false });
+        }
+      }
       for (const market of marketContainers) {
         if (!market.element) continue;
         const priceElements = [...market.element.querySelectorAll(".odds")].slice(0, 2);
@@ -112,7 +120,7 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
           odds: priceElements.map((element, index) => ({
             marketOddsId, priceText: clean(element.textContent, 32), status: null,
             greyedOut: element.classList.contains("no-hover") || element.getAttribute("aria-disabled") === "true" ? "true" : null,
-            ...(market.betType === "1" && index === 0 ? { lineText: lineValue } : {})
+            ...(market.isHandicap && index === 0 ? { lineText: lineValue } : {})
           }))
         });
       }

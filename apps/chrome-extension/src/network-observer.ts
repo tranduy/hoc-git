@@ -5,6 +5,8 @@ import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
 import { buildCmdSelectionFocusExpression, buildGenericSelectionFocusExpression,
   type SelectionFocusIdentity } from "./selection-focus.js";
+import { buildCmdHiddenMarketProbeExpression, summarizeCmdHiddenProtocolFrame,
+  type CmdHiddenDomProbeResult, type CmdHiddenProtocolEvidence } from "./cmd-hidden-market-probe.js";
 
 const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
@@ -41,6 +43,14 @@ interface ReplayableWsEvent {
   readonly source: ObservedSource;
   readonly url: string;
   readonly body: string;
+}
+
+interface ActiveCmdHiddenProbe {
+  readonly requestId: string;
+  readonly providerEventId: string;
+  readonly httpEvidence: Array<{ readonly method: string; readonly hostname: string; readonly pathname: string;
+    readonly resourceType: string; readonly eventIdReferenced: boolean }>;
+  readonly websocketEvidence: CmdHiddenProtocolEvidence[];
 }
 
 const DISCOVERY_EXPRESSION = `(() => {
@@ -330,6 +340,7 @@ export class NetworkObserver {
   readonly #imLastRecoveryAtMs = new Map<string, number>();
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, number>>();
+  readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
 
   constructor(dependencies: NetworkObserverDependencies) {
     this.#sendCommand = dependencies.sendCommand;
@@ -386,6 +397,7 @@ export class NetworkObserver {
       this.#tsportSnapshots.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
+      this.#activeCmdHiddenProbes.delete(sourceId);
     }
     for (const [key, socket] of this.#webSockets) {
       if (socket.source.tabId === tabId) this.#webSockets.delete(key);
@@ -504,6 +516,27 @@ export class NetworkObserver {
     }
     const requestId = typeof params.requestId === "string" ? params.requestId : null;
     const key = requestId ? `${source.tabId}:${requestId}` : null;
+
+    const activeProbe = source.lobby === "CMD" ? this.#activeCmdHiddenProbes.get(source.sourceId) : undefined;
+    if (activeProbe && method === "Network.requestWillBeSent") {
+      const request = isRecord(params.request) ? params.request : null;
+      const resourceType = typeof params.type === "string" ? params.type : "Other";
+      if (request && typeof request.url === "string" && typeof request.method === "string") {
+        try {
+          const parsed = new URL(request.url);
+          if (/^https?:$/u.test(parsed.protocol)) activeProbe.httpEvidence.push({ method: request.method,
+            hostname: parsed.hostname, pathname: parsed.pathname.slice(0, 512), resourceType,
+            eventIdReferenced: parsed.pathname.includes(activeProbe.providerEventId) ||
+              parsed.search.includes(activeProbe.providerEventId) });
+        } catch { /* malformed provider URL is not probe evidence */ }
+      }
+    }
+    if (activeProbe && (method === "Network.webSocketFrameSent" || method === "Network.webSocketFrameReceived")) {
+      const response = isRecord(params.response) ? params.response : null;
+      if (response && typeof response.payloadData === "string") activeProbe.websocketEvidence.push(
+        summarizeCmdHiddenProtocolFrame(response.payloadData, activeProbe.providerEventId,
+          method === "Network.webSocketFrameSent" ? "SENT" : "RECEIVED"));
+    }
 
     if (method === "Network.webSocketCreated" && key && typeof params.url === "string") {
       this.#webSockets.set(key, { source, url: params.url });
@@ -721,6 +754,54 @@ export class NetworkObserver {
     return evaluations.some((evaluation) => nestedBoolean(evaluation, "result", "value", "ok") === true);
   }
 
+  async probeCmdHiddenMarkets(source: ObservedSource, request: { readonly requestId: string;
+    readonly providerEventId: string }): Promise<void> {
+    if (source.lobby !== "CMD" || !/^[a-z0-9._:-]{1,128}$/iu.test(request.requestId) ||
+      !/^[a-z0-9._:-]{1,512}$/iu.test(request.providerEventId) ||
+      this.#activeCmdHiddenProbes.has(source.sourceId)) return;
+    const active: ActiveCmdHiddenProbe = { ...request, httpEvidence: [], websocketEvidence: [] };
+    this.#activeCmdHiddenProbes.set(source.sourceId, active);
+    let dom: CmdHiddenDomProbeResult | null = null;
+    try {
+      const frameTree = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Page.getFrameTree")).catch(() => ({}));
+      const frameIds = collectFrameIds(frameTree);
+      const expression = buildCmdHiddenMarketProbeExpression(request.providerEventId);
+      const evaluations = frameIds.length === 0
+        ? [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression, returnByValue: true, awaitPromise: true })).catch(() => ({}))]
+        : await Promise.all(frameIds.map(async (frameId) => {
+          const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Page.createIsolatedWorld", {
+            frameId, worldName: "fieldline-cmd-hidden-probe", grantUniveralAccess: false })).catch(() => ({}));
+          const contextId = nestedNumber(world, "executionContextId");
+          if (contextId === null) return {};
+          return this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            expression, contextId, returnByValue: true, awaitPromise: true })).catch(() => ({}));
+        }));
+      for (const evaluation of evaluations) {
+        const value = nestedValue(evaluation, "result", "value");
+        if (isCmdHiddenDomProbeResult(value) && (dom === null || cmdHiddenDomScore(value) > cmdHiddenDomScore(dom))) dom = value;
+      }
+      const before = dom?.beforeMarketIds ?? [];
+      const after = dom?.afterMarketIds ?? [];
+      const clicked = dom?.clickedControls ?? [];
+      const status = dom === null ? "TIMEOUT" : !dom.found ? "EVENT_NOT_FOUND"
+        : after.some((id) => !before.includes(id)) ? "EXPANDED"
+        : clicked.length > 0 ? "NO_NEW_MARKETS" : "NO_SAFE_CONTROL";
+      await this.#emit(source, "https://cmd.invalid/__fieldline_cmd_hidden_probe__", "DOM", "DOM_SNAPSHOT", {
+        encoding: "UTF8", body: JSON.stringify({ requestId: request.requestId,
+          providerEventId: request.providerEventId, status, beforeMarketIds: before, afterMarketIds: after,
+          clickedControlCount: clicked.length, clickedControls: clicked,
+          candidateControls: dom?.candidateControls ?? [], marketStructures: dom?.marketStructures ?? [],
+          visibleEventIds: dom?.visibleEventIds ?? [],
+          stablePasses: dom?.stablePasses ?? 0,
+          httpEvidence: uniqueObjects(active.httpEvidence), websocketEvidence: uniqueObjects(active.websocketEvidence) })
+      });
+    } finally {
+      this.#activeCmdHiddenProbes.delete(source.sourceId);
+    }
+  }
+
   async replaySnapshots(requestedSourceId?: string): Promise<boolean> {
     let replayed = false;
     for (const [sourceId, snapshot] of this.#cmdSnapshots) {
@@ -909,6 +990,41 @@ function nestedBoolean(value: unknown, ...keys: string[]): boolean | null {
     current = current[key];
   }
   return typeof current === "boolean" ? current : null;
+}
+
+function nestedValue(value: unknown, ...keys: string[]): unknown {
+  let current: unknown = value;
+  for (const key of keys) {
+    if (!isRecord(current)) return undefined;
+    current = current[key];
+  }
+  return current;
+}
+
+function isCmdHiddenDomProbeResult(value: unknown): value is CmdHiddenDomProbeResult {
+  return isRecord(value) && typeof value.found === "boolean" &&
+    Array.isArray(value.beforeMarketIds) && value.beforeMarketIds.every((item) => typeof item === "string") &&
+    Array.isArray(value.afterMarketIds) && value.afterMarketIds.every((item) => typeof item === "string") &&
+    Array.isArray(value.clickedControls) && value.clickedControls.every((item) => typeof item === "string") &&
+    Array.isArray(value.candidateControls) && value.candidateControls.every((item) => typeof item === "string") &&
+    Array.isArray(value.marketStructures) && value.marketStructures.every((item) => typeof item === "string") &&
+    Array.isArray(value.visibleEventIds) && value.visibleEventIds.every((item) => typeof item === "string") &&
+    typeof value.stablePasses === "number" && Number.isSafeInteger(value.stablePasses);
+}
+
+function cmdHiddenDomScore(value: CmdHiddenDomProbeResult): number {
+  return (value.found ? 1_000_000 : 0) + value.afterMarketIds.length * 1_000 +
+    value.beforeMarketIds.length * 100 + value.clickedControls.length * 10 + value.candidateControls.length;
+}
+
+function uniqueObjects<T>(items: readonly T[]): readonly T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = JSON.stringify(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function collectFrameIds(value: unknown): string[] {

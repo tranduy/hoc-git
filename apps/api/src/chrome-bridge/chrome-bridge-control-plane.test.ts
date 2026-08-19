@@ -73,6 +73,17 @@ describe("ChromeBridgeControlPlane", () => {
     expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ version: 1, kind: "RESTORE_SOURCE", lobby: "CMD" }));
   });
 
+  it("sends an exact CMD hidden-market probe only to its attached live socket", () => {
+    const socket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attach("chrome:CMD:9", socket);
+
+    expect(plane.probeCmdHiddenMarkets("chrome:CMD:9", "probe-1", "25250586")).toBe(true);
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ version: 1, kind: "PROBE_CMD_HIDDEN_MARKETS",
+      sourceId: "chrome:CMD:9", requestId: "probe-1", providerEventId: "25250586" }));
+    expect(plane.probeCmdHiddenMarkets("chrome:SABA:9", "probe-2", "25250586")).toBe(false);
+  });
+
   it("skips closed sockets and detaches every source owned by a closed connection", () => {
     const socket = { send: vi.fn(), readyState: 3 };
     const plane = new ChromeBridgeControlPlane();
