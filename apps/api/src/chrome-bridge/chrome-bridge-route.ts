@@ -101,13 +101,11 @@ export function registerChromeBridgeRoute(
         if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") { socket.close(); return; }
         if (control.kind === "ACK" && !requestedSnapshots.has(parsed.data.sourceId)) {
           requestedSnapshots.add(parsed.data.sourceId);
-          // SABA needs a complete socket reset/done replay. IM needs both
-          // GetSE market partitions, whose cached receipt clocks may predate
-          // an API restart. Reload those provider tabs instead of promoting a
-          // replayed baseline to fresh data.
-          const kind = parsed.data.lobby === "SABA" || parsed.data.lobby === "IM"
-            ? "RELOAD_SOURCE"
-            : "REQUEST_SNAPSHOT";
+          // SABA needs a complete socket reset/done replay. IM launch URLs are
+          // one-time credentials, so reloading that tab can invalidate a
+          // healthy session; request its cached baseline and let the bounded
+          // in-page GetSE refresh replace both partitions instead.
+          const kind = parsed.data.lobby === "SABA" ? "RELOAD_SOURCE" : "REQUEST_SNAPSHOT";
           socket.send(JSON.stringify({ version: 1, kind, sourceId: parsed.data.sourceId }));
         }
       });

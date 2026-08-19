@@ -66,7 +66,7 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
-  it("reloads IM so both complete market partitions are reacquired after an API restart", async () => {
+  it("requests the cached IM baseline without reusing its one-time launch URL", async () => {
     const { app } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
       headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
@@ -83,7 +83,7 @@ describe("Chrome bridge route", () => {
       transport: "TAB_STATE", request: { ...validEnvelope.request, pathnameClass: "/__fieldline_heartbeat__" } }));
     await expect(controls).resolves.toEqual([
       expect.objectContaining({ kind: "ACK", sourceId: "chrome:IM:7" }),
-      { version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:IM:7" }
+      { version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:IM:7" }
     ]);
     socket.terminate();
     await app.close();
