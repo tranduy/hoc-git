@@ -618,6 +618,32 @@ describe("RealtimeMessageSchema", () => {
     }).success).toBe(true);
   });
 
+  it("accepts strict catalog revision baseline and update envelopes", () => {
+    expect(RealtimeMessageSchema.safeParse({
+      type: "CATALOG_REVISION_BASELINE", sequence: 4,
+      entries: [{ accountId: "catalog-source:SABA:FOOTBALL", revision: "SABA-100-FRESH",
+        observedAtMs: 100, snapshotState: "FRESH" }]
+    }).success).toBe(true);
+    expect(RealtimeMessageSchema.safeParse({
+      type: "CATALOG_REVISION", sequence: 5,
+      accountId: "catalog-source:SABA:FOOTBALL", revision: "SABA-101-STALE",
+      observedAtMs: 101, snapshotState: "STALE"
+    }).success).toBe(true);
+  });
+
+  it("rejects unsafe catalog revision envelope fields", () => {
+    expect(RealtimeMessageSchema.safeParse({
+      type: "CATALOG_REVISION", sequence: -1,
+      accountId: "catalog-source:SABA:FOOTBALL", revision: "",
+      observedAtMs: -1, snapshotState: "FRESH", secret: "must-not-pass"
+    }).success).toBe(false);
+    expect(RealtimeMessageSchema.safeParse({
+      type: "CATALOG_REVISION_BASELINE", sequence: 1,
+      entries: [{ accountId: "", revision: "valid", observedAtMs: 1,
+        snapshotState: "UNKNOWN" }]
+    }).success).toBe(false);
+  });
+
   it("rejects malformed, mismatched, and unknown realtime data", () => {
     expect(RealtimeMessageSchema.safeParse({
       type: "SNAPSHOT", revision: 1, data: { revision: "wrong" }

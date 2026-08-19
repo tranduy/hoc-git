@@ -457,6 +457,16 @@ export interface AppSnapshot {
   readonly blockedDiagnostics: readonly BlockedDiagnostic[];
 }
 
+export interface CatalogRevisionEntry {
+  readonly accountId: string;
+  readonly revision: string;
+  readonly observedAtMs: number;
+  readonly snapshotState: "FRESH" | "STALE";
+}
+
 export type RealtimeMessage =
   | { readonly type: "SNAPSHOT"; readonly revision: number; readonly data: AppSnapshot }
-  | { readonly type: "HEARTBEAT"; readonly revision: number; readonly serverTimeMs: number };
+  | { readonly type: "HEARTBEAT"; readonly revision: number; readonly serverTimeMs: number }
+  | { readonly type: "CATALOG_REVISION_BASELINE"; readonly sequence: number;
+      readonly entries: readonly CatalogRevisionEntry[] }
+  | ({ readonly type: "CATALOG_REVISION"; readonly sequence: number } & CatalogRevisionEntry);

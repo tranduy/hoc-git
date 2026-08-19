@@ -765,6 +765,13 @@ export const AppSnapshotSchema = z.strictObject({
   });
 }) satisfies z.ZodType<AppSnapshot>;
 
+const CatalogRevisionEntrySchema = z.strictObject({
+  accountId: z.string().trim().min(1).max(128),
+  revision: z.string().trim().min(1).max(256),
+  observedAtMs: z.number().int().nonnegative().safe(),
+  snapshotState: z.enum(["FRESH", "STALE"])
+});
+
 export const RealtimeMessageSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("SNAPSHOT"),
@@ -783,5 +790,15 @@ export const RealtimeMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("HEARTBEAT"),
     revision: z.number(),
     serverTimeMs: z.number()
+  }),
+  z.strictObject({
+    type: z.literal("CATALOG_REVISION_BASELINE"),
+    sequence: z.number().int().nonnegative().safe(),
+    entries: CatalogRevisionEntrySchema.array().max(1_000)
+  }),
+  z.strictObject({
+    type: z.literal("CATALOG_REVISION"),
+    sequence: z.number().int().nonnegative().safe(),
+    ...CatalogRevisionEntrySchema.shape
   })
 ]) satisfies z.ZodType<RealtimeMessage>;
