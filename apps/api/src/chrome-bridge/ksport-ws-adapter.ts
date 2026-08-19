@@ -6,7 +6,6 @@ import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
-const RETENTION_MS = 15_000;
 const ACCOUNT_ID = "catalog-source:SBOBET:FOOTBALL";
 
 interface RetainedRecord {
@@ -88,9 +87,9 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         seenAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
         sequence: envelope.sequence });
     }
-    for (const [eventId, entry] of retained) {
-      if (envelope.observedAtMs - entry.seenAtMs > RETENTION_MS) retained.delete(eventId);
-    }
+    // K-Sports publishes deltas: silence for one event means "unchanged", not
+    // "deleted". Keep its last provider state for this socket generation and
+    // clear it only at the WS lifecycle boundary handled above.
     this.#records.set(streamKey, retained);
     const parts: NormalizedCatalogPart[] = [];
     for (const [key, streamRecords] of this.#records) {

@@ -54,7 +54,7 @@ describe("KsportWsCatalogAdapter", () => {
       .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 90, sequence: 6 })]));
   });
 
-  it("expires untouched socket deltas after fifteen seconds", () => {
+  it("does not erase an unchanged event when another delta arrives after fifteen seconds", () => {
     const event = (id: number) => ({ "0": "2026-08-15T13:00:00Z", "2": `Home ${id}`, "3": `Away ${id}`, "7": {
       "5": [`0.5 0.92*${id}0050000000h -0.98*${id}0050000000a h 735502668161000 0 0 1 1 0`]
     }, "8": id });
@@ -64,8 +64,11 @@ describe("KsportWsCatalogAdapter", () => {
       { observedAtMs: startedAtMs }));
     const catalog = adapter.decode(envelope([{ "1": "League", "2": [event(5593393)] }], undefined,
       { sequence: 6, observedAtMs: startedAtMs + 15_001, receivedMonotonicMs: 90 }))[0]!.value as {
-        events: Array<{ providerEventId: string }> };
-    expect(catalog.events).toEqual([expect.objectContaining({ providerEventId: "5593393" })]);
+        events: Array<{ providerEventId: string }>; quotes: Array<{
+          providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
+    expect(catalog.events.map((item) => item.providerEventId).sort()).toEqual(["5593392", "5593393"]);
+    expect(catalog.quotes.filter((quote) => quote.providerEventId === "5593392"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 60, sequence: 5 })]));
   });
 
   it("invalidates SBOBET immediately when its active socket closes", () => {
