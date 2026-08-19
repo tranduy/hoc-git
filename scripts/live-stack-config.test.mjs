@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveLiveStackEnvironment } from "./live-stack-config.mjs";
+import { resolveApiNodeArgs, resolveLiveStackEnvironment } from "./live-stack-config.mjs";
 
 test("uses the public dashboard origin only when explicitly configured", () => {
   const local = resolveLiveStackEnvironment({}, "127.0.0.1", 4311);
@@ -26,4 +26,14 @@ test("disables legacy browser maintenance by default for the Chrome bridge stack
 
   assert.equal(defaults.SESSION_MAINTENANCE_ENABLED, "0");
   assert.equal(explicit.SESSION_MAINTENANCE_ENABLED, "1");
+});
+
+test("bounds the live API heap while allowing a safe explicit override", () => {
+  assert.deepEqual(resolveApiNodeArgs({}), ["--max-old-space-size=256"]);
+  assert.deepEqual(resolveApiNodeArgs({ FIELDLINE_API_MAX_OLD_SPACE_MB: "384" }),
+    ["--max-old-space-size=384"]);
+  assert.deepEqual(resolveApiNodeArgs({ FIELDLINE_API_MAX_OLD_SPACE_MB: "64" }),
+    ["--max-old-space-size=256"]);
+  assert.deepEqual(resolveApiNodeArgs({ FIELDLINE_API_MAX_OLD_SPACE_MB: "not-a-number" }),
+    ["--max-old-space-size=256"]);
 });

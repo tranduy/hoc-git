@@ -7,7 +7,7 @@ import { stopManagedChildren } from "./managed-stack.mjs";
 import { resolveStackEntries } from "./stack-paths.mjs";
 import { cleanupStaleStack, removeStackState, writeStackState } from "./stack-state.mjs";
 import { ensureChromeBridgeKey } from "./chrome-bridge-key.mjs";
-import { resolveLiveStackEnvironment } from "./live-stack-config.mjs";
+import { resolveApiNodeArgs, resolveLiveStackEnvironment } from "./live-stack-config.mjs";
 import { cleanupOrphanedAutomationBrowsers } from "./automation-browser-cleanup.mjs";
 import { enforceToolResourceRetention } from "./resource-retention.mjs";
 
@@ -55,7 +55,7 @@ const environment = {
   CHROME_BRIDGE_KEY: chromeBridgeKey,
   CHROME_BRIDGE_CAPTURE: process.env.CHROME_BRIDGE_CAPTURE ?? "0"
 };
-const api = spawn(process.execPath, [apiEntry], {
+const api = spawn(process.execPath, [...resolveApiNodeArgs(process.env), apiEntry], {
   cwd: repositoryRoot,
   env: environment,
   stdio: ["inherit", "inherit", "inherit", "ipc"],
