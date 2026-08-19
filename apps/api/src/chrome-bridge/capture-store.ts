@@ -41,11 +41,11 @@ export class CaptureStore {
   }
 
   async record(envelope: ChromeBridgeEnvelope): Promise<void> {
+    if (!this.#enabled) return;
     if (this.#allowedLobbies !== null && !this.#allowedLobbies.has(envelope.lobby)) return;
     const sanitized = sanitizeEnvelope(envelope);
     this.#ring.push(sanitized);
     while (this.#ring.length > this.#maxEntries) this.#ring.shift();
-    if (!this.#enabled) return;
     try {
       const line = `${JSON.stringify(sanitized)}\n`;
       const lineBytes = Buffer.byteLength(line, "utf8");

@@ -19,6 +19,16 @@ function envelope(sequence: number, body: string, lobby: ChromeBridgeEnvelope["l
 }
 
 describe("CaptureStore", () => {
+  it("does not retain or sanitize high-volume envelopes when capture is disabled", async () => {
+    const writeLine = vi.fn(async () => undefined);
+    const store = new CaptureStore({ enabled: false, directory: "ignored", writeLine });
+
+    await store.record(envelope(0, JSON.stringify({ odds: "x".repeat(100_000) })));
+
+    expect(store.recent()).toEqual([]);
+    expect(writeLine).not.toHaveBeenCalled();
+  });
+
   it("writes sanitized JSONL with neutral filenames and replays ordering", async () => {
     const root = await mkdtemp(join(tmpdir(), "bridge-capture-"));
     roots.push(root);
