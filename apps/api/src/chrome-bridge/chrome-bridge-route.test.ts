@@ -89,6 +89,24 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
+  it("does not reload or replay BTI's one-time launch when the bridge reconnects", async () => {
+    const { app } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const received: unknown[] = [];
+    socket.on("message", (data) => received.push(JSON.parse(data.toString("utf8"))));
+
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "BTI", sourceId: "chrome:BTI:7",
+      transport: "TAB_STATE", request: { ...validEnvelope.request, pathnameClass: "/__fieldline_heartbeat__" } }));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(received).toEqual([expect.objectContaining({ kind: "ACK", sourceId: "chrome:BTI:7" })]);
+    socket.terminate();
+    await app.close();
+  });
+
   it("requests an in-page snapshot for a non-SABA source on a new bridge connection", async () => {
     const { app } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {

@@ -60,4 +60,24 @@ describe("refreshBridgeProviderSources", () => {
     })).rejects.toThrow("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
     expect(ensureLobby).toHaveBeenCalledTimes(5);
   });
+
+  it("can recover only BTI without navigating or restoring the other provider tabs", async () => {
+    const ensureLobby = vi.fn((_lobby: string, _url: string) => 1);
+    const restoreLobby = vi.fn((_lobby: string) => 1);
+    const launchProviders: string[] = [];
+    const withLatestFabetLaunch = async <T>(provider: "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI",
+      _category: "FOOTBALL", consume: (url: string) => Promise<T>): Promise<T> => {
+      launchProviders.push(provider);
+      return consume(`https://${provider.toLowerCase()}.provider.test/fresh`);
+    };
+
+    await expect(refreshBridgeProviderSources({
+      controlPlane: { ensureLobby, restoreLobby }, withLatestFabetLaunch, minAcquiredAtMs: 123,
+      providers: ["BTI"], restoreCmd: false
+    })).resolves.toBe(1);
+
+    expect(launchProviders).toEqual(["BTI"]);
+    expect(ensureLobby.mock.calls.map((call) => call[0])).toEqual(["BTI"]);
+    expect(restoreLobby).not.toHaveBeenCalled();
+  });
 });

@@ -101,10 +101,14 @@ export function registerChromeBridgeRoute(
         if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") { socket.close(); return; }
         if (control.kind === "ACK" && !requestedSnapshots.has(parsed.data.sourceId)) {
           requestedSnapshots.add(parsed.data.sourceId);
-          // SABA needs a complete socket reset/done replay. IM launch URLs are
-          // one-time credentials, so reloading that tab can invalidate a
-          // healthy session; request its cached baseline and let the bounded
-          // in-page GetSE refresh replace both partitions instead.
+          // BTI launch URLs are one-time credentials. Its extension poller
+          // already performs an authenticated in-page catalog refresh, so a
+          // reconnect must not turn a healthy tab into a reload of a consumed
+          // launch. If no fresh catalog arrives, the data plane requests a
+          // newly issued launch through targeted source recovery.
+          if (parsed.data.lobby === "BTI") return;
+          // SABA needs a complete socket reset/done replay. Other sources can
+          // provide their current baseline without a new Fabet navigation.
           const kind = parsed.data.lobby === "SABA" ? "RELOAD_SOURCE" : "REQUEST_SNAPSHOT";
           socket.send(JSON.stringify({ version: 1, kind, sourceId: parsed.data.sourceId }));
         }

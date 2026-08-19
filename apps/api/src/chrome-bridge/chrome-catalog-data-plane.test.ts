@@ -140,6 +140,29 @@ describe("ChromeCatalogDataPlane", () => {
     expect(onSourceRecoveryNeeded).toHaveBeenCalledWith("catalog-source:IM:FOOTBALL");
   });
 
+  it("requests recovery when a bridge keeps heartbeating but never produces its first catalog", () => {
+    let now = 1_000;
+    const onSourceRecoveryNeeded = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
+      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+    const heartbeat = (sequence: number): ChromeBridgeEnvelope => ({
+      ...envelope(sequence), observedAtMs: now, transport: "TAB_STATE",
+      request: { hostname: "prod20091.fxf774.com", pathnameClass: "/__fieldline_heartbeat__",
+        resourceType: "Tab" },
+      lobby: "BTI", sourceId: "chrome:BTI:9", tabId: 9,
+      payload: { encoding: "UTF8", body: "{}" }
+    });
+
+    expect(plane.ingest(heartbeat(1))).toBe(false);
+    now = 60_999;
+    expect(plane.ingest(heartbeat(2))).toBe(false);
+    expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+    now = 61_001;
+    expect(plane.ingest(heartbeat(3))).toBe(false);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledWith("catalog-source:BTI:FOOTBALL");
+  });
+
   it("owns every configured Football source while the Chrome bridge is enabled", () => {
     const plane = new ChromeCatalogDataPlane();
     expect(plane.owns("catalog-source:CMD:FOOTBALL")).toBe(true);

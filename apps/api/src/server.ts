@@ -284,7 +284,30 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   }),
     journal: new MaintenanceJournal({ nowMs: Date.now },
       join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
-  requestAutomaticSourceRecovery = () => { maintenance.start("MANUAL"); };
+  const automaticSourceRecoveries = new Map<string, Promise<void>>();
+  requestAutomaticSourceRecovery = (accountId) => {
+    if (automaticSourceRecoveries.has(accountId)) return;
+    const match = /^catalog-source:(SABA|IM|SBOBET|APSPORT|BTI):FOOTBALL$/u.exec(accountId);
+    if (match === null) {
+      maintenance.start("MANUAL");
+      return;
+    }
+    const provider = match[1] as "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
+    const recoveryStartedAtMs = Date.now();
+    const operation = (async () => {
+      // Refresh Fabet's launch set, but navigate only the stalled provider.
+      // Healthy Chrome tabs keep their current streams and one-time sessions.
+      await sessionServices.renewAll();
+      await refreshBridgeProviderSources({
+        controlPlane: chromeBridgeControlPlane!,
+        withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
+        minAcquiredAtMs: recoveryStartedAtMs,
+        providers: [provider],
+        restoreCmd: false
+      });
+    })().catch(() => undefined).finally(() => automaticSourceRecoveries.delete(accountId));
+    automaticSourceRecoveries.set(accountId, operation);
+  };
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,

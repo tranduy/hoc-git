@@ -190,13 +190,19 @@ async function configureBridgeOnce(): Promise<boolean> {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
         if (!attached) return;
         // Never replay cached response bytes with a new timestamp. A recovery
-        // must prove freshness from the current page DOM or from a tab reload.
+        // must prove freshness from the current page without consuming BTI's
+        // one-time Fabet launch URL again.
         await recoverAttachedSource(attached, {
           capture: async (source) => observer.captureCmdSnapshot({
             lobby: source.lobby,
             sourceId,
             tabId: source.tabId
           }, source.hostname),
+          refresh: async (source) => observer.refreshCatalog({
+            lobby: source.lobby,
+            sourceId,
+            tabId: source.tabId
+          }),
           reload: async (tabId) => chrome.tabs.reload(tabId)
         });
       },

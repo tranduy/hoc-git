@@ -12,6 +12,8 @@ interface RefreshOptions {
   readonly withLatestFabetLaunch: <T>(provider: FabetProvider, category: "FOOTBALL",
     consume: (url: string) => Promise<T>, minAcquiredAtMs: number) => Promise<T>;
   readonly minAcquiredAtMs: number;
+  readonly providers?: readonly FabetProvider[];
+  readonly restoreCmd?: boolean;
 }
 
 const PROVIDER_LOBBIES = [
@@ -26,8 +28,11 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
   // Resolve the complete fresh launch set before touching any attached tab.
   // Partial success would mix old and new one-time tokens and make the button
   // report a successful refresh while one provider remains expired.
+  const selected = options.providers === undefined
+    ? PROVIDER_LOBBIES
+    : PROVIDER_LOBBIES.filter(([provider]) => options.providers?.includes(provider));
   const launches = await Promise.all(
-    PROVIDER_LOBBIES.map(async ([provider, lobby]) =>
+    selected.map(async ([provider, lobby]) =>
       options.withLatestFabetLaunch(provider, "FOOTBALL", async (url) => ({ lobby, url }),
         options.minAcquiredAtMs)));
 
@@ -37,8 +42,10 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
     if (delivered === 0) throw new Error(`CHROME_BRIDGE_ENSURE_UNDELIVERED:${launch.lobby}`);
     requested += delivered;
   }
-  const restored = options.controlPlane.restoreLobby("CMD");
-  if (restored === 0) throw new Error("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
-  requested += restored;
+  if (options.restoreCmd ?? true) {
+    const restored = options.controlPlane.restoreLobby("CMD");
+    if (restored === 0) throw new Error("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
+    requested += restored;
+  }
   return requested;
 }

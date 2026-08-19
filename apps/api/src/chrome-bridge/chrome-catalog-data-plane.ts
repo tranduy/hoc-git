@@ -36,6 +36,7 @@ export class ChromeCatalogDataPlane {
   readonly #coverage = new CatalogCoverageGuard();
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
   readonly #lastTransportAtMs = new Map<string, number>();
+  readonly #transportStartedAtMs = new Map<string, number>();
   readonly #lastRecoveryAtMs = new Map<string, number>();
   readonly #sourceEpochs = new Map<string, string>();
   readonly #invalidatedAccounts = new Set<string>();
@@ -78,6 +79,9 @@ export class ChromeCatalogDataPlane {
       this.#sourceEpochs.set(envelope.sourceId, envelope.sourceEpoch);
     }
     if (transportAccountId !== null) {
+      if (!this.#lastTransportAtMs.has(transportAccountId)) {
+        this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
+      }
       this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
       if (envelope.request.pathnameClass === "/__fieldline_heartbeat__") {
         this.#requestRecoveryIfStalled(transportAccountId);
@@ -150,7 +154,8 @@ export class ChromeCatalogDataPlane {
 
   #requestRecoveryIfStalled(accountId: string): void {
     const catalog = this.#catalogs.get(accountId);
-    if (catalog === undefined || this.#now() - catalog.observedAtMs < this.#recoveryAfterMs) return;
+    const stalledSinceMs = catalog?.observedAtMs ?? this.#transportStartedAtMs.get(accountId);
+    if (stalledSinceMs === undefined || this.#now() - stalledSinceMs < this.#recoveryAfterMs) return;
     const lastRecoveryAtMs = this.#lastRecoveryAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY;
     if (this.#now() - lastRecoveryAtMs < this.#recoveryCooldownMs) return;
     this.#lastRecoveryAtMs.set(accountId, this.#now());
