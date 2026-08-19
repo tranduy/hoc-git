@@ -43,6 +43,39 @@ describe("CatalogApi", () => {
     expect(new Headers(requestHeaders[1]).get("if-none-match")).toBe('"catalog-100"');
   });
 
+  it("returns and reuses the server catalog revision across a 304", async () => {
+    let calls = 0;
+    const api = new CatalogApi(async () => ++calls === 1
+      ? new Response(JSON.stringify(response), { status: 200,
+          headers: { etag: '"catalog-100"', "x-catalog-revision": "catalog-100" } })
+      : new Response(null, { status: 304 }));
+
+    await expect(api.readRevision("account-1")).resolves.toEqual({
+      catalog: response, revision: "catalog-100"
+    });
+    await expect(api.readRevision("account-1")).resolves.toEqual({
+      catalog: response, revision: "catalog-100"
+    });
+  });
+
+  it("does not replace a newer cached catalog with an older concurrent response", async () => {
+    const resolvers: Array<(response: Response) => void> = [];
+    const api = new CatalogApi(() => new Promise<Response>((resolve) => resolvers.push(resolve)));
+    const older = api.readRevision("account-1");
+    const newer = api.readRevision("account-1");
+    resolvers[1]!(new Response(JSON.stringify({ ...response, observedAtMs: 200 }), {
+      status: 200, headers: { etag: '"catalog-200"', "x-catalog-revision": "catalog-200" }
+    }));
+    await expect(newer).resolves.toMatchObject({ revision: "catalog-200",
+      catalog: { observedAtMs: 200 } });
+    resolvers[0]!(new Response(JSON.stringify(response), {
+      status: 200, headers: { etag: '"catalog-100"', "x-catalog-revision": "catalog-100" }
+    }));
+
+    await expect(older).resolves.toMatchObject({ revision: "catalog-200",
+      catalog: { observedAtMs: 200 } });
+  });
+
   it("rejects a fixture or malformed response at the UI boundary", async () => {
     const api = new CatalogApi(async () => new Response(JSON.stringify({ ...response, dataMode: "FIXTURE" }), { status: 200 }));
     await expect(api.read("account-1")).rejects.toThrow("Invalid live catalog response");

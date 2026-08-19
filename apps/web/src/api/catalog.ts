@@ -29,6 +29,11 @@ export interface CatalogApiLike {
   read(accountId: string): Promise<LiveCatalogResponse>;
 }
 
+export interface CatalogReadResult {
+  readonly catalog: LiveCatalogResponse;
+  readonly revision: string;
+}
+
 export type CatalogReadErrorCode = "CATALOG_TIMEOUT" | "CATALOG_UNAVAILABLE" | "CATALOG_SCHEMA_ERROR";
 
 export class CatalogReadError extends Error {
@@ -86,7 +91,8 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
 export class CatalogApi implements CatalogApiLike {
   readonly #fetch: typeof fetch;
   readonly #timeoutMs: number;
-  readonly #cache = new Map<string, { readonly etag: string; readonly catalog: LiveCatalogResponse }>();
+  readonly #cache = new Map<string, { readonly etag: string; readonly revision: string;
+    readonly catalog: LiveCatalogResponse }>();
 
   constructor(fetcher: typeof fetch = window.fetch.bind(window), timeoutMs = 10_000) {
     this.#fetch = fetcher;
@@ -94,6 +100,10 @@ export class CatalogApi implements CatalogApiLike {
   }
 
   async read(accountId: string): Promise<LiveCatalogResponse> {
+    return (await this.readRevision(accountId)).catalog;
+  }
+
+  async readRevision(accountId: string): Promise<CatalogReadResult> {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
@@ -104,7 +114,7 @@ export class CatalogApi implements CatalogApiLike {
       });
       if (response.status === 304) {
         if (cached === undefined) throw new Error("Invalid live catalog response");
-        return cached.catalog;
+        return { catalog: cached.catalog, revision: cached.revision };
       }
       if (!response.ok) {
         let errorBody: unknown = null;
@@ -120,8 +130,15 @@ export class CatalogApi implements CatalogApiLike {
       }
       const catalog = parseLiveCatalogResponse(value, accountId);
       const etag = response.headers.get("etag");
-      if (etag !== null && etag.length > 0) this.#cache.set(accountId, { etag, catalog });
-      return catalog;
+      const revisionHeader = response.headers.get("x-catalog-revision");
+      const revision = revisionHeader?.trim() || etag?.replace(/^"|"$/gu, "") ||
+        `${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${catalog.snapshotState ?? "FRESH"}`;
+      const latest = this.#cache.get(accountId);
+      if (latest !== undefined && latest.catalog.observedAtMs > catalog.observedAtMs) {
+        return { catalog: latest.catalog, revision: latest.revision };
+      }
+      if (etag !== null && etag.length > 0) this.#cache.set(accountId, { etag, revision, catalog });
+      return { catalog, revision };
     } catch (error) {
       if (controller.signal.aborted) throw new CatalogReadError("CATALOG_TIMEOUT", 0);
       throw error;

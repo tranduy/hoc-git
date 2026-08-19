@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AppSnapshot } from "@tool-chenh/contracts";
+import type { AppSnapshot, CatalogRevisionEntry } from "@tool-chenh/contracts";
 import { SnapshotClient } from "./client.js";
 
 const snapshot = (revision: number, generatedAtMs = 1): AppSnapshot => ({
@@ -21,6 +21,32 @@ class FakeSocket {
 afterEach(() => vi.useRealTimers());
 
 describe("SnapshotClient", () => {
+  it("delivers a catalog baseline and only later catalog sequences on the same socket", async () => {
+    const socket = new FakeSocket();
+    const baselines: Array<{ entries: readonly CatalogRevisionEntry[]; sequence: number }> = [];
+    const updates: CatalogRevisionEntry[] = [];
+    const client = new SnapshotClient({
+      initialSnapshot: snapshot(1), onSnapshot: () => {}, onConnectionState: () => {},
+      onCatalogBaseline: (entries, sequence) => baselines.push({ entries, sequence }),
+      onCatalogRevision: (entry) => updates.push(entry),
+      fetchSnapshot: async () => new Response(JSON.stringify(snapshot(1)), { status: 200 }),
+      createWebSocket: () => socket as unknown as WebSocket
+    });
+    await client.start();
+    socket.onmessage?.({ data: JSON.stringify({ type: "SNAPSHOT", revision: 1, data: snapshot(1) }) } as MessageEvent);
+    const entry = { accountId: "catalog-source:SABA:FOOTBALL", revision: "catalog-4",
+      observedAtMs: 100, snapshotState: "FRESH" as const };
+    socket.onmessage?.({ data: JSON.stringify({ type: "CATALOG_REVISION_BASELINE",
+      sequence: 4, entries: [entry] }) } as MessageEvent);
+    socket.onmessage?.({ data: JSON.stringify({ type: "CATALOG_REVISION", sequence: 4, ...entry }) } as MessageEvent);
+    socket.onmessage?.({ data: JSON.stringify({ type: "CATALOG_REVISION", sequence: 5,
+      ...entry, revision: "catalog-5", observedAtMs: 101 }) } as MessageEvent);
+
+    expect(baselines).toEqual([{ sequence: 4, entries: [entry] }]);
+    expect(updates).toEqual([{ ...entry, revision: "catalog-5", observedAtMs: 101 }]);
+    client.stop();
+  });
+
   it("fetches once, accepts the first realtime baseline, then only higher revisions", async () => {
     const received: AppSnapshot[] = [];
     const socket = new FakeSocket();

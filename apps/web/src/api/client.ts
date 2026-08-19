@@ -2,6 +2,7 @@ import {
   AppSnapshotSchema,
   RealtimeMessageSchema,
   type AppSnapshot,
+  type CatalogRevisionEntry,
   type RealtimeMessage
 } from "@tool-chenh/contracts";
 
@@ -12,6 +13,8 @@ export interface SnapshotClientOptions {
   readonly onSnapshot: (snapshot: AppSnapshot) => void;
   readonly onConnectionState: (state: ConnectionState) => void;
   readonly onDiagnostic?: (message: string) => void;
+  readonly onCatalogBaseline?: (entries: readonly CatalogRevisionEntry[], sequence: number) => void;
+  readonly onCatalogRevision?: (entry: CatalogRevisionEntry, sequence: number) => void;
   readonly fetchSnapshot?: typeof fetch;
   readonly createWebSocket?: (url: string) => WebSocket;
 }
@@ -28,9 +31,13 @@ export class SnapshotClient {
   #socket: WebSocket | undefined;
   #retryTimer: number | undefined;
   #awaitingRealtimeBaseline = false;
+  #awaitingCatalogBaseline = false;
+  #catalogSequence = -1;
   readonly #onSnapshot: (snapshot: AppSnapshot) => void;
   readonly #onConnectionState: (state: ConnectionState) => void;
   readonly #onDiagnostic: (message: string) => void;
+  readonly #onCatalogBaseline: (entries: readonly CatalogRevisionEntry[], sequence: number) => void;
+  readonly #onCatalogRevision: (entry: CatalogRevisionEntry, sequence: number) => void;
   readonly #fetchSnapshot: typeof fetch;
   readonly #createWebSocket: (url: string) => WebSocket;
 
@@ -39,6 +46,8 @@ export class SnapshotClient {
     this.#onSnapshot = options.onSnapshot;
     this.#onConnectionState = options.onConnectionState;
     this.#onDiagnostic = options.onDiagnostic ?? (() => {});
+    this.#onCatalogBaseline = options.onCatalogBaseline ?? (() => {});
+    this.#onCatalogRevision = options.onCatalogRevision ?? (() => {});
     this.#fetchSnapshot = options.fetchSnapshot ?? window.fetch.bind(window);
     this.#createWebSocket = options.createWebSocket ?? ((url) => new WebSocket(url));
   }
@@ -77,6 +86,7 @@ export class SnapshotClient {
       const socket = this.#createWebSocket(realtimeUrl());
       this.#socket = socket;
       this.#awaitingRealtimeBaseline = true;
+      this.#awaitingCatalogBaseline = true;
       socket.onopen = () => {
         if (this.#socket !== socket) return;
         this.#retryAttempt = 0;
@@ -108,6 +118,16 @@ export class SnapshotClient {
       }
       const message: RealtimeMessage = parsed.data;
       if (message.type === "SNAPSHOT") this.#acceptRealtimeSnapshot(message.data);
+      else if (message.type === "CATALOG_REVISION_BASELINE") {
+        this.#awaitingCatalogBaseline = false;
+        this.#catalogSequence = message.sequence;
+        this.#onCatalogBaseline(message.entries, message.sequence);
+      } else if (message.type === "CATALOG_REVISION") {
+        if (this.#awaitingCatalogBaseline || message.sequence <= this.#catalogSequence) return;
+        this.#catalogSequence = message.sequence;
+        this.#onCatalogRevision({ accountId: message.accountId, revision: message.revision,
+          observedAtMs: message.observedAtMs, snapshotState: message.snapshotState }, message.sequence);
+      }
     } catch {
       this.#onDiagnostic("Ignored invalid realtime message.");
     }
