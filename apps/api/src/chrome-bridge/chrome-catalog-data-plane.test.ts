@@ -18,10 +18,12 @@ function envelope(sequence = 1, records: readonly unknown[] = [record], chunkInd
     }) } };
 }
 
-function imEnvelope(): ChromeBridgeEnvelope {
-  return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence: 1,
+function imEnvelope(providerPartition: "IM_MARKET_1" | "IM_MARKET_2" = "IM_MARKET_1",
+  sequence = 1): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence,
     observedAtMs: 1_200, receivedMonotonicMs: 55, transport: "HTTP_RESPONSE",
-    request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR" },
+    request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR",
+      providerPartition },
     payload: { encoding: "UTF8", body: JSON.stringify({ StatusCode: 100, sel: [{ eid: 22,
       htn: "Home", atn: "Away", cn: "League", edt: "2026-08-16T20:00:00Z", isrbt: false,
       iscyb: false, mls: [{ mi: 220, bti: 1, gp: 1, ws: [
@@ -122,10 +124,11 @@ describe("ChromeCatalogDataPlane", () => {
       acquiredAtMs: 900,
       reason: null
     };
-    expect(plane.ingest(imEnvelope())).toBe(true);
+    expect(plane.ingest(imEnvelope("IM_MARKET_1", 1))).toBe(false);
+    expect(plane.ingest(imEnvelope("IM_MARKET_2", 2))).toBe(true);
 
     now = 61_201;
-    expect(plane.ingest({ ...imEnvelope(), sequence: 2, observedAtMs: now,
+    expect(plane.ingest({ ...imEnvelope("IM_MARKET_2", 3), observedAtMs: now,
       request: { hostname: "imsports.directsb.net", pathnameClass: "/__fieldline_heartbeat__",
         resourceType: "Other" },
       payload: { encoding: "UTF8", body: "{}" } })).toBe(false);
@@ -268,7 +271,8 @@ describe("ChromeCatalogDataPlane", () => {
 
   it("serves an IM catalog from the authenticated Chrome response instead of the legacy reader", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
-    expect(plane.ingest(imEnvelope())).toBe(true);
+    expect(plane.ingest(imEnvelope("IM_MARKET_1", 1))).toBe(false);
+    expect(plane.ingest(imEnvelope("IM_MARKET_2", 2))).toBe(true);
     await expect(plane.read("catalog-source:IM:FOOTBALL")).resolves.toMatchObject({
       provider: "IM", events: [{ providerEventId: "22" }]
     });

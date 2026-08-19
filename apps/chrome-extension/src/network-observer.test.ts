@@ -800,6 +800,9 @@ describe("NetworkObserver", () => {
     let now = 1_000;
     const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => 60 });
     const source = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "snapshot",
+      request: { url: "https://imsports.directsb.net/api/EventV6/GetSE",
+        postData: JSON.stringify({ SportId: 1, Market: 2 }) } });
     await observer.handleEvent(source, "Network.responseReceived", { requestId: "snapshot", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(source, "Network.loadingFinished", { requestId: "snapshot" });
@@ -812,8 +815,34 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls[0]![0]).toMatchObject({ sourceId: "chrome:IM:8", sequence: 1,
       observedAtMs: 1_000, transport: "HTTP_RESPONSE",
       request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR",
-        replayed: true } });
+        providerPartition: "IM_MARKET_2", replayed: true } });
     expect(forward.mock.calls[0]![0].payload.body).toBe(snapshot);
+  });
+
+  it("retains both IM partitions even when their response bodies are identical", async () => {
+    const snapshot = JSON.stringify({ StatusCode: 100, sel: [] });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
+      ? { body: snapshot, base64Encoded: false }
+      : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000, monotonicNow: () => 60 });
+    const source = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    for (const market of [1, 2] as const) {
+      const requestId = `snapshot-${market}`;
+      await observer.handleEvent(source, "Network.requestWillBeSent", { requestId,
+        request: { url: "https://imsports.directsb.net/api/EventV6/GetSE",
+          postData: JSON.stringify({ SportId: 1, Market: market }) } });
+      await observer.handleEvent(source, "Network.responseReceived", { requestId, type: "XHR",
+        response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+      await observer.handleEvent(source, "Network.loadingFinished", { requestId });
+    }
+    forward.mockClear();
+
+    await observer.replaySnapshots(source.sourceId);
+
+    expect(forward).toHaveBeenCalledTimes(2);
+    expect(new Set(forward.mock.calls.map(([message]) => message.request.providerPartition)))
+      .toEqual(new Set(["IM_MARKET_1", "IM_MARKET_2"]));
   });
 
   it("replays retained T-Sports football event frames after the local API restarts", async () => {

@@ -1020,7 +1020,12 @@ export class NetworkObserver {
     try { parsed = JSON.parse(body); } catch { return; }
     if (!isRecord(parsed) || parsed.StatusCode !== 100 || !Array.isArray(parsed.sel)) return;
     const existing = this.#httpSnapshots.get(pending.source.sourceId) ?? [];
-    const deduplicated = existing.filter((entry) => entry.body !== body);
+    // Market 1 and Market 2 can legitimately return byte-identical bodies.
+    // Replace only the same safe partition; body-only deduplication loses one
+    // baseline and makes the backend wait forever for a complete IM catalog.
+    const deduplicated = existing.filter((entry) => pending.providerPartition === undefined
+      ? entry.body !== body
+      : entry.providerPartition !== pending.providerPartition);
     deduplicated.push({ source: pending.source, url: pending.url, resourceType: pending.resourceType, body,
       ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }), ...clocks });
     while (deduplicated.length > 4 || deduplicated.reduce((sum, entry) => sum + entry.body.length, 0) > 12_000_000) {
