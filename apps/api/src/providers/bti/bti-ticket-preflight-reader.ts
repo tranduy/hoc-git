@@ -7,7 +7,8 @@ import type { BtiCatalogSnapshot } from "./bti-browser-manager.js";
 import type { BtiTicketConstraintSnapshot } from "./bti-ticket-constraint.js";
 
 export interface BtiPreflightSource {
-  readCatalog(input: { readonly sessionId: string; readonly launchUrl: string }): Promise<BtiCatalogSnapshot>;
+  readCatalog(input: { readonly sessionId: string; readonly launchUrl: string;
+    readonly providerEventId?: string }): Promise<BtiCatalogSnapshot>;
   readTicketConstraint?(input: { readonly sessionId: string; readonly launchUrl: string;
     readonly providerEventId: string; readonly providerMarketId: string;
     readonly providerSelectionId: string; readonly participantA: string; readonly participantB: string;
@@ -34,7 +35,8 @@ export class BtiTicketPreflightReader implements ProviderTicketPreflightReader {
     if (handle.provider !== "BTI" || handle.category !== "FOOTBALL") throw new Error("PREFLIGHT_ACCOUNT_UNAVAILABLE");
     return handle.withSecret(async (secret) => {
       if (secret.kind !== "LAUNCH_URL") throw new Error("PREFLIGHT_ACCOUNT_UNAVAILABLE");
-      const snapshot = await this.#source.readCatalog({ sessionId: handle.sessionId, launchUrl: secret.value });
+      const snapshot = await this.#source.readCatalog({ sessionId: handle.sessionId, launchUrl: secret.value,
+        providerEventId: request.providerEventId });
       const normalized = normalizeSbobetCatalog(snapshot.records, { provider: "BTI",
         settlementProfile: "football-regulation-including-added-time", observedAtMs: snapshot.observedAtMs,
         receivedMonotonicMs: snapshot.receivedMonotonicMs, sequence: 1 });

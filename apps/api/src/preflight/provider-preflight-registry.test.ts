@@ -1,5 +1,6 @@
-import type { AccountStatus, ProviderTicketPreflight, ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
+import type { AccountStatus, ProviderId, ProviderTicketPreflight, ProviderTicketPreflightRequest } from "@tool-chenh/contracts";
 import { describe, expect, it, vi } from "vitest";
+import type { ActiveSecretHandle } from "../sessions/types.js";
 import { ProviderPreflightRegistry } from "./provider-preflight-registry.js";
 
 const request: ProviderTicketPreflightRequest = { accountId: "account-1", providerEventId: "event-1",
@@ -25,6 +26,30 @@ function registry(preflight = async (): Promise<ProviderTicketPreflight> => resu
 }
 
 describe("ProviderPreflightRegistry", () => {
+  it("resolves a synthetic catalog source through the current catalog session", async () => {
+    const catalogRequest = { ...request, accountId: "catalog-source:SABA:FOOTBALL" };
+    let currentSourceHandleCalls = 0;
+    const currentSourceHandle = async <T>(_id: string, _provider: ProviderId,
+      consume: (handle: ActiveSecretHandle) => Promise<T>): Promise<T> => {
+      currentSourceHandleCalls += 1;
+      return consume({ sessionId: "latest-saba", provider: "SABA", category: "FOOTBALL",
+        withSecret: async (use) => use({ kind: "LAUNCH_URL", value: "https://current.test/" }) });
+    };
+    const service = new ProviderPreflightRegistry({
+      accounts: { listStatuses: async () => [account],
+        withActiveHandle: async () => { throw new Error("old account must not be used"); } },
+      sources: { listStatuses: async () => [{ id: catalogRequest.accountId, provider: "SABA" as const,
+        sessionState: "ACTIVE" as const }], withActiveHandle: currentSourceHandle },
+      readers: [{ provider: "SABA", capabilities: ["PREFLIGHT"],
+        preflight: async (_handle, input) => ({ ...result, accountId: input.accountId }) }]
+    });
+
+    await expect(service.preflight(catalogRequest)).resolves.toMatchObject({
+      accountId: catalogRequest.accountId, providerSelectionId: "selection-1", selection: "HOME", line: "-0.5"
+    });
+    expect(currentSourceHandleCalls).toBe(1);
+  });
+
   it("returns strict evidence bound to the requested account and ticket", async () => {
     await expect(registry().preflight(request)).resolves.toEqual(result);
   });

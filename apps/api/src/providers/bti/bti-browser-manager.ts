@@ -64,13 +64,15 @@ export class PlaywrightBtiBrowserManager {
     catch { return false; }
   }
 
-  async readCatalog(input: { sessionId: string; launchUrl: string }): Promise<BtiCatalogSnapshot> {
-    const active = this.#reads.get(input.sessionId);
+  async readCatalog(input: { sessionId: string; launchUrl: string;
+    providerEventId?: string }): Promise<BtiCatalogSnapshot> {
+    const key = `${input.sessionId}:${input.providerEventId ?? "CATALOG"}`;
+    const active = this.#reads.get(key);
     if (active !== undefined) return active;
     const next = this.#read(input).finally(() => {
-      if (this.#reads.get(input.sessionId) === next) this.#reads.delete(input.sessionId);
+      if (this.#reads.get(key) === next) this.#reads.delete(key);
     });
-    this.#reads.set(input.sessionId, next);
+    this.#reads.set(key, next);
     return next;
   }
 
@@ -216,13 +218,26 @@ export class PlaywrightBtiBrowserManager {
     return null;
   }
 
-  async #read(input: { sessionId: string; launchUrl: string }): Promise<BtiCatalogSnapshot> {
+  async #read(input: { sessionId: string; launchUrl: string;
+    providerEventId?: string }): Promise<BtiCatalogSnapshot> {
     const session = await this.#get(input);
-    const payload: unknown = await session.page.evaluate(async (url) => {
-      const response = await fetch(url, { credentials: "include" });
-      if (!response.ok) throw new Error("BTI_CATALOG_UNAVAILABLE");
-      return response.json();
-    }, session.initialUrl);
+    const payload: unknown = input.providerEventId === undefined
+      ? await session.page.evaluate(async (url) => {
+        const response = await fetch(url, { credentials: "include", cache: "no-store" });
+        if (!response.ok) throw new Error("BTI_CATALOG_UNAVAILABLE");
+        return response.json();
+      }, session.initialUrl)
+      : await session.page.evaluate(async (providerEventId) => {
+        const headers: Record<string, string> = { Accept: "application/json" };
+        const authorization = localStorage.getItem("CT_APP_AUTHORIZATION");
+        const serviceContext = localStorage.getItem("CT_APP_SERVICE_CONTEXT");
+        if (authorization) headers.authorization = authorization;
+        if (serviceContext) headers["service-context"] = serviceContext;
+        const response = await fetch(`/api/eventpage/events/${encodeURIComponent(providerEventId)}?hideX25X75Selections=false`,
+          { credentials: "include", cache: "no-store", headers });
+        if (!response.ok) throw new Error("BTI_CATALOG_UNAVAILABLE");
+        return response.json();
+      }, input.providerEventId);
     const records = extractBtiCatalogRecords(payload);
     if (records.length === 0) throw new Error("BTI_CATALOG_EMPTY");
     return { records, observedAtMs: Date.now(), receivedMonotonicMs: performance.now() };

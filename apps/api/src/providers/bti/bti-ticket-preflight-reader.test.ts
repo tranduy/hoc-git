@@ -20,6 +20,23 @@ const handle = { sessionId: "session-1", provider: "BTI", category: "FOOTBALL" a
     consume({ kind: "LAUNCH_URL", value: "https://private.test/" }) };
 
 describe("BtiTicketPreflightReader", () => {
+  it("reads the requested prematch event detail instead of the live-only catalog", async () => {
+    const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
+    let requestedEventId = "";
+    const reader = new BtiTicketPreflightReader({ source: {
+      readCatalog: async ({ providerEventId }) => {
+        requestedEventId = providerEventId ?? "";
+        if (providerEventId === undefined) throw new Error("live-only catalog must not be used");
+        return { records: extractBtiCatalogRecords(payload), observedAtMs: 1000, receivedMonotonicMs: 10 };
+      }
+    }, fee: { type: "NONE" } });
+
+    await expect(reader.preflight(handle, request)).resolves.toMatchObject({
+      providerEventId: "event-real", providerSelectionId: "home-real", selection: "HOME", line: "-0.5"
+    });
+    expect(requestedEventId).toBe("event-real");
+  });
+
   it("re-reads the exact public ticket and blocks honestly while limits are unavailable", async () => {
     const { extractBtiCatalogRecords } = await import("./bti-direct-catalog.js");
     const reader = new BtiTicketPreflightReader({ source: { readCatalog: async () => ({

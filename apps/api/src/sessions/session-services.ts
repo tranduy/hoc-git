@@ -268,7 +268,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   });
   const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts: catalogSources, source: apsportBrowser });
   const btiCatalogReader = new BtiObservedCatalogReader({ accounts: catalogSources, source: btiBrowser });
-  const providerPreflight = new ProviderPreflightRegistry({ accounts,
+  const providerPreflight = new ProviderPreflightRegistry({ accounts, sources: catalogSources,
     readers: [new SabaTicketPreflightReader({ source: sabaBrowser,
       ...(options.providerFees?.SABA === undefined ? {} : { fee: options.providerFees.SABA }) }),
       new BtiTicketPreflightReader({ source: btiBrowser,
