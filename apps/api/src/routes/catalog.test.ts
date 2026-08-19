@@ -5,6 +5,7 @@ import { createFixtureRuntime } from "../server.js";
 import { CatalogTelemetryRegistry } from "./catalog-telemetry.js";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import type { CatalogStoreLike } from "../catalog/durable-catalog-store.js";
+import { CatalogRevisionStore } from "../catalog/catalog-revision-store.js";
 
 const apps: FastifyInstance[] = [];
 afterEach(async () => Promise.all(apps.splice(0).map(async (app) => app.close())));
@@ -462,6 +463,33 @@ describe("provider catalog route", () => {
       headers: { "if-none-match": etag! } });
     expect(unchanged.statusCode).toBe(304);
     expect(unchanged.body).toBe("");
+  });
+
+  it("serves a newer published revision inside the reader coalescing window", async () => {
+    const revisions = new CatalogRevisionStore({ now: () => 200 });
+    const oldCatalog: ObservedProviderCatalog = {
+      dataMode: "LIVE", accountId: "account-1", provider: "SABA", category: "FOOTBALL",
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100,
+      rejectedMarketCount: 0, events: [], markets: [], quotes: []
+    };
+    const app = buildApp(createFixtureRuntime(1_000), {
+      catalogRevisions: revisions,
+      catalogReader: { responseCacheMaxAgeMs: 5_000, read: async () => oldCatalog }
+    });
+    apps.push(app);
+    const first = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
+    const oldEtag = first.headers.etag;
+
+    const latest = revisions.publish("account-1", { ...oldCatalog, observedAtMs: 200 }, {
+      snapshotState: "FRESH", freshnessMs: 20_000
+    });
+    const refreshed = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1",
+      headers: { "if-none-match": oldEtag! } });
+
+    expect(refreshed.statusCode).toBe(200);
+    expect(refreshed.json()).toMatchObject({ accountId: "account-1", observedAtMs: 200 });
+    expect(refreshed.headers["x-catalog-revision"]).toBe(latest.revision);
+    expect(refreshed.headers.etag).toBe(`"${latest.revision}"`);
   });
 
   it("returns a verified catalog even when downstream runtime publication fails", async () => {

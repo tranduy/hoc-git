@@ -4,6 +4,7 @@ import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-cata
 import { CatalogTelemetryRegistry } from "./catalog-telemetry.js";
 import type { CatalogStoreLike } from "../catalog/durable-catalog-store.js";
 import { CatalogCoverageGuard } from "../catalog/catalog-coverage-guard.js";
+import type { CatalogRevisionStore, StoredCatalogRevision } from "../catalog/catalog-revision-store.js";
 
 export interface CatalogReaderLike {
   readonly requestTimeoutMs?: number;
@@ -29,7 +30,8 @@ export function registerCatalogRoutes(
   reader: CatalogReaderLike,
   telemetry: CatalogTelemetryRegistry = new CatalogTelemetryRegistry(),
   observer?: CatalogObserverLike,
-  store?: CatalogStoreLike
+  store?: CatalogStoreLike,
+  revisions?: CatalogRevisionStore
 ): void {
   const requestTimeoutMs = reader.requestTimeoutMs ?? 3_000;
   const responseCacheMaxAgeMs = reader.responseCacheMaxAgeMs ?? 5_000;
@@ -204,7 +206,16 @@ export function registerCatalogRoutes(
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     try {
       const accountId = parsed.data.accountId;
+      const sendRevision = (entry: StoredCatalogRevision) => {
+        const etag = `"${entry.revision}"`;
+        reply.header("etag", etag).header("x-catalog-revision", entry.revision);
+        if (request.headers["if-none-match"] === etag) return reply.code(304).send();
+        return forAccount(entry.catalog, accountId, entry.snapshotState);
+      };
       const sendCatalog = (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => {
+        if (revisions !== undefined) return sendRevision(revisions.publish(accountId, catalog, {
+          snapshotState, freshnessMs: snapshotFreshnessMaxAgeMs
+        }));
         const etag = `"${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${snapshotState}"`;
         reply.header("etag", etag);
         if (request.headers["if-none-match"] === etag) return reply.code(304).send();
@@ -217,6 +228,12 @@ export function registerCatalogRoutes(
       );
       lastDemandAtMs.set(sourceKey, performance.now());
       await within(restoreSource(sourceKey), deadlineMs - performance.now());
+      const published = revisions?.get(accountId);
+      if (published !== undefined) {
+        if (published.snapshotState === "STALE") void startRead(sourceKey, accountId).catch(() => undefined);
+        else scheduleCollector(sourceKey, accountId);
+        return sendRevision(published);
+      }
       const recent = recentReads.get(sourceKey);
       const recentAgeMs = recent === undefined ? Number.POSITIVE_INFINITY : performance.now() - recent.completedAtMs;
       if (recent !== undefined && recent.restored) {

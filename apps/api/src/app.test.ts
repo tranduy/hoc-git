@@ -18,6 +18,7 @@ import {
 } from "./app.js";
 import { sendBoundedMessage } from "./realtime/opportunity-ws.js";
 import { Runtime, type RuntimeClock } from "./runtime.js";
+import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 import { createFixtureRuntime, createLiveRuntime, resolveServerConfig, shouldPersistCatalogJournal,
   shouldRunLegacySessionMaintenance } from "./server.js";
 
@@ -621,6 +622,38 @@ describe("Fastify realtime API", () => {
       type: "SNAPSHOT",
       revision: runtime.getSnapshot().revision,
       data: runtime.getSnapshot()
+    });
+  });
+
+  it("sends a catalog revision baseline and only the accepted changed account", async () => {
+    const runtime = await readyRuntime();
+    const revisions = new CatalogRevisionStore({ now: () => 1_000 });
+    const app = buildApp(runtime, { heartbeatIntervalMs: 60_000, catalogRevisions: revisions });
+    apps.push(app);
+    await app.ready();
+    const messages = collectMessages();
+    const socket = await app.injectWS("/api/realtime", {}, { onInit: messages.onInit });
+    sockets.push(socket);
+
+    expect(await messages.next()).toMatchObject({ type: "SNAPSHOT" });
+    expect(await messages.next()).toEqual({
+      type: "CATALOG_REVISION_BASELINE", sequence: 0, entries: []
+    });
+
+    const catalog = {
+      dataMode: "LIVE" as const, accountId: "catalog-source:SABA:FOOTBALL",
+      provider: "SABA" as const, category: "FOOTBALL" as const,
+      comparisonState: "AWAITING_SECOND_PROVIDER" as const, observedAtMs: 1_000,
+      rejectedMarketCount: 0, events: [], markets: [], quotes: []
+    };
+    const accepted = revisions.publish(catalog.accountId, catalog, {
+      snapshotState: "FRESH", freshnessMs: 20_000
+    });
+
+    expect(await messages.next()).toEqual({
+      type: "CATALOG_REVISION", sequence: accepted.sequence,
+      accountId: accepted.accountId, revision: accepted.revision,
+      observedAtMs: accepted.observedAtMs, snapshotState: "FRESH"
     });
   });
 

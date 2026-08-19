@@ -6,12 +6,14 @@ import {
 import type { FastifyInstance } from "fastify";
 import type WebSocket from "ws";
 import type { Runtime } from "../runtime.js";
+import type { CatalogRevisionStore, StoredCatalogRevision } from "../catalog/catalog-revision-store.js";
 
 const webSocketOpen = 1;
 
 interface Client {
   readonly socket: WebSocket;
   lastRevision: number;
+  lastCatalogSequence: number;
 }
 
 export interface BoundedSocket {
@@ -66,7 +68,8 @@ export function registerOpportunityWebsocket(
   options: {
     readonly heartbeatIntervalMs: number;
     readonly maxBufferedBytes: number;
-  }
+  },
+  catalogRevisions?: CatalogRevisionStore
 ): void {
   const clients = new Set<Client>();
   const broadcastSnapshot = (snapshot: AppSnapshot): void => {
@@ -81,6 +84,18 @@ export function registerOpportunityWebsocket(
     }
   };
   const unsubscribe = runtime.subscribe(broadcastSnapshot);
+  const broadcastCatalogRevision = (entry: StoredCatalogRevision): void => {
+    const payload = serialize({ type: "CATALOG_REVISION", sequence: entry.sequence,
+      accountId: entry.accountId, revision: entry.revision, observedAtMs: entry.observedAtMs,
+      snapshotState: entry.snapshotState });
+    for (const client of clients) {
+      if (entry.sequence <= client.lastCatalogSequence) continue;
+      if (sendBoundedMessage(client.socket, payload, options.maxBufferedBytes)) {
+        client.lastCatalogSequence = entry.sequence;
+      } else clients.delete(client);
+    }
+  };
+  const unsubscribeCatalogs = catalogRevisions?.subscribe(broadcastCatalogRevision) ?? (() => undefined);
   const heartbeat = setInterval(() => {
     const snapshot = runtime.getSnapshot();
     const payload = serialize({
@@ -97,16 +112,25 @@ export function registerOpportunityWebsocket(
   heartbeat.unref();
 
   app.get("/api/realtime", { websocket: true }, (socket) => {
-    const client: Client = { socket, lastRevision: -1 };
+    const client: Client = { socket, lastRevision: -1, lastCatalogSequence: -1 };
     clients.add(client);
     socket.once("close", () => clients.delete(client));
     socket.once("error", () => clients.delete(client));
     broadcastSnapshot(runtime.getSnapshot());
+    if (catalogRevisions !== undefined) {
+      const baseline = catalogRevisions.baseline();
+      const payload = serialize({ type: "CATALOG_REVISION_BASELINE",
+        sequence: baseline.sequence, entries: baseline.entries });
+      if (sendBoundedMessage(socket, payload, options.maxBufferedBytes)) {
+        client.lastCatalogSequence = baseline.sequence;
+      } else clients.delete(client);
+    }
   });
 
   app.addHook("onClose", async () => {
     clearInterval(heartbeat);
     unsubscribe();
+    unsubscribeCatalogs();
     for (const client of clients) client.socket.terminate();
     clients.clear();
   });

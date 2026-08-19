@@ -24,6 +24,7 @@ import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-featu
 import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
 import { refreshBridgeProviderSources } from "./chrome-bridge/provider-source-refresh.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
+import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -228,11 +229,14 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const twoLegPreflight = new TwoLegPreflight({ opportunities: runtime, providers: sessionServices.providerPreflight });
   const betHistory = new FileBetHistory(join(localAppData, "tool-chenh", "history", "bets.jsonl"));
   const catalogStore = new DurableCatalogStore(join(localAppData, "tool-chenh", "catalog-cache"));
+  const catalogRevisions = new CatalogRevisionStore();
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
   const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane() : null;
   const chromeCatalogDataPlane = chromeBridgeRegistry
-    ? new ChromeCatalogDataPlane()
+    ? new ChromeCatalogDataPlane({ publish: (catalog) => {
+      catalogRevisions.publish(catalog.accountId, catalog, { snapshotState: "FRESH", freshnessMs: 20_000 });
+    } })
     : null;
   if (chromeBridgeRegistry) {
     const allowedCaptureLobbies = captureLobbies(env.CHROME_BRIDGE_CAPTURE_LOBBIES);
@@ -284,6 +288,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     // Fixture mode keeps its deterministic observer path for integration tests.
     catalogTelemetry,
     catalogStore,
+    catalogRevisions,
     providerPreflight: sessionServices.providerPreflight,
     twoLegPreflight,
     receiptProtocol: sessionServices.receiptProtocol,

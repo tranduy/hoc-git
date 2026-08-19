@@ -21,6 +21,7 @@ import type { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registr
 import type { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
 import { registerMaintenanceRoutes } from "./routes/maintenance.js";
 import type { SessionRefreshControl } from "./session-maintenance.js";
+import type { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 
 export interface AppOptions {
   readonly viteOrigin?: string;
@@ -33,6 +34,7 @@ export interface AppOptions {
   readonly catalogObserver?: CatalogObserverLike;
   readonly catalogTelemetry?: CatalogTelemetryRegistry;
   readonly catalogStore?: CatalogStoreLike;
+  readonly catalogRevisions?: CatalogRevisionStore;
   readonly providerPreflight?: ProviderPreflightLike;
   readonly twoLegPreflight?: TwoLegPreflightLike;
   readonly receiptProtocol?: ReceiptProtocolLike;
@@ -156,7 +158,8 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
   if (options.catalogSources !== undefined) registerCatalogSourceRoutes(app, options.catalogSources);
   if (options.catalogReader !== undefined) registerCatalogRoutes(
-    app, options.catalogReader, options.catalogTelemetry, options.catalogObserver, options.catalogStore
+    app, options.catalogReader, options.catalogTelemetry, options.catalogObserver, options.catalogStore,
+    options.catalogRevisions
   );
   if (options.providerPreflight !== undefined) registerProviderPreflightRoutes(app, options.providerPreflight);
   if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight, options.betHistory);
@@ -173,8 +176,9 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
     });
   });
   void app.register(async (instance) => {
-    registerOpportunityWebsocket(instance, runtime, { heartbeatIntervalMs, maxBufferedBytes });
+    registerOpportunityWebsocket(instance, runtime, { heartbeatIntervalMs, maxBufferedBytes }, options.catalogRevisions);
   });
+  if (options.catalogRevisions !== undefined) app.addHook("onClose", async () => options.catalogRevisions?.close());
 
   return app;
 }
