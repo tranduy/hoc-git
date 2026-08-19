@@ -5,12 +5,23 @@ import { markSabaLiveContextRecords } from "../providers/saba/saba-football-push
 import { SabaPushDecoder } from "../providers/saba/saba-push-decoder.js";
 import { parseSabaSocketFrame } from "../providers/saba/saba-socket-frame.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
-import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
+import { mergeObservedCatalogParts, type CatalogEvent, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 import { decodePublicDomRecords } from "./cmd-dom-adapter.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:SABA:FOOTBALL";
+
+function liveIdentityScore(event: CatalogEvent): number {
+  if (event.category !== "FOOTBALL" || event.liveState === null) return 0;
+  const state = event.liveState;
+  return Number(state.period !== null) + Number(state.clockMs !== null) +
+    Number(state.scoreHome !== null) + Number(state.scoreAway !== null);
+}
+
+function selectStableSabaEvent(current: CatalogEvent, candidate: CatalogEvent): CatalogEvent {
+  return liveIdentityScore(candidate) > liveIdentityScore(current) ? candidate : current;
+}
 
 export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "saba-ws-catalog-v1";
@@ -103,7 +114,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     const sourceParts = [...this.#parts].filter(([key]) => key.startsWith(`${envelope.sourceId}|`))
       .map(([, value]) => value);
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SABA",
-      observedAtMs: envelope.observedAtMs, parts: sourceParts });
+      observedAtMs: envelope.observedAtMs, parts: sourceParts, selectEvent: selectStableSabaEvent });
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog }];
   }

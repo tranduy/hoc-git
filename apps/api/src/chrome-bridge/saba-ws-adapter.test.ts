@@ -130,6 +130,51 @@ describe("SabaWsCatalogAdapter", () => {
       value: { observedAtMs: 1_786_449_550_000 } });
   });
 
+  it("keeps the richer DOM event identity while later socket frames update SABA prices", () => {
+    const rows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "ASEAN CHAMPIONSHIP 2026", sporttype: 1 }),
+      encoded({ type: "m", matchid: 132353281, leagueid: 1, hteamnameen: "Vietnam", ateamnameen: "Malaysia",
+        kickofftime: 1_786_144_399, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 1051703674, matchid: 132353281, bettype: 3, parenttypeid: 3,
+        oddsstatus: "running", enable: 1, odds1a: -0.74, odds2a: 0.6, hdp1: 1.75, hdp2: 0 }),
+      [0, "done"]];
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(envelope(`42${JSON.stringify(["m", "b1", rows, "rev1"])}`))).toHaveLength(1);
+
+    const dom: ChromeBridgeEnvelope = { ...envelope(""), sequence: 5,
+      observedAtMs: 1_786_449_550_000, transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: "saba:7:snapshot-identity", chunkIndex: 0, chunkCount: 1, records: [{
+          sportId: "1", leagueId: "1", leagueName: "GIẢI VÔ ĐỊCH BÓNG ĐÁ ASEAN 2026",
+          matchId: "132353281", timeText: "2H12'", teamNames: ["Việt Nam", "Malaysia"],
+          groups: [{ betTypeIds: ["3"], labels: ["1.75"], odds: [
+            { marketOddsId: "dom-total", priceText: "-0.74", status: null, greyedOut: null },
+            { marketOddsId: "dom-total", priceText: "0.6", status: null, greyedOut: null }
+          ] }]
+        }] }) } };
+    expect(adapter.decode(dom)[0]!.value).toMatchObject({ events: [expect.objectContaining({
+      providerEventId: "132353281", participantA: "Việt Nam",
+      liveState: expect.objectContaining({ period: "2H", clockMs: 720_000 })
+    })] });
+
+    const delta = [encoded({ type: "o", oddsid: 1051703674, matchid: 132353281,
+      bettype: 3, parenttypeid: 3, oddsstatus: "running", enable: 1,
+      odds1a: -0.65, odds2a: 0.51, hdp1: 1.75, hdp2: 0 })];
+    const updated = adapter.decode({
+      ...envelope(`42${JSON.stringify(["m", "b1", delta, "rev2"])}`), sequence: 6,
+      observedAtMs: 1_786_449_552_000
+    })[0]!.value as { events: Array<{ providerEventId: string; participantA: string;
+      liveState: { period: string | null; clockMs: number | null } | null }>;
+      quotes: Array<{ providerMarketId: string; rawOdds: string }> };
+
+    expect(updated.events.find((event) => event.providerEventId === "132353281")).toMatchObject({
+      participantA: "Việt Nam", liveState: expect.objectContaining({ period: "2H", clockMs: 720_000 })
+    });
+    expect(updated.quotes.filter((quote) => quote.providerMarketId === "1051703674")
+      .map((quote) => quote.rawOdds)).toEqual(["-0.65", "0.51"]);
+  });
+
   it("invalidates SABA immediately when the active catalog socket closes", () => {
     const adapter = new SabaWsCatalogAdapter();
     const closed: ChromeBridgeEnvelope = { ...envelope(""), transport: "WS_STATE",

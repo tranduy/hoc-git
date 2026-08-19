@@ -8,17 +8,24 @@ export interface NormalizedCatalogPart {
   readonly quotes: ObservedProviderCatalog["quotes"];
 }
 
+export type CatalogEvent = ObservedProviderCatalog["events"][number];
+
 export function mergeObservedCatalogParts(input: {
   readonly accountId: string;
   readonly provider: ProviderId;
   readonly observedAtMs: number;
   readonly parts: readonly NormalizedCatalogPart[];
+  readonly selectEvent?: (current: CatalogEvent, candidate: CatalogEvent) => CatalogEvent;
 }): ObservedProviderCatalog {
   const events = new Map<string, ObservedProviderCatalog["events"][number]>();
   const markets = new Map<string, ObservedProviderCatalog["markets"][number]>();
   const quotes = new Map<string, ObservedProviderCatalog["quotes"][number]>();
   for (const part of input.parts) {
-    for (const event of part.events) events.set(event.providerEventId, event);
+    for (const event of part.events) {
+      const current = events.get(event.providerEventId);
+      events.set(event.providerEventId,
+        current === undefined ? event : (input.selectEvent?.(current, event) ?? event));
+    }
     for (const market of part.markets) markets.set(`${market.providerEventId}|${market.providerMarketId}`, market);
     for (const quote of part.quotes) {
       quotes.set(`${quote.providerEventId}|${quote.providerMarketId}|${quote.providerSelectionId}`, quote);
