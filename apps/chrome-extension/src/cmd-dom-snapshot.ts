@@ -8,6 +8,56 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
   const directText = (element) => clean([...element.childNodes]
     .filter((node) => node.nodeType === Node.TEXT_NODE)
     .map((node) => node.textContent ?? "").join(" "), 80);
+  const visibleTextCenters = (container, expectedText) => {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const centers = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (clean(node.textContent, 160) !== expectedText) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rect = range.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) centers.push(rect.top + rect.height / 2);
+    }
+    return centers;
+  };
+  const legacyTeamCenters = (eventName, teamNames) => {
+    const centers = teamNames.map((teamName) => visibleTextCenters(eventName, teamName));
+    if (centers.some((values) => values.length !== 1) || Math.abs(centers[0][0] - centers[1][0]) < 1) return null;
+    return centers.map((values) => values[0]);
+  };
+  const legacyTwoWayLayout = (container, priceElements, lineValue, isHandicap, teamCenters) => {
+    const positioned = priceElements.map((element) => ({ element, rect: element.getBoundingClientRect() }));
+    if (positioned.length !== 2 || positioned.some(({ rect }) => rect.width <= 0 || rect.height <= 0)) return null;
+    positioned.sort((left, right) => left.rect.top + left.rect.height / 2 - (right.rect.top + right.rect.height / 2));
+    const centers = positioned.map(({ rect }) => rect.top + rect.height / 2);
+    if (Math.abs(centers[0] - centers[1]) < 1) return null;
+    if (!isHandicap) return { priceElements: positioned.map(({ element }) => element), lineOwnerIndex: null };
+    if (teamCenters === null) return null;
+    const priceOwners = centers.map((center) => {
+      const distances = teamCenters.map((teamCenter) => Math.abs(center - teamCenter));
+      if (Math.abs(distances[0] - distances[1]) < 1) return null;
+      return distances[0] < distances[1] ? 0 : 1;
+    });
+    if (priceOwners.some((owner) => owner === null) || new Set(priceOwners).size !== 2) return null;
+    const orderedPrices = [0, 1].map((owner) => positioned[priceOwners.indexOf(owner)]?.element);
+    if (orderedPrices.some((element) => element === undefined)) return null;
+    const expected = lineValue.replace(/\s+/gu, "");
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    const lineCenters = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.parentElement?.closest(".odds")) continue;
+      if (clean(node.textContent, 80).replace(/\s+/gu, "") !== expected) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rect = range.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) lineCenters.push(rect.top + rect.height / 2);
+    }
+    if (lineCenters.length !== 1) return null;
+    const distances = teamCenters.map((center) => Math.abs(center - lineCenters[0]));
+    if (Math.abs(distances[0] - distances[1]) < 1) return null;
+    return { priceElements: orderedPrices,
+      lineOwnerIndex: distances[0] < distances[1] ? 0 : 1 };
+  };
   const result = [];
   for (const match of document.querySelectorAll(".c-odds-table--sport1 .c-match[data-matchid]")) {
     const matchId = clean(match.getAttribute("data-matchid"), 128);
@@ -73,7 +123,8 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
       }
       const rowId = clean(node.id.replace(/^R_/u, ""), 128);
       if (!rowId || !leagueId || !leagueName) continue;
-      if (node.classList.contains("default-match") || !baseMatchId) baseMatchId = rowId;
+      const startsMatch = node.classList.contains("default-match") || !baseMatchId;
+      if (startsMatch) baseMatchId = rowId;
       const team = node.querySelector(".team");
       if (!team) continue;
       const eventName = team.querySelector(".tableDiv-match-info__event") ?? team;
@@ -88,6 +139,7 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
         .sort((left, right) => left.length - right.length);
       const teamNames = (lineTeams.length >= 2 ? lineTeams : fallbackTeams).slice(0, 2);
       if (teamNames.length !== 2) continue;
+      const teamCenters = legacyTeamCenters(eventName, teamNames);
       const rawTime = clean(node.querySelector(".tableDiv-match-time")?.textContent, 80);
       const liveClock = /(\\d)H\\s*(\\d+)/iu.exec(rawTime);
       const timeText = liveClock ? liveClock[1] + "H" + liveClock[2] + "'" : rawTime;
@@ -107,20 +159,24 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
       }
       for (const market of marketContainers) {
         if (!market.element) continue;
-        const priceElements = [...market.element.querySelectorAll(".odds")].slice(0, 2);
+        let priceElements = [...market.element.querySelectorAll(".odds")].slice(0, 2);
         if (priceElements.length !== 2) continue;
         const clone = market.element.cloneNode(true);
         clone.querySelectorAll(".odds").forEach((price) => price.remove());
         const evidence = clean(clone.textContent, 80).replace(/\\b(?:o|u|ou)\\b/giu, " ");
         const lineValue = evidence.match(/[+-]?\\d+(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+(?:\\.\\d+)?)?/u)?.[0] ?? "";
         if (!lineValue) continue;
+        const layout = legacyTwoWayLayout(market.element, priceElements, lineValue, market.isHandicap, teamCenters);
+        if (layout === null) continue;
+        priceElements = layout.priceElements;
+        const lineOwnerIndex = layout.lineOwnerIndex;
         const marketOddsId = "legacy:" + rowId + ":" + market.betType + ":" + lineValue.replace(/\\s+/gu, "");
         groups.push({
           betTypeIds: [market.betType], labels: [lineValue],
           odds: priceElements.map((element, index) => ({
             marketOddsId, priceText: clean(element.textContent, 32), status: null,
             greyedOut: element.classList.contains("no-hover") || element.getAttribute("aria-disabled") === "true" ? "true" : null,
-            ...(market.isHandicap && index === 0 ? { lineText: lineValue } : {})
+            ...(market.isHandicap && index === lineOwnerIndex ? { lineText: lineValue } : {})
           }))
         });
       }

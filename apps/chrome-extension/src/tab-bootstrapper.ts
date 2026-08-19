@@ -6,6 +6,8 @@ export interface TabBootstrapperDependencies {
   readonly reload: (tabId: number) => Promise<void>;
 }
 
+export type TabReloadAuthorization = "EXPLICIT_RESET" | "SCHEDULED_MAINTENANCE";
+
 export class TabBootstrapper {
   readonly #dependencies: TabBootstrapperDependencies;
   readonly #inFlight = new Map<number, Promise<void>>();
@@ -14,7 +16,8 @@ export class TabBootstrapper {
     this.#dependencies = dependencies;
   }
 
-  ensure(tab: AttachedLobbyTab): Promise<void> {
+  ensure(tab: AttachedLobbyTab, authorization?: TabReloadAuthorization): Promise<void> {
+    if (authorization === undefined) return Promise.resolve();
     const current = this.#inFlight.get(tab.tabId);
     if (current !== undefined) return current;
     const operation = this.#ensure(tab).finally(() => {
