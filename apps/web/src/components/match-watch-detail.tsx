@@ -28,7 +28,9 @@ import type { LagSignal } from "../watch/lag-signal-tracker.js";
 import type { RankedTicket } from "../watch/ranked-tickets.js";
 import { RankedTicketTable, renderableRankedTickets } from "./ranked-ticket-table.js";
 import { ProviderBrand } from "./provider-brand.js";
+import { RoiBadge } from "./roi-badge.js";
 import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
+import { sortProviderItems } from "../catalog/provider-order.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
@@ -59,15 +61,16 @@ function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stak
   if (pairedTickets.length === 0) return null;
   return <><h2 id="current-prices-heading">Vé chấp 2 cửa giữa các sàn</h2>
     <div className="watch-odds-tickets">{pairedTickets.map(({ observedRow, displayRow, signal, plan }) => {
+    const orderedLegs = sortProviderItems(plan.legs, (leg) => leg.provider);
     return <article className={signal === undefined ? "watch-odds-ticket" : "watch-odds-ticket watch-odds-ticket--profitable"}
       key={observedRow.key}>
       <header className="watch-odds-ticket__header">
         <div><strong>{ticketMarketLabel(observedRow.marketType)}</strong>
           <small>{observedRow.line === null ? "Không line" : `Kèo ${observedRow.line}`}</small></div>
-        <div className="watch-odds-ticket__edge"><b>ROI {(Number(plan.roi) * 100).toFixed(2)}%</b>
+        <div className="watch-odds-ticket__edge"><RoiBadge roiPercent={Number(plan.roi) * 100} size="sm" />
           <small>{signal === undefined ? "Đang theo dõi" : "Đủ điều kiện · lãi ≥ 20.000 VND"}</small></div>
       </header>
-      <div className="watch-odds-grid">{plan.legs.map((leg) => {
+      <div className="watch-odds-grid">{orderedLegs.map((leg) => {
         const cell = observedRow.cells.find((candidate) => candidate.provider === leg.provider);
         const quotes = cell?.quotes.filter((quote) => quote.selection === leg.selection) ?? [];
         return <section className="watch-odds-provider" key={leg.provider}>
@@ -80,8 +83,8 @@ function CompactComparisonGrid({ comparison, selectedProviders, lagSignals, stak
         </section>;
       })}</div>
       <footer className="watch-odds-ticket__plan" aria-label={`Gross preflight ${observedRow.marketType}${observedRow.line === null ? "" : ` line ${observedRow.line}`}`}>
-        <><div>{plan.legs.map((leg) => <span key={leg.selection}><small>#{leg.provider} · {selectionLabel(comparison.event, leg.selection)} @ {formatDisplayDecimal(leg.decimalOdds)}</small>
-          <b>{money(leg.stake)} {leg.role.toLowerCase()}</b></span>)}</div><strong>Worst {money(plan.worstCaseProfit)} · ROI {(Number(plan.roi) * 100).toFixed(2)}%</strong></>
+        <><div>{orderedLegs.map((leg) => <span key={leg.selection}><small>#{leg.provider} · {selectionLabel(comparison.event, leg.selection)} @ {formatDisplayDecimal(leg.decimalOdds)}</small>
+          <b>{money(leg.stake)} {leg.role.toLowerCase()}</b></span>)}</div><div className="watch-odds-ticket__result"><strong>Worst {money(plan.worstCaseProfit)}</strong><RoiBadge roiPercent={Number(plan.roi) * 100} size="sm" /></div></>
       </footer>
     </article>;
   })}</div></>;
@@ -161,9 +164,9 @@ export function MatchWatchDetail({
   const [watching, setWatching] = useState(true);
   const [watcherState, setWatcherState] = useState<WatcherState>("WATCHING");
   const [successfulSamples, setSuccessfulSamples] = useState(1);
-  const visibleBooks = books ?? (comparisonEvent?.providers ?? [initialCatalog.provider]).map((provider) => ({
+  const visibleBooks = sortProviderItems(books ?? (comparisonEvent?.providers ?? [initialCatalog.provider]).map((provider) => ({
     provider, connected: true, selected: true, hasExactEvent: true
-  }));
+  })), (book) => book.provider);
   const effectiveBooks = visibleBooks.map((book) => ({ ...book,
     hasExactEvent: currentComparison?.providers.includes(book.provider) ?? book.hasExactEvent }));
   const catalogSources = useMemo(() => comparisonCatalogs ?? comparisonEvent?.catalogs ?? [initialCatalog],

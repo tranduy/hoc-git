@@ -62,6 +62,7 @@ export function registerChromeBridgeRoute(
     }
   }, (socket) => {
     const writableSocket = socket as unknown as WritableBridgeSocket;
+    options.controlPlane?.attachInstallation(writableSocket);
     const connection = {};
     const requestedSnapshots = new Set<string>();
     const connectionSources = new Set<string>();

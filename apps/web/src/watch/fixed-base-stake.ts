@@ -99,6 +99,8 @@ function settlementFactors(row: StakeComparableRow, firstOdds: Decimal,
   } else {
     const homeHalfWin = (Math.abs(fraction - 0.25) < 1e-9 && line > 0) ||
       (Math.abs(fraction - 0.75) < 1e-9 && line < 0);
+    // Handicap domains are canonicalized as AWAY, HOME, so the first leg has
+    // the inverse half-settlement of the home handicap encoded by row.line.
     firstHalfWin = !homeHalfWin;
   }
   const halfWin = (odds: Decimal) => odds.plus(1).div(2);
@@ -291,8 +293,8 @@ function buildPlanForPair(row: StakeComparableRow, pair: OpposingLegPair,
     if (requireProfit && !worstCaseProfit.gt(0)) return [];
     return [{ hedgeStake, totalStake, anchorPayout, calculatedPayout, anchorProfit, calculatedProfit,
       profitDifference: Decimal.max(...scenarioProfits).minus(worstCaseProfit), worstCaseProfit }];
-  }).sort((left, right) => left.profitDifference.comparedTo(right.profitDifference) ||
-    right.worstCaseProfit.comparedTo(left.worstCaseProfit) ||
+  }).sort((left, right) => right.worstCaseProfit.comparedTo(left.worstCaseProfit) ||
+    left.profitDifference.comparedTo(right.profitDifference) ||
     left.totalStake.comparedTo(right.totalStake));
   const plan = plans[0];
   if (plan === undefined) return null;

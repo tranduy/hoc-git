@@ -1,7 +1,7 @@
 import type { ChromeLobbyId } from "@tool-chenh/contracts";
 import { LocalBridge, type BridgeSocket } from "./local-bridge.js";
 import { NetworkObserver, type ObservedSource } from "./network-observer.js";
-import { recognizeLobbyTab } from "./lobby-signatures.js";
+import { recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
 import { TabRegistry } from "./tab-registry.js";
 import { resolveInstallationKey } from "./bridge-key.js";
 import { BridgeWakeup } from "./bridge-wakeup.js";
@@ -10,12 +10,14 @@ import { recoverAttachedSource } from "./snapshot-recovery.js";
 import { tabsNeedingContentScriptRefresh } from "./extension-update.js";
 import { SourceTabKeepAlive } from "./source-tab-keepalive.js";
 import { CmdSnapshotPoller } from "./cmd-snapshot-poller.js";
+import { SourceTabRecovery } from "./source-tab-recovery.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 
 let bridge: LocalBridge | null = null;
 let configureInFlight: Promise<boolean> | null = null;
 let restoreInFlight: Promise<void> | null = null;
+const sourceLaunchUrlsKey = "sourceLaunchUrls";
 
 const sourceTabKeepAlive = new SourceTabKeepAlive({
   attach: async (tabId) => chrome.debugger.attach({ tabId }, "1.3"),
@@ -67,6 +69,73 @@ const tabBootstrapper = new TabBootstrapper({
   reload: async (tabId) => { await chrome.tabs.reload(tabId); }
 });
 
+async function attachRecoveredTab(tab: TabDescriptor): Promise<void> {
+  await rememberRecognizedUrl(tab);
+  const attached = await registry.attachSelected(tab);
+  const source: ObservedSource = {
+    lobby: attached.lobby,
+    tabId: attached.tabId,
+    sourceId: `chrome:${attached.lobby}:${attached.tabId}`
+  };
+  await observer.start(source);
+  // A recovered provider launch can be one-time. Reloading it here consumes
+  // the restored navigation and can make the provider close the tab again.
+  // The current extension worker already owns the observer, so attach it
+  // directly and reserve bootstrap reloads for normal startup restoration.
+  await sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
+}
+
+async function rememberRecognizedUrl(tab: TabDescriptor): Promise<void> {
+  const recognized = recognizeLobbyTab(tab);
+  if (!recognized || !tab.url) return;
+  const stored = await chrome.storage.session.get(sourceLaunchUrlsKey);
+  const current = stored[sourceLaunchUrlsKey] && typeof stored[sourceLaunchUrlsKey] === "object"
+    ? stored[sourceLaunchUrlsKey] as Record<string, unknown>
+    : {};
+  await chrome.storage.session.set({ [sourceLaunchUrlsKey]: { ...current, [recognized.lobby]: tab.url } });
+}
+
+const sourceTabRecovery = new SourceTabRecovery({
+  listAttached: () => registry.list(),
+  query: async () => chrome.tabs.query({}),
+  update: async (tabId, url) => {
+    const tab = await chrome.tabs.update(tabId, { url });
+    if (!tab) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
+    return tab;
+  },
+  create: async (url, active) => chrome.tabs.create({ url, active }),
+  get: async (tabId) => chrome.tabs.get(tabId),
+  attach: attachRecoveredTab,
+  recentlyClosed: async () => (await chrome.sessions.getRecentlyClosed({ maxResults: 25 })).map((session) => {
+    const sessionId = session.tab?.sessionId ?? session.window?.sessionId;
+    return {
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(session.tab === undefined ? {} : { tab: session.tab }),
+      ...(session.window?.tabs === undefined ? {} : { window: { tabs: session.window.tabs } })
+    };
+  }),
+  restore: async (sessionId) => {
+    const restored = await chrome.sessions.restore(sessionId);
+    const tabs = [restored.tab, ...(restored.window?.tabs ?? [])].filter((tab): tab is chrome.tabs.Tab => tab !== undefined);
+    const tab = tabs.find((candidate) => recognizeLobbyTab(candidate) !== null);
+    if (!tab) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
+    return tab;
+  },
+  loadRemembered: async (lobby) => {
+    const stored = await chrome.storage.session.get(sourceLaunchUrlsKey);
+    const launches = stored[sourceLaunchUrlsKey];
+    if (!launches || typeof launches !== "object") return null;
+    const url = (launches as Record<string, unknown>)[lobby];
+    return typeof url === "string" ? url : null;
+  },
+  // CMD's authenticated sports page uses the existing Chrome cookie session.
+  // This canonical entry lets the very first reset recover even when the tab
+  // was closed before this extension version had a chance to remember its URL.
+  fallbackUrl: (lobby) => lobby === "CMD"
+    ? "https://cgnew.fts368.com/DomainNames/cgnew/home.aspx"
+    : null
+});
+
 setInterval(() => {
   // Chrome can throttle a short standalone MV3 interval. Reuse this proven
   // heartbeat wake-up so catalog refresh/capture cannot silently stop while
@@ -105,6 +174,17 @@ async function configureBridgeOnce(): Promise<boolean> {
   bridge = installationKey
     ? new LocalBridge({
       installationKey,
+      readinessProbe: async () => {
+        try {
+          const response = await fetch("http://127.0.0.1:4310/api/health", {
+            cache: "no-store",
+            signal: AbortSignal.timeout(1_500)
+          });
+          return response.ok;
+        } catch {
+          return false;
+        }
+      },
       socketFactory: (url, protocols) => new WebSocket(url, protocols) as unknown as BridgeSocket,
       onSnapshotRequest: async (sourceId) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
@@ -133,6 +213,8 @@ async function configureBridgeOnce(): Promise<boolean> {
           recognized?.lobby !== attached.lobby) throw new Error("UNTRUSTED_LAUNCH_URL");
         await chrome.tabs.update(attached.tabId, { url });
       },
+      onSourceEnsure: async (lobby, url) => sourceTabRecovery.ensure(lobby, url),
+      onSourceRestore: async (lobby) => sourceTabRecovery.restore(lobby),
       onFocusSelection: async (request) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === request.sourceId);
         if (!attached) throw new Error("SOURCE_NOT_ATTACHED");
@@ -168,7 +250,9 @@ async function restorePreferredTabs(): Promise<void> {
 }
 
 async function restorePreferredTabsOnce(): Promise<void> {
-  const restored = await registry.restore(await chrome.tabs.query({}));
+  const tabs = await chrome.tabs.query({});
+  await Promise.all(tabs.map(async (tab) => rememberRecognizedUrl(tab)));
+  const restored = await registry.restore(tabs);
   for (const attached of restored) {
     const source: ObservedSource = {
       lobby: attached.lobby,
@@ -228,6 +312,7 @@ chrome.debugger.onEvent.addListener((debuggee, method, params) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url || changeInfo.status === "loading") {
     const descriptor = { id: tabId, url: tab.url, title: tab.title };
+    void rememberRecognizedUrl(descriptor);
     const source = sourceForTab(tabId);
     if (source && recognizeLobbyTab(descriptor) === null) {
       void observer.stop(source).finally(() => registry.handleNavigation(descriptor));

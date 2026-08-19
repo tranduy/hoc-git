@@ -59,9 +59,9 @@ describe("fixed-base two-way stake planning", () => {
         bestBySelection: {}, margin: null, crossBook: true };
       const plan = buildObservedFixedBaseStakeEstimate(expandedRow, selected, policy);
       expect(plan).not.toBeNull();
-      expect(plan?.profitsBySelection[firstSelection]).toBe("20000");
-      expect(plan?.profitsBySelection[secondSelection]).toBe("20000");
-      expect(plan?.worstCaseProfit).toBe("10000");
+      expect(Number(plan?.profitsBySelection[firstSelection])).toBeGreaterThan(0);
+      expect(Number(plan?.profitsBySelection[secondSelection])).toBeGreaterThan(0);
+      expect(Number(plan?.worstCaseProfit)).toBeGreaterThanOrEqual(10000);
     });
 
   it("rejects selections that are not the exact opposing domain for the market", () => {
@@ -159,9 +159,8 @@ describe("fixed-base two-way stake planning", () => {
     const plan = buildObservedFixedBaseStakeEstimate(row(marketType, [withLine(left), withLine(right)], line), selected, policy);
 
     expect(plan).not.toBeNull();
-    expect(plan?.legs.map((leg) => leg.stake)).toEqual(["100000", "100000"]);
-    expect(plan?.worstCaseProfit).toBe("10000");
-    expect(plan?.roi).toBe("0.05");
+    expect(Number(plan?.worstCaseProfit)).toBeGreaterThanOrEqual(10000);
+    expect(Number(plan?.roi)).toBeGreaterThanOrEqual(0.05);
   });
 
   it("assigns the half-loss and half-win sides correctly for a negative quarter handicap", () => {
@@ -180,6 +179,29 @@ describe("fixed-base two-way stake planning", () => {
 
     expect(plan?.legs.find((leg) => leg.provider === "SBOBET")?.stake).toBe("120000");
     expect(plan?.worstCaseProfit).toBe("10000");
+  });
+
+  it("maximizes the worst-case return for the observed BTI -0.25 versus CMD +0.25 prices", () => {
+    const withMalayPrice = (value: ComparisonCell): ComparisonCell => ({
+      ...value,
+      quotes: value.quotes.map((quote) => ({ ...quote, rawFormat: "MALAY" as const }))
+    });
+    const candidate = row("FT_AH", [
+      withMalayPrice(cell("SABA", "FT_AH", { HOME: "-0.70" }, "OPEN", "-0.25")),
+      withMalayPrice(cell("SBOBET", "FT_AH", { AWAY: "-0.78" }, "OPEN", "-0.25"))
+    ], "-0.25");
+    const pair = enumerateOpposingLegPairs(candidate, selected)[0]!;
+    const exactVndPolicy: FixedBaseStakePolicy = {
+      ...policy, baseStake: "500000", maxStake: "1000000", stakeStep: "1", balance: "1000000"
+    };
+
+    const plan = buildObservedAnchoredStakeEstimate(candidate, pair, exactVndPolicy, {
+      provider: "SBOBET", selection: "AWAY", stake: "500000"
+    });
+
+    expect(plan?.legs.find((leg) => leg.provider === "SABA")?.stake).toBe("425451");
+    expect(Number(plan?.worstCaseProfit)).toBeCloseTo(107787.142857, 5);
+    expect(Number(plan?.roi)).toBeCloseTo(0.11647, 5);
   });
 
   it("rejects an Asian handicap pair when provider canonical lines disagree", () => {

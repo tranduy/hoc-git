@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  ensureWarpTunnelConnected,
   parseWarpStatusOutputs,
   type WarpCli,
   WarpSocksAuthEgress,
@@ -71,6 +72,14 @@ afterEach(async () => {
 });
 
 describe("WarpSocksAuthEgress", () => {
+  it("connects the full WARP tunnel before a reset continues", async () => {
+    const cli = new FakeWarpCli({ connected: false, mode: "warp", proxyPort: null }, 2);
+
+    await ensureWarpTunnelConnected(cli, { pollMs: 1, timeoutMs: 100 });
+
+    expect(cli.calls).toEqual(["status", "connect", "status", "status"]);
+  });
+
   it("normalizes the current Windows WarpProxy settings output", () => {
     expect(parseWarpStatusOutputs(
       "Status update: Connected\nNetwork: healthy",

@@ -42,6 +42,37 @@ describe("ChromeBridgeControlPlane", () => {
     expect(bti.send).not.toHaveBeenCalled();
   });
 
+  it("ensures a missing lobby through the installation socket without an attached source", () => {
+    const socket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attachInstallation(socket);
+
+    expect(plane.ensureLobby("CMD", "https://cgnew.fts368.com/sports?opaque=1")).toBe(1);
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      version: 1, kind: "ENSURE_SOURCE", lobby: "CMD", url: "https://cgnew.fts368.com/sports?opaque=1"
+    }));
+  });
+
+  it("delivers one ensure command when one installation socket owns several sources", () => {
+    const socket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attachInstallation(socket);
+    plane.attach("chrome:SABA:1", socket);
+    plane.attach("chrome:BTI:2", socket);
+
+    expect(plane.ensureLobby("SABA", "https://c0z0oa.bpd3a3fn.com/sports")).toBe(1);
+    expect(socket.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("requests restoration of a closed lobby without requiring a launch URL", () => {
+    const socket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attachInstallation(socket);
+
+    expect(plane.restoreLobby("CMD")).toBe(1);
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ version: 1, kind: "RESTORE_SOURCE", lobby: "CMD" }));
+  });
+
   it("skips closed sockets and detaches every source owned by a closed connection", () => {
     const socket = { send: vi.fn(), readyState: 3 };
     const plane = new ChromeBridgeControlPlane();

@@ -8,9 +8,16 @@ import type { RankedTicket } from "../watch/ranked-tickets.js";
 import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
 import { ProviderBrand } from "./provider-brand.js";
 import { RoiBadge } from "./roi-badge.js";
+import { sortProviderItems, sortProviders } from "../catalog/provider-order.js";
 
 function money(value: string): string {
   return `${Number(value).toLocaleString("en-US")} VND`;
+}
+
+function displayReason(reason: string): string {
+  return reason === "Provider preflight required"
+    ? "Chưa kiểm tra lại vé trực tiếp tại sàn"
+    : reason;
 }
 
 function legId(provider: ProviderId, selection: string): string {
@@ -53,11 +60,14 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     buildObservedAnchoredStakeEstimate(ticket.row, pair, stakePolicy, anchor), [anchor, pair, stakePolicy, ticket]);
   const plan = anchor === null ? ticket.plan : adjustedPlan;
   const quotePlan = plan ?? ticket.plan;
+  const orderedProviders = useMemo(() => sortProviders(providers), [providers]);
+  const orderedQuoteLegs = useMemo(() => sortProviderItems(quotePlan?.legs ?? [], (leg) => leg.provider), [quotePlan]);
+  const orderedOriginalLegs = useMemo(() => sortProviderItems(ticket.plan?.legs ?? [], (leg) => leg.provider), [ticket.plan]);
   const profitable = ticket.state === "VERIFIED_PROFIT" && plan !== null && Number(plan.worstCaseProfit) >= 20_000;
   const selections = [...new Set(ticket.row.cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)))].sort();
   const rowProviders = compact && quotePlan !== null
-    ? providers.filter((provider) => quotePlan.legs.some((leg) => leg.provider === provider)) : providers;
-  const openableLegs = quotePlan?.legs.flatMap((leg) => {
+    ? orderedProviders.filter((provider) => orderedQuoteLegs.some((leg) => leg.provider === provider)) : orderedProviders;
+  const openableLegs = orderedQuoteLegs.flatMap((leg) => {
     const quote = ticket.row.cells.find((cell) => cell.provider === leg.provider)
       ?.quotes.find((candidate) => candidate.selection === leg.selection);
     return quote === undefined ? [] : [{ leg, quote }];
@@ -73,7 +83,7 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     id={ticketDomId(ticket.eventKey, ticket.key)} tabIndex={-1}
     style={compact ? { "--ticket-provider-count": rowProviders.length } as CSSProperties : undefined}>
     <th><strong>{ticketMarketLabel(ticket.row.marketType)}</strong><span>{ticket.row.line === null ? "No line" : `Line ${ticket.row.line}`}</span>
-      {plan !== null && <RoiBadge className="ranked-ticket-roi" roiPercent={Number(plan.roi) * 100} />}
+      {plan !== null && <RoiBadge className="ranked-ticket-roi" roiPercent={Number(plan.roi) * 100} size="sm" />}
       <small>{ticket.key}</small>{openableLegs.length > 0 && onOpenProviderTicket !== undefined &&
         <div className="open-provider-ticket-group">{openableLegs.map(({ leg, quote }) =>
           <button aria-label={`Mở kèo ${leg.provider} tại sàn`} className="open-provider-ticket"
@@ -81,7 +91,7 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
               provider: leg.provider, providerEventId: quote.providerEventId,
               providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId
             }); }} type="button">Mở {leg.provider}</button>)}</div>}</th>
-    {rowProviders.map((provider) => {
+    {rowProviders.map((provider, providerIndex) => {
       const cell = ticket.row.cells.find((candidate) => candidate.provider === provider);
       const selectedLeg = compact ? quotePlan?.legs.find((leg) => leg.provider === provider) : undefined;
       const visibleQuotes = selectedLeg === undefined ? cell?.quotes :
@@ -89,25 +99,28 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
       return <td data-label={`#${provider} prices`} key={provider}>{compact &&
         <header className="ranked-ticket-provider-heading"><ProviderBrand compact provider={provider} /></header>}
         {cell === undefined ? <span className="rate-missing">Unavailable</span> :
-        <div className="ranked-ticket-prices">{visibleQuotes?.map((quote) => {
+        <div className="ranked-ticket-prices">{visibleQuotes?.map((quote, quoteIndex) => {
           const normalized = decimalOdds(quote);
           const best = ticket.row.bestBySelection[quote.selection] === provider;
           const handicap = selectionHandicapLine(ticket.row, quote.selection);
           const label = selectionLabel(event, quote.selection);
+          const copyName = compact
+            ? (providerIndex === 0 ? event.participantA : event.participantB)
+            : (quoteIndex === 0 ? event.participantA : event.participantB);
           return <span className={best ? "ranked-ticket-price ranked-ticket-price--best" : "ranked-ticket-price"}
             key={quote.providerSelectionId}><span className="ranked-ticket-price__team"><b>{label}{handicap === null ? "" : ` · AH ${handicap}`}</b>
-              <button aria-label={`Copy ${label}`} className="ticket-team-copy-icon" onClick={() => { void copyTeam(label); }}
-                title={`Copy ${label}`} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M7 6V4h9v9h-2V6H7Zm-3 1h9v9H4V7Zm2 2v5h5V9H6Z" /></svg></button>
+              <button aria-label={`Copy ${copyName}`} className="ticket-team-copy-icon" onClick={() => { void copyTeam(copyName); }}
+                title={`Copy ${copyName}`} type="button"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M7 6V4h9v9h-2V6H7Zm-3 1h9v9H4V7Zm2 2v5h5V9H6Z" /></svg></button>
             </span>
             <strong>{formatDisplayDecimal(quote.rawOdds)} {quote.rawFormat}</strong>
             <small>{normalized === null ? "invalid" : `decimal ${normalized.toFixed(3)}`} · {quote.status}</small></span>;
         })}</div>}</td>;
     })}
     <td data-label="Selected opposing legs">{quotePlan === null ? <span className="rate-missing">No opposing pair</span> :
-      <div className="ranked-ticket-legs">{quotePlan.legs.map((leg) => <span key={legId(leg.provider, leg.selection)}>
+      <div className="ranked-ticket-legs">{orderedQuoteLegs.map((leg) => <span key={legId(leg.provider, leg.selection)}>
         <b>#{leg.provider} · {selectionLabel(event, leg.selection)}</b><small>@ {formatDisplayDecimal(leg.decimalOdds)}</small></span>)}</div>}</td>
     <td data-label="Stakes">{ticket.plan === null ? "—" : <div className="ranked-ticket-stakes">
-      {ticket.plan.legs.map((leg) => <label key={`${legId(leg.provider, leg.selection)}-stake`}>
+      {orderedOriginalLegs.map((leg) => <label key={`${legId(leg.provider, leg.selection)}-stake`}>
         <span className="ranked-ticket-stake-control">
           <span className="ranked-ticket-stake-provider" style={{ minWidth: 112, width: 112 }}>
             <ProviderBrand compact provider={leg.provider} />
@@ -124,12 +137,12 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     <td data-label="Outcome profit">{plan === null ? "—" : <div className="ranked-ticket-profits">{selections.map((selection) =>
       <span key={selection}>If {selectionLabel(event, selection)} wins <b>{money(plan.profitsBySelection[selection] ?? "0")}</b></span>)}</div>}</td>
     <td data-label="Guaranteed / ROI">{plan === null ? <span className="rate-missing">Cannot calculate</span> : <div className="ranked-ticket-result">
-      <strong>Guaranteed {money(plan.worstCaseProfit)}</strong><RoiBadge roiPercent={Number(plan.roi) * 100} />
+      <strong>Guaranteed {money(plan.worstCaseProfit)}</strong><RoiBadge roiPercent={Number(plan.roi) * 100} size="md" />
       {Object.entries(ticket.gapsBySelection).map(([selection, gap]) => <small key={selection}>
         {selectionLabel(event, selection)}: Gap {formatDisplayDecimal(gap.absolute)} · {Number(gap.percent).toFixed(2)}%
       </small>)}
       <small>Move {ticket.movementMagnitude}</small></div>}
-      {ticket.reason !== null && <p className="ranked-ticket-reason">{ticket.reason}</p>}</td>
+      {ticket.reason !== null && <p className="ranked-ticket-reason">{displayReason(ticket.reason)}</p>}</td>
   </tr>;
 }
 
@@ -143,7 +156,8 @@ export function RankedTicketTable({ event, providers, tickets, compact = false, 
   readonly stakePolicy?: FixedBaseStakePolicy;
   readonly onOpenProviderTicket?: ((identity: ProviderTicketIdentity) => void) | undefined;
 }) {
-  const visible = renderableRankedTickets(tickets, providers).slice(0, 5);
+  const orderedProviders = useMemo(() => sortProviders(providers), [providers]);
+  const visible = renderableRankedTickets(tickets, orderedProviders).slice(0, 5);
   const autoFocusedHighlight = useRef<string | null>(null);
   useEffect(() => {
     if (highlightTicketKey === null || highlightTicketKey === undefined) {
@@ -163,10 +177,10 @@ export function RankedTicketTable({ event, providers, tickets, compact = false, 
   return <div className={`ranked-ticket-table-wrap${compact ? " ranked-ticket-table-wrap--compact" : ""}`}>
     <table className={`ranked-ticket-table${compact ? " ranked-ticket-table--compact" : ""}`}
       aria-label={`Top exact tickets for ${event.participantA} vs ${event.participantB}`}>
-      <thead><tr><th>Ticket / line</th>{providers.map((provider) => <th aria-label={provider} key={provider}><ProviderBrand compact provider={provider} /><small>prices</small></th>)}
+      <thead><tr><th>Ticket / line</th>{orderedProviders.map((provider) => <th aria-label={provider} key={provider}><ProviderBrand compact provider={provider} /><small>prices</small></th>)}
         <th>Selected opposing legs</th><th>Stakes</th><th>Outcome profit</th><th>Guaranteed / ROI</th></tr></thead>
       <tbody>{visible.map((ticket) => <TicketRow compact={compact} event={event} highlighted={highlightTicketKey === ticket.key}
-        key={ticket.key} onOpenProviderTicket={onOpenProviderTicket} providers={providers} stakePolicy={stakePolicy}
+        key={ticket.key} onOpenProviderTicket={onOpenProviderTicket} providers={orderedProviders} stakePolicy={stakePolicy}
         ticket={ticket} />)}</tbody>
     </table>
   </div>;

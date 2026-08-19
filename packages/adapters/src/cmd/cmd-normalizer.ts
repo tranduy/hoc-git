@@ -199,14 +199,19 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
       providerNow.getUTCDate(), hour, minute) - options.timezoneOffsetMinutes * 60_000;
     return { startAtUtcMs: timestamp, isLive: false, period: null, clockMs: null };
   }
-  const match = /^(\d{2})\/(\d{2})\s+(\d{1,2}):(\d{2})(AM|PM)$/u.exec(normalized);
+  const match = /^(\d{2})\/(\d{2})\s*(\d{1,2}):(\d{2})(AM|PM)?$/u.exec(normalized);
   if (match === null) return null;
   const observed = new Date(options.observedAtMs);
   const month = Number(match[1]);
   const day = Number(match[2]);
-  let hour = Number(match[3]) % 12;
-  if (match[5] === "PM") hour += 12;
+  let hour = Number(match[3]);
+  const meridiem = match[5];
+  if (meridiem !== undefined) {
+    hour %= 12;
+    if (meridiem === "PM") hour += 12;
+  }
   const minute = Number(match[4]);
+  if (hour > 23 || minute > 59) return null;
   let year = observed.getUTCFullYear();
   let timestamp = Date.UTC(year, month - 1, day, hour, minute) - options.timezoneOffsetMinutes * 60_000;
   if (timestamp < options.observedAtMs - 180 * 86_400_000) {

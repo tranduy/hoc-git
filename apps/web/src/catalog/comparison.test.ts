@@ -363,9 +363,29 @@ describe("catalog comparison", () => {
     const result = buildComparisonEvents([im, saba]);
 
     expect(result).toHaveLength(1);
-    expect(result[0]?.providers).toEqual(["IM", "SABA"]);
+    expect(result[0]?.providers).toEqual(["SABA", "IM"]);
     expect(result[0]?.rows).toHaveLength(1);
-    expect(result[0]?.event.participantA).toBe("Movistar KOI Fénix");
+    expect(result[0]?.event.participantA).toBe("Los Heretics");
+  });
+
+  it("keeps the fixed provider order and highest-priority event labels when catalog arrival order changes", () => {
+    const saba = handicapCatalog("SABA", "saba-priority", "-0.5", ["0.82", "-0.90"]);
+    const sbobetBase = handicapCatalog("SBOBET", "sbobet-priority", "0.5", ["0.78", "-0.86"]);
+    const sbobet = { ...sbobetBase, events: [{ ...sbobetBase.events[0]!,
+      competition: "SB localized league", participantA: "Molde", participantB: "Kristiansund BK" }] };
+
+    const forward = buildComparisonEvents([saba, sbobet]);
+    const reversed = buildComparisonEvents([sbobet, saba]);
+
+    for (const result of [forward, reversed]) {
+      expect(result).toHaveLength(1);
+      expect(result[0]?.providers).toEqual(["SABA", "SBOBET"]);
+      expect(result[0]?.catalogs.map((source) => source.provider)).toEqual(["SABA", "SBOBET"]);
+      expect(result[0]?.event.competition).toBe("Eliteserien");
+      expect(result[0]?.event.participantA).toBe("Kristiansund BK");
+      expect(result[0]?.event.participantB).toBe("Molde");
+      expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SABA", "SBOBET"]);
+    }
   });
 
   it("rejects LoL series-winner rows whose outcome domain is not TEAM_A and TEAM_B", () => {

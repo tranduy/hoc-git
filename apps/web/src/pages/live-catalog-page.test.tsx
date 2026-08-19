@@ -143,8 +143,8 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => [source("SABA"), source("SBOBET")] }}
       catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
 
-    expect(await screen.findByText("10.00%", {}, { timeout: 1_000 })).toBeTruthy();
-    const compactCard = screen.getByRole("button", { name: "Compare Alpha vs Beta" });
+    const compactCard = await screen.findByRole("button", { name: "Compare Alpha vs Beta" }, { timeout: 1_000 });
+    expect(within(compactCard).getByText("ROI 10.00%")).toBeTruthy();
     expect(within(compactCard).getByText(/Estimated balanced profit/u)).toBeTruthy();
     expect(within(compactCard).queryByText(/exact two-outcome ticket/u)).toBeNull();
     expect(within(compactCard).queryByText(/#SABA ↔ #SBOBET/u)).toBeNull();
@@ -170,9 +170,12 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => [source("SABA"), source("SBOBET")] }}
       catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
 
-    expect(await screen.findByText("10.00%")).toBeTruthy();
-    expect(screen.getByText("Estimated balanced profit 20,000 VND")).toBeTruthy();
-    const summaryCard = screen.getByRole("button", { name: "Compare Alpha vs Beta" });
+    const summaryCard = await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
+    const summaryRoi = within(summaryCard).getByText("ROI 10.00%");
+    expect(within(summaryCard).getAllByText("ROI 10.00%")).toHaveLength(1);
+    expect(summaryRoi.classList.contains("event-edge-summary__roi")).toBe(true);
+    expect(summaryRoi.classList.contains("roi-badge--lg")).toBe(true);
+    expect(within(summaryCard).getByText("Estimated balanced profit 20,000 VND")).toBeTruthy();
     expect(summaryCard.classList.contains("catalog-event--roi-positive")).toBe(false);
     expect(within(summaryCard).getByTestId("provider-brand-SABA")).toBeTruthy();
     expect(within(summaryCard).getByTestId("provider-brand-SBOBET")).toBeTruthy();
@@ -199,8 +202,9 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => [source("SABA"), source("SBOBET")] }}
       catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
 
-    expect(await screen.findByText("-10.00%")).toBeTruthy();
-    const card = screen.getByRole("button", { name: "Compare Alpha vs Beta" });
+    const card = await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
+    const roi = within(card).getByText("ROI -10.00%");
+    expect(roi.classList.contains("roi-badge--lg")).toBe(true);
     expect(card.classList.contains("catalog-event--roi-negative")).toBe(true);
     expect(card.querySelector(".event-edge-summary")?.classList.contains("event-edge-summary--roi-negative")).toBe(true);
   });
@@ -231,8 +235,8 @@ describe("LiveCatalogPage", () => {
 
     const cards = await screen.findAllByRole("button", { name: /Compare Alpha vs Beta/u });
     expect(cards).toHaveLength(2);
-    expect(within(cards[0]!).getByText("50.00%")).toBeTruthy();
-    expect(within(cards[1]!).getByText("10.00%")).toBeTruthy();
+    expect(within(cards[0]!).getByText("ROI 50.00%")).toBeTruthy();
+    expect(within(cards[1]!).getByText("ROI 10.00%")).toBeTruthy();
 
     fireEvent.click(cards[1]!);
     expect(new URLSearchParams(window.location.search).get("ticket")).not.toBeNull();
@@ -375,8 +379,8 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async (id) => id.includes("SABA") ? never
         : providerCatalog(id.includes("APSPORT") ? "APSPORT" : "SBOBET") }} />);
 
-    expect(await screen.findByText("10.00%", {}, { timeout: 1_000 })).toBeTruthy();
-    const compactCard = screen.getByRole("button", { name: "Compare Alpha vs Beta" });
+    const compactCard = await screen.findByRole("button", { name: "Compare Alpha vs Beta" }, { timeout: 1_000 });
+    expect(within(compactCard).getByText("ROI 10.00%")).toBeTruthy();
     expect(within(compactCard).getByTestId("provider-brand-APSPORT")).toBeTruthy();
     expect(within(compactCard).getByTestId("provider-brand-SBOBET")).toBeTruthy();
   });
@@ -500,7 +504,7 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByLabelText("Leg #SBOBET HOME at 2.2")).toBeNull();
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Compare Alpha vs Beta" }));
-    expect(screen.getByText("Provider preflight required")).toBeTruthy();
+    expect(screen.getByText("Chưa kiểm tra lại vé trực tiếp tại sàn")).toBeTruthy();
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
@@ -713,6 +717,91 @@ describe("LiveCatalogPage", () => {
 
     expect(fastReads).toBeGreaterThan(1);
     expect(screen.getByText("No exact two-book comparison is currently available")).toBeTruthy();
+  });
+
+  it("does not let an older overlapping refresh erase a newer exact pair", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const sources: readonly CatalogSourceStatus[] = [
+      { id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+        sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null },
+      { id: "catalog-source:SBOBET:FOOTBALL", alias: "SBOBET", provider: "SBOBET", category: "FOOTBALL",
+        sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null }
+    ];
+    const counts = new Map<string, number>();
+    let releaseSlowRefresh: ((value: LiveCatalogResponse) => void) | undefined;
+    const slowRefresh = new Promise<LiveCatalogResponse>((resolve) => { releaseSlowRefresh = resolve; });
+    const providerCatalog = (source: CatalogSourceStatus, observedAtMs: number,
+      empty = false): LiveCatalogResponse => {
+      const providerEventId = `${source.provider}-event`;
+      const providerMarketId = `${source.provider}-market`;
+      return { ...catalog, accountId: source.id, provider: source.provider, observedAtMs,
+        events: empty ? [] : [{ ...event, provider: source.provider, providerEventId }],
+        markets: empty ? [] : [{ ...market, provider: source.provider, providerEventId, providerMarketId }],
+        quotes: empty ? [] : quotes.map((quote) => ({ ...quote, provider: source.provider, providerEventId,
+          providerMarketId, providerSelectionId: `${source.provider}-${quote.selection}`,
+          rawOdds: source.provider === "SABA"
+            ? (quote.selection === "HOME" ? "2.2" : "1.7")
+            : (quote.selection === "HOME" ? "1.7" : "2.2") })) };
+    };
+    const read = vi.fn(async (id: string): Promise<LiveCatalogResponse> => {
+      const source = sources.find((candidate) => candidate.id === id)!;
+      const count = (counts.get(id) ?? 0) + 1;
+      counts.set(id, count);
+      if (count === 1) return providerCatalog(source, 100);
+      if (source.provider === "SBOBET" && count === 2) return slowRefresh;
+      if (source.provider === "SABA" && count === 2) return providerCatalog(source, 200, true);
+      return providerCatalog(source, 300 + count);
+    });
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => sources }} catalogApi={{ read }} />);
+    expect(await screen.findByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+
+    await act(async () => {
+      releaseSlowRefresh?.(providerCatalog(sources[1]!, 200));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+  });
+
+  it("keeps the last exact pair visible when source status briefly becomes unavailable", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const activeSources: readonly CatalogSourceStatus[] = (["SABA", "SBOBET"] as const).map((provider) => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+    }));
+    let sourceReads = 0;
+    const providerCatalog = (source: CatalogSourceStatus): LiveCatalogResponse => {
+      const providerEventId = `${source.provider}-event`;
+      const providerMarketId = `${source.provider}-market`;
+      return { ...catalog, accountId: source.id, provider: source.provider,
+        events: [{ ...event, provider: source.provider, providerEventId }],
+        markets: [{ ...market, provider: source.provider, providerEventId, providerMarketId }],
+        quotes: quotes.map((quote) => ({ ...quote, provider: source.provider, providerEventId,
+          providerMarketId, providerSelectionId: `${source.provider}-${quote.selection}`,
+          rawOdds: source.provider === "SABA"
+            ? (quote.selection === "HOME" ? "2.2" : "1.7")
+            : (quote.selection === "HOME" ? "1.7" : "2.2") })) };
+    };
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => {
+        sourceReads += 1;
+        return sourceReads === 1 ? activeSources : activeSources.map((source) => ({ ...source,
+          sessionState: "ACTION_REQUIRED" as const, reason: "EXPIRED" as const }));
+      } }} catalogApi={{ read: async (id) => providerCatalog(activeSources.find((source) => source.id === id)!) }} />);
+    expect(await screen.findByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+
+    expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
   });
 
   it("keeps a just-verified catalog fresh across a transient poll failure", async () => {

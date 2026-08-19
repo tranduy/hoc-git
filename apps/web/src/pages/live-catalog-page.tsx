@@ -9,6 +9,7 @@ import { buildComparisonEvents, decimalOdds, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, observedTicketAsComparisonRow, selectionLabel, ticketMarketLabel,
   type ComparisonEvent, type ComparisonRow, type EventPhase } from "../catalog/comparison.js";
 import { formatDisplayDecimal } from "../catalog/display-format.js";
+import { PROVIDER_DISPLAY_ORDER, sortProviderItems } from "../catalog/provider-order.js";
 import { MatchWatchDetail, type ComparisonBook } from "../components/match-watch-detail.js";
 import { ProfitToastStack } from "../components/profit-toast-stack.js";
 import { ProviderBrand } from "../components/provider-brand.js";
@@ -32,7 +33,7 @@ import { ProviderTicketApi, type ProviderTicketApiLike, type ProviderTicketIdent
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
 const defaultProviderTicketApi = new ProviderTicketApi();
-const comparisonProviders: readonly ProviderId[] = ["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"];
+const comparisonProviders: readonly ProviderId[] = PROVIDER_DISPLAY_ORDER.filter((provider) => provider !== "FABET");
 const catalogRefreshIntervalMs = 250;
 const catalogFailureGraceMs = 5_000;
 const executableProfileMaxAgeMs = 30_000;
@@ -277,15 +278,16 @@ function SelectedTicketBalance({ ranked }: { readonly ranked: RankedEvent }) {
   const ticket = edge === null ? null : ranked.tickets.find((item) => item.key === edge.ticketKey);
   const plan = ticket?.plan ?? null;
   if (edge === null || ticket === undefined || plan === null) return null;
+  const orderedLegs = sortProviderItems(plan.legs, (leg) => leg.provider);
   return <section aria-label="Selected ticket balance" className="selected-ticket-balance">
     <header><div><small>Selected exact two-book ticket</small>
       <h2>{ranked.event.event.participantA} vs {ranked.event.event.participantB}</h2>
       <p>{edge.marketType} · {edge.line === null ? "No line" : `Line ${edge.line}`}</p></div>
       <div className={`selected-ticket-balance__roi ${edge.state === "VERIFIED_PROFIT" ? "selected-ticket-balance__roi--verified" : ""}`}>
-        <RoiBadge roiPercent={edge.roiPercent} />
+        <RoiBadge roiPercent={edge.roiPercent} size="lg" />
         <small>{edge.state === "OBSERVATION" ? "READ-ONLY ESTIMATE" : "PREFLIGHT VERIFIED"}</small>
       </div></header>
-    <div className="selected-ticket-balance__legs">{plan.legs.map((leg) => <article key={`${leg.provider}-${leg.selection}`}>
+    <div className="selected-ticket-balance__legs">{orderedLegs.map((leg) => <article key={`${leg.provider}-${leg.selection}`}>
       <ProviderBrand compact provider={leg.provider} /><strong>{selectionLabel(ranked.event.event, leg.selection)} @ {formatDisplayDecimal(leg.decimalOdds)}</strong>
       <span>Stake {money(leg.stake)}</span><small>If this outcome wins: {money(leg.profit)}</small>
     </article>)}</div>
@@ -351,7 +353,7 @@ function ComparisonTable({ item, baseStake, signals }: { readonly item: Comparis
           <small>#{leg.provider} · {selectionLabel(item.event, leg.selection)} @ {formatDisplayDecimal(leg.decimalOdds)}</small><b>{money(leg.stake)} {leg.role.toLowerCase()}</b>
         </span>)}<span>Total {money(plan.totalStake)}</span>{plan.legs.map((leg) => <span key={`${leg.selection}-profit`}>
           <small>Nếu {selectionLabel(item.event, leg.selection)} thắng</small><b>Lãi/lỗ {money(leg.profit)}</b></span>)}
-          <b>Worst {money(plan.worstCaseProfit)} · ROI {(Number(plan.roi) * 100).toFixed(2)}%</b></div>}</td></tr>;
+          <b>Worst {money(plan.worstCaseProfit)}</b><RoiBadge roiPercent={Number(plan.roi) * 100} size="sm" /></div>}</td></tr>;
     })}
   </tbody></table></div>;
 }
@@ -368,7 +370,7 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
   return <aside className="arbitrage-toast lag-alert-toast" aria-live="assertive">
     <header><strong>PRICE GAP DETECTED</strong><span>10-second alert</span></header>
     <h2>{visible.event.event.participantA} vs {visible.event.event.participantB}</h2>
-    <p>{visible.row.marketType}{visible.row.line === null ? "" : ` · Line ${visible.row.line}`} · ROI {(Number(visible.plan.roi) * 100).toFixed(2)}%</p>
+    <div className="lag-alert-toast__market">{visible.row.marketType}{visible.row.line === null ? "" : ` · Line ${visible.row.line}`} <RoiBadge roiPercent={Number(visible.plan.roi) * 100} size="sm" /></div>
     <p>Worst profit {money(visible.plan.worstCaseProfit)} · verify both legs before execution</p>
   </aside>;
 }
@@ -475,8 +477,21 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         if (value === null) throw lastError;
         return value;
       })().finally(() => catalogRefreshesInFlight.current.delete(id))));
-      const accepted = results.flatMap((result) => result.status === "fulfilled" &&
+      const completed = results.flatMap((result) => result.status === "fulfilled" &&
         result.value.category === expectedCategory ? [result.value] : []);
+      const previousByAccount = new Map(catalogsRef.current.map((catalog) => [catalog.accountId, catalog]));
+      // Provider reads overlap intentionally so a fast book is not blocked by a
+      // slow one. A slower, older batch must never roll an account back after a
+      // newer poll has already committed, otherwise exact pairs blink out and
+      // back in on every alternating response.
+      const accepted = completed.filter((candidate) => {
+        const previous = previousByAccount.get(candidate.accountId);
+        if (previous === undefined || candidate.observedAtMs > previous.observedAtMs) return true;
+        return candidate.observedAtMs === previous.observedAtMs &&
+          catalogRevision(candidate) === catalogRevision(previous);
+      });
+      const supersededIds = new Set(completed.filter((candidate) => !accepted.includes(candidate))
+        .map((candidate) => candidate.accountId));
       const failedIds = new Set(requestedIds.filter((_id, index) => {
         const result = results[index];
         return result?.status !== "fulfilled" || result.value.category !== expectedCategory;
@@ -489,7 +504,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         else retryAfterMs.current.delete(id);
       }
       const preserved = catalogsRef.current.filter((catalog) =>
-        (!requestedIds.includes(catalog.accountId) || failedIds.has(catalog.accountId)) &&
+        (!requestedIds.includes(catalog.accountId) || failedIds.has(catalog.accountId) ||
+          supersededIds.has(catalog.accountId)) &&
         !accepted.some((candidate) => candidate.accountId === catalog.accountId));
       const nextCatalogs = [...accepted, ...preserved];
       const nextStale = new Set(staleAccountIdsRef.current);
@@ -504,7 +520,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           nextStale.add(id);
         }
       }
-      const previousByAccount = new Map(catalogsRef.current.map((catalog) => [catalog.accountId, catalog]));
       const catalogsChanged = nextCatalogs.length !== catalogsRef.current.length || nextCatalogs.some((catalog) => {
         const previous = previousByAccount.get(catalog.accountId);
         return previous === undefined || catalogRevision(previous) !== catalogRevision(catalog);
@@ -647,7 +662,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs) &&
     matchesEventPhase(item.event, eventPhases)), [events, eventPhases, nowMs]);
   const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
-    selectedIds.has(source.id) && source.sessionState === "ACTIVE").map((source) => source.provider)),
+    selectedIds.has(source.id)).map((source) => source.provider)),
   [categorySources, selectedIds]);
   const rankedEvents = useMemo(() => {
     const sorted = sortRankedEvents(visibleEvents.filter((item) => item.rows.length > 0)
@@ -825,7 +840,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           <span>{item.observedRows.length} supported two-way ticket(s)</span>
           <b>{item.providers.map((provider) => `#${provider}`).join(" · ")}</b>
         </div> : <div className={`event-edge-summary event-edge-summary--roi-${edgeTone}`}>
-          <RoiBadge roiPercent={edge.roiPercent} showLabel={false} />
+          <RoiBadge className="event-edge-summary__roi" roiPercent={edge.roiPercent} size="lg" />
           <span>Estimated balanced profit {money(edge.worstCaseProfit)}</span>
           <span>{edge.marketType} · {edge.line === null ? "No line" : `Line ${edge.line}`}</span>
           <span>{edge.odds.map(formatSummaryOdds).join(" / ")}</span>

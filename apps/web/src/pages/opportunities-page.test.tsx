@@ -46,7 +46,7 @@ describe("OpportunitiesPage", () => {
     expect(within(card).getByLabelText("Effective decimal odds: 2.02")).toBeTruthy();
     expect(within(card).getAllByText("100.00")).toHaveLength(2);
     expect(within(card).getAllByLabelText("Outcome payout in USD: 100")).toHaveLength(2);
-    expect(within(card).getByText("1.00%")).toBeTruthy();
+    expect(within(card).getByText("ROI 1.00%")).toBeTruthy();
     expect(within(card).getByText("Worst-case profit (USD)")).toBeTruthy();
     expect(within(card).getByLabelText("Worst-case profit in USD: 1.00")).toBeTruthy();
     expect(within(card).getByLabelText("ROI: 0.01")).toBeTruthy();

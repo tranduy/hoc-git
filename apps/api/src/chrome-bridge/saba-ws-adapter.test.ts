@@ -100,4 +100,33 @@ describe("SabaWsCatalogAdapter", () => {
     expect(value.quotes).toHaveLength(2);
   });
 
+  it("renews a quiet socket catalog from the current SABA DOM after the socket bootstrap", () => {
+    const rows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(envelope(`42${JSON.stringify(["m", "b1", rows, 1])}`))).toHaveLength(1);
+
+    const dom: ChromeBridgeEnvelope = { ...envelope(""), sequence: 5,
+      observedAtMs: 1_786_449_550_000, transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: "saba:7:snapshot-after-ws", chunkIndex: 0, chunkCount: 1, records: [{
+          sportId: "1", leagueId: "1", leagueName: "League", matchId: "2", timeText: "1H0'",
+          teamNames: ["Home", "Away"], groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
+            { marketOddsId: "3", priceText: "0.92", status: null, greyedOut: null, lineText: "0.5" },
+            { marketOddsId: "3", priceText: "-0.98", status: null, greyedOut: null }
+          ] }]
+        }] }) } };
+
+    const refreshed = adapter.decode(dom);
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0]).toMatchObject({ observedAtMs: 1_786_449_550_000,
+      value: { observedAtMs: 1_786_449_550_000 } });
+  });
+
 });

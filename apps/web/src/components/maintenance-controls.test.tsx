@@ -19,23 +19,20 @@ describe("MaintenanceControls", () => {
     expect(bell.closest(".maintenance-top-actions")).toBeTruthy();
     expect(refresh.closest(".maintenance-top-actions")).toBeTruthy();
     expect(refresh.querySelector(".maintenance-restart-icon")).toBeTruthy();
-    expect(refresh.getAttribute("title")).toBe("Chỉ reset khi cần thiết");
+    expect(refresh.getAttribute("title")).toBe("Kiểm tra và khôi phục tất cả nguồn");
   });
 
-  it("uses an in-app confirmation modal instead of window.confirm", async () => {
-    const refreshAll = vi.fn(async () => status);
-    const browserConfirm = vi.spyOn(window, "confirm");
+  it("starts reset on the first click without a confirmation step", async () => {
+    let resolveRefresh!: (value: MaintenanceStatus) => void;
+    const refreshAll = vi.fn(() => new Promise<MaintenanceStatus>((resolve) => { resolveRefresh = resolve; }));
     render(<MaintenanceControls api={{ status: async () => status, refreshAll }} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Reset sàn" }));
 
-    expect(screen.getByRole("dialog", { name: /xác nhận làm mới tất cả sảnh/i })).toBeTruthy();
-    expect(refreshAll).not.toHaveBeenCalled();
-    expect(browserConfirm).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: /hủy/i }));
-    expect(screen.queryByRole("dialog", { name: /xác nhận làm mới tất cả sảnh/i })).toBeNull();
-    browserConfirm.mockRestore();
+    expect(refreshAll).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("status", { name: /đang làm mới tất cả sảnh/i })).toBeTruthy();
+    resolveRefresh(status);
   });
 
   it("covers the whole screen with progress until maintenance completes", async () => {
@@ -44,7 +41,6 @@ describe("MaintenanceControls", () => {
     render(<MaintenanceControls api={{ status: async () => status, refreshAll }} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Reset sàn" }));
-    fireEvent.click(screen.getByRole("button", { name: /xác nhận làm mới/i }));
 
     const overlay = screen.getByRole("status", { name: /đang làm mới tất cả sảnh/i });
     expect(overlay.classList.contains("maintenance-fullscreen-progress")).toBe(true);

@@ -18,7 +18,6 @@ function RestartIcon() {
 export function MaintenanceControls({ api = defaultApi }: { readonly api?: MaintenanceApiLike }) {
   const [status, setStatus] = useState<MaintenanceStatus | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -47,15 +46,6 @@ export function MaintenanceControls({ api = defaultApi }: { readonly api?: Maint
   }, [notificationsOpen]);
 
   useEffect(() => {
-    if (!confirmationOpen) return;
-    const closeOnEscape = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") setConfirmationOpen(false);
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [confirmationOpen]);
-
-  useEffect(() => {
     if (!running) { setProgress(0); return; }
     setProgress(5);
     const timer = window.setInterval(() => setProgress((value) => Math.min(90, value + (value < 50 ? 5 : 2))), 450);
@@ -63,7 +53,6 @@ export function MaintenanceControls({ api = defaultApi }: { readonly api?: Maint
   }, [running]);
 
   const run = async (): Promise<void> => {
-    setConfirmationOpen(false);
     setStarting(true);
     try { setStatus(await api.refreshAll()); setError(null); }
     catch { setError("Không thể bắt đầu làm mới các sảnh"); }
@@ -74,7 +63,7 @@ export function MaintenanceControls({ api = defaultApi }: { readonly api?: Maint
   return <>
     <div className="maintenance-top-actions" ref={notificationLayer}>
       <button aria-busy={running} aria-label="Reset sàn" className="maintenance-restart-button"
-        disabled={running} onClick={() => setConfirmationOpen(true)} title="Chỉ reset khi cần thiết" type="button">
+        disabled={running} onClick={() => void run()} title="Kiểm tra và khôi phục tất cả nguồn" type="button">
         <RestartIcon /><span>{running ? "Đang reset…" : "Reset sàn"}</span>
       </button>
       <button aria-expanded={notificationsOpen} aria-label={`Thông báo hệ thống (${notifications.length})`}
@@ -90,20 +79,6 @@ export function MaintenanceControls({ api = defaultApi }: { readonly api?: Maint
         {error !== null && <p role="alert">{error}</p>}
       </aside>}
     </div>
-
-    {confirmationOpen && <div className="maintenance-modal-backdrop" onMouseDown={(event) => {
-      if (event.currentTarget === event.target) setConfirmationOpen(false);
-    }}>
-      <section aria-labelledby="maintenance-confirm-title" aria-modal="true" className="maintenance-confirm-modal" role="dialog">
-        <span className="maintenance-confirm-icon"><RestartIcon /></span>
-        <h2 id="maintenance-confirm-title">Xác nhận làm mới tất cả sảnh</h2>
-        <p>Hệ thống sẽ làm mới session và khởi động lại toàn bộ reader. Node server vẫn tiếp tục chạy.</p>
-        <div className="maintenance-confirm-actions">
-          <button onClick={() => setConfirmationOpen(false)} type="button">Hủy</button>
-          <button className="primary" onClick={() => void run()} type="button">Xác nhận làm mới</button>
-        </div>
-      </section>
-    </div>}
 
     {running && <div aria-label="Đang làm mới tất cả sảnh" aria-live="assertive"
       className="maintenance-fullscreen-progress" role="status">

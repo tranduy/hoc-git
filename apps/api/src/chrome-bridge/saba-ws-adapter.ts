@@ -22,7 +22,6 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #decoders = new Map<string, SabaPushDecoder>();
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #parts = new Map<string, NormalizedCatalogPart>();
-  readonly #wsSources = new Set<string>();
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "SABA" || envelope.payload.encoding !== "UTF8") return false;
@@ -35,9 +34,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
     if (envelope.transport === "DOM_SNAPSHOT") {
-      // The DOM is only a bootstrap fallback. Once the authenticated socket is
-      // available it must not overwrite the union of its parallel channels.
-      if (this.#wsSources.has(envelope.sourceId)) return [];
+      // Keep accepting the current visible DOM after the socket bootstrap. A
+      // quiet SABA socket may not publish another catalog frame for minutes;
+      // dropping these snapshots made an otherwise healthy catalog expire.
+      // The DOM remains a separate partition, so hidden socket-only markets
+      // stay in the union while overlapping visible prices are refreshed.
       const records = decodePublicDomRecords(this.#assembler, envelope);
       if (records === null) return [];
       const normalized = normalizeObservedFootballCatalog("SABA", records, {
@@ -61,8 +62,6 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         receivedMonotonicMs: envelope.receivedMonotonicMs,
         sequence: envelope.sequence
       });
-      this.#wsSources.add(envelope.sourceId);
-      this.#parts.delete(`${envelope.sourceId}|DOM`);
       return this.#update(envelope, `WS:${frame.bridgeId}`, normalized);
     } catch {
       return [];

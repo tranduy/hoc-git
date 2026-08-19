@@ -5,6 +5,7 @@ interface CatalogSourceStatus {
 }
 
 const BRIDGE_SOURCE = /^catalog-source:(CMD|IM|SABA|SBOBET|APSPORT|BTI):FOOTBALL$/u;
+const REQUIRED_BRIDGE_PROVIDERS = ["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"] as const;
 
 export async function refreshCatalogSources(options: {
   readonly legacyRefresh: () => Promise<void>;
@@ -21,10 +22,26 @@ export async function refreshCatalogSources(options: {
   }
   const now = options.now ?? Date.now;
   const freshAfterMs = now();
-  // A manual refresh is an explicit credential rotation. Never hide an auth
-  // or launch-capture failure and then fall back to an old one-time URL.
-  await options.prepareSources?.();
-  if (await options.requestBridgeSnapshots(freshAfterMs) === 0) {
+  // Credential rotation is preferred, but the monitor is read-only and an
+  // already attached provider tab can still be healthy while the Fabet root
+  // domain is blocked. Always ask those tabs for a new snapshot; only surface
+  // the preparation error when the attached readers cannot actually recover.
+  let preparationError: unknown = null;
+  try {
+    await options.prepareSources?.();
+  } catch (error) {
+    preparationError = error;
+  }
+  let requestedSnapshots: number | null = null;
+  try {
+    requestedSnapshots = await options.requestBridgeSnapshots(freshAfterMs);
+  } catch (error) {
+    // A reset command that could not acquire or deliver every launch is a
+    // failed reset even if an attached tab happens to publish concurrently.
+    throw error;
+  }
+  if (requestedSnapshots === 0) {
+    if (preparationError !== null) throw preparationError;
     throw new Error("CHROME_BRIDGE_NO_ATTACHED_SOURCE");
   }
 
@@ -34,12 +51,16 @@ export async function refreshCatalogSources(options: {
   let unavailable: string[] = [];
   do {
     const current = (await options.statuses()).filter((source) => BRIDGE_SOURCE.test(source.id));
-    unavailable = current.filter((source) => source.sessionState !== "ACTIVE" ||
-      source.acquiredAtMs === null || source.acquiredAtMs === undefined || source.acquiredAtMs < freshAfterMs)
-      .map((source) => source.id.split(":")[1] ?? source.id);
-    if (current.length > 0 && unavailable.length === 0) return;
+    const byProvider = new Map(current.map((source) => [source.id.split(":")[1], source]));
+    unavailable = REQUIRED_BRIDGE_PROVIDERS.filter((provider) => {
+      const source = byProvider.get(provider);
+      return source === undefined || source.sessionState !== "ACTIVE" ||
+        source.acquiredAtMs === null || source.acquiredAtMs === undefined || source.acquiredAtMs < freshAfterMs;
+    });
+    if (unavailable.length === 0) return;
     if (now() >= deadline) break;
     await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - now()))));
   } while (true);
+  if (preparationError !== null) throw preparationError;
   throw new Error(`CHROME_BRIDGE_REFRESH_INCOMPLETE:${unavailable.join(",") || "NO_CATALOG"}`);
 }

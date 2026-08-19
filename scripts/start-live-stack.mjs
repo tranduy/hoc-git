@@ -39,6 +39,12 @@ await cleanupOrphanedAutomationBrowsers();
 const localToolRoot = resolve(process.env.LOCALAPPDATA ?? repositoryRoot, "tool-chenh");
 const retention = await enforceToolResourceRetention({ repositoryRoot, localToolRoot });
 if (retention.removedFiles > 0) process.stdout.write(`[live-stack] resource cleanup removed ${retention.removedFiles} item(s), reclaimed ${Math.round(retention.reclaimedBytes / 1024 / 1024)} MB.\n`);
+const retentionTimer = setInterval(() => {
+  void enforceToolResourceRetention({ repositoryRoot, localToolRoot }).catch(() => {
+    // Retention is best-effort and must never interrupt live ingestion.
+  });
+}, 15 * 60 * 1_000);
+retentionTimer.unref();
 
 for (const entry of [apiEntry, viteEntry]) {
   if (!existsSync(entry)) throw new Error(`Missing built entrypoint: ${entry}`);
@@ -71,6 +77,7 @@ let stopping = false;
 async function shutdown(exitCode) {
   if (stopping) return;
   stopping = true;
+  clearInterval(retentionTimer);
   await stopManagedChildren(children);
   await removeStackState(statePath);
   process.exitCode = exitCode;

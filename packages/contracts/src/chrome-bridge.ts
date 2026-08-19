@@ -120,6 +120,19 @@ const NavigateSourceMessageSchema = z.strictObject({
   url: FreshLaunchUrlSchema
 });
 
+const EnsureSourceMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("ENSURE_SOURCE"),
+  lobby: ChromeLobbyIdSchema,
+  url: FreshLaunchUrlSchema
+});
+
+const RestoreSourceMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("RESTORE_SOURCE"),
+  lobby: ChromeLobbyIdSchema
+});
+
 const OpaqueProviderIdSchema = z.string().trim().min(1).max(512);
 
 const FocusSelectionMessageSchema = z.strictObject({
@@ -170,6 +183,8 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
   SnapshotRequestMessageSchema,
   ReloadSourceMessageSchema,
   NavigateSourceMessageSchema,
+  EnsureSourceMessageSchema,
+  RestoreSourceMessageSchema,
   FocusSelectionMessageSchema,
   RejectMessageSchema,
   SourceStateMessageSchema

@@ -21,6 +21,29 @@ export interface WarpCli {
   disconnect(): Promise<void>;
 }
 
+export async function ensureWarpTunnelConnected(
+  cli: WarpCli,
+  options: { readonly pollMs?: number; readonly timeoutMs?: number } = {},
+): Promise<void> {
+  const pollMs = options.pollMs ?? 250;
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const initial = await cli.status();
+  if (initial.connected && initial.mode === "warp") return;
+  if (initial.connected) await cli.disconnect();
+  if (initial.mode !== "warp") await cli.setMode("warp");
+  await cli.connect();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const status = await cli.status();
+    if (status.connected && status.mode === "warp") return;
+    if (Date.now() >= deadline) throw new Error("WARP_TUNNEL_UNAVAILABLE");
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, pollMs);
+      timer.unref?.();
+    });
+  }
+}
+
 interface PersistentLease {
   readonly version: 1;
   readonly ownerPid: number;

@@ -227,7 +227,8 @@ describe("MatchWatchDetail", () => {
     expect(screen.getByRole("alert").textContent).toMatch(/SABA.*HOME.*150,000 VND/u);
     expect(screen.getByRole("alert").textContent).toMatch(/SBOBET.*AWAY.*150,000 VND/u);
     expect(screen.getByRole("alert").textContent).toMatch(/Worst-case profit 30,000 VND.*ROI 10.00%/u);
-    expect(screen.getByLabelText("Gross preflight FT_AH line -0.5").textContent).toMatch(/150,000 VND base.*150,000 VND hedge/u);
+    expect(screen.getByLabelText("Gross preflight FT_AH line -0.5").textContent)
+      .toMatch(/#SABA.*150,000 VND hedge.*#SBOBET.*150,000 VND base/u);
 
     act(() => { vi.advanceTimersByTime(10_000); });
     expect(screen.queryByRole("alert")).toBeNull();

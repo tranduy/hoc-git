@@ -49,6 +49,18 @@ describe("RankedTicketTable", () => {
   const stakePolicy = { currency: "VND", baseStake: "100000", minStake: "30000",
     maxStake: "1000000", stakeStep: "1000", balance: "1000000" } as const;
 
+  it("renders providers and stake legs in the canonical order even when inputs arrive reversed", () => {
+    const reversed = ticket(1);
+    const reversedTicket = { ...reversed, plan: { ...reversed.plan!, legs: [...reversed.plan!.legs].reverse() } };
+    render(<RankedTicketTable event={event} providers={["IM", "SABA"]} tickets={[reversedTicket]} />);
+
+    const headers = screen.getAllByRole("columnheader").map((header) => header.getAttribute("aria-label"))
+      .filter((label): label is string => label !== null);
+    expect(headers.slice(0, 2)).toEqual(["SABA", "IM"]);
+    const stakes = screen.getAllByRole("spinbutton").map((input) => input.getAttribute("aria-label"));
+    expect(stakes).toEqual(["Stake SABA Nongshim Academy", "Stake IM Dplus Challengers"]);
+  });
+
   it("shows complementary Asian handicap signs separately from negative Malay prices", () => {
     const footballEvent: ProviderEvent = { provider: "CMD", category: "FOOTBALL", providerEventId: "city-arsenal",
       competition: "Premier League", seasonStage: null, startAtUtcMs: 10_000,
@@ -87,7 +99,7 @@ describe("RankedTicketTable", () => {
     expect(within(ticketRow).getAllByText("-0.65 MALAY")).toHaveLength(2);
   });
 
-  it("labels an exact full-time total clearly", () => {
+  it("copies the two team names instead of the total selections", () => {
     const base = ticket(1);
     const totalCells = base.row.cells.map((sourceCell) => ({ ...sourceCell,
       market: { ...sourceCell.market, category: "FOOTBALL" as const, marketType: "FT_TOTAL" as const,
@@ -107,9 +119,19 @@ describe("RankedTicketTable", () => {
       eventScope: "REGULATION", bestOf: null, isLive: false, rematchCandidate: false, fixtureDiscriminator: null,
       isVirtual: false, sportVariant: "FOOTBALL", liveState: null };
 
-    render(<RankedTicketTable event={footballEvent} providers={["SABA", "IM"]} tickets={[total]} />);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(<RankedTicketTable compact event={footballEvent} providers={["SABA", "IM"]} tickets={[total]} />);
 
     expect(screen.getByText("T\u00e0i/X\u1ec9u to\u00e0n tr\u1eadn")).toBeTruthy();
+    const first = screen.getByRole("button", { name: "Copy Alpha" });
+    const second = screen.getByRole("button", { name: "Copy Beta" });
+    expect(screen.queryByRole("button", { name: "Copy T\u00e0i" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy X\u1ec9u" })).toBeNull();
+    fireEvent.click(first);
+    fireEvent.click(second);
+    expect(writeText).toHaveBeenNthCalledWith(1, "Alpha");
+    expect(writeText).toHaveBeenNthCalledWith(2, "Beta");
   });
 
   it("shows at most five horizontal exact tickets with named outcomes, provider prices, stakes and profit", () => {
@@ -135,7 +157,7 @@ describe("RankedTicketTable", () => {
 
     expect(screen.getByLabelText("Ticket series-1").className).toContain("ranked-ticket-row--profitable");
     expect(screen.getByLabelText("Ticket series-2").className).toContain("ranked-ticket-row--neutral");
-    expect(screen.getByText("Provider preflight required")).toBeTruthy();
+    expect(screen.getByText("Chưa kiểm tra lại vé trực tiếp tại sàn")).toBeTruthy();
   });
 
   it("labels every data cell so the selected-match panel can stack without horizontal scrolling", () => {

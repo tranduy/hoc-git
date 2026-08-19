@@ -5,6 +5,7 @@ import { buildObservedFixedBaseStakeEstimate, type FixedBaseStakePlan,
   type FixedBaseStakePolicy } from "./fixed-base-stake.js";
 import type { ObservedPriceMovement } from "./price-movement-tracker.js";
 import type { VerifiedTicketEvidence } from "./ticket-preflight-coordinator.js";
+import { sortProviders } from "../catalog/provider-order.js";
 
 export type RankedTicketState = "VERIFIED_PROFIT" | "VERIFIED_NO_PROFIT" | "OBSERVATION";
 
@@ -43,7 +44,7 @@ export interface EventEdgeSummary {
 
 export function ticketEdgeSummary(ticket: RankedTicket): EventEdgeSummary | null {
   if (ticket.plan === null) return null;
-  const providers = [...new Set(ticket.plan.legs.map((leg) => leg.provider))].sort();
+  const providers = sortProviders([...new Set(ticket.plan.legs.map((leg) => leg.provider))]);
   if (providers.length !== 2) return null;
   return {
     ticketKey: ticket.key,

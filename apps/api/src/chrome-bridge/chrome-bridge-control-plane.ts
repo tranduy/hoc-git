@@ -1,4 +1,4 @@
-import type { ChromeBridgeControlMessage } from "@tool-chenh/contracts";
+import type { ChromeBridgeControlMessage, ChromeLobbyId } from "@tool-chenh/contracts";
 
 export interface BridgeControlSocket {
   readonly readyState: number;
@@ -7,12 +7,18 @@ export interface BridgeControlSocket {
 
 export class ChromeBridgeControlPlane {
   readonly #socketsBySource = new Map<string, BridgeControlSocket>();
+  readonly #installationSockets = new Set<BridgeControlSocket>();
+
+  attachInstallation(socket: BridgeControlSocket): void {
+    this.#installationSockets.add(socket);
+  }
 
   attach(sourceId: string, socket: BridgeControlSocket): void {
     this.#socketsBySource.set(sourceId, socket);
   }
 
   detach(socket: BridgeControlSocket): void {
+    this.#installationSockets.delete(socket);
     for (const [sourceId, attached] of this.#socketsBySource) {
       if (attached === socket) this.#socketsBySource.delete(sourceId);
     }
@@ -49,6 +55,26 @@ export class ChromeBridgeControlPlane {
       requested += 1;
     }
     return requested;
+  }
+
+  ensureLobby(lobby: ChromeLobbyId, url: string): number {
+    for (const socket of this.#installationSockets) {
+      if (socket.readyState !== 1) continue;
+      const control: ChromeBridgeControlMessage = { version: 1, kind: "ENSURE_SOURCE", lobby, url };
+      socket.send(JSON.stringify(control));
+      return 1;
+    }
+    return 0;
+  }
+
+  restoreLobby(lobby: ChromeLobbyId): number {
+    for (const socket of this.#installationSockets) {
+      if (socket.readyState !== 1) continue;
+      const control: ChromeBridgeControlMessage = { version: 1, kind: "RESTORE_SOURCE", lobby };
+      socket.send(JSON.stringify(control));
+      return 1;
+    }
+    return 0;
   }
 
   #broadcast(kind: "REQUEST_SNAPSHOT" | "RELOAD_SOURCE"): number {

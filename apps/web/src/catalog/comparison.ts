@@ -1,5 +1,6 @@
 import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
+import { compareProviders, sortProviderItems } from "./provider-order.js";
 
 export interface ComparisonCell {
   readonly provider: ProviderId;
@@ -407,7 +408,7 @@ export function observedTicketAsComparisonRow(ticket: ObservedTicketRow): Compar
       quote.status === "OPEN" && cell.market.status === "OPEN").flatMap((quote) => {
       const odds = decimalOdds(quote);
       return odds === null ? [] : [{ provider: cell.provider, odds }];
-    })).sort((left, right) => right.odds - left.odds || left.provider.localeCompare(right.provider))[0];
+    })).sort((left, right) => right.odds - left.odds || compareProviders(left.provider, right.provider))[0];
     if (best !== undefined) bestBySelection[selection] = best.provider;
   }
   const bestOdds = ticket.outcomeDomain.map((selection) => {
@@ -424,11 +425,13 @@ export function observedTicketAsComparisonRow(ticket: ObservedTicketRow): Compar
 }
 
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]): readonly ComparisonEvent[] {
+  const orderedCatalogs = sortProviderItems(catalogs, (catalog) => catalog.provider,
+    (left, right) => left.accountId.localeCompare(right.accountId));
   const catalogIndexes = new Map<LiveCatalogResponse, {
     readonly marketsByEvent: ReadonlyMap<string, readonly ProviderMarket[]>;
     readonly quotesByMarket: ReadonlyMap<string, readonly ProviderQuote[]>;
   }>();
-  for (const catalog of catalogs) {
+  for (const catalog of orderedCatalogs) {
     const marketsByEvent = new Map<string, ProviderMarket[]>();
     for (const market of catalog.markets) {
       const values = marketsByEvent.get(market.providerEventId) ?? [];
@@ -444,7 +447,7 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
     catalogIndexes.set(catalog, { marketsByEvent, quotesByMarket });
   }
   const identityCounts = new Map<string, number>();
-  for (const catalog of catalogs) for (const event of catalog.events) {
+  for (const catalog of orderedCatalogs) for (const event of catalog.events) {
     const key = [catalog.provider, event.category, event.isLive ? "LIVE" : String(event.startAtUtcMs),
       unorderedParticipantKey(event)].join("|");
     identityCounts.set(key, (identityCounts.get(key) ?? 0) + 1);
@@ -458,7 +461,7 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
     ids: Partial<Record<ProviderId, string>>; orientations: Partial<Record<ProviderId, EventOrientation>> };
   const groups: MutableEventGroup[] = [];
   const groupsByParticipants = new Map<string, MutableEventGroup[]>();
-  for (const catalog of catalogs) {
+  for (const catalog of orderedCatalogs) {
     for (const event of catalog.events) {
       let orientation: EventOrientation | null = null;
       const participantKey = [event.category, event.isLive ? "LIVE" : "PREMATCH",

@@ -23,6 +23,28 @@ class FakeSocket implements BridgeSocket {
 }
 
 describe("LocalBridge", () => {
+  it("waits for loopback health before constructing a WebSocket", () => {
+    const socket = new FakeSocket();
+    const factory = vi.fn(() => socket);
+    const scheduled: Array<() => void> = [];
+    let ready = false;
+    const bridge = new LocalBridge({
+      socketFactory: factory,
+      installationKey: "local-key",
+      readinessProbe: () => ready,
+      setTimer: (callback) => { scheduled.push(callback); return scheduled.length; },
+      clearTimer: () => undefined
+    });
+
+    bridge.connect();
+    expect(factory).not.toHaveBeenCalled();
+    expect(scheduled).toHaveLength(1);
+
+    ready = true;
+    scheduled[0]!();
+    expect(factory).toHaveBeenCalledOnce();
+  });
+
   it("uses one loopback socket and sends queued envelopes in sequence order", () => {
     const socket = new FakeSocket();
     const factory = vi.fn(() => socket);
@@ -136,6 +158,31 @@ describe("LocalBridge", () => {
 
     expect(onSourceNavigate).toHaveBeenCalledWith("chrome:SABA:7",
       "https://c0z0ob.bpd3a3fn.com/sports?token=opaque");
+  });
+
+  it("forwards an ensure-source command even when no provider tab is attached", () => {
+    const socket = new FakeSocket();
+    const onSourceEnsure = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceEnsure });
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "ENSURE_SOURCE", lobby: "CMD",
+      url: "https://cgnew.fts368.com/sports?opaque=1" }) });
+
+    expect(onSourceEnsure).toHaveBeenCalledWith("CMD", "https://cgnew.fts368.com/sports?opaque=1");
+  });
+
+  it("forwards a restore-source command for a closed provider tab", () => {
+    const socket = new FakeSocket();
+    const onSourceRestore = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceRestore });
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "RESTORE_SOURCE", lobby: "CMD" }) });
+
+    expect(onSourceRestore).toHaveBeenCalledWith("CMD");
   });
 
   it("forwards a strict read-only focus command without mutating queued data", () => {

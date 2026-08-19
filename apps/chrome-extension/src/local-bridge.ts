@@ -26,6 +26,7 @@ interface QueueEntry {
 
 export interface LocalBridgeOptions {
   readonly socketFactory: (url: string, protocols: string[]) => BridgeSocket;
+  readonly readinessProbe?: () => boolean | Promise<boolean>;
   readonly installationKey: string;
   readonly maxQueueBytes?: number;
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
@@ -34,12 +35,15 @@ export interface LocalBridgeOptions {
   readonly onSnapshotRequest?: (sourceId: string) => void | Promise<void>;
   readonly onSourceReload?: (sourceId: string) => void | Promise<void>;
   readonly onSourceNavigate?: (sourceId: string, url: string) => void | Promise<void>;
+  readonly onSourceEnsure?: (lobby: ChromeBridgeEnvelope["lobby"], url: string) => void | Promise<void>;
+  readonly onSourceRestore?: (lobby: ChromeBridgeEnvelope["lobby"]) => void | Promise<void>;
   readonly onFocusSelection?: (request: Omit<Extract<ChromeBridgeControlMessage,
     { readonly kind: "FOCUS_SELECTION" }>, "version" | "kind">) => void | Promise<void>;
 }
 
 export class LocalBridge {
   readonly #socketFactory: LocalBridgeOptions["socketFactory"];
+  readonly #readinessProbe: NonNullable<LocalBridgeOptions["readinessProbe"]>;
   readonly #installationKey: string;
   readonly #maxQueueBytes: number;
   readonly #setTimer: (callback: () => void, delayMs: number) => unknown;
@@ -48,6 +52,8 @@ export class LocalBridge {
   readonly #onSnapshotRequest: (sourceId: string) => void | Promise<void>;
   readonly #onSourceReload: (sourceId: string) => void | Promise<void>;
   readonly #onSourceNavigate: NonNullable<LocalBridgeOptions["onSourceNavigate"]>;
+  readonly #onSourceEnsure: NonNullable<LocalBridgeOptions["onSourceEnsure"]>;
+  readonly #onSourceRestore: NonNullable<LocalBridgeOptions["onSourceRestore"]>;
   readonly #onFocusSelection: NonNullable<LocalBridgeOptions["onFocusSelection"]>;
   readonly #queue: QueueEntry[] = [];
   #socket: BridgeSocket | null = null;
@@ -55,10 +61,13 @@ export class LocalBridge {
   #generation = 0;
   #reconnectAttempts = 0;
   #insertCounter = 0;
+  #probeInFlight = false;
+  #connectToken = 0;
 
   constructor(options: LocalBridgeOptions) {
     if (!options.installationKey.trim()) throw new Error("INSTALLATION_KEY_REQUIRED");
     this.#socketFactory = options.socketFactory;
+    this.#readinessProbe = options.readinessProbe ?? (() => true);
     this.#installationKey = options.installationKey;
     this.#maxQueueBytes = options.maxQueueBytes ?? 16 * 1024 * 1024;
     this.#setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
@@ -67,6 +76,8 @@ export class LocalBridge {
     this.#onSnapshotRequest = options.onSnapshotRequest ?? (() => undefined);
     this.#onSourceReload = options.onSourceReload ?? (() => undefined);
     this.#onSourceNavigate = options.onSourceNavigate ?? (() => undefined);
+    this.#onSourceEnsure = options.onSourceEnsure ?? (() => undefined);
+    this.#onSourceRestore = options.onSourceRestore ?? (() => undefined);
     this.#onFocusSelection = options.onFocusSelection ?? (() => undefined);
   }
 
@@ -109,11 +120,48 @@ export class LocalBridge {
 
   connect(): void {
     if (this.#socket && (this.#socket.readyState === 0 || this.#socket.readyState === 1)) return;
+    if (this.#probeInFlight) return;
     if (this.#timer !== null) {
       this.#clearTimer(this.#timer);
       this.#timer = null;
     }
-    const socket = this.#socketFactory(LOOPBACK_URL, ["tool-chenh.v1", this.#installationKey]);
+    const token = ++this.#connectToken;
+    let readiness: boolean | Promise<boolean>;
+    try {
+      readiness = this.#readinessProbe();
+    } catch {
+      this.#scheduleReconnect();
+      return;
+    }
+    if (typeof (readiness as Promise<boolean>)?.then === "function") {
+      this.#probeInFlight = true;
+      void Promise.resolve(readiness).then((ready) => {
+        if (token !== this.#connectToken) return;
+        this.#probeInFlight = false;
+        if (ready) this.#openSocket();
+        else this.#scheduleReconnect();
+      }).catch(() => {
+        if (token !== this.#connectToken) return;
+        this.#probeInFlight = false;
+        this.#scheduleReconnect();
+      });
+      return;
+    }
+    if (!readiness) {
+      this.#scheduleReconnect();
+      return;
+    }
+    this.#openSocket();
+  }
+
+  #openSocket(): void {
+    let socket: BridgeSocket;
+    try {
+      socket = this.#socketFactory(LOOPBACK_URL, ["tool-chenh.v1", this.#installationKey]);
+    } catch {
+      this.#scheduleReconnect();
+      return;
+    }
     this.#socket = socket;
     const generation = ++this.#generation;
     socket.onopen = () => {
@@ -128,15 +176,22 @@ export class LocalBridge {
     socket.onclose = () => {
       if (this.#socket !== socket) return;
       this.#socket = null;
-      const delayMs = Math.min(30_000, 500 * 2 ** this.#reconnectAttempts++);
-      this.#timer = this.#setTimer(() => {
-        this.#timer = null;
-        this.connect();
-      }, delayMs);
+      this.#scheduleReconnect();
     };
   }
 
+  #scheduleReconnect(): void {
+    if (this.#timer !== null) return;
+    const delayMs = Math.min(30_000, 500 * 2 ** this.#reconnectAttempts++);
+    this.#timer = this.#setTimer(() => {
+      this.#timer = null;
+      this.connect();
+    }, delayMs);
+  }
+
   close(): void {
+    this.#connectToken++;
+    this.#probeInFlight = false;
     if (this.#timer !== null) this.#clearTimer(this.#timer);
     this.#timer = null;
     const socket = this.#socket;
@@ -178,6 +233,16 @@ export class LocalBridge {
       if (parsed.data.kind === "NAVIGATE_SOURCE") {
         try { void Promise.resolve(this.#onSourceNavigate(parsed.data.sourceId, parsed.data.url)).catch(() => undefined); }
         catch { /* fresh launch recovery must not disrupt the bridge */ }
+        return;
+      }
+      if (parsed.data.kind === "ENSURE_SOURCE") {
+        try { void Promise.resolve(this.#onSourceEnsure(parsed.data.lobby, parsed.data.url)).catch(() => undefined); }
+        catch { /* source recovery must not disrupt the bridge */ }
+        return;
+      }
+      if (parsed.data.kind === "RESTORE_SOURCE") {
+        try { void Promise.resolve(this.#onSourceRestore(parsed.data.lobby)).catch(() => undefined); }
+        catch { /* closed-tab recovery must not disrupt the bridge */ }
         return;
       }
       if (parsed.data.kind === "FOCUS_SELECTION") {

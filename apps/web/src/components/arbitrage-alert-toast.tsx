@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { WatchArbitrageAlert } from "../watch/arbitrage-alert.js";
 import { formatDisplayDecimal } from "../catalog/display-format.js";
+import { RoiBadge } from "./roi-badge.js";
 
 function money(value: string, currency: string): string {
   return `${Number(value).toLocaleString("en-US")} ${currency}`;
@@ -39,7 +40,7 @@ export function ArbitrageAlertToast({
       <b>{leg.role}</b> · <b>#{leg.provider}</b> · {leg.selection} · odds {formatDisplayDecimal(leg.decimalOdds)} · stake {money(leg.stake, visibleAlert.currency)}
       <span> · Profit {money(leg.profit, visibleAlert.currency)}</span>
     </li>)}</ol>
-    <p><b>Total stake {money(visibleAlert.totalStake, visibleAlert.currency)}</b> · Worst-case profit {money(visibleAlert.worstCaseProfit, visibleAlert.currency)} · ROI {(Number(visibleAlert.roi) * 100).toFixed(2)}%</p>
+    <div className="arbitrage-toast__result"><b>Total stake {money(visibleAlert.totalStake, visibleAlert.currency)}</b> · Worst-case profit {money(visibleAlert.worstCaseProfit, visibleAlert.currency)} <RoiBadge roiPercent={Number(visibleAlert.roi) * 100} size="sm" /></div>
     <small>Provider preflight is required before placement.</small>
   </aside>;
 }

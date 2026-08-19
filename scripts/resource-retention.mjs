@@ -1,7 +1,14 @@
 import { readdir, rm, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
-const cacheNames = new Set(["cache", "code cache", "gpucache", "grshadercache", "shadercache"]);
+const disposableBrowserDataNames = new Set([
+  "browsermetrics",
+  "cache",
+  "code cache",
+  "gpucache",
+  "grshadercache",
+  "shadercache"
+]);
 const ephemeralProfileName = /^(?:chrome|chromium|playwright)[-_]|(?:^|[-_])(?:probe|profile)(?:[-_]|$)/iu;
 
 function within(root, candidate) {
@@ -34,13 +41,36 @@ async function pruneBrowserCaches(root, result) {
     if (!entry.isDirectory()) continue;
     const path = join(root, entry.name);
     if (!within(root, path)) continue;
-    if (cacheNames.has(entry.name.toLocaleLowerCase("en"))) {
-      try { await rm(path, { recursive: true, force: true }); result.removedFiles += 1; }
+    const normalizedName = entry.name.toLocaleLowerCase("en");
+    const disposable = disposableBrowserDataNames.has(normalizedName) ||
+      (normalizedName === "reports" && basename(root).toLocaleLowerCase("en") === "crashpad");
+    if (disposable) {
+      try {
+        const bytes = await directoryBytes(path);
+        await rm(path, { recursive: true, force: true });
+        result.removedFiles += 1;
+        result.reclaimedBytes += bytes;
+      }
       catch { /* a live profile may hold a cache lock; leave it for the next start */ }
       continue;
     }
     await pruneBrowserCaches(path, result);
   }
+}
+
+async function directoryBytes(root) {
+  let entries;
+  try { entries = await readdir(root, { withFileTypes: true }); } catch { return 0; }
+  let bytes = 0;
+  for (const entry of entries) {
+    const path = join(root, entry.name);
+    if (!within(root, path)) continue;
+    if (entry.isDirectory()) bytes += await directoryBytes(path);
+    else if (entry.isFile()) {
+      try { bytes += (await stat(path)).size; } catch { /* file changed during cleanup */ }
+    }
+  }
+  return bytes;
 }
 
 async function pruneEphemeralBrowserProfiles(runRoot, result) {
@@ -58,7 +88,8 @@ async function pruneEphemeralBrowserProfiles(runRoot, result) {
 export async function enforceToolResourceRetention({ repositoryRoot, localToolRoot, nowMs = Date.now(),
   maxLogBytes = 64 * 1024 * 1024, maxLogAgeMs = 3 * 24 * 60 * 60 * 1_000 }) {
   const result = { removedFiles: 0, reclaimedBytes: 0 };
-  for (const root of [join(repositoryRoot, ".run"), join(repositoryRoot, "artifacts"),
+  for (const root of [join(repositoryRoot, ".run"), join(repositoryRoot, ".auth", "run"),
+    join(repositoryRoot, "artifacts"),
     join(localToolRoot, "logs"), join(localToolRoot, "chrome-bridge-captures")]) {
     await pruneLogs(root, { nowMs, maxLogBytes, maxLogAgeMs }, result);
   }

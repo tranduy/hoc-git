@@ -86,6 +86,14 @@ describe("ChromeBridgeControlMessageSchema", () => {
       url: "http://c0z0ob.bpd3a3fn.com/sports" }).success).toBe(false);
     expect(schema.safeParse({ version: 1, kind: "NAVIGATE_SOURCE", sourceId: "chrome:SABA:7",
       url: "https://user:password@c0z0ob.bpd3a3fn.com/sports" }).success).toBe(false);
+    expect(schema.safeParse({ version: 1, kind: "ENSURE_SOURCE", lobby: "CMD",
+      url: "https://cgnew.fts368.com/sports?opaque=1" }).success).toBe(true);
+    expect(schema.safeParse({ version: 1, kind: "ENSURE_SOURCE", lobby: "CMD",
+      url: "http://cgnew.fts368.com/sports" }).success).toBe(false);
+    expect(schema.safeParse({ version: 1, kind: "ENSURE_SOURCE", lobby: "UNKNOWN",
+      url: "https://cgnew.fts368.com/sports" }).success).toBe(false);
+    expect(schema.safeParse({ version: 1, kind: "RESTORE_SOURCE", lobby: "CMD" }).success).toBe(true);
+    expect(schema.safeParse({ version: 1, kind: "RESTORE_SOURCE", lobby: "CMD", url: "secret" }).success).toBe(false);
     expect(schema.safeParse({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:IM:42",
       token: "super-secret" }).success).toBe(false);
   });

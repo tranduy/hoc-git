@@ -59,7 +59,7 @@ import type { ReceiptReader } from "../execution/receipt-reconciler.js";
 import { CatalogSourceRegistry, type SupportedCatalogPair } from "../catalog/catalog-source-registry.js";
 import { Tk88BrowserAutomation } from "./tk88-browser.js";
 import { ConfiguredProxyAuthEgress, DirectAuthEgress, type AuthEgress } from "./auth-egress.js";
-import { ProcessWarpCli, WarpSocksAuthEgress } from "./warp-socks-egress.js";
+import { ensureWarpTunnelConnected, ProcessWarpCli, WarpSocksAuthEgress } from "./warp-socks-egress.js";
 import { verifyRefreshedCatalogSources } from "./session-refresh.js";
 
 export interface CreateSessionServicesOptions {
@@ -195,6 +195,10 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     ...(options.warpCliPath === undefined ? {} : { warpCliPath: options.warpCliPath }),
     ...(options.warpProxyPort === undefined ? {} : { warpProxyPort: options.warpProxyPort }),
   });
+  const warpCliPath = options.warpCliPath ?? "C:\\Program Files\\Cloudflare\\Cloudflare WARP\\warp-cli.exe";
+  const maintenanceWarpCli = options.enableLocalWarpAuth === true && existsSync(warpCliPath)
+    ? new ProcessWarpCli({ executable: warpCliPath })
+    : null;
   const manager = new SessionManager({
     vault,
     validators: new SessionValidatorRegistry(options.validators ?? [
@@ -305,6 +309,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
       await manager.tick();
     },
     async renewAll(): Promise<void> {
+      if (maintenanceWarpCli !== null) await ensureWarpTunnelConnected(maintenanceWarpCli);
       await multiProviderCatalogReader.restartAll();
       const statuses = (await manager.listStatuses()).sessions;
       const operations = statuses.flatMap((status) => {

@@ -281,6 +281,20 @@ describe("normalizeCmdCatalog", () => {
     expect(result.diagnostics).toEqual([]);
   });
 
+  it("accepts the current CMD dated prematch row when DOM text joins date and 24-hour clock", () => {
+    const prematch = { ...record, timeText: "08/2007:30", groups: [record.groups[1]!] };
+    const result = normalizeCmdCatalog([prematch], {
+      observedAtMs: Date.UTC(2026, 7, 19, 2), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 1
+    });
+
+    expect(result.events[0]).toEqual(expect.objectContaining({
+      isLive: false,
+      startAtUtcMs: Date.UTC(2026, 7, 19, 23, 30)
+    }));
+    expect(result.diagnostics).toEqual([]);
+  });
+
   it("keeps valid markets when another market in the same event is invalid", () => {
     const mixed: CmdCatalogInputRecord = { ...structuredClone(record), groups: [
       {

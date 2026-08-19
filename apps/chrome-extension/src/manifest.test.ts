@@ -9,8 +9,9 @@ describe("extension manifest", () => {
       permissions?: string[];
       content_scripts?: Array<{ world?: string; js?: string[]; matches?: string[]; include_globs?: string[] }>;
     };
-    expect(manifest.version).toBe("0.2.11");
+    expect(manifest.version).toBe("0.2.18");
     expect(manifest.permissions).toContain("debugger");
+    expect(manifest.permissions).toContain("sessions");
     expect(manifest.content_scripts).toBeUndefined();
   });
 });

@@ -1,5 +1,7 @@
 :root { --bg: #101317; --panel: #192027; --panel-raised: #202a33; --text: #f4f7fb; --muted: #b6c0cb; --line: #44515f; --focus: #ffd166; --positive: #4ade80; --warning: #fbbf24; --blocked: #fb7185; --saba: #7dd3fc; --im: #c4b5fd; --space: 8px; color: var(--text); background: var(--bg); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-.roi-badge--high { color: var(--positive) !important; }.roi-badge--medium { color: var(--warning) !important; }.roi-badge--negative { color: var(--blocked) !important; }
+.roi-badge { --roi-color: var(--warning); display: inline-flex; width: fit-content; max-width: 100%; align-items: center; justify-content: center; border: 1px solid var(--roi-color); border-radius: 8px; color: #fff !important; background: color-mix(in srgb, var(--roi-color) 38%, #101820); box-shadow: inset 4px 0 0 var(--roi-color), 0 0 0 1px color-mix(in srgb, var(--roi-color) 35%, transparent), 0 3px 12px color-mix(in srgb, var(--roi-color) 28%, transparent); font-weight: 900; line-height: 1; letter-spacing: .01em; text-shadow: 0 1px 2px rgb(0 0 0 / 75%); white-space: nowrap; }
+.roi-badge--high { --roi-color: var(--positive); }.roi-badge--medium { --roi-color: var(--warning); }.roi-badge--negative { --roi-color: var(--blocked); }
+.roi-badge--sm { padding: 4px 7px; border-radius: 999px; font-size: .72rem; }.roi-badge--md { padding: 5px 9px; font-size: .9rem; }.roi-badge--lg { padding: 8px 12px; font-size: clamp(1.15rem, 1.8vw, 1.5rem); }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; background: var(--bg); }
 a, button, select { min-height: 44px; }
@@ -88,8 +90,6 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .watch-odds-ticket__header > div { display: grid; gap: 1px; min-width: 0; }
 .watch-odds-ticket__header small { color: var(--muted); font-size: .68rem; }
 .watch-odds-ticket__edge { justify-items: end; text-align: right; }
-.watch-odds-ticket__edge b { color: var(--warning); font-size: .82rem; }
-.watch-odds-ticket--profitable .watch-odds-ticket__edge b { color: var(--positive); }
 .watch-odds-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 6px; min-width: 0; }
 .watch-odds-provider { min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
 .watch-odds-provider > header { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-width: 0; margin-bottom: 5px; }
@@ -102,7 +102,8 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .watch-odds-ticket__plan { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line); font-size: .68rem; }
 .watch-odds-ticket__plan > div { display: flex; flex-wrap: wrap; gap: 5px 10px; min-width: 0; }
 .watch-odds-ticket__plan span { display: grid; gap: 1px; }
-.watch-odds-ticket__plan > strong { flex: 0 0 auto; color: var(--positive); text-align: right; }
+.watch-odds-ticket__result { display: flex !important; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 6px; text-align: right; }
+.watch-odds-ticket__result strong { color: var(--positive); }
 .ticket-row { background: rgb(19 28 36 / 55%); }
 .ticket-row--profitable { background: rgb(20 83 51 / 42%); outline: 2px solid var(--positive); outline-offset: -2px; }
 .ticket-row--profitable td, .ticket-row--profitable th { border-color: #39d981; }
@@ -152,6 +153,7 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .arbitrage-toast small {
   color: #ffd66b;
 }
+.arbitrage-toast__result, .lag-alert-toast__market { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
 .lag-monitor { display: grid; gap: calc(var(--space) * 2); margin-bottom: calc(var(--space) * 3); }
 .lag-monitor--waiting { padding: calc(var(--space) * 2.5); border: 1px dashed #3d7a59; border-radius: 10px; background: #101a16; }
@@ -251,12 +253,13 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .catalog-event--stable .catalog-event__identity h3 { margin: 3px 0 5px; font-size: 1rem; }
 .catalog-event--stable .provider-tags { display: flex; align-items: center; height: 30px; gap: 5px; overflow: hidden; white-space: nowrap; }
 .catalog-event--stable .catalog-event__stale { flex: none; padding: 2px 6px; border: 1px solid var(--warning); border-radius: 999px; color: var(--warning); font-size: .65rem; line-height: 1; }
-.catalog-event--stable .event-edge-summary { height: 90px; align-content: center; padding: 5px 9px; line-height: 1.1; }
+.catalog-event--stable .event-edge-summary { height: 90px; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto repeat(3, minmax(0, auto)); align-content: center; gap: 2px; padding: 4px 8px; line-height: 1.1; }
+.catalog-event--stable .event-edge-summary__roi { grid-column: 2; grid-row: 1; justify-self: end; padding: 6px 10px; font-size: 1.18rem; }
 .catalog-event--stable .event-edge-summary > strong { font-size: 1.4rem; line-height: 1.2; }
 .catalog-event--stable .event-edge-summary > span,
 .catalog-event--stable .event-edge-summary > b { font-size: .68rem; line-height: 1.2; }
 .catalog-event--stable .event-edge-summary > span,
-.catalog-event--stable .event-edge-summary > b { white-space: nowrap; }
+.catalog-event--stable .event-edge-summary > b { grid-column: 1 / -1; white-space: nowrap; }
 .catalog-event--stable .catalog-event-actions { align-content: center; gap: 4px; font-size: .75rem; }
 .catalog-event-list { gap: 8px; }
 .catalog-event__identity small { line-height: 1.25; }
@@ -340,7 +343,7 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .ticket-team-copy-icon { display: inline-grid; flex: 0 0 24px; width: 24px; height: 24px; min-height: 0; padding: 3px; place-items: center; border: 1px solid var(--line); border-radius: 4px; background: #0d171f; color: var(--muted); cursor: pointer; }
 .ticket-team-copy-icon:hover, .ticket-team-copy-icon:focus-visible { border-color: var(--focus); color: var(--focus); }
 .ticket-team-copy-icon svg { width: 15px; height: 15px; fill: currentColor; }
-.ranked-ticket-roi { width: fit-content; padding: 2px 6px; border: 1px solid currentColor; border-radius: 999px; color: var(--positive); font-size: .72rem; line-height: 1.2; }
+.ranked-ticket-roi { width: fit-content; }
 .ranked-ticket-stakes label { display: block; min-width: 0; }
 .ranked-ticket-stake-control { display: grid; grid-template-columns: 112px minmax(0, 1fr); min-width: 0; gap: 6px; align-items: center; }
 .ranked-ticket-stake-provider { display: block; width: 112px; min-width: 112px; overflow: hidden; }
