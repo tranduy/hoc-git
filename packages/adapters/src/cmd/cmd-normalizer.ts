@@ -156,7 +156,7 @@ function canonicalHomeHandicap(odds: readonly CmdCatalogOdd[]): string | null {
     const parsed = handicapValue(raw);
     if (parsed === null || parsed === 0) return [Number.NaN];
     const explicitSign = /^[+-]/u.test(raw);
-    const selectionLine = explicitSign ? parsed : Math.abs(parsed);
+    const selectionLine = explicitSign ? parsed : -Math.abs(parsed);
     return [index === 0 ? selectionLine : -selectionLine];
   });
   if (evidence.length === 0 || evidence.some((value) => !Number.isFinite(value)) ||

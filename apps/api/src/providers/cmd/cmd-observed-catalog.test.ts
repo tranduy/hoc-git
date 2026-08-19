@@ -69,7 +69,7 @@ describe("CmdObservedCatalogReader", () => {
       comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 1_788_000_000_000
     });
     expect(result.events).toEqual([expect.objectContaining({ participantA: "Alpha", participantB: "Beta" })]);
-    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_AH", line: "0.5" })]);
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_AH", line: "-0.5" })]);
     expect(result.quotes.map((quote) => quote.rawOdds)).toEqual(["0.8", "-0.9"]);
     expect(JSON.stringify(result)).not.toMatch(/secret-canary|private\.test|launch\?/u);
   });
@@ -124,9 +124,9 @@ describe("CmdObservedCatalogReader", () => {
     const result = await reader.read("account-1");
     expect(result.markets).toEqual([
       expect.objectContaining({ providerMarketId: "total", marketType: "FT_TOTAL", line: "2.5" }),
-      expect.objectContaining({ providerMarketId: "quarter", marketType: "FT_AH", line: "0.25" }),
-      expect.objectContaining({ providerMarketId: "half", marketType: "FT_AH", line: "0.5" }),
-      expect.objectContaining({ providerMarketId: "three-quarter", marketType: "FT_AH", line: "0.75" })
+      expect.objectContaining({ providerMarketId: "quarter", marketType: "FT_AH", line: "-0.25" }),
+      expect.objectContaining({ providerMarketId: "half", marketType: "FT_AH", line: "-0.5" }),
+      expect.objectContaining({ providerMarketId: "three-quarter", marketType: "FT_AH", line: "-0.75" })
     ]);
     expect(result.quotes).toHaveLength(8);
     expect(result.rejectedMarketCount).toBe(0);
@@ -148,7 +148,7 @@ describe("CmdObservedCatalogReader", () => {
     });
 
     const result = await reader.read("saba-account");
-    expect(result.markets).toEqual([expect.objectContaining({ provider: "SABA", marketType: "FT_AH", line: "0.5" })]);
+    expect(result.markets).toEqual([expect.objectContaining({ provider: "SABA", marketType: "FT_AH", line: "-0.5" })]);
     expect(result.quotes.map((quote) => quote.selection)).toEqual(["HOME", "AWAY"]);
   });
 });

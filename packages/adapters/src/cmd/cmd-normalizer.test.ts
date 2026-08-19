@@ -121,7 +121,7 @@ describe("normalizeCmdCatalog", () => {
     });
 
     expect(result.markets).toEqual([
-      expect.objectContaining({ marketType: "FH_AH", scope: "FIRST_HALF", line: "0.75",
+      expect.objectContaining({ marketType: "FH_AH", scope: "FIRST_HALF", line: "-0.75",
         settlementProfile: "football-first-half-including-added-time" }),
       expect.objectContaining({ marketType: "FH_TOTAL", scope: "FIRST_HALF", line: "1.25",
         settlementProfile: "football-first-half-including-added-time" })
@@ -190,9 +190,9 @@ describe("normalizeCmdCatalog", () => {
     ]);
     expect(result.markets.map(({ marketType, scope, line, settlementProfile }) =>
       [marketType, scope, line, settlementProfile])).toEqual([
-      ["CORNER_FT_AH", "FULL_TIME", "0.5", "football-corners-regulation"],
+      ["CORNER_FT_AH", "FULL_TIME", "-0.5", "football-corners-regulation"],
       ["CORNER_FT_TOTAL", "FULL_TIME", "9.5", "football-corners-regulation"],
-      ["CORNER_FH_AH", "FIRST_HALF", "0.5", "football-corners-first-half"],
+      ["CORNER_FH_AH", "FIRST_HALF", "-0.5", "football-corners-first-half"],
       ["CARD_FT_TOTAL", "FULL_TIME", "4.5", "football-cards-regulation"],
       ["CARD_FH_TOTAL", "FIRST_HALF", "2.5", "football-cards-first-half"]
     ]);
@@ -220,7 +220,7 @@ describe("normalizeCmdCatalog", () => {
     }
   });
 
-  it("treats an unsigned CMD handicap as received by the team row that displays the line", () => {
+  it("treats an unsigned CMD handicap as laid by the team row that displays the line", () => {
     const handicap: CmdCatalogInputRecord = { ...structuredClone(record), groups: [{
       betTypeIds: ["1"], labels: ["0.5"], odds: [
         { marketOddsId: "ah-half", priceText: "0.79", status: null, greyedOut: "false", lineText: "0.5" },
@@ -228,21 +228,21 @@ describe("normalizeCmdCatalog", () => {
       ]
     }] };
 
-    const homeReceives = normalizeObservedFootballCatalog("SABA", [handicap], {
+    const homeLays = normalizeObservedFootballCatalog("SABA", [handicap], {
       observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
     });
-    expect(homeReceives.markets).toEqual([expect.objectContaining({ marketType: "FT_AH", line: "0.5" })]);
-    expect(homeReceives.quotes.map((quote) => [quote.selection, quote.line, quote.rawFormat])).toEqual([
-      ["HOME", "0.5", "MALAY"], ["AWAY", "0.5", "MALAY"]
+    expect(homeLays.markets).toEqual([expect.objectContaining({ marketType: "FT_AH", line: "-0.5" })]);
+    expect(homeLays.quotes.map((quote) => [quote.selection, quote.line, quote.rawFormat])).toEqual([
+      ["HOME", "-0.5", "MALAY"], ["AWAY", "-0.5", "MALAY"]
     ]);
 
     const awayHandicap: CmdCatalogInputRecord = { ...handicap, groups: [{ ...handicap.groups[0]!, odds: [
       { ...handicap.groups[0]!.odds[0]!, lineText: null }, { ...handicap.groups[0]!.odds[1]!, lineText: "0.5" }
     ] }] };
-    const awayReceives = normalizeObservedFootballCatalog("SABA", [awayHandicap], {
+    const awayLays = normalizeObservedFootballCatalog("SABA", [awayHandicap], {
       observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 2
     });
-    expect(awayReceives.markets[0]?.line).toBe("-0.5");
+    expect(awayLays.markets[0]?.line).toBe("0.5");
   });
 
   it("removes the neutral-ground marker and duplicate team node emitted by the current CMD DOM", () => {
