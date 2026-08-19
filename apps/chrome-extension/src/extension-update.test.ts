@@ -8,8 +8,8 @@ describe("tabsNeedingContentScriptRefresh", () => {
     { lobby: "IM", tabId: 9, hostname: "imsports.directsb.net", state: "ATTACHED" }
   ] as const;
 
-  it("reloads every attached tab after an extension update invalidates its content script", () => {
-    expect(tabsNeedingContentScriptRefresh("update", tabs)).toEqual([7, 8, 9]);
+  it("does not hard-reload attached sportsbook tabs during an extension update", () => {
+    expect(tabsNeedingContentScriptRefresh("update", tabs)).toEqual([]);
   });
 
   it("does not disturb sportsbook tabs on an ordinary install", () => {

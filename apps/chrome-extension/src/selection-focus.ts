@@ -5,11 +5,13 @@ export interface SelectionFocusIdentity {
 }
 
 export function buildCmdSelectionFocusExpression(identity: SelectionFocusIdentity): string {
-  const suffix = identity.providerSelectionId === `${identity.providerMarketId}:home` ? "home"
-    : identity.providerSelectionId === `${identity.providerMarketId}:away` ? "away"
+  const selectionIndex = identity.providerSelectionId === `${identity.providerMarketId}:home`
+      || identity.providerSelectionId === `${identity.providerMarketId}:over` ? 0
+    : identity.providerSelectionId === `${identity.providerMarketId}:away`
+      || identity.providerSelectionId === `${identity.providerMarketId}:under` ? 1
     : null;
-  if (suffix === null) throw new Error("SELECTION_IDENTITY_MISMATCH");
-  const input = JSON.stringify({ ...identity, selectionIndex: suffix === "home" ? 0 : 1 });
+  if (selectionIndex === null) throw new Error("SELECTION_IDENTITY_MISMATCH");
+  const input = JSON.stringify({ ...identity, selectionIndex });
   return `(() => {
     const input = ${input};
     let target = null;
@@ -21,14 +23,39 @@ export function buildCmdSelectionFocusExpression(identity: SelectionFocusIdentit
       if (odds.length === 2) target = odds[input.selectionIndex] ?? null;
     }
     if (!target && input.providerMarketId.startsWith('legacy:')) {
-      const parts = input.providerMarketId.split(':');
-      const rowId = parts[1] ?? '';
-      if (rowId && rowId === input.providerEventId) {
-        const rows = [...document.querySelectorAll('.match')]
-          .filter((row) => row.id === 'R_' + rowId);
-        if (rows.length === 1) {
-          const odds = [...rows[0].querySelectorAll('.Dbox_b2 .odds')].slice(0, 2);
-          if (odds.length === 2) target = odds[input.selectionIndex] ?? null;
+      const identity = /^legacy:([^:]+):([1378]):(.+)$/u.exec(input.providerMarketId);
+      if (identity) {
+        const [, rowId, betType, expectedLine] = identity;
+        const rows = [...document.querySelectorAll('.match')];
+        const rowMatches = rows.filter((row) => row.id === 'R_' + rowId);
+        const rowIndex = rowMatches.length === 1 ? rows.indexOf(rowMatches[0]) : -1;
+        let baseRow = null;
+        for (let index = rowIndex; index >= 0; index -= 1) {
+          if (rows[index].classList.contains('default-match')) {
+            baseRow = rows[index];
+            break;
+          }
+        }
+        if (rowIndex >= 0 && baseRow?.id === 'R_' + input.providerEventId) {
+          let firstHalfStarted = false;
+          const candidates = [];
+          for (const container of rowMatches[0].querySelectorAll('.Dbox_b2, .Dbox_b3, .Dbox_b5')) {
+            const odds = [...container.querySelectorAll('.odds')].slice(0, 2);
+            if (odds.length !== 2) continue;
+            let containerBetType = null;
+            if (container.classList.contains('Dbox_b5')) {
+              firstHalfStarted = true;
+              containerBetType = '7';
+            } else if (container.classList.contains('Dbox_b2')) containerBetType = '1';
+            else containerBetType = firstHalfStarted ? '8' : '3';
+            const clone = container.cloneNode(true);
+            clone.querySelectorAll('.odds').forEach((price) => price.remove());
+            const evidence = String(clone.textContent ?? '').replace(/\\b(?:o|u|ou)\\b/giu, ' ');
+            const line = evidence.match(/[+-]?\\d+(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+(?:\\.\\d+)?)?/u)?.[0]
+              ?.replace(/\\s+/gu, '') ?? '';
+            if (containerBetType === betType && line === expectedLine) candidates.push(odds);
+          }
+          if (candidates.length === 1) target = candidates[0][input.selectionIndex] ?? null;
         }
       }
     }
