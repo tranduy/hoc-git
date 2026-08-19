@@ -66,6 +66,29 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
+  it("reloads IM so both complete market partitions are reacquired after an API restart", async () => {
+    const { app } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const controls = new Promise<unknown[]>((resolve) => {
+      const received: unknown[] = [];
+      socket.on("message", (data) => {
+        received.push(JSON.parse(data.toString("utf8")));
+        if (received.length === 2) resolve(received);
+      });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "IM", sourceId: "chrome:IM:7",
+      transport: "TAB_STATE", request: { ...validEnvelope.request, pathnameClass: "/__fieldline_heartbeat__" } }));
+    await expect(controls).resolves.toEqual([
+      expect.objectContaining({ kind: "ACK", sourceId: "chrome:IM:7" }),
+      { version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:IM:7" }
+    ]);
+    socket.terminate();
+    await app.close();
+  });
+
   it("requests an in-page snapshot for a non-SABA source on a new bridge connection", async () => {
     const { app } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
