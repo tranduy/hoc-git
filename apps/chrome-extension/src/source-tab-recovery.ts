@@ -11,6 +11,7 @@ interface SourceTabRecoveryOptions {
   readonly query: () => Promise<readonly TabDescriptor[]>;
   readonly update: (tabId: number, url: string) => Promise<TabDescriptor>;
   readonly create: (url: string, active: boolean) => Promise<TabDescriptor>;
+  readonly remove?: (tabId: number) => Promise<void>;
   readonly attach: (tab: TabDescriptor) => Promise<void>;
   readonly recentlyClosed?: () => Promise<readonly {
     readonly sessionId?: string;
@@ -35,28 +36,40 @@ export class SourceTabRecovery {
     const recognized = recognizeLobbyTab({ id: 0, url });
     if (recognized?.lobby !== lobby) throw new Error("UNTRUSTED_LAUNCH_URL");
 
-    const attached = this.#options.listAttached().find((source) => source.lobby === lobby);
-    if (attached) {
-      await this.#options.update(attached.tabId, url);
-      return;
+    const currentTabs = await this.#options.query();
+    const oldTabIds = new Set<number>();
+    for (const source of this.#options.listAttached()) {
+      if (source.lobby === lobby) oldTabIds.add(source.tabId);
+    }
+    for (const tab of currentTabs) {
+      if (tab.id !== undefined && recognizeLobbyTab(tab)?.lobby === lobby) oldTabIds.add(tab.id);
+    }
+    if (oldTabIds.size > 0 && this.#options.remove === undefined) {
+      throw new Error("SOURCE_TAB_CLEANUP_UNAVAILABLE");
     }
 
-    const existing = (await this.#options.query()).find((tab) => recognizeLobbyTab(tab)?.lobby === lobby);
-    const pending = existing?.id === undefined
-      ? await this.#options.create(url, false)
-      : await this.#options.update(existing.id, url);
-    const recovered = await this.#waitForLobby(pending, lobby);
-    await this.#options.attach(recovered);
+    const pending = await this.#options.create(url, false);
+    try {
+      const recovered = await this.#waitForLobby(pending, lobby);
+      await this.#options.attach(recovered);
+    } catch (error) {
+      if (pending.id !== undefined) await this.#options.remove?.(pending.id).catch(() => undefined);
+      throw error;
+    }
+    if (pending.id !== undefined) oldTabIds.delete(pending.id);
+    await Promise.all([...oldTabIds].map(async (tabId) => {
+      await this.#options.remove?.(tabId);
+    }));
   }
 
   async restore(lobby: ChromeLobbyId): Promise<void> {
-    if (this.#options.listAttached().some((source) => source.lobby === lobby)) return;
-
-    const existing = (await this.#options.query()).find((tab) => recognizeLobbyTab(tab)?.lobby === lobby);
+    const currentTabs = await this.#options.query();
+    const existing = currentTabs.find((tab) => recognizeLobbyTab(tab)?.lobby === lobby);
     if (existing) {
-      await this.#options.attach(existing);
+      await this.ensure(lobby, existing.url!);
       return;
     }
+    if (this.#options.listAttached().some((source) => source.lobby === lobby)) return;
 
     const recentlyClosed = await this.#options.recentlyClosed?.() ?? [];
     for (const session of recentlyClosed) {

@@ -18,15 +18,22 @@ export interface TabPreferenceStore {
   save(preferences: Record<string, ChromeLobbyId>): Promise<void>;
 }
 
+export interface TabRegistryLifecyclePort {
+  closeTab(tabId: number): Promise<void>;
+}
+
 export class TabRegistry {
   readonly #port: DebuggerAttachmentPort;
   readonly #store: TabPreferenceStore | null;
+  readonly #lifecycle: TabRegistryLifecyclePort | null;
   readonly #attached = new Map<number, AttachedLobbyTab>();
   readonly #preferred = new Map<number, ChromeLobbyId>();
 
-  constructor(port: DebuggerAttachmentPort, store: TabPreferenceStore | null = null) {
+  constructor(port: DebuggerAttachmentPort, store: TabPreferenceStore | null = null,
+    lifecycle: TabRegistryLifecyclePort | null = null) {
     this.#port = port;
     this.#store = store;
+    this.#lifecycle = lifecycle;
   }
 
   list(): readonly AttachedLobbyTab[] {
@@ -95,32 +102,48 @@ export class TabRegistry {
         }
       }
     }
+    const byLobby = new Map<ChromeLobbyId, TabDescriptor[]>();
     for (const tab of tabs) {
-      if (!recognizeLobbyTab(tab)) continue;
-      try {
-        // Chrome assigns a new tab id after a provider redirect or restored
-        // session. Adopt every recognized current tab so a stale old id never
-        // leaves that provider permanently disconnected.
-        await this.attachSelected(tab);
-      } catch (error) {
-        if (tab.id !== undefined && isExistingDebuggerAttachment(error)) {
-          try {
-            // An MV3 worker restart clears this in-memory registry while
-            // Chrome can retain the extension's debugger attachment. Reclaim
-            // that orphaned session instead of leaving every source detached.
-            await this.#port.detach(tab.id);
-            await this.attachSelected(tab);
-            continue;
-          } catch {
-            // A DevTools-owned target is not ours to reclaim. Continue with
-            // the other providers and retry this tab on the next alarm.
+      const recognized = recognizeLobbyTab(tab);
+      if (recognized === null) continue;
+      const candidates = byLobby.get(recognized.lobby) ?? [];
+      candidates.push(tab);
+      byLobby.set(recognized.lobby, candidates);
+    }
+    for (const candidates of byLobby.values()) {
+      candidates.sort((left, right) => (right.id ?? -1) - (left.id ?? -1));
+      let activeTabId: number | null = null;
+      for (const tab of candidates) {
+        try {
+          await this.attachSelected(tab);
+          activeTabId = tab.id ?? null;
+          break;
+        } catch (error) {
+          if (tab.id !== undefined && isExistingDebuggerAttachment(error)) {
+            try {
+              // An MV3 worker restart clears this in-memory registry while
+              // Chrome can retain the extension's debugger attachment. Reclaim
+              // that orphaned session instead of leaving every source detached.
+              await this.#port.detach(tab.id);
+              await this.attachSelected(tab);
+              activeTabId = tab.id;
+              break;
+            } catch {
+              // A DevTools-owned target is not ours to reclaim. Try the next
+              // current tab for this lobby before leaving the source offline.
+            }
           }
         }
-        // One tab can temporarily be owned by DevTools or be navigating.
-        // Keep restoring the remaining recognized provider tabs; the Chrome
-        // alarm will retry this one on the next recovery pass.
+      }
+      if (activeTabId === null) continue;
+      for (const duplicate of candidates) {
+        if (duplicate.id === undefined || duplicate.id === activeTabId) continue;
+        this.#attached.delete(duplicate.id);
+        this.#preferred.delete(duplicate.id);
+        await this.#lifecycle?.closeTab(duplicate.id).catch(() => undefined);
       }
     }
+    await this.#persist();
     return this.list();
   }
 

@@ -40,6 +40,8 @@ const registry = new TabRegistry({
   save: async (preferences) => {
     await chrome.storage.local.set({ tabPreferences: preferences });
   }
+}, {
+  closeTab: async (tabId) => chrome.tabs.remove(tabId)
 });
 
 const observer = new NetworkObserver({
@@ -104,6 +106,7 @@ const sourceTabRecovery = new SourceTabRecovery({
     return tab;
   },
   create: async (url, active) => chrome.tabs.create({ url, active }),
+  remove: async (tabId) => chrome.tabs.remove(tabId),
   get: async (tabId) => chrome.tabs.get(tabId),
   attach: attachRecoveredTab,
   recentlyClosed: async () => (await chrome.sessions.getRecentlyClosed({ maxResults: 25 })).map((session) => {

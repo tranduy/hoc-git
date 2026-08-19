@@ -2,33 +2,69 @@ import { describe, expect, it, vi } from "vitest";
 import { SourceTabRecovery } from "./source-tab-recovery.js";
 
 describe("SourceTabRecovery", () => {
-  it("navigates the attached lobby without creating a duplicate tab", async () => {
-    const update = vi.fn(async (tabId: number, url: string) => ({ id: tabId, url }));
-    const create = vi.fn();
-    const attach = vi.fn();
+  it("replaces the attached lobby on repeated resets without accumulating source tabs", async () => {
+    let nextTabId = 8;
+    let tabs = [{ id: 7, url: "https://cgnew.fts368.com/old" }];
+    let attached = [{ lobby: "CMD" as const, tabId: 7 }];
+    const operations: string[] = [];
     const recovery = new SourceTabRecovery({
-      listAttached: () => [{ lobby: "CMD", tabId: 7 }], query: async () => [], update, create, attach
+      listAttached: () => attached,
+      query: async () => tabs,
+      update: vi.fn(),
+      create: async (url: string) => {
+        const tab = { id: nextTabId++, url };
+        tabs = [...tabs, tab];
+        operations.push(`create:${tab.id}`);
+        return tab;
+      },
+      attach: async (tab) => {
+        attached = [...attached, { lobby: "CMD", tabId: tab.id! }];
+        operations.push(`attach:${tab.id}`);
+      },
+      remove: async (tabId) => {
+        tabs = tabs.filter((tab) => tab.id !== tabId);
+        attached = attached.filter((tab) => tab.tabId !== tabId);
+        operations.push(`remove:${tabId}`);
+      }
     });
 
-    await recovery.ensure("CMD", "https://cgnew.fts368.com/sports?opaque=1");
+    await recovery.ensure("CMD", "https://cgnew.fts368.com/sports?generation=1");
+    await recovery.ensure("CMD", "https://cgnew.fts368.com/sports?generation=2");
 
-    expect(update).toHaveBeenCalledWith(7, "https://cgnew.fts368.com/sports?opaque=1");
-    expect(create).not.toHaveBeenCalled();
-    expect(attach).not.toHaveBeenCalled();
+    expect(tabs).toEqual([{ id: 9, url: "https://cgnew.fts368.com/sports?generation=2" }]);
+    expect(attached).toEqual([{ lobby: "CMD", tabId: 9 }]);
+    expect(operations).toEqual(["create:8", "attach:8", "remove:7", "create:9", "attach:9", "remove:8"]);
   });
 
-  it("adopts and navigates an existing recognized lobby tab", async () => {
-    const update = vi.fn(async (tabId: number, url: string) => ({ id: tabId, url }));
+  it("keeps the existing source tab when attaching its replacement fails", async () => {
+    const removed: number[] = [];
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "CMD", tabId: 7 }],
+      query: async () => [{ id: 7, url: "https://cgnew.fts368.com/old" }],
+      update: vi.fn(),
+      create: async (url: string) => ({ id: 8, url }),
+      attach: async () => { throw new Error("ATTACH_FAILED"); },
+      remove: async (tabId) => { removed.push(tabId); }
+    });
+
+    await expect(recovery.ensure("CMD", "https://cgnew.fts368.com/fresh"))
+      .rejects.toThrow("ATTACH_FAILED");
+
+    expect(removed).toEqual([8]);
+  });
+
+  it("replaces an existing recognized lobby tab even when it was not attached", async () => {
+    const remove = vi.fn(async () => undefined);
     const attach = vi.fn(async () => undefined);
     const recovery = new SourceTabRecovery({
       listAttached: () => [], query: async () => [{ id: 8, url: "https://cgnew.fts368.com/old" }],
-      update, create: vi.fn(), attach
+      update: vi.fn(), create: async (url: string) => ({ id: 9, url }), attach, remove
     });
 
     await recovery.ensure("CMD", "https://cgnew.fts368.com/fresh");
 
-    expect(update).toHaveBeenCalledWith(8, "https://cgnew.fts368.com/fresh");
-    expect(attach).toHaveBeenCalledWith({ id: 8, url: "https://cgnew.fts368.com/fresh" });
+    expect(attach).toHaveBeenCalledWith({ id: 9, url: "https://cgnew.fts368.com/fresh" });
+    expect(remove).toHaveBeenCalledWith(8);
   });
 
   it("creates an inactive tab and attaches it when the source tab was closed", async () => {
@@ -82,6 +118,22 @@ describe("SourceTabRecovery", () => {
 
     expect(restore).toHaveBeenCalledWith("closed-cmd");
     expect(attach).toHaveBeenCalledWith({ id: 10, url: "https://cgnew.fts368.com/live" });
+  });
+
+  it("replaces an attached source during restore so CMD reset also releases its old renderer", async () => {
+    const operations: string[] = [];
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "CMD", tabId: 7 }],
+      query: async () => [{ id: 7, url: "https://cgnew.fts368.com/live" }],
+      update: vi.fn(),
+      create: async (url: string) => { operations.push("create:8"); return { id: 8, url }; },
+      attach: async () => { operations.push("attach:8"); },
+      remove: async (tabId) => { operations.push(`remove:${tabId}`); }
+    });
+
+    await recovery.restore("CMD");
+
+    expect(operations).toEqual(["create:8", "attach:8", "remove:7"]);
   });
 
   it("creates a tab from the session-only remembered launch when recently closed history is unavailable", async () => {
