@@ -491,6 +491,31 @@ describe("Fastify snapshot API", () => {
     expect(wrongScheme.statusCode).toBe(403);
   });
 
+  it("allows the local dashboard alongside the configured public dashboard", async () => {
+    const runtime = await readyRuntime();
+    const app = buildApp(runtime, { viteOrigin: "https://live.babiesbo.uk" });
+    apps.push(app);
+    app.post("/api/test-dashboard-origin", async () => ({ accepted: true }));
+
+    const localDashboard = await app.inject({
+      method: "POST",
+      url: "/api/test-dashboard-origin",
+      headers: { origin: "http://127.0.0.1:4311" }
+    });
+    expect(localDashboard.statusCode).toBe(200);
+    expect(localDashboard.headers["access-control-allow-origin"])
+      .toBe("http://127.0.0.1:4311");
+
+    const publicDashboard = await app.inject({
+      method: "POST",
+      url: "/api/test-dashboard-origin",
+      headers: { origin: "https://live.babiesbo.uk" }
+    });
+    expect(publicDashboard.statusCode).toBe(200);
+    expect(publicDashboard.headers["access-control-allow-origin"])
+      .toBe("https://live.babiesbo.uk");
+  });
+
   it("sets no-store on every API response including early and generated errors", async () => {
     const runtime = await readyRuntime();
     const app = buildApp(runtime, { viteOrigin: "http://127.0.0.1:4311" });

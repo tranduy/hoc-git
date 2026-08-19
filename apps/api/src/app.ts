@@ -98,6 +98,7 @@ export function safeResponseSerializer(response: unknown): { readonly statusCode
 
 export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyInstance {
   const viteOrigin = validateViteOrigin(options.viteOrigin ?? defaultViteOrigin);
+  const dashboardOrigins = new Set([defaultViteOrigin, viteOrigin]);
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? defaultHeartbeatIntervalMs;
   const maxBufferedBytes = options.maxBufferedBytes ?? defaultMaxBufferedBytes;
   if (!Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs <= 0) {
@@ -145,12 +146,15 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
     const origin = request.headers.origin;
     const chromeBridgeOrigin = request.url.startsWith("/api/chrome-bridge")
       && origin?.startsWith("chrome-extension://") === true;
-    if (origin !== undefined && origin !== viteOrigin && !chromeBridgeOrigin) {
+    if (origin !== undefined && !dashboardOrigins.has(origin) && !chromeBridgeOrigin) {
       await reply.code(403).send({ error: "Origin not allowed" });
     }
   });
   void app.register(cors, {
-    origin: (origin, callback) => callback(null, origin === viteOrigin ? viteOrigin : false),
+    origin: (origin, callback) => callback(
+      null,
+      origin !== undefined && dashboardOrigins.has(origin) ? origin : false
+    ),
     methods: ["GET", "POST"]
   });
 
