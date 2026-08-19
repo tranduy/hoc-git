@@ -300,21 +300,6 @@ function SelectedTicketBalance({ ranked }: { readonly ranked: RankedEvent }) {
   </section>;
 }
 
-function exactProviderTicketIdentities(ranked: RankedEvent, ticketKey?: string): readonly ProviderTicketIdentity[] {
-  const edge = ticketKey === undefined ? eventEdgeSummary(ranked) : null;
-  const ticket = ranked.tickets.find((item) => item.key === (ticketKey ?? edge?.ticketKey));
-  return ticket?.plan?.legs.flatMap((leg) => {
-    const quote = ticket.row.cells.find((cell) => cell.provider === leg.provider)
-      ?.quotes.find((item) => item.selection === leg.selection);
-    return quote === undefined ? [] : [{
-      provider: leg.provider,
-      providerEventId: quote.providerEventId,
-      providerMarketId: quote.providerMarketId,
-      providerSelectionId: quote.providerSelectionId
-    }];
-  }) ?? [];
-}
-
 function RateGapSummary({ event, row }: { readonly event: ComparisonEvent["event"]; readonly row: ComparisonRow }) {
   const selections = [...new Set(row.cells.flatMap((cell) => cell.quotes.map((quote) => quote.selection)))].sort();
   return <div className="rate-gap-summary">{selections.map((selection) => {
@@ -925,7 +910,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       // its displayed ROI is coloured.  Always colour every numeric ROI by
       // its sign so a negative display-only estimate can never look neutral.
       const edgeTone = edge === null ? null : roiTone(edge.roiPercent);
-      const openableIdentities = !openProviderTicketEnabled ? [] : exactProviderTicketIdentities(ranked, ticket.key);
       return <article aria-label={`${edge === null ? "Observe" : "Compare"} ${label}`} aria-pressed={isPinnedEvent(item)}
         className={`catalog-event catalog-event--stable catalog-event--dense${isPinnedEvent(item) ? " catalog-event--selected" : ""}${
           edgeTone === null ? "" : ` catalog-event--roi-${edgeTone}`}`}
@@ -948,12 +932,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         </div>}
         <div className="catalog-event-actions"><strong>{item.event.isLive ? formatMatchClock(item.event.liveState) : formatCountdown(item.event.startAtUtcMs, nowMs)}</strong>
           <span className="catalog-event__detail-cue">Xem chi tiết 2 cửa</span>
-          {openableIdentities.length > 0 && <div className="catalog-event__provider-actions">
-            {openableIdentities.map((identity) => <button aria-label={`Mở kèo ${identity.provider} tại sàn`}
-              className="open-provider-ticket catalog-event__open-provider" key={identity.provider}
-              onClick={(event) => { event.stopPropagation(); openProviderTicket(identity); }}
-              onKeyDown={(event) => event.stopPropagation()} type="button">Mở {identity.provider}</button>)}
-          </div>}
           </div></header>
         </article>;
       })}</div></div>

@@ -244,7 +244,7 @@ describe("LiveCatalogPage", () => {
     expect(document.querySelector(".ranked-ticket-row--highlight")).toBeTruthy();
   });
 
-  it("shows one enabled provider button for each leg directly on a profitable match card", async () => {
+  it("shows provider buttons only after the profitable match is opened in detail", async () => {
     const source = (provider: "SABA" | "CMD"): CatalogSourceStatus => ({
       id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
       sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
@@ -274,8 +274,12 @@ describe("LiveCatalogPage", () => {
       providerTicketApi={providerTicketApi} />);
 
     const card = await screen.findByRole("button", { name: "Compare Alpha vs Beta" });
-    fireEvent.click(await within(card).findByRole("button", { name: "Mở kèo SABA tại sàn" }));
-    fireEvent.click(within(card).getByRole("button", { name: "Mở kèo CMD tại sàn" }));
+    expect(within(card).queryByRole("button", { name: "Mở kèo SABA tại sàn" })).toBeNull();
+    expect(within(card).queryByRole("button", { name: "Mở kèo CMD tại sàn" })).toBeNull();
+
+    fireEvent.click(card);
+    fireEvent.click(await screen.findByRole("button", { name: "Mở kèo SABA tại sàn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Mở kèo CMD tại sàn" }));
 
     expect(opened).toEqual([
       { provider: "SABA", providerEventId: "SABA-event", providerMarketId: "SABA-market",
@@ -283,7 +287,7 @@ describe("LiveCatalogPage", () => {
       { provider: "CMD", providerEventId: "CMD-event", providerMarketId: "CMD-market",
         providerSelectionId: "CMD-market:away" }
     ]);
-    expect(screen.queryByRole("button", { name: "Back to matches" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Back to matches" })).toBeTruthy();
   });
 
   it("shows only the two providers that produce the displayed edge on each match card", async () => {
