@@ -61,6 +61,44 @@ describe("NetworkObserver", () => {
     expect(() => new Function(`return ${IM_CATALOG_DISCOVERY_EXPRESSION}`)).not.toThrow();
   });
 
+  it("requests only IM prematch events in the next 48-hour UTC window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-19T00:00:00.000Z"));
+    try {
+      const listeners = new Map<string, (event: { detail: string }) => void>();
+      const requests: Array<Record<string, unknown>> = [];
+      const windowStub = {
+        global: { PlatForm: "web" },
+        addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
+        removeEventListener: (name: string) => listeners.delete(name),
+        dispatchEvent: (event: { type: string; detail: { c: string } }) => {
+          if (event.type === "helo") listeners.get(`halo_${event.detail.c}`)?.({ detail: "signed" });
+        }
+      };
+      const execute = new Function("document", "location", "window", "sessionStorage", "CustomEvent", "fetch",
+        `return ${IM_CATALOG_DISCOVERY_EXPRESSION}`) as (...args: unknown[]) => string;
+
+      expect(execute(
+        { documentElement: { dataset: {} }, querySelectorAll: () => [] },
+        { hostname: "imsports.directsb.net", search: "" },
+        windowStub,
+        { getItem: () => "token" },
+        class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
+          get detail(): { c: string } { return this.init.detail; } },
+        async (_path: string, init: { body: string }) => { requests.push(JSON.parse(init.body)); return {}; }
+      )).toBe("catalog-requested");
+      await vi.runAllTimersAsync();
+
+      expect(requests).toHaveLength(2);
+      expect(requests.map(({ DateFrom, DateTo, Market }) => ({ DateFrom, DateTo, Market }))).toEqual([
+        { DateFrom: "2026/08/19", DateTo: "2026/08/21", Market: 1 },
+        { DateFrom: "2026/08/19", DateTo: "2026/08/21", Market: 2 }
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps CMD on the unfiltered football catalog before advancing its virtualized table", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, _params?: Record<string, unknown>) =>
       method === "Page.getFrameTree"

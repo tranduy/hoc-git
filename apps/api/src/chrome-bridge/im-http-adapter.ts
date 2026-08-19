@@ -9,6 +9,7 @@ const ACCOUNT_ID = "catalog-source:IM:FOOTBALL";
 const HOST = "imsports.directsb.net";
 const SNAPSHOT_PATH = "/api/EventV6/GetSE";
 const DELTA_PATH = "/api/EventV6/GetSEDelta";
+const PREMATCH_HORIZON_MS = 48 * 60 * 60 * 1_000;
 type ImPartition = "IM_MARKET_1" | "IM_MARKET_2";
 type ImRecord = ReturnType<typeof extractImFootballCatalog>[number];
 
@@ -52,7 +53,10 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       const partition = envelope.request.providerPartition;
       if (partition === undefined) return [];
       const records = new Map<string, RetainedRecord>();
-      for (const record of extractImFootballCatalog(root)) {
+      for (const record of extractImFootballCatalog(root, {
+        nowMs: envelope.observedAtMs,
+        prematchHorizonMs: PREMATCH_HORIZON_MS
+      })) {
         records.set(record.eventId, { record, observedAtMs: envelope.observedAtMs,
           receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       }

@@ -25,7 +25,7 @@ function imEnvelope(providerPartition: "IM_MARKET_1" | "IM_MARKET_2" = "IM_MARKE
     request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR",
       providerPartition },
     payload: { encoding: "UTF8", body: JSON.stringify({ StatusCode: 100, sel: [{ eid: 22,
-      htn: "Home", atn: "Away", cn: "League", edt: "2026-08-16T20:00:00Z", isrbt: false,
+      htn: "Home", atn: "Away", cn: "League", edt: "1970-01-01T00:00:02Z", isrbt: false,
       iscyb: false, mls: [{ mi: 220, bti: 1, gp: 1, ws: [
         { wsi: 221, si: 1, hdp: -0.5, dih: "+0.5", o: 0.8, ot: 1 },
         { wsi: 222, si: 2, hdp: -0.5, dih: "-0.5", o: -0.9, ot: 1 }

@@ -22,6 +22,21 @@ const event = {
 };
 
 describe("extractImFootballCatalog", () => {
+  it("keeps live events but limits prematch events to the next 48 hours", () => {
+    const nowMs = Date.parse("2026-08-19T00:00:00.000Z");
+    const candidate = (eid: number, edt: string, isrbt = false) => ({ ...event, eid, edt, isrbt });
+
+    const records = extractImFootballCatalog({ StatusCode: 100, sel: [
+      candidate(1, "2026-08-01T00:00:00.000Z", true),
+      candidate(2, "2026-08-18T23:59:59.999Z"),
+      candidate(3, "2026-08-19T00:00:00.000Z"),
+      candidate(4, "2026-08-21T00:00:00.000Z"),
+      candidate(5, "2026-08-21T00:00:00.001Z")
+    ] }, { nowMs, prematchHorizonMs: 48 * 60 * 60 * 1_000 });
+
+    expect(records.map(({ eventId }) => eventId)).toEqual(["1", "3", "4"]);
+  });
+
   it("extracts exact full-time fractional handicap and total tickets", () => {
     expect(extractImFootballCatalog({ StatusCode: 100, sel: [event] })).toEqual([{
       eventId: "112516390", leagueName: "Leagues Cup", timeText: "PREMATCH", scoreText: null,

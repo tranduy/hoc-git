@@ -271,6 +271,9 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(() => {
   // Network observation captures the response exactly like a normal UI read.
   if (location.hostname === 'imsports.directsb.net') {
     root.dataset.fieldlineImCatalogRefreshAt = String(now);
+    const providerDate = (value) => new Date(value).toISOString().slice(0, 10).replace(/-/g, '/');
+    const dateFrom = providerDate(now);
+    const dateTo = providerDate(now + 48 * 60 * 60 * 1000);
     // IM signs each API request through its same-page CORS helper. Cookies alone
     // are insufficient: an unsigned GetSE returns StatusCode 500 even while the
     // tab is authenticated. Reuse the page's own signing event and keep every
@@ -295,7 +298,7 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(() => {
     });
     const common = {
       SportId: 1, BetTypeIds: [1, 2, 3, 5], GamePeriods: [1, 2, 3], IsCombo: false,
-      ['O' + 'ddsType']: 2, DateFrom: '', DateTo: '', CompetitionIds: [],
+      ['O' + 'ddsType']: 2, DateFrom: dateFrom, DateTo: dateTo, CompetitionIds: [],
       SortType: 2, ProgrammeIds: []
     };
     void (async () => {

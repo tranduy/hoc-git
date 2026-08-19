@@ -73,7 +73,15 @@ function liveTime(value: unknown): string {
   return clock === null ? "LIVE" : `${clock[1]}H ${clock[2]}'`;
 }
 
-export function extractImFootballCatalog(value: unknown): readonly SbobetCatalogInputRecord[] {
+export interface ImFootballCatalogWindow {
+  readonly nowMs: number;
+  readonly prematchHorizonMs: number;
+}
+
+export function extractImFootballCatalog(
+  value: unknown,
+  window?: ImFootballCatalogWindow
+): readonly SbobetCatalogInputRecord[] {
   const root = record(value);
   if (root === null || root.StatusCode !== 100 || !Array.isArray(root.sel)) return [];
   return root.sel.flatMap((candidate): SbobetCatalogInputRecord[] => {
@@ -84,11 +92,13 @@ export function extractImFootballCatalog(value: unknown): readonly SbobetCatalog
     const away = text(item.atn);
     const leagueName = text(item.cn);
     const startAtUtcMs = typeof item.edt === "string" ? Date.parse(item.edt) : Number.NaN;
+    const isLive = item.isrbt === true;
     if (eventId === null || home === null || away === null || home === away || leagueName === null ||
       !Number.isFinite(startAtUtcMs) || !Array.isArray(item.mls)) return [];
+    if (!isLive && window !== undefined &&
+      (startAtUtcMs < window.nowMs || startAtUtcMs > window.nowMs + window.prematchHorizonMs)) return [];
     const acceptedMarkets = markets(item.mls);
     if (acceptedMarkets.length === 0) return [];
-    const isLive = item.isrbt === true;
     const scoreText = isLive && Number.isSafeInteger(item.hs) && Number.isSafeInteger(item.as) &&
       Number(item.hs) >= 0 && Number(item.as) >= 0 ? `${item.hs}-${item.as}` : null;
     return [{

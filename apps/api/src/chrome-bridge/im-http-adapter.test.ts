@@ -11,7 +11,8 @@ const event = { eid: 112516390, htn: "Monterrey Rayados", atn: "Nashville SC", c
 function envelope(body: unknown, sequence = 1, path = "/api/EventV6/GetSE",
   providerPartition?: "IM_MARKET_1" | "IM_MARKET_2"): ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence,
-    observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
+    observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + sequence,
+    receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
     request: { hostname: "imsports.directsb.net", pathnameClass: path, resourceType: "XHR",
       ...(providerPartition === undefined ? {} : { providerPartition }) },
     payload: { encoding: "UTF8", body: JSON.stringify(body) } };
