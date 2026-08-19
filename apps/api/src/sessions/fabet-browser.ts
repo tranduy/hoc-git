@@ -5,6 +5,7 @@ import type { Category } from "@tool-chenh/contracts";
 import { SecretVault } from "./secret-vault.js";
 import { TrustedDomainStore } from "./trusted-domain-store.js";
 import { observeProtocolMetadata } from "../providers/protocol-inspector.js";
+import { installCatalogResourcePolicy } from "../providers/browser-resource-policy.js";
 import type { AuthEgress } from "./auth-egress.js";
 import { attestFabetOrigin, type FabetOriginEvidence } from "./fabet-origin-attestation.js";
 
@@ -332,51 +333,55 @@ export class FabetBrowserDriver {
   }
 
   async captureLobbyLaunches(categories: readonly Category[] = ["FOOTBALL", "LOL"]): Promise<readonly LaunchCandidate[]> {
-    await this.#resumePersistedProfile();
-    const enabled = new Set(categories);
-    const lobbies: ReadonlyArray<{ category: Category; url: string }> = [
-      { category: "FOOTBALL", url: `${this.#baseOrigin}/lobby-the-thao?type=livesports` },
-      { category: "LOL", url: `${this.#baseOrigin}/lobby-the-thao?type=esports` }
-    ];
-    const candidates: LaunchCandidate[] = [];
-    const seen = new Set<string>();
-    for (const lobby of lobbies) {
-      if (!enabled.has(lobby.category)) continue;
-      const pending = lobby.category === "FOOTBALL" ? this.#pendingAuthenticatedNavigations : [];
-      const navigations = pending.length > 0
-        ? pending
-        : await this.#automation.captureNavigations(lobby.url);
-      for (const navigation of navigations) {
-        if (!launcherMatchesCategory(lobby.category, navigation.label)) continue;
-        if (seen.has(navigation.url)) continue;
-        const launch = safeHttpsUrl(navigation.url);
-        if (launch.origin === this.#baseOrigin) continue;
-        seen.add(navigation.url);
-        const capturedAtMs = this.#clock.nowMs();
-        const vaultRecordId = `launch-${this.#idFactory()}`;
-        await this.#vault.save(vaultRecordId, {
-          kind: "LAUNCH_URL",
-          value: navigation.url,
-          capturedAtMs
-        });
-        candidates.push({
-          category: lobby.category,
-          providerHint: providerHint(navigation.label, launch.hostname),
-          hostname: launch.hostname,
-          capturedAtMs,
-          vaultRecordId
-        });
-        process.stderr.write(`Fabet launcher candidate: ${JSON.stringify({
-          category: lobby.category,
-          sourceLabel: navigation.label,
-          providerHint: providerHint(navigation.label, launch.hostname),
-          hostname: launch.hostname
-        })}\n`);
+    try {
+      await this.#resumePersistedProfile();
+      const enabled = new Set(categories);
+      const lobbies: ReadonlyArray<{ category: Category; url: string }> = [
+        { category: "FOOTBALL", url: `${this.#baseOrigin}/lobby-the-thao?type=livesports` },
+        { category: "LOL", url: `${this.#baseOrigin}/lobby-the-thao?type=esports` }
+      ];
+      const candidates: LaunchCandidate[] = [];
+      const seen = new Set<string>();
+      for (const lobby of lobbies) {
+        if (!enabled.has(lobby.category)) continue;
+        const pending = lobby.category === "FOOTBALL" ? this.#pendingAuthenticatedNavigations : [];
+        const navigations = pending.length > 0
+          ? pending
+          : await this.#automation.captureNavigations(lobby.url);
+        for (const navigation of navigations) {
+          if (!launcherMatchesCategory(lobby.category, navigation.label)) continue;
+          if (seen.has(navigation.url)) continue;
+          const launch = safeHttpsUrl(navigation.url);
+          if (launch.origin === this.#baseOrigin) continue;
+          seen.add(navigation.url);
+          const capturedAtMs = this.#clock.nowMs();
+          const vaultRecordId = `launch-${this.#idFactory()}`;
+          await this.#vault.save(vaultRecordId, {
+            kind: "LAUNCH_URL",
+            value: navigation.url,
+            capturedAtMs
+          });
+          candidates.push({
+            category: lobby.category,
+            providerHint: providerHint(navigation.label, launch.hostname),
+            hostname: launch.hostname,
+            capturedAtMs,
+            vaultRecordId
+          });
+          process.stderr.write(`Fabet launcher candidate: ${JSON.stringify({
+            category: lobby.category,
+            sourceLabel: navigation.label,
+            providerHint: providerHint(navigation.label, launch.hostname),
+            hostname: launch.hostname
+          })}\n`);
+        }
       }
+      this.#pendingAuthenticatedNavigations = [];
+      this.#diagnostics = candidates;
+      return candidates;
+    } finally {
+      await this.#automation.close().catch(() => undefined);
     }
-    this.#pendingAuthenticatedNavigations = [];
-    this.#diagnostics = candidates;
-    return candidates;
   }
 
   async withProviderPage<T>(provider: FabetJitProvider, category: Category,
@@ -494,6 +499,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         viewport: { width: 1_920, height: 1_080 },
         ...(lease.playwrightProxy === null ? {} : { proxy: lease.playwrightProxy }),
       });
+      await installCatalogResourcePolicy(authContext);
       stage = "PAGE_CREATE";
       const page = await authContext.newPage();
       const observedResponseUrls: string[] = [];
@@ -614,6 +620,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         viewport: { width: 1_920, height: 1_080 },
         storageState,
       });
+      await installCatalogResourcePolicy(this.#context);
       this.#page = await this.#context.newPage();
       await this.#page.goto(new URL(input.authentication.finalUrl).origin, {
         waitUntil: "domcontentloaded",
@@ -1204,6 +1211,7 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         viewport: { width: 1_920, height: 1_080 },
         args: ["--blink-settings=imagesEnabled=false"]
       });
+      await installCatalogResourcePolicy(context);
       this.#context = context;
     }
     return this.#context;

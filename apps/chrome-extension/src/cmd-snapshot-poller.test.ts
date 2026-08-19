@@ -15,6 +15,29 @@ describe("CmdSnapshotPoller", () => {
     expect(refreshCatalog).toHaveBeenCalledTimes(1);
   });
 
+  it("coalesces a heartbeat wake-up with a just-completed scheduled catalog poll", async () => {
+    let callback: (() => void) | undefined;
+    let now = 1_000;
+    const capture = vi.fn(async () => undefined);
+    const poller = new CmdSnapshotPoller({
+      list: () => [{ lobby: "CMD", tabId: 9, hostname: "cgnew.fts368.com", state: "ATTACHED" }],
+      capture, now: () => now,
+      setInterval: (next) => { callback = next; return 1; }
+    });
+
+    poller.start();
+    callback?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    poller.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(capture).toHaveBeenCalledTimes(1);
+
+    now = 3_000;
+    poller.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(capture).toHaveBeenCalledTimes(2);
+  });
+
   it("polls attached CMD/SABA/TSPORT public catalogs and keeps one read per tab in flight", async () => {
     let callback: (() => void) | undefined;
     let scheduledDelayMs: number | undefined;

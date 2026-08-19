@@ -27,6 +27,7 @@ export class CmdSnapshotPoller {
   #replayInFlight = false;
   readonly #maintenanceInFlight = new Set<number>();
   readonly #catalogRefreshInFlight = new Set<number>();
+  #lastScheduledPollAtMs: number | null = null;
 
   constructor(dependencies: CmdSnapshotPollerDependencies) {
     this.#dependencies = dependencies;
@@ -35,7 +36,10 @@ export class CmdSnapshotPoller {
   start(): void {
     if (this.#timer !== null) return;
     const schedule = this.#dependencies.setInterval ?? ((callback, delayMs) => setInterval(callback, delayMs));
-    this.#timer = schedule(() => this.#tick(), this.#dependencies.intervalMs ?? 2_000);
+    this.#timer = schedule(() => {
+      this.#lastScheduledPollAtMs = (this.#dependencies.now ?? Date.now)();
+      this.#tick();
+    }, this.#dependencies.intervalMs ?? 2_000);
   }
 
   stop(): void {
@@ -46,6 +50,9 @@ export class CmdSnapshotPoller {
   }
 
   pollNow(): void {
+    const now = (this.#dependencies.now ?? Date.now)();
+    if (this.#lastScheduledPollAtMs !== null &&
+      now - this.#lastScheduledPollAtMs < (this.#dependencies.intervalMs ?? 2_000)) return;
     this.#tick();
   }
 

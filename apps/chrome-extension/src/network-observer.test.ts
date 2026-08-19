@@ -365,6 +365,41 @@ describe("NetworkObserver", () => {
     expect(maximumInFlight).toBe(3);
   });
 
+  it("runs periodic provider DOM work in one cross-tab lane to avoid synchronized CPU spikes", async () => {
+    let releaseFirstScan: (() => void) | undefined;
+    const firstScanBlocked = new Promise<void>((resolve) => { releaseFirstScan = resolve; });
+    const startedTabs: number[] = [];
+    const sendCommand = vi.fn(async (tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") {
+        startedTabs.push(tabId);
+        if (tabId === 9) await firstScanBlocked;
+        return { frameTree: { frame: { id: `top-${tabId}` } } };
+      }
+      if (method === "Page.createIsolatedWorld") return { executionContextId: tabId };
+      if (method === "Runtime.evaluate") return { result: { type: "string", value: "[]" } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+
+    const cmdCapture = observer.captureCmdSnapshot(
+      { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 }, "cgnew.fts368.com"
+    );
+    await vi.waitFor(() => expect(startedTabs).toEqual([9]));
+    const tsportMaintenance = observer.maintain(
+      { lobby: "TSPORT", sourceId: "chrome:TSPORT:11", tabId: 11 }
+    );
+    const btiRefresh = observer.refreshCatalog(
+      { lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 }
+    );
+    await Promise.resolve();
+
+    expect(sendCommand.mock.calls.filter(([tabId]) => tabId !== 9)).toHaveLength(0);
+
+    releaseFirstScan?.();
+    await Promise.all([cmdCapture, tsportMaintenance, btiRefresh]);
+    expect(startedTabs).toEqual([9, 11, 6]);
+  });
+
   it("captures a complete T-Sports DOM baseline instead of waiting for WebSocket price deltas", async () => {
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain(".match__team-name");
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain("25|5|75");

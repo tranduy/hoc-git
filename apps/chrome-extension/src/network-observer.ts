@@ -436,6 +436,7 @@ export class NetworkObserver {
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, number>>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
+  #periodicDomWorkTail: Promise<void> = Promise.resolve();
 
   constructor(dependencies: NetworkObserverDependencies) {
     this.#sendCommand = dependencies.sendCommand;
@@ -511,76 +512,80 @@ export class NetworkObserver {
   }
 
   async maintain(source: ObservedSource): Promise<void> {
-    await this.#sendCommand(source.tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => ({}));
-    await this.#sendCommand(source.tabId, "Page.setWebLifecycleState", { state: "active" }).catch(() => ({}));
-    const expression = source.lobby === "IM" ? IM_CATALOG_DISCOVERY_EXPRESSION :
-      source.lobby === "CMD" ? CMD_CATALOG_DISCOVERY_EXPRESSION :
-        source.lobby === "TSPORT" ? TSPORT_CATALOG_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
-    if (source.lobby === "IM") {
-      // GetSE is signed by IM's page-owned helo/halo_ event handler and uses
-      // page globals. Evaluating in an isolated world can still read the DOM,
-      // but it cannot invoke that signer, so the request silently degrades to
-      // StatusCode 500. The expression is read-only and runs in the top page's
-      // main world; Network observation captures its resulting response.
-      await this.#sendCommand(source.tabId, "Runtime.evaluate", {
-        expression, returnByValue: true, awaitPromise: false
-      }).catch(() => ({}));
-      return;
-    }
-    const frameTree = await this.#withFrameCommandTimeout(
-      this.#sendCommand(source.tabId, "Page.getFrameTree")
-    ).catch(() => ({}));
-    const frameIds = collectFrameIds(frameTree);
-    if (frameIds.length === 0) {
-      await this.#sendCommand(source.tabId, "Runtime.evaluate", {
+    await this.#runPeriodicDomWork(async () => {
+      await this.#sendCommand(source.tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => ({}));
+      await this.#sendCommand(source.tabId, "Page.setWebLifecycleState", { state: "active" }).catch(() => ({}));
+      const expression = source.lobby === "IM" ? IM_CATALOG_DISCOVERY_EXPRESSION :
+        source.lobby === "CMD" ? CMD_CATALOG_DISCOVERY_EXPRESSION :
+          source.lobby === "TSPORT" ? TSPORT_CATALOG_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
+      if (source.lobby === "IM") {
+        // GetSE is signed by IM's page-owned helo/halo_ event handler and uses
+        // page globals. Evaluating in an isolated world can still read the DOM,
+        // but it cannot invoke that signer, so the request silently degrades to
+        // StatusCode 500. The expression is read-only and runs in the top page's
+        // main world; Network observation captures its resulting response.
+        await this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression, returnByValue: true, awaitPromise: false
-      }).catch(() => ({}));
-      return;
-    }
-    for (const frameId of frameIds) {
-      const world = await this.#sendCommand(source.tabId, "Page.createIsolatedWorld", {
-        frameId, worldName: "fieldline-keep-active", grantUniveralAccess: false
-      }).catch(() => ({}));
-      const contextId = nestedNumber(world, "executionContextId");
-      if (contextId === null) continue;
-      await this.#sendCommand(source.tabId, "Runtime.evaluate", {
-        expression, contextId, returnByValue: true, awaitPromise: false
-      }).catch(() => ({}));
-    }
+        }).catch(() => ({}));
+        return;
+      }
+      const frameTree = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Page.getFrameTree")
+      ).catch(() => ({}));
+      const frameIds = collectFrameIds(frameTree);
+      if (frameIds.length === 0) {
+        await this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            expression, returnByValue: true, awaitPromise: false
+        }).catch(() => ({}));
+        return;
+      }
+      for (const frameId of frameIds) {
+        const world = await this.#sendCommand(source.tabId, "Page.createIsolatedWorld", {
+          frameId, worldName: "fieldline-keep-active", grantUniveralAccess: false
+        }).catch(() => ({}));
+        const contextId = nestedNumber(world, "executionContextId");
+        if (contextId === null) continue;
+        await this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression, contextId, returnByValue: true, awaitPromise: false
+        }).catch(() => ({}));
+      }
+    });
   }
 
   async refreshCatalog(source: ObservedSource): Promise<void> {
     if (source.lobby !== "BTI") return;
-    const frameTree = await this.#withFrameCommandTimeout(
-      this.#sendCommand(source.tabId, "Page.getFrameTree")
-    ).catch(() => ({}));
-    const frameIds = collectFrameIds(frameTree);
-    // Always address the current top-level main world directly. Cached CDP
-    // execution-context ids are invalidated on provider-side redirects and a
-    // stale id otherwise makes every later refresh a silent no-op.
-    await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-      expression: BTI_CATALOG_REFRESH_EXPRESSION, returnByValue: true, awaitPromise: true
-    })).catch(() => ({}));
-    if (frameIds.length <= 1) return;
-    await Promise.all(frameIds.slice(1).map(async (frameId) => {
-      const mainContextId = this.#mainWorldContexts.get(source.tabId)?.get(frameId);
-      if (mainContextId !== undefined) {
-        await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-          expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId: mainContextId,
-          returnByValue: true, awaitPromise: true
-        })).catch(() => ({}));
-        return;
-      }
-      const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
-        "Page.createIsolatedWorld", {
-        frameId, worldName: "fieldline-bti-catalog-refresh", grantUniveralAccess: false
-      })).catch(() => ({}));
-      const contextId = nestedNumber(world, "executionContextId");
-      if (contextId === null) return;
+    await this.#runPeriodicDomWork(async () => {
+      const frameTree = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Page.getFrameTree")
+      ).catch(() => ({}));
+      const frameIds = collectFrameIds(frameTree);
+      // Always address the current top-level main world directly. Cached CDP
+      // execution-context ids are invalidated on provider-side redirects and a
+      // stale id otherwise makes every later refresh a silent no-op.
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-        expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId, returnByValue: true, awaitPromise: true
+        expression: BTI_CATALOG_REFRESH_EXPRESSION, returnByValue: true, awaitPromise: true
       })).catch(() => ({}));
-    }));
+      if (frameIds.length <= 1) return;
+      await Promise.all(frameIds.slice(1).map(async (frameId) => {
+        const mainContextId = this.#mainWorldContexts.get(source.tabId)?.get(frameId);
+        if (mainContextId !== undefined) {
+          await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId: mainContextId,
+            returnByValue: true, awaitPromise: true
+          })).catch(() => ({}));
+          return;
+        }
+        const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+          "Page.createIsolatedWorld", {
+          frameId, worldName: "fieldline-bti-catalog-refresh", grantUniveralAccess: false
+        })).catch(() => ({}));
+        const contextId = nestedNumber(world, "executionContextId");
+        if (contextId === null) return;
+        await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId, returnByValue: true, awaitPromise: true
+        })).catch(() => ({}));
+      }));
+    });
   }
 
   async heartbeat(source: ObservedSource, hostname: string): Promise<void> {
@@ -795,60 +800,68 @@ export class NetworkObserver {
       !/^[a-z0-9.-]+$/iu.test(hostname)) return;
     this.#cmdCapturesInFlight.add(source.sourceId);
     try {
-      const expression = source.lobby === "TSPORT"
-        ? TSPORT_PUBLIC_CATALOG_EXPRESSION : CMD_PUBLIC_CATALOG_EXPRESSION;
-      const frameTree = await this.#withFrameCommandTimeout(
-        this.#sendCommand(source.tabId, "Page.getFrameTree")
-      ).catch(() => ({}));
-      const frameIds = collectFrameIds(frameTree);
-      const values: unknown[] = [];
-      if (frameIds.length === 0) {
-        values.push(await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-          expression, returnByValue: true, awaitPromise: false
-        })).catch(() => ({})));
-      } else {
-        const frameValues = await Promise.all(frameIds.map(async (frameId) => {
-          const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
-            "Page.createIsolatedWorld", {
-            frameId, worldName: "fieldline-read-only", grantUniveralAccess: false
-          })).catch(() => ({}));
-          const contextId = nestedNumber(world, "executionContextId");
-          if (contextId === null) return null;
-          return this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-            expression, contextId, returnByValue: true, awaitPromise: false
-          })).catch(() => ({}));
-        }));
-        values.push(...frameValues.filter((value) => value !== null));
-      }
-      const evaluated = values.flatMap(readEvaluationRecords);
-      const catalogRecords = evaluated.filter((value) => !isRecord(value) || !("__fieldlineDiagnostic" in value));
-      const records = catalogRecords.length > 0 ? catalogRecords : evaluated;
-      if (records.length === 0) return;
-      const catalogBody = JSON.stringify(records);
-      const nowMs = this.#now();
-      const receivedMonotonicMs = this.#monotonicNow();
-      const previous = this.#cmdLastBodies.get(source.sourceId);
-      // Transport heartbeats only prove that the tab is attached. Renew the
-      // unchanged catalog before the API freshness TTL expires so a quiet
-      // market cannot be misclassified as a dead data source.
-      if (previous === catalogBody && nowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0)
-        < CATALOG_REFRESH_INTERVAL_MS) return;
-      const snapshotId = `cmd:${source.tabId}:${nowMs}`;
-      const chunks = chunkCmdSnapshot(records, snapshotId);
-      for (const chunk of chunks) {
-        await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
-          encoding: "UTF8", body: JSON.stringify(chunk)
-        }, { observedAtMs: nowMs, receivedMonotonicMs });
-      }
-      this.#cmdLastBodies.set(source.sourceId, catalogBody);
-      this.#cmdLastSentAtMs.set(source.sourceId, nowMs);
-      if (isReplayableCmdCatalog(records)) {
-        this.#cmdSnapshots.set(source.sourceId, { body: catalogBody, sentAtMs: nowMs, receivedMonotonicMs });
-        this.#cmdSnapshotHosts.set(source.sourceId, hostname);
-      }
+      await this.#runPeriodicDomWork(async () => {
+        const expression = source.lobby === "TSPORT"
+          ? TSPORT_PUBLIC_CATALOG_EXPRESSION : CMD_PUBLIC_CATALOG_EXPRESSION;
+        const frameTree = await this.#withFrameCommandTimeout(
+          this.#sendCommand(source.tabId, "Page.getFrameTree")
+        ).catch(() => ({}));
+        const frameIds = collectFrameIds(frameTree);
+        const values: unknown[] = [];
+        if (frameIds.length === 0) {
+          values.push(await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            expression, returnByValue: true, awaitPromise: false
+          })).catch(() => ({})));
+        } else {
+          const frameValues = await Promise.all(frameIds.map(async (frameId) => {
+            const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+              "Page.createIsolatedWorld", {
+              frameId, worldName: "fieldline-read-only", grantUniveralAccess: false
+            })).catch(() => ({}));
+            const contextId = nestedNumber(world, "executionContextId");
+            if (contextId === null) return null;
+            return this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+              expression, contextId, returnByValue: true, awaitPromise: false
+            })).catch(() => ({}));
+          }));
+          values.push(...frameValues.filter((value) => value !== null));
+        }
+        const evaluated = values.flatMap(readEvaluationRecords);
+        const catalogRecords = evaluated.filter((value) => !isRecord(value) || !("__fieldlineDiagnostic" in value));
+        const records = catalogRecords.length > 0 ? catalogRecords : evaluated;
+        if (records.length === 0) return;
+        const catalogBody = JSON.stringify(records);
+        const nowMs = this.#now();
+        const receivedMonotonicMs = this.#monotonicNow();
+        const previous = this.#cmdLastBodies.get(source.sourceId);
+        // Transport heartbeats only prove that the tab is attached. Renew the
+        // unchanged catalog before the API freshness TTL expires so a quiet
+        // market cannot be misclassified as a dead data source.
+        if (previous === catalogBody && nowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0)
+          < CATALOG_REFRESH_INTERVAL_MS) return;
+        const snapshotId = `cmd:${source.tabId}:${nowMs}`;
+        const chunks = chunkCmdSnapshot(records, snapshotId);
+        for (const chunk of chunks) {
+          await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
+            encoding: "UTF8", body: JSON.stringify(chunk)
+          }, { observedAtMs: nowMs, receivedMonotonicMs });
+        }
+        this.#cmdLastBodies.set(source.sourceId, catalogBody);
+        this.#cmdLastSentAtMs.set(source.sourceId, nowMs);
+        if (isReplayableCmdCatalog(records)) {
+          this.#cmdSnapshots.set(source.sourceId, { body: catalogBody, sentAtMs: nowMs, receivedMonotonicMs });
+          this.#cmdSnapshotHosts.set(source.sourceId, hostname);
+        }
+      });
     } finally {
       this.#cmdCapturesInFlight.delete(source.sourceId);
     }
+  }
+
+  async #runPeriodicDomWork<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#periodicDomWorkTail.catch(() => undefined).then(operation);
+    this.#periodicDomWorkTail = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   async #withFrameCommandTimeout<T>(operation: Promise<T>): Promise<T> {

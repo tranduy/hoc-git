@@ -256,6 +256,21 @@ describe("FabetBrowserDriver", () => {
     expect(context.automation.lobbyCalls).toEqual(["https://fabet.party/lobby-the-thao?type=livesports"]);
   });
 
+  it("releases the Fabet bootstrap browser after launch URLs are captured", async () => {
+    const context = await setup();
+    await context.trustStore.approve("fabet.party");
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 20 }, idFactory: () => "1" });
+    await driver.login({ entryUrl: "https://fabet.party/", username: "development-user",
+      password: "development-pass" });
+    context.automation.launches["https://fabet.party/lobby-the-thao?type=livesports"] = [
+      { url: "https://sports.vendor.test/launch", label: "SABA-SPORTS" }
+    ];
+
+    await driver.captureLobbyLaunches(["FOOTBALL"]);
+
+    expect(context.automation.closed).toBe(true);
+  });
+
   it("does not bind a Football C-Sports launch to the LoL SABA reader", async () => {
     const context = await setup();
     await context.trustStore.approve("fabet.party");
@@ -451,6 +466,44 @@ describe("PlaywrightFabetAutomation", () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
   }, 5_000);
+
+  it("does not load decorative media in the long-lived Fabet browser context", async () => {
+    let mediaRequests = 0;
+    const server = createServer((request, response) => {
+      if (request.url === "/heavy.mp4") {
+        mediaRequests += 1;
+        response.statusCode = 204;
+        response.end();
+        return;
+      }
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/provider") {
+        response.end("<!doctype html><main>Provider ready</main><video preload='auto' src='/heavy.mp4'></video>");
+        return;
+      }
+      response.end(`<!doctype html><div class="game-item lobby">
+        <img class="game-item__thumb" src="/game/sabaport.webp"><p class="game-item__name">SABA-SPORTS</p>
+        <div class="game-item__play-btn"><button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/provider')">Play</button></div>
+      </div>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const automation = new PlaywrightFabetAutomation({
+      profilePath: join(await setup().then((value) => value.directory), "resource-policy-profile"), headless: true
+    });
+    try {
+      await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
+        provider: "SABA", category: "FOOTBALL" }, async (page) => {
+        await page.waitForTimeout(100);
+        return page.locator("main").innerText();
+      })).resolves.toBe("Provider ready");
+      expect(mediaRequests).toBe(0);
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
 
   it("clicks the real SABA lobby card and reuses the popup in the Fabet browser context", async () => {
     let launchCount = 0;
