@@ -3,6 +3,7 @@ import { CmdSnapshotChunkSchema, type ChromeBridgeEnvelope } from "@tool-chenh/c
 import { z } from "zod";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
+import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 
 const text = (max: number) => z.string().trim().min(1).max(max);
@@ -54,8 +55,10 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
   readonly #recordsBySource = new Map<string, Map<string, {
     readonly record: CmdCatalogInputRecord;
     readonly observedAtMs: number;
+    readonly receivedMonotonicMs: number;
+    readonly sequence: number;
   }>>();
-  static readonly #viewportRetentionMs = 180_000;
+  static readonly #viewportRetentionMs = 15_000;
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     return envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
@@ -81,29 +84,25 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
       if (entry.observedAtMs < oldestAllowedMs) cached.delete(matchId);
     }
     for (const record of usableRecords) {
-      cached.set(record.matchId, { record, observedAtMs: envelope.observedAtMs });
+      cached.set(record.matchId, { record, observedAtMs: envelope.observedAtMs,
+        receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
     }
     this.#recordsBySource.set(envelope.sourceId, cached);
-    const normalized = normalizeObservedFootballCatalog("CMD", [...cached.values()].map((entry) => entry.record), {
-      observedAtMs: envelope.observedAtMs,
-      receivedMonotonicMs: envelope.receivedMonotonicMs,
-      timezoneOffsetMinutes: 480,
-      sequence: envelope.sequence
+    const parts: NormalizedCatalogPart[] = [...cached.values()].map((entry) => {
+      const normalized = normalizeObservedFootballCatalog("CMD", [entry.record], {
+        observedAtMs: entry.observedAtMs,
+        receivedMonotonicMs: entry.receivedMonotonicMs,
+        timezoneOffsetMinutes: 480,
+        sequence: entry.sequence
+      });
+      const markets = normalized.markets.filter((market) => market.marketType !== "FT_1X2");
+      const marketKeys = new Set(markets.map((market) => `${market.providerEventId}|${market.providerMarketId}`));
+      return { diagnostics: normalized.diagnostics, events: normalized.events, markets,
+        quotes: normalized.quotes.filter((quote) =>
+          marketKeys.has(`${quote.providerEventId}|${quote.providerMarketId}`)) };
     });
-    const markets = normalized.markets.filter((market) => market.marketType !== "FT_1X2");
-    const marketKeys = new Set(markets.map((market) => `${market.providerEventId}|${market.providerMarketId}`));
-    const catalog: ObservedProviderCatalog = {
-      dataMode: "LIVE",
-      accountId: "catalog-source:CMD:FOOTBALL",
-      provider: "CMD",
-      category: "FOOTBALL",
-      comparisonState: "AWAITING_SECOND_PROVIDER",
-      observedAtMs: envelope.observedAtMs,
-      rejectedMarketCount: normalized.diagnostics.length,
-      events: normalized.events,
-      markets,
-      quotes: normalized.quotes.filter((quote) => marketKeys.has(`${quote.providerEventId}|${quote.providerMarketId}`))
-    };
+    const catalog = mergeObservedCatalogParts({ accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD",
+      observedAtMs: envelope.observedAtMs, parts });
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog }];
   }

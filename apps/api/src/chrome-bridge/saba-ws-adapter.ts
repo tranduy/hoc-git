@@ -5,15 +5,11 @@ import { markSabaLiveContextRecords } from "../providers/saba/saba-football-push
 import { SabaPushDecoder } from "../providers/saba/saba-push-decoder.js";
 import { parseSabaSocketFrame } from "../providers/saba/saba-socket-frame.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
+import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 import { decodePublicDomRecords } from "./cmd-dom-adapter.js";
 
-interface NormalizedCatalogPart {
-  readonly diagnostics: readonly unknown[];
-  readonly events: ObservedProviderCatalog["events"];
-  readonly markets: ObservedProviderCatalog["markets"];
-  readonly quotes: ObservedProviderCatalog["quotes"];
-}
+const ACCOUNT_ID = "catalog-source:SABA:FOOTBALL";
 
 export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "saba-ws-catalog-v1";
@@ -22,18 +18,23 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #decoders = new Map<string, SabaPushDecoder>();
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #parts = new Map<string, NormalizedCatalogPart>();
+  readonly #readyPartitions = new Set<string>();
 
   resetSource(sourceId: string): void {
-    this.#decoders.delete(sourceId);
+    for (const key of this.#decoders.keys()) if (key.startsWith(`${sourceId}|`)) this.#decoders.delete(key);
     this.#assembler.resetSource(sourceId);
     for (const key of this.#parts.keys()) if (key.startsWith(`${sourceId}|`)) this.#parts.delete(key);
+    for (const key of this.#readyPartitions) if (key.startsWith(`${sourceId}|`)) this.#readyPartitions.delete(key);
   }
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "SABA" || envelope.payload.encoding !== "UTF8") return false;
     if (envelope.transport === "DOM_SNAPSHOT" && envelope.request.resourceType === "DOM" &&
       envelope.request.pathnameClass === "/__fieldline_dom_snapshot__") return true;
-    if (envelope.transport !== "WS_FRAME" || envelope.request.pathnameClass !== "/socket.io/") return false;
+    if ((envelope.transport !== "WS_FRAME" && envelope.transport !== "WS_STATE") ||
+      envelope.request.pathnameClass !== "/socket.io/") return false;
+    if (envelope.transport === "WS_STATE") return envelope.request.streamId !== undefined &&
+      (envelope.payload.body === "OPEN" || envelope.payload.body === "CLOSED");
     try { return parseSabaSocketFrame(envelope.payload.body) !== null; } catch { return false; }
   }
 
@@ -53,23 +54,39 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       });
       return this.#update(envelope, "DOM", normalized);
     }
+    const streamId = envelope.request.streamId ?? "legacy";
+    const decoderKey = `${envelope.sourceId}|${streamId}`;
+    if (envelope.transport === "WS_STATE") {
+      this.#dropStream(envelope.sourceId, streamId);
+      if (envelope.payload.body === "OPEN") return [];
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+        invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
+    }
     try {
       const frame = parseSabaSocketFrame(envelope.payload.body);
       if (frame === null) return [];
-      let decoder = this.#decoders.get(envelope.sourceId);
+      let decoder = this.#decoders.get(decoderKey);
       if (decoder === undefined) {
         decoder = new SabaPushDecoder();
-        this.#decoders.set(envelope.sourceId, decoder);
+        this.#decoders.set(decoderKey, decoder);
       }
       const applied = decoder.apply(frame);
       if (applied.duplicate || applied.records.length === 0) return [];
+      const readyKey = `${decoderKey}|${frame.bridgeId}`;
+      if (applied.fullSnapshot) this.#readyPartitions.add(readyKey);
+      if (!this.#readyPartitions.has(readyKey)) return [];
       const normalized = normalizeSabaFootballRecords(markSabaLiveContextRecords(applied.records), {
         observedAtMs: envelope.observedAtMs,
         receivedMonotonicMs: envelope.receivedMonotonicMs,
         sequence: envelope.sequence
       });
-      return this.#update(envelope, `WS:${frame.bridgeId}`, normalized);
-    } catch {
+      return this.#update(envelope, `WS:${streamId}:${frame.bridgeId}`, normalized);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP")) {
+        this.#dropStream(envelope.sourceId, streamId);
+        return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+          invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_GAP" }];
+      }
       return [];
     }
   }
@@ -82,23 +99,20 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     this.#parts.set(partitionKey, normalized);
     const sourceParts = [...this.#parts].filter(([key]) => key.startsWith(`${envelope.sourceId}|`))
       .map(([, value]) => value);
-    const events = new Map<string, ObservedProviderCatalog["events"][number]>();
-    const markets = new Map<string, ObservedProviderCatalog["markets"][number]>();
-    const quotes = new Map<string, ObservedProviderCatalog["quotes"][number]>();
-    for (const part of sourceParts) {
-      for (const event of part.events) events.set(event.providerEventId, event);
-      for (const market of part.markets) markets.set(`${market.providerEventId}|${market.providerMarketId}`, market);
-      for (const quote of part.quotes) {
-        quotes.set(`${quote.providerEventId}|${quote.providerMarketId}|${quote.providerSelectionId}`, quote);
-      }
-    }
-    const catalog: ObservedProviderCatalog = {
-      dataMode: "LIVE", accountId: "catalog-source:SABA:FOOTBALL", provider: "SABA", category: "FOOTBALL",
-      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: envelope.observedAtMs,
-      rejectedMarketCount: sourceParts.reduce((total, part) => total + part.diagnostics.length, 0),
-      events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()]
-    };
+    const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SABA",
+      observedAtMs: envelope.observedAtMs, parts: sourceParts });
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog }];
+  }
+
+  #dropStream(sourceId: string, streamId: string): void {
+    const decoderKey = `${sourceId}|${streamId}`;
+    this.#decoders.delete(decoderKey);
+    for (const key of this.#parts.keys()) {
+      if (key.startsWith(`${sourceId}|WS:${streamId}:`)) this.#parts.delete(key);
+    }
+    for (const key of this.#readyPartitions) {
+      if (key.startsWith(`${decoderKey}|`)) this.#readyPartitions.delete(key);
+    }
   }
 }

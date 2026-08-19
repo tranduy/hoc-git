@@ -480,14 +480,14 @@ describe("provider catalog route", () => {
     const first = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" });
     const oldEtag = first.headers.etag;
 
-    const latest = revisions.publish("account-1", { ...oldCatalog, observedAtMs: 200 }, {
+    const latest = revisions.publish("account-1", { ...oldCatalog, observedAtMs: 200, rejectedMarketCount: 1 }, {
       snapshotState: "FRESH", freshnessMs: 20_000
     });
     const refreshed = await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1",
       headers: { "if-none-match": oldEtag! } });
 
     expect(refreshed.statusCode).toBe(200);
-    expect(refreshed.json()).toMatchObject({ accountId: "account-1", observedAtMs: 200 });
+    expect(refreshed.json()).toMatchObject({ accountId: "account-1", observedAtMs: 200, rejectedMarketCount: 1 });
     expect(refreshed.headers["x-catalog-revision"]).toBe(latest.revision);
     expect(refreshed.headers.etag).toBe(`"${latest.revision}"`);
   });

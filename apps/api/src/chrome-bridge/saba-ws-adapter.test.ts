@@ -11,7 +11,8 @@ const encoded = (record: Record<string, unknown>): unknown[] => Object.entries(r
 function envelope(body: string, sourceId = "chrome:SABA:7"): ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId, tabId: 7,
     sequence: 4, observedAtMs: 1_786_449_540_000, receivedMonotonicMs: 50, transport: "WS_FRAME",
-    request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket" },
+    request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket",
+      streamId: "saba-stream-1" },
     payload: { encoding: "UTF8", body } };
 }
 
@@ -127,6 +128,46 @@ describe("SabaWsCatalogAdapter", () => {
     expect(refreshed).toHaveLength(1);
     expect(refreshed[0]).toMatchObject({ observedAtMs: 1_786_449_550_000,
       value: { observedAtMs: 1_786_449_550_000 } });
+  });
+
+  it("invalidates SABA immediately when the active catalog socket closes", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    const closed: ChromeBridgeEnvelope = { ...envelope(""), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: "CLOSED" } };
+    expect(adapter.fingerprint(closed)).toBe(true);
+    expect(adapter.decode(closed)).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_CLOSED"
+    })]);
+  });
+
+  it("does not publish a new stream until reset/done establishes a complete baseline", () => {
+    const rows = [["f", 0, fields],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 })];
+    const input = { ...envelope(`42${JSON.stringify(["m", "b1", rows, 1])}`),
+      request: { ...envelope("").request, streamId: "fresh-stream-without-baseline" } };
+    expect(new SabaWsCatalogAdapter().decode(input)).toEqual([]);
+  });
+
+  it("invalidates SABA on a provider revision gap instead of retaining old prices", () => {
+    const fullRows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(envelope(`42${JSON.stringify(["m", "b1", fullRows, "rev1"])}`))).toHaveLength(1);
+    const gapRows = [encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+      oddsstatus: "running", enable: 1, odds1a: 0.5, odds2a: -0.5, hdp1: 0.5, hdp2: 0 })];
+    const gap = { ...envelope(`42${JSON.stringify(["m", "b1", gapRows, "rev3"])}`), sequence: 5 };
+    expect(adapter.decode(gap)).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
   });
 
 });

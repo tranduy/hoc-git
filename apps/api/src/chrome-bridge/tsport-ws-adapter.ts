@@ -3,10 +3,18 @@ import { CmdSnapshotChunkSchema, type ChromeBridgeEnvelope } from "@tool-chenh/c
 import { z } from "zod";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
+import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 
 const ACCOUNT_ID = "catalog-source:APSPORT:FOOTBALL";
-const RETENTION_MS = 2 * 60 * 60 * 1_000;
+const DOM_RETENTION_MS = 15_000;
+
+interface RetainedRecord {
+  readonly record: SbobetCatalogInputRecord;
+  readonly seenAtMs: number;
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number;
+}
 
 type JsonRecord = Record<string, unknown>;
 type TsportTwoWayMarketType = Exclude<SbobetCatalogInputRecord["markets"][number]["marketType"], "FT_1X2">;
@@ -124,12 +132,14 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "tsport-ws-catalog-v1";
   readonly lobby = "TSPORT" as const;
   readonly providerFamily = "APSPORT";
-  readonly #records = new Map<string, Map<string, { record: SbobetCatalogInputRecord; seenAtMs: number }>>();
+  readonly #domRecords = new Map<string, Map<string, RetainedRecord>>();
+  readonly #wsRecords = new Map<string, Map<string, RetainedRecord>>();
   readonly #parsed = new WeakMap<ChromeBridgeEnvelope, JsonRecord | null>();
   readonly #assembler = new CmdSnapshotAssembler();
 
   resetSource(sourceId: string): void {
-    this.#records.delete(sourceId);
+    this.#domRecords.delete(sourceId);
+    for (const key of this.#wsRecords.keys()) if (key.startsWith(`${sourceId}|`)) this.#wsRecords.delete(key);
     this.#assembler.resetSource(sourceId);
   }
 
@@ -137,10 +147,12 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (envelope.lobby !== "TSPORT" || envelope.payload.encoding !== "UTF8") return false;
     if (envelope.transport === "DOM_SNAPSHOT") return envelope.request.resourceType === "DOM" &&
       envelope.request.pathnameClass === "/__fieldline_dom_snapshot__";
-    if (envelope.transport !== "WS_FRAME" ||
+    if ((envelope.transport !== "WS_FRAME" && envelope.transport !== "WS_STATE") ||
       !/^spws\.(?:agenate|racern)\.com$/iu.test(envelope.request.hostname) ||
       !/^\/ln\/[^/]+\/(?:p\/1\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/0\/tr\/0$/u.test(
         envelope.request.pathnameClass)) return false;
+    if (envelope.transport === "WS_STATE") return envelope.request.streamId !== undefined &&
+      (envelope.payload.body === "OPEN" || envelope.payload.body === "CLOSED");
     const parsed = parseOuter(envelope.payload.body)?.event ?? null;
     this.#parsed.set(envelope, parsed);
     return parsed !== null && extractTsportFootballRecord(parsed) !== null;
@@ -148,6 +160,13 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
+    const streamKey = `${envelope.sourceId}|${envelope.request.streamId ?? "legacy"}`;
+    if (envelope.transport === "WS_STATE") {
+      this.#wsRecords.delete(streamKey);
+      if (envelope.payload.body === "OPEN") return [];
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+        invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
+    }
     let incomingRecords: readonly SbobetCatalogInputRecord[];
     if (envelope.transport === "DOM_SNAPSHOT") {
       let raw: unknown;
@@ -167,32 +186,40 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (incoming === null) return [];
       incomingRecords = [incoming];
     }
-    const retained = this.#records.get(envelope.sourceId) ?? new Map<string,
-      { record: SbobetCatalogInputRecord; seenAtMs: number }>();
+    const retained = envelope.transport === "DOM_SNAPSHOT"
+      ? this.#domRecords.get(envelope.sourceId) ?? new Map<string, RetainedRecord>()
+      : this.#wsRecords.get(streamKey) ?? new Map<string, RetainedRecord>();
     for (const incoming of incomingRecords) {
-      retained.set(incoming.eventId, { record: incoming, seenAtMs: envelope.observedAtMs });
+      retained.set(incoming.eventId, { record: incoming, seenAtMs: envelope.observedAtMs,
+        receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
     }
-    for (const [eventId, entry] of retained) {
-      if (envelope.observedAtMs - entry.seenAtMs > RETENTION_MS) retained.delete(eventId);
+    if (envelope.transport === "DOM_SNAPSHOT") {
+      for (const [eventId, entry] of retained) {
+        if (envelope.observedAtMs - entry.seenAtMs > DOM_RETENTION_MS) retained.delete(eventId);
+      }
+      this.#domRecords.set(envelope.sourceId, retained);
+    } else {
+      this.#wsRecords.set(streamKey, retained);
     }
-    this.#records.set(envelope.sourceId, retained);
-    const normalized = normalizeSbobetCatalog([...retained.values()].map((entry) => entry.record), {
-      observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
-      sequence: envelope.sequence, provider: "APSPORT",
+    const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => normalizeSbobetCatalog([entry.record], {
+      observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
+      sequence: entry.sequence, provider: "APSPORT",
       settlementProfile: "football-regulation-including-added-time"
     });
-    const emptyCatalog = normalized.events.length === 0 && normalized.markets.length === 0 &&
-      normalized.quotes.length === 0;
-    const virtualOnly = emptyCatalog && normalized.diagnostics.length > 0 &&
-      normalized.diagnostics.every((diagnostic) => diagnostic === "SBOBET_CATALOG_EVENT_UNSUPPORTED");
-    if (!virtualOnly && (normalized.events.length === 0 || normalized.markets.length === 0 ||
-      normalized.quotes.length === 0)) return [];
-    const catalog: ObservedProviderCatalog = {
-      dataMode: "LIVE", accountId: ACCOUNT_ID, provider: "APSPORT", category: "FOOTBALL",
-      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: envelope.observedAtMs,
-      rejectedMarketCount: normalized.diagnostics.length,
-      events: normalized.events, markets: normalized.markets, quotes: normalized.quotes
-    };
+    // DOM is only a visible baseline. Socket partitions are appended last so
+    // provider push prices always win collisions without erasing hidden rows.
+    const parts: NormalizedCatalogPart[] = [...(this.#domRecords.get(envelope.sourceId)?.values() ?? [])]
+      .map(normalizeEntry);
+    for (const [key, records] of this.#wsRecords) {
+      if (key.startsWith(`${envelope.sourceId}|`)) parts.push(...[...records.values()].map(normalizeEntry));
+    }
+    const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
+      observedAtMs: envelope.observedAtMs, parts });
+    const virtualOnly = catalog.events.length === 0 && catalog.markets.length === 0 && catalog.quotes.length === 0 &&
+      parts.length > 0 && parts.every((part) => part.diagnostics.length > 0 &&
+        part.diagnostics.every((diagnostic) => diagnostic === "SBOBET_CATALOG_EVENT_UNSUPPORTED"));
+    if (!virtualOnly && (catalog.events.length === 0 || catalog.markets.length === 0 ||
+      catalog.quotes.length === 0)) return [];
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog }];
   }

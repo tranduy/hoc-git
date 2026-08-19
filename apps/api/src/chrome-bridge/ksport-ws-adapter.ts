@@ -1,9 +1,19 @@
 import { normalizeSbobetCatalog, type SbobetCatalogInputRecord } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
-import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { extractSbobetDirectCatalogRecords } from "../providers/sbobet/sbobet-direct-catalog.js";
 import { decodeSbobetStompBodies } from "../providers/sbobet/sbobet-stomp.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
+import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
+
+const RETENTION_MS = 15_000;
+const ACCOUNT_ID = "catalog-source:SBOBET:FOOTBALL";
+
+interface RetainedRecord {
+  readonly record: SbobetCatalogInputRecord;
+  readonly seenAtMs: number;
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number;
+}
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -35,53 +45,64 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "ksport-ws-catalog-v1";
   readonly lobby = "KSPORT" as const;
   readonly providerFamily = "SBOBET";
-  readonly #records = new Map<string, Map<string, { record: SbobetCatalogInputRecord; seenAtMs: number }>>();
+  readonly #records = new Map<string, Map<string, RetainedRecord>>();
 
   resetSource(sourceId: string): void {
-    this.#records.delete(sourceId);
+    for (const key of this.#records.keys()) if (key.startsWith(`${sourceId}|`)) this.#records.delete(key);
   }
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
-    return envelope.lobby === "KSPORT" && envelope.transport === "WS_FRAME" &&
-      envelope.payload.encoding === "UTF8" && envelope.request.pathnameClass.startsWith("/sport/") &&
+    if (envelope.lobby !== "KSPORT" || envelope.payload.encoding !== "UTF8" ||
+      !envelope.request.pathnameClass.startsWith("/sport/") || envelope.request.streamId === undefined) return false;
+    if (envelope.transport === "WS_STATE") return envelope.payload.body === "OPEN" || envelope.payload.body === "CLOSED";
+    return envelope.transport === "WS_FRAME" &&
       envelope.payload.body.includes("destination:/topic/sports/") &&
       decodeSbobetStompBodies(envelope.payload.body).length > 0;
   }
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
+    const streamKey = `${envelope.sourceId}|${envelope.request.streamId ?? "legacy"}`;
+    if (envelope.transport === "WS_STATE") {
+      this.#records.delete(streamKey);
+      if (envelope.payload.body === "OPEN") return [];
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+        invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
+    }
     const live = envelope.payload.body.includes("/live/");
     const changed: readonly SbobetCatalogInputRecord[] = decodeSbobetStompBodies(envelope.payload.body).flatMap((body) => {
       const bootstrap = bootstrapRecords(body, live);
       return extractSbobetDirectCatalogRecords(body, bootstrap);
     });
     if (changed.length === 0) return [];
-    const retained: Map<string, { record: SbobetCatalogInputRecord; seenAtMs: number }> =
-      this.#records.get(envelope.sourceId) ?? new Map();
+    const retained = this.#records.get(streamKey) ?? new Map<string, RetainedRecord>();
     for (const incoming of changed) {
       const previous = retained.get(incoming.eventId)?.record;
       const markets = new Map<string, SbobetCatalogInputRecord["markets"][number]>(
         previous?.markets.map((market) => [market.marketId, market] as const) ?? []);
       incoming.markets.forEach((market) => markets.set(market.marketId, market));
-      retained.set(incoming.eventId, { record: { ...incoming, markets: [...markets.values()] }, seenAtMs: envelope.observedAtMs });
+      retained.set(incoming.eventId, { record: { ...incoming, markets: [...markets.values()] },
+        seenAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
+        sequence: envelope.sequence });
     }
     for (const [eventId, entry] of retained) {
-      if (envelope.observedAtMs - entry.seenAtMs > 2 * 60 * 60 * 1_000) retained.delete(eventId);
+      if (envelope.observedAtMs - entry.seenAtMs > RETENTION_MS) retained.delete(eventId);
     }
-    this.#records.set(envelope.sourceId, retained);
-    const records = [...retained.values()].map((entry) => entry.record);
-    const normalized = normalizeSbobetCatalog(records, {
-      observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
-      sequence: envelope.sequence, provider: "SBOBET",
-      settlementProfile: "football-regulation-including-added-time"
-    });
-    if (normalized.events.length === 0 || normalized.markets.length === 0 || normalized.quotes.length === 0) return [];
-    const catalog: ObservedProviderCatalog = {
-      dataMode: "LIVE", accountId: "catalog-source:SBOBET:FOOTBALL", provider: "SBOBET", category: "FOOTBALL",
-      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: envelope.observedAtMs,
-      rejectedMarketCount: normalized.diagnostics.length,
-      events: normalized.events, markets: normalized.markets, quotes: normalized.quotes
-    };
+    this.#records.set(streamKey, retained);
+    const parts: NormalizedCatalogPart[] = [];
+    for (const [key, streamRecords] of this.#records) {
+      if (!key.startsWith(`${envelope.sourceId}|`)) continue;
+      for (const entry of streamRecords.values()) {
+        parts.push(normalizeSbobetCatalog([entry.record], {
+          observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
+          sequence: entry.sequence, provider: "SBOBET",
+          settlementProfile: "football-regulation-including-added-time"
+        }));
+      }
+    }
+    const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET",
+      observedAtMs: envelope.observedAtMs, parts });
+    if (catalog.events.length === 0 || catalog.markets.length === 0 || catalog.quotes.length === 0) return [];
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog }];
   }

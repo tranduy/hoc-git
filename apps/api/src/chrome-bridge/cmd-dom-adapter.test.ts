@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { CmdDomCatalogAdapter } from "./cmd-dom-adapter.js";
 
-function envelope(body: string, overrides: Partial<Pick<ChromeBridgeEnvelope, "sequence" | "observedAtMs">> = {}): ChromeBridgeEnvelope {
+function envelope(body: string, overrides: Partial<Pick<ChromeBridgeEnvelope,
+  "sequence" | "observedAtMs" | "receivedMonotonicMs">> = {}): ChromeBridgeEnvelope {
   return {
     version: 1, kind: "NETWORK", lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9,
     sequence: overrides.sequence ?? 12,
-    observedAtMs: overrides.observedAtMs ?? Date.UTC(2026, 7, 15, 5), receivedMonotonicMs: 50,
+    observedAtMs: overrides.observedAtMs ?? Date.UTC(2026, 7, 15, 5),
+    receivedMonotonicMs: overrides.receivedMonotonicMs ?? 50,
     transport: "DOM_SNAPSHOT",
     request: { hostname: "cgnew.fts368.com", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
     payload: { encoding: "UTF8", body }
@@ -94,13 +96,30 @@ describe("CmdDomCatalogAdapter", () => {
       }]
     };
 
-    adapter.decode(envelope(snapshotBody([record]), { sequence: 12 }));
+    adapter.decode(envelope(snapshotBody([record]), { sequence: 12, receivedMonotonicMs: 50 }));
     const updates = adapter.decode(envelope(
       snapshotBody([nextRecord], { snapshotId: "cmd:9:snapshot-0002" }),
-      { sequence: 13, observedAtMs: Date.UTC(2026, 7, 15, 5, 0, 2) }
+      { sequence: 13, observedAtMs: Date.UTC(2026, 7, 15, 5, 0, 2), receivedMonotonicMs: 80 }
     ));
 
-    expect((updates[0]!.value as { events: readonly { providerEventId: string }[] }).events
+    const catalog = updates[0]!.value as { events: readonly { providerEventId: string }[];
+      quotes: readonly { providerEventId: string; receivedMonotonicMs: number; sequence: number | null }[] };
+    expect(catalog.events
       .map((event) => event.providerEventId).sort()).toEqual(["event-1", "event-2"]);
+    expect(catalog.quotes.filter((quote) => quote.providerEventId === "event-1"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 50, sequence: 12 })]));
+    expect(catalog.quotes.filter((quote) => quote.providerEventId === "event-2"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 80, sequence: 13 })]));
+  });
+
+  it("expires CMD viewport rows that have not been observed within fifteen seconds", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    const nextRecord = { ...record, matchId: "event-2", teamNames: ["Gamma FC", "Delta FC"] };
+    const startedAtMs = Date.UTC(2026, 7, 15, 5);
+    adapter.decode(envelope(snapshotBody([record]), { observedAtMs: startedAtMs }));
+    const update = adapter.decode(envelope(snapshotBody([nextRecord], { snapshotId: "cmd:9:snapshot-expiry" }),
+      { sequence: 13, observedAtMs: startedAtMs + 15_001, receivedMonotonicMs: 80 }))[0]!;
+    expect((update.value as { events: readonly { providerEventId: string }[] }).events)
+      .toEqual([expect.objectContaining({ providerEventId: "event-2" })]);
   });
 });

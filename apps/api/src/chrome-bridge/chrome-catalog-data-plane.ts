@@ -88,7 +88,11 @@ export class ChromeCatalogDataPlane {
     const route = this.#router.route(assembled);
     if (route.status !== "TRUSTED" || route.adapter === null) return stateChanged;
     const update = route.adapter.decode(assembled).at(-1);
-    if (update === undefined || !isObservedCatalog(update.value)) return stateChanged;
+    if (update === undefined) return stateChanged;
+    if (update.invalidateAccountId !== undefined) {
+      return this.#invalidate(update.invalidateAccountId) || stateChanged;
+    }
+    if (!isObservedCatalog(update.value)) return stateChanged;
     if (update.value.category !== "FOOTBALL") return stateChanged;
     // A provider page can briefly render the event shell before its market
     // rows. Such a snapshot is transport-valid but unusable for comparison;

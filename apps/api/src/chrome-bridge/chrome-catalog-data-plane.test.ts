@@ -48,7 +48,8 @@ function sabaEnvelope(sequence: number, matchIds: readonly number[]): ChromeBrid
   rows.push([0, "done"]);
   return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
     sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence, transport: "WS_FRAME",
-    request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket" },
+    request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket",
+      streamId: "saba-stream-1" },
     payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", "b1", rows, sequence])}` } };
 }
 
@@ -226,6 +227,18 @@ describe("ChromeCatalogDataPlane", () => {
         expect.objectContaining({ providerEventId: "10" })
       ])
     });
+  });
+
+  it("marks a provider stale immediately when its catalog socket closes", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    const baseline = sabaEnvelope(1, [1]);
+    expect(plane.ingest(baseline)).toBe(true);
+    const closed: ChromeBridgeEnvelope = { ...baseline, sequence: 2, observedAtMs: 1_100,
+      receivedMonotonicMs: 60, transport: "WS_STATE", payload: { encoding: "UTF8", body: "CLOSED" } };
+    expect(plane.ingest(closed)).toBe(true);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
   });
 
   it("drops an expired replay before decoding or publishing it", async () => {

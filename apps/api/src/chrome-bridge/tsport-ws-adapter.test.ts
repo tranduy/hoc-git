@@ -8,7 +8,7 @@ function envelope(event: unknown, sequence = 1): ChromeBridgeEnvelope {
     sequence, observedAtMs: Date.UTC(2026, 7, 16, 3), receivedMonotonicMs: 50,
     transport: "WS_FRAME",
     request: { hostname: "spws.agenate.com", pathnameClass: "/ln/en/p/1/u/redacted/session-part/s/1/mg/0/tr/0",
-      resourceType: "WebSocket" },
+      resourceType: "WebSocket", streamId: "tsport-stream-1" },
     payload: { encoding: "UTF8", body: JSON.stringify({ s: 1, t: "eu", tmrg: "0", d: JSON.stringify(event) }) }
   };
 }
@@ -160,8 +160,15 @@ describe("TsportWsCatalogAdapter", () => {
   it("retains unchanged events across one-event socket deltas", () => {
     const adapter = new TsportWsCatalogAdapter();
     adapter.decode(envelope(event(1, "Home 1")));
-    const second = adapter.decode(envelope(event(2, "Home 2"), 2))[0]!.value as { events: unknown[] };
+    const next = { ...envelope(event(2, "Home 2"), 2), observedAtMs: Date.UTC(2026, 7, 16, 3, 0, 1),
+      receivedMonotonicMs: 80 };
+    const second = adapter.decode(next)[0]!.value as { events: unknown[]; quotes: Array<{
+      providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
     expect(second.events).toHaveLength(2);
+    expect(second.quotes.filter((quote) => quote.providerEventId === "1"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 50, sequence: 1 })]));
+    expect(second.quotes.filter((quote) => quote.providerEventId === "2"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 80, sequence: 2 })]));
   });
 
   it("seeds the complete catalog from a DOM baseline before merging one-event socket deltas", () => {
@@ -179,6 +186,35 @@ describe("TsportWsCatalogAdapter", () => {
     expect(seeded.events).toHaveLength(3);
     const merged = adapter.decode(envelope(event(2, "Updated Home 2"), 2))[0]!.value as { events: unknown[] };
     expect(merged.events).toHaveLength(3);
+  });
+
+  it("does not let a later partial DOM viewport erase socket-only APSPORT markets", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const socketCatalog = adapter.decode(envelope(event(2, "Socket Home")))[0]!.value as { markets: unknown[] };
+    expect(socketCatalog.markets).toHaveLength(4);
+    const partialDom = [{ eventId: "2", leagueName: "League", timeText: "LIVE", scoreText: "0 - 0",
+      teamNames: ["DOM Home", "Away 2"], markets: [{ marketId: "2-ah", marketType: "FT_AH",
+        lineText: "-0.5", selections: [
+          { selectionId: "2-home", selection: "HOME", priceText: "0.1", locked: false, lineText: "-0.5" },
+          { selectionId: "2-away", selection: "AWAY", priceText: "0.1", locked: false, lineText: "+0.5" }
+        ] }] }];
+    const laterDom = { ...domEnvelope(partialDom, 2), observedAtMs: Date.UTC(2026, 7, 16, 3, 0, 1),
+      receivedMonotonicMs: 80 };
+    const merged = adapter.decode(laterDom)[0]!.value as { events: Array<{ participantA: string }>;
+      markets: unknown[]; quotes: Array<{ rawOdds: string }> };
+    expect(merged.markets).toHaveLength(4);
+    expect(merged.events[0]).toMatchObject({ participantA: "Socket Home" });
+    expect(merged.quotes).toEqual(expect.arrayContaining([expect.objectContaining({ rawOdds: "0.79" })]));
+  });
+
+  it("invalidates APSPORT immediately when its active socket closes", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const closed: ChromeBridgeEnvelope = { ...envelope(event(1, "Home")), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: "CLOSED" } };
+    expect(adapter.fingerprint(closed)).toBe(true);
+    expect(adapter.decode(closed)).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:APSPORT:FOOTBALL", reason: "PROVIDER_STREAM_CLOSED"
+    })]);
   });
 
   it("rejects other sports, hosts and non-event frames", () => {
