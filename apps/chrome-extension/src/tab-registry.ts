@@ -102,7 +102,20 @@ export class TabRegistry {
         // session. Adopt every recognized current tab so a stale old id never
         // leaves that provider permanently disconnected.
         await this.attachSelected(tab);
-      } catch {
+      } catch (error) {
+        if (tab.id !== undefined && isExistingDebuggerAttachment(error)) {
+          try {
+            // An MV3 worker restart clears this in-memory registry while
+            // Chrome can retain the extension's debugger attachment. Reclaim
+            // that orphaned session instead of leaving every source detached.
+            await this.#port.detach(tab.id);
+            await this.attachSelected(tab);
+            continue;
+          } catch {
+            // A DevTools-owned target is not ours to reclaim. Continue with
+            // the other providers and retry this tab on the next alarm.
+          }
+        }
         // One tab can temporarily be owned by DevTools or be navigating.
         // Keep restoring the remaining recognized provider tabs; the Chrome
         // alarm will retry this one on the next recovery pass.
@@ -117,4 +130,8 @@ export class TabRegistry {
     for (const [tabId, lobby] of this.#preferred) preferences[String(tabId)] = lobby;
     await this.#store.save(preferences);
   }
+}
+
+function isExistingDebuggerAttachment(error: unknown): boolean {
+  return error instanceof Error && /another debugger is already attached/iu.test(error.message);
 }

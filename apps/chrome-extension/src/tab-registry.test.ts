@@ -66,6 +66,25 @@ describe("TabRegistry", () => {
     expect(attach).toHaveBeenCalledWith(99);
   });
 
+  it("reclaims an orphaned debugger attachment after the extension worker restarts", async () => {
+    let attachAttempts = 0;
+    const attach = vi.fn(async () => {
+      attachAttempts++;
+      if (attachAttempts === 1) throw new Error("Another debugger is already attached");
+    });
+    const detach = vi.fn(async () => undefined);
+    const registry = new TabRegistry(
+      { attach, detach },
+      { load: async () => ({ "7": "IM" }), save: vi.fn(async () => undefined) }
+    );
+
+    await expect(registry.restore([
+      { id: 7, url: "https://imsports.directsb.net/live" }
+    ])).resolves.toMatchObject([{ lobby: "IM", tabId: 7 }]);
+    expect(detach).toHaveBeenCalledWith(7);
+    expect(attach).toHaveBeenCalledTimes(2);
+  });
+
   it("continues restoring healthy preferred tabs when one debugger attachment fails", async () => {
     const attach = vi.fn(async (tabId: number) => {
       if (tabId === 7) throw new Error("Another debugger is already attached");
