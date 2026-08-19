@@ -104,6 +104,35 @@ describe("CmdSnapshotPoller", () => {
     expect(maintain).toHaveBeenCalledTimes(4);
   });
 
+  it("reacquires both IM market partitions every fifteen seconds", async () => {
+    let now = 1_000;
+    const maintain = vi.fn(async () => undefined);
+    const poller = new CmdSnapshotPoller({
+      list: () => [
+        { lobby: "IM", tabId: 4, hostname: "imsports.directsb.net", state: "ATTACHED" },
+        { lobby: "SABA", tabId: 5, hostname: "sports.example", state: "ATTACHED" }
+      ],
+      capture: vi.fn(async () => undefined), maintain, now: () => now
+    });
+
+    poller.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(maintain).toHaveBeenCalledTimes(2);
+
+    now = 15_999;
+    poller.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(maintain).toHaveBeenCalledTimes(2);
+
+    now = 16_000;
+    poller.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(maintain).toHaveBeenCalledTimes(3);
+    expect(maintain).toHaveBeenLastCalledWith(
+      { lobby: "IM", sourceId: "chrome:IM:4", tabId: 4 }
+    );
+  });
+
   it("advances virtualized CMD and TSPORT tables on every snapshot cadence while other tabs stay bounded", async () => {
     let callback: (() => void) | undefined;
     let now = 1_000;

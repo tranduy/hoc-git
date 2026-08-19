@@ -10,6 +10,7 @@ export interface CmdSnapshotPollerDependencies {
   readonly now?: () => number;
   readonly replayIntervalMs?: number;
   readonly cmdDiscoveryIntervalMs?: number;
+  readonly imDiscoveryIntervalMs?: number;
   readonly setInterval?: (callback: () => void, delayMs: number) => unknown;
   readonly clearInterval?: (handle: unknown) => void;
   readonly intervalMs?: number;
@@ -21,7 +22,7 @@ export class CmdSnapshotPoller {
   #timer: unknown = null;
   #lastReplayAtMs: number | null = null;
   #lastMaintenanceAtMs: number | null = null;
-  readonly #lastCmdMaintenanceAtMs = new Map<number, number>();
+  readonly #lastFastMaintenanceAtMs = new Map<number, number>();
   readonly #lastCatalogRefreshAtMs = new Map<number, number>();
   #replayInFlight = false;
   readonly #maintenanceInFlight = new Set<number>();
@@ -56,8 +57,8 @@ export class CmdSnapshotPoller {
       this.#lastMaintenanceAtMs = now;
       for (const tab of tabs) {
         if (this.#maintenanceInFlight.has(tab.tabId)) continue;
-        if (tab.lobby === "CMD" || tab.lobby === "TSPORT") {
-          this.#lastCmdMaintenanceAtMs.set(tab.tabId, now);
+        if (tab.lobby === "CMD" || tab.lobby === "TSPORT" || tab.lobby === "IM") {
+          this.#lastFastMaintenanceAtMs.set(tab.tabId, now);
         }
         this.#maintenanceInFlight.add(tab.tabId);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
@@ -67,10 +68,13 @@ export class CmdSnapshotPoller {
     }
     if (this.#dependencies.maintain !== undefined) {
       for (const tab of tabs) {
-        if ((tab.lobby !== "CMD" && tab.lobby !== "TSPORT") || this.#maintenanceInFlight.has(tab.tabId) ||
-          now - (this.#lastCmdMaintenanceAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) <
-            (this.#dependencies.cmdDiscoveryIntervalMs ?? this.#dependencies.intervalMs ?? 2_000)) continue;
-        this.#lastCmdMaintenanceAtMs.set(tab.tabId, now);
+        const intervalMs = tab.lobby === "IM" ? this.#dependencies.imDiscoveryIntervalMs ?? 15_000
+          : tab.lobby === "CMD" || tab.lobby === "TSPORT"
+            ? this.#dependencies.cmdDiscoveryIntervalMs ?? this.#dependencies.intervalMs ?? 2_000
+            : null;
+        if (intervalMs === null || this.#maintenanceInFlight.has(tab.tabId) ||
+          now - (this.#lastFastMaintenanceAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) < intervalMs) continue;
+        this.#lastFastMaintenanceAtMs.set(tab.tabId, now);
         this.#maintenanceInFlight.add(tab.tabId);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
         void this.#dependencies.maintain(source).catch(() => undefined)
