@@ -140,6 +140,25 @@ describe("ChromeBridgeControlMessageSchema", () => {
     expect(schema.safeParse({ ...valid, providerEventId: "" }).success).toBe(false);
     expect(schema.safeParse({ ...valid, requestId: "x".repeat(129) }).success).toBe(false);
   });
+
+  it("accepts only a strict read-only visible selection price probe command", () => {
+    const schema = contracts.ChromeBridgeControlMessageSchema;
+    const valid = { version: 1, kind: "PROBE_SELECTION_PRICE", sourceId: "chrome:TSPORT:42",
+      requestId: "price-4f90a2", providerEventId: "event-1", providerMarketId: "market-1",
+      providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
+      scope: "FULL_TIME", selection: "UNDER", line: "2.5" } as const;
+    expect(schema.safeParse(valid).success).toBe(true);
+    expect(schema.safeParse({ ...valid, click: true }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, requestId: "x".repeat(129) }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, providerSelectionId: "" }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, eventLabel: "" }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, participantA: "" }).success).toBe(false);
+    expect(schema.safeParse({ ...valid, participantB: "x".repeat(257) }).success).toBe(false);
+    const { participantA: _participantA, ...withoutParticipant } = valid;
+    expect(schema.safeParse(withoutParticipant).success).toBe(false);
+    expect(schema.safeParse({ ...valid, line: "not-a-line" }).success).toBe(false);
+  });
 });
 
 describe("CmdSnapshotChunkSchema", () => {

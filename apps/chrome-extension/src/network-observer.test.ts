@@ -276,6 +276,178 @@ describe("NetworkObserver", () => {
     expect(result.candidateControls).toEqual(["button.c-match__detail View details"]);
   });
 
+  it("reads one exact visible bookmaker price from DOM and emits only correlated price evidence", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
+        childFrames: [{ frame: { id: "sports" } }] } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: params?.frameId === "top" ? 21 : 22 };
+      if (method === "Runtime.evaluate") return params?.contextId === 22
+        ? { result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100 } } }
+        : { result: { value: { ok: false, reason: "EXACT_SELECTION_NOT_FOUND" } } };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+
+    await observer.probeSelectionPrice({ lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 },
+      { requestId: "price-1", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+        participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection: "UNDER", line: "2.5" });
+
+    expect(forwarded).toHaveLength(1);
+    expect(forwarded[0]?.request.pathnameClass).toBe("/__fieldline_selection_price_probe__");
+    expect(JSON.parse(forwarded[0]!.payload.body)).toEqual({ requestId: "price-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", status: "FOUND",
+      rawOdds: "0.17", observedAtMs: 1_100, method: "DOM" });
+    const evaluations = sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate");
+    expect(String(evaluations[0]?.[2]?.expression)).not.toContain(".click(");
+  });
+
+  it("fails closed when more than one frame resolves the requested selection", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
+        childFrames: [{ frame: { id: "sports" } }] } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: params?.frameId === "top" ? 21 : 22 };
+      if (method === "Runtime.evaluate") return { result: { value: { ok: true,
+        rawOdds: params?.contextId === 21 ? "0.17" : "0.36", observedAtMs: 1_100 } } };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+
+    await observer.probeSelectionPrice({ lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 },
+      { requestId: "price-ambiguous", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+        participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection: "UNDER", line: "2.5" });
+
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "AMBIGUOUS", rawOdds: null,
+      method: "DOM", reason: "VISIBLE_PRICE_AMBIGUOUS" });
+  });
+
+  it("rechecks IM in its new document after opening the exact collapsed event", async () => {
+    let evaluations = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 21 };
+      if (method === "Runtime.evaluate") {
+        evaluations += 1;
+        return evaluations === 1
+          ? { result: { value: { ok: false, reason: "IM_NAVIGATION_REQUESTED" } } }
+          : { result: { value: { ok: true, rawOdds: "0.91", observedAtMs: 1_100 } } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+
+    await observer.probeSelectionPrice({ lobby: "IM", sourceId: "chrome:IM:7", tabId: 7 },
+      { requestId: "price-im", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1", eventLabel: "KaPa vs JIPPO",
+        participantA: "KaPa", participantB: "JIPPO", marketType: "FT_AH",
+        scope: "FULL_TIME", selection: "AWAY", line: "0.75" });
+
+    expect(evaluations).toBe(2);
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "0.91" });
+  });
+
+  it("checks BTI through a fresh awaited exact event-detail read instead of visible DOM", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Runtime.evaluate") {
+        return { result: { value: { ok: true, rawOdds: "-0.29", observedAtMs: 1_100 } } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+
+    await observer.probeSelectionPrice({ lobby: "BTI", sourceId: "chrome:BTI:7", tabId: 7 },
+      { requestId: "price-bti", providerEventId: "877857668386287616",
+        providerMarketId: "0OU877857669225148454:2.5",
+        providerSelectionId: "0OU877857669225148454OMM",
+        eventLabel: "Polisi Tanzania vs JKT Tanzania", participantA: "Polisi Tanzania",
+        participantB: "JKT Tanzania", marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection: "OVER", line: "2.5" });
+
+    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate")?.[2];
+    expect(evaluation?.awaitPromise).toBe(true);
+    expect(String(evaluation?.expression)).toContain("/api/eventpage/events/");
+    expect(String(evaluation?.expression)).toContain("cache: 'no-store'");
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "-0.29",
+      method: "IN_PAGE_FETCH" });
+  });
+
+  it("checks SBOBET through a fresh awaited exact getEvent read instead of visible DOM", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, _params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
+        childFrames: [{ frame: { id: "provider-child" } }] } };
+      if (method === "Runtime.evaluate") {
+        return { result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100 } } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+    await observer.handleEvent({ lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 },
+      "Runtime.executionContextCreated", { context: { id: 71,
+        auxData: { frameId: "provider-child", isDefault: true } } });
+    await observer.handleEvent({ lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 },
+      "Network.requestWillBeSent", { requestId: "sbobet-current", type: "Fetch",
+        request: { method: "GET", url: "https://sbobet.example/api/v2/getEvent?live=1&lang=en",
+          headers: { "x-session-proof": "current-tab-session", Cookie: "must-not-be-copied" } } });
+    await observer.handleEvent({ lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 },
+      "Network.responseReceived", { requestId: "sbobet-current", type: "Fetch",
+        response: { url: "https://sbobet.example/api/v2/getEvent?live=1&lang=en" } });
+
+    await observer.probeSelectionPrice({ lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 },
+      { requestId: "price-sbobet", providerEventId: "5643423", providerMarketId: "7307800681810075",
+        providerSelectionId: "56434230030000075h", eventLabel: "El Daklyeh vs Mega Sport Club",
+        participantA: "El Daklyeh", participantB: "Mega Sport Club",
+        marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "0.75" });
+
+    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate")?.[2];
+    expect(evaluation?.awaitPromise).toBe(true);
+    expect(String(evaluation?.expression)).toContain("/api/v2/getEvent");
+    expect(String(evaluation?.expression)).toContain("live=1&lang=en");
+    expect(String(evaluation?.expression)).toContain("current-tab-session");
+    expect(String(evaluation?.expression)).not.toContain("must-not-be-copied");
+    expect(String(evaluation?.expression)).toContain("cache: 'no-store'");
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Page.getFrameTree")).toBe(false);
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "0.17" });
+  });
+
+  it("restores SBOBET's request template after the extension worker restarts", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) =>
+      method === "Runtime.evaluate"
+        ? { result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100 } } }
+        : {});
+    const loadSbobetEventRequest = vi.fn(async () => ({
+      url: "https://api.sbobet.example/api/v2/getEvent?live=1",
+      headers: { "x-session-proof": "restored-session" }
+    }));
+    const observer = new NetworkObserver({ sendCommand, loadSbobetEventRequest, now: () => 1_100,
+      forward: vi.fn(async () => undefined) });
+
+    await observer.probeSelectionPrice({ lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 },
+      { requestId: "price-restored", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+        participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection: "OVER", line: "2.5" });
+
+    expect(loadSbobetEventRequest).toHaveBeenCalledTimes(1);
+    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate")?.[2];
+    expect(String(evaluation?.expression)).toContain("api.sbobet.example/api/v2/getEvent?live=1");
+    expect(String(evaluation?.expression)).toContain("restored-session");
+  });
+
   it("requests a fresh BTI football catalog in the attached authenticated tab", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },

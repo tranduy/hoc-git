@@ -344,6 +344,12 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .ticket-realtime-audit { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 7px; }
 .ticket-realtime-audit__leg { display: grid; gap: 4px; min-width: 0; padding: 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel-raised); overflow-wrap: anywhere; }
 .ticket-realtime-audit__leg strong, .ticket-realtime-audit__leg span { font-size: .76rem; }
+.ticket-realtime-audit__prices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.ticket-realtime-audit__price { display: grid; gap: 2px; min-width: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px; background: #0d171f; }
+.ticket-realtime-audit__price--bookmaker { border-color: var(--focus); background: #10251d; }
+.ticket-realtime-audit__price > small { color: var(--muted); font-size: .68rem; font-weight: 850; }
+.ticket-realtime-audit__price > strong { color: var(--text); font-size: .95rem; }
+.ticket-realtime-audit__price--bookmaker > strong { color: var(--positive); }
 .ticket-realtime-audit__status { width: fit-content; padding: 2px 6px; border-radius: 999px; color: var(--text); background: var(--muted); font-size: .7rem; }
 .ticket-realtime-audit__status--match { background: var(--positive); color: #06140c; }
 .ticket-realtime-audit__status--odds_changed { background: var(--warning); color: #181100; }

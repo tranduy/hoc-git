@@ -355,10 +355,11 @@ describe("RankedTicketTable", () => {
     fireEvent.click(screen.getByRole("button", { name: "Kiểm tra giá thật" }));
 
     const audit = screen.getByLabelText("Kiểm tra giá thật series-1");
-    expect(within(audit).getByText(/TOOL · SABA/u).textContent).toContain("2.2 DECIMAL");
-    expect(within(audit).getByText(/TOOL · IM/u).textContent).toContain("2.5 DECIMAL");
+    expect(within(within(audit).getByLabelText("Giá tool SABA")).getByText("2.2 DECIMAL")).toBeTruthy();
+    expect(within(within(audit).getByLabelText("Giá tool IM")).getByText("2.5 DECIMAL")).toBeTruthy();
     expect(within(audit).getAllByText("Đang đọc trực tiếp…")).toHaveLength(2);
     expect(calls[0]).toMatchObject({ eventLabel: "Nongshim Academy vs Dplus Challengers",
+      participantA: "Nongshim Academy", participantB: "Dplus Challengers",
       marketType: "SERIES_WINNER", scope: "SERIES", legs: [
         { provider: "SABA", accountId: "saba-account", providerSelectionId: "SABA-TEAM_A", rawOdds: "2.2" },
         { provider: "IM", accountId: "im-account", providerSelectionId: "IM-TEAM_B", rawOdds: "2.5" }
@@ -366,8 +367,11 @@ describe("RankedTicketTable", () => {
 
     const captured = calls[0]!;
     resolveCheck?.({ checkId: "check-1", eventLabel: captured.eventLabel, marketType: captured.marketType,
+      participantA: captured.participantA, participantB: captured.participantB,
       scope: captured.scope, capturedAtMs: captured.capturedAtMs, completedAtMs: captured.capturedAtMs + 25,
       persisted: true, legs: captured.legs.map((leg, index) => ({ status: index === 0 ? "MATCH" : "ODDS_CHANGED",
+        verificationStatus: index === 0 ? "MATCH" : "MISMATCH",
+        directMethod: index === 0 ? "DOM" : "IN_PAGE_FETCH",
         displayed: leg, direct: { accountId: leg.accountId, provider: leg.provider,
           providerEventId: leg.providerEventId, providerMarketId: leg.providerMarketId,
           providerSelectionId: leg.providerSelectionId, selection: leg.selection, line: leg.line,
@@ -378,10 +382,16 @@ describe("RankedTicketTable", () => {
         error: null, startedAtMs: captured.capturedAtMs + 1, completedAtMs: captured.capturedAtMs + 20,
         elapsedMs: 19 })) as unknown as TicketRealtimeCheckResponse["legs"] });
 
-    expect((await within(audit).findByText(/SÀN · SABA/u)).textContent).toContain("2.2 DECIMAL");
-    expect(within(audit).getByText(/SÀN · IM/u).textContent).toContain("2.2 DECIMAL");
+    const sabaBookmaker = await within(audit).findByLabelText("Giá sàn SABA");
+    expect(within(sabaBookmaker).getByText("2.2 DECIMAL")).toBeTruthy();
+    expect(within(within(audit).getByLabelText("Giá sàn IM")).getByText("2.2 DECIMAL")).toBeTruthy();
     expect(within(audit).getByText("MATCH")).toBeTruthy();
-    expect(within(audit).getByText("ODDS_CHANGED")).toBeTruthy();
+    expect(within(audit).getByText("MISMATCH")).toBeTruthy();
+    expect(within(audit).getByText(/DOM/u)).toBeTruthy();
+    expect(within(audit).getByText(/IN_PAGE_FETCH/u)).toBeTruthy();
+    const sabaComparison = within(audit).getByLabelText("So sánh giá SABA");
+    expect(within(within(sabaComparison).getByLabelText("Giá tool SABA")).getByText("2.2 DECIMAL")).toBeTruthy();
+    expect(within(within(sabaComparison).getByLabelText("Giá sàn SABA")).getByText("2.2 DECIMAL")).toBeTruthy();
     expect(within(audit).getByText(/Đã ghi JSONL/u)).toBeTruthy();
   });
 });

@@ -246,6 +246,27 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([0]);
   });
 
+  it("forwards a correlated visible-price probe without mutating queued data", () => {
+    const socket = new FakeSocket();
+    const onSelectionPriceProbe = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key",
+      onSelectionPriceProbe });
+    bridge.enqueue(envelope(0));
+    bridge.connect();
+    socket.open();
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "PROBE_SELECTION_PRICE",
+      sourceId: "chrome:TSPORT:7", requestId: "price-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "UNDER", line: "2.5" }) });
+
+    expect(onSelectionPriceProbe).toHaveBeenCalledWith({ sourceId: "chrome:TSPORT:7", requestId: "price-1",
+      providerEventId: "event-1", providerMarketId: "market-1", providerSelectionId: "selection-1",
+      eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "UNDER", line: "2.5" });
+    expect(bridge.pendingSequences()).toEqual([0]);
+  });
+
   it("evicts oldest diagnostics before quote frames when the queue reaches its bound", () => {
     const bridge = new LocalBridge({
       socketFactory: () => new FakeSocket(), installationKey: "local-key", maxQueueBytes: 900

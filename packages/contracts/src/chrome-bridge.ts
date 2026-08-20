@@ -150,6 +150,23 @@ const FocusSelectionMessageSchema = z.strictObject({
   providerSelectionId: OpaqueProviderIdSchema
 });
 
+const SelectionPriceProbeMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("PROBE_SELECTION_PRICE"),
+  sourceId: SourceIdSchema,
+  requestId: z.string().trim().min(1).max(128).regex(/^[a-z0-9._:-]+$/iu),
+  providerEventId: OpaqueProviderIdSchema,
+  providerMarketId: OpaqueProviderIdSchema,
+  providerSelectionId: OpaqueProviderIdSchema,
+  eventLabel: z.string().trim().min(1).max(512),
+  participantA: z.string().trim().min(1).max(256),
+  participantB: z.string().trim().min(1).max(256),
+  marketType: z.string().trim().min(1).max(64).regex(/^[A-Z0-9_]+$/u),
+  scope: z.string().trim().min(1).max(64).regex(/^[A-Z0-9_]+$/u),
+  selection: z.string().trim().min(1).max(128).regex(/^[A-Z0-9_]+$/u),
+  line: z.string().trim().regex(/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u).max(128).nullable()
+});
+
 const CmdHiddenMarketProbeMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("PROBE_CMD_HIDDEN_MARKETS"),
@@ -200,6 +217,7 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
   EnsureSourceMessageSchema,
   RestoreSourceMessageSchema,
   FocusSelectionMessageSchema,
+  SelectionPriceProbeMessageSchema,
   CmdHiddenMarketProbeMessageSchema,
   RejectMessageSchema,
   SourceStateMessageSchema

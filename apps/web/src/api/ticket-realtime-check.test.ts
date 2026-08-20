@@ -7,12 +7,14 @@ const displayed = { provider: "SBOBET", accountId: "sbobet", providerEventId: "e
   rawOdds: "-0.17", rawFormat: "MALAY", decimalOdds: "6.88235294117647", quoteStatus: "OPEN",
   providerObservedAtMs: 1_000, receivedMonotonicMs: 10, sequence: 2, requestedStake: "100000" } as const;
 const request: TicketRealtimeCheckRequest = { eventLabel: "Philadelphia vs Inter Miami", marketType: "FT_TOTAL",
-  scope: "FULL_TIME", capturedAtMs: 1_100,
+  participantA: "Philadelphia", participantB: "Inter Miami", scope: "FULL_TIME", capturedAtMs: 1_100,
   legs: [displayed, { ...displayed, provider: "APSPORT", accountId: "apsport", providerEventId: "event-ap",
     providerMarketId: "market-ap", providerSelectionId: "under", selection: "UNDER" }] };
 const response: TicketRealtimeCheckResponse = { checkId: "check-1", eventLabel: request.eventLabel,
+  participantA: request.participantA, participantB: request.participantB,
   marketType: request.marketType, scope: request.scope, capturedAtMs: request.capturedAtMs,
-  completedAtMs: 1_200, persisted: true, legs: request.legs.map((leg) => ({ status: "MATCH", displayed: leg,
+  completedAtMs: 1_200, persisted: true, legs: request.legs.map((leg) => ({ status: "MATCH",
+    verificationStatus: "MATCH", directMethod: "DOM", displayed: leg,
     direct: { accountId: leg.accountId, provider: leg.provider, providerEventId: leg.providerEventId,
       providerMarketId: leg.providerMarketId, providerSelectionId: leg.providerSelectionId,
       selection: leg.selection, line: leg.line, rawOdds: leg.rawOdds, rawFormat: leg.rawFormat,

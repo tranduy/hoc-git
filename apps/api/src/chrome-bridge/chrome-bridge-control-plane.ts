@@ -87,6 +87,16 @@ export class ChromeBridgeControlPlane {
     return true;
   }
 
+  probeSelectionPrice(sourceId: string, input: Omit<Extract<ChromeBridgeControlMessage,
+    { readonly kind: "PROBE_SELECTION_PRICE" }>, "version" | "kind" | "sourceId">): boolean {
+    const socket = this.#socketsBySource.get(sourceId);
+    if (!socket || socket.readyState !== 1) return false;
+    const control: ChromeBridgeControlMessage = { version: 1, kind: "PROBE_SELECTION_PRICE", sourceId,
+      ...input };
+    socket.send(JSON.stringify(control));
+    return true;
+  }
+
   #broadcast(kind: "REQUEST_SNAPSHOT" | "RELOAD_SOURCE"): number {
     let requested = 0;
     for (const [sourceId, socket] of this.#socketsBySource) {

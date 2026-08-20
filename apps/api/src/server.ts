@@ -21,6 +21,7 @@ import { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js"
 import { CaptureStore } from "./chrome-bridge/capture-store.js";
 import { ChromeCatalogDataPlane } from "./chrome-bridge/chrome-catalog-data-plane.js";
 import { CmdHiddenMarketProbeCoordinator } from "./chrome-bridge/cmd-hidden-market-probe-coordinator.js";
+import { SelectionPriceProbeCoordinator } from "./chrome-bridge/selection-price-probe-coordinator.js";
 import { createChromeCatalogOverlay } from "./chrome-bridge/chrome-catalog-overlay.js";
 import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-feature-flags.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
@@ -242,6 +243,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
       controlPlane: chromeBridgeControlPlane })
     : null;
+  const selectionPriceProbe = chromeBridgeRegistry && chromeBridgeControlPlane
+    ? new SelectionPriceProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
+      controlPlane: chromeBridgeControlPlane })
+    : null;
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs: 20_000 });
@@ -266,6 +271,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     chromeBridgeRegistry.subscribe((envelope) => { chromeCatalogDataPlane?.ingest(envelope); });
     if (cmdHiddenMarketProbe !== null) {
       chromeBridgeRegistry.subscribe((envelope) => { cmdHiddenMarketProbe.ingest(envelope); });
+    }
+    if (selectionPriceProbe !== null) {
+      chromeBridgeRegistry.subscribe((envelope) => { selectionPriceProbe.ingest(envelope); });
     }
   }
   const catalogAccess = chromeCatalogDataPlane === null
@@ -321,7 +329,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     catalogStore,
     catalogRevisions,
     providerPreflight: sessionServices.providerPreflight,
-    providerPreflightOptions: { journal: ticketRealtimeAudit },
+    providerPreflightOptions: { journal: ticketRealtimeAudit,
+      ...(selectionPriceProbe === null ? {} : { visiblePriceProbe: selectionPriceProbe }) },
     twoLegPreflight,
     receiptProtocol: sessionServices.receiptProtocol,
     betHistory,

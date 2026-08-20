@@ -109,6 +109,7 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     const legs: TicketRealtimeCheckRequest["legs"] = [toDisplayedLeg(openableLegs[0]!),
       toDisplayedLeg(openableLegs[1]!)];
     const request: TicketRealtimeCheckRequest = { eventLabel: `${event.participantA} vs ${event.participantB}`,
+      participantA: event.participantA, participantB: event.participantB,
       marketType: ticket.row.marketType as TicketRealtimeCheckRequest["marketType"],
       scope: ticket.row.scope as TicketRealtimeCheckRequest["scope"], capturedAtMs, legs };
     setAudit({ request, response: null, error: null, pending: true });
@@ -195,11 +196,24 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
       {audit.request.legs.map((displayed, index) => {
         const checked = audit.response?.legs[index];
         return <article className="ticket-realtime-audit__leg" key={`${displayed.provider}:${displayed.providerSelectionId}`}>
-          <strong>TOOL · {displayed.provider} — {displayed.rawOdds} {displayed.rawFormat} · decimal {displayed.decimalOdds} · seq {displayed.sequence}</strong>
-          {checked?.direct !== undefined && checked.direct !== null
-            ? <strong>SÀN · {checked.direct.provider} — {checked.direct.rawOdds} {checked.direct.rawFormat} · decimal {checked.direct.decimalOdds} · seq {checked.direct.sequence} · {checked.elapsedMs} ms</strong>
-            : <span>{audit.pending ? "Đang đọc trực tiếp…" : `SÀN · ${displayed.provider} — ${checked?.error ?? audit.error ?? "Không có dữ liệu"}`}</span>}
-          {checked !== undefined && <b className={`ticket-realtime-audit__status ticket-realtime-audit__status--${checked.status.toLowerCase()}`}>{checked.status}</b>}
+          <div aria-label={`So sánh giá ${displayed.provider}`} className="ticket-realtime-audit__prices">
+            <div aria-label={`Giá tool ${displayed.provider}`} className="ticket-realtime-audit__price">
+              <small>TOOL</small>
+              <strong>{displayed.rawOdds} {displayed.rawFormat}</strong>
+              <span>TOOL · {displayed.provider} · decimal {displayed.decimalOdds} · seq {displayed.sequence}</span>
+            </div>
+            <div aria-label={`Giá sàn ${displayed.provider}`} className="ticket-realtime-audit__price ticket-realtime-audit__price--bookmaker">
+              <small>SÀN HIỆN TẠI</small>
+              {checked?.direct !== undefined && checked.direct !== null ? <>
+                <strong>{checked.direct.rawOdds} {checked.direct.rawFormat}</strong>
+                <span>SÀN · {checked.direct.provider} · {checked.directMethod ?? "KHÔNG RÕ"} lúc {new Date(checked.direct.providerObservedAtMs)
+                  .toLocaleTimeString("vi-VN", { hour12: false })} · {checked.elapsedMs} ms</span>
+              </> : <span>{audit.pending ? "Đang đọc trực tiếp…" :
+                `SÀN · ${displayed.provider} — ${checked?.error ?? audit.error ?? "Không có dữ liệu"}`}</span>}
+            </div>
+          </div>
+          {checked !== undefined && <b className={`ticket-realtime-audit__status ticket-realtime-audit__status--${(checked.verificationStatus ?? checked.status).toLowerCase()}`}>
+            {checked.verificationStatus ?? checked.status}</b>}
         </article>;
       })}
       {audit.response !== null && <small>{audit.response.persisted ? "Đã ghi JSONL" : "Không ghi được JSONL"} · {audit.response.checkId}</small>}

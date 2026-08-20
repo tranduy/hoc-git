@@ -53,7 +53,8 @@ describe("provider preflight route", () => {
       idFactory: () => "check-1", journal: { append: async (entry: unknown) => {
         const type = (entry as { type: string }).type; order.push(type); journal.push(entry);
       } } });
-    const payload = { eventLabel: "Alpha vs Beta", marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
+    const payload = { eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
       legs: [{ provider: "SABA", accountId: "account-1", providerEventId: "event-1", providerMarketId: "market-1",
         providerSelectionId: "selection-1", selection: "OVER", line: "2.5", rawOdds: "1.2", rawFormat: "HK",
         decimalOdds: "2.2", quoteStatus: "OPEN", providerObservedAtMs: 900, receivedMonotonicMs: 70,
@@ -76,6 +77,53 @@ describe("provider preflight route", () => {
     await app.close();
   });
 
+  it("uses only post-click prices read from the attached bookmaker DOM when that probe is configured", async () => {
+    const provider = { preflight: async (): Promise<ProviderTicketPreflight> => {
+      throw new Error("catalog preflight must not run for a visible-price check");
+    } };
+    const probes: unknown[] = [];
+    const app = Fastify();
+    registerProviderPreflightRoutes(app, provider, { visiblePriceProbe: { probe: async (input) => {
+      probes.push(input);
+      return { rawOdds: input.provider === "SABA" ? "1.2" : "0.9", observedAtMs: 1_020,
+        method: input.provider === "SABA" ? "DOM" : "IN_PAGE_FETCH" };
+    } }, clock: { nowMs: (() => { let now = 1_030; return () => ++now; })() }, idFactory: () => "dom-check" });
+    const displayed = { provider: "SABA" as const, accountId: "account-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", selection: "OVER", line: "2.5",
+      rawOdds: "1.2", rawFormat: "HK" as const, decimalOdds: "2.2000000000000002", quoteStatus: "OPEN" as const,
+      providerObservedAtMs: 900, receivedMonotonicMs: 70, sequence: 17, requestedStake: "100000" };
+    const response = await app.inject({ method: "POST", url: "/api/preflight/realtime-check", payload: {
+      eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
+      legs: [displayed, { ...displayed, provider: "CMD", accountId: "account-2", providerEventId: "event-2",
+        providerMarketId: "market-2", providerSelectionId: "selection-2", selection: "UNDER", rawOdds: "1.1",
+        decimalOdds: "2.1" }]
+    } });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ legs: [
+      { status: "MATCH", verificationStatus: "MATCH", directMethod: "DOM",
+        direct: { provider: "SABA", rawOdds: "1.2", decimalOdds: "2.2",
+        providerObservedAtMs: 1_020, sequence: null } },
+      { status: "ODDS_CHANGED", verificationStatus: "MISMATCH", directMethod: "IN_PAGE_FETCH",
+        direct: { provider: "CMD", rawOdds: "0.9", decimalOdds: "1.9",
+        providerObservedAtMs: 1_020, sequence: null } }
+    ] });
+    expect(probes).toEqual([
+      { provider: "SABA", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+        participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection: "OVER", line: "2.5", requestedAtMs: 1_000 },
+      { provider: "CMD", providerEventId: "event-2", providerMarketId: "market-2",
+        providerSelectionId: "selection-2", eventLabel: "Alpha vs Beta",
+        participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection: "UNDER", line: "2.5", requestedAtMs: 1_000 }
+    ]);
+    const completed = response.json();
+    expect(completed).toMatchObject({ participantA: "Alpha", participantB: "Beta" });
+    await app.close();
+  });
+
   it("returns a per-leg timeout without hiding the other provider result", async () => {
     let release: ((value: ProviderTicketPreflight) => void) | undefined;
     const provider = { preflight: async (input: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight> =>
@@ -89,7 +137,8 @@ describe("provider preflight route", () => {
       rawOdds: "1.2", rawFormat: "HK", decimalOdds: "2.2", quoteStatus: "OPEN",
       providerObservedAtMs: 900, receivedMonotonicMs: 70, sequence: 17, requestedStake: "100000" };
     const pending = app.inject({ method: "POST", url: "/api/preflight/realtime-check", payload: {
-      eventLabel: "Alpha vs Beta", marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
+      eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
       legs: [displayed, { ...displayed, provider: "CMD", accountId: "account-2", providerEventId: "event-2",
       providerMarketId: "market-2", providerSelectionId: "selection-2", selection: "AWAY" }]
     } });
@@ -103,5 +152,43 @@ describe("provider preflight route", () => {
     if (outcome !== "deadline") expect(outcome.json()).toMatchObject({
       legs: [{ status: "MATCH" }, { status: "TIMEOUT", direct: null, error: "PREFLIGHT_TIMEOUT" }]
     });
+  });
+
+  it("logs distinct NOT_FOUND and AMBIGUOUS direct outcomes with their attempted read methods", async () => {
+    const journal: unknown[] = [];
+    const provider = { preflight: async (): Promise<ProviderTicketPreflight> => result };
+    const app = Fastify();
+    registerProviderPreflightRoutes(app, provider, { journal: { append: async (entry) => { journal.push(entry); } },
+      visiblePriceProbe: { probe: async (input) => {
+        throw Object.assign(new Error(input.provider === "SABA" ? "VISIBLE_PRICE_NOT_FOUND" :
+          "VISIBLE_PRICE_AMBIGUOUS"), { method: input.provider === "SABA" ? "DOM" : "IN_PAGE_FETCH" });
+      } } });
+    const displayed = { provider: "SABA" as const, accountId: "account-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", selection: "OVER", line: "2.5",
+      rawOdds: "1.2", rawFormat: "HK" as const, decimalOdds: "2.2", quoteStatus: "OPEN" as const,
+      providerObservedAtMs: 900, receivedMonotonicMs: 70, sequence: 17, requestedStake: "100000" };
+    const response = await app.inject({ method: "POST", url: "/api/preflight/realtime-check", payload: {
+      eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
+      legs: [displayed, { ...displayed, provider: "BTI", accountId: "account-2",
+        providerEventId: "event-2", providerMarketId: "market-2", providerSelectionId: "selection-2",
+        selection: "UNDER" }]
+    } });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ legs: [
+      { verificationStatus: "NOT_FOUND", directMethod: "DOM", direct: null },
+      { verificationStatus: "AMBIGUOUS", directMethod: "IN_PAGE_FETCH", direct: null }
+    ] });
+    expect(journal[0]).toMatchObject({ type: "DISPLAY_CAPTURED", request: {
+      participantA: "Alpha", participantB: "Beta", legs: [
+        { providerEventId: "event-1", providerMarketId: "market-1", providerSelectionId: "selection-1" },
+        { providerEventId: "event-2", providerMarketId: "market-2", providerSelectionId: "selection-2" }
+      ] } });
+    expect(journal[1]).toMatchObject({ type: "CHECK_COMPLETED", legs: [
+      { verificationStatus: "NOT_FOUND", directMethod: "DOM" },
+      { verificationStatus: "AMBIGUOUS", directMethod: "IN_PAGE_FETCH" }
+    ] });
+    await app.close();
   });
 });

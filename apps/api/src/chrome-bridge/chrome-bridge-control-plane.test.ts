@@ -84,6 +84,23 @@ describe("ChromeBridgeControlPlane", () => {
     expect(plane.probeCmdHiddenMarkets("chrome:SABA:9", "probe-2", "25250586")).toBe(false);
   });
 
+  it("sends a correlated visible-price probe only to the exact attached source", () => {
+    const socket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attach("chrome:TSPORT:9", socket);
+
+    expect(plane.probeSelectionPrice("chrome:TSPORT:9", { requestId: "price-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "UNDER", line: "2.5" }))
+      .toBe(true);
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ version: 1, kind: "PROBE_SELECTION_PRICE",
+      sourceId: "chrome:TSPORT:9", requestId: "price-1", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "UNDER", line: "2.5" }));
+  });
+
   it("skips closed sockets and detaches every source owned by a closed connection", () => {
     const socket = { send: vi.fn(), readyState: 3 };
     const plane = new ChromeBridgeControlPlane();

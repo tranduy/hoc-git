@@ -46,8 +46,22 @@ const registry = new TabRegistry({
   closeTab: async (tabId) => chrome.tabs.remove(tabId)
 });
 
+const sbobetEventRequestStorageKey = "sbobetEventRequestTemplate";
 const observer = new NetworkObserver({
   sendCommand: async (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params),
+  loadSbobetEventRequest: async () => {
+    const value = (await chrome.storage.session.get(sbobetEventRequestStorageKey))[sbobetEventRequestStorageKey];
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const candidate = value as { readonly url?: unknown; readonly headers?: unknown };
+    if (typeof candidate.url !== "string" || !candidate.headers || typeof candidate.headers !== "object" ||
+      Array.isArray(candidate.headers) || Object.values(candidate.headers).some((item) => typeof item !== "string")) {
+      return null;
+    }
+    return { url: candidate.url, headers: candidate.headers as Readonly<Record<string, string>> };
+  },
+  saveSbobetEventRequest: async (request) => {
+    await chrome.storage.session.set({ [sbobetEventRequestStorageKey]: request });
+  },
   recoverImBaseline: async (source) => {
     // Obtain both signed GetSE partitions inside the current authenticated IM
     // page. Reloading changes source state and can discard the first partition.
@@ -268,6 +282,12 @@ async function configureBridgeOnce(): Promise<boolean> {
         // providers exposing an exact DOM identity also scroll/highlight the
         // selection; an opaque network-only ID remains read-only and unclicked.
         if (!focused && attached.lobby === "CMD") throw new Error("EXACT_SELECTION_NOT_FOUND");
+      },
+      onSelectionPriceProbe: async (request) => {
+        const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === request.sourceId);
+        if (!attached) throw new Error("SOURCE_NOT_ATTACHED");
+        await observer.probeSelectionPrice({ lobby: attached.lobby, sourceId: request.sourceId,
+          tabId: attached.tabId }, request);
       },
       onCmdHiddenMarketProbe: async (request) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === request.sourceId);

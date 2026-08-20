@@ -159,6 +159,8 @@ export interface TicketRealtimeDisplayedLeg {
 
 export interface TicketRealtimeCheckRequest {
   readonly eventLabel: string;
+  readonly participantA: string;
+  readonly participantB: string;
   readonly marketType: MarketType;
   readonly scope: Scope;
   readonly capturedAtMs: number;
@@ -168,8 +170,13 @@ export interface TicketRealtimeCheckRequest {
 export type TicketRealtimeCheckStatus = "MATCH" | "ODDS_CHANGED" | "MARKET_NOT_OPEN" |
   "IDENTITY_MISMATCH" | "SOURCE_UNAVAILABLE" | "UNSUPPORTED" | "TIMEOUT" | "ERROR";
 
+export type TicketRealtimeVerificationStatus = "MATCH" | "MISMATCH" | "NOT_FOUND" | "AMBIGUOUS";
+export type TicketRealtimeDirectReadMethod = "DOM" | "IN_PAGE_FETCH";
+
 export interface TicketRealtimeCheckLegResult {
   readonly status: TicketRealtimeCheckStatus;
+  readonly verificationStatus: TicketRealtimeVerificationStatus | null;
+  readonly directMethod: TicketRealtimeDirectReadMethod | null;
   readonly displayed: TicketRealtimeDisplayedLeg;
   readonly direct: ProviderTicketPreflight | null;
   readonly error: string | null;
@@ -181,6 +188,8 @@ export interface TicketRealtimeCheckLegResult {
 export interface TicketRealtimeCheckResponse {
   readonly checkId: string;
   readonly eventLabel: string;
+  readonly participantA: string;
+  readonly participantB: string;
   readonly marketType: MarketType;
   readonly scope: Scope;
   readonly capturedAtMs: number;

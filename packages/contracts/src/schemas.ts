@@ -369,6 +369,8 @@ export const TicketRealtimeDisplayedLegSchema = z.strictObject({
 
 export const TicketRealtimeCheckRequestSchema = z.strictObject({
   eventLabel: z.string().trim().min(1).max(512),
+  participantA: z.string().trim().min(1).max(256),
+  participantB: z.string().trim().min(1).max(256),
   marketType: MarketTypeSchema,
   scope: ScopeSchema,
   capturedAtMs: z.number().finite().nonnegative(),
@@ -384,9 +386,13 @@ export const TicketRealtimeCheckRequestSchema = z.strictObject({
 
 const TicketRealtimeCheckStatusSchema = z.enum(["MATCH", "ODDS_CHANGED", "MARKET_NOT_OPEN",
   "IDENTITY_MISMATCH", "SOURCE_UNAVAILABLE", "UNSUPPORTED", "TIMEOUT", "ERROR"]);
+const TicketRealtimeVerificationStatusSchema = z.enum(["MATCH", "MISMATCH", "NOT_FOUND", "AMBIGUOUS"]);
+const TicketRealtimeDirectReadMethodSchema = z.enum(["DOM", "IN_PAGE_FETCH"]);
 
 export const TicketRealtimeCheckLegResultSchema = z.strictObject({
   status: TicketRealtimeCheckStatusSchema,
+  verificationStatus: TicketRealtimeVerificationStatusSchema.nullable(),
+  directMethod: TicketRealtimeDirectReadMethodSchema.nullable(),
   displayed: TicketRealtimeDisplayedLegSchema,
   direct: ProviderTicketPreflightSchema.nullable(),
   error: z.string().trim().min(1).max(128).nullable(),
@@ -398,6 +404,8 @@ export const TicketRealtimeCheckLegResultSchema = z.strictObject({
 export const TicketRealtimeCheckResponseSchema = z.strictObject({
   checkId: z.string().trim().min(1).max(128),
   eventLabel: z.string().trim().min(1).max(512),
+  participantA: z.string().trim().min(1).max(256),
+  participantB: z.string().trim().min(1).max(256),
   marketType: MarketTypeSchema,
   scope: ScopeSchema,
   capturedAtMs: z.number().finite().nonnegative(),

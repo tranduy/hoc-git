@@ -25,8 +25,50 @@ import {
   SessionSourceSchema,
   ScopeSchema,
   StakeLegSchema,
+  TicketRealtimeCheckRequestSchema,
+  TicketRealtimeCheckResponseSchema,
   TwoLegExecutionResultSchema
 } from "./schemas.js";
+
+describe("TicketRealtimeCheck schemas", () => {
+  const displayed = { provider: "SABA", accountId: "saba", providerEventId: "event-a",
+    providerMarketId: "market-a", providerSelectionId: "selection-a", selection: "HOME", line: "-0.25",
+    rawOdds: "0.91", rawFormat: "MALAY", decimalOdds: "1.91", quoteStatus: "OPEN",
+    providerObservedAtMs: 1_000, receivedMonotonicMs: 10, sequence: 8, requestedStake: "100000" } as const;
+  const request = { eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+    marketType: "FT_AH", scope: "FULL_TIME", capturedAtMs: 1_100,
+    legs: [displayed, { ...displayed, provider: "CMD", accountId: "cmd", providerEventId: "event-b",
+      providerMarketId: "market-b", providerSelectionId: "selection-b", selection: "AWAY" }] } as const;
+
+  it("requires explicit participants in the exact displayed ticket identity", () => {
+    expect(TicketRealtimeCheckRequestSchema.safeParse(request).success).toBe(true);
+    const { participantA: _participantA, ...missingParticipant } = request;
+    expect(TicketRealtimeCheckRequestSchema.safeParse(missingParticipant).success).toBe(false);
+  });
+
+  it("preserves direct read method and the four fail-closed verification outcomes", () => {
+    const direct = { accountId: "saba", provider: "SABA", providerEventId: "event-a",
+      providerMarketId: "market-a", providerSelectionId: "selection-a", selection: "HOME", line: "-0.25",
+      rawOdds: "0.91", rawFormat: "MALAY", decimalOdds: "1.91", quoteStatus: "OPEN",
+      providerObservedAtMs: 1_120, receivedMonotonicMs: 11, sequence: null,
+      limitEvidence: null, constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"] };
+    const leg = { status: "MATCH", verificationStatus: "MATCH", directMethod: "DOM",
+      displayed, direct, error: null, startedAtMs: 1_101, completedAtMs: 1_121, elapsedMs: 20 };
+    const response = { checkId: "check-1", eventLabel: request.eventLabel,
+      participantA: request.participantA, participantB: request.participantB,
+      marketType: request.marketType, scope: request.scope, capturedAtMs: request.capturedAtMs,
+      completedAtMs: 1_121, persisted: true,
+      legs: [leg, { ...leg, status: "ODDS_CHANGED", verificationStatus: "MISMATCH",
+        directMethod: "IN_PAGE_FETCH", displayed: request.legs[1], direct: { ...direct, accountId: "cmd",
+          provider: "CMD", providerEventId: "event-b", providerMarketId: "market-b",
+          providerSelectionId: "selection-b", selection: "AWAY" } }] };
+    expect(TicketRealtimeCheckResponseSchema.safeParse(response).success).toBe(true);
+    for (const status of ["MATCH", "MISMATCH", "NOT_FOUND", "AMBIGUOUS"] as const) {
+      expect(TicketRealtimeCheckResponseSchema.safeParse({ ...response,
+        legs: [{ ...leg, verificationStatus: status }, response.legs[1]] }).success).toBe(true);
+    }
+  });
+});
 
 describe("SessionSourceSchema", () => {
   it("keeps TK88 Chrome distinct from Fabet and manual provider sessions", () => {

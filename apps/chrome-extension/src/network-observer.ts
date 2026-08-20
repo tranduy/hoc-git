@@ -5,6 +5,9 @@ import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
 import { buildCmdSelectionFocusExpression, buildGenericSelectionFocusExpression,
   type SelectionFocusIdentity } from "./selection-focus.js";
+import { buildBtiSelectionPriceExpression, buildCmdSelectionPriceExpression, buildGenericSelectionPriceExpression,
+  buildImSelectionPriceExpression, buildSbobetSelectionPriceExpression,
+  type SelectionPriceProbeIdentity } from "./selection-price.js";
 import { buildCmdHiddenMarketProbeExpression, summarizeCmdHiddenProtocolFrame,
   type CmdHiddenDomProbeResult, type CmdHiddenProtocolEvidence } from "./cmd-hidden-market-probe.js";
 
@@ -25,6 +28,10 @@ export interface NetworkObserverDependencies {
   readonly recoverImBaseline?: (source: ObservedSource) => Promise<void>;
   readonly frameCommandTimeoutMs?: number;
   readonly observerSessionId?: string;
+  readonly loadSbobetEventRequest?: () => Promise<{ readonly url: string;
+    readonly headers: Readonly<Record<string, string>> } | null>;
+  readonly saveSbobetEventRequest?: (request: { readonly url: string;
+    readonly headers: Readonly<Record<string, string>> }) => Promise<void>;
 }
 
 type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
@@ -415,6 +422,8 @@ export class NetworkObserver {
   readonly #recoverImBaseline: ((source: ObservedSource) => Promise<void>) | null;
   readonly #frameCommandTimeoutMs: number;
   readonly #observerSessionId: string;
+  readonly #loadSbobetEventRequest: NonNullable<NetworkObserverDependencies["loadSbobetEventRequest"]>;
+  readonly #saveSbobetEventRequest: NonNullable<NetworkObserverDependencies["saveSbobetEventRequest"]>;
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
   readonly #streamOrdinals = new Map<string, number>();
@@ -435,6 +444,8 @@ export class NetworkObserver {
   readonly #imCatalogRefreshes = new Map<string, Promise<void>>();
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, number>>();
+  readonly #sbobetEventRequests = new Map<string, { readonly url: string;
+    readonly headers: Readonly<Record<string, string>> }>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
   #periodicDomWorkTail: Promise<void> = Promise.resolve();
 
@@ -446,6 +457,8 @@ export class NetworkObserver {
     this.#recoverImBaseline = dependencies.recoverImBaseline ?? null;
     this.#frameCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 2_500;
     this.#observerSessionId = dependencies.observerSessionId ?? crypto.randomUUID();
+    this.#loadSbobetEventRequest = dependencies.loadSbobetEventRequest ?? (async () => null);
+    this.#saveSbobetEventRequest = dependencies.saveSbobetEventRequest ?? (async () => undefined);
     if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
       throw new Error("OBSERVER_SESSION_ID_INVALID");
     }
@@ -487,6 +500,7 @@ export class NetworkObserver {
     for (const sourceId of this.#httpSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#tsportSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
+    for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
     for (const sourceId of sourceIds) {
       this.#sourceGenerations.set(sourceId, (this.#sourceGenerations.get(sourceId) ?? 0) + 1);
       this.#sequences.delete(sourceId);
@@ -498,6 +512,7 @@ export class NetworkObserver {
       this.#httpSnapshots.delete(sourceId);
       this.#tsportSnapshots.delete(sourceId);
       this.#catalogWsSnapshots.delete(sourceId);
+      this.#sbobetEventRequests.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
       this.#imCatalogRefreshes.delete(sourceId);
@@ -689,6 +704,20 @@ export class NetworkObserver {
       const partition = request === null ? null : imPartitionFromRequest(source, request);
       if (partition === null) this.#requestPartitions.delete(key);
       else this.#requestPartitions.set(key, partition);
+      if (source.lobby === "KSPORT" && request !== null && typeof request.url === "string") {
+        try {
+          const url = new URL(request.url);
+          if (url.protocol === "https:" && url.pathname === "/api/v2/getEvent") {
+            const rawHeaders = isRecord(request.headers) ? request.headers : {};
+            const headers = Object.fromEntries(Object.entries(rawHeaders).flatMap(([name, value]) =>
+              /^(?:cookie|host|content-length|accept-encoding|connection|origin|referer|user-agent|sec-|:)/iu.test(name) ||
+                (typeof value !== "string" && typeof value !== "number") ? [] : [[name, String(value)]]));
+            const template = { url: request.url, headers };
+            this.#sbobetEventRequests.set(source.sourceId, template);
+            await this.#saveSbobetEventRequest(template).catch(() => undefined);
+          }
+        } catch { /* Ignore malformed provider URLs. */ }
+      }
     }
 
     const activeProbe = source.lobby === "CMD" ? this.#activeCmdHiddenProbes.get(source.sourceId) : undefined;
@@ -1005,6 +1034,82 @@ export class NetworkObserver {
       }
     }
     return evaluations.some((evaluation) => nestedBoolean(evaluation, "result", "value", "ok") === true);
+  }
+
+  async probeSelectionPrice(source: ObservedSource, request: SelectionPriceProbeIdentity & {
+    readonly requestId: string }): Promise<void> {
+    if (source.lobby === "KSPORT" && !this.#sbobetEventRequests.has(source.sourceId)) {
+      const stored = await this.#loadSbobetEventRequest().catch(() => null);
+      if (stored !== null) this.#sbobetEventRequests.set(source.sourceId, stored);
+    }
+    const expression = source.lobby === "CMD" || source.lobby === "SABA"
+      ? buildCmdSelectionPriceExpression(request)
+      : source.lobby === "IM" ? buildImSelectionPriceExpression(request)
+      : source.lobby === "BTI" ? buildBtiSelectionPriceExpression(request)
+      : source.lobby === "KSPORT" ? buildSbobetSelectionPriceExpression(request,
+        this.#sbobetEventRequests.get(source.sourceId) ?? null)
+      : buildGenericSelectionPriceExpression(request);
+    const evaluateFrames = async (): Promise<unknown[]> => {
+      if (source.lobby === "KSPORT") {
+        return [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression, returnByValue: true, awaitPromise: true
+        }), 8_000).catch(() => ({}))];
+      }
+      const frameTree = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Page.getFrameTree")).catch(() => ({}));
+      const frameIds = collectFrameIds(frameTree);
+      if (source.lobby === "BTI") {
+        const top = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression, returnByValue: true, awaitPromise: true
+        }), 5_000).catch(() => ({}));
+        const contexts = this.#mainWorldContexts.get(source.tabId);
+        const nested = await Promise.all(frameIds.slice(1).flatMap((frameId) => {
+          const contextId = contexts?.get(frameId);
+          return contextId === undefined ? [] : [this.#withFrameCommandTimeout(
+            this.#sendCommand(source.tabId, "Runtime.evaluate", {
+              expression, contextId, returnByValue: true, awaitPromise: true
+            }), 5_000).catch(() => ({}))];
+        }));
+        return [top, ...nested];
+      }
+      return frameIds.length === 0
+        ? [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression, returnByValue: true, awaitPromise: false })).catch(() => ({}))]
+        : Promise.all(frameIds.map(async (frameId) => {
+          const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Page.createIsolatedWorld", {
+            frameId, worldName: "fieldline-selection-price", grantUniveralAccess: false })).catch(() => ({}));
+          const contextId = nestedNumber(world, "executionContextId");
+          if (contextId === null) return {};
+          return this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            expression, contextId, returnByValue: true, awaitPromise: false })).catch(() => ({}));
+        }));
+    };
+    let evaluations = await evaluateFrames();
+    let candidates = evaluations.map((evaluation) => nestedValue(evaluation, "result", "value"))
+      .filter((value): value is Record<string, unknown> => isRecord(value));
+    if (source.lobby === "IM" && candidates.some((value) => value.reason === "IM_NAVIGATION_REQUESTED")) {
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      evaluations = await evaluateFrames();
+      candidates = evaluations.map((evaluation) => nestedValue(evaluation, "result", "value"))
+        .filter((value): value is Record<string, unknown> => isRecord(value));
+    }
+    const foundCandidates = candidates.filter((value) => value.ok === true && typeof value.rawOdds === "string" &&
+      typeof value.observedAtMs === "number");
+    const found = foundCandidates.length === 1 ? foundCandidates[0] : undefined;
+    const ambiguous = foundCandidates.length > 1 ||
+      candidates.some((value) => value.reason === "VISIBLE_PRICE_AMBIGUOUS");
+    const diagnosticReason = foundCandidates.length > 1 ? "VISIBLE_PRICE_AMBIGUOUS" :
+      candidates.find((value) => typeof value.reason === "string")?.reason;
+    const observedAtMs = typeof found?.observedAtMs === "number" ? found.observedAtMs : this.#now();
+    const method = source.lobby === "BTI" || source.lobby === "KSPORT" ? "IN_PAGE_FETCH" : "DOM";
+    await this.#emit(source, `https://${source.lobby.toLocaleLowerCase("en")}.invalid/__fieldline_selection_price_probe__`,
+      "DOM", "DOM_SNAPSHOT", { encoding: "UTF8", body: JSON.stringify({ requestId: request.requestId,
+        providerEventId: request.providerEventId, providerMarketId: request.providerMarketId,
+        providerSelectionId: request.providerSelectionId,
+        status: found === undefined ? ambiguous ? "AMBIGUOUS" : "NOT_FOUND" : "FOUND",
+        rawOdds: found === undefined ? null : found.rawOdds, observedAtMs, method,
+        ...(found === undefined && typeof diagnosticReason === "string" ? { reason: diagnosticReason } : {})
+      }) }, { observedAtMs });
   }
 
   async probeCmdHiddenMarkets(source: ObservedSource, request: { readonly requestId: string;

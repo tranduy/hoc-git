@@ -39,6 +39,8 @@ export interface LocalBridgeOptions {
   readonly onSourceRestore?: (lobby: ChromeBridgeEnvelope["lobby"]) => void | Promise<void>;
   readonly onFocusSelection?: (request: Omit<Extract<ChromeBridgeControlMessage,
     { readonly kind: "FOCUS_SELECTION" }>, "version" | "kind">) => void | Promise<void>;
+  readonly onSelectionPriceProbe?: (request: Omit<Extract<ChromeBridgeControlMessage,
+    { readonly kind: "PROBE_SELECTION_PRICE" }>, "version" | "kind">) => void | Promise<void>;
   readonly onCmdHiddenMarketProbe?: (request: Omit<Extract<ChromeBridgeControlMessage,
     { readonly kind: "PROBE_CMD_HIDDEN_MARKETS" }>, "version" | "kind">) => void | Promise<void>;
 }
@@ -57,6 +59,7 @@ export class LocalBridge {
   readonly #onSourceEnsure: NonNullable<LocalBridgeOptions["onSourceEnsure"]>;
   readonly #onSourceRestore: NonNullable<LocalBridgeOptions["onSourceRestore"]>;
   readonly #onFocusSelection: NonNullable<LocalBridgeOptions["onFocusSelection"]>;
+  readonly #onSelectionPriceProbe: NonNullable<LocalBridgeOptions["onSelectionPriceProbe"]>;
   readonly #onCmdHiddenMarketProbe: NonNullable<LocalBridgeOptions["onCmdHiddenMarketProbe"]>;
   readonly #queue: QueueEntry[] = [];
   #socket: BridgeSocket | null = null;
@@ -83,6 +86,7 @@ export class LocalBridge {
     this.#onSourceEnsure = options.onSourceEnsure ?? (() => undefined);
     this.#onSourceRestore = options.onSourceRestore ?? (() => undefined);
     this.#onFocusSelection = options.onFocusSelection ?? (() => undefined);
+    this.#onSelectionPriceProbe = options.onSelectionPriceProbe ?? (() => undefined);
     this.#onCmdHiddenMarketProbe = options.onCmdHiddenMarketProbe ?? (() => undefined);
   }
 
@@ -255,6 +259,16 @@ export class LocalBridge {
         try { void Promise.resolve(this.#onFocusSelection({ sourceId, providerEventId,
           providerMarketId, providerSelectionId })).catch(() => undefined); }
         catch { /* focus failure must not disrupt realtime collection */ }
+        return;
+      }
+      if (parsed.data.kind === "PROBE_SELECTION_PRICE") {
+        const { sourceId, requestId, providerEventId, providerMarketId, providerSelectionId,
+          eventLabel, participantA, participantB, marketType, scope, selection, line } = parsed.data;
+        try { void Promise.resolve(this.#onSelectionPriceProbe({ sourceId, requestId, providerEventId,
+          providerMarketId, providerSelectionId, eventLabel, participantA, participantB,
+          marketType, scope, selection, line }))
+          .catch(() => undefined); }
+        catch { /* visible price probe failure must not disrupt realtime collection */ }
         return;
       }
       if (parsed.data.kind === "PROBE_CMD_HIDDEN_MARKETS") {
