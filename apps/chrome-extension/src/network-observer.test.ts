@@ -73,7 +73,8 @@ describe("NetworkObserver", () => {
           ] }
           : { status: "navigation-not-found", responses: [] } } }
         : {});
-    const forward = vi.fn(async () => undefined);
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const forward = vi.fn(async (message: ChromeBridgeEnvelope) => { forwarded.push(message); });
     const observer = new NetworkObserver({ sendCommand, forward });
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     await observer.handleEvent(im, "Runtime.executionContextCreated", {
@@ -106,17 +107,22 @@ describe("NetworkObserver", () => {
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({
       transport: "HTTP_RESPONSE",
       request: expect.objectContaining({
-        pathnameClass: "/api/EventV6/GetSE", providerPartition: "IM_MARKET_1"
+        pathnameClass: "/api/EventV6/GetSE", providerPartition: "IM_MARKET_1",
+        streamId: expect.stringMatching(/^im:8:/u)
       }),
       payload: expect.objectContaining({ body: '{"sel":[],"StatusCode":100}' })
     }));
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({
       transport: "HTTP_RESPONSE",
       request: expect.objectContaining({
-        pathnameClass: "/api/EventV6/GetSE", providerPartition: "IM_MARKET_2"
+        pathnameClass: "/api/EventV6/GetSE", providerPartition: "IM_MARKET_2",
+        streamId: expect.stringMatching(/^im:8:/u)
       }),
       payload: expect.objectContaining({ body: '{"sel":[],"StatusCode":100}' })
     }));
+    const partitions = forwarded
+      .filter((message) => message.transport === "HTTP_RESPONSE");
+    expect(new Set(partitions.map((message) => message.request.streamId)).size).toBe(1);
   });
 
   it("coalesces concurrent IM snapshot recovery so both large partitions are fetched once", async () => {
@@ -358,22 +364,22 @@ describe("NetworkObserver", () => {
       method: "DOM", reason: "VISIBLE_PRICE_AMBIGUOUS" });
   });
 
-  it("rechecks IM in its new document after opening the exact collapsed event", async () => {
-    let evaluations = 0;
-    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
-      if (method === "Page.createIsolatedWorld") return { executionContextId: 21 };
-      if (method === "Runtime.evaluate") {
-        evaluations += 1;
-        return evaluations === 1
-          ? { result: { value: { ok: false, reason: "IM_NAVIGATION_REQUESTED" } } }
-          : { result: { value: { ok: true, rawOdds: "0.91", observedAtMs: 1_100 } } };
-      }
+  it("checks IM once in existing main worlds without requesting event navigation", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
+        childFrames: [{ frame: { id: "im-app" } }] } };
+      if (method === "Runtime.evaluate") return params?.contextId === 21
+        ? { result: { value: { ok: true, rawOdds: "0.91", observedAtMs: 1_100,
+          method: "IN_PAGE_FETCH" } } }
+        : { result: { value: { ok: false, reason: "IM_DIRECT_SELECTION_NOT_FOUND" } } };
       return {};
     });
     const forwarded: ChromeBridgeEnvelope[] = [];
     const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
       forward: async (envelope) => { forwarded.push(envelope); } });
+    await observer.handleEvent({ lobby: "IM", sourceId: "chrome:IM:7", tabId: 7 },
+      "Runtime.executionContextCreated", { context: { id: 21,
+        auxData: { frameId: "im-app", isDefault: true } } });
 
     await observer.probeSelectionPrice({ lobby: "IM", sourceId: "chrome:IM:7", tabId: 7 },
       { requestId: "price-im", providerEventId: "event-1", providerMarketId: "market-1",
@@ -381,8 +387,13 @@ describe("NetworkObserver", () => {
         participantA: "KaPa", participantB: "JIPPO", marketType: "FT_AH",
         scope: "FULL_TIME", selection: "AWAY", line: "0.75" });
 
-    expect(evaluations).toBe(2);
-    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "0.91" });
+    const evaluations = sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate");
+    expect(evaluations).toHaveLength(2);
+    expect(evaluations.every(([, , params]) => params?.awaitPromise === true)).toBe(true);
+    expect(evaluations.every(([, , params]) => !String(params?.expression).includes(".click("))).toBe(true);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Page.createIsolatedWorld")).toBe(false);
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "0.91",
+      method: "IN_PAGE_FETCH" });
   });
 
   it("checks BTI through a fresh awaited exact event-detail read instead of visible DOM", async () => {

@@ -115,6 +115,32 @@ describe("SelectionPriceProbeCoordinator", () => {
     await expect(result).rejects.toThrow("IM_ID_NOT_FOUND");
   });
 
+  it.each([
+    ["NOT_FOUND", "IM_DIRECT_SELECTION_NOT_FOUND"],
+    ["AMBIGUOUS", "IM_DIRECT_SELECTION_AMBIGUOUS"],
+    ["NOT_FOUND", "IM_DIRECT_TOKEN_UNAVAILABLE"]
+  ] as const)("accepts IM direct %s diagnostic %s instead of timing out", async (status, reason) => {
+    const coordinator = new SelectionPriceProbeCoordinator({
+      listSources: () => [{ lobby: "IM", sourceId: "chrome:IM:9", tabId: 9, state: "LIVE",
+        lastSequence: 1, lastAcceptedAtMs: 1_000, reason: null }],
+      controlPlane: { probeSelectionPrice: () => true }, idFactory: () => "price-im-direct", timeoutMs: 1_000
+    });
+    const result = coordinator.probe({ provider: "IM", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_AH", scope: "FULL_TIME",
+      selection: "AWAY", line: "-0.5", requestedAtMs: 1_000 });
+    const accepted = coordinator.ingest({ ...envelope("price-im-direct"), lobby: "IM",
+      sourceId: "chrome:IM:9", payload: { encoding: "UTF8", body: JSON.stringify({
+        requestId: "price-im-direct", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1", status, rawOdds: null, observedAtMs: 1_020,
+        method: "IN_PAGE_FETCH", reason
+      }) } });
+
+    expect(accepted).toBe(true);
+    const failure = await result.catch((error: unknown) => error);
+    expect(failure).toMatchObject({ message: reason, method: "IN_PAGE_FETCH" });
+  });
+
   it("accepts SABA's exact-selection-not-found result instead of timing out", async () => {
     const coordinator = new SelectionPriceProbeCoordinator({
       listSources: () => [{ lobby: "SABA", sourceId: "chrome:SABA:9", tabId: 9, state: "LIVE",

@@ -3,11 +3,12 @@ import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { buildTsportSelectionPriceExpression } from "./tsport-selection-price.js";
+import { buildImExactSelectionPriceExpression } from "./im-selection-price.js";
 import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
 import { buildCmdSelectionFocusExpression, buildGenericSelectionFocusExpression,
   type SelectionFocusIdentity } from "./selection-focus.js";
 import { buildBtiSelectionPriceExpression, buildCmdSelectionPriceExpression, buildGenericSelectionPriceExpression,
-  buildImSelectionPriceExpression, buildSabaSelectionPriceExpression, buildSbobetSelectionPriceExpression,
+  buildSabaSelectionPriceExpression, buildSbobetSelectionPriceExpression,
   type SelectionPriceProbeIdentity } from "./selection-price.js";
 import { buildCmdHiddenMarketProbeExpression, summarizeCmdHiddenProtocolFrame,
   type CmdHiddenDomProbeResult, type CmdHiddenProtocolEvidence } from "./cmd-hidden-market-probe.js";
@@ -45,6 +46,7 @@ interface PendingRequest {
   readonly url: string;
   readonly resourceType: string;
   readonly providerPartition?: ImProviderPartition;
+  readonly streamId?: string;
 }
 
 interface ReplayableHttpSnapshot {
@@ -53,6 +55,7 @@ interface ReplayableHttpSnapshot {
   readonly resourceType: string;
   readonly body: string;
   readonly providerPartition?: ImProviderPartition;
+  readonly streamId?: string;
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
 }
@@ -464,6 +467,7 @@ export class NetworkObserver {
   readonly #cmdCapturesInFlight = new Set<string>();
   readonly #imLastRecoveryAtMs = new Map<string, number>();
   readonly #imCatalogRefreshes = new Map<string, Promise<void>>();
+  readonly #imSnapshotOrdinals = new Map<string, number>();
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, number>>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
@@ -535,6 +539,7 @@ export class NetworkObserver {
       this.#cmdLastSentAtMs.delete(sourceId);
       this.#cmdSnapshotHosts.delete(sourceId);
       this.#httpSnapshots.delete(sourceId);
+      this.#imSnapshotOrdinals.delete(sourceId);
       this.#tsportSnapshots.delete(sourceId);
       this.#tsportRequestUrls.delete(sourceId);
       this.#catalogWsSnapshots.delete(sourceId);
@@ -682,10 +687,13 @@ export class NetworkObserver {
       ).catch(() => null);
       const value = nestedValue(response, "result", "value");
       if (awaitPromise && isRecord(value) && Array.isArray(value.responses)) {
+        const ordinal = (this.#imSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
+        this.#imSnapshotOrdinals.set(source.sourceId, ordinal);
+        const generation = `im:${source.tabId}:${ordinal}`;
         for (const item of value.responses) {
           if (!isRecord(item) || (item.market !== 1 && item.market !== 2) || typeof item.body !== "string") continue;
           await this.ingestHttpResponse(source, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
-            item.body, item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2");
+            item.body, item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2", generation);
         }
       }
       const status = isRecord(value) ? value.status : null;
@@ -941,16 +949,17 @@ export class NetworkObserver {
   }
 
   async ingestHttpResponse(source: ObservedSource, url: string, resourceType: "XHR" | "Fetch",
-    body: string, providerPartition?: ImProviderPartition): Promise<void> {
+    body: string, providerPartition?: ImProviderPartition, streamId?: string): Promise<void> {
     if (!/^https?:\/\//iu.test(url)) return;
     const pending: PendingRequest = { source, url, resourceType,
-      ...(providerPartition === undefined ? {} : { providerPartition }) };
+      ...(providerPartition === undefined ? {} : { providerPartition }),
+      ...(streamId === undefined ? {} : { streamId }) };
     const safeBody = redactNetworkBody(body);
     await this.#recoverMissingImBaseline(pending);
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
     const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
-    const request = providerPartition === undefined ? {} : { request: { providerPartition } };
+    const request = providerPartition === undefined ? {} : { request: { providerPartition, streamId } };
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
         { ...request, ...clocks });
@@ -1101,7 +1110,7 @@ export class NetworkObserver {
     }
     const expression = source.lobby === "CMD" ? buildCmdSelectionPriceExpression(request)
       : source.lobby === "SABA" ? buildSabaSelectionPriceExpression(request)
-      : source.lobby === "IM" ? buildImSelectionPriceExpression(request)
+      : source.lobby === "IM" ? buildImExactSelectionPriceExpression(request)
       : source.lobby === "BTI" ? buildBtiSelectionPriceExpression(request)
       : source.lobby === "KSPORT" ? buildSbobetSelectionPriceExpression(request,
         this.#sbobetEventRequests.get(source.sourceId) ?? null)
@@ -1122,6 +1131,20 @@ export class NetworkObserver {
       const frameTree = await this.#withFrameCommandTimeout(
         this.#sendCommand(source.tabId, "Page.getFrameTree")).catch(() => ({}));
       const frameIds = collectFrameIds(frameTree);
+      if (source.lobby === "IM") {
+        const top = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression, returnByValue: true, awaitPromise: true
+        }), 20_000).catch(() => ({}));
+        const contexts = this.#mainWorldContexts.get(source.tabId);
+        const nested = await Promise.all(frameIds.slice(1).flatMap((frameId) => {
+          const contextId = contexts?.get(frameId);
+          return contextId === undefined ? [] : [this.#withFrameCommandTimeout(
+            this.#sendCommand(source.tabId, "Runtime.evaluate", {
+              expression, contextId, returnByValue: true, awaitPromise: true
+            }), 20_000).catch(() => ({}))];
+        }));
+        return [top, ...nested];
+      }
       if (source.lobby === "BTI") {
         const top = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression, returnByValue: true, awaitPromise: true
@@ -1148,20 +1171,15 @@ export class NetworkObserver {
             expression, contextId, returnByValue: true, awaitPromise: source.lobby === "TSPORT" })).catch(() => ({}));
         }));
     };
-    let evaluations = await evaluateFrames();
-    let candidates = evaluations.map((evaluation) => nestedValue(evaluation, "result", "value"))
+    const evaluations = await evaluateFrames();
+    const candidates = evaluations.map((evaluation) => nestedValue(evaluation, "result", "value"))
       .filter((value): value is Record<string, unknown> => isRecord(value));
-    if (source.lobby === "IM" && candidates.some((value) => value.reason === "IM_NAVIGATION_REQUESTED")) {
-      await new Promise((resolve) => setTimeout(resolve, 750));
-      evaluations = await evaluateFrames();
-      candidates = evaluations.map((evaluation) => nestedValue(evaluation, "result", "value"))
-        .filter((value): value is Record<string, unknown> => isRecord(value));
-    }
     const foundCandidates = candidates.filter((value) => value.ok === true && typeof value.rawOdds === "string" &&
       typeof value.observedAtMs === "number");
     const found = foundCandidates.length === 1 ? foundCandidates[0] : undefined;
     const ambiguous = foundCandidates.length > 1 ||
-      candidates.some((value) => value.reason === "VISIBLE_PRICE_AMBIGUOUS");
+      candidates.some((value) => value.reason === "VISIBLE_PRICE_AMBIGUOUS" ||
+        value.reason === "IM_DIRECT_SELECTION_AMBIGUOUS");
     const diagnosticReason = foundCandidates.length > 1 ? "VISIBLE_PRICE_AMBIGUOUS" :
       candidates.find((value) => typeof value.reason === "string")?.reason;
     const observedAtMs = typeof found?.observedAtMs === "number" ? found.observedAtMs : this.#now();
@@ -1254,7 +1272,7 @@ export class NetworkObserver {
         if (fragments.length === 1) {
           await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: snapshot.body
-          }, { request: { providerPartition: snapshot.providerPartition, replayed: true },
+          }, { request: { providerPartition: snapshot.providerPartition, streamId: snapshot.streamId, replayed: true },
             observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
         } else {
           const snapshotId = `network-replay:${snapshot.source.tabId}:${this.#now()}:${this.#sequences.get(sourceId) ?? 0}`;
@@ -1262,7 +1280,7 @@ export class NetworkObserver {
             await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
               encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
                 chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-            }, { request: { providerPartition: snapshot.providerPartition, replayed: true },
+            }, { request: { providerPartition: snapshot.providerPartition, streamId: snapshot.streamId, replayed: true },
               observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
           }
         }
@@ -1496,7 +1514,8 @@ export class NetworkObserver {
       ? entry.body !== body
       : entry.providerPartition !== pending.providerPartition);
     deduplicated.push({ source: pending.source, url: pending.url, resourceType: pending.resourceType, body,
-      ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }), ...clocks });
+      ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
+      ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }), ...clocks });
     while (deduplicated.length > 4 || deduplicated.reduce((sum, entry) => sum + entry.body.length, 0) > 12_000_000) {
       deduplicated.shift();
     }

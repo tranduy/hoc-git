@@ -9,12 +9,14 @@ const event = { eid: 112516390, htn: "Monterrey Rayados", atn: "Nashville SC", c
   ] }] };
 
 function envelope(body: unknown, sequence = 1, path = "/api/EventV6/GetSE",
-  providerPartition?: "IM_MARKET_1" | "IM_MARKET_2"): ChromeBridgeEnvelope {
+  providerPartition?: "IM_MARKET_1" | "IM_MARKET_2", generation = "im:8:generation-1",
+  sourceEpoch = "observer-im:0"): ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence,
+    sourceEpoch,
     observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + sequence,
     receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
     request: { hostname: "imsports.directsb.net", pathnameClass: path, resourceType: "XHR",
-      ...(providerPartition === undefined ? {} : { providerPartition }) },
+      ...(providerPartition === undefined ? {} : { providerPartition, streamId: generation }) },
     payload: { encoding: "UTF8", body: JSON.stringify(body) } };
 }
 
@@ -75,7 +77,7 @@ describe("ImHttpCatalogAdapter", () => {
     ]));
   });
 
-  it("replaces only the refreshed IM partition and preserves clocks in the untouched partition", () => {
+  it("replaces both partitions together and gives the completed generation its own clocks", () => {
     const makeEvent = (eventId: number, marketId: number, home: string) => ({ ...event, eid: eventId,
       htn: home, atn: `Away ${eventId}`, mls: event.mls.map((market) => ({ ...market, mi: marketId,
         ws: market.ws.map((selection, index) => ({ ...selection, wsi: marketId * 10 + index })) })) });
@@ -87,14 +89,78 @@ describe("ImHttpCatalogAdapter", () => {
     adapter.decode(envelope({ StatusCode: 100, sel: [marketTwo] }, 2, undefined, "IM_MARKET_2"));
 
     const replacement = makeEvent(303, 33, "Replacement");
-    const catalog = adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 3, undefined,
-      "IM_MARKET_1"))[0]!.value as { events: Array<{ providerEventId: string }>;
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 3, undefined,
+      "IM_MARKET_1", "im:8:generation-2"))).toEqual([]);
+    const catalog = adapter.decode(envelope({ StatusCode: 100, sel: [marketTwo] }, 4, undefined,
+      "IM_MARKET_2", "im:8:generation-2"))[0]!.value as { events: Array<{ providerEventId: string }>;
         quotes: Array<{ providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
     expect(catalog.events.map((item) => item.providerEventId).sort()).toEqual(["202", "303"]);
     expect(catalog.quotes.filter((quote) => quote.providerEventId === "202"))
-      .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 52, sequence: 2 })]));
+      .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 54, sequence: 4 })]));
     expect(catalog.quotes.filter((quote) => quote.providerEventId === "303"))
       .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 53, sequence: 3 })]));
+  });
+
+  it("does not combine Market 1 from a new generation with Market 2 from the old generation", () => {
+    const makeEvent = (eventId: number, marketId: number, home: string) => ({ ...event, eid: eventId,
+      htn: home, atn: `Away ${eventId}`, mls: event.mls.map((market) => ({ ...market, mi: marketId,
+        ws: market.ws.map((selection, index) => ({ ...selection, wsi: marketId * 10 + index })) })) });
+    const adapter = new ImHttpCatalogAdapter();
+    adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(101, 11, "Old One")] }, 1,
+      undefined, "IM_MARKET_1", "im:8:old"));
+    const oldCatalog = adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(202, 22, "Old Two")] }, 2,
+      undefined, "IM_MARKET_2", "im:8:old"));
+    expect(oldCatalog).toHaveLength(1);
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(303, 33, "New One")] }, 3,
+      undefined, "IM_MARKET_1", "im:8:new"))).toEqual([]);
+    const current = adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(404, 44, "New Two")] }, 4,
+      undefined, "IM_MARKET_2", "im:8:new"))[0]!.value as {
+        events: Array<{ providerEventId: string }> };
+    expect(current.events.map((item) => item.providerEventId).sort()).toEqual(["303", "404"]);
+  });
+
+  it("publishes one atomic generation when Market 2 arrives before Market 1", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 1, undefined,
+      "IM_MARKET_2", "im:8:reverse"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 2, undefined,
+      "IM_MARKET_1", "im:8:reverse"))[0]?.value).toMatchObject({
+      events: [{ providerEventId: "112516390" }]
+    });
+  });
+
+  it("does not roll back when both partitions of an older completed generation arrive late", () => {
+    const makeEvent = (eventId: number) => ({ ...event, eid: eventId, htn: `Home ${eventId}`,
+      atn: `Away ${eventId}` });
+    const adapter = new ImHttpCatalogAdapter();
+    adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(101)] }, 1, undefined,
+      "IM_MARKET_1", "im:8:old"));
+    adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(102)] }, 2, undefined,
+      "IM_MARKET_2", "im:8:old"));
+    adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(201)] }, 3, undefined,
+      "IM_MARKET_1", "im:8:new"));
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(202)] }, 4, undefined,
+      "IM_MARKET_2", "im:8:new"))).toHaveLength(1);
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(101)] }, 5, undefined,
+      "IM_MARKET_1", "im:8:old"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(102)] }, 6, undefined,
+      "IM_MARKET_2", "im:8:old"))).toEqual([]);
+  });
+
+  it("accepts a lower sequence only after the source epoch resets adapter state", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 900, undefined,
+      "IM_MARKET_1", "im:8:before", "observer-im:0"));
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 901, undefined,
+      "IM_MARKET_2", "im:8:before", "observer-im:0"))).toHaveLength(1);
+
+    adapter.resetSource("chrome:IM:8");
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 1, undefined,
+      "IM_MARKET_2", "im:8:after", "observer-im:1"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 2, undefined,
+      "IM_MARKET_1", "im:8:after", "observer-im:1"))).toHaveLength(1);
   });
 
   it("rejects an unpartitioned GetSE snapshot instead of ambiguously merging it", () => {
