@@ -29,11 +29,11 @@ test("disables legacy browser maintenance by default for the Chrome bridge stack
 });
 
 test("bounds the live API heap while allowing a safe explicit override", () => {
-  assert.deepEqual(resolveApiNodeArgs({}), ["--max-old-space-size=256"]);
+  assert.deepEqual(resolveApiNodeArgs({}), ["--max-old-space-size=512"]);
   assert.deepEqual(resolveApiNodeArgs({ FIELDLINE_API_MAX_OLD_SPACE_MB: "384" }),
     ["--max-old-space-size=384"]);
   assert.deepEqual(resolveApiNodeArgs({ FIELDLINE_API_MAX_OLD_SPACE_MB: "64" }),
-    ["--max-old-space-size=256"]);
+    ["--max-old-space-size=512"]);
   assert.deepEqual(resolveApiNodeArgs({ FIELDLINE_API_MAX_OLD_SPACE_MB: "not-a-number" }),
-    ["--max-old-space-size=256"]);
+    ["--max-old-space-size=512"]);
 });
