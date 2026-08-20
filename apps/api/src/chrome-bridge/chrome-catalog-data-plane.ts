@@ -79,7 +79,10 @@ export class ChromeCatalogDataPlane {
       }
       this.#sourceEpochs.set(envelope.sourceId, envelope.sourceEpoch);
     }
-    if (transportAccountId !== null) {
+    // KSPORT heartbeats and analytics only prove that the tab exists. Its
+    // catalog transport is the sportsbook STOMP socket, so only a routed
+    // WebSocket frame may refresh transport liveness for this provider.
+    if (transportAccountId !== null && envelope.lobby !== "KSPORT") {
       if (!this.#lastTransportAtMs.has(transportAccountId)) {
         this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
       }
@@ -91,6 +94,12 @@ export class ChromeCatalogDataPlane {
     if (route.status !== "TRUSTED" || route.adapter === null) return stateChanged;
     const update = route.adapter.decode(assembled).at(-1);
     if (update === undefined) return stateChanged;
+    if (transportAccountId !== null && envelope.lobby === "KSPORT") {
+      if (!this.#lastTransportAtMs.has(transportAccountId)) {
+        this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
+      }
+      this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
+    }
     if (update.invalidateAccountId !== undefined) {
       return this.#invalidate(update.invalidateAccountId) || stateChanged;
     }
@@ -106,6 +115,7 @@ export class ChromeCatalogDataPlane {
     // complete catalog until the smaller event set is stable across three
     // identical reads; this prevents a transient partial update erasing most
     // of a provider's prices.
+    if (update.authoritativeBaseline === true) this.#coverage.reset(update.value.accountId);
     if (!this.#coverage.accept(update.value.accountId,
       update.value.events.map((event) => event.providerEventId))) return stateChanged;
     this.#catalogs.set(update.value.accountId, update.value);

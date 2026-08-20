@@ -5,6 +5,7 @@ export type DecodedCatalogUpdate = {
   readonly sequence: number;
   readonly observedAtMs: number;
   readonly value: unknown;
+  readonly authoritativeBaseline?: boolean;
   readonly invalidateAccountId?: never;
   readonly reason?: never;
 } | {

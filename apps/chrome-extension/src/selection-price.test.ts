@@ -1,7 +1,7 @@
 import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildBtiSelectionPriceExpression, buildCmdSelectionPriceExpression, buildGenericSelectionPriceExpression,
-  buildImSelectionPriceExpression,
+  buildImSelectionPriceExpression, buildSbobetCatalogRefreshExpression,
   buildSbobetSelectionPriceExpression } from "./selection-price.js";
 
 describe("visible provider price probe", () => {
@@ -97,7 +97,8 @@ describe("visible provider price probe", () => {
       if (requests === 2) expect(route.request().headers()["x-session-proof"]).toBe("current-tab-session");
       const price = requests === 1 ? "0.96" : "0.17";
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ payload: [{
-        "8": "wrong-event", "7": { "3": ["0.75 9.99*56434230030000075h 0.95*x wrong-market"] }
+        "8": "wrong-event", "2": "Other Home", "3": "Other Away",
+        "7": { "3": ["0.75 0.99*56434230030000075h 0.95*56434230030000075a 7307800681810075"] }
       }, {
         "8": "5643423", "2": "El Daklyeh", "3": "Mega Sport Club",
         "7": { "3": [
@@ -129,17 +130,196 @@ describe("visible provider price probe", () => {
       body: "<p>The initial resource timing buffer is empty</p>" }));
     await page.route("https://sbobet.example/api/v2/getEvent", async (route) => route.fulfill({
       contentType: "application/json", body: JSON.stringify({ payload: { "8": "event-1",
-        "7": { "3": ["2.5 0.17*selection-1 0.95*selection-2 market-1"] } } })
+        "2": "Alpha", "3": "Beta",
+        "7": { "3": ["2.5 0.17*selection-h 0.95*selection-a market-1"] } } })
     }));
     await page.goto("https://sbobet.example/");
 
     const value = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "event-1",
-      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      providerMarketId: "market-1", providerSelectionId: "selection-h", eventLabel: "Alpha vs Beta",
       participantA: "Alpha", participantB: "Beta",
       marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "2.5"
     })) as { ok: boolean; rawOdds?: string; reason?: string };
 
     expect(value).toEqual(expect.objectContaining({ ok: true, rawOdds: "0.17" }));
+    await page.close();
+  });
+
+  it("reads SBOBET's currently displayed exact DOM selection without calling the catalog endpoint", async () => {
+    const page = await browser.newPage();
+    let directRequests = 0;
+    await page.route("https://sbobet.example/api/v2/getEvent", async (route) => {
+      directRequests += 1;
+      await route.fulfill({ status: 500, body: "must not be called" });
+    });
+    await page.setContent(`<section class="wrapper-match-component" id="wrapper-match-component-5643423">
+      <span class="row-team-name">Coquimbo Unido</span><span class="row-team-name">CA Platense</span>
+      <div class="match-item"><div class="promotion-market" data-market-id="7307800681610075">
+        <div class="odd-row"><span class="rate-asian">0.25</span>
+          <button class="odd-item" id="odd-item-56434230050000025h"><span class="odd-val">-0.41</span></button></div>
+        <div class="odd-row"><span class="rate-asian"></span>
+          <button class="odd-item" id="odd-item-56434230050000025a"><span class="odd-val">-0.67</span></button></div>
+      </div></div></section>`);
+
+    const value = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "5643423",
+      providerMarketId: "7307800681610075", providerSelectionId: "56434230050000025h",
+      eventLabel: "Coquimbo Unido vs CA Platense", participantA: "Coquimbo Unido",
+      participantB: "CA Platense", marketType: "FT_AH", scope: "FULL_TIME",
+      selection: "HOME", line: "-0.25" })) as { ok: boolean; rawOdds?: string; method?: string };
+
+    expect(value).toEqual(expect.objectContaining({ ok: true, rawOdds: "-0.41", method: "DOM" }));
+    expect(directRequests).toBe(0);
+    await page.close();
+  });
+
+  it("does not accept an SBOBET DOM price when the exact provider market ID is not proven", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`<section class="wrapper-match-component" id="wrapper-match-component-event-1">
+      <span class="row-team-name">Alpha</span><span class="row-team-name">Beta</span>
+      <div class="promotion-market"><div class="odd-row"><span class="rate-asian">2.5</span>
+        <button class="odd-item" id="odd-item-selection-h"><span class="odd-val">0.17</span></button></div>
+        <div class="odd-row"><span class="rate-asian">u</span>
+        <button class="odd-item" id="odd-item-selection-a"><span class="odd-val">0.95</span></button></div></div>
+      </section>`);
+
+    const value = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-h", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME",
+      selection: "OVER", line: "2.5" }, null, "DOM_ONLY")) as { ok: boolean; reason?: string };
+
+    expect(value).toEqual({ ok: false, reason: "SBOBET_SELECTION_NOT_FOUND" });
+    await page.close();
+  });
+
+  it("fails closed when SBOBET has duplicate visible exact DOM selections", async () => {
+    const page = await browser.newPage();
+    await page.setContent(["event-a", "event-b"].map((eventId) =>
+      `<section class="wrapper-match-component" id="wrapper-match-component-${eventId}">
+        <span class="row-team-name">Alpha</span><span class="row-team-name">Beta</span>
+        <div class="match-item"><div class="promotion-market">
+          <div class="odd-row"><span class="rate-asian">2.5</span>
+            <button class="odd-item" id="odd-item-selection-h"><span class="odd-val">0.17</span></button></div>
+          <div class="odd-row"><span class="rate-asian">u</span>
+            <button class="odd-item" id="odd-item-selection-a"><span class="odd-val">0.95</span></button></div>
+        </div></div></section>`).join(""));
+
+    const value = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "event-a",
+      providerMarketId: "market-1", providerSelectionId: "selection-h", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME",
+      selection: "OVER", line: "2.5" })) as { ok: boolean; reason?: string };
+
+    expect(value).toEqual({ ok: false, reason: "SBOBET_SELECTION_AMBIGUOUS" });
+    await page.close();
+  });
+
+  it("fails closed when the direct SBOBET response contains duplicate exact candidates", async () => {
+    const page = await browser.newPage();
+    await page.route("https://sbobet.example/", async (route) => route.fulfill({ contentType: "text/html",
+      body: "<p>sportsbook</p>" }));
+    const event = { "8": "5643423", "2": "Alpha", "3": "Beta",
+      "7": { "3": ["2.5 0.17*selection-h 0.95*selection-a market-1"] } };
+    await page.route("https://sbobet.example/api/v2/getEvent", async (route) => route.fulfill({
+      contentType: "application/json", body: JSON.stringify({ payload: [event, event] })
+    }));
+    await page.goto("https://sbobet.example/");
+
+    const value = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "5643423",
+      providerMarketId: "market-1", providerSelectionId: "selection-h", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME",
+      selection: "OVER", line: "2.5" })) as { ok: boolean; reason?: string };
+
+    expect(value).toEqual({ ok: false, reason: "SBOBET_SELECTION_AMBIGUOUS" });
+    await page.close();
+  });
+
+  it("fails closed when exact IDs belong to the wrong participants or market scope", async () => {
+    const page = await browser.newPage();
+    await page.route("https://sbobet.example/", async (route) => route.fulfill({ contentType: "text/html",
+      body: "<p>sportsbook</p>" }));
+    await page.route("https://sbobet.example/api/v2/getEvent", async (route) => route.fulfill({
+      contentType: "application/json", body: JSON.stringify({ payload: [{ "8": "5643423",
+        "2": "Wrong Home", "3": "Wrong Away",
+        "7": { "4": ["2.5 0.17*selection-h 0.95*selection-a market-1"] } }] })
+    }));
+    await page.goto("https://sbobet.example/");
+
+    const value = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "5643423",
+      providerMarketId: "market-1", providerSelectionId: "selection-h", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME",
+      selection: "OVER", line: "2.5" })) as { ok: boolean; reason?: string };
+
+    expect(value).toEqual({ ok: false, reason: "SBOBET_SELECTION_NOT_FOUND" });
+    await page.close();
+  });
+
+  it("does not borrow an SBOBET price from another event with the same market line", async () => {
+    const page = await browser.newPage();
+    await page.route("https://sbobet.example/", async (route) => route.fulfill({ contentType: "text/html",
+      body: "<p>sportsbook</p>" }));
+    await page.route("https://sbobet.example/api/v2/getEvent", async (route) => route.fulfill({
+      contentType: "application/json", body: JSON.stringify({ payload: [{ "8": "other-event",
+        "2": "Alpha", "3": "Beta",
+        "7": { "3": ["2.5 8.88*selection-h 0.95*selection-a market-1"] }
+      }, { "8": "event-1", "2": "Alpha", "3": "Beta",
+        "7": { "3": ["2.5 0.17*selection-h 0.95*selection-a market-1"] }
+      }] })
+    }));
+    await page.goto("https://sbobet.example/");
+
+    const value = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-h", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME",
+      selection: "OVER", line: "2.5" })) as { ok: boolean; rawOdds?: string };
+
+    expect(value).toEqual(expect.objectContaining({ ok: true, rawOdds: "0.17" }));
+    await page.close();
+  });
+
+  it("reads the exact home handicap with the same sign convention as the normalized ticket", async () => {
+    const page = await browser.newPage();
+    await page.route("https://sbobet.example/", async (route) => route.fulfill({ contentType: "text/html",
+      body: "<p>sportsbook</p>" }));
+    await page.route("https://sbobet.example/api/v2/getEvent", async (route) => route.fulfill({
+      contentType: "application/json", body: JSON.stringify({ payload: [{ "8": "5643423",
+        "2": "Coquimbo Unido", "3": "CA Platense", "7": {
+          "5": ["0.25 -0.41*56434230050000025h -0.67*56434230050000025a h 7307800681610075"]
+        } }] })
+    }));
+    await page.goto("https://sbobet.example/");
+
+    const value = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "5643423",
+      providerMarketId: "7307800681610075", providerSelectionId: "56434230050000025h",
+      eventLabel: "Coquimbo Unido vs CA Platense", participantA: "Coquimbo Unido",
+      participantB: "CA Platense", marketType: "FT_AH", scope: "FULL_TIME",
+      selection: "HOME", line: "-0.25" })) as { ok: boolean; rawOdds?: string };
+
+    expect(value).toEqual(expect.objectContaining({ ok: true, rawOdds: "-0.41" }));
+    const reversed = await page.evaluate(buildSbobetSelectionPriceExpression({ providerEventId: "5643423",
+      providerMarketId: "7307800681610075", providerSelectionId: "56434230050000025h",
+      eventLabel: "CA Platense vs Coquimbo Unido", participantA: "CA Platense",
+      participantB: "Coquimbo Unido", marketType: "FT_AH", scope: "FULL_TIME",
+      selection: "HOME", line: "0.25" })) as { ok: boolean; reason?: string };
+    expect(reversed).toEqual({ ok: false, reason: "SBOBET_SELECTION_NOT_FOUND" });
+    await page.close();
+  });
+
+  it("refreshes SBOBET's same-origin catalog when Chrome evicted its resource timing entry", async () => {
+    const page = await browser.newPage();
+    let requests = 0;
+    await page.route("https://sbobet.example/", async (route) => route.fulfill({ contentType: "text/html",
+      body: "<p>The initial resource timing buffer is empty</p>" }));
+    await page.route("https://sbobet.example/api/v2/getEvent", async (route) => {
+      requests += 1;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ payload: [] }) });
+    });
+    await page.goto("https://sbobet.example/");
+
+    const value = await page.evaluate(buildSbobetCatalogRefreshExpression(null)) as {
+      ok: boolean; status?: number; reason?: string
+    };
+
+    expect(value).toEqual(expect.objectContaining({ ok: true, status: 200 }));
+    expect(requests).toBe(1);
     await page.close();
   });
 

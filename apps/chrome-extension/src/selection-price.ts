@@ -112,12 +112,77 @@ export function buildSabaSelectionPriceExpression(identity: SelectionPriceProbeI
 }
 
 export function buildSbobetSelectionPriceExpression(identity: SelectionPriceProbeIdentity,
-  observedRequest: { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null = null): string {
+  observedRequest: { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null = null,
+  probeMode: "DOM_ONLY" | "FETCH_ONLY" | "DOM_OR_FETCH" = "DOM_OR_FETCH"): string {
   const input = JSON.stringify(identity);
-  const capturedRequest = JSON.stringify(observedRequest);
+  const capturedRequest = JSON.stringify(probeMode === "DOM_ONLY" ? null : observedRequest);
+  const mode = JSON.stringify(probeMode);
   return `(async () => {
     const input = ${input};
     const capturedRequest = ${capturedRequest};
+    const probeMode = ${mode};
+    const normalizeDom = (value) => String(value ?? '').normalize('NFKC').replace(/\\s+/gu, ' ').trim()
+      .toLocaleLowerCase('en');
+    const domLineMagnitude = (value) => {
+      const match = String(value ?? '').match(/\\d+(?:\\.\\d+)?(?:\\s*[\\/-]\\s*\\d+(?:\\.\\d+)?)?/u)?.[0];
+      if (!match) return null;
+      const parts = match.replace(/\\s+/gu, '').replace('-', '/').split('/').map(Number);
+      return parts.length >= 1 && parts.length <= 2 && parts.every(Number.isFinite)
+        ? parts.reduce((sum, part) => sum + part, 0) / parts.length : null;
+    };
+    const exactDomId = 'odd-item-' + input.providerSelectionId;
+    const exactSelector = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? '#' + CSS.escape(exactDomId) : '[id^="odd-item-"]';
+    const visibleExactNodes = probeMode === 'FETCH_ONLY' ? [] : [...document.querySelectorAll(exactSelector)]
+      .filter((node) => node.id === exactDomId && node.getClientRects().length > 0);
+    if (visibleExactNodes.length > 1) return { ok: false, reason: 'SBOBET_SELECTION_AMBIGUOUS' };
+    if (visibleExactNodes.length === 1) {
+      const target = visibleExactNodes[0];
+      const event = target.closest('.wrapper-match-component');
+      const eventId = event?.id.match(/^wrapper-match-component-(.+)$/u)?.[1] ?? '';
+      const teams = event ? [...event.querySelectorAll('.row-team-name')].slice(0, 2)
+        .map((node) => normalizeDom(node.textContent)) : [];
+      const column = target.closest('.promotion-market, .un-promotion');
+      const marketOwner = target.closest('[data-market-id], [data-marketid], [data-mid], [data-moid]');
+      const domMarketId = marketOwner?.getAttribute('data-market-id') ??
+        marketOwner?.getAttribute('data-marketid') ?? marketOwner?.getAttribute('data-mid') ??
+        marketOwner?.getAttribute('data-moid') ?? '';
+      const odds = column ? [...column.querySelectorAll('.odd-item')] : [];
+      const targetIndex = odds.indexOf(target);
+      const rateLabels = column ? [...column.querySelectorAll('.odd-row .rate-asian')]
+        .map((node) => String(node.textContent ?? '').trim()) : [];
+      const inferredType = odds.length >= 3 ? 'FT_1X2'
+        : rateLabels.some((label) => /^[ou]$/iu.test(label)) ? 'FT_TOTAL' : 'FT_AH';
+      const expectedIndex = input.selection === 'HOME' || input.selection === 'OVER' ? 0
+        : input.selection === 'AWAY' || input.selection === 'UNDER' ? 1 : -1;
+      const scopeOwner = target.closest('[data-scope], [class*="first-half"], [class*="1h"]');
+      const explicitScope = normalizeDom(scopeOwner?.getAttribute('data-scope') ?? scopeOwner?.className ?? '');
+      const scopeMatches = input.scope === 'FULL_TIME'
+        ? !/(?:first.?half|\\b1h\\b)/u.test(explicitScope)
+        : input.scope === 'FIRST_HALF' && /(?:first.?half|\\b1h\\b)/u.test(explicitScope);
+      const requestedType = input.marketType === 'FT_TOTAL' || input.marketType === 'FH_TOTAL' ? 'FT_TOTAL'
+        : input.marketType === 'FT_AH' || input.marketType === 'FH_AH' ? 'FT_AH' : input.marketType;
+      const magnitude = rateLabels.map(domLineMagnitude).find((value) => value !== null) ?? null;
+      let canonicalLine = magnitude;
+      if (requestedType === 'FT_AH' && magnitude !== null) {
+        const favoredIndex = rateLabels.findIndex((label) => domLineMagnitude(label) !== null);
+        canonicalLine = favoredIndex === 0 ? -magnitude : favoredIndex === 1 ? magnitude : null;
+      }
+      const requestedLine = input.line === null ? null : Number(input.line);
+      const rawOdds = String(target.querySelector('.odd-val')?.textContent ?? target.textContent ?? '')
+        .replace(/\\s+/gu, ' ').trim();
+      const identityMatches = eventId === input.providerEventId && domMarketId === input.providerMarketId &&
+        teams.length === 2 &&
+        teams[0] === normalizeDom(input.participantA) && teams[1] === normalizeDom(input.participantB) &&
+        requestedType === inferredType && scopeMatches && targetIndex === expectedIndex &&
+        requestedLine !== null && Number.isFinite(requestedLine) && canonicalLine !== null &&
+        Math.abs(canonicalLine - requestedLine) <= 1e-9;
+      if (!identityMatches || !/^[+-]?\\d+(?:\\.\\d+)?$/u.test(rawOdds) || Number(rawOdds) === 0) {
+        return { ok: false, reason: 'SBOBET_SELECTION_NOT_FOUND' };
+      }
+      return { ok: true, rawOdds, observedAtMs: Date.now(), method: 'DOM' };
+    }
+    if (probeMode === 'DOM_ONLY') return { ok: false, reason: 'SBOBET_SELECTION_NOT_FOUND' };
     const performanceUrl = [...performance.getEntriesByType('resource')]
       .map((entry) => String(entry.name ?? ''))
       .filter((value) => {
@@ -145,34 +210,98 @@ export function buildSbobetSelectionPriceExpression(identity: SelectionPriceProb
     let payload;
     try { payload = await response.json(); }
     catch { return { ok: false, reason: 'SBOBET_DIRECT_INVALID_JSON' }; }
-    const prices = [];
-    const readRows = (value) => {
-      if (typeof value === 'string') {
-        const tokens = value.trim().split(/\\s+/u);
-        if (!tokens.includes(input.providerMarketId)) return;
-        for (const token of tokens) {
-          const separator = token.lastIndexOf('*');
-          if (separator <= 0 || token.slice(separator + 1) !== input.providerSelectionId) continue;
-          const rawOdds = token.slice(0, separator);
-          if (/^[+-]?\\d+(?:\\.\\d+)?$/u.test(rawOdds) && Number(rawOdds) !== 0) prices.push(rawOdds);
+    const groupSemantics = {
+      '3': ['FT_TOTAL', 'FULL_TIME', 'TOTAL'], '4': ['FH_TOTAL', 'FIRST_HALF', 'TOTAL'],
+      '5': ['FT_AH', 'FULL_TIME', 'HANDICAP'], '6': ['FH_AH', 'FIRST_HALF', 'HANDICAP'],
+      '19': ['CORNER_FT_AH', 'FULL_TIME', 'HANDICAP'], '20': ['CORNER_FH_AH', 'FIRST_HALF', 'HANDICAP'],
+      '21': ['CORNER_FT_TOTAL', 'FULL_TIME', 'TOTAL'], '22': ['CORNER_FH_TOTAL', 'FIRST_HALF', 'TOTAL'],
+      '31': ['CARD_FT_TOTAL', 'FULL_TIME', 'TOTAL'], '32': ['CARD_FH_TOTAL', 'FIRST_HALF', 'TOTAL'],
+      '33': ['CARD_FT_AH', 'FULL_TIME', 'HANDICAP'], '34': ['CARD_FH_AH', 'FIRST_HALF', 'HANDICAP'],
+      '80': ['SH_TOTAL', 'SECOND_HALF', 'TOTAL'], '85': ['SH_AH', 'SECOND_HALF', 'HANDICAP']
+    };
+    const text = (value) => String(value ?? '').normalize('NFKC').replace(/\\s+/gu, ' ').trim()
+      .toLocaleLowerCase('en');
+    const lineMagnitude = (value) => {
+      const raw = String(value ?? '').trim();
+      const parts = raw.replace(/^(\\d+(?:\\.\\d+)?)-(\\d+(?:\\.\\d+)?)$/u, '$1/$2')
+        .split('/').map(Number);
+      return parts.length >= 1 && parts.length <= 2 && parts.every((part) => Number.isFinite(part))
+        ? parts.reduce((sum, part) => sum + part, 0) / parts.length : null;
+    };
+    const candidates = [];
+    const readEvent = (event) => {
+      if (text(event['2']) !== text(input.participantA) || text(event['3']) !== text(input.participantB)) return;
+      const groups = event['7'];
+      if (!groups || typeof groups !== 'object' || Array.isArray(groups)) return;
+      for (const [groupKey, rows] of Object.entries(groups)) {
+        const semantics = groupSemantics[groupKey];
+        if (!semantics || semantics[0] !== input.marketType || semantics[1] !== input.scope ||
+          !Array.isArray(rows)) continue;
+        for (const row of rows) {
+          if (typeof row !== 'string') continue;
+          const tokens = row.trim().split(/\\s+/u);
+          const magnitude = lineMagnitude(tokens[0]);
+          if (magnitude === null) continue;
+          const handicap = semantics[2] === 'HANDICAP';
+          const marketId = handicap ? tokens[4] : tokens[3];
+          const favored = handicap ? tokens[3] : null;
+          const canonicalLine = handicap ? favored === 'h' ? -magnitude : favored === 'a' ? magnitude : null
+            : magnitude;
+          if (marketId !== input.providerMarketId || canonicalLine === null || input.line === null ||
+            Math.abs(canonicalLine - Number(input.line)) > 1e-9) continue;
+          const expectedSuffix = input.selection === 'HOME' || input.selection === 'OVER' ? 'h'
+            : input.selection === 'AWAY' || input.selection === 'UNDER' ? 'a' : null;
+          if (expectedSuffix === null || !input.providerSelectionId.endsWith(expectedSuffix)) continue;
+          for (const token of tokens.slice(1, 3)) {
+            const separator = token.lastIndexOf('*');
+            if (separator <= 0 || token.slice(separator + 1) !== input.providerSelectionId) continue;
+            const rawOdds = token.slice(0, separator);
+            if (/^[+-]?\\d+(?:\\.\\d+)?$/u.test(rawOdds) && Number(rawOdds) !== 0) candidates.push(rawOdds);
+          }
         }
-        return;
       }
-      if (Array.isArray(value)) { for (const child of value) readRows(child); return; }
-      if (value && typeof value === 'object') for (const child of Object.values(value)) readRows(child);
     };
     const visit = (value, depth = 0) => {
       if (!value || typeof value !== 'object' || depth > 20) return;
-      if (!Array.isArray(value) && String(value['8'] ?? '') === input.providerEventId && value['7']) {
-        readRows(value['7']);
-      }
+      if (!Array.isArray(value) && String(value['8'] ?? '') === input.providerEventId) readEvent(value);
       for (const child of Object.values(value)) visit(child, depth + 1);
     };
     visit(payload);
-    const unique = [...new Set(prices)];
-    if (unique.length === 0) return { ok: false, reason: 'SBOBET_SELECTION_NOT_FOUND' };
-    if (unique.length !== 1) return { ok: false, reason: 'SBOBET_SELECTION_AMBIGUOUS' };
-    return { ok: true, rawOdds: unique[0], observedAtMs: Date.now() };
+    if (candidates.length === 0) return { ok: false, reason: 'SBOBET_SELECTION_NOT_FOUND' };
+    if (candidates.length !== 1) return { ok: false, reason: 'SBOBET_SELECTION_AMBIGUOUS' };
+    return { ok: true, rawOdds: candidates[0], observedAtMs: Date.now(), method: 'IN_PAGE_FETCH' };
+  })()`;
+}
+
+export function buildSbobetCatalogRefreshExpression(
+  observedRequest: { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null
+): string {
+  const capturedRequest = JSON.stringify(observedRequest);
+  return `(async () => {
+    const capturedRequest = ${capturedRequest};
+    const performanceUrl = [...performance.getEntriesByType('resource')]
+      .map((entry) => String(entry.name ?? ''))
+      .filter((value) => {
+        try {
+          const url = new URL(value, location.href);
+          return url.protocol === 'https:' && url.pathname === '/api/v2/getEvent';
+        } catch { return false; }
+      }).at(-1);
+    const requestUrl = capturedRequest?.url ?? performanceUrl ?? new URL('/api/v2/getEvent', location.href).href;
+    try {
+      const url = new URL(requestUrl, location.href);
+      if (url.protocol !== 'https:' || url.pathname !== '/api/v2/getEvent') {
+        return { ok: false, reason: 'SBOBET_DIRECT_REQUEST_INVALID' };
+      }
+    } catch { return { ok: false, reason: 'SBOBET_DIRECT_REQUEST_INVALID' }; }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7_500);
+    try {
+      const response = await fetch(requestUrl, { method: 'GET', credentials: 'include', cache: 'no-store',
+        signal: controller.signal, headers: { Accept: 'application/json', ...(capturedRequest?.headers ?? {}) } });
+      return { ok: response.ok, status: response.status, observedAtMs: Date.now() };
+    } catch { return { ok: false, reason: 'SBOBET_DIRECT_REQUEST_FAILED' }; }
+    finally { clearTimeout(timeout); }
   })()`;
 }
 

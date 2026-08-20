@@ -32,11 +32,14 @@ export interface TrafficMarker {
 export function recognizeLobbyTab(tab: TabDescriptor): LobbyTabCandidate | null {
   if (!Number.isSafeInteger(tab.id) || (tab.id ?? -1) < 0 || !tab.url) return null;
   try {
-    const hostname = new URL(tab.url).hostname.toLowerCase();
+    const parsed = new URL(tab.url);
+    const hostname = parsed.hostname.toLowerCase();
     const lobby = HOST_TO_LOBBY.get(hostname) ??
       (/^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/iu.test(hostname) ? "SABA" :
         /^pacific\.(?:agenate|racern)\.com$/iu.test(hostname) ? "TSPORT" : undefined);
     if (!lobby) return null;
+    if (lobby === "KSPORT" && (/\bvolta\b/iu.test(parsed.pathname) ||
+      /volta|something went wrong/iu.test(tab.title?.trim() ?? ""))) return null;
     return { lobby, tabId: tab.id!, hostname, confidence: "CANDIDATE" };
   } catch {
     return null;

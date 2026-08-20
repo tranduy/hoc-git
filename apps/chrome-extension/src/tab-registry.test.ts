@@ -86,7 +86,9 @@ describe("TabRegistry", () => {
       expect.objectContaining({ lobby: "CMD", tabId: 8 }),
       expect.objectContaining({ lobby: "KSPORT", tabId: 7 })
     ]));
-    expect(closed).toEqual([9]);
+    // Volta is not a KSPORT candidate, so the registry neither attaches nor
+    // mutates that unrelated product tab.
+    expect(closed).toEqual([]);
   });
 
   it("rejects a persisted K-Sports error page in favour of the loaded Sportsbook tab", async () => {

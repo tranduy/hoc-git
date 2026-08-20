@@ -1,25 +1,78 @@
-export function decodeSbobetStompBodies(payload: string): readonly unknown[] {
+export interface SbobetStompProviderReceipt {
+  readonly destination: string;
+  readonly subscription: string | null;
+  readonly messageId: string | null;
+  readonly receiptSequence: number | null;
+  readonly body: unknown;
+}
+
+function sockJsStrings(payload: string): readonly string[] {
   const candidate = payload.startsWith("a[") ? payload.slice(1) : payload.startsWith("[") ? payload : null;
   if (candidate === null) return [];
-  let frames: unknown;
-  try { frames = JSON.parse(candidate); } catch { return []; }
-  if (!Array.isArray(frames)) return [];
-  return frames.flatMap((item) => {
-    if (typeof item !== "string") return [];
-    const separator = item.indexOf("\n\n");
-    if (separator < 0 || item.slice(0, separator).split("\n")[0]?.trim() !== "MESSAGE") return [];
-    const raw = item.slice(separator + 2).replace(/\0+$/u, "").trim();
-    try {
-      const outer = JSON.parse(raw) as unknown;
-      if (typeof outer === "object" && outer !== null && !Array.isArray(outer)) {
-        const nested = (outer as Record<string, unknown>).body;
-        if (typeof nested === "string" && /^[\[{]/u.test(nested.trim())) {
-          try { return [JSON.parse(nested) as unknown]; } catch { return [outer]; }
-        }
+  try {
+    const parsed = JSON.parse(candidate) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch { return []; }
+}
+
+function headers(value: string): Readonly<Record<string, string>> {
+  const result: Record<string, string> = {};
+  for (const line of value.split("\n").slice(1)) {
+    const separator = line.indexOf(":");
+    if (separator > 0) result[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+  }
+  return result;
+}
+
+function receiptSequence(messageId: string | null): number | null {
+  const match = messageId === null ? null : /(?:^|[-:])(\d+)$/u.exec(messageId);
+  if (match === null) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+export class SbobetStompReceiptDecoder {
+  #pending = "";
+
+  reset(): void { this.#pending = ""; }
+
+  push(payload: string): readonly SbobetStompProviderReceipt[] {
+    const strings = sockJsStrings(payload);
+    const output: SbobetStompProviderReceipt[] = [];
+    for (const fragment of strings) {
+      if (fragment.trim() === "") continue;
+      this.#pending += fragment;
+      if (this.#pending.length > 4_000_000) { this.#pending = ""; continue; }
+      let terminator = this.#pending.indexOf("\0");
+      while (terminator >= 0) {
+        const frame = this.#pending.slice(0, terminator);
+        this.#pending = this.#pending.slice(terminator + 1);
+        terminator = this.#pending.indexOf("\0");
+        const separator = frame.indexOf("\n\n");
+        if (separator < 0 || frame.slice(0, separator).split("\n")[0]?.trim() !== "MESSAGE") continue;
+        const frameHeaders = headers(frame.slice(0, separator));
+        const destination = frameHeaders.destination;
+        if (destination === undefined) continue;
+        let outer: unknown;
+        try { outer = JSON.parse(frame.slice(separator + 2).trim()) as unknown; } catch { continue; }
+        if (typeof outer !== "object" || outer === null || Array.isArray(outer)) continue;
+        const receipt = outer as Record<string, unknown>;
+        if ((receipt.statusCode !== undefined && receipt.statusCode !== "OK") ||
+          (receipt.statusCodeValue !== undefined && receipt.statusCodeValue !== 200) ||
+          typeof receipt.body !== "string") continue;
+        let body: unknown;
+        try { body = JSON.parse(receipt.body) as unknown; } catch { continue; }
+        const messageId = frameHeaders["message-id"] ?? null;
+        output.push({ destination, subscription: frameHeaders.subscription ?? null,
+          messageId, receiptSequence: receiptSequence(messageId), body });
       }
-      return [outer];
-    } catch { return []; }
-  });
+    }
+    return output;
+  }
+}
+
+export function decodeSbobetStompBodies(payload: string): readonly unknown[] {
+  return new SbobetStompReceiptDecoder().push(payload).map((receipt) => receipt.body);
 }
 
 export function decodeSbobetJsonBody(payload: string): readonly unknown[] {

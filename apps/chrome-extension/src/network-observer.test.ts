@@ -149,17 +149,67 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
   });
 
-  it.each(["KSPORT", "SABA", "TSPORT"] as const)(
-    "recovers %s decoder state without toggling the provider network or reloading the tab", async (lobby) => {
+  it("replays retained SBOBET STOMP partitions without issuing a catalog request or touching the tab", async () => {
+    const sendCommand = vi.fn(async () => ({}));
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
+    const live = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\n{\"event\":1}\u0000";
+    const today = "MESSAGE\ndestination:/topic/sports/1_1/today/ma/event/vi\n\n{\"event\":2}\u0000";
+    await observer.ingestWebSocketFrame(source, "wss://sports.example/sport/socket", live);
+    await observer.ingestWebSocketFrame(source, "wss://sports.example/sport/socket", today);
+    forward.mockClear();
+
+    await observer.refreshCatalog(source);
+
+    expect(sendCommand).not.toHaveBeenCalled();
+    expect(forward).toHaveBeenCalledTimes(2);
+    expect(forward.mock.calls.map(([envelope]) => envelope.transport)).toEqual(["WS_FRAME", "WS_FRAME"]);
+    expect(forward.mock.calls.every(([envelope]) => envelope.request.replayed === true)).toBe(true);
+  });
+
+  it("recovers TSPORT decoder state without toggling the provider network or reloading the tab", async () => {
       const sendCommand = vi.fn(async (_tabId: number, _method: string,
         _params?: Record<string, unknown>) => ({}));
       const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
-      const provider = { lobby, sourceId: `chrome:${lobby}:8`, tabId: 8 } as const;
+      const provider = { lobby: "TSPORT", sourceId: "chrome:TSPORT:8", tabId: 8 } as const;
 
       await observer.refreshCatalog(provider);
 
       expect(sendCommand).not.toHaveBeenCalled();
       expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
+  });
+
+  it("fails closed when SABA has no retained complete socket baseline", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>) => ({}));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+
+    await observer.refreshCatalog(source);
+
+    expect(sendCommand.mock.calls.map(([, method]) => method)).toEqual(["Runtime.evaluate"]);
+  });
+
+  it("does not mistake a partial SABA DOM cache for a complete socket baseline", async () => {
+      const sendCommand = vi.fn(async (_tabId: number, _method: string,
+        _params?: Record<string, unknown>) => ({}));
+      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+      const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+      await observer.ingestDomSnapshot(source, "sports.example", JSON.stringify([{
+        sportId: "1", leagueId: "league-1", leagueName: "League", matchId: "match-1",
+        timeText: "LIVE", teamNames: ["Alpha", "Beta"], groups: [{
+          betTypeIds: ["1"], labels: ["0.5"], odds: [
+            { marketOddsId: "m-1", priceText: "0.91", lineText: "0.5" },
+            { marketOddsId: "m-1", priceText: "-0.99" }
+          ]
+        }]
+      }]));
+      sendCommand.mockClear();
+
+      await observer.refreshCatalog(source);
+
+      expect(sendCommand.mock.calls.map(([, method]) => method)).toEqual(["Runtime.evaluate"]);
   });
 
   it("requests only IM prematch events in the next 48-hour UTC window", async () => {
@@ -424,12 +474,17 @@ describe("NetworkObserver", () => {
       method: "IN_PAGE_FETCH" });
   });
 
-  it("checks SBOBET through a fresh awaited exact getEvent read instead of visible DOM", async () => {
-    const sendCommand = vi.fn(async (_tabId: number, method: string, _params?: Record<string, unknown>) => {
+  it("checks SBOBET's exact selection across every sportsbook frame", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
         childFrames: [{ frame: { id: "provider-child" } }] } };
+      if (method === "Page.createIsolatedWorld") return {
+        executionContextId: params?.frameId === "top" ? 71 : 72
+      };
       if (method === "Runtime.evaluate") {
-        return { result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100 } } };
+        return params?.contextId === 72
+          ? { result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100, method: "DOM" } } }
+          : { result: { value: { ok: false, reason: "SBOBET_SELECTION_NOT_FOUND" } } };
       }
       return {};
     });
@@ -453,23 +508,28 @@ describe("NetworkObserver", () => {
         participantA: "El Daklyeh", participantB: "Mega Sport Club",
         marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "0.75" });
 
-    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate")?.[2];
+    const evaluation = sendCommand.mock.calls.find(([, method, params]) =>
+      method === "Runtime.evaluate" && params?.contextId === 72)?.[2];
     expect(evaluation?.awaitPromise).toBe(true);
-    expect(String(evaluation?.expression)).toContain("/api/v2/getEvent");
-    expect(String(evaluation?.expression)).toContain("live=1&lang=en");
-    expect(String(evaluation?.expression)).toContain("current-tab-session");
+    expect(String(evaluation?.expression)).toContain('const probeMode = "DOM_ONLY"');
+    expect(String(evaluation?.expression)).not.toContain("live=1&lang=en");
+    expect(String(evaluation?.expression)).not.toContain("current-tab-session");
     expect(String(evaluation?.expression)).not.toContain("must-not-be-copied");
-    expect(String(evaluation?.expression)).toContain("cache: 'no-store'");
-    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
-    expect(sendCommand.mock.calls.some(([, method]) => method === "Page.getFrameTree")).toBe(false);
-    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "0.17" });
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(2);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Page.getFrameTree")).toBe(true);
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({
+      status: "FOUND", rawOdds: "0.17", method: "DOM"
+    });
   });
 
   it("restores SBOBET's request template after the extension worker restarts", async () => {
-    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) =>
-      method === "Runtime.evaluate"
-        ? { result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100 } } }
-        : {});
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method !== "Runtime.evaluate") return {};
+      return String(params?.expression).includes('const probeMode = "FETCH_ONLY"')
+        ? { result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100,
+          method: "IN_PAGE_FETCH" } } }
+        : { result: { value: { ok: false, reason: "SBOBET_SELECTION_NOT_FOUND" } } };
+    });
     const loadSbobetEventRequest = vi.fn(async () => ({
       url: "https://api.sbobet.example/api/v2/getEvent?live=1",
       headers: { "x-session-proof": "restored-session" }
@@ -484,7 +544,8 @@ describe("NetworkObserver", () => {
         scope: "FULL_TIME", selection: "OVER", line: "2.5" });
 
     expect(loadSbobetEventRequest).toHaveBeenCalledTimes(1);
-    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate")?.[2];
+    const evaluation = sendCommand.mock.calls.find(([, method, params]) => method === "Runtime.evaluate" &&
+      String(params?.expression).includes('const probeMode = "FETCH_ONLY"'))?.[2];
     expect(String(evaluation?.expression)).toContain("api.sbobet.example/api/v2/getEvent?live=1");
     expect(String(evaluation?.expression)).toContain("restored-session");
   });
@@ -1376,6 +1437,48 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls.map(([message]) => message.payload.body)).toEqual(input.bodies);
     expect(forward.mock.calls.every(([message]) => message.request.replayed === true)).toBe(true);
     expect(forward.mock.calls.map(([message]) => message.observedAtMs)).toEqual([1_000, 1_100]);
+  });
+
+  it("retains every fragment of the current SBOBET STOMP stream and drops a retired stream", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward,
+      now: () => 1_000, monotonicNow: () => 60 });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    const url = "wss://sports.example/sport/socket";
+    await observer.handleEvent(source, "Network.webSocketCreated", { requestId: "old", url });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", { requestId: "old",
+      response: { opcode: 1, payloadData: "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\nold" } });
+    await observer.handleEvent(source, "Network.webSocketCreated", { requestId: "current", url });
+    const fragments = [
+      "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\npartial-",
+      "continuation-without-destination\u0000"
+    ];
+    for (const payloadData of fragments) await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "current", response: { opcode: 1, payloadData }
+    });
+    forward.mockClear();
+
+    await observer.replaySnapshots(source.sourceId);
+
+    expect(forward.mock.calls.map(([message]) => message.payload.body)).toEqual(fragments);
+    expect(forward.mock.calls.every(([message]) => message.request.streamId === "2")).toBe(true);
+  });
+
+  it("does not replay a closed SBOBET socket baseline", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:15", tabId: 15 } as const;
+    const url = "wss://sports.example/sport/socket";
+    await observer.handleEvent(source, "Network.webSocketCreated", { requestId: "sports", url });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", { requestId: "sports",
+      response: { opcode: 1, payloadData:
+        "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\ncurrent\u0000" } });
+    await observer.handleEvent(source, "Network.webSocketClosed", { requestId: "sports" });
+    forward.mockClear();
+
+    await observer.replaySnapshots(source.sourceId);
+
+    expect(forward).not.toHaveBeenCalled();
   });
 
   it("replays retained T-Sports frames after the provider rotates to racern.com", async () => {

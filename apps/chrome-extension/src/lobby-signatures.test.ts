@@ -27,6 +27,14 @@ describe("lobby tab recognition", () => {
     expect(recognizeLobbyTab({ id: 2, url: "https://imsports.directsb.net.evil.test/", title: "Sports" })).toBeNull();
   });
 
+  it("does not recognize a Volta or provider error page as the K-Sports sportsbook", () => {
+    expect(recognizeLobbyTab({ id: 3, url: "https://zenandfe.com/volta", title: "Volta" })).toBeNull();
+    expect(recognizeLobbyTab({ id: 4, url: "https://zenandfe.com/?token=failed",
+      title: "Something went wrong" })).toBeNull();
+    expect(recognizeLobbyTab({ id: 5, url: "https://zenandfe.com/sports", title: "Sportsbook" })?.lobby)
+      .toBe("KSPORT");
+  });
+
   it("recognizes a rotated SABA launch host without accepting a suffix lookalike", () => {
     expect(recognizeLobbyTab({ id: 3, url: "https://c0z0ob.bpd3a3fn.com/sports?token=opaque" })?.lobby).toBe("SABA");
     expect(recognizeLobbyTab({ id: 5, url: "https://c0z0ob.bp7xvs95.com/sports?token=opaque" })?.lobby).toBe("SABA");

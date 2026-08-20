@@ -5,8 +5,51 @@ import {
   isSbobetPublicFeedUrl, isSbobetResponseCandidate,
   isSbobetSocketUrl, nextSbobetSocketDirtyAtMs
 } from "./sbobet-stomp.js";
+import { SbobetStompReceiptDecoder } from "./sbobet-stomp.js";
 
 describe("SBOBET SockJS/STOMP decoding", () => {
+  it("reassembles a fragmented STOMP MESSAGE before exposing its provider receipt", () => {
+    const decoder = new SbobetStompReceiptDecoder();
+    const nested = JSON.stringify([{ "8": 5603585 }]);
+    const frame = `MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n` +
+      `subscription:subSportBookLive\nmessage-id:stream-410\n\n${JSON.stringify({
+        statusCode: "OK", statusCodeValue: 200, body: nested
+      })}\0`;
+    const splitAt = Math.floor(frame.length / 2);
+
+    expect(decoder.push(`a${JSON.stringify([frame.slice(0, splitAt)])}`)).toEqual([]);
+    expect(decoder.push(`a${JSON.stringify([frame.slice(splitAt)])}`)).toEqual([{
+      destination: "/topic/sports/1_1/live/ma/event/vi",
+      subscription: "subSportBookLive",
+      messageId: "stream-410",
+      receiptSequence: 410,
+      body: [{ "8": 5603585 }]
+    }]);
+  });
+
+  it("ignores a late STOMP RECEIPT without replaying the preceding MESSAGE", () => {
+    const decoder = new SbobetStompReceiptDecoder();
+    const message = `MESSAGE\ndestination:/topic/sports/1_1/today/ma/event/vi\n` +
+      `subscription:subSportBookToday\nmessage-id:stream-12\n\n${JSON.stringify({
+        statusCode: "OK", statusCodeValue: 200, body: "[]"
+      })}\0`;
+    expect(decoder.push(`a${JSON.stringify([message])}`)).toHaveLength(1);
+    expect(decoder.push(`a${JSON.stringify(["RECEIPT\nreceipt-id:stream-11\n\n\0"])}`)).toEqual([]);
+  });
+
+  it("ignores SockJS STOMP heartbeats without poisoning the next MESSAGE", () => {
+    const decoder = new SbobetStompReceiptDecoder();
+    const message = `MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n` +
+      `subscription:subSportBookLive\nmessage-id:stream-13\n\n${JSON.stringify({
+        statusCode: "OK", statusCodeValue: 200, body: "[]"
+      })}\0`;
+
+    expect(decoder.push(`a${JSON.stringify(["\n"])}`)).toEqual([]);
+    expect(decoder.push(`a${JSON.stringify([message])}`)).toEqual([
+      expect.objectContaining({ messageId: "stream-13", receiptSequence: 13, body: [] })
+    ]);
+  });
+
   it("unwraps a MESSAGE and its nested JSON body without accepting headers as data", () => {
     const nested = JSON.stringify({ "1": [{ "2": 5603585, "3": "Home" }] });
     const frame = `MESSAGE\ndestination:/safe\n\n${JSON.stringify({ body: nested })}\0`;

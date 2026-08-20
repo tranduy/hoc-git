@@ -55,6 +55,21 @@ function sabaEnvelope(sequence: number, matchIds: readonly number[]): ChromeBrid
     payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", "b1", rows, sequence])}` } };
 }
 
+function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds: readonly number[]): ChromeBridgeEnvelope {
+  const events = eventIds.map((eventId) => ({ "2": `Home ${eventId}`, "3": `Away ${eventId}`, "8": eventId,
+    "7": { "3": [`2.5 0.92*${eventId}0030002005h -0.98*${eventId}0030002005a ${eventId}181025`] } }));
+  const destination = `/topic/sports/1_1/${partition}/ma/event/vi`;
+  const subscription = partition === "live" ? "subSportBookLive" : "subSportBookToday";
+  const frame = `MESSAGE\ndestination:${destination}\nsubscription:${subscription}\nmessage-id:socket-${sequence}\n\n` +
+    `${JSON.stringify({ statusCode: "OK", statusCodeValue: 200,
+      body: JSON.stringify([{ "1": "League", "2": events }]) })}\0`;
+  return { version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8,
+    sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence, transport: "WS_FRAME",
+    request: { hostname: "sports.example", pathnameClass: "/sport/session/websocket",
+      resourceType: "WebSocket", streamId: "ksport-stream-1" },
+    payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
+}
+
 const fallbackStatus: CatalogSourceStatus = { id: "catalog-source:CMD:FOOTBALL", alias: "T-Sports · CMD",
   provider: "CMD", category: "FOOTBALL", sessionState: "UNCONFIGURED", acquiredAtMs: null, reason: null };
 
@@ -131,6 +146,42 @@ describe("ChromeCatalogDataPlane", () => {
       sessionState: "ACTIVE",
       acquiredAtMs: 1_000,
       reason: null
+    }]);
+  });
+
+  it("does not treat a KSPORT tab heartbeat as fresh sportsbook transport", async () => {
+    let now = 1_500;
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000 });
+    const authenticated: CatalogSourceStatus = {
+      ...fallbackStatus,
+      id: "catalog-source:SBOBET:FOOTBALL",
+      alias: "K-Sports · SBOBET",
+      provider: "SBOBET",
+      sessionState: "ACTIVE",
+      acquiredAtMs: 900,
+      reason: null
+    };
+    expect(plane.ingest(ksportEnvelope(1, "live", [101]))).toBe(false);
+    expect(plane.ingest(ksportEnvelope(2, "today", [102]))).toBe(true);
+
+    now = 21_003;
+    expect(plane.ingest({
+      ...ksportEnvelope(3, "today", []),
+      observedAtMs: now,
+      transport: "TAB_STATE",
+      request: { hostname: "zenandfe.com", pathnameClass: "/__fieldline_heartbeat__", resourceType: "Tab" },
+      payload: { encoding: "UTF8", body: "{}" }
+    })).toBe(false);
+
+    expect(plane.ingest({
+      ...ksportEnvelope(4, "today", []),
+      observedAtMs: now,
+      payload: { encoding: "UTF8", body: `a${JSON.stringify(["\n"])}` }
+    })).toBe(false);
+
+    await expect(plane.overlayStatuses([authenticated])).resolves.toMatchObject([{
+      sessionState: "ACTION_REQUIRED",
+      reason: "PROVIDER_VALIDATION_FAILED"
     }]);
   });
 
@@ -341,6 +392,18 @@ describe("ChromeCatalogDataPlane", () => {
         expect.objectContaining({ providerEventId: "1" }),
         expect.objectContaining({ providerEventId: "10" })
       ])
+    });
+  });
+
+  it("accepts a completed authoritative KSPORT partition after real event coverage shrinks", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    const ten = Array.from({ length: 10 }, (_, index) => 5_600_000 + index);
+    expect(plane.ingest(ksportEnvelope(1, "live", ten))).toBe(false);
+    expect(plane.ingest(ksportEnvelope(2, "today", []))).toBe(true);
+
+    expect(plane.ingest(ksportEnvelope(3, "live", [5_600_000]))).toBe(true);
+    await expect(plane.read("catalog-source:SBOBET:FOOTBALL")).resolves.toMatchObject({
+      events: [{ providerEventId: "5600000" }]
     });
   });
 
