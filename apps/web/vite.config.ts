@@ -19,6 +19,10 @@ const config = {
     port: 4311,
     strictPort: true,
     allowedHosts: ["live.babiesbo.uk"],
+    // Vite 8 enables browser-console forwarding when it detects an agent.
+    // Errors injected by unrelated Chrome extensions would otherwise be
+    // written to the live-stack log several times per second.
+    forwardConsole: false,
     hmr: process.env.FIXTURE_MODE === "1" ? false : undefined,
     proxy: {
       "/api": apiProxy

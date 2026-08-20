@@ -7,6 +7,12 @@ afterEach(() => {
 });
 
 describe("Vite API WebSocket proxy", () => {
+  it("does not forward unrelated browser-extension errors into the live stack", async () => {
+    const { default: config } = await import("../vite.config.js");
+
+    expect(config.server!.forwardConsole).toBe(false);
+  });
+
   it("forwards the trusted dashboard origin during the WebSocket upgrade", async () => {
     vi.stubEnv("VITE_ORIGIN", "https://live.babiesbo.uk");
     const { default: config } = await import("../vite.config.js");
