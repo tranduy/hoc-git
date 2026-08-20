@@ -376,3 +376,84 @@ Verification on 2026-08-21:
 - Evidence remains untracked in `sbobet-runtime-evidence.json`,
   `sbobet-direct-price-precheck.json`, and the capture under
   `%LOCALAPPDATA%/tool-chenh/chrome-bridge-captures/`.
+
+## BTI atomic catalog and exact-price verification
+
+- Code commit: `e5f7c72` (`fix(bti): publish atomic realtime generations`)
+- Scope: BTI HTTP event-list/detail ingestion, BTI catalog liveness, exact-price
+  probing, and BTI-only runtime verification scripts. No collector for another
+  bookmaker was included.
+
+### Fixes and regression coverage
+
+- A refresh now tags all four live/prematch event-list requests with one
+  generation. The adapter publishes only after all four partitions complete,
+  replaces them atomically, and rejects late older generations. A timeout,
+  malformed response, incomplete generation, or uncorrelated direct-price
+  detail cannot erase or overlay the last good catalog.
+- Event detail obtained as part of catalog refresh is generation-correlated and
+  bounded. A newly committed baseline clears detail overlays from the previous
+  generation.
+- BTI heartbeat/analytics traffic advances source transport sequence but no
+  longer refreshes catalog liveness. Catalog `acquiredAt` advances only after a
+  valid decoded catalog update, allowing legitimate provider silence to be
+  distinguished from a dead catalog while keeping the lightweight in-tab
+  snapshot path.
+- The direct-price check sends one fresh authenticated no-store BTI event-detail
+  request inside the existing tab. It requires one exact ordered event, market
+  ID/type/scope/canonical line, selection ID/outcome/side and an enabled quote.
+  Missing or multiple event/market/selection candidates fail closed; catalog or
+  event-list odds are never returned as the current bookmaker price.
+
+### Tests and build evidence on 2026-08-21
+
+- Focused adapter/observer/probe suite: **118 passed** across four files.
+- BTI direct-catalog and BTI data-plane cases: **8 passed** (20 unrelated cases
+  skipped by the BTI filter).
+- API and extension typecheck passed; API and extension builds passed;
+  `git diff --cached --check` passed.
+- Independent review found no remaining Critical/Important implementation
+  defect. It requested a UI verifier; `scripts/verify-bti-ui-runtime.mjs` was
+  added before the code commit.
+
+### Runtime evidence and status
+
+- Existing installed-runtime direct AH check
+  `41e5f73f-aa3c-4612-89a6-4854c21039ba`: event
+  `877193587199340544`, market `0HC877193588084412471:-0.25`, selection
+  `0HC877193588084412471HMM`; TOOL `0.77`, fresh detail `0.77`, `MATCH`,
+  `IN_PAGE_FETCH` in 202 ms.
+- Existing installed-runtime direct TOTAL check
+  `5b84b1a7-8f27-4c4c-b05c-c985eac91f6c`: event
+  `877193587199340544`, market `0OU877193588084412472:3.25`, selection
+  `0OU877193588084412472OMM`; TOOL `0.82`, fresh detail `0.82`, `MATCH`,
+  `IN_PAGE_FETCH` in 707 ms.
+- Fifteen-minute passive API soak: **889/889** samples LIVE, source sequence
+  `64842 -> 80886`, catalog acquired time advanced, 725 catalog revision
+  changes, 3,517 BTI WebSocket revision messages, event count 35-44, **0**
+  false-zero samples, and no WebSocket errors. Multiple AH/TOTAL quote changes
+  were observed.
+- Fifteen-minute browser UI soak performed exactly one document navigation and
+  observed 1,581 BTI catalog responses plus exact-ID AH/TOTAL quote changes
+  without F5. Example AH selection
+  `877994424062545920|0HC877994427346612259:0.5|0HC877994427346612259HMM`
+  changed `0.83 -> 0.75`, sequence `69440 -> 69523`. The first verifier run
+  recorded a shutdown-only response-handler race; the verifier was fixed to
+  drain pending responses, and a 10-second smoke then completed with 16 catalog
+  responses, multiple quote changes and **0** page errors.
+- Runtime status for commit `e5f7c72` is **NOT YET FINAL PASS**. The running API
+  process and extension service worker were already loaded before this commit.
+  The old installed runtime exposed at least one per-quote sequence regression
+  during the soak; the new atomic-generation code targets that exact failure,
+  but activating it requires an extension lifecycle reload. This task forbids
+  reload/reset/close/URL changes, so no such action was performed and the final
+  bundle was not falsely reported as runtime-proven.
+
+### Evidence files and remaining step
+
+- Evidence remains untracked in `bti-runtime-evidence.json`,
+  `bti-ui-runtime-evidence.json`, and `bti-direct-price-evidence.json`.
+- After an explicitly permitted extension reload/deployment, rerun the same
+  15-minute API/UI verifiers. Final PASS requires monotonic generation/quote
+  evidence, a BTI quote change reflected in UI without F5, no false zero, and
+  fresh AH/TOTAL detail checks.
