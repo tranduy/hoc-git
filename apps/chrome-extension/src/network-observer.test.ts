@@ -303,6 +303,36 @@ describe("NetworkObserver", () => {
       rawOdds: "0.17", observedAtMs: 1_100, method: "DOM" });
     const evaluations = sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate");
     expect(String(evaluations[0]?.[2]?.expression)).not.toContain(".click(");
+    expect(String(evaluations[0]?.[2]?.expression)).toContain("TSPORT_SELECTION_NOT_FOUND");
+    expect(evaluations.every(([, , params]) => params?.awaitPromise === true)).toBe(true);
+  });
+
+  it("reports TSPORT's fresh same-tab resolver method instead of labelling it as DOM", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 21 };
+      if (method === "Runtime.evaluate") return { result: { value: { ok: true, rawOdds: "0.93",
+        observedAtMs: 1_100, method: "IN_PAGE_FETCH" } } };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+    await observer.handleEvent({ lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 },
+      "Network.requestWillBeSent", { requestId: "tsport-current", type: "Fetch",
+        request: { method: "GET", url: "https://pacific.agenate.com/event/778899" } });
+
+    await observer.probeSelectionPrice({ lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 },
+      { requestId: "price-fetch", providerEventId: "778899", providerMarketId: "market-1",
+        providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+        participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection: "UNDER", line: "2.5" });
+
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "0.93",
+      method: "IN_PAGE_FETCH" });
+    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate")?.[2];
+    expect(String(evaluation?.expression)).toContain("https://pacific.agenate.com/event/778899");
+    expect(String(evaluation?.expression)).toContain("cache: 'no-store'");
   });
 
   it("fails closed when more than one frame resolves the requested selection", async () => {
@@ -680,6 +710,7 @@ describe("NetworkObserver", () => {
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain("CORNER_");
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain("CARD_");
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain('secondHalf ? "SH"');
+    expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).not.toContain('eventId + ":" + marketType + ":" + groupIndex + ":" + index');
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).not.toMatch(/cookie|localStorage|sessionStorage|password|token/iu);
     expect(() => new Function(`return ${TSPORT_PUBLIC_CATALOG_EXPRESSION}`)).not.toThrow();
     const records = JSON.stringify([{ eventId: "event-1", leagueName: "League", timeText: "LIVE",

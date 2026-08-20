@@ -53,8 +53,7 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
       if (lines.some((value) => value === null)) return [];
       if (!isHandicap && new Set(lines).size !== 1) return [];
       const selections = odds.map((odd, index) => ({
-        selectionId: clean(odd.id.replace(/^odd-item-/u, ""), 128) ||
-          eventId + ":" + marketType + ":" + groupIndex + ":" + index,
+        selectionId: clean(odd.id.replace(/^odd-item-/u, ""), 128),
         selection: isHandicap ? (index === 0 ? "HOME" : "AWAY")
           : (index === 0 ? "OVER" : "UNDER"),
         priceText: text(odd, ".match__odd-value", 32),
@@ -62,7 +61,7 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
           odd.querySelector("[disabled], .disabled, .locked") !== null,
         ...(isHandicap ? { lineText: lines[index] } : {})
       }));
-      if (selections.some((selection) => !selection.priceText)) return [];
+      if (selections.some((selection) => !selection.selectionId || !selection.priceText)) return [];
       const lineText = lines[0];
       return [{ marketId: eventId + ":" + marketType + ":" + lineText + ":" + groupIndex,
         marketType, lineText, selections }];

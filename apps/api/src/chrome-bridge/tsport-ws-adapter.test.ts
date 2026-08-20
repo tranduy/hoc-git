@@ -209,6 +209,32 @@ describe("TsportWsCatalogAdapter", () => {
     expect(merged.quotes.some((quote) => quote.providerMarketId === "2-total")).toBe(true);
   });
 
+  it("atomically replaces an older DOM generation and removes its obsolete selection IDs", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const record = (eventId: string, selectionSuffix: string, priceText: string) => [{
+      eventId, leagueName: "League", timeText: "LIVE", scoreText: "0 - 0",
+      teamNames: [`Home ${eventId}`, `Away ${eventId}`], markets: [{ marketId: `${eventId}-ah-${selectionSuffix}`,
+        marketType: "FT_AH", lineText: "-0.5", selections: [
+          { selectionId: `${eventId}-home-${selectionSuffix}`, selection: "HOME", priceText,
+            locked: false, lineText: "-0.5" },
+          { selectionId: `${eventId}-away-${selectionSuffix}`, selection: "AWAY", priceText,
+            locked: false, lineText: "+0.5" }
+        ] }]
+    }];
+
+    adapter.decode(domEnvelope(record("old-event", "old", "0.1"), 10));
+    const latest = adapter.decode({ ...domEnvelope(record("new-event", "new", "0.2"), 11),
+      observedAtMs: Date.UTC(2026, 7, 16, 3, 0, 1), receivedMonotonicMs: 80 })[0]!.value as {
+        quotes: Array<{ providerSelectionId: string; rawOdds: string }>;
+      };
+
+    expect(latest.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerSelectionId: "new-event-home-new", rawOdds: "0.2" }),
+      expect.objectContaining({ providerSelectionId: "new-event-away-new", rawOdds: "0.2" })
+    ]));
+    expect(latest.quotes.some(({ providerSelectionId }) => providerSelectionId.startsWith("old-event-"))).toBe(false);
+  });
+
   it("invalidates APSPORT immediately when its active socket closes", () => {
     const adapter = new TsportWsCatalogAdapter();
     const closed: ChromeBridgeEnvelope = { ...envelope(event(1, "Home")), transport: "WS_STATE",

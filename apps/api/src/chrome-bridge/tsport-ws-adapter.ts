@@ -8,8 +8,6 @@ import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:APSPORT:FOOTBALL";
-const DOM_RETENTION_MS = 15_000;
-
 interface RetainedRecord {
   readonly record: SbobetCatalogInputRecord;
   readonly seenAtMs: number;
@@ -190,16 +188,17 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       incomingRecords = [incoming];
     }
     const retained = envelope.transport === "DOM_SNAPSHOT"
-      ? this.#domRecords.get(envelope.sourceId) ?? new Map<string, RetainedRecord>()
+      ? new Map<string, RetainedRecord>()
       : this.#wsRecords.get(streamKey) ?? new Map<string, RetainedRecord>();
     for (const incoming of incomingRecords) {
       retained.set(incoming.eventId, { record: incoming, seenAtMs: envelope.observedAtMs,
         receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
     }
     if (envelope.transport === "DOM_SNAPSHOT") {
-      for (const [eventId, entry] of retained) {
-        if (envelope.observedAtMs - entry.seenAtMs > DOM_RETENTION_MS) retained.delete(eventId);
-      }
+      // A completed DOM chunk set is one observation generation. Replace the
+      // prior generation as a unit so removed events/selections cannot remain
+      // alongside current prices. Socket-only hidden markets are retained in
+      // the independent WebSocket partition below.
       this.#domRecords.set(envelope.sourceId, retained);
     } else {
       this.#wsRecords.set(streamKey, retained);

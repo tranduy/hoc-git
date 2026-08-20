@@ -64,7 +64,7 @@ function safeProviderError(error: unknown): { readonly status: TicketRealtimeChe
   const method = typeof error === "object" && error !== null && "method" in error &&
     ((error as { method?: unknown }).method === "DOM" || (error as { method?: unknown }).method === "IN_PAGE_FETCH")
     ? (error as { method: "DOM" | "IN_PAGE_FETCH" }).method : null;
-  const providerReadFailure = /^(?:SBOBET_(?:DIRECT|SELECTION)|BTI_(?:DETAIL|EVENT|MARKET|SELECTION|PRICE))_[A-Z0-9_]+$/u
+  const providerReadFailure = /^(?:SBOBET_(?:DIRECT|SELECTION)|BTI_(?:DETAIL|EVENT|MARKET|SELECTION|PRICE)|TSPORT_(?:SELECTION|EVENT|PARTICIPANTS|MARKET|OUTCOME|LINE|PRICE))_[A-Z0-9_]+$/u
     .test(candidate);
   const code = knownProviderErrors.has(candidate) || providerReadFailure ? candidate : "PREFLIGHT_UNAVAILABLE";
   if (code === "PREFLIGHT_IDENTITY_MISMATCH") {
@@ -79,7 +79,9 @@ function safeProviderError(error: unknown): { readonly status: TicketRealtimeChe
   if (code === "VISIBLE_PRICE_AMBIGUOUS" || /_AMBIGUOUS$/u.test(code)) {
     return { status: "IDENTITY_MISMATCH", verificationStatus: "AMBIGUOUS", directMethod: method, code };
   }
-  if (code === "VISIBLE_PRICE_NOT_FOUND" || code === "VISIBLE_PRICE_AMBIGUOUS" || code.startsWith("IM_")) {
+  if (code === "VISIBLE_PRICE_NOT_FOUND" || code === "VISIBLE_PRICE_AMBIGUOUS" || code.startsWith("IM_") ||
+    (code.startsWith("TSPORT_") && (code.endsWith("_NOT_FOUND") || code.endsWith("_NOT_RENDERED") ||
+      code.endsWith("_HIDDEN")))) {
     return { status: "IDENTITY_MISMATCH", verificationStatus: "NOT_FOUND", directMethod: method, code };
   }
   if (code === "PREFLIGHT_ACCOUNT_NOT_FOUND" || code === "PREFLIGHT_ACCOUNT_UNAVAILABLE" ||

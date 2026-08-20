@@ -2,6 +2,7 @@ import type { ChromeBridgeEnvelope, ChromeLobbyId } from "@tool-chenh/contracts"
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
+import { buildTsportSelectionPriceExpression } from "./tsport-selection-price.js";
 import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
 import { buildCmdSelectionFocusExpression, buildGenericSelectionFocusExpression,
   type SelectionFocusIdentity } from "./selection-focus.js";
@@ -451,6 +452,7 @@ export class NetworkObserver {
   readonly #cmdSnapshotHosts = new Map<string, string>();
   readonly #httpSnapshots = new Map<string, ReplayableHttpSnapshot[]>();
   readonly #tsportSnapshots = new Map<string, Map<string, ReplayableWsEvent>>();
+  readonly #tsportRequestUrls = new Map<string, string[]>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #sabaReadySnapshotPartitions = new Set<string>();
   readonly #sabaSnapshotLoads = new Set<string>();
@@ -521,6 +523,7 @@ export class NetworkObserver {
     for (const sourceId of this.#cmdSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#httpSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#tsportSnapshots.keys()) remember(sourceId);
+    for (const sourceId of this.#tsportRequestUrls.keys()) remember(sourceId);
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
     for (const sourceId of sourceIds) {
@@ -533,6 +536,7 @@ export class NetworkObserver {
       this.#cmdSnapshotHosts.delete(sourceId);
       this.#httpSnapshots.delete(sourceId);
       this.#tsportSnapshots.delete(sourceId);
+      this.#tsportRequestUrls.delete(sourceId);
       this.#catalogWsSnapshots.delete(sourceId);
       for (const key of this.#sabaReadySnapshotPartitions) {
         if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
@@ -756,6 +760,19 @@ export class NetworkObserver {
             await this.#saveSbobetEventRequest(template).catch(() => undefined);
           }
         } catch { /* Ignore malformed provider URLs. */ }
+      }
+      if (source.lobby === "TSPORT" && /^(?:XHR|Fetch)$/u.test(String(params.type ?? "")) &&
+        request !== null && request.method === "GET" && typeof request.url === "string") {
+        try {
+          const url = new URL(request.url);
+          if (url.protocol === "https:") {
+            const retained = (this.#tsportRequestUrls.get(source.sourceId) ?? [])
+              .filter((value) => value !== request.url);
+            retained.push(request.url);
+            while (retained.length > 32) retained.shift();
+            this.#tsportRequestUrls.set(source.sourceId, retained);
+          }
+        } catch { /* Ignore malformed provider request URLs. */ }
       }
     }
 
@@ -1088,6 +1105,8 @@ export class NetworkObserver {
       : source.lobby === "BTI" ? buildBtiSelectionPriceExpression(request)
       : source.lobby === "KSPORT" ? buildSbobetSelectionPriceExpression(request,
         this.#sbobetEventRequests.get(source.sourceId) ?? null)
+      : source.lobby === "TSPORT" ? buildTsportSelectionPriceExpression(request,
+        (this.#tsportRequestUrls.get(source.sourceId) ?? []).filter((url) => url.includes(request.providerEventId)))
       : buildGenericSelectionPriceExpression(request);
     const evaluateFrames = async (): Promise<unknown[]> => {
       if (source.lobby === "KSPORT") {
@@ -1119,14 +1138,14 @@ export class NetworkObserver {
       }
       return frameIds.length === 0
         ? [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-          expression, returnByValue: true, awaitPromise: false })).catch(() => ({}))]
+          expression, returnByValue: true, awaitPromise: source.lobby === "TSPORT" })).catch(() => ({}))]
         : Promise.all(frameIds.map(async (frameId) => {
           const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Page.createIsolatedWorld", {
             frameId, worldName: "fieldline-selection-price", grantUniveralAccess: false })).catch(() => ({}));
           const contextId = nestedNumber(world, "executionContextId");
           if (contextId === null) return {};
           return this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-            expression, contextId, returnByValue: true, awaitPromise: false })).catch(() => ({}));
+            expression, contextId, returnByValue: true, awaitPromise: source.lobby === "TSPORT" })).catch(() => ({}));
         }));
     };
     let evaluations = await evaluateFrames();
@@ -1146,7 +1165,8 @@ export class NetworkObserver {
     const diagnosticReason = foundCandidates.length > 1 ? "VISIBLE_PRICE_AMBIGUOUS" :
       candidates.find((value) => typeof value.reason === "string")?.reason;
     const observedAtMs = typeof found?.observedAtMs === "number" ? found.observedAtMs : this.#now();
-    const method = source.lobby === "BTI" || source.lobby === "KSPORT" ? "IN_PAGE_FETCH" : "DOM";
+    const method = found?.method === "IN_PAGE_FETCH" || found?.method === "DOM" ? found.method
+      : source.lobby === "BTI" || source.lobby === "KSPORT" ? "IN_PAGE_FETCH" : "DOM";
     await this.#emit(source, `https://${source.lobby.toLocaleLowerCase("en")}.invalid/__fieldline_selection_price_probe__`,
       "DOM", "DOM_SNAPSHOT", { encoding: "UTF8", body: JSON.stringify({ requestId: request.requestId,
         providerEventId: request.providerEventId, providerMarketId: request.providerMarketId,

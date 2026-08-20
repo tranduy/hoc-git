@@ -177,4 +177,28 @@ describe("SelectionPriceProbeCoordinator", () => {
     const failure = await result.catch((error: unknown) => error);
     expect(failure).toMatchObject({ message: "VISIBLE_PRICE_AMBIGUOUS", method: "DOM" });
   });
+
+  it.each([
+    ["NOT_FOUND", "TSPORT_SELECTION_NOT_FOUND", "TSPORT_SELECTION_NOT_FOUND"],
+    ["AMBIGUOUS", "TSPORT_SELECTION_AMBIGUOUS", "TSPORT_SELECTION_AMBIGUOUS"]
+  ] as const)("accepts TSPORT %s diagnostics instead of timing out", async (status, reason, expected) => {
+    const coordinator = new SelectionPriceProbeCoordinator({
+      listSources: () => [{ lobby: "TSPORT", sourceId: "chrome:TSPORT:9", tabId: 9, state: "LIVE",
+        lastSequence: 1, lastAcceptedAtMs: 1_000, reason: null }],
+      controlPlane: { probeSelectionPrice: () => true }, idFactory: () => "price-tsport", timeoutMs: 1_000
+    });
+    const result = coordinator.probe({ provider: "APSPORT", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME",
+      selection: "UNDER", line: "2.5", requestedAtMs: 1_000 });
+    const accepted = coordinator.ingest({ ...envelope("price-tsport"), payload: {
+      encoding: "UTF8", body: JSON.stringify({ requestId: "price-tsport", providerEventId: "event-1",
+        providerMarketId: "market-1", providerSelectionId: "selection-1", status, rawOdds: null,
+        observedAtMs: 1_020, method: "IN_PAGE_FETCH", reason })
+    } });
+
+    expect(accepted).toBe(true);
+    const failure = await result.catch((error: unknown) => error);
+    expect(failure).toMatchObject({ message: expected, method: "IN_PAGE_FETCH" });
+  });
 });
