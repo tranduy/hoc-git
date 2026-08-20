@@ -209,13 +209,15 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       sequence: entry.sequence, provider: "APSPORT",
       settlementProfile: "football-regulation-including-added-time"
     });
-    // DOM is only a visible baseline. Socket partitions are appended last so
-    // provider push prices always win collisions without erasing hidden rows.
-    const parts: NormalizedCatalogPart[] = [...(this.#domRecords.get(envelope.sourceId)?.values() ?? [])]
-      .map(normalizeEntry);
+    // Preserve socket-only hidden rows, but resolve overlapping rows by the
+    // provider observation order instead of permanently favoring one transport.
+    const retainedEntries: RetainedRecord[] = [...(this.#domRecords.get(envelope.sourceId)?.values() ?? [])];
     for (const [key, records] of this.#wsRecords) {
-      if (key.startsWith(`${envelope.sourceId}|`)) parts.push(...[...records.values()].map(normalizeEntry));
+      if (key.startsWith(`${envelope.sourceId}|`)) retainedEntries.push(...records.values());
     }
+    retainedEntries.sort((left, right) => left.sequence - right.sequence ||
+      left.receivedMonotonicMs - right.receivedMonotonicMs || left.seenAtMs - right.seenAtMs);
+    const parts: NormalizedCatalogPart[] = retainedEntries.map(normalizeEntry);
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
       observedAtMs: envelope.observedAtMs, parts });
     const virtualOnly = catalog.events.length === 0 && catalog.markets.length === 0 && catalog.quotes.length === 0 &&

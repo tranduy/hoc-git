@@ -188,7 +188,7 @@ describe("TsportWsCatalogAdapter", () => {
     expect(merged.events).toHaveLength(3);
   });
 
-  it("does not let a later partial DOM viewport erase socket-only APSPORT markets", () => {
+  it("uses a newer DOM price without erasing socket-only APSPORT markets", () => {
     const adapter = new TsportWsCatalogAdapter();
     const socketCatalog = adapter.decode(envelope(event(2, "Socket Home")))[0]!.value as { markets: unknown[] };
     expect(socketCatalog.markets).toHaveLength(4);
@@ -201,10 +201,12 @@ describe("TsportWsCatalogAdapter", () => {
     const laterDom = { ...domEnvelope(partialDom, 2), observedAtMs: Date.UTC(2026, 7, 16, 3, 0, 1),
       receivedMonotonicMs: 80 };
     const merged = adapter.decode(laterDom)[0]!.value as { events: Array<{ participantA: string }>;
-      markets: unknown[]; quotes: Array<{ rawOdds: string }> };
+      markets: unknown[]; quotes: Array<{ providerMarketId: string; rawOdds: string }> };
     expect(merged.markets).toHaveLength(4);
-    expect(merged.events[0]).toMatchObject({ participantA: "Socket Home" });
-    expect(merged.quotes).toEqual(expect.arrayContaining([expect.objectContaining({ rawOdds: "0.79" })]));
+    expect(merged.events[0]).toMatchObject({ participantA: "DOM Home" });
+    expect(merged.quotes.filter((quote) => quote.providerMarketId === "2-ah"))
+      .toEqual([expect.objectContaining({ rawOdds: "0.1" }), expect.objectContaining({ rawOdds: "0.1" })]);
+    expect(merged.quotes.some((quote) => quote.providerMarketId === "2-total")).toBe(true);
   });
 
   it("invalidates APSPORT immediately when its active socket closes", () => {
