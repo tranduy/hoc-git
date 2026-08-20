@@ -119,6 +119,47 @@ export function providerLaunchUrlFromResponseBody(value: unknown): string | null
   return url;
 }
 
+export function providerLaunchResponseDiagnostic(value: unknown): {
+  readonly responseKeys: readonly string[];
+  readonly dataKeys: readonly string[];
+  readonly code?: string;
+  readonly status?: string | number;
+  readonly messagePresent: boolean;
+  readonly urlHost?: string;
+  readonly tokenState: "EMPTY" | "MISSING" | "PRESENT";
+} {
+  const response = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : {};
+  const data = typeof response.data === "object" && response.data !== null && !Array.isArray(response.data)
+    ? response.data as Record<string, unknown> : {};
+  const safeScalar = (candidate: unknown): string | number | undefined => {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+    return typeof candidate === "string" && /^[a-z0-9_. -]{1,64}$/iu.test(candidate) ? candidate : undefined;
+  };
+  let urlHost: string | undefined;
+  let tokenState: "EMPTY" | "MISSING" | "PRESENT" = "MISSING";
+  if (typeof data.url === "string") {
+    try {
+      const parsed = new URL(data.url);
+      urlHost = parsed.hostname.toLowerCase();
+      if (parsed.searchParams.has("token")) tokenState = parsed.searchParams.get("token")?.trim() ? "PRESENT" : "EMPTY";
+    } catch {
+      // URL contents are never copied into diagnostics.
+    }
+  }
+  const code = safeScalar(response.code);
+  const status = safeScalar(response.status);
+  return {
+    responseKeys: Object.keys(response).filter((key) => /^[a-z0-9_.-]{1,64}$/iu.test(key)).sort(),
+    dataKeys: Object.keys(data).filter((key) => /^[a-z0-9_.-]{1,64}$/iu.test(key)).sort(),
+    ...(typeof code === "string" ? { code } : {}),
+    ...(status !== undefined ? { status } : {}),
+    messagePresent: typeof response.message === "string" && response.message.length > 0,
+    ...(urlHost === undefined ? {} : { urlHost }),
+    tokenState
+  };
+}
+
 export function capturedTopLevelNavigation(lobbyOrigin: string, label: string, value: string): CapturedNavigation | null {
   if (!launcherTextIsSafe(label)) return null;
   const observation = observeProtocolMetadata({
@@ -128,6 +169,11 @@ export function capturedTopLevelNavigation(lobbyOrigin: string, label: string, v
   try {
     const url = new URL(value);
     if (url.origin === lobbyOrigin) return null;
+    // K-Sports emits a second popup navigation after the authenticated
+    // game-url response. That popup can contain the same provider hostname
+    // with an empty token; accepting it lets the later candidate overwrite
+    // the usable one-time launch captured from the response body.
+    if (url.hostname.toLowerCase() === "zenandfe.com" && !url.searchParams.get("token")?.trim()) return null;
     return { url: value, label: label.trim().replace(/\s+/gu, " ") };
   } catch {
     return null;
@@ -740,9 +786,27 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
           }
         };
         const onResponse = (response: Response): void => {
+          if (label.trim().toUpperCase() === "K-SPORTS") {
+            try {
+              const responseUrl = new URL(response.url());
+              if (responseUrl.origin === lobbyOrigin && responseUrl.pathname === "/api/v3/game-url") {
+                void response.json().then((body: unknown) => {
+                  process.stderr.write(`[fabet-launch-response] ${label}: ${JSON.stringify(
+                    providerLaunchResponseDiagnostic(body))}\n`);
+                }).catch(() => undefined);
+              }
+            } catch {
+              // Ignore malformed or unrelated responses.
+            }
+          }
           if (!isProviderLaunchResponseForCurrentCard(lobbyOrigin, response, launchRequests)) return;
           launchBodies.push(response.json()
-            .then((body: unknown) => providerLaunchUrlFromResponseBody(body))
+            .then((body: unknown) => {
+              const launchUrl = providerLaunchUrlFromResponseBody(body);
+              if (launchUrl === null && label.trim().toUpperCase() !== "K-SPORTS") process.stderr.write(`[fabet-launch-response] ${label}: ${JSON.stringify(
+                providerLaunchResponseDiagnostic(body))}\n`);
+              return launchUrl;
+            })
             .catch(() => null));
         };
         const blockExternalProviderNavigation = async (route: Route): Promise<void> => {

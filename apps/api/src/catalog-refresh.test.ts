@@ -61,6 +61,16 @@ describe("refreshCatalogSources", () => {
     })).rejects.toThrow("FABET_PROVIDER_LAUNCH_UNAVAILABLE:APSPORT;CHROME_BRIDGE_REFRESH_INCOMPLETE:SBOBET");
   });
 
+  it("accepts a fresh catalog snapshot when Fabet temporarily omits that provider launch", async () => {
+    await expect(refreshCatalogSources({
+      legacyRefresh: async () => undefined,
+      requestBridgeSnapshots: async () => { throw new Error("FABET_PROVIDER_LAUNCH_UNAVAILABLE:APSPORT"); },
+      statuses: async () => activeBridgeStatuses(),
+      now: () => 100,
+      timeoutMs: 0
+    })).resolves.toBeUndefined();
+  });
+
   it("waits for bridge-owned sources and fails with their provider names when recovery is incomplete", async () => {
     const statuses = vi.fn(async () => [
       { id: "catalog-source:SABA:FOOTBALL", sessionState: "ACTION_REQUIRED", acquiredAtMs: 101 },

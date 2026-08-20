@@ -63,7 +63,11 @@ export async function refreshCatalogSources(options: {
         source.acquiredAtMs === null || source.acquiredAtMs === undefined || source.acquiredAtMs < freshAfterMs;
     });
     if (unavailable.length === 0) {
-      if (requestError !== null) throw requestError;
+      // A provider card can be temporarily absent from Fabet even while its
+      // already attached reader returns a snapshot acquired in this reset
+      // cycle. Catalog freshness is the functional reset result; do not turn
+      // a healthy live feed into a false global failure merely because there
+      // was no replacement launch URL for that one provider.
       return;
     }
     if (now() >= deadline) break;

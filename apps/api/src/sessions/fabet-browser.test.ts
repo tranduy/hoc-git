@@ -11,6 +11,7 @@ import {
   safeLauncherAssetName,
   launcherTextIsSafe,
   providerLaunchUrlFromResponseBody,
+  providerLaunchResponseDiagnostic,
   PlaywrightFabetAutomation,
   shouldBlockExternalProviderNavigation,
   isProviderLaunchResponseForCurrentCard,
@@ -164,6 +165,12 @@ describe("FabetBrowserDriver", () => {
     expect(capturedTopLevelNavigation(
       "https://fabet.party", "Deposit", "https://sports.vendor.test/launch"
     )).toBeNull();
+    expect(capturedTopLevelNavigation(
+      "https://fabet.party", "K-SPORTS", "https://zenandfe.com/?token="
+    )).toBeNull();
+    expect(capturedTopLevelNavigation(
+      "https://fabet.party", "K-SPORTS", "https://zenandfe.com/?token=fresh"
+    )).toEqual({ url: "https://zenandfe.com/?token=fresh", label: "K-SPORTS" });
   });
   it("blocks only external top-level provider navigation while preserving the launch API request", () => {
     expect(shouldBlockExternalProviderNavigation(
@@ -429,6 +436,24 @@ describe("FabetBrowserDriver", () => {
     expect(providerLaunchUrlFromResponseBody({ data: { url: "https://zenandfe.com/?token=fresh" } }))
       .toBe("https://zenandfe.com/?token=fresh");
     expect(providerLaunchUrlFromResponseBody({ url: "https://provider.test/wrong-level" })).toBeNull();
+  });
+
+  it("diagnoses an empty provider token without exposing the launch URL", () => {
+    expect(providerLaunchResponseDiagnostic({
+      code: "PROVIDER_BUSY", status: 409, message: "contains private account detail",
+      data: { url: "https://zenandfe.com/?token=secret-canary", retryAfter: 30 }
+    })).toEqual({
+      responseKeys: ["code", "data", "message", "status"],
+      dataKeys: ["retryAfter", "url"],
+      code: "PROVIDER_BUSY",
+      status: 409,
+      messagePresent: true,
+      urlHost: "zenandfe.com",
+      tokenState: "PRESENT"
+    });
+    expect(JSON.stringify(providerLaunchResponseDiagnostic({ data: {
+      url: "https://zenandfe.com/?token=secret-canary"
+    } }))).not.toContain("secret-canary");
   });
 
   it("deletes only its isolated profile after reset", async () => {

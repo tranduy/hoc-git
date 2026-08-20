@@ -72,9 +72,13 @@ describe("SourceTabRecovery", () => {
     ]);
   });
 
-  it("opens K-Sports through the signed-in portal after closing failed duplicate sessions", async () => {
+  it("consumes the authenticated K-Sports launch directly after closing failed duplicate sessions", async () => {
     const operations: string[] = [];
-    const create = vi.fn(async (url: string) => ({ id: 10, url }));
+    const create = vi.fn(async (url: string) => {
+      operations.push(`create:${url}`);
+      return { id: 10, url };
+    });
+    const launchFromPortal = vi.fn(async (_lobby, url) => ({ id: 11, url, title: "Sportsbook" }));
     const recovery = new SourceTabRecovery({
       listAttached: () => [{ lobby: "KSPORT", tabId: 7 }],
       query: async () => [
@@ -82,10 +86,7 @@ describe("SourceTabRecovery", () => {
         { id: 9, url: "https://zenandfe.com/?token=failed", title: "zenandfe.com/?token=failed" }
       ],
       create,
-      launchFromPortal: async (_lobby, url) => {
-        operations.push("portal");
-        return { id: 11, url, title: "Sportsbook" };
-      },
+      launchFromPortal,
       attach: async (tab) => { operations.push(`attach:${tab.id}`); },
       update: async (tabId, url) => {
         operations.push(`update:${tabId}`);
@@ -96,8 +97,10 @@ describe("SourceTabRecovery", () => {
 
     await recovery.ensure("KSPORT", "https://zenandfe.com/?token=fresh");
 
-    expect(create).not.toHaveBeenCalled();
-    expect(operations).toEqual(["remove:7", "remove:9", "portal", "attach:11"]);
+    expect(launchFromPortal).not.toHaveBeenCalled();
+    expect(operations).toEqual([
+      "remove:7", "remove:9", "create:about:blank", "attach:10", "update:10"
+    ]);
   });
 
   it("rejects an empty K-Sports token before closing the current source", async () => {
