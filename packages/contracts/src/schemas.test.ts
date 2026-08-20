@@ -105,10 +105,15 @@ describe("live account and preflight schemas", () => {
       expiresAtMs: constraint.expiresAtMs };
     expect(ProviderTicketPreflightRequestSchema.safeParse(request).success).toBe(true);
     expect(ProviderStakeConstraintSchema.safeParse(constraint).success).toBe(true);
-    expect(ProviderTicketPreflightSchema.safeParse({ accountId: request.accountId, provider: "SABA",
+    const direct = ProviderTicketPreflightSchema.safeParse({ accountId: request.accountId, provider: "SABA",
       providerEventId: request.providerEventId, providerMarketId: request.providerMarketId,
       providerSelectionId: request.providerSelectionId, selection: request.selection, line: request.line,
-      decimalOdds: "2.2", quoteStatus: "OPEN", limitEvidence, constraint, eligible: true, reasons: [] }).success).toBe(true);
+      rawOdds: "-0.83", rawFormat: "MALAY", decimalOdds: "2.2", quoteStatus: "OPEN",
+      providerObservedAtMs: 1_100, receivedMonotonicMs: 75, sequence: 18,
+      limitEvidence, constraint, eligible: true, reasons: [] });
+    expect(direct.success).toBe(true);
+    if (direct.success) expect(direct.data).toMatchObject({ rawOdds: "-0.83", rawFormat: "MALAY",
+      providerObservedAtMs: 1_100, receivedMonotonicMs: 75, sequence: 18 });
   });
 
   it("rejects long-lived or internally inconsistent provider preflight evidence", () => {
@@ -132,14 +137,18 @@ describe("live account and preflight schemas", () => {
   it("allows a blocked exact quote to report unavailable limits without inventing a constraint", () => {
     expect(ProviderTicketPreflightSchema.safeParse({ accountId: "a", provider: "BTI", providerEventId: "e",
       providerMarketId: "m", providerSelectionId: "s", selection: "HOME", line: "-0.5",
-      decimalOdds: "2.2", quoteStatus: "OPEN", limitEvidence: null, constraint: null,
+      rawOdds: "1.2", rawFormat: "HK", decimalOdds: "2.2", quoteStatus: "OPEN",
+      providerObservedAtMs: 1_100, receivedMonotonicMs: 75, sequence: null,
+      limitEvidence: null, constraint: null,
       eligible: false, reasons: ["LIMIT_UNAVAILABLE"] }).success).toBe(true);
   });
 
   it("allows a blocked exact quote to report missing financial policy without inventing fee-free terms", () => {
     expect(ProviderTicketPreflightSchema.safeParse({ accountId: "a", provider: "SABA", providerEventId: "e",
       providerMarketId: "m", providerSelectionId: "s", selection: "HOME", line: "-0.5",
-      decimalOdds: "2.2", quoteStatus: "OPEN", limitEvidence: { currency: "VND", minStake: "30000",
+      rawOdds: "2.2", rawFormat: "DECIMAL", decimalOdds: "2.2", quoteStatus: "OPEN",
+      providerObservedAtMs: 1_100, receivedMonotonicMs: 75, sequence: 1,
+      limitEvidence: { currency: "VND", minStake: "30000",
         maxStake: "54945000", stakeStep: "1000", balance: "29610", verifiedAsOfMs: 1000, expiresAtMs: 3500 },
       constraint: null,
       eligible: false, reasons: ["FINANCIAL_POLICY_UNAVAILABLE"] }).success).toBe(true);

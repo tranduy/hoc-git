@@ -10,7 +10,9 @@ const leg: PreflightLeg = { accountId: "account-a", provider: "SBOBET", provider
 function result(overrides: Partial<ProviderTicketPreflight> = {}): ProviderTicketPreflight {
   return { accountId: leg.accountId, provider: leg.provider, providerEventId: leg.providerEventId,
     providerMarketId: leg.providerMarketId, providerSelectionId: leg.providerSelectionId,
-    selection: leg.selection, line: leg.line, decimalOdds: leg.decimalOdds, quoteStatus: "OPEN",
+    selection: leg.selection, line: leg.line, rawOdds: "0.93", rawFormat: "MALAY",
+    decimalOdds: leg.decimalOdds, quoteStatus: "OPEN", providerObservedAtMs: 1_100,
+    receivedMonotonicMs: 100, sequence: 1,
     limitEvidence: { currency: "VND", minStake: "30000", maxStake: "100000", stakeStep: "1000",
       balance: "100000", verifiedAsOfMs: 1100, expiresAtMs: 3000 },
     constraint: { currency: "VND", minStake: "30000", maxStake: "100000", stakeStep: "1000",

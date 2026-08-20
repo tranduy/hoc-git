@@ -1,4 +1,5 @@
-import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote,
+  TicketRealtimeCheckRequest, TicketRealtimeCheckResponse } from "@tool-chenh/contracts";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ComparisonCell, ComparisonRow } from "../catalog/comparison.js";
@@ -338,5 +339,49 @@ describe("RankedTicketTable", () => {
       { provider: "CMD", providerEventId: "CMD-event", providerMarketId: "CMD-market",
         providerSelectionId: "CMD-TEAM_B" }
     ]);
+  });
+
+  it("captures displayed odds first, then shows adjacent direct-provider evidence on manual check", async () => {
+    const calls: TicketRealtimeCheckRequest[] = [];
+    let resolveCheck: ((value: TicketRealtimeCheckResponse) => void) | undefined;
+    const check = (request: TicketRealtimeCheckRequest): Promise<TicketRealtimeCheckResponse> => {
+      calls.push(request);
+      return new Promise((resolve) => { resolveCheck = resolve; });
+    };
+    render(<RankedTicketTable compact event={event} providers={["SABA", "IM"]} tickets={[ticket(1)]}
+      providerCatalogEvidence={{ SABA: { accountId: "saba-account", observedAtMs: 9_900 },
+        IM: { accountId: "im-account", observedAtMs: 9_910 } }} realtimeCheckApi={{ check }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Kiểm tra giá thật" }));
+
+    const audit = screen.getByLabelText("Kiểm tra giá thật series-1");
+    expect(within(audit).getByText(/TOOL · SABA/u).textContent).toContain("2.2 DECIMAL");
+    expect(within(audit).getByText(/TOOL · IM/u).textContent).toContain("2.5 DECIMAL");
+    expect(within(audit).getAllByText("Đang đọc trực tiếp…")).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ eventLabel: "Nongshim Academy vs Dplus Challengers",
+      marketType: "SERIES_WINNER", scope: "SERIES", legs: [
+        { provider: "SABA", accountId: "saba-account", providerSelectionId: "SABA-TEAM_A", rawOdds: "2.2" },
+        { provider: "IM", accountId: "im-account", providerSelectionId: "IM-TEAM_B", rawOdds: "2.5" }
+      ] });
+
+    const captured = calls[0]!;
+    resolveCheck?.({ checkId: "check-1", eventLabel: captured.eventLabel, marketType: captured.marketType,
+      scope: captured.scope, capturedAtMs: captured.capturedAtMs, completedAtMs: captured.capturedAtMs + 25,
+      persisted: true, legs: captured.legs.map((leg, index) => ({ status: index === 0 ? "MATCH" : "ODDS_CHANGED",
+        displayed: leg, direct: { accountId: leg.accountId, provider: leg.provider,
+          providerEventId: leg.providerEventId, providerMarketId: leg.providerMarketId,
+          providerSelectionId: leg.providerSelectionId, selection: leg.selection, line: leg.line,
+          rawOdds: index === 0 ? leg.rawOdds : "2.2", rawFormat: leg.rawFormat,
+          decimalOdds: index === 0 ? leg.decimalOdds : "2.2", quoteStatus: "OPEN",
+          providerObservedAtMs: captured.capturedAtMs + 10, receivedMonotonicMs: 3, sequence: 2,
+          limitEvidence: null, constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"] },
+        error: null, startedAtMs: captured.capturedAtMs + 1, completedAtMs: captured.capturedAtMs + 20,
+        elapsedMs: 19 })) as unknown as TicketRealtimeCheckResponse["legs"] });
+
+    expect((await within(audit).findByText(/SÀN · SABA/u)).textContent).toContain("2.2 DECIMAL");
+    expect(within(audit).getByText(/SÀN · IM/u).textContent).toContain("2.2 DECIMAL");
+    expect(within(audit).getByText("MATCH")).toBeTruthy();
+    expect(within(audit).getByText("ODDS_CHANGED")).toBeTruthy();
+    expect(within(audit).getByText(/Đã ghi JSONL/u)).toBeTruthy();
   });
 });

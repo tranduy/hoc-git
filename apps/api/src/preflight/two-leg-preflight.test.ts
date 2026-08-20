@@ -30,7 +30,9 @@ function result(request: ProviderTicketPreflightRequest, provider: ProviderId,
   overrides: Partial<ProviderTicketPreflight> = {}): ProviderTicketPreflight {
   const limitEvidence = { currency: "VND", minStake: "10000", maxStake: "500000", stakeStep: "1000",
     balance: "500000", verifiedAsOfMs: 1000, expiresAtMs: 3000 };
-  return { ...request, provider, decimalOdds: request.expectedDecimalOdds, quoteStatus: "OPEN",
+  return { ...request, provider, rawOdds: "0.9", rawFormat: "MALAY",
+    decimalOdds: request.expectedDecimalOdds, quoteStatus: "OPEN",
+    providerObservedAtMs: 1_100, receivedMonotonicMs: 100, sequence: 1,
     limitEvidence, constraint: { ...limitEvidence, feeType: "NONE", feeRate: null },
     eligible: true, reasons: [], ...overrides };
 }

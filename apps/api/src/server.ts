@@ -9,6 +9,7 @@ import { Runtime, type RuntimeOptions } from "./runtime.js";
 import { createSessionServices } from "./sessions/session-services.js";
 import { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { JsonlCatalogJournal } from "./routes/catalog-jsonl-journal.js";
+import { FileTicketRealtimeAuditJournal } from "./routes/ticket-realtime-audit-journal.js";
 import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
 import { resolveProviderFees } from "./providers/provider-fees.js";
 import { FileBetHistory } from "./history/file-bet-history.js";
@@ -230,6 +231,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   await runtime.start(controller.signal);
   const twoLegPreflight = new TwoLegPreflight({ opportunities: runtime, providers: sessionServices.providerPreflight });
   const betHistory = new FileBetHistory(join(localAppData, "tool-chenh", "history", "bets.jsonl"));
+  const ticketRealtimeAudit = new FileTicketRealtimeAuditJournal(
+    join(localAppData, "tool-chenh", "logs", "realtime-ticket-checks.jsonl")
+  );
   const catalogStore = new DurableCatalogStore(join(localAppData, "tool-chenh", "catalog-cache"));
   const catalogRevisions = new CatalogRevisionStore();
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
@@ -310,6 +314,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     catalogStore,
     catalogRevisions,
     providerPreflight: sessionServices.providerPreflight,
+    providerPreflightOptions: { journal: ticketRealtimeAudit },
     twoLegPreflight,
     receiptProtocol: sessionServices.receiptProtocol,
     betHistory,

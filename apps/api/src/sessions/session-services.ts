@@ -21,6 +21,7 @@ import { CmdProfileReader } from "../providers/cmd/cmd-profile-reader.js";
 import { CmdSessionValidator } from "../providers/cmd/cmd-session-validator.js";
 import { CmdObservedCatalogReader } from "../providers/cmd/cmd-observed-catalog.js";
 import { JitCmdFootballCatalogSource } from "../providers/cmd/cmd-football-jit-source.js";
+import { CmdTicketPreflightReader } from "../providers/cmd/cmd-ticket-preflight-reader.js";
 import { PlaywrightSabaBrowserManager } from "../providers/saba/saba-browser-manager.js";
 import { FabetSabaBrowserManager } from "../providers/saba/fabet-saba-browser-manager.js";
 import { PlaywrightSabaFootballPushBrowserManager } from "../providers/saba/saba-football-push-browser-manager.js";
@@ -37,6 +38,7 @@ import { SbobetTicketPreflightReader } from "../providers/sbobet/sbobet-ticket-p
 import { PlaywrightImFootballBrowserManager } from "../providers/im/im-football-browser-manager.js";
 import { JitImFootballCatalogSource } from "../providers/im/im-football-jit-source.js";
 import { ImFootballObservedCatalogReader } from "../providers/im/im-football-observed-catalog.js";
+import { ImFootballTicketPreflightReader } from "../providers/im/im-football-ticket-preflight-reader.js";
 import { ImSessionValidator } from "../providers/im/im-session-validator.js";
 import { ImProfileReader } from "../providers/im/im-profile-reader.js";
 import { PlaywrightApsportBrowserManager } from "../providers/apsport/apsport-browser-manager.js";
@@ -241,14 +243,15 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     idFactory
   });
   const catalogSources = new CatalogSourceRegistry({ sessions: manager, accounts, supportedPairs: supportedCatalogPairs });
+  const cmdJitSource = new JitCmdFootballCatalogSource({
+    fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) },
+    browser: cmdBrowser,
+    tk88: { withProviderPage: async (consume) =>
+      tk88Browser.withVerifiedProviderPage("CMD", "FOOTBALL", consume) },
+    sessionAccess: manager
+  });
   const catalogReader = new CmdObservedCatalogReader({
-    jitSource: new JitCmdFootballCatalogSource({
-      fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) },
-      browser: cmdBrowser,
-      tk88: { withProviderPage: async (consume) =>
-        tk88Browser.withVerifiedProviderPage("CMD", "FOOTBALL", consume) },
-      sessionAccess: manager
-    }),
+    jitSource: cmdJitSource,
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) },
     timezoneOffsetMinutes: 420
   });
@@ -260,16 +263,17 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     accounts: catalogSources, source: sbobetBrowser,
     clock: { now: () => ({ wallClockNowMs: clock.nowMs(), monotonicNowMs: performance.now() }) }
   });
-  const imFootballCatalogReader = new ImFootballObservedCatalogReader({
-    source: new JitImFootballCatalogSource({
-      fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) },
-      browser: imFootballBrowser
-    })
+  const imFootballJitSource = new JitImFootballCatalogSource({
+    fabet: { withProviderPage: manager.withFabetProviderPage.bind(manager) },
+    browser: imFootballBrowser
   });
+  const imFootballCatalogReader = new ImFootballObservedCatalogReader({ source: imFootballJitSource });
   const apsportCatalogReader = new ApsportObservedCatalogReader({ accounts: catalogSources, source: apsportBrowser });
   const btiCatalogReader = new BtiObservedCatalogReader({ accounts: catalogSources, source: btiBrowser });
   const providerPreflight = new ProviderPreflightRegistry({ accounts, sources: catalogSources,
-    readers: [new SabaTicketPreflightReader({ source: sabaBrowser,
+    readers: [new CmdTicketPreflightReader({ source: cmdJitSource }),
+      new ImFootballTicketPreflightReader({ source: imFootballJitSource }),
+      new SabaTicketPreflightReader({ source: sabaBrowser,
       ...(options.providerFees?.SABA === undefined ? {} : { fee: options.providerFees.SABA }) }),
       new BtiTicketPreflightReader({ source: btiBrowser,
         ...(options.providerFees?.BTI === undefined ? {} : { fee: options.providerFees.BTI }) }),

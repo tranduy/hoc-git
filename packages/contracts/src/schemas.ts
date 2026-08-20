@@ -29,6 +29,10 @@ import type {
   ProviderStakeConstraint,
   ProviderTicketPreflight,
   ProviderTicketPreflightRequest,
+  TicketRealtimeCheckLegResult,
+  TicketRealtimeCheckRequest,
+  TicketRealtimeCheckResponse,
+  TicketRealtimeDisplayedLeg,
   ProfileState,
   ProviderCapability,
   ProviderConnectionState,
@@ -314,8 +318,13 @@ export const ProviderTicketPreflightSchema = z.strictObject({
   providerSelectionId: z.string().trim().min(1).max(256),
   selection: z.string().trim().min(1).max(128),
   line: DecimalStringSchema.nullable(),
+  rawOdds: DecimalStringSchema,
+  rawFormat: OddsFormatSchema,
   decimalOdds: NonnegativeDecimalStringSchema,
   quoteStatus: QuoteStatusSchema,
+  providerObservedAtMs: z.number().finite().nonnegative(),
+  receivedMonotonicMs: z.number().finite().nonnegative(),
+  sequence: z.number().int().nonnegative().safe().nullable(),
   limitEvidence: ProviderStakeLimitEvidenceSchema.nullable(),
   constraint: ProviderStakeConstraintSchema.nullable(),
   eligible: z.boolean(),
@@ -339,6 +348,63 @@ export const ProviderTicketPreflightSchema = z.strictObject({
     context.addIssue({ code: "custom", path: ["constraint"], message: "constraint must use the reported limit evidence" });
   }
 }) satisfies z.ZodType<ProviderTicketPreflight>;
+
+export const TicketRealtimeDisplayedLegSchema = z.strictObject({
+  provider: ProviderIdSchema,
+  accountId: z.string().trim().min(1).max(128),
+  providerEventId: z.string().trim().min(1).max(256),
+  providerMarketId: z.string().trim().min(1).max(256),
+  providerSelectionId: z.string().trim().min(1).max(256),
+  selection: z.string().trim().min(1).max(128),
+  line: DecimalStringSchema.nullable(),
+  rawOdds: DecimalStringSchema,
+  rawFormat: OddsFormatSchema,
+  decimalOdds: NonnegativeDecimalStringSchema,
+  quoteStatus: QuoteStatusSchema,
+  providerObservedAtMs: z.number().finite().nonnegative(),
+  receivedMonotonicMs: z.number().finite().nonnegative(),
+  sequence: z.number().int().nonnegative().safe().nullable(),
+  requestedStake: NonnegativeDecimalStringSchema
+}) satisfies z.ZodType<TicketRealtimeDisplayedLeg>;
+
+export const TicketRealtimeCheckRequestSchema = z.strictObject({
+  eventLabel: z.string().trim().min(1).max(512),
+  marketType: MarketTypeSchema,
+  scope: ScopeSchema,
+  capturedAtMs: z.number().finite().nonnegative(),
+  legs: z.tuple([TicketRealtimeDisplayedLegSchema, TicketRealtimeDisplayedLegSchema])
+}).superRefine((request, context) => {
+  if (request.legs[0].provider === request.legs[1].provider) {
+    context.addIssue({ code: "custom", path: ["legs", 1, "provider"], message: "providers must be distinct" });
+  }
+  if (request.legs[0].selection === request.legs[1].selection) {
+    context.addIssue({ code: "custom", path: ["legs", 1, "selection"], message: "selections must oppose" });
+  }
+}) satisfies z.ZodType<TicketRealtimeCheckRequest>;
+
+const TicketRealtimeCheckStatusSchema = z.enum(["MATCH", "ODDS_CHANGED", "MARKET_NOT_OPEN",
+  "IDENTITY_MISMATCH", "SOURCE_UNAVAILABLE", "UNSUPPORTED", "TIMEOUT", "ERROR"]);
+
+export const TicketRealtimeCheckLegResultSchema = z.strictObject({
+  status: TicketRealtimeCheckStatusSchema,
+  displayed: TicketRealtimeDisplayedLegSchema,
+  direct: ProviderTicketPreflightSchema.nullable(),
+  error: z.string().trim().min(1).max(128).nullable(),
+  startedAtMs: z.number().finite().nonnegative(),
+  completedAtMs: z.number().finite().nonnegative(),
+  elapsedMs: z.number().finite().nonnegative()
+}) satisfies z.ZodType<TicketRealtimeCheckLegResult>;
+
+export const TicketRealtimeCheckResponseSchema = z.strictObject({
+  checkId: z.string().trim().min(1).max(128),
+  eventLabel: z.string().trim().min(1).max(512),
+  marketType: MarketTypeSchema,
+  scope: ScopeSchema,
+  capturedAtMs: z.number().finite().nonnegative(),
+  completedAtMs: z.number().finite().nonnegative(),
+  persisted: z.boolean(),
+  legs: z.tuple([TicketRealtimeCheckLegResultSchema, TicketRealtimeCheckLegResultSchema])
+}) satisfies z.ZodType<TicketRealtimeCheckResponse>;
 
 export const PreflightLegSchema = z.strictObject({
   accountId: z.string().trim().min(1).max(128),

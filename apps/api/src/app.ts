@@ -10,7 +10,8 @@ import { registerSessionRoutes, type SessionServices } from "./routes/sessions.j
 import { registerCatalogRoutes, type CatalogObserverLike, type CatalogReaderLike } from "./routes/catalog.js";
 import { registerCatalogSourceRoutes, type CatalogSourceRegistryLike } from "./routes/catalog-sources.js";
 import type { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
-import { registerProviderPreflightRoutes, type ProviderPreflightLike } from "./routes/provider-preflight.js";
+import { registerProviderPreflightRoutes, type ProviderPreflightLike,
+  type ProviderPreflightRouteOptions } from "./routes/provider-preflight.js";
 import { registerTwoLegPreflightRoutes, type TwoLegPreflightLike } from "./routes/two-leg-preflight.js";
 import { registerReceiptProtocolRoute, type ReceiptProtocolLike } from "./routes/receipt-protocol.js";
 import { registerBetHistoryRoute, type BetHistoryLike } from "./routes/bet-history.js";
@@ -37,6 +38,7 @@ export interface AppOptions {
   readonly catalogStore?: CatalogStoreLike;
   readonly catalogRevisions?: CatalogRevisionStore;
   readonly providerPreflight?: ProviderPreflightLike;
+  readonly providerPreflightOptions?: ProviderPreflightRouteOptions;
   readonly twoLegPreflight?: TwoLegPreflightLike;
   readonly receiptProtocol?: ReceiptProtocolLike;
   readonly betHistory?: FileBetHistory & BetHistoryLike;
@@ -167,7 +169,9 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
     app, options.catalogReader, options.catalogTelemetry, options.catalogObserver, options.catalogStore,
     options.catalogRevisions
   );
-  if (options.providerPreflight !== undefined) registerProviderPreflightRoutes(app, options.providerPreflight);
+  if (options.providerPreflight !== undefined) {
+    registerProviderPreflightRoutes(app, options.providerPreflight, options.providerPreflightOptions);
+  }
   if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight, options.betHistory);
   if (options.receiptProtocol !== undefined) registerReceiptProtocolRoute(app, options.receiptProtocol);
   if (options.betHistory !== undefined) registerBetHistoryRoute(app, options.betHistory);

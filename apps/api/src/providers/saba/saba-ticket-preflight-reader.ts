@@ -78,7 +78,9 @@ export class SabaTicketPreflightReader implements ProviderTicketPreflightReader 
       }
       return { accountId: request.accountId, provider: "SABA", providerEventId: quote.providerEventId,
         providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId,
-        selection: quote.selection, line: quote.line, decimalOdds, quoteStatus: quote.status, limitEvidence, constraint,
+        selection: quote.selection, line: quote.line, rawOdds, rawFormat: quote.rawFormat,
+        decimalOdds, quoteStatus: quote.status, providerObservedAtMs: fresh ? limit.observedAtMs : observedAtMs,
+        receivedMonotonicMs: quote.receivedMonotonicMs, sequence: quote.sequence, limitEvidence, constraint,
         eligible: quote.status === "OPEN" && constraint !== null && reasons.length === 0, reasons };
     });
   }

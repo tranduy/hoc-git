@@ -8,7 +8,9 @@ const request: ProviderTicketPreflightRequest = { accountId: "account-1", provid
   expectedDecimalOdds: "2.2", requestedStake: "100000" };
 const result: ProviderTicketPreflight = { accountId: "account-1", provider: "SABA", providerEventId: "event-1",
   providerMarketId: "market-1", providerSelectionId: "selection-1", selection: "HOME", line: "-0.5",
-  decimalOdds: "2.2", quoteStatus: "OPEN", limitEvidence: { currency: "VND", minStake: "50000",
+  rawOdds: "1.2", rawFormat: "HK", decimalOdds: "2.2", quoteStatus: "OPEN",
+  providerObservedAtMs: 1_100, receivedMonotonicMs: 100, sequence: 1,
+  limitEvidence: { currency: "VND", minStake: "50000",
     maxStake: "200000", stakeStep: "1000", balance: "300000", verifiedAsOfMs: 1000, expiresAtMs: 3000 },
   constraint: { currency: "VND", minStake: "50000",
     maxStake: "200000", stakeStep: "1000", balance: "300000", feeType: "NONE", feeRate: null,

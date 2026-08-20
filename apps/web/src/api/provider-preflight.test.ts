@@ -21,8 +21,13 @@ const providerPreflight: ProviderTicketPreflight = {
   providerSelectionId: "saba-home",
   selection: "HOME",
   line: "-0.5",
+  rawOdds: "1.2",
+  rawFormat: "HK",
   decimalOdds: "2.2",
   quoteStatus: "OPEN",
+  providerObservedAtMs: 1_100,
+  receivedMonotonicMs: 100,
+  sequence: 1,
   limitEvidence: {
     currency: "VND", minStake: "30000", maxStake: "500000", stakeStep: "1000", balance: "600000",
     verifiedAsOfMs: 1_000, expiresAtMs: 4_000

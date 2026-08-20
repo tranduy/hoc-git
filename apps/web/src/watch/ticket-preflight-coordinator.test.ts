@@ -52,8 +52,10 @@ function response(request: ProviderTicketPreflightRequest, provider: ProviderId,
     balance: "500000", feeType: "NONE" as const, feeRate: null, verifiedAsOfMs: nowMs, expiresAtMs: nowMs + 3_000 };
   return { accountId: request.accountId, provider, providerEventId: request.providerEventId,
     providerMarketId: request.providerMarketId, providerSelectionId: request.providerSelectionId,
-    selection: request.selection, line: request.line, decimalOdds: request.expectedDecimalOdds,
-    quoteStatus: "OPEN", limitEvidence: constraint, constraint, eligible: true, reasons: [], ...overrides };
+    selection: request.selection, line: request.line, rawOdds: "1.2", rawFormat: "HK",
+    decimalOdds: request.expectedDecimalOdds, quoteStatus: "OPEN", providerObservedAtMs: nowMs,
+    receivedMonotonicMs: 1, sequence: 1, limitEvidence: constraint, constraint,
+    eligible: true, reasons: [], ...overrides };
 }
 
 class FakeApi implements ProviderPreflightApiLike {

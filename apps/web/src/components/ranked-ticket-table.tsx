@@ -1,4 +1,5 @@
-import type { ProviderEvent, ProviderId } from "@tool-chenh/contracts";
+import type { ProviderEvent, ProviderId, TicketRealtimeCheckRequest,
+  TicketRealtimeCheckResponse } from "@tool-chenh/contracts";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { decimalOdds, selectionHandicapLine, selectionLabel, ticketMarketLabel } from "../catalog/comparison.js";
 import { formatDisplayDecimal } from "../catalog/display-format.js";
@@ -9,6 +10,12 @@ import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
 import { ProviderBrand } from "./provider-brand.js";
 import { RoiBadge } from "./roi-badge.js";
 import { sortProviderItems, sortProviders } from "../catalog/provider-order.js";
+import type { TicketRealtimeCheckApiLike } from "../api/ticket-realtime-check.js";
+
+export type ProviderCatalogEvidence = Partial<Record<ProviderId, {
+  readonly accountId: string;
+  readonly observedAtMs: number;
+}>>;
 
 function money(value: string): string {
   return `${Number(value).toLocaleString("en-US")} VND`;
@@ -44,7 +51,8 @@ export function ticketDomId(eventKey: string, ticketKey: string): string {
   return `ticket-${encodeURIComponent(eventKey)}-${encodeURIComponent(ticketKey)}`;
 }
 
-function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy, onOpenProviderTicket }: {
+function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy, onOpenProviderTicket,
+  providerCatalogEvidence, realtimeCheckApi }: {
   readonly event: ProviderEvent;
   readonly providers: readonly ProviderId[];
   readonly ticket: RankedTicket;
@@ -52,9 +60,14 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
   readonly highlighted: boolean;
   readonly stakePolicy?: FixedBaseStakePolicy | undefined;
   readonly onOpenProviderTicket?: ((identity: ProviderTicketIdentity) => void) | undefined;
+  readonly providerCatalogEvidence?: ProviderCatalogEvidence | undefined;
+  readonly realtimeCheckApi?: TicketRealtimeCheckApiLike | undefined;
 }) {
   const [anchor, setAnchor] = useState<{ readonly provider: ProviderId; readonly selection: string;
     readonly stake: string } | null>(null);
+  const [audit, setAudit] = useState<{ readonly request: TicketRealtimeCheckRequest;
+    readonly response: TicketRealtimeCheckResponse | null; readonly error: string | null;
+    readonly pending: boolean } | null>(null);
   const pair = useMemo(() => pairForPlan(ticket, providers), [providers, ticket]);
   const adjustedPlan = useMemo(() => anchor === null ? ticket.plan : stakePolicy === undefined || pair === null ? null :
     buildObservedAnchoredStakeEstimate(ticket.row, pair, stakePolicy, anchor), [anchor, pair, stakePolicy, ticket]);
@@ -77,7 +90,39 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     return plan?.legs.find((leg) => leg.provider === provider && leg.selection === selection)?.stake ??
       ticket.plan?.legs.find((leg) => leg.provider === provider && leg.selection === selection)?.stake ?? "";
   };
-  return <tr aria-label={`Ticket ${ticket.key}`}
+  const canCheckRealtime = realtimeCheckApi !== undefined && openableLegs.length === 2 && openableLegs.every(({ leg }) =>
+    providerCatalogEvidence?.[leg.provider] !== undefined && displayedStake(leg.provider, leg.selection) !== "");
+  const checkRealtime = async (): Promise<void> => {
+    if (!canCheckRealtime || realtimeCheckApi === undefined) return;
+    const capturedAtMs = Date.now();
+    const toDisplayedLeg = ({ leg, quote }: (typeof openableLegs)[number]): TicketRealtimeCheckRequest["legs"][number] => {
+      const evidence = providerCatalogEvidence![leg.provider]!;
+      const normalized = decimalOdds(quote);
+      if (normalized === null) throw new Error("DISPLAYED_ODDS_INVALID");
+      return { provider: leg.provider, accountId: evidence.accountId, providerEventId: quote.providerEventId,
+        providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId,
+        selection: quote.selection, line: quote.line, rawOdds: quote.rawOdds, rawFormat: quote.rawFormat,
+        decimalOdds: normalized.toString(), quoteStatus: quote.status, providerObservedAtMs: evidence.observedAtMs,
+        receivedMonotonicMs: quote.receivedMonotonicMs, sequence: quote.sequence,
+        requestedStake: displayedStake(leg.provider, leg.selection) };
+    };
+    const legs: TicketRealtimeCheckRequest["legs"] = [toDisplayedLeg(openableLegs[0]!),
+      toDisplayedLeg(openableLegs[1]!)];
+    const request: TicketRealtimeCheckRequest = { eventLabel: `${event.participantA} vs ${event.participantB}`,
+      marketType: ticket.row.marketType as TicketRealtimeCheckRequest["marketType"],
+      scope: ticket.row.scope as TicketRealtimeCheckRequest["scope"], capturedAtMs, legs };
+    setAudit({ request, response: null, error: null, pending: true });
+    try {
+      const response = await realtimeCheckApi.check(request);
+      setAudit((current) => current?.request === request
+        ? { request, response, error: null, pending: false } : current);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "REALTIME_CHECK_UNAVAILABLE";
+      setAudit((current) => current?.request === request
+        ? { request, response: null, error: message, pending: false } : current);
+    }
+  };
+  return <><tr aria-label={`Ticket ${ticket.key}`}
     className={`${profitable ? "ranked-ticket-row ranked-ticket-row--profitable" :
       "ranked-ticket-row ranked-ticket-row--neutral"}${compact ? " ranked-ticket-row--compact" : ""}${highlighted ? " ranked-ticket-row--highlight" : ""}`}
     id={ticketDomId(ticket.eventKey, ticket.key)} tabIndex={-1}
@@ -143,11 +188,28 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
       </small>)}
       <small>Move {ticket.movementMagnitude}</small></div>}
       {ticket.reason !== null && <p className="ranked-ticket-reason">{displayReason(ticket.reason)}</p>}</td>
-  </tr>;
+  </tr>{canCheckRealtime && <tr className="ticket-realtime-audit-row"><td colSpan={rowProviders.length + 5}>
+    <button className="ticket-realtime-check" disabled={audit?.pending === true}
+      onClick={() => { void checkRealtime(); }} type="button">{audit?.pending === true ? "Đang kiểm tra…" : "Kiểm tra giá thật"}</button>
+    {audit !== null && <section aria-label={`Kiểm tra giá thật ${ticket.key}`} className="ticket-realtime-audit">
+      {audit.request.legs.map((displayed, index) => {
+        const checked = audit.response?.legs[index];
+        return <article className="ticket-realtime-audit__leg" key={`${displayed.provider}:${displayed.providerSelectionId}`}>
+          <strong>TOOL · {displayed.provider} — {displayed.rawOdds} {displayed.rawFormat} · decimal {displayed.decimalOdds} · seq {displayed.sequence}</strong>
+          {checked?.direct !== undefined && checked.direct !== null
+            ? <strong>SÀN · {checked.direct.provider} — {checked.direct.rawOdds} {checked.direct.rawFormat} · decimal {checked.direct.decimalOdds} · seq {checked.direct.sequence} · {checked.elapsedMs} ms</strong>
+            : <span>{audit.pending ? "Đang đọc trực tiếp…" : `SÀN · ${displayed.provider} — ${checked?.error ?? audit.error ?? "Không có dữ liệu"}`}</span>}
+          {checked !== undefined && <b className={`ticket-realtime-audit__status ticket-realtime-audit__status--${checked.status.toLowerCase()}`}>{checked.status}</b>}
+        </article>;
+      })}
+      {audit.response !== null && <small>{audit.response.persisted ? "Đã ghi JSONL" : "Không ghi được JSONL"} · {audit.response.checkId}</small>}
+      {audit.error !== null && <small className="ticket-realtime-audit__error">{audit.error}</small>}
+    </section>}
+  </td></tr>}</>;
 }
 
 export function RankedTicketTable({ event, providers, tickets, compact = false, highlightTicketKey, stakePolicy,
-  onOpenProviderTicket }: {
+  onOpenProviderTicket, providerCatalogEvidence, realtimeCheckApi }: {
   readonly event: ProviderEvent;
   readonly providers: readonly ProviderId[];
   readonly tickets: readonly RankedTicket[];
@@ -155,6 +217,8 @@ export function RankedTicketTable({ event, providers, tickets, compact = false, 
   readonly highlightTicketKey?: string | null;
   readonly stakePolicy?: FixedBaseStakePolicy;
   readonly onOpenProviderTicket?: ((identity: ProviderTicketIdentity) => void) | undefined;
+  readonly providerCatalogEvidence?: ProviderCatalogEvidence | undefined;
+  readonly realtimeCheckApi?: TicketRealtimeCheckApiLike | undefined;
 }) {
   const orderedProviders = useMemo(() => sortProviders(providers), [providers]);
   const visible = renderableRankedTickets(tickets, orderedProviders).slice(0, 5);
@@ -181,7 +245,7 @@ export function RankedTicketTable({ event, providers, tickets, compact = false, 
         <th>Selected opposing legs</th><th>Stakes</th><th>Outcome profit</th><th>Guaranteed / ROI</th></tr></thead>
       <tbody>{visible.map((ticket) => <TicketRow compact={compact} event={event} highlighted={highlightTicketKey === ticket.key}
         key={ticket.key} onOpenProviderTicket={onOpenProviderTicket} providers={orderedProviders} stakePolicy={stakePolicy}
-        ticket={ticket} />)}</tbody>
+        providerCatalogEvidence={providerCatalogEvidence} realtimeCheckApi={realtimeCheckApi} ticket={ticket} />)}</tbody>
     </table>
   </div>;
 }

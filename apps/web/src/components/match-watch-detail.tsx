@@ -31,6 +31,7 @@ import { ProviderBrand } from "./provider-brand.js";
 import { RoiBadge } from "./roi-badge.js";
 import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
 import { sortProviderItems } from "../catalog/provider-order.js";
+import { defaultTicketRealtimeCheckApi, type TicketRealtimeCheckApiLike } from "../api/ticket-realtime-check.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
@@ -132,6 +133,7 @@ export function MatchWatchDetail({
   rankedTickets = [],
   highlightTicketKey = null,
   onOpenProviderTicket,
+  ticketRealtimeCheckApi = defaultTicketRealtimeCheckApi,
   externallyRefreshed = false,
   storage = window.localStorage,
   clock = systemClock
@@ -151,6 +153,7 @@ export function MatchWatchDetail({
   readonly rankedTickets?: readonly RankedTicket[];
   readonly highlightTicketKey?: string | null;
   readonly onOpenProviderTicket?: ((identity: ProviderTicketIdentity) => void) | undefined;
+  readonly ticketRealtimeCheckApi?: TicketRealtimeCheckApiLike;
   readonly externallyRefreshed?: boolean;
   readonly storage?: Storage;
   readonly clock?: () => number;
@@ -171,6 +174,8 @@ export function MatchWatchDetail({
     hasExactEvent: currentComparison?.providers.includes(book.provider) ?? book.hasExactEvent }));
   const catalogSources = useMemo(() => comparisonCatalogs ?? comparisonEvent?.catalogs ?? [initialCatalog],
     [comparisonCatalogs, comparisonEvent, initialCatalog]);
+  const providerCatalogEvidence = useMemo(() => Object.fromEntries(catalogSources.map((catalog) =>
+    [catalog.provider, { accountId: catalog.accountId, observedAtMs: catalog.observedAtMs }])), [catalogSources]);
   const providerSamplesRef = useRef<Map<string, MatchSample> | null>(null);
   if (providerSamplesRef.current === null) {
     providerSamplesRef.current = new Map(catalogSources.flatMap((catalog) => {
@@ -347,7 +352,8 @@ export function MatchWatchDetail({
           <p className="connection-warning" role="status">The exact ticket expired before it could be opened.</p>}
         <RankedTicketTable event={event} providers={selectedTicketProviders}
           compact tickets={visibleRankedTickets} highlightTicketKey={highlightTicketKey} stakePolicy={stakePolicy}
-          onOpenProviderTicket={onOpenProviderTicket} />
+          onOpenProviderTicket={onOpenProviderTicket} providerCatalogEvidence={providerCatalogEvidence}
+          realtimeCheckApi={ticketRealtimeCheckApi} />
       </section>}
 
       <div className="match-watch__layout">

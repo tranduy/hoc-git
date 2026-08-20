@@ -892,7 +892,8 @@ describe("LiveCatalogPage", () => {
       accountId: request.accountId, provider: request.accountId === sabaAccount.id ? "SABA" as const : "SBOBET" as const,
       providerEventId: request.providerEventId, providerMarketId: request.providerMarketId,
       providerSelectionId: request.providerSelectionId, selection: request.selection, line: request.line,
-      decimalOdds: request.expectedDecimalOdds, quoteStatus: "OPEN" as const,
+      rawOdds: "1.2", rawFormat: "HK" as const, decimalOdds: request.expectedDecimalOdds,
+      quoteStatus: "OPEN" as const, providerObservedAtMs: 500, receivedMonotonicMs: 1, sequence: 5,
       limitEvidence: { currency: "VND" as const, minStake: "30000", maxStake: "500000", stakeStep: "1000",
         balance: "500000", verifiedAsOfMs: 500, expiresAtMs: Date.now() + 10_000 },
       constraint: { currency: "VND" as const, minStake: "30000", maxStake: "500000", stakeStep: "1000",
@@ -1037,8 +1038,10 @@ describe("LiveCatalogPage", () => {
         verifiedAsOfMs: observedAtMs, expiresAtMs: Date.now() + 3_000 };
       return { accountId: request.accountId, provider, providerEventId: request.providerEventId,
         providerMarketId: request.providerMarketId, providerSelectionId: request.providerSelectionId,
-        selection: request.selection, line: request.line, decimalOdds: request.expectedDecimalOdds,
-        quoteStatus: "OPEN" as const, limitEvidence: constraint, constraint, eligible: true, reasons: [] };
+        selection: request.selection, line: request.line, rawOdds: "1.2", rawFormat: "HK" as const,
+        decimalOdds: request.expectedDecimalOdds, quoteStatus: "OPEN" as const,
+        providerObservedAtMs: observedAtMs, receivedMonotonicMs: 1, sequence: 1,
+        limitEvidence: constraint, constraint, eligible: true, reasons: [] };
     } };
 
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }}

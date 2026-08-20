@@ -124,14 +124,69 @@ export interface ProviderTicketPreflight {
   readonly providerSelectionId: string;
   readonly selection: string;
   readonly line: string | null;
+  readonly rawOdds: string;
+  readonly rawFormat: OddsFormat;
   readonly decimalOdds: string;
   readonly quoteStatus: QuoteStatus;
+  readonly providerObservedAtMs: number;
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number | null;
   readonly limitEvidence: ProviderStakeLimitEvidence | null;
   readonly constraint: ProviderStakeConstraint | null;
   readonly eligible: boolean;
   readonly reasons: readonly ("IDENTITY_MISMATCH" | "ODDS_CHANGED" | "MARKET_NOT_OPEN" |
     "BELOW_MIN" | "ABOVE_MAX" | "STAKE_STEP_MISMATCH" | "INSUFFICIENT_BALANCE" | "LIMIT_UNAVAILABLE" |
     "FINANCIAL_POLICY_UNAVAILABLE")[];
+}
+
+export interface TicketRealtimeDisplayedLeg {
+  readonly provider: ProviderId;
+  readonly accountId: string;
+  readonly providerEventId: string;
+  readonly providerMarketId: string;
+  readonly providerSelectionId: string;
+  readonly selection: string;
+  readonly line: string | null;
+  readonly rawOdds: string;
+  readonly rawFormat: OddsFormat;
+  readonly decimalOdds: string;
+  readonly quoteStatus: QuoteStatus;
+  readonly providerObservedAtMs: number;
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number | null;
+  readonly requestedStake: string;
+}
+
+export interface TicketRealtimeCheckRequest {
+  readonly eventLabel: string;
+  readonly marketType: MarketType;
+  readonly scope: Scope;
+  readonly capturedAtMs: number;
+  readonly legs: readonly [TicketRealtimeDisplayedLeg, TicketRealtimeDisplayedLeg];
+}
+
+export type TicketRealtimeCheckStatus = "MATCH" | "ODDS_CHANGED" | "MARKET_NOT_OPEN" |
+  "IDENTITY_MISMATCH" | "SOURCE_UNAVAILABLE" | "UNSUPPORTED" | "TIMEOUT" | "ERROR";
+
+export interface TicketRealtimeCheckLegResult {
+  readonly status: TicketRealtimeCheckStatus;
+  readonly displayed: TicketRealtimeDisplayedLeg;
+  readonly direct: ProviderTicketPreflight | null;
+  readonly error: string | null;
+  readonly startedAtMs: number;
+  readonly completedAtMs: number;
+  readonly elapsedMs: number;
+}
+
+export interface TicketRealtimeCheckResponse {
+  readonly checkId: string;
+  readonly eventLabel: string;
+  readonly marketType: MarketType;
+  readonly scope: Scope;
+  readonly capturedAtMs: number;
+  readonly completedAtMs: number;
+  readonly persisted: boolean;
+  readonly legs: readonly [TicketRealtimeCheckLegResult, TicketRealtimeCheckLegResult];
 }
 
 export interface PreflightLeg {
