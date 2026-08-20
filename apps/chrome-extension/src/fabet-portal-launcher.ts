@@ -27,20 +27,24 @@ const KSPORT_CONTROL_EXPRESSION = `(() => {
     if (close.getClientRects().length > 0) close.click();
   }
   const cards = [...document.querySelectorAll('.game-item.lobby')];
-  const fallback = [...document.querySelectorAll('[class*="game-item" i], [class*="lobby" i], button, [role="button"]')];
-  const candidates = [...new Set([...cards, ...fallback])]
-    .filter((node) => /(?:^| )K SPORTS(?: |$)/.test(normalize(node.innerText || node.textContent)));
+  const exactCards = cards.filter((node) => normalize(node.querySelector('.game-item__name')?.textContent) === 'K SPORTS');
+  const fallback = [...document.querySelectorAll('[class*="game-item" i], [class*="lobby" i], button, [role="button"]')]
+    .filter((node) => normalize(node.textContent) === 'K SPORTS')
+    .map((node) => node.closest('.game-item.lobby') || node);
+  const candidates = [...new Set([...exactCards, ...fallback])];
   for (const card of candidates) {
     const control = card.querySelector('.game-item__play-btn button, button, [role="button"]') || card;
-    control.scrollIntoView({ block: 'center', inline: 'center' });
+    card.scrollIntoView({ block: 'center', inline: 'center' });
     const rect = control.getBoundingClientRect();
     const style = getComputedStyle(control);
-    if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') continue;
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
+    const ready = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    const target = ready ? rect : card.getBoundingClientRect();
+    if (target.width <= 0 || target.height <= 0) continue;
+    const x = target.left + target.width / 2;
+    const y = target.top + target.height / 2;
     if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
-    control.focus();
-    return { x, y };
+    if (ready) control.focus();
+    return { x, y, ready };
   }
   return null;
 })()`;
@@ -82,10 +86,16 @@ export class FabetPortalLauncher {
     this.#options.addUpdatedListener?.(onUpdated);
     try {
       await this.#options.sendCommand(portal.id, "Runtime.enable", {});
-      await this.#clickKsportControl(portal.id);
-      const stable = await this.#waitForStableKsportDescendant(descendants, initialTabIds);
-      await this.#options.attachSource(stable);
-      return stable;
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await this.#clickKsportControl(portal.id);
+        try {
+          return await this.#waitForStableKsportDescendant(descendants, initialTabIds);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError ?? new Error("FABET_KSPORT_POPUP_UNAVAILABLE");
     } finally {
       this.#options.removeCreatedListener(onCreated);
       this.#options.removeUpdatedListener?.(onUpdated);
@@ -105,6 +115,10 @@ export class FabetPortalLauncher {
         await this.#options.sendCommand(tabId, "Input.dispatchMouseEvent", {
           type: "mouseMoved", x: point.x, y: point.y
         });
+        if (!point.ready) {
+          await delay(150);
+          continue;
+        }
         await this.#options.sendCommand(tabId, "Input.dispatchMouseEvent", {
           type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1
         });
@@ -125,7 +139,8 @@ export class FabetPortalLauncher {
     const delay = this.#options.delay ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
     let stableTabId: number | null = null;
     let stablePolls = 0;
-    for (let attempt = 0; attempt < 60; attempt += 1) {
+    const attachedTabIds = new Set<number>();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
       // Provider popups created with `noopener` have no openerTabId. Discover
       // them by bounded before/after tab identity as well as the opener chain.
       const queried = await this.#options.query().catch(() => []);
@@ -135,6 +150,13 @@ export class FabetPortalLauncher {
       let current: PortalTab | null = null;
       if (latest?.id !== undefined) current = await this.#options.get(latest.id).catch(() => null);
       if (current !== null && recognizeLobbyTab(current)?.lobby === "KSPORT") {
+        if (current.id !== undefined && !attachedTabIds.has(current.id)) {
+          // Attach at the first recognized provider URL, before waiting for a
+          // stable title. K-Sports publishes its initial STOMP catalog during
+          // this bootstrap window; attaching after stability misses it.
+          await this.#options.attachSource(current);
+          attachedTabIds.add(current.id);
+        }
         if (stableTabId === current.id) stablePolls++;
         else { stableTabId = current.id ?? null; stablePolls = 1; }
         if (stablePolls >= 8) {
@@ -158,7 +180,7 @@ function isFabetPortalTab(tab: PortalTab): boolean {
   } catch { return false; }
 }
 
-function evaluationPoint(value: unknown): { readonly x: number; readonly y: number } | null {
+function evaluationPoint(value: unknown): { readonly x: number; readonly y: number; readonly ready: boolean } | null {
   if (typeof value !== "object" || value === null) return null;
   const result = (value as Record<string, unknown>).result;
   if (typeof result !== "object" || result === null) return null;
@@ -166,6 +188,7 @@ function evaluationPoint(value: unknown): { readonly x: number; readonly y: numb
   if (typeof point !== "object" || point === null) return null;
   const x = (point as Record<string, unknown>).x;
   const y = (point as Record<string, unknown>).y;
+  const ready = (point as Record<string, unknown>).ready;
   return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)
-    ? { x, y } : null;
+    && typeof ready === "boolean" ? { x, y, ready } : null;
 }

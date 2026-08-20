@@ -173,6 +173,33 @@ describe("LocalBridge", () => {
     expect(onSourceEnsure).toHaveBeenCalledWith("CMD", "https://cgnew.fts368.com/sports?opaque=1");
   });
 
+  it("serializes reset source recovery so provider bootstraps do not overload Chrome", async () => {
+    const socket = new FakeSocket();
+    let releaseFirst: (() => void) | undefined;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const calls: string[] = [];
+    const bridge = new LocalBridge({
+      socketFactory: () => socket,
+      installationKey: "local-key",
+      onSourceEnsure: async (lobby) => {
+        calls.push(lobby);
+        if (lobby === "SABA") await first;
+      }
+    });
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "ENSURE_SOURCE", lobby: "SABA",
+      url: "https://c0z0ob.bpd3a3fn.com/sports?token=opaque" }) });
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "ENSURE_SOURCE", lobby: "BTI",
+      url: "https://prod20091.fxf774.com/sports?token=opaque" }) });
+
+    expect(calls).toEqual(["SABA"]);
+    releaseFirst?.();
+    await first;
+    await vi.waitFor(() => expect(calls).toEqual(["SABA", "BTI"]));
+  });
+
   it("forwards a restore-source command for a closed provider tab", () => {
     const socket = new FakeSocket();
     const onSourceRestore = vi.fn();

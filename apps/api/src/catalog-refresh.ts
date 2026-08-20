@@ -65,11 +65,11 @@ export async function refreshCatalogSources(options: {
     throw new Error("CHROME_BRIDGE_NO_ATTACHED_SOURCE");
   }
 
-  // Fabet launch capture can finish before an IM one-time page exposes both
-  // signed catalog partitions. Its bounded in-page bootstrap retry completes
-  // within ~20 seconds, so the reset gate must not declare the source dead at
-  // the previous 15-second boundary.
-  const timeoutMs = options.timeoutMs ?? 30_000;
+  // Provider replacement is deliberately serialized in Chrome so six heavy
+  // sportsbook bootstraps cannot saturate CPU/RAM at once. The last sources
+  // can therefore arrive just after 30 seconds even though every feed is
+  // healthy; allow the full queue plus the stability observation window.
+  const timeoutMs = options.timeoutMs ?? 60_000;
   const pollMs = options.pollMs ?? 250;
   const stabilityMs = options.bridgeSources === undefined ? 0 : options.stabilityMs ?? 10_000;
   const sleep = options.sleep ?? ((delayMs: number) =>

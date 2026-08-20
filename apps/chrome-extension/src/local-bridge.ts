@@ -66,6 +66,7 @@ export class LocalBridge {
   #insertCounter = 0;
   #probeInFlight = false;
   #connectToken = 0;
+  #sourceRecoveryTail: Promise<void> | null = null;
 
   constructor(options: LocalBridgeOptions) {
     if (!options.installationKey.trim()) throw new Error("INSTALLATION_KEY_REQUIRED");
@@ -240,13 +241,13 @@ export class LocalBridge {
         return;
       }
       if (parsed.data.kind === "ENSURE_SOURCE") {
-        try { void Promise.resolve(this.#onSourceEnsure(parsed.data.lobby, parsed.data.url)).catch(() => undefined); }
-        catch { /* source recovery must not disrupt the bridge */ }
+        const { lobby, url } = parsed.data;
+        this.#enqueueSourceRecovery(() => this.#onSourceEnsure(lobby, url));
         return;
       }
       if (parsed.data.kind === "RESTORE_SOURCE") {
-        try { void Promise.resolve(this.#onSourceRestore(parsed.data.lobby)).catch(() => undefined); }
-        catch { /* closed-tab recovery must not disrupt the bridge */ }
+        const { lobby } = parsed.data;
+        this.#enqueueSourceRecovery(() => this.#onSourceRestore(lobby));
         return;
       }
       if (parsed.data.kind === "FOCUS_SELECTION") {
@@ -297,6 +298,19 @@ export class LocalBridge {
     } catch {
       // Invalid control traffic cannot mutate the send queue.
     }
+  }
+
+  #enqueueSourceRecovery(task: () => void | Promise<void>): void {
+    const invoke = async (): Promise<void> => {
+      try { await task(); } catch { /* one source failure must not block the remaining reset */ }
+    };
+    const operation = this.#sourceRecoveryTail === null
+      ? invoke()
+      : this.#sourceRecoveryTail.then(invoke, invoke);
+    const settled = operation.finally(() => {
+      if (this.#sourceRecoveryTail === settled) this.#sourceRecoveryTail = null;
+    });
+    this.#sourceRecoveryTail = settled;
   }
 
 }

@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
 
 describe("FabetPortalLauncher", () => {
-  it("opens K-Sports from the signed-in Chrome portal and attaches only after bootstrap is stable", async () => {
+  it("opens K-Sports from the portal and attaches before waiting for bootstrap stability", async () => {
     let created: ((tab: { id?: number; url?: string; title?: string; openerTabId?: number }) => void) | null = null;
     const operations: string[] = [];
     let inspected = false;
+    let getCount = 0;
+    let attachedAtGet = 0;
+    let evaluations = 0;
     const launcher = new FabetPortalLauncher({
       query: async () => [{ id: 3, url: "https://fabet.monster/lobby-the-thao", title: "Lobby Thể Thao" }],
       update: async (tabId, url, active) => {
@@ -19,7 +22,8 @@ describe("FabetPortalLauncher", () => {
         operations.push(method);
         if (method === "Runtime.evaluate") {
           inspected = true;
-          return { result: { value: { x: 120, y: 240 } } };
+          evaluations++;
+          return { result: { value: { x: 120, y: 240, ready: evaluations > 1 } } };
         }
         if (method === "Input.dispatchMouseEvent" && created !== null) {
           if (created !== null) {
@@ -31,14 +35,16 @@ describe("FabetPortalLauncher", () => {
       },
       addCreatedListener: (listener) => { created = listener; },
       removeCreatedListener: () => { created = null; },
-      attachSource: async (tab) => { operations.push(`source:${tab.id}:${tab.url}`); },
-      get: async () => ({ id: 8, url: "https://zenandfe.com/?token=fresh", title: "Sportsbook" }),
+      attachSource: async (tab) => { attachedAtGet = getCount; operations.push(`source:${tab.id}:${tab.url}`); },
+      get: async () => { getCount++; return { id: 8, url: "https://zenandfe.com/?token=fresh", title: "Sportsbook" }; },
       delay: async () => undefined
     });
 
     await expect(launcher.launchKsport("https://zenandfe.com/?token=marker"))
       .resolves.toMatchObject({ id: 8, title: "Sportsbook" });
     expect(operations).toContain("source:8:https://zenandfe.com/?token=fresh");
+    expect(attachedAtGet).toBe(1);
+    expect(evaluations).toBe(2);
     expect(inspected).toBe(true);
     expect(operations.at(-1)).toBe("detach:3");
   });
@@ -65,7 +71,7 @@ describe("FabetPortalLauncher", () => {
       attachDebugger: async () => undefined,
       detachDebugger: async () => undefined,
       sendCommand: async (_tabId, method) => {
-        if (method === "Runtime.evaluate") return { result: { value: { x: 1, y: 2 } } };
+        if (method === "Runtime.evaluate") return { result: { value: { x: 1, y: 2, ready: true } } };
         if (method === "Input.dispatchMouseEvent" && created !== null) {
           if (created !== null) {
             const notify = created as (tab: { id?: number; openerTabId?: number }) => void;
@@ -110,7 +116,7 @@ describe("FabetPortalLauncher", () => {
       attachDebugger: async () => undefined,
       detachDebugger: async () => undefined,
       sendCommand: async (_tabId, method) => {
-        if (method === "Runtime.evaluate") return { result: { value: { x: 10, y: 20 } } };
+        if (method === "Runtime.evaluate") return { result: { value: { x: 10, y: 20, ready: true } } };
         if (method === "Input.dispatchMouseEvent") clicked = true;
         return {};
       },
@@ -124,5 +130,37 @@ describe("FabetPortalLauncher", () => {
     await expect(launcher.launchKsport("https://zenandfe.com/?token=marker"))
       .resolves.toMatchObject({ id: 12, title: "Sportsbook" });
     expect(attached).toEqual([12]);
+  });
+
+  it("retries the trusted K-Sports card when the first click creates no popup", async () => {
+    let clicks = 0;
+    const attached: number[] = [];
+    const launcher = new FabetPortalLauncher({
+      query: async () => clicks >= 2
+        ? [
+            { id: 3, url: "https://fabet.monster/lobby-the-thao", title: "Lobby Thể Thao" },
+            { id: 14, url: "https://zenandfe.com/?token=fresh", title: "Sportsbook" }
+          ]
+        : [{ id: 3, url: "https://fabet.monster/lobby-the-thao", title: "Lobby Thể Thao" }],
+      update: async (tabId, url) => ({ id: tabId, url, title: "Lobby Thể Thao" }),
+      focusWindow: async () => undefined,
+      attachDebugger: async () => undefined,
+      detachDebugger: async () => undefined,
+      sendCommand: async (_tabId, method, params) => {
+        if (method === "Runtime.evaluate") return { result: { value: { x: 10, y: 20, ready: true } } };
+        if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased") clicks++;
+        return {};
+      },
+      addCreatedListener: () => undefined,
+      removeCreatedListener: () => undefined,
+      attachSource: async (tab) => { attached.push(tab.id!); },
+      get: async (tabId) => ({ id: tabId, url: "https://zenandfe.com/?token=fresh", title: "Sportsbook" }),
+      delay: async () => undefined
+    });
+
+    await expect(launcher.launchKsport("https://zenandfe.com/?token=marker"))
+      .resolves.toMatchObject({ id: 14 });
+    expect(clicks).toBe(2);
+    expect(attached).toEqual([14]);
   });
 });
