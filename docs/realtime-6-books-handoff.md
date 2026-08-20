@@ -124,3 +124,64 @@ Verification on 2026-08-21:
   through the tested compatibility path above. Reloading a newly built extension
   later will select the full-identity command automatically; it is not required
   for the runtime PASS recorded here.
+
+## SABA WebSocket catalog and direct-price verification
+
+- Commit: `c62bff8` (`fix(saba): preserve websocket baseline across reconnects`)
+- Scope: SABA and the minimum shared bridge compatibility needed by the installed
+  extension. No collector implementation for the other five books was included.
+
+### Fixes and regression coverage
+
+- SABA only publishes a WebSocket partition after `reset/empty -> baseline -> done`;
+  pre-baseline deltas cannot create a partial catalog. Subsequent upsert/delete
+  deltas are applied by provider event/odds IDs; duplicate and older revisions
+  fail closed.
+- Complete SABA baselines are retained per document and persisted in
+  `chrome.storage.session`. A bridge/API reconnect replays only a complete
+  baseline from the same page document. A document/source epoch change discards
+  the old state; no tab reload, close or URL mutation is used.
+- Memory pressure removes an entire SABA partition instead of deleting middle
+  deltas and creating an unrecoverable sequence gap.
+- Exact direct-price lookup uses SABA event/market/selection IDs in the current
+  top document, distinguishes HOME/AWAY and OVER/UNDER, and fails closed when
+  missing or ambiguous. The installed strict bridge shape and its missing legacy
+  `method` field are accepted only for correlated SABA/CMD DOM responses.
+- Regression cases cover reset/baseline/done/delta, duplicate/out-of-order,
+  lower sequence after source epoch change, reversed participants, quarter
+  handicap, FULL_TIME/FIRST_HALF, exact selection and ambiguity.
+
+### Verification on 2026-08-21
+
+- API focused suite: **40 passed**.
+- Extension focused suite: **83 passed**.
+- SABA normalizer: **10 passed**.
+- Web comparison/worker suite: **54 passed**.
+- Typecheck: all six workspaces passed; `git diff --cached --check` passed.
+- CDP capture before the extension worker transition recorded 27 SABA
+  `Network.webSocketFrameReceived` `/socket.io/` frames, sequence `23926 ->
+  23993`, one source epoch and 26 delta frames.
+- Ten-minute pre-deployment soak: 591/591 source samples LIVE, source sequence
+  `22709 -> 24133`, event count fixed at 60 with zero false-zero samples. It also
+  exposed the real remaining defect: **0 catalog revisions and 0 UI SABA
+  responses**, so this run is explicitly not recorded as realtime PASS.
+- Direct authenticated DOM verification now completes against exact IDs:
+  AH check `9b999142-dd40-489c-9cc2-497039a6c3ee` read `-0.99` in 61 ms versus
+  stale TOOL `-0.93`; TOTAL check `7643a834-3475-448b-9ed5-bfae2c6e4b8a`
+  read `0.93` in 915 ms versus stale TOOL `0.94`. Both correctly returned
+  `ODDS_CHANGED/MISMATCH`, proving the direct value is not copied from catalog.
+
+### Runtime blocker still open
+
+- The built extension service worker was restarted without changing any provider
+  tab. Chrome reattached CDP to the already-open SABA page, but CDP cannot replay
+  the baseline of a WebSocket that was created before the new debugger session.
+  The current SABA catalog therefore remains the persisted 60-event STALE
+  snapshot until the provider socket naturally reconnects and emits a new
+  reset/done baseline. Forcing that baseline would require a provider-tab reload,
+  which this task explicitly forbids. Do not claim SABA catalog realtime PASS
+  until a natural reconnect yields a new baseline and the 10-minute verifier
+  records quote/revision/UI changes without F5.
+- Local evidence files: `saba-cdp-capture-evidence.json`,
+  `saba-runtime-evidence.json`, `saba-ui-runtime-evidence.json`, and
+  `saba-direct-price-evidence.json` (kept untracked).
