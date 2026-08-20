@@ -68,6 +68,25 @@ describe("SelectionPriceProbeCoordinator", () => {
     await expect(result).resolves.toEqual({ rawOdds: "0.17", observedAtMs: 1_020, method: "DOM" });
   });
 
+  it("accepts a correlated SABA DOM result from the installed bridge version that omitted the method field", async () => {
+    const coordinator = new SelectionPriceProbeCoordinator({
+      listSources: () => [{ lobby: "SABA", sourceId: "chrome:SABA:9", tabId: 9, state: "LIVE",
+        lastSequence: 1, lastAcceptedAtMs: 1_000, reason: null }],
+      controlPlane: { probeSelectionPrice: () => true }, idFactory: () => "price-saba-legacy", timeoutMs: 1_000
+    });
+    const result = coordinator.probe({ provider: "SABA", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_AH", scope: "FULL_TIME",
+      selection: "HOME", line: "-0.5", requestedAtMs: 1_000 });
+    const legacyResult = JSON.parse(envelope("price-saba-legacy").payload.body) as Record<string, unknown>;
+    delete legacyResult.method;
+    const accepted = coordinator.ingest({ ...envelope("price-saba-legacy"), lobby: "SABA",
+      sourceId: "chrome:SABA:9", payload: { encoding: "UTF8", body: JSON.stringify(legacyResult) } });
+
+    expect(accepted).toBe(true);
+    await expect(result).resolves.toEqual({ rawOdds: "0.17", observedAtMs: 1_020, method: "DOM" });
+  });
+
   it("fails immediately when no matching provider tab is live", async () => {
     const coordinator = new SelectionPriceProbeCoordinator({ listSources: () => [],
       controlPlane: { probeSelectionPrice: vi.fn(() => false) }, timeoutMs: 250 });

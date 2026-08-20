@@ -75,6 +75,42 @@ export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentit
   })()`;
 }
 
+export function buildSabaSelectionPriceExpression(identity: SelectionPriceProbeIdentity): string {
+  const input = JSON.stringify(identity);
+  return `(() => {
+    const input = ${input};
+    const suffix = input.selection === 'HOME' ? 'home' : input.selection === 'AWAY' ? 'away'
+      : input.selection === 'OVER' ? 'over' : input.selection === 'UNDER' ? 'under' : null;
+    if (suffix === null || input.providerSelectionId !== input.providerMarketId + ':' + suffix) {
+      return { ok: false, reason: 'SELECTION_IDENTITY_MISMATCH' };
+    }
+    const selectionIndex = suffix === 'home' || suffix === 'over' ? 0 : 1;
+    const rows = [...document.querySelectorAll('.c-match[data-matchid]')]
+      .filter((row) => row.getAttribute('data-matchid') === input.providerEventId);
+    if (rows.length === 0) return { ok: false, reason: 'EXACT_SELECTION_NOT_FOUND' };
+    if (rows.length !== 1) return { ok: false, reason: 'VISIBLE_PRICE_AMBIGUOUS' };
+    const visibleMarketId = input.providerMarketId.includes('__')
+      ? input.providerMarketId.slice(input.providerMarketId.lastIndexOf('__') + 2)
+      : input.providerMarketId;
+    const allOdds = [...rows[0].querySelectorAll('.c-odds[data-moid]')];
+    const exact = allOdds.filter((node) => node.getAttribute('data-moid') === input.providerMarketId);
+    const candidates = exact.length > 0 ? exact
+      : allOdds.filter((node) => node.getAttribute('data-moid') === visibleMarketId);
+    if (candidates.length === 0) return { ok: false, reason: 'EXACT_SELECTION_NOT_FOUND' };
+    if (candidates.length !== 2) return { ok: false, reason: 'VISIBLE_PRICE_AMBIGUOUS' };
+    const target = candidates[selectionIndex];
+    if (!target || target.getClientRects().length === 0) {
+      return { ok: false, reason: 'EXACT_SELECTION_NOT_FOUND' };
+    }
+    const rawOdds = String(target.textContent ?? '').replace(/\\s+/gu, ' ').trim();
+    if (!/^[+-]?\\d+(?:\\.\\d+)?$/u.test(rawOdds)) {
+      return { ok: false, reason: 'VISIBLE_PRICE_AMBIGUOUS' };
+    }
+    target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' });
+    return { ok: true, rawOdds, observedAtMs: Date.now() };
+  })()`;
+}
+
 export function buildSbobetSelectionPriceExpression(identity: SelectionPriceProbeIdentity,
   observedRequest: { readonly url: string; readonly headers: Readonly<Record<string, string>> } | null = null): string {
   const input = JSON.stringify(identity);

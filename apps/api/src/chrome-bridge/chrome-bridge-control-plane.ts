@@ -94,7 +94,7 @@ export class ChromeBridgeControlPlane {
     const control: ChromeBridgeControlMessage = { version: 1, kind: "PROBE_SELECTION_PRICE", sourceId,
       ...input };
     socket.send(JSON.stringify(control));
-    if (sourceId.startsWith("chrome:CMD:")) {
+    if (sourceId.startsWith("chrome:CMD:") || sourceId.startsWith("chrome:SABA:")) {
       // Installed bundles predating participant identity used a strict schema and
       // silently rejected the expanded command. The two strict shapes are
       // mutually exclusive, so exactly one probe runs during the rollout.

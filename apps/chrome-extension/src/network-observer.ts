@@ -6,13 +6,14 @@ import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
 import { buildCmdSelectionFocusExpression, buildGenericSelectionFocusExpression,
   type SelectionFocusIdentity } from "./selection-focus.js";
 import { buildBtiSelectionPriceExpression, buildCmdSelectionPriceExpression, buildGenericSelectionPriceExpression,
-  buildImSelectionPriceExpression, buildSbobetSelectionPriceExpression,
+  buildImSelectionPriceExpression, buildSabaSelectionPriceExpression, buildSbobetSelectionPriceExpression,
   type SelectionPriceProbeIdentity } from "./selection-price.js";
 import { buildCmdHiddenMarketProbeExpression, summarizeCmdHiddenProtocolFrame,
   type CmdHiddenDomProbeResult, type CmdHiddenProtocolEvidence } from "./cmd-hidden-market-probe.js";
 
 const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
+const SABA_SNAPSHOT_PERSIST_INTERVAL_MS = 5_000;
 
 export interface ObservedSource {
   readonly lobby: ChromeLobbyId;
@@ -32,6 +33,8 @@ export interface NetworkObserverDependencies {
     readonly headers: Readonly<Record<string, string>> } | null>;
   readonly saveSbobetEventRequest?: (request: { readonly url: string;
     readonly headers: Readonly<Record<string, string>> }) => Promise<void>;
+  readonly loadSabaWsSnapshots?: () => Promise<unknown>;
+  readonly saveSabaWsSnapshots?: (snapshots: PersistedSabaWsSnapshots) => Promise<void>;
 }
 
 type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
@@ -60,6 +63,14 @@ interface ReplayableWsEvent {
   readonly streamId: string;
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
+}
+
+export interface PersistedSabaWsSnapshots {
+  readonly version: 1;
+  readonly sourceId: string;
+  readonly documentMarker: string;
+  readonly partitions: ReadonlyArray<{ readonly partition: string;
+    readonly frames: ReadonlyArray<Omit<ReplayableWsEvent, "source">> }>;
 }
 
 interface ActiveCmdHiddenProbe {
@@ -424,6 +435,8 @@ export class NetworkObserver {
   readonly #observerSessionId: string;
   readonly #loadSbobetEventRequest: NonNullable<NetworkObserverDependencies["loadSbobetEventRequest"]>;
   readonly #saveSbobetEventRequest: NonNullable<NetworkObserverDependencies["saveSbobetEventRequest"]>;
+  readonly #loadSabaWsSnapshots: NonNullable<NetworkObserverDependencies["loadSabaWsSnapshots"]>;
+  readonly #saveSabaWsSnapshots: NetworkObserverDependencies["saveSabaWsSnapshots"];
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
   readonly #streamOrdinals = new Map<string, number>();
@@ -439,6 +452,13 @@ export class NetworkObserver {
   readonly #httpSnapshots = new Map<string, ReplayableHttpSnapshot[]>();
   readonly #tsportSnapshots = new Map<string, Map<string, ReplayableWsEvent>>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
+  readonly #sabaReadySnapshotPartitions = new Set<string>();
+  readonly #sabaSnapshotLoads = new Set<string>();
+  readonly #sabaSnapshotSaveRequested = new Set<string>();
+  readonly #sabaSnapshotSaveOperations = new Map<string, Promise<void>>();
+  readonly #sabaSnapshotSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #sabaSnapshotLastSavedAtMs = new Map<string, number>();
+  readonly #sabaDocumentMarkers = new Map<string, string>();
   readonly #cmdCapturesInFlight = new Set<string>();
   readonly #imLastRecoveryAtMs = new Map<string, number>();
   readonly #imCatalogRefreshes = new Map<string, Promise<void>>();
@@ -459,6 +479,8 @@ export class NetworkObserver {
     this.#observerSessionId = dependencies.observerSessionId ?? crypto.randomUUID();
     this.#loadSbobetEventRequest = dependencies.loadSbobetEventRequest ?? (async () => null);
     this.#saveSbobetEventRequest = dependencies.saveSbobetEventRequest ?? (async () => undefined);
+    this.#loadSabaWsSnapshots = dependencies.loadSabaWsSnapshots ?? (async () => null);
+    this.#saveSabaWsSnapshots = dependencies.saveSabaWsSnapshots;
     if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
       throw new Error("OBSERVER_SESSION_ID_INVALID");
     }
@@ -512,6 +534,16 @@ export class NetworkObserver {
       this.#httpSnapshots.delete(sourceId);
       this.#tsportSnapshots.delete(sourceId);
       this.#catalogWsSnapshots.delete(sourceId);
+      for (const key of this.#sabaReadySnapshotPartitions) {
+        if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
+      }
+      this.#sabaSnapshotLoads.delete(sourceId);
+      this.#sabaSnapshotSaveRequested.delete(sourceId);
+      const sabaSaveTimer = this.#sabaSnapshotSaveTimers.get(sourceId);
+      if (sabaSaveTimer !== undefined) clearTimeout(sabaSaveTimer);
+      this.#sabaSnapshotSaveTimers.delete(sourceId);
+      this.#sabaSnapshotLastSavedAtMs.delete(sourceId);
+      this.#sabaDocumentMarkers.delete(sourceId);
       this.#sbobetEventRequests.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
@@ -583,7 +615,13 @@ export class NetworkObserver {
       this.#imCatalogRefreshes.set(source.sourceId, operation);
       return operation;
     }
-    if (source.lobby === "KSPORT" || source.lobby === "SABA" || source.lobby === "TSPORT") {
+    if (source.lobby === "SABA") {
+      if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
+      await this.#restoreSabaWsSnapshots(source);
+      await this.#replayCatalogWsSnapshots(source.sourceId);
+      return;
+    }
+    if (source.lobby === "KSPORT" || source.lobby === "TSPORT") {
       // Rebuild API-side decoder state from the provider frames already
       // observed in this unchanged tab. Preserve their clocks; replay is state
       // recovery, never evidence that an old quote was observed just now.
@@ -685,6 +723,7 @@ export class NetworkObserver {
     if (method === "Runtime.executionContextsCleared") {
       this.#mainWorldContexts.delete(source.tabId);
       this.#sourceGenerations.set(source.sourceId, (this.#sourceGenerations.get(source.sourceId) ?? 0) + 1);
+      if (source.lobby === "SABA") this.#discardSabaWsSnapshots(source.sourceId);
       return;
     }
     if (method === "Runtime.executionContextDestroyed" && typeof params.executionContextId === "number") {
@@ -767,6 +806,7 @@ export class NetworkObserver {
       const opcode = typeof response.opcode === "number" ? response.opcode : 1;
       const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
       if (opcode !== 2) {
+        if (socket.source.lobby === "SABA") await this.#sabaDocumentMarker(socket.source);
         this.#rememberTsportWsEvent(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
         this.#rememberCatalogWsFrame(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
       }
@@ -1042,8 +1082,8 @@ export class NetworkObserver {
       const stored = await this.#loadSbobetEventRequest().catch(() => null);
       if (stored !== null) this.#sbobetEventRequests.set(source.sourceId, stored);
     }
-    const expression = source.lobby === "CMD" || source.lobby === "SABA"
-      ? buildCmdSelectionPriceExpression(request)
+    const expression = source.lobby === "CMD" ? buildCmdSelectionPriceExpression(request)
+      : source.lobby === "SABA" ? buildSabaSelectionPriceExpression(request)
       : source.lobby === "IM" ? buildImSelectionPriceExpression(request)
       : source.lobby === "BTI" ? buildBtiSelectionPriceExpression(request)
       : source.lobby === "KSPORT" ? buildSbobetSelectionPriceExpression(request,
@@ -1054,6 +1094,11 @@ export class NetworkObserver {
         return [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression, returnByValue: true, awaitPromise: true
         }), 8_000).catch(() => ({}))];
+      }
+      if (source.lobby === "SABA") {
+        return [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression, returnByValue: true, awaitPromise: false
+        }), 5_000).catch(() => ({}))];
       }
       const frameTree = await this.#withFrameCommandTimeout(
         this.#sendCommand(source.tabId, "Page.getFrameTree")).catch(() => ({}));
@@ -1214,9 +1259,17 @@ export class NetworkObserver {
         replayed = true;
       }
     }
+    replayed = await this.#replayCatalogWsSnapshots(requestedSourceId) || replayed;
+    return replayed;
+  }
+
+  async #replayCatalogWsSnapshots(requestedSourceId?: string): Promise<boolean> {
+    let replayed = false;
     for (const [sourceId, partitions] of this.#catalogWsSnapshots) {
       if (requestedSourceId !== undefined && sourceId !== requestedSourceId) continue;
-      for (const snapshots of partitions.values()) {
+      for (const [partition, snapshots] of partitions) {
+        if (snapshots[0]?.source.lobby === "SABA" &&
+          !this.#sabaReadySnapshotPartitions.has(`${sourceId}|${partition}`)) continue;
         for (const snapshot of snapshots) {
           await this.#emit(snapshot.source, snapshot.url, "WebSocket", "WS_FRAME", {
             encoding: "UTF8", body: snapshot.body
@@ -1236,6 +1289,7 @@ export class NetworkObserver {
     try { parsedUrl = new URL(url); } catch { return; }
     let partition = streamId;
     let startsBaseline = source.lobby === "KSPORT";
+    let completesBaseline = false;
     if (source.lobby === "SABA") {
       if (!/\/socket\.io\/?$/u.test(parsedUrl.pathname) || !body.startsWith("42")) return;
       try {
@@ -1245,22 +1299,37 @@ export class NetworkObserver {
         partition = `${streamId}:${payload[1]}`;
         startsBaseline = payload[2].some((row) => Array.isArray(row) &&
           (row[1] === "reset" || row[1] === "empty"));
+        completesBaseline = payload[2].some((row) => Array.isArray(row) && row[1] === "done");
       } catch { return; }
     } else if (!/\/sport\//u.test(parsedUrl.pathname) ||
       !body.includes("destination:/topic/sports/")) return;
     const partitions = this.#catalogWsSnapshots.get(source.sourceId) ?? new Map<string, ReplayableWsEvent[]>();
-    if (startsBaseline && source.lobby === "SABA") partitions.set(partition, []);
+    const readyKey = `${source.sourceId}|${partition}`;
+    if (startsBaseline && source.lobby === "SABA") {
+      partitions.set(partition, []);
+      this.#sabaReadySnapshotPartitions.delete(readyKey);
+    }
     const retained = partitions.get(partition);
     if (retained === undefined && source.lobby === "SABA") return;
     const frames = retained ?? [];
     frames.push({ source, url, body, streamId, ...clocks });
     partitions.set(partition, frames);
+    if (source.lobby === "SABA" && completesBaseline) this.#sabaReadySnapshotPartitions.add(readyKey);
     const totals = () => [...partitions.values()].reduce((result, values) => ({
       frames: result.frames + values.length,
       bytes: result.bytes + values.reduce((sum, frame) => sum + frame.body.length, 0)
     }), { frames: 0, bytes: 0 });
     let usage = totals();
     while (usage.frames > 2_048 || usage.bytes > 24_000_000) {
+      if (source.lobby === "SABA") {
+        const oldestPartition = [...partitions.entries()].sort((left, right) =>
+          (left[1][0]?.observedAtMs ?? 0) - (right[1][0]?.observedAtMs ?? 0))[0]?.[0];
+        if (oldestPartition === undefined) break;
+        partitions.delete(oldestPartition);
+        this.#sabaReadySnapshotPartitions.delete(`${source.sourceId}|${oldestPartition}`);
+        usage = totals();
+        continue;
+      }
       const candidates = [...partitions.entries()].flatMap(([key, values]) =>
         values.slice(source.lobby === "SABA" ? 1 : 0).map((frame, index) => ({
           key, index: index + (source.lobby === "SABA" ? 1 : 0), observedAtMs: frame.observedAtMs
@@ -1276,6 +1345,99 @@ export class NetworkObserver {
       usage = totals();
     }
     this.#catalogWsSnapshots.set(source.sourceId, partitions);
+    if (source.lobby === "SABA" && this.#sabaReadySnapshotPartitions.has(readyKey)) {
+      this.#scheduleSabaWsSnapshotSave(source.sourceId, completesBaseline);
+    }
+  }
+
+  async #restoreSabaWsSnapshots(source: ObservedSource): Promise<void> {
+    if (this.#sabaSnapshotLoads.has(source.sourceId)) return;
+    this.#sabaSnapshotLoads.add(source.sourceId);
+    const documentMarker = await this.#sabaDocumentMarker(source);
+    if (documentMarker === null) return;
+    const raw = await this.#loadSabaWsSnapshots().catch(() => null);
+    if (!isRecord(raw) || raw.version !== 1 || raw.sourceId !== source.sourceId ||
+      raw.documentMarker !== documentMarker || !Array.isArray(raw.partitions)) return;
+    const restored = new Map<string, ReplayableWsEvent[]>();
+    for (const candidate of raw.partitions) {
+      if (!isRecord(candidate) || typeof candidate.partition !== "string" || !Array.isArray(candidate.frames)) continue;
+      const frames: ReplayableWsEvent[] = [];
+      for (const frame of candidate.frames) {
+        if (!isRecord(frame) || typeof frame.url !== "string" || typeof frame.body !== "string" ||
+          typeof frame.streamId !== "string" || typeof frame.observedAtMs !== "number" ||
+          typeof frame.receivedMonotonicMs !== "number") continue;
+        frames.push({ source, url: frame.url, body: frame.body, streamId: frame.streamId,
+          observedAtMs: frame.observedAtMs, receivedMonotonicMs: frame.receivedMonotonicMs });
+      }
+      if (frames.length === 0 || !sabaFramesContainCompleteBaseline(frames)) continue;
+      restored.set(candidate.partition, frames);
+      this.#sabaReadySnapshotPartitions.add(`${source.sourceId}|${candidate.partition}`);
+    }
+    if (restored.size > 0) this.#catalogWsSnapshots.set(source.sourceId, restored);
+  }
+
+  #scheduleSabaWsSnapshotSave(sourceId: string, immediate: boolean): void {
+    if (this.#saveSabaWsSnapshots === undefined) return;
+    if (immediate) {
+      const timer = this.#sabaSnapshotSaveTimers.get(sourceId);
+      if (timer !== undefined) clearTimeout(timer);
+      this.#sabaSnapshotSaveTimers.delete(sourceId);
+    }
+    const elapsed = this.#now() - (this.#sabaSnapshotLastSavedAtMs.get(sourceId) ?? Number.NEGATIVE_INFINITY);
+    if (!immediate && elapsed < SABA_SNAPSHOT_PERSIST_INTERVAL_MS) {
+      if (!this.#sabaSnapshotSaveTimers.has(sourceId)) {
+        const timer = setTimeout(() => {
+          this.#sabaSnapshotSaveTimers.delete(sourceId);
+          this.#scheduleSabaWsSnapshotSave(sourceId, true);
+        }, SABA_SNAPSHOT_PERSIST_INTERVAL_MS - Math.max(0, elapsed));
+        this.#sabaSnapshotSaveTimers.set(sourceId, timer);
+      }
+      return;
+    }
+    this.#sabaSnapshotSaveRequested.add(sourceId);
+    if (this.#sabaSnapshotSaveOperations.has(sourceId)) return;
+    const operation = Promise.resolve().then(async () => {
+      while (this.#sabaSnapshotSaveRequested.delete(sourceId)) {
+        const cache = this.#sabaWsSnapshotCache(sourceId);
+        if (cache !== null) {
+          await this.#saveSabaWsSnapshots!(cache).catch(() => undefined);
+          this.#sabaSnapshotLastSavedAtMs.set(sourceId, this.#now());
+        }
+      }
+    }).finally(() => { this.#sabaSnapshotSaveOperations.delete(sourceId); });
+    this.#sabaSnapshotSaveOperations.set(sourceId, operation);
+  }
+
+  #sabaWsSnapshotCache(sourceId: string): PersistedSabaWsSnapshots | null {
+    const documentMarker = this.#sabaDocumentMarkers.get(sourceId);
+    if (documentMarker === undefined) return null;
+    const partitions = [...(this.#catalogWsSnapshots.get(sourceId) ?? [])].flatMap(([partition, frames]) =>
+      this.#sabaReadySnapshotPartitions.has(`${sourceId}|${partition}`) ? [{ partition,
+        frames: frames.map(({ source: _source, ...frame }) => frame) }] : []);
+    if (partitions.length === 0) return null;
+    const value: PersistedSabaWsSnapshots = { version: 1, sourceId, documentMarker, partitions };
+    return JSON.stringify(value).length <= 6_000_000 ? value : null;
+  }
+
+  async #sabaDocumentMarker(source: ObservedSource): Promise<string | null> {
+    const retained = this.#sabaDocumentMarkers.get(source.sourceId);
+    if (retained !== undefined) return retained;
+    const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+      expression: "String(performance.timeOrigin)", returnByValue: true, awaitPromise: false
+    })).catch(() => null);
+    const value = nestedValue(evaluation, "result", "value");
+    if (typeof value !== "string" || !/^\d+(?:\.\d+)?$/u.test(value) || value.length > 64) return null;
+    this.#sabaDocumentMarkers.set(source.sourceId, value);
+    return value;
+  }
+
+  #discardSabaWsSnapshots(sourceId: string): void {
+    this.#catalogWsSnapshots.delete(sourceId);
+    for (const key of this.#sabaReadySnapshotPartitions) {
+      if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
+    }
+    this.#sabaSnapshotLoads.add(sourceId);
+    this.#sabaDocumentMarkers.delete(sourceId);
   }
 
   #rememberTsportWsEvent(source: ObservedSource, url: string, body: string, streamId: string,
@@ -1437,6 +1599,23 @@ function isReplayableCmdCatalog(records: readonly unknown[]): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sabaFramesContainCompleteBaseline(frames: readonly ReplayableWsEvent[]): boolean {
+  let reset = false;
+  for (const frame of frames) {
+    try {
+      if (!frame.body.startsWith("42")) continue;
+      const payload: unknown = JSON.parse(frame.body.slice(2));
+      if (!Array.isArray(payload) || payload[0] !== "m" || !Array.isArray(payload[2])) continue;
+      for (const row of payload[2]) {
+        if (!Array.isArray(row)) continue;
+        if (row[1] === "reset" || row[1] === "empty") reset = true;
+        if (row[1] === "done" && reset) return true;
+      }
+    } catch { return false; }
+  }
+  return false;
 }
 
 function nestedNumber(value: unknown, key: string): number | null {

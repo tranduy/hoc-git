@@ -47,6 +47,7 @@ const registry = new TabRegistry({
 });
 
 const sbobetEventRequestStorageKey = "sbobetEventRequestTemplate";
+const sabaWsSnapshotsStorageKey = "sabaWsSnapshotsV1";
 const observer = new NetworkObserver({
   sendCommand: async (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params),
   loadSbobetEventRequest: async () => {
@@ -61,6 +62,11 @@ const observer = new NetworkObserver({
   },
   saveSbobetEventRequest: async (request) => {
     await chrome.storage.session.set({ [sbobetEventRequestStorageKey]: request });
+  },
+  loadSabaWsSnapshots: async () =>
+    (await chrome.storage.session.get(sabaWsSnapshotsStorageKey))[sabaWsSnapshotsStorageKey] ?? null,
+  saveSabaWsSnapshots: async (snapshots) => {
+    await chrome.storage.session.set({ [sabaWsSnapshotsStorageKey]: snapshots });
   },
   recoverImBaseline: async (source) => {
     // Obtain both signed GetSE partitions inside the current authenticated IM

@@ -119,6 +119,22 @@ describe("ChromeBridgeControlPlane", () => {
       marketType: "FT_AH", scope: "FULL_TIME", selection: "HOME", line: "-0.25" }));
   });
 
+  it("also sends SABA's exact-ID compatibility probe for an already-installed bridge bundle", () => {
+    const socket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attach("chrome:SABA:9", socket);
+    const input = { requestId: "price-saba", providerEventId: "event-1", providerMarketId: "market-1",
+      providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta", participantA: "Alpha",
+      participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "2.5" };
+
+    expect(plane.probeSelectionPrice("chrome:SABA:9", input)).toBe(true);
+    expect(socket.send).toHaveBeenCalledTimes(2);
+    expect(socket.send).toHaveBeenNthCalledWith(2, JSON.stringify({ version: 1, kind: "PROBE_SELECTION_PRICE",
+      sourceId: "chrome:SABA:9", requestId: "price-saba", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "2.5" }));
+  });
+
   it("skips closed sockets and detaches every source owned by a closed connection", () => {
     const socket = { send: vi.fn(), readyState: 3 };
     const plane = new ChromeBridgeControlPlane();

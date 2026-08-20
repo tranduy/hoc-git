@@ -114,7 +114,8 @@ export class SelectionPriceProbeCoordinator {
       pending.request.providerSelectionId !== parsed.data.providerSelectionId) return false;
     // The corresponding installed CMD bundle always used Runtime.evaluate on
     // the live DOM but did not yet serialize that method in its result.
-    const method = parsed.data.method ?? (pending.request.provider === "CMD" ? "DOM" : null);
+    const method = parsed.data.method ??
+      (pending.request.provider === "CMD" || pending.request.provider === "SABA" ? "DOM" : null);
     if (method === null) return false;
     clearTimeout(pending.timer);
     this.#pending.delete(parsed.data.requestId);
