@@ -185,3 +185,61 @@ Verification on 2026-08-21:
 - Local evidence files: `saba-cdp-capture-evidence.json`,
   `saba-runtime-evidence.json`, `saba-ui-runtime-evidence.json`, and
   `saba-direct-price-evidence.json` (kept untracked).
+
+## APSPORT/TSPORT atomic catalog and exact-price verification
+
+- Commit: `96c0ba6` (`fix(apsport): verify exact live selection prices`)
+- Scope: APSPORT/TSPORT plus the minimum shared probe/coordinator handling for
+  TSPORT diagnostic results. No collector code for the other five books was
+  included.
+
+### Fixes and regression coverage
+
+- A completed TSPORT DOM snapshot now replaces the prior DOM generation as one
+  unit. Obsolete events and selection IDs cannot survive into the new
+  generation; socket-only hidden markets remain in their independent partition.
+- DOM snapshot extraction no longer invents selection IDs. Catalog rows keep
+  the provider event, market and `odd-item-<selectionId>` identities.
+- Direct-price verification first requires one visible exact DOM selection with
+  the same event, ordered participants, market type, scope, line and outcome.
+  Hidden duplicates are ignored; missing or multiple visible exact candidates
+  fail closed.
+- If the exact DOM row is virtualized, the extension performs a fresh
+  credentialed, no-store GET using a request URL observed in the same TSPORT
+  tab and accepts only a full provider-ID identity match. The catalog and its
+  realtime WebSocket are never used as the direct-price result.
+- TSPORT's async resolver is awaited through CDP, and API preflight preserves
+  its exact NOT_FOUND/AMBIGUOUS diagnostic instead of timing out.
+- Regression tests cover hidden/duplicate nodes, similar team names, the same
+  line in another market, obsolete selection IDs, reversed participants,
+  ambiguous/not-found results, bounded stalled requests and atomic generation
+  replacement.
+
+### Verification on 2026-08-21
+
+- Extension focused suite: **74 passed**.
+- API focused suite: **29 passed**.
+- Typecheck: API and extension passed; `git diff --cached --check` passed.
+- Direct authenticated AH check: event `5639352`, market
+  `5639352:FT_AH:+0/0.5:0`, selection `56393520050000025h`; TOOL `0.77`, direct
+  DOM `0.77`, `MATCH`, 1,015 ms.
+- Direct authenticated TOTAL check: event `5628780`, market
+  `5628780:FT_TOTAL:2.5/3:1`, selection `56287800030020075h`; TOOL `0.87`, direct
+  DOM `0.87`, `MATCH`, 7 ms. Both checks are recorded in
+  `%LOCALAPPDATA%/tool-chenh/logs/realtime-ticket-checks.jsonl`.
+- Clean ten-minute soak after the scheduled 03:00 maintenance: 592 samples,
+  zero false-zero catalogs, source sequence `358 -> 12270`, 562 catalog
+  revision changes and 3,595 APSPORT realtime revision messages. Event count
+  stayed between 53 and 60.
+- The API and UI independently recorded the same exact-ID odds changes. Example:
+  selection `56525400030020075h` changed `0.84 -> 0.85`, sequence `1261 ->
+  1306`; the UI recorded one initial document navigation, no F5/reload and no
+  page errors. Current TSPORT source is LIVE with 60 events and 272 quotes.
+
+### Evidence and remaining note
+
+- Runtime evidence is kept untracked in `apsport-runtime-evidence-clean.json`,
+  `apsport-ui-runtime-evidence-clean.json`, and
+  `apsport-direct-price-diagnostic.json`.
+- The 03:00 scheduled maintenance overlapped a discarded intermediate monitor;
+  none of its observations are used for the clean soak evidence above.
