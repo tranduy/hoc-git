@@ -11,7 +11,7 @@ const ResultSchema = z.strictObject({
   status: z.enum(["FOUND", "NOT_FOUND", "AMBIGUOUS"]),
   rawOdds: z.string().trim().regex(/^[+-]?\d+(?:\.\d+)?$/u).max(32).nullable(),
   observedAtMs: z.number().finite().nonnegative(),
-  method: z.enum(["DOM", "IN_PAGE_FETCH"]),
+  method: z.enum(["DOM", "IN_PAGE_FETCH"]).optional(),
   reason: z.union([z.enum(["IM_SELECTION_UNSUPPORTED", "IM_ID_NOT_FOUND", "IM_ID_AMBIGUOUS",
     "IM_ID_HIDDEN", "IM_PRICE_AMBIGUOUS", "EXACT_SELECTION_NOT_FOUND",
     "VISIBLE_PRICE_AMBIGUOUS",
@@ -112,10 +112,14 @@ export class SelectionPriceProbeCoordinator {
       pending.request.providerEventId !== parsed.data.providerEventId ||
       pending.request.providerMarketId !== parsed.data.providerMarketId ||
       pending.request.providerSelectionId !== parsed.data.providerSelectionId) return false;
+    // The corresponding installed CMD bundle always used Runtime.evaluate on
+    // the live DOM but did not yet serialize that method in its result.
+    const method = parsed.data.method ?? (pending.request.provider === "CMD" ? "DOM" : null);
+    if (method === null) return false;
     clearTimeout(pending.timer);
     this.#pending.delete(parsed.data.requestId);
     if (parsed.data.observedAtMs < pending.request.requestedAtMs) {
-      pending.reject(directReadError("VISIBLE_PRICE_NOT_FRESH", parsed.data.method));
+      pending.reject(directReadError("VISIBLE_PRICE_NOT_FRESH", method));
     } else if (parsed.data.status !== "FOUND" || parsed.data.rawOdds === null) {
       const reason = parsed.data.reason;
       const normalized = reason === "EXACT_SELECTION_NOT_FOUND" ||
@@ -124,10 +128,10 @@ export class SelectionPriceProbeCoordinator {
           ? "VISIBLE_PRICE_AMBIGUOUS" : reason;
       pending.reject(directReadError(normalized ??
         (parsed.data.status === "AMBIGUOUS" ? "VISIBLE_PRICE_AMBIGUOUS" : "VISIBLE_PRICE_NOT_FOUND"),
-      parsed.data.method));
+      method));
     } else {
       pending.resolve({ rawOdds: parsed.data.rawOdds, observedAtMs: parsed.data.observedAtMs,
-        method: parsed.data.method });
+        method });
     }
     return true;
   }

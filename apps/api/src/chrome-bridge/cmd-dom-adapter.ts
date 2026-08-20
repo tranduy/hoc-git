@@ -37,7 +37,8 @@ export function decodePublicDomRecords(
   try { raw = JSON.parse(envelope.payload.body); } catch { return null; }
   const parsedChunk = CmdSnapshotChunkSchema.safeParse(raw);
   if (!parsedChunk.success) return null;
-  const assembled = assembler.ingest(envelope.sourceId, parsedChunk.data, envelope.observedAtMs);
+  const assembled = assembler.ingest(envelope.sourceId, parsedChunk.data,
+    envelope.receivedMonotonicMs, envelope.observedAtMs);
   if (!assembled) return null;
   if (assembled.length === 0 || assembled.length > 5_000) return null;
   const records = assembled.flatMap((candidate): CmdCatalogInputRecord[] => {

@@ -19,16 +19,30 @@ export class CmdSnapshotAssembler {
   readonly #maxBufferedBytes: number;
   readonly #pending = new Map<string, PendingSnapshot>();
   readonly #closedUntil = new Map<string, number>();
+  readonly #latestGenerationBySource = new Map<string, { readonly observedAtMs: number; readonly snapshotId: string }>();
 
   constructor(options: CmdSnapshotAssemblerOptions = {}) {
     this.#ttlMs = options.ttlMs ?? 10_000;
     this.#maxBufferedBytes = options.maxBufferedBytes ?? 20 * 1024 * 1024;
   }
 
-  ingest(sourceId: string, chunk: CmdSnapshotChunk, receivedAtMs: number): readonly unknown[] | null {
+  ingest(sourceId: string, chunk: CmdSnapshotChunk, receivedAtMs: number,
+    generationObservedAtMs = receivedAtMs): readonly unknown[] | null {
     this.#expire(receivedAtMs);
     const key = keyOf(sourceId, chunk.snapshotId);
     if ((this.#closedUntil.get(key) ?? 0) > receivedAtMs) return null;
+
+    const latest = this.#latestGenerationBySource.get(sourceId);
+    if (latest && generationObservedAtMs < latest.observedAtMs) return null;
+    if (!latest || generationObservedAtMs > latest.observedAtMs ||
+      (generationObservedAtMs === latest.observedAtMs && chunk.snapshotId !== latest.snapshotId)) {
+      const prefix = `${sourceId}\u0000`;
+      for (const pendingKey of this.#pending.keys()) {
+        if (pendingKey.startsWith(prefix)) this.#pending.delete(pendingKey);
+      }
+      this.#latestGenerationBySource.set(sourceId, { observedAtMs: generationObservedAtMs,
+        snapshotId: chunk.snapshotId });
+    }
 
     let pending = this.#pending.get(key);
     if (!pending) {
@@ -70,6 +84,7 @@ export class CmdSnapshotAssembler {
     const prefix = `${sourceId}\u0000`;
     for (const key of this.#pending.keys()) if (key.startsWith(prefix)) this.#pending.delete(key);
     for (const key of this.#closedUntil.keys()) if (key.startsWith(prefix)) this.#closedUntil.delete(key);
+    this.#latestGenerationBySource.delete(sourceId);
   }
 
   #reject(key: string, nowMs: number): void {

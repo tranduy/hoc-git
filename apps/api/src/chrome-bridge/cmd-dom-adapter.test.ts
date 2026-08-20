@@ -84,6 +84,27 @@ describe("CmdDomCatalogAdapter", () => {
     expect((updates[0]!.value as { events: readonly unknown[] }).events).toHaveLength(783);
   });
 
+  it("does not let an old snapshot complete after and overwrite a newer CMD generation", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    const oldRecord = { ...structuredClone(record), groups: [{ ...record.groups[0]!, odds:
+      record.groups[0]!.odds.map((odd) => ({ ...odd, priceText: "0.61" })) }] };
+    const newRecord = { ...structuredClone(record), groups: [{ ...record.groups[0]!, odds:
+      record.groups[0]!.odds.map((odd) => ({ ...odd, priceText: "0.91" })) }] };
+
+    expect(adapter.decode(envelope(snapshotBody([oldRecord], {
+      snapshotId: "cmd:9:old-generation", chunkIndex: 0, chunkCount: 2
+    }), { sequence: 20, observedAtMs: 100, receivedMonotonicMs: 10 }))).toEqual([]);
+    const newest = adapter.decode(envelope(snapshotBody([newRecord], {
+      snapshotId: "cmd:9:new-generation"
+    }), { sequence: 21, observedAtMs: 200, receivedMonotonicMs: 20 }));
+    expect((newest[0]!.value as { quotes: readonly { rawOdds: string }[] }).quotes
+      .map((quote) => quote.rawOdds)).toEqual(["0.91", "0.91"]);
+
+    expect(adapter.decode(envelope(snapshotBody([oldRecord], {
+      snapshotId: "cmd:9:old-generation", chunkIndex: 1, chunkCount: 2
+    }), { sequence: 22, observedAtMs: 100, receivedMonotonicMs: 30 }))).toEqual([]);
+  });
+
   it("retains previously observed CMD rows while a virtualized table scans the next viewport", () => {
     const adapter = new CmdDomCatalogAdapter();
     const nextRecord = {
