@@ -54,6 +54,7 @@ describe("ComparisonWorkerEngine", () => {
 
     expect(stale.displayEvents[0]?.providers).toEqual(["SABA", "SBOBET"]);
     expect(stale.freshEvents[0]?.providers).toEqual(["SABA"]);
+    expect(stale.freshEvents[0]?.rows).toEqual([]);
   });
 
   it("upserts and removes only the addressed account at the requested generation", () => {
@@ -67,5 +68,35 @@ describe("ComparisonWorkerEngine", () => {
     const removed = engine.apply({ type: "REMOVE", generation: 3, accountId: "saba-account" });
     expect(removed.generation).toBe(3);
     expect(removed.displayEvents[0]?.providers).toEqual(["SBOBET"]);
+  });
+
+  it("keeps the last complete display snapshot while a half-generation upsert fails closed", () => {
+    const engine = new ComparisonWorkerEngine();
+    const saba = catalog("SABA", "saba-account", ["2.20", "1.80"]);
+    const sbobet = catalog("SBOBET", "sbobet-account", ["2.10", "1.90"]);
+    engine.apply({ type: "RESET", generation: 1, catalogs: [saba, sbobet], staleAccountIds: [] });
+    const halfGeneration = { ...saba, quotes: saba.quotes.map((quote, index) => ({ ...quote,
+      rawOdds: index === 0 ? "2.40" : quote.rawOdds, sequence: index === 0 ? 2 : 1 })) };
+
+    const output = engine.apply({ type: "UPSERT", generation: 2, catalog: halfGeneration, stale: false });
+
+    expect(output.displayEvents[0]?.rows[0]?.cells.find((cell) => cell.provider === "SABA")
+      ?.quotes.map((quote) => quote.rawOdds)).toEqual(["2.20", "1.80"]);
+    expect(output.freshEvents[0]?.rows).toEqual([]);
+  });
+
+  it("keeps the last complete display snapshot when an atomic-looking upsert has duplicate outcomes", () => {
+    const engine = new ComparisonWorkerEngine();
+    const saba = catalog("SABA", "saba-account", ["2.20", "1.80"]);
+    const sbobet = catalog("SBOBET", "sbobet-account", ["2.10", "1.90"]);
+    engine.apply({ type: "RESET", generation: 1, catalogs: [saba, sbobet], staleAccountIds: [] });
+    const duplicateOutcome = { ...saba, quotes: saba.quotes.map((quote) => ({ ...quote,
+      selection: "OVER", sequence: 2 })) };
+
+    const output = engine.apply({ type: "UPSERT", generation: 2, catalog: duplicateOutcome, stale: false });
+
+    expect(output.displayEvents[0]?.rows[0]?.cells.find((cell) => cell.provider === "SABA")
+      ?.quotes.map((quote) => quote.rawOdds)).toEqual(["2.20", "1.80"]);
+    expect(output.freshEvents[0]?.rows).toEqual([]);
   });
 });

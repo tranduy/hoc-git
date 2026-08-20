@@ -111,6 +111,32 @@ describe("CatalogRevisionCoordinator", () => {
     coordinator.stop();
   });
 
+  it("accepts a lower sequence after an API restart baseline and fetches the next epoch revision", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const reads: string[] = [];
+    const accepted: CatalogReadResult[] = [];
+    const coordinator = new CatalogRevisionCoordinator({
+      read: async (requestedAccountId) => {
+        reads.push(requestedAccountId);
+        return result(accountId, "new-epoch-r2", 202);
+      },
+      onCatalog: (value) => accepted.push(value)
+    });
+    coordinator.setSelected([accountId]);
+    coordinator.setHeldRevision(accountId, "same-prices");
+    coordinator.acceptBaseline([entry(accountId, "same-prices", 100)], 499);
+    coordinator.acceptRevision(entry(accountId, "old-epoch-change", 101), 500);
+
+    coordinator.acceptBaseline([entry(accountId, "same-prices", 200)], 6);
+    coordinator.acceptRevision(entry(accountId, "new-epoch-r2", 202), 7);
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(reads).toEqual([accountId]);
+    expect(accepted).toEqual([result(accountId, "new-epoch-r2", 202)]);
+    coordinator.stop();
+  });
+
   it("polls selected accounts every second only while realtime is unavailable", async () => {
     vi.useFakeTimers();
     const accepted: CatalogReadResult[] = [];

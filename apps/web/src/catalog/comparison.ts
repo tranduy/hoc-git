@@ -84,9 +84,38 @@ function identityText(value: string): string {
   return footballTeamAliases.get(normalized) ?? normalized;
 }
 
+const footballCompetitionAliases = new Map<string, string>([
+  ["vong loai cup c3 chau au play off", "uefa-conference-league-qualification"],
+  ["vong loai cup c3 chau au", "uefa-conference-league-qualification"],
+  ["uefa europa conference league qualification", "uefa-conference-league-qualification"],
+  ["giai hang 4 iceland", "iceland-fourth-division"],
+  ["giai hang tu iceland", "iceland-fourth-division"],
+  ["iceland fourth division", "iceland-fourth-division"],
+  ["mexico liga de expansion", "mexico-liga-expansion"],
+  ["mexico liga expansion mx", "mexico-liga-expansion"],
+  ["giai hang nhi mexico expansion mx", "mexico-liga-expansion"],
+  ["colombia primera b", "colombia-primera-b"],
+  ["giai hang nhi colombia", "colombia-primera-b"],
+  ["giai laliga tay ban nha", "spain-la-liga"],
+  ["giai vo dich quoc gia tay ban nha la liga", "spain-la-liga"],
+  ["vong loai cup c2 chau au play off", "uefa-europa-league-qualification"],
+  ["vong loai cup c2 chau au", "uefa-europa-league-qualification"],
+  ["uefa europa league qualification", "uefa-europa-league-qualification"],
+  ["giai ligue 3 phap", "france-national-1"],
+  ["giai hang ba phap", "france-national-1"],
+  ["france ligue 3", "france-national-1"],
+  ["france national 1", "france-national-1"],
+  ["cup quoc gia ecuador", "ecuador-cup"],
+  ["ecuador cup", "ecuador-cup"],
+  ["ecuador serie b", "ecuador-primera-b"],
+  ["giai hang nhi quoc gia ecuador", "ecuador-primera-b"],
+  ["ecuador primera b", "ecuador-primera-b"]
+]);
+
 function competitionIdentity(value: string): string {
-  return decodeHtmlEntities(value).normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
+  const normalized = decodeHtmlEntities(value).normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/gu, " ");
+  return footballCompetitionAliases.get(normalized) ?? normalized;
 }
 
 function participantIdentity(category: ProviderEvent["category"], value: string): string {
@@ -200,6 +229,13 @@ function compatibleEventOrientation(left: ProviderEvent, right: ProviderEvent): 
     left.fixtureDiscriminator !== right.fixtureDiscriminator) return null;
   const orientation = participantOrientation(left, right);
   if (orientation === null || !footballLiveEvidenceCompatible(left, right, orientation)) return null;
+  if (!left.isLive && left.category === "FOOTBALL") {
+    const sameFixture = left.fixtureDiscriminator !== null && left.fixtureDiscriminator.length > 0 &&
+      left.fixtureDiscriminator === right.fixtureDiscriminator;
+    const leftCompetition = competitionIdentity(left.competition);
+    const rightCompetition = competitionIdentity(right.competition);
+    if (!sameFixture && (leftCompetition.length === 0 || leftCompetition !== rightCompetition)) return null;
+  }
   if (left.isLive && left.category === "FOOTBALL" &&
     !hasIndependentFootballLiveIdentity(left, right, orientation)) return null;
   const kickoffToleranceMs = left.category === "LOL" ? 30 * 60_000 : 120_000;
@@ -214,6 +250,13 @@ function invertLine(line: string | null): string | null {
   const value = Number(line);
   if (!Number.isFinite(value)) return line;
   return String(Object.is(-value, -0) ? 0 : -value);
+}
+
+function canonicalLine(line: string | null): string | null {
+  if (line === null) return null;
+  const value = Number(line);
+  if (!Number.isFinite(value)) return line;
+  return String(Object.is(value, -0) ? 0 : value);
 }
 
 const footballHandicapMarketTypes = new Set([
@@ -243,13 +286,13 @@ export function selectionHandicapLine(
 }
 
 function orientMarket(market: ProviderMarket, orientation: EventOrientation): ProviderMarket {
-  if (orientation !== "SWAPPED" || market.category !== "FOOTBALL" ||
-    !isFootballHandicapMarketType(market.marketType)) return market;
-  return { ...market, line: invertLine(market.line) };
+  const shouldInvert = orientation === "SWAPPED" && market.category === "FOOTBALL" &&
+    isFootballHandicapMarketType(market.marketType);
+  return { ...market, line: canonicalLine(shouldInvert ? invertLine(market.line) : market.line) };
 }
 
 function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrientation): readonly ProviderQuote[] {
-  if (orientation !== "SWAPPED") return quotes;
+  if (orientation !== "SWAPPED") return quotes.map((quote) => ({ ...quote, line: canonicalLine(quote.line) }));
   return quotes.map((quote) => {
     if (quote.category === "LOL") {
       if (quote.selection === "TEAM_A") return { ...quote, selection: "TEAM_B" };
@@ -258,7 +301,7 @@ function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrient
     }
     if (quote.category === "FOOTBALL") {
       const selection = quote.selection === "HOME" ? "AWAY" : quote.selection === "AWAY" ? "HOME" : quote.selection;
-      const line = isFootballHandicapMarketType(quote.marketType) ? invertLine(quote.line) : quote.line;
+      const line = canonicalLine(isFootballHandicapMarketType(quote.marketType) ? invertLine(quote.line) : quote.line);
       return { ...quote, selection, line };
     }
     return quote;
@@ -266,7 +309,7 @@ function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrient
 }
 
 function marketKey(market: ProviderMarket): string {
-  return [market.marketType, market.scope, market.line ?? ""].join("|");
+  return [market.marketType, market.scope, canonicalLine(market.line) ?? ""].join("|");
 }
 
 function eligibleTwoWayCells(cells: readonly ComparisonCell[], requireSameSettlement = true): readonly ComparisonCell[] {
@@ -345,6 +388,8 @@ export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
   if (new Set(selections).size !== selections.length || [...selections].sort().join("|") !== expectedDomain.join("|")) return false;
   const selectionIds = cell.quotes.map((quote) => quote.providerSelectionId);
   if (new Set(selectionIds).size !== selectionIds.length) return false;
+  const generation = cell.quotes[0]?.sequence ?? null;
+  if (generation === null || !cell.quotes.every((quote) => quote.sequence === generation)) return false;
   return cell.quotes.every((quote) => quote.status === "OPEN" && quote.provider === cell.provider &&
     quote.category === cell.market.category && quote.providerEventId === cell.market.providerEventId &&
     quote.providerMarketId === cell.market.providerMarketId && quote.marketType === cell.market.marketType &&

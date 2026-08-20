@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
-  isVisibleEvent, matchesEventPhase, selectionLabel, decimalOdds } from "./comparison.js";
+  isVisibleEvent, matchesEventPhase, selectionHandicapLine, selectionLabel, decimalOdds } from "./comparison.js";
 
 const event = (provider: "SABA" | "SBOBET", id: string): ProviderEvent => ({
   provider, category: "FOOTBALL", providerEventId: id, competition: "Eliteserien",
@@ -369,10 +369,12 @@ describe("catalog comparison", () => {
   });
 
   it("keeps the fixed provider order and highest-priority event labels when catalog arrival order changes", () => {
-    const saba = handicapCatalog("SABA", "saba-priority", "-0.5", ["0.82", "-0.90"]);
+    const sabaBase = handicapCatalog("SABA", "saba-priority", "-0.5", ["0.82", "-0.90"]);
+    const saba = { ...sabaBase, events: [{ ...sabaBase.events[0]!, fixtureDiscriminator: "fixture-priority" }] };
     const sbobetBase = handicapCatalog("SBOBET", "sbobet-priority", "0.5", ["0.78", "-0.86"]);
     const sbobet = { ...sbobetBase, events: [{ ...sbobetBase.events[0]!,
-      competition: "SB localized league", participantA: "Molde", participantB: "Kristiansund BK" }] };
+      competition: "SB localized league", participantA: "Molde", participantB: "Kristiansund BK",
+      fixtureDiscriminator: "fixture-priority" }] };
 
     const forward = buildComparisonEvents([saba, sbobet]);
     const reversed = buildComparisonEvents([sbobet, saba]);
@@ -411,6 +413,79 @@ describe("catalog comparison", () => {
     expect(result[0]?.observedRows[0]?.cells[1]?.quotes.map((quote) => [quote.selection, quote.rawOdds])).toEqual([
       ["AWAY", "0.78"], ["HOME", "-0.86"]
     ]);
+  });
+
+  it("canonicalizes equivalent numeric lines before matching the same market", () => {
+    const saba = handicapCatalog("SABA", "saba-event", "-0.250", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-event", "-0.25", ["0.78", "-0.86"]);
+
+    const result = buildComparisonEvents([saba, sbobet]);
+
+    expect(result[0]?.rows).toHaveLength(1);
+    expect(result[0]?.rows[0]?.line).toBe("-0.25");
+  });
+
+  it("keeps Coquimbo handicap signs attached to teams after reversing provider participants", () => {
+    const sbobetBase = handicapCatalog("SBOBET", "sbobet-coquimbo", "0.25", ["-0.51", "0.51"]);
+    const sbobet = { ...sbobetBase, events: [{ ...sbobetBase.events[0]!, competition: "Copa Libertadores",
+      participantA: "CA Platense", participantB: "Coquimbo Unido" }] };
+    const sabaBase = handicapCatalog("SABA", "saba-coquimbo", "-0.25", ["-0.67", "0.67"]);
+    const saba = { ...sabaBase, events: [{ ...sabaBase.events[0]!, competition: "Copa Libertadores",
+      participantA: "Coquimbo Unido", participantB: "CA Platense" }] };
+
+    const result = buildComparisonEvents([sbobet, saba]);
+    const row = result[0]?.rows[0];
+
+    expect(row?.line).toBe("-0.25");
+    expect(selectionHandicapLine(row!, "HOME")).toBe("-0.25");
+    expect(selectionHandicapLine(row!, "AWAY")).toBe("+0.25");
+    expect(row?.cells.find((cell) => cell.provider === "SBOBET")?.quotes.map((quote) =>
+      [quote.selection, quote.line])).toEqual([["AWAY", "-0.25"], ["HOME", "-0.25"]]);
+  });
+
+  it("rejects a half-updated provider market whose opposing quotes come from different generations", () => {
+    const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
+    const halfUpdated = { ...saba, quotes: saba.quotes.map((quote, index) => ({ ...quote,
+      sequence: index === 0 ? 41 : 42 })) };
+    const sbobet = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+
+    const result = buildComparisonEvents([halfUpdated, sbobet]);
+
+    expect(result[0]?.rows).toEqual([]);
+    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SBOBET"]);
+  });
+
+  it("does not pair same-name prematch participants across different competitions", () => {
+    const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
+    const sbobetBase = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+    const sbobet = { ...sbobetBase, events: [{ ...sbobetBase.events[0]!, competition: "Reserve League" }] };
+
+    const result = buildComparisonEvents([saba, sbobet]);
+
+    expect(result).toHaveLength(2);
+    expect(result.flatMap((item) => item.rows)).toEqual([]);
+  });
+
+  it("matches verified localized competition identities without fuzzy league text", () => {
+    const sabaBase = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
+    const saba = { ...sabaBase, events: [{ ...sabaBase.events[0]!,
+      competition: "VÒNG LOẠI CÚP C3 CHÂU ÂU (PLAY OFF)" }] };
+    const sbobetBase = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+    const sbobet = { ...sbobetBase, events: [{ ...sbobetBase.events[0]!,
+      competition: "UEFA Europa Conference League Qualification" }] };
+
+    expect(buildComparisonEvents([saba, sbobet])[0]?.rows).toHaveLength(1);
+  });
+
+  it("rejects opposing quotes with an unknown generation", () => {
+    const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
+    const unknownGeneration = { ...saba, quotes: saba.quotes.map((quote) => ({ ...quote, sequence: null })) };
+    const sbobet = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+
+    const result = buildComparisonEvents([unknownGeneration, sbobet]);
+
+    expect(result[0]?.rows).toEqual([]);
+    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SBOBET"]);
   });
 
   it("shows same-ticket prices but blocks profit when settlement profiles differ", () => {
