@@ -14,6 +14,8 @@ interface RefreshOptions {
   readonly minAcquiredAtMs: number;
   readonly providers?: readonly FabetProvider[];
   readonly restoreCmd?: boolean;
+  readonly refreshLaunches?: () => Promise<void>;
+  readonly maxLaunchAttempts?: number;
 }
 
 const PROVIDER_LOBBIES = [
@@ -28,15 +30,20 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
   const selected = options.providers === undefined
     ? PROVIDER_LOBBIES
     : PROVIDER_LOBBIES.filter(([provider]) => options.providers?.includes(provider));
-  const launches = await Promise.all(selected.map(async ([provider, lobby]) => {
-    try {
-      const launch = await options.withLatestFabetLaunch(provider, "FOOTBALL",
-        async (url) => ({ lobby, url }), options.minAcquiredAtMs);
-      return { ok: true, provider, launch } as const;
-    } catch (error) {
-      return { ok: false, provider, error } as const;
+  const maxLaunchAttempts = Math.max(1, Math.floor(options.maxLaunchAttempts ?? 1));
+  let launches: Awaited<ReturnType<typeof collectLaunches>> = [];
+  for (let attempt = 1; attempt <= maxLaunchAttempts; attempt += 1) {
+    launches = await collectLaunches(selected, options);
+    const failure = launches.find((result) => !result.ok);
+    if (failure === undefined) break;
+    if (attempt === maxLaunchAttempts || options.refreshLaunches === undefined) {
+      const reason = failure.error instanceof Error
+        ? failure.error.message
+        : "FABET_PROVIDER_LAUNCH_UNAVAILABLE";
+      throw new Error(`${reason}:${failure.provider}`);
     }
-  }));
+    await options.refreshLaunches();
+  }
 
   let requested = 0;
   let firstFailure: Error | null = null;
@@ -60,4 +67,19 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
   }
   if (firstFailure !== null) throw firstFailure;
   return requested;
+}
+
+async function collectLaunches(
+  selected: readonly (readonly [FabetProvider, ChromeLobbyId])[],
+  options: RefreshOptions
+) {
+  return Promise.all(selected.map(async ([provider, lobby]) => {
+    try {
+      const launch = await options.withLatestFabetLaunch(provider, "FOOTBALL",
+        async (url) => ({ lobby, url }), options.minAcquiredAtMs);
+      return { ok: true, provider, launch } as const;
+    } catch (error) {
+      return { ok: false, provider, error } as const;
+    }
+  }));
 }

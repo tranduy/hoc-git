@@ -4,14 +4,23 @@ interface CatalogSourceStatus {
   readonly acquiredAtMs?: number | null;
 }
 
+interface BridgeSourceStatus {
+  readonly lobby: string;
+  readonly tabId: number;
+  readonly state: string;
+  readonly lastAcceptedAtMs: number;
+}
+
 const BRIDGE_SOURCE = /^catalog-source:(CMD|IM|SABA|SBOBET|APSPORT|BTI):FOOTBALL$/u;
 const REQUIRED_BRIDGE_PROVIDERS = ["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"] as const;
+const REQUIRED_BRIDGE_LOBBIES = ["CMD", "IM", "SABA", "KSPORT", "TSPORT", "BTI"] as const;
 
 export async function refreshCatalogSources(options: {
   readonly legacyRefresh: () => Promise<void>;
   readonly prepareSources?: () => Promise<void>;
   readonly requestBridgeSnapshots?: (freshAfterMs: number) => number | Promise<number>;
   readonly statuses: () => Promise<readonly CatalogSourceStatus[]>;
+  readonly bridgeSources?: () => readonly BridgeSourceStatus[] | Promise<readonly BridgeSourceStatus[]>;
   readonly now?: () => number;
   readonly timeoutMs?: number;
   readonly pollMs?: number;
@@ -22,6 +31,14 @@ export async function refreshCatalogSources(options: {
   }
   const now = options.now ?? Date.now;
   const freshAfterMs = now();
+  const previousTabIds = new Map<string, Set<number>>();
+  if (options.bridgeSources !== undefined) {
+    for (const source of await options.bridgeSources()) {
+      const ids = previousTabIds.get(source.lobby) ?? new Set<number>();
+      ids.add(source.tabId);
+      previousTabIds.set(source.lobby, ids);
+    }
+  }
   // Credential rotation is preferred, but the monitor is read-only and an
   // already attached provider tab can still be healthy while the Fabet root
   // domain is blocked. Always ask those tabs for a new snapshot; only surface
@@ -54,6 +71,7 @@ export async function refreshCatalogSources(options: {
   const pollMs = options.pollMs ?? 250;
   const deadline = now() + timeoutMs;
   let unavailable: string[] = [];
+  let unreplaced: string[] = [];
   do {
     const current = (await options.statuses()).filter((source) => BRIDGE_SOURCE.test(source.id));
     const byProvider = new Map(current.map((source) => [source.id.split(":")[1], source]));
@@ -62,7 +80,13 @@ export async function refreshCatalogSources(options: {
       return source === undefined || source.sessionState !== "ACTIVE" ||
         source.acquiredAtMs === null || source.acquiredAtMs === undefined || source.acquiredAtMs < freshAfterMs;
     });
-    if (unavailable.length === 0) {
+    if (options.bridgeSources !== undefined) {
+      const bridgeSources = await options.bridgeSources();
+      unreplaced = REQUIRED_BRIDGE_LOBBIES.filter((lobby) => !bridgeSources.some((source) =>
+        source.lobby === lobby && source.state === "LIVE" && source.lastAcceptedAtMs >= freshAfterMs &&
+        !previousTabIds.get(lobby)?.has(source.tabId)));
+    }
+    if (unavailable.length === 0 && unreplaced.length === 0) {
       // A provider card can be temporarily absent from Fabet even while its
       // already attached reader returns a snapshot acquired in this reset
       // cycle. Catalog freshness is the functional reset result; do not turn
@@ -77,5 +101,8 @@ export async function refreshCatalogSources(options: {
     .filter((error) => error !== null)
     .map((error) => error instanceof Error ? error.message : "SOURCE_REFRESH_FAILED");
   messages.push(`CHROME_BRIDGE_REFRESH_INCOMPLETE:${unavailable.join(",") || "NO_CATALOG"}`);
+  if (unreplaced.length > 0) {
+    messages.push(`CHROME_BRIDGE_TAB_REPLACEMENT_INCOMPLETE:${unreplaced.join(",")}`);
+  }
   throw new Error(messages.join(";"));
 }

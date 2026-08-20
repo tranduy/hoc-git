@@ -293,10 +293,13 @@ export async function startServer(env: Readonly<Record<string, string | undefine
           return refreshBridgeProviderSources({
             controlPlane: chromeBridgeControlPlane,
             withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
-            minAcquiredAtMs: freshAfterMs
+            minAcquiredAtMs: freshAfterMs,
+            refreshLaunches: () => sessionServices.refreshFabetLaunches(),
+            maxLaunchAttempts: 3
           });
         } }),
-      statuses: () => catalogAccess.sources.listStatuses()
+      statuses: () => catalogAccess.sources.listStatuses(),
+      ...(chromeBridgeRegistry === null ? {} : { bridgeSources: () => chromeBridgeRegistry.listSources() })
     });
   },
     journal: new MaintenanceJournal({ nowMs: Date.now },

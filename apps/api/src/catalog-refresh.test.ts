@@ -145,4 +145,42 @@ describe("refreshCatalogSources", () => {
       timeoutMs: 0
     })).rejects.toThrow("SABA");
   });
+
+  it("does not report success until every source is owned by a replacement tab", async () => {
+    const oldSources = ["CMD", "IM", "SABA", "KSPORT", "TSPORT", "BTI"].map((lobby, index) => ({
+      lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99
+    }));
+    const bridgeSources = vi.fn()
+      .mockReturnValueOnce(oldSources)
+      .mockReturnValue(oldSources.map((source) => ({ ...source, lastAcceptedAtMs: 101 })));
+
+    await expect(refreshCatalogSources({
+      legacyRefresh: async () => undefined,
+      requestBridgeSnapshots: () => 6,
+      statuses: async () => activeBridgeStatuses(),
+      bridgeSources,
+      now: () => 100,
+      timeoutMs: 0
+    })).rejects.toThrow("CHROME_BRIDGE_TAB_REPLACEMENT_INCOMPLETE");
+  });
+
+  it("accepts fresh catalogs only after all six replacement tabs publish", async () => {
+    const lobbies = ["CMD", "IM", "SABA", "KSPORT", "TSPORT", "BTI"];
+    const bridgeSources = vi.fn()
+      .mockReturnValueOnce(lobbies.map((lobby, index) => ({
+        lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99
+      })))
+      .mockReturnValue(lobbies.map((lobby, index) => ({
+        lobby, tabId: index + 101, state: "LIVE", lastAcceptedAtMs: 101
+      })));
+
+    await expect(refreshCatalogSources({
+      legacyRefresh: async () => undefined,
+      requestBridgeSnapshots: () => 6,
+      statuses: async () => activeBridgeStatuses(),
+      bridgeSources,
+      now: () => 100,
+      timeoutMs: 0
+    })).resolves.toBeUndefined();
+  });
 });

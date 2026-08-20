@@ -24,10 +24,10 @@ describe("SourceTabRecovery", () => {
     await recovery.ensure("BTI", "https://prod20091.fxf774.com/fresh");
 
     expect(operations).toEqual([
+      "remove:7",
       "create:about:blank",
       "attach:https://prod20091.fxf774.com/fresh",
-      "update:8:https://prod20091.fxf774.com/fresh",
-      "remove:7"
+      "update:8:https://prod20091.fxf774.com/fresh"
     ]);
   });
 
@@ -67,8 +67,8 @@ describe("SourceTabRecovery", () => {
     expect(tabs).toEqual([{ id: 9, url: "https://cgnew.fts368.com/sports?generation=2" }]);
     expect(attached).toEqual([{ lobby: "CMD", tabId: 9 }]);
     expect(operations).toEqual([
-      "create:8", "attach:8", "update:8", "remove:7",
-      "create:9", "attach:9", "update:9", "remove:8"
+      "remove:7", "create:8", "attach:8", "update:8",
+      "remove:8", "create:9", "attach:9", "update:9"
     ]);
   });
 
@@ -118,7 +118,27 @@ describe("SourceTabRecovery", () => {
     expect(launchFromPortal).not.toHaveBeenCalled();
   });
 
-  it("keeps the existing source tab when attaching its replacement fails", async () => {
+  it("waits for the K-Sports sportsbook instead of accepting a Volta page on the same host", async () => {
+    const get = vi.fn()
+      .mockResolvedValueOnce({ id: 10, url: "https://zenandfe.com/volta", title: "Volta" })
+      .mockResolvedValueOnce({ id: 10, url: "https://zenandfe.com/sports", title: "Sportsbook" });
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "KSPORT", tabId: 7 }],
+      query: async () => [{ id: 7, url: "https://zenandfe.com/?token=old", title: "Sportsbook" }],
+      create: async (url) => ({ id: 10, url }),
+      attach: async () => undefined,
+      update: async (tabId) => ({ id: tabId, url: "https://zenandfe.com/volta", title: "Volta" }),
+      remove: async () => undefined,
+      get,
+      delay: async () => undefined
+    });
+
+    await recovery.ensure("KSPORT", "https://zenandfe.com/?token=fresh");
+
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes the existing source before opening and cleans a failed replacement", async () => {
     const removed: number[] = [];
     const recovery = new SourceTabRecovery({
       listAttached: () => [{ lobby: "CMD", tabId: 7 }],
@@ -132,7 +152,7 @@ describe("SourceTabRecovery", () => {
     await expect(recovery.ensure("CMD", "https://cgnew.fts368.com/fresh"))
       .rejects.toThrow("ATTACH_FAILED");
 
-    expect(removed).toEqual([8]);
+    expect(removed).toEqual([7, 8]);
   });
 
   it("replaces an existing recognized lobby tab even when it was not attached", async () => {
@@ -215,7 +235,7 @@ describe("SourceTabRecovery", () => {
 
     await recovery.restore("CMD");
 
-    expect(operations).toEqual(["create:8", "attach:8", "update:8", "remove:7"]);
+    expect(operations).toEqual(["remove:7", "create:8", "attach:8", "update:8"]);
   });
 
   it("creates a tab from the session-only remembered launch when recently closed history is unavailable", async () => {

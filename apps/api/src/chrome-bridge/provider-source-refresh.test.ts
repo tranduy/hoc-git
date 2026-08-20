@@ -23,8 +23,9 @@ describe("refreshBridgeProviderSources", () => {
     ]);
   });
 
-  it("recovers every available provider before reporting one missing launch", async () => {
+  it("does not replace any provider when one fresh launch is missing", async () => {
     const ensureLobby = vi.fn((_lobby: string, _url: string) => 1);
+    const restoreLobby = vi.fn(() => 1);
     const withLatestFabetLaunch = async <T>(provider: "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI",
       _category: "FOOTBALL", consume: (url: string) => Promise<T>): Promise<T> => {
       if (provider === "IM") throw new Error("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
@@ -32,13 +33,34 @@ describe("refreshBridgeProviderSources", () => {
     };
 
     await expect(refreshBridgeProviderSources({
-      controlPlane: { ensureLobby, restoreLobby: vi.fn(() => 1) },
+      controlPlane: { ensureLobby, restoreLobby },
       withLatestFabetLaunch,
       minAcquiredAtMs: 123
     })).rejects.toThrow("FABET_PROVIDER_LAUNCH_UNAVAILABLE:IM");
-    expect(ensureLobby.mock.calls.map((call) => call[0])).toEqual([
-      "SABA", "KSPORT", "TSPORT", "BTI"
-    ]);
+    expect(ensureLobby).not.toHaveBeenCalled();
+    expect(restoreLobby).not.toHaveBeenCalled();
+  });
+
+  it("recaptures Fabet launches before replacing tabs when the first preflight is incomplete", async () => {
+    const ensureLobby = vi.fn((_lobby: string, _url: string) => 1);
+    const restoreLobby = vi.fn(() => 1);
+    let attempt = 0;
+    const refreshLaunches = vi.fn(async () => { attempt = 1; });
+    const withLatestFabetLaunch = async <T>(provider: "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI",
+      _category: "FOOTBALL", consume: (url: string) => Promise<T>): Promise<T> => {
+      if (provider === "IM" && attempt === 0) throw new Error("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
+      return consume(`https://${provider.toLowerCase()}.provider.test/fresh`);
+    };
+
+    const operation = refreshBridgeProviderSources({
+      controlPlane: { ensureLobby, restoreLobby }, withLatestFabetLaunch, minAcquiredAtMs: 123,
+      refreshLaunches,
+      maxLaunchAttempts: 2
+    });
+    await expect(operation).resolves.toBe(6);
+    expect(refreshLaunches).toHaveBeenCalledOnce();
+    expect(ensureLobby).toHaveBeenCalledTimes(5);
+    expect(restoreLobby).toHaveBeenCalledOnce();
   });
 
   it("fails when a fresh launch cannot be delivered to its attached lobby", async () => {
