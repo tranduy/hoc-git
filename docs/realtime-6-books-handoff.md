@@ -53,3 +53,74 @@
   pages. This handoff does **not** claim that any bookmaker is realtime.
 - Existing unstaged collector/reset work in the worktree remains untouched and is
   not part of commit `d0711c5`.
+
+## CMD collector and direct-price verification
+
+- Commit: `271ddcc` (`fix(cmd): preserve realtime snapshot generations`)
+- Scope: CMD only. No other bookmaker collector was staged or committed.
+
+### Fixes
+
+- `CmdSnapshotAssembler` now tracks the newest generation independently from
+  chunk arrival time. A late chunk from an older snapshot cannot complete and
+  overwrite a newer CMD catalog; source reset clears the generation watermark.
+- `CmdDomCatalogAdapter` supplies both the monotonic arrival clock and provider
+  observation generation to the assembler.
+- CMD direct-price checks retain the expanded event/participant/market identity,
+  while remaining compatible with the installed strict bridge bundle. The two
+  command shapes are mutually exclusive: a new bundle accepts the full command;
+  the installed bundle accepts the exact-ID compatibility command. Missing
+  `method` is inferred as `DOM` only for this known CMD bundle.
+- Added reusable CMD runtime verifiers for source/catalog/WebSocket and browser
+  UI observation without provider-tab navigation.
+
+### Regression tests
+
+- Out-of-order chunks assemble once in index order.
+- A late old generation cannot overwrite the newer snapshot.
+- HOME `-0.25` and AWAY `+0.25` retain exact event/market/selection identity.
+- FULL_TIME does not mix with FIRST_HALF at the same line.
+- The same market/line in two events resolves only the requested event.
+- A missing exact CMD selection fails closed.
+- Installed CMD bridge compatibility remains correlated to the exact request.
+
+Verification on 2026-08-21:
+
+- CMD/provider/bridge focused suite: **160 passed** across 27 files.
+- Web revision/UI suite: **70 passed, 4 skipped** across 2 files.
+- `npm.cmd run typecheck`: all six workspaces passed.
+- Runtime verifier scripts passed `node --check`; `git diff --cached --check`
+  passed before commit.
+
+### Authenticated runtime evidence
+
+- No provider tab was reset, reloaded, closed, or navigated. The same CMD tab
+  remained `chrome:CMD:2105811967` throughout.
+- Ten-minute source soak (`.auth/run/cmd-runtime-evidence.json`): 591/591 samples
+  LIVE; source sequence `5366 -> 5708`; catalog revision changed 99 times and
+  the WebSocket delivered 99 CMD revision messages; event count stayed between
+  98 and 108 with **0** live samples at zero events; no WebSocket errors.
+- A concrete exact quote changed without a refresh, for example
+  `25243041 | legacy:25243041:3:0.5 | ...:over` changed `-0.78 -> -0.80`
+  from source sequence `5398 -> 5402`.
+- Ten-minute browser UI soak (`.auth/run/cmd-ui-runtime-evidence.json`): exactly
+  one document navigation, 100 CMD catalog responses, the same exact quote
+  changes observed in the page session, and no page errors. This proves the UI
+  consumed CMD updates without F5.
+- Direct DOM AH check: event `25243032`, market
+  `legacy:25243032:1:0/0.5`, HOME line `-0.25`; TOOL `0.76`, direct CMD `0.76`,
+  `MATCH`, 40 ms.
+- Direct DOM TOTAL check: event `25243041`, market
+  `legacy:25243041:3:0.5`, OVER line `0.5`; TOOL `-0.88`, direct CMD `-0.88`,
+  `MATCH`, 32 ms.
+- Full identities and both prices were persisted to
+  `%LOCALAPPDATA%/tool-chenh/logs/realtime-ticket-checks.jsonl` under check IDs
+  `61d30d81-3d81-4216-abd0-6a7b29f5a786` and
+  `e09519ea-986b-476a-ad4f-7f8b35a37604`.
+
+### Remaining CMD note
+
+- The currently installed extension is an older strict bundle. CMD works now
+  through the tested compatibility path above. Reloading a newly built extension
+  later will select the full-identity command automatically; it is not required
+  for the runtime PASS recorded here.
