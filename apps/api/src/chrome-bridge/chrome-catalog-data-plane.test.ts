@@ -59,6 +59,29 @@ const fallbackStatus: CatalogSourceStatus = { id: "catalog-source:CMD:FOOTBALL",
   provider: "CMD", category: "FOOTBALL", sessionState: "UNCONFIGURED", acquiredAtMs: null, reason: null };
 
 describe("ChromeCatalogDataPlane", () => {
+  it("drops retained adapter state when a provider moves to a replacement tab", async () => {
+    let now = 1_000;
+    const plane = new ChromeCatalogDataPlane({ now: () => now });
+    const replacementRecord = { ...record, matchId: "event-2", teamNames: ["Gamma", "Delta"] };
+    const returnedRecord = { ...record, matchId: "event-3", teamNames: ["Epsilon", "Zeta"] };
+    const fromSource = (sourceId: string, tabId: number, sequence: number, value: unknown,
+      snapshotId: string): ChromeBridgeEnvelope => ({
+      ...envelope(sequence, [value], 0, 1, snapshotId), sourceId, tabId, observedAtMs: now
+    });
+
+    expect(plane.ingest(fromSource("chrome:CMD:9", 9, 1, record, "cmd:9:source-switch-first-0001"))).toBe(true);
+    now += 1;
+    expect(plane.ingest(fromSource("chrome:CMD:10", 10, 1, replacementRecord,
+      "cmd:10:source-switch-first-0001"))).toBe(true);
+    now += 1;
+    expect(plane.ingest(fromSource("chrome:CMD:9", 9, 2, returnedRecord,
+      "cmd:9:source-switch-returned-0002"))).toBe(true);
+
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({
+      events: [{ providerEventId: "event-3" }]
+    });
+  });
+
   it("does not report an authenticated bridge source as active until it has a fresh decoded catalog", async () => {
     let now = 1_500;
     const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000 });

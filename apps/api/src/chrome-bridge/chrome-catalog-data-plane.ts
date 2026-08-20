@@ -42,6 +42,7 @@ export class ChromeCatalogDataPlane {
   readonly #transportStartedAtMs = new Map<string, number>();
   readonly #lastRecoveryAtMs = new Map<string, number>();
   readonly #sourceEpochs = new Map<string, string>();
+  readonly #activeSourceIds = new Map<string, string>();
   readonly #invalidatedAccounts = new Set<string>();
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
@@ -71,6 +72,15 @@ export class ChromeCatalogDataPlane {
     if (!Number.isFinite(ageMs) || ageMs > this.#maxEnvelopeAgeMs) return false;
     const transportAccountId = accountIdForLobby(envelope.lobby);
     let stateChanged = false;
+    if (transportAccountId !== null) {
+      const previousSourceId = this.#activeSourceIds.get(transportAccountId);
+      if (previousSourceId !== undefined && previousSourceId !== envelope.sourceId) {
+        this.#router.resetSource(previousSourceId);
+        this.#networkBodies.resetSource(previousSourceId);
+        this.#sourceEpochs.delete(previousSourceId);
+      }
+      this.#activeSourceIds.set(transportAccountId, envelope.sourceId);
+    }
     if (envelope.sourceEpoch !== undefined) {
       const priorEpoch = this.#sourceEpochs.get(envelope.sourceId);
       if (priorEpoch !== undefined && priorEpoch !== envelope.sourceEpoch) {
