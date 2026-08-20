@@ -180,7 +180,36 @@ describe("refreshCatalogSources", () => {
       statuses: async () => activeBridgeStatuses(),
       bridgeSources,
       now: () => 100,
-      timeoutMs: 0
+      timeoutMs: 0,
+      stabilityMs: 0
     })).resolves.toBeUndefined();
+  });
+
+  it("does not report success when a replacement source stops after its initial snapshot", async () => {
+    const lobbies = ["CMD", "IM", "SABA", "KSPORT", "TSPORT", "BTI"];
+    let nowMs = 100;
+    let bridgeRead = 0;
+    const bridgeSources = vi.fn(() => {
+      bridgeRead += 1;
+      if (bridgeRead === 1) return lobbies.map((lobby, index) => ({
+        lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99
+      }));
+      return lobbies.map((lobby, index) => ({
+        lobby, tabId: index + 101, state: "LIVE",
+        lastAcceptedAtMs: lobby === "KSPORT" ? 101 : Math.max(101, nowMs)
+      }));
+    });
+
+    await expect(refreshCatalogSources({
+      legacyRefresh: async () => undefined,
+      requestBridgeSnapshots: () => 6,
+      statuses: async () => activeBridgeStatuses(),
+      bridgeSources,
+      now: () => nowMs,
+      timeoutMs: 4,
+      pollMs: 1,
+      stabilityMs: 2,
+      sleep: async (delayMs) => { nowMs += delayMs; }
+    })).rejects.toThrow("CHROME_BRIDGE_STABILITY_INCOMPLETE:KSPORT");
   });
 });

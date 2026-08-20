@@ -72,13 +72,16 @@ describe("SourceTabRecovery", () => {
     ]);
   });
 
-  it("consumes the authenticated K-Sports launch directly after closing failed duplicate sessions", async () => {
+  it("opens K-Sports through the Fabet portal after closing failed duplicate sessions", async () => {
     const operations: string[] = [];
     const create = vi.fn(async (url: string) => {
       operations.push(`create:${url}`);
       return { id: 10, url };
     });
-    const launchFromPortal = vi.fn(async (_lobby, url) => ({ id: 11, url, title: "Sportsbook" }));
+    const launchFromPortal = vi.fn(async (_lobby, url) => {
+      operations.push("launch:portal");
+      return { id: 11, url, title: "Sportsbook" };
+    });
     const recovery = new SourceTabRecovery({
       listAttached: () => [{ lobby: "KSPORT", tabId: 7 }],
       query: async () => [
@@ -97,10 +100,9 @@ describe("SourceTabRecovery", () => {
 
     await recovery.ensure("KSPORT", "https://zenandfe.com/?token=fresh");
 
-    expect(launchFromPortal).not.toHaveBeenCalled();
-    expect(operations).toEqual([
-      "remove:7", "remove:9", "create:about:blank", "attach:10", "update:10"
-    ]);
+    expect(launchFromPortal).toHaveBeenCalledWith("KSPORT", "https://zenandfe.com/?token=fresh");
+    expect(operations).toEqual(["remove:7", "remove:9", "launch:portal"]);
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("rejects an empty K-Sports token before closing the current source", async () => {
@@ -125,10 +127,11 @@ describe("SourceTabRecovery", () => {
     const recovery = new SourceTabRecovery({
       listAttached: () => [{ lobby: "KSPORT", tabId: 7 }],
       query: async () => [{ id: 7, url: "https://zenandfe.com/?token=old", title: "Sportsbook" }],
-      create: async (url) => ({ id: 10, url }),
-      attach: async () => undefined,
-      update: async (tabId) => ({ id: tabId, url: "https://zenandfe.com/volta", title: "Volta" }),
+      create: vi.fn(),
+      attach: vi.fn(),
+      update: vi.fn(),
       remove: async () => undefined,
+      launchFromPortal: async () => ({ id: 10, url: "https://zenandfe.com/volta", title: "Volta" }),
       get,
       delay: async () => undefined
     });

@@ -56,6 +56,14 @@ export class SourceTabRecovery {
     // its replacement. This keeps repeated resets from accumulating Chrome
     // processes and prevents old/new feeds from publishing concurrently.
     await Promise.all([...oldTabIds].map(async (tabId) => this.#options.remove!(tabId)));
+    if (lobby === "KSPORT" && this.#options.launchFromPortal !== undefined) {
+      // K-Sports launches a short-lived bootstrap tab that can close itself
+      // and hand off to a child sportsbook. Let the signed-in Fabet portal
+      // create and follow that popup chain instead of navigating a standalone
+      // extension-created tab that dies shortly after its first snapshot.
+      await this.#waitForLobby(await this.#options.launchFromPortal(lobby, url), lobby);
+      return;
+    }
     const pending = await this.#options.create("about:blank", false);
     try {
       if (pending.id === undefined) throw new Error("SOURCE_TAB_RECOVERY_FAILED");

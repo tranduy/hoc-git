@@ -24,6 +24,8 @@ export async function refreshCatalogSources(options: {
   readonly now?: () => number;
   readonly timeoutMs?: number;
   readonly pollMs?: number;
+  readonly stabilityMs?: number;
+  readonly sleep?: (delayMs: number) => Promise<void>;
 }): Promise<void> {
   if (options.requestBridgeSnapshots === undefined) {
     await options.legacyRefresh();
@@ -69,9 +71,15 @@ export async function refreshCatalogSources(options: {
   // the previous 15-second boundary.
   const timeoutMs = options.timeoutMs ?? 30_000;
   const pollMs = options.pollMs ?? 250;
+  const stabilityMs = options.bridgeSources === undefined ? 0 : options.stabilityMs ?? 10_000;
+  const sleep = options.sleep ?? ((delayMs: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
   const deadline = now() + timeoutMs;
   let unavailable: string[] = [];
   let unreplaced: string[] = [];
+  let unstable: string[] = [];
+  let stabilityStartedAtMs: number | null = null;
+  let stabilityBaseline = new Map<string, { readonly tabId: number; readonly lastAcceptedAtMs: number }>();
   do {
     const current = (await options.statuses()).filter((source) => BRIDGE_SOURCE.test(source.id));
     const byProvider = new Map(current.map((source) => [source.id.split(":")[1], source]));
@@ -80,11 +88,16 @@ export async function refreshCatalogSources(options: {
       return source === undefined || source.sessionState !== "ACTIVE" ||
         source.acquiredAtMs === null || source.acquiredAtMs === undefined || source.acquiredAtMs < freshAfterMs;
     });
+    let replacements = new Map<string, BridgeSourceStatus>();
     if (options.bridgeSources !== undefined) {
       const bridgeSources = await options.bridgeSources();
-      unreplaced = REQUIRED_BRIDGE_LOBBIES.filter((lobby) => !bridgeSources.some((source) =>
-        source.lobby === lobby && source.state === "LIVE" && source.lastAcceptedAtMs >= freshAfterMs &&
-        !previousTabIds.get(lobby)?.has(source.tabId)));
+      for (const lobby of REQUIRED_BRIDGE_LOBBIES) {
+        const replacement = bridgeSources.filter((source) => source.lobby === lobby && source.state === "LIVE" &&
+          source.lastAcceptedAtMs >= freshAfterMs && !previousTabIds.get(lobby)?.has(source.tabId))
+          .sort((left, right) => right.lastAcceptedAtMs - left.lastAcceptedAtMs)[0];
+        if (replacement !== undefined) replacements.set(lobby, replacement);
+      }
+      unreplaced = REQUIRED_BRIDGE_LOBBIES.filter((lobby) => !replacements.has(lobby));
     }
     if (unavailable.length === 0 && unreplaced.length === 0) {
       // A provider card can be temporarily absent from Fabet even while its
@@ -92,17 +105,39 @@ export async function refreshCatalogSources(options: {
       // cycle. Catalog freshness is the functional reset result; do not turn
       // a healthy live feed into a false global failure merely because there
       // was no replacement launch URL for that one provider.
-      return;
+      if (stabilityMs <= 0) return;
+      const replacementChanged = REQUIRED_BRIDGE_LOBBIES.some((lobby) =>
+        stabilityBaseline.get(lobby)?.tabId !== replacements.get(lobby)?.tabId);
+      if (stabilityStartedAtMs === null || replacementChanged) {
+        stabilityStartedAtMs = now();
+        stabilityBaseline = new Map([...replacements].map(([lobby, source]) => [lobby, {
+          tabId: source.tabId, lastAcceptedAtMs: source.lastAcceptedAtMs
+        }]));
+        unstable = [...REQUIRED_BRIDGE_LOBBIES];
+      } else {
+        unstable = REQUIRED_BRIDGE_LOBBIES.filter((lobby) => {
+          const source = replacements.get(lobby);
+          const baseline = stabilityBaseline.get(lobby);
+          return source === undefined || baseline === undefined || source.lastAcceptedAtMs <= baseline.lastAcceptedAtMs;
+        });
+        if (now() - stabilityStartedAtMs >= stabilityMs && unstable.length === 0) return;
+      }
+    } else {
+      stabilityStartedAtMs = null;
+      stabilityBaseline.clear();
+      unstable = [];
     }
     if (now() >= deadline) break;
-    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - now()))));
+    await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
   } while (true);
   const messages = [preparationError, requestError]
     .filter((error) => error !== null)
     .map((error) => error instanceof Error ? error.message : "SOURCE_REFRESH_FAILED");
-  messages.push(`CHROME_BRIDGE_REFRESH_INCOMPLETE:${unavailable.join(",") || "NO_CATALOG"}`);
+  if (unavailable.length > 0) messages.push(`CHROME_BRIDGE_REFRESH_INCOMPLETE:${unavailable.join(",")}`);
   if (unreplaced.length > 0) {
     messages.push(`CHROME_BRIDGE_TAB_REPLACEMENT_INCOMPLETE:${unreplaced.join(",")}`);
   }
+  if (unstable.length > 0) messages.push(`CHROME_BRIDGE_STABILITY_INCOMPLETE:${unstable.join(",")}`);
+  if (messages.length === 0) messages.push("CHROME_BRIDGE_REFRESH_INCOMPLETE:NO_CATALOG");
   throw new Error(messages.join(";"));
 }
