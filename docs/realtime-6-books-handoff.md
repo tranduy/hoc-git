@@ -308,3 +308,71 @@ Verification on 2026-08-21:
 - There was no live IM fixture during the soak, so retention of an old-start live
   event is test-proven rather than live-runtime-proven. No other IM blocker was
   observed in this run.
+
+## SBOBET/KSPORT STOMP catalog and exact-price verification
+
+- Commit: `158cb57` (`fix(sbobet): harden realtime stomp ingestion`)
+- Scope: KSPORT/SBOBET STOMP decoder and catalog adapter, KSPORT transport
+  validity, exact-price probing, tab identity, replay, and SBOBET-only runtime
+  verification scripts. No collector for another bookmaker was committed.
+
+### Fixes and regression coverage
+
+- SockJS/STOMP MESSAGE fragments are reassembled through NUL termination;
+  heartbeats and late RECEIPT frames cannot poison or replay the next provider
+  message. Live and today must both establish a baseline before publication.
+- Provider receipt order is monotonic per partition. Event deltas merge by
+  provider event ID and market deltas merge by provider market ID without
+  erasing unrelated events or markets. Full partition snapshots still replace
+  atomically.
+- An explicit socket OPEN retires the old stream and starts an empty epoch. Late
+  old-stream frames are ignored. CLOSED retires the current stream, invalidates
+  the catalog, and clears retained replay frames so stale prices cannot be
+  resurrected.
+- Replay retains every STOMP fragment from only the current sports stream. A
+  continuation fragment does not need to repeat the destination header.
+- Tab heartbeats, analytics, jackpot frames and undecodable WS frames do not
+  refresh KSPORT catalog liveness. Only a decoded provider catalog update can
+  do so; the system therefore fails closed instead of showing heartbeat-only
+  data as realtime.
+- Volta/error/non-sportsbook tabs are rejected as KSPORT authorities.
+- Direct price verification first checks exact visible DOM identity across all
+  frames. DOM is accepted only when event ID, ordered participants, market ID,
+  selection ID, market type, scope, canonical line and outcome all match. If no
+  DOM candidate exists, frames are tried sequentially with one fresh no-store
+  `/api/v2/getEvent` request at a time. It stops on the first fully identified
+  result; multiple candidates and missing identity fail closed. Catalog odds
+  are never returned as `SÀN HIỆN TẠI`.
+
+### Tests and runtime evidence on 2026-08-21
+
+- Focused suite: **141 passed** across seven SBOBET/KSPORT adapter, observer,
+  price, identity and normalizer files.
+- API and extension typecheck passed; API and extension builds passed;
+  `git diff --cached --check` passed.
+- Independent code review found no remaining Critical or Important issue after
+  the closed-stream retirement regression was added.
+- Passive ten-minute soak (`sbobet-runtime-evidence.json`): 591 samples; source
+  heartbeat sequence `1574 -> 2031`; provider status was `ACTION_REQUIRED` in
+  **591/591** samples and `ACTIVE` in **0/591**; no false-zero transition;
+  retained stale catalog stayed at 62 events and one unchanged revision.
+- A bounded CDP capture contained no KSPORT sports STOMP frame. It contained
+  only the tab heartbeat, analytics traffic and a direct `/api/v2/getEvent`
+  HTTP 404. Therefore there was no real quote delta available to prove
+  frame -> source sequence -> catalog revision -> UI in this run.
+- Direct AH and TOTAL preflight both failed closed with `SOURCE_UNAVAILABLE` /
+  `SBOBET_DIRECT_HTTP_404`; no catalog price was substituted as the current
+  bookmaker price.
+
+### Runtime status and remaining blocker
+
+- Runtime realtime status is **NOT PASS**. The current authenticated KSPORT tab
+  has no active sportsbook STOMP feed, so quote-change/UI-no-F5 and direct AH /
+  TOTAL MATCH evidence cannot be produced honestly.
+- No launcher, provider reset, reload, close or URL change was performed. The
+  code is built, but loading the rebuilt extension into the existing Chrome
+  session would itself require an extension/tab lifecycle action outside this
+  task's runtime constraints.
+- Evidence remains untracked in `sbobet-runtime-evidence.json`,
+  `sbobet-direct-price-precheck.json`, and the capture under
+  `%LOCALAPPDATA%/tool-chenh/chrome-bridge-captures/`.
