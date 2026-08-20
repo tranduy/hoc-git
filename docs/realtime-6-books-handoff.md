@@ -243,3 +243,68 @@ Verification on 2026-08-21:
   `apsport-direct-price-diagnostic.json`.
 - The 03:00 scheduled maintenance overlapped a discarded intermediate monitor;
   none of its observations are used for the clean soak evidence above.
+
+## IM atomic GetSE catalog and exact-price verification
+
+- Commit: `e7c7c59` (`fix(im): publish atomic realtime generations`)
+- Scope: IM collector, IM direct-price resolver, and only the shared diagnostic
+  handling required to carry IM fail-closed results. No collector for another
+  bookmaker was staged or committed.
+
+### Fixes and regression coverage
+
+- Each signed in-page GetSE refresh assigns one generation to Market 1 and
+  Market 2. The API publishes only after both partitions of that generation
+  arrive; a new partition cannot be combined with an old one, reverse arrival
+  is supported, and a complete old generation arriving late cannot roll the
+  catalog back. Source reset clears pending/current generation state so a lower
+  sequence in a new epoch is accepted.
+- IM recovery continues to use the lightweight `REQUEST_SNAPSHOT` path and the
+  authenticated in-page signing helper. It never uses `RELOAD_SOURCE` for the
+  one-time IM URL.
+- Prematch extraction retains only the next 48 hours. Live events bypass that
+  age filter. Runtime contained no prematch event beyond 48 hours; the old-live
+  case is covered by the focused catalog regression test because no IM live
+  event existed during this run.
+- Direct-price verification never clicks, opens, or navigates to an IM event.
+  It accepts a visible DOM value only with exact event/market/selection IDs;
+  otherwise it signs and sends fresh no-store Market 1 and Market 2 GetSE
+  requests in the existing authenticated main world. Event, ordered
+  participants, market ID/type, scope, outcome, line and selection ID must all
+  match uniquely. Missing, ambiguous, stale-scope/line/outcome and unavailable
+  token/request results fail closed.
+
+### Tests and runtime evidence on 2026-08-21
+
+- TDD red cases were observed for mixed Market 1/Market 2 generations, a late
+  complete old generation, missing direct-price module, navigation-based IM
+  probing, and previously unrecognized IM direct diagnostics.
+- API focused suite: **51 passed** across five files.
+- Extension focused suite: **69 passed** across two files.
+- Typecheck: all six workspaces passed; `git diff --cached --check` passed.
+- Ten-minute source soak (`im-runtime-evidence.json`): **586/586** samples LIVE,
+  source sequence `285 -> 673`, 27 catalog revision changes and 35 IM WebSocket
+  revision messages. Event count stayed between 417 and 420 with **0** false-zero
+  samples and no WebSocket errors.
+- Ten-minute browser UI soak (`im-ui-runtime-evidence.json`): exactly one initial
+  document navigation, 27 IM catalog responses, the same exact-ID quote changes
+  as the API monitor, and no page errors. Example selection
+  `112810440|2505747403|32416727556` changed `0.82 -> 0.78`, sequence
+  `291 -> 303`, without F5.
+- Final authenticated direct AH check `6dfb613b-bd96-465c-9fd1-cbebd98827fc`:
+  event `112768882`, market `2504645311`, selection `32399416603`, HOME line
+  `0.5`; TOOL `0.92`, fresh GetSE `0.92`, `MATCH`, `IN_PAGE_FETCH`.
+- Final authenticated direct TOTAL check `e7feb063-5188-4e51-ac08-668283195548`:
+  event `112732851`, market `2503756420`, selection `32392951293`, OVER line
+  `2.75`; TOOL `0.80`, fresh GetSE `0.80`, `MATCH`, `IN_PAGE_FETCH`.
+- The final build was deployed without resetting, reloading, closing or changing
+  any provider tab URL. IM remained on tab `2105812090`; after the final API
+  restart it was LIVE with 419 events and 1,864 quotes.
+
+### Evidence files and remaining note
+
+- Evidence is kept untracked in `im-runtime-evidence.json`,
+  `im-ui-runtime-evidence.json`, and `im-direct-price-evidence-final.json`.
+- There was no live IM fixture during the soak, so retention of an old-start live
+  event is test-proven rather than live-runtime-proven. No other IM blocker was
+  observed in this run.
