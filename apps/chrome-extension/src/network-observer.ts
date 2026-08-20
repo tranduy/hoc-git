@@ -565,6 +565,18 @@ export class NetworkObserver {
       this.#imCatalogRefreshes.set(source.sourceId, operation);
       return operation;
     }
+    if (source.lobby === "KSPORT") {
+      const conditions = { latency: 0, downloadThroughput: -1, uploadThroughput: -1 };
+      const disconnected = await this.#sendCommand(source.tabId, "Network.emulateNetworkConditions", {
+        ...conditions, offline: true
+      }).then(() => true).catch(() => false);
+      if (!disconnected) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      await this.#sendCommand(source.tabId, "Network.emulateNetworkConditions", {
+        ...conditions, offline: false
+      }).catch(() => ({}));
+      return;
+    }
     if (source.lobby !== "BTI") return;
     await this.#runPeriodicDomWork(async () => {
       const frameTree = await this.#withFrameCommandTimeout(

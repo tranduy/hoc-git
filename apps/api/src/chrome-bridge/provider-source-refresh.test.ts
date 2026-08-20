@@ -23,7 +23,7 @@ describe("refreshBridgeProviderSources", () => {
     ]);
   });
 
-  it("fails closed when one provider has no newly captured launch", async () => {
+  it("recovers every available provider before reporting one missing launch", async () => {
     const ensureLobby = vi.fn((_lobby: string, _url: string) => 1);
     const withLatestFabetLaunch = async <T>(provider: "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI",
       _category: "FOOTBALL", consume: (url: string) => Promise<T>): Promise<T> => {
@@ -35,8 +35,10 @@ describe("refreshBridgeProviderSources", () => {
       controlPlane: { ensureLobby, restoreLobby: vi.fn(() => 1) },
       withLatestFabetLaunch,
       minAcquiredAtMs: 123
-    })).rejects.toThrow("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
-    expect(ensureLobby).not.toHaveBeenCalled();
+    })).rejects.toThrow("FABET_PROVIDER_LAUNCH_UNAVAILABLE:IM");
+    expect(ensureLobby.mock.calls.map((call) => call[0])).toEqual([
+      "SABA", "KSPORT", "TSPORT", "BTI"
+    ]);
   });
 
   it("fails when a fresh launch cannot be delivered to its attached lobby", async () => {

@@ -143,6 +143,35 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
   });
 
+  it("reconnects the K-Sports network in place to recover its missing baseline without reloading the tab", async () => {
+    vi.useFakeTimers();
+    try {
+      const sendCommand = vi.fn(async (_tabId: number, _method: string,
+        _params?: Record<string, unknown>) => ({}));
+      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+      const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
+
+      const recovery = observer.refreshCatalog(ksport);
+      await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledWith(8, "Network.emulateNetworkConditions", {
+        offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1
+      }));
+      await vi.advanceTimersByTimeAsync(250);
+      await recovery;
+
+      expect(sendCommand.mock.calls).toEqual([
+        [8, "Network.emulateNetworkConditions", {
+          offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1
+        }],
+        [8, "Network.emulateNetworkConditions", {
+          offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1
+        }]
+      ]);
+      expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("requests only IM prematch events in the next 48-hour UTC window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-19T00:00:00.000Z"));

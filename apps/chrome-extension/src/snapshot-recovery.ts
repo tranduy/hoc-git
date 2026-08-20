@@ -7,7 +7,7 @@ export function snapshotRecoveryMode(lobby: ChromeLobbyId): SnapshotRecoveryMode
   // currently visible viewport; a tab reload is required to make its socket
   // replay the complete reset/done snapshot after bridge state is lost.
   if (lobby === "CMD") return "DOM_CAPTURE";
-  if (lobby === "BTI" || lobby === "IM") return "CATALOG_REFRESH";
+  if (lobby === "BTI" || lobby === "IM" || lobby === "KSPORT") return "CATALOG_REFRESH";
   return "TAB_RELOAD";
 }
 

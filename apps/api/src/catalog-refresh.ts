@@ -33,19 +33,24 @@ export async function refreshCatalogSources(options: {
     preparationError = error;
   }
   let requestedSnapshots: number | null = null;
+  let requestError: unknown = null;
   try {
     requestedSnapshots = await options.requestBridgeSnapshots(freshAfterMs);
   } catch (error) {
-    // A reset command that could not acquire or deliver every launch is a
-    // failed reset even if an attached tab happens to publish concurrently.
-    throw error;
+    // Continue through the freshness gate so one missing launch cannot hide
+    // another provider whose replacement tab never produced a valid catalog.
+    requestError = error;
   }
   if (requestedSnapshots === 0) {
     if (preparationError !== null) throw preparationError;
     throw new Error("CHROME_BRIDGE_NO_ATTACHED_SOURCE");
   }
 
-  const timeoutMs = options.timeoutMs ?? 15_000;
+  // Fabet launch capture can finish before an IM one-time page exposes both
+  // signed catalog partitions. Its bounded in-page bootstrap retry completes
+  // within ~20 seconds, so the reset gate must not declare the source dead at
+  // the previous 15-second boundary.
+  const timeoutMs = options.timeoutMs ?? 30_000;
   const pollMs = options.pollMs ?? 250;
   const deadline = now() + timeoutMs;
   let unavailable: string[] = [];
@@ -57,10 +62,16 @@ export async function refreshCatalogSources(options: {
       return source === undefined || source.sessionState !== "ACTIVE" ||
         source.acquiredAtMs === null || source.acquiredAtMs === undefined || source.acquiredAtMs < freshAfterMs;
     });
-    if (unavailable.length === 0) return;
+    if (unavailable.length === 0) {
+      if (requestError !== null) throw requestError;
+      return;
+    }
     if (now() >= deadline) break;
     await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - now()))));
   } while (true);
-  if (preparationError !== null) throw preparationError;
-  throw new Error(`CHROME_BRIDGE_REFRESH_INCOMPLETE:${unavailable.join(",") || "NO_CATALOG"}`);
+  const messages = [preparationError, requestError]
+    .filter((error) => error !== null)
+    .map((error) => error instanceof Error ? error.message : "SOURCE_REFRESH_FAILED");
+  messages.push(`CHROME_BRIDGE_REFRESH_INCOMPLETE:${unavailable.join(",") || "NO_CATALOG"}`);
+  throw new Error(messages.join(";"));
 }

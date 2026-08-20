@@ -425,6 +425,9 @@ describe("FabetBrowserDriver", () => {
   it("accepts only the provider launch field from the game-url response shape", () => {
     expect(providerLaunchUrlFromResponseBody({ data: { url: "https://provider.test/launch" } }))
       .toBe("https://provider.test/launch");
+    expect(providerLaunchUrlFromResponseBody({ data: { url: "https://zenandfe.com/?token=" } })).toBeNull();
+    expect(providerLaunchUrlFromResponseBody({ data: { url: "https://zenandfe.com/?token=fresh" } }))
+      .toBe("https://zenandfe.com/?token=fresh");
     expect(providerLaunchUrlFromResponseBody({ url: "https://provider.test/wrong-level" })).toBeNull();
   });
 

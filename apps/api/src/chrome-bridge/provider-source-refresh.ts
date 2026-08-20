@@ -25,27 +25,39 @@ const PROVIDER_LOBBIES = [
 ] as const satisfies readonly (readonly [FabetProvider, ChromeLobbyId])[];
 
 export async function refreshBridgeProviderSources(options: RefreshOptions): Promise<number> {
-  // Resolve the complete fresh launch set before touching any attached tab.
-  // Partial success would mix old and new one-time tokens and make the button
-  // report a successful refresh while one provider remains expired.
   const selected = options.providers === undefined
     ? PROVIDER_LOBBIES
     : PROVIDER_LOBBIES.filter(([provider]) => options.providers?.includes(provider));
-  const launches = await Promise.all(
-    selected.map(async ([provider, lobby]) =>
-      options.withLatestFabetLaunch(provider, "FOOTBALL", async (url) => ({ lobby, url }),
-        options.minAcquiredAtMs)));
+  const launches = await Promise.all(selected.map(async ([provider, lobby]) => {
+    try {
+      const launch = await options.withLatestFabetLaunch(provider, "FOOTBALL",
+        async (url) => ({ lobby, url }), options.minAcquiredAtMs);
+      return { ok: true, provider, launch } as const;
+    } catch (error) {
+      return { ok: false, provider, error } as const;
+    }
+  }));
 
   let requested = 0;
-  for (const launch of launches) {
-    const delivered = options.controlPlane.ensureLobby(launch.lobby, launch.url);
-    if (delivered === 0) throw new Error(`CHROME_BRIDGE_ENSURE_UNDELIVERED:${launch.lobby}`);
+  let firstFailure: Error | null = null;
+  for (const result of launches) {
+    if (!result.ok) {
+      const reason = result.error instanceof Error ? result.error.message : "FABET_PROVIDER_LAUNCH_UNAVAILABLE";
+      firstFailure ??= new Error(`${reason}:${result.provider}`);
+      continue;
+    }
+    const delivered = options.controlPlane.ensureLobby(result.launch.lobby, result.launch.url);
+    if (delivered === 0) {
+      firstFailure ??= new Error(`CHROME_BRIDGE_ENSURE_UNDELIVERED:${result.launch.lobby}`);
+      continue;
+    }
     requested += delivered;
   }
   if (options.restoreCmd ?? true) {
     const restored = options.controlPlane.restoreLobby("CMD");
-    if (restored === 0) throw new Error("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
-    requested += restored;
+    if (restored === 0) firstFailure ??= new Error("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
+    else requested += restored;
   }
+  if (firstFailure !== null) throw firstFailure;
   return requested;
 }

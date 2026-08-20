@@ -7,12 +7,13 @@ describe("snapshotRecoveryMode", () => {
     expect(snapshotRecoveryMode("CMD")).toBe("DOM_CAPTURE");
     expect(snapshotRecoveryMode("BTI")).toBe("CATALOG_REFRESH");
     expect(snapshotRecoveryMode("IM")).toBe("CATALOG_REFRESH");
-    for (const lobby of ["SABA", "KSPORT", "TSPORT", "SBO"] as const) {
+    expect(snapshotRecoveryMode("KSPORT")).toBe("CATALOG_REFRESH");
+    for (const lobby of ["SABA", "TSPORT", "SBO"] as const) {
       expect(snapshotRecoveryMode(lobby)).toBe("TAB_RELOAD");
     }
   });
 
-  it.each(["BTI", "IM"] as const)("refreshes %s in place without replacing its source", async (lobby) => {
+  it.each(["BTI", "IM", "KSPORT"] as const)("refreshes %s in place without replacing its source", async (lobby) => {
     const capture = vi.fn(async () => undefined);
     const reload = vi.fn(async () => undefined);
     const refresh = vi.fn(async () => undefined);

@@ -110,8 +110,13 @@ export class TabRegistry {
       candidates.push(tab);
       byLobby.set(recognized.lobby, candidates);
     }
-    for (const candidates of byLobby.values()) {
-      candidates.sort((left, right) => (right.id ?? -1) - (left.id ?? -1));
+    for (const [lobby, candidates] of byLobby) {
+      candidates.sort((left, right) => {
+        const leftPreferred = left.id !== undefined && this.#preferred.get(left.id) === lobby ? 1 : 0;
+        const rightPreferred = right.id !== undefined && this.#preferred.get(right.id) === lobby ? 1 : 0;
+        return tabRestoreQuality(lobby, right) - tabRestoreQuality(lobby, left) ||
+          rightPreferred - leftPreferred || (right.id ?? -1) - (left.id ?? -1);
+      });
       let activeTabId: number | null = null;
       for (const tab of candidates) {
         try {
@@ -153,6 +158,14 @@ export class TabRegistry {
     for (const [tabId, lobby] of this.#preferred) preferences[String(tabId)] = lobby;
     await this.#store.save(preferences);
   }
+}
+
+function tabRestoreQuality(lobby: ChromeLobbyId, tab: TabDescriptor): number {
+  if (lobby !== "KSPORT") return 0;
+  const title = tab.title?.trim() ?? "";
+  if (/sportsbook/iu.test(title)) return 2;
+  if (/something went wrong/iu.test(title) || /^zenandfe\.com(?:\/|\?|$)/iu.test(title)) return -1;
+  return 0;
 }
 
 function isExistingDebuggerAttachment(error: unknown): boolean {

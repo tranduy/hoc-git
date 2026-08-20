@@ -109,7 +109,14 @@ export function providerLaunchUrlFromResponseBody(value: unknown): string | null
   const data = (value as Record<string, unknown>).data;
   if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
   const url = (data as Record<string, unknown>).url;
-  return typeof url === "string" ? url : null;
+  if (typeof url !== "string") return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.toLowerCase() === "zenandfe.com" && !parsed.searchParams.get("token")?.trim()) return null;
+  } catch {
+    return null;
+  }
+  return url;
 }
 
 export function capturedTopLevelNavigation(lobbyOrigin: string, label: string, value: string): CapturedNavigation | null {

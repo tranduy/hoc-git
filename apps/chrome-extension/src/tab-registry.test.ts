@@ -66,27 +66,49 @@ describe("TabRegistry", () => {
     expect(attach).toHaveBeenCalledWith(99);
   });
 
-  it("keeps one newest tab per lobby and closes older duplicates during startup restore", async () => {
+  it("restores the persisted source tab before a newer same-host product tab", async () => {
     const attach = vi.fn(async () => undefined);
     const closed: number[] = [];
     const registry = new TabRegistry(
       { attach, detach: vi.fn(async () => undefined) },
-      { load: async () => ({ "7": "IM", "9": "IM", "8": "CMD" }), save: vi.fn(async () => undefined) },
+      { load: async () => ({ "7": "KSPORT", "8": "CMD" }), save: vi.fn(async () => undefined) },
       { closeTab: async (tabId) => { closed.push(tabId); } }
     );
 
     await registry.restore([
-      { id: 7, url: "https://imsports.directsb.net/old" },
-      { id: 9, url: "https://imsports.directsb.net/new" },
+      { id: 7, url: "https://zenandfe.com/sports" },
+      { id: 9, url: "https://zenandfe.com/volta" },
       { id: 8, url: "https://cgnew.fts368.com/live" }
     ]);
 
     expect(registry.list()).toHaveLength(2);
     expect(registry.list()).toEqual(expect.arrayContaining([
       expect.objectContaining({ lobby: "CMD", tabId: 8 }),
-      expect.objectContaining({ lobby: "IM", tabId: 9 })
+      expect.objectContaining({ lobby: "KSPORT", tabId: 7 })
     ]));
-    expect(closed).toEqual([7]);
+    expect(closed).toEqual([9]);
+  });
+
+  it("rejects a persisted K-Sports error page in favour of the loaded Sportsbook tab", async () => {
+    const attached: number[] = [];
+    const closed: number[] = [];
+    const registry = new TabRegistry({
+      attach: async (tabId) => { attached.push(tabId); },
+      detach: async () => undefined
+    }, {
+      load: async () => ({ "9": "KSPORT" }),
+      save: async () => undefined
+    }, {
+      closeTab: async (tabId) => { closed.push(tabId); }
+    });
+
+    await registry.restore([
+      { id: 7, url: "https://zenandfe.com/?token=old", title: "Sportsbook" },
+      { id: 9, url: "https://zenandfe.com/?token=failed", title: "zenandfe.com/?token=failed" }
+    ]);
+
+    expect(attached).toEqual([7]);
+    expect(closed).toEqual([9]);
   });
 
   it("reclaims an orphaned debugger attachment after the extension worker restarts", async () => {

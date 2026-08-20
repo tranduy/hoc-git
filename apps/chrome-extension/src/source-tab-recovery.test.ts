@@ -72,6 +72,49 @@ describe("SourceTabRecovery", () => {
     ]);
   });
 
+  it("opens K-Sports through the signed-in portal after closing failed duplicate sessions", async () => {
+    const operations: string[] = [];
+    const create = vi.fn(async (url: string) => ({ id: 10, url }));
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "KSPORT", tabId: 7 }],
+      query: async () => [
+        { id: 7, url: "https://zenandfe.com/?token=old", title: "Sportsbook" },
+        { id: 9, url: "https://zenandfe.com/?token=failed", title: "zenandfe.com/?token=failed" }
+      ],
+      create,
+      launchFromPortal: async (_lobby, url) => {
+        operations.push("portal");
+        return { id: 11, url, title: "Sportsbook" };
+      },
+      attach: async (tab) => { operations.push(`attach:${tab.id}`); },
+      update: async (tabId, url) => {
+        operations.push(`update:${tabId}`);
+        return { id: tabId, url, title: "Sportsbook" };
+      },
+      remove: async (tabId) => { operations.push(`remove:${tabId}`); }
+    });
+
+    await recovery.ensure("KSPORT", "https://zenandfe.com/?token=fresh");
+
+    expect(create).not.toHaveBeenCalled();
+    expect(operations).toEqual(["remove:7", "remove:9", "portal", "attach:11"]);
+  });
+
+  it("rejects an empty K-Sports token before closing the current source", async () => {
+    const remove = vi.fn(async () => undefined);
+    const launchFromPortal = vi.fn(async () => ({ id: 11, url: "https://zenandfe.com/?token=", title: "Sportsbook" }));
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "KSPORT", tabId: 7 }],
+      query: async () => [{ id: 7, url: "https://zenandfe.com/?token=old", title: "Sportsbook" }],
+      create: vi.fn(), update: vi.fn(), attach: vi.fn(), remove, launchFromPortal
+    });
+
+    await expect(recovery.ensure("KSPORT", "https://zenandfe.com/?token="))
+      .rejects.toThrow("FABET_KSPORT_TOKEN_UNAVAILABLE");
+    expect(remove).not.toHaveBeenCalled();
+    expect(launchFromPortal).not.toHaveBeenCalled();
+  });
+
   it("keeps the existing source tab when attaching its replacement fails", async () => {
     const removed: number[] = [];
     const recovery = new SourceTabRecovery({

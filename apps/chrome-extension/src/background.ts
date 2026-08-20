@@ -11,6 +11,8 @@ import { tabsNeedingContentScriptRefresh } from "./extension-update.js";
 import { SourceTabKeepAlive } from "./source-tab-keepalive.js";
 import { CmdSnapshotPoller } from "./cmd-snapshot-poller.js";
 import { SourceTabRecovery } from "./source-tab-recovery.js";
+import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
+import { retryImBootstrapRefresh } from "./im-bootstrap-refresh.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 
@@ -80,6 +82,12 @@ async function attachRecoveredTab(tab: TabDescriptor): Promise<void> {
     sourceId: `chrome:${attached.lobby}:${attached.tabId}`
   };
   await observer.start(source);
+  if (source.lobby === "IM") {
+    // The authenticated IM page can need several seconds before both signed
+    // GetSE partitions become callable. Retry in-page capture during this
+    // bounded bootstrap window; never navigate or reload the provider tab.
+    void retryImBootstrapRefresh(() => observer.refreshCatalog(source));
+  }
   // A recovered provider launch can be one-time. Reloading it here consumes
   // the restored navigation and can make the provider close the tab again.
   // The current extension worker already owns the observer, so attach it
@@ -97,6 +105,25 @@ async function rememberRecognizedUrl(tab: TabDescriptor): Promise<void> {
   await chrome.storage.session.set({ [sourceLaunchUrlsKey]: { ...current, [recognized.lobby]: tab.url } });
 }
 
+const fabetPortalLauncher = new FabetPortalLauncher({
+  query: async () => chrome.tabs.query({}),
+  update: async (tabId, url, active) => {
+    const tab = await chrome.tabs.update(tabId, { url, active });
+    if (!tab) throw new Error("FABET_PORTAL_TAB_UNAVAILABLE");
+    return tab;
+  },
+  focusWindow: async (windowId) => { await chrome.windows.update(windowId, { focused: true }); },
+  attachDebugger: async (tabId) => chrome.debugger.attach({ tabId }, "1.3"),
+  detachDebugger: async (tabId) => chrome.debugger.detach({ tabId }),
+  sendCommand: async (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params),
+  addCreatedListener: (listener) => chrome.tabs.onCreated.addListener(listener),
+  removeCreatedListener: (listener) => chrome.tabs.onCreated.removeListener(listener),
+  addUpdatedListener: (listener) => chrome.tabs.onUpdated.addListener(listener),
+  removeUpdatedListener: (listener) => chrome.tabs.onUpdated.removeListener(listener),
+  attachSource: attachRecoveredTab,
+  get: async (tabId) => chrome.tabs.get(tabId)
+});
+
 const sourceTabRecovery = new SourceTabRecovery({
   listAttached: () => registry.list(),
   query: async () => chrome.tabs.query({}),
@@ -109,6 +136,10 @@ const sourceTabRecovery = new SourceTabRecovery({
   remove: async (tabId) => chrome.tabs.remove(tabId),
   get: async (tabId) => chrome.tabs.get(tabId),
   attach: attachRecoveredTab,
+  launchFromPortal: async (lobby, sourceMarkerUrl) => {
+    if (lobby !== "KSPORT") throw new Error("FABET_PORTAL_LAUNCH_UNSUPPORTED");
+    return fabetPortalLauncher.launchKsport(sourceMarkerUrl);
+  },
   recentlyClosed: async () => (await chrome.sessions.getRecentlyClosed({ maxResults: 25 })).map((session) => {
     const sessionId = session.tab?.sessionId ?? session.window?.sessionId;
     return {
