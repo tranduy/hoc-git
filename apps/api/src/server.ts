@@ -25,7 +25,6 @@ import { createChromeCatalogOverlay } from "./chrome-bridge/chrome-catalog-overl
 import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-feature-flags.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
 import { refreshBridgeProviderSources } from "./chrome-bridge/provider-source-refresh.js";
-import { AutomaticSourceRecovery } from "./chrome-bridge/automatic-source-recovery.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 
@@ -239,7 +238,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
   const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane() : null;
-  let requestAutomaticSourceRecovery = (_accountId: string): void => undefined;
   const cmdHiddenMarketProbe = chromeBridgeRegistry && chromeBridgeControlPlane
     ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
       controlPlane: chromeBridgeControlPlane })
@@ -247,7 +245,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs: 20_000 });
-    }, onSourceRecoveryNeeded: (accountId) => requestAutomaticSourceRecovery(accountId) })
+    } })
     : null;
   if (chromeBridgeRegistry) {
     const allowedCaptureLobbies = captureLobbies(env.CHROME_BRIDGE_CAPTURE_LOBBIES);
@@ -289,16 +287,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   }),
     journal: new MaintenanceJournal({ nowMs: Date.now },
       join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
-  if (chromeBridgeControlPlane !== null) {
-    const automaticSourceRecovery = new AutomaticSourceRecovery({
-      controlPlane: chromeBridgeControlPlane,
-      refreshFabetLaunches: () => sessionServices.refreshFabetLaunches(),
-      withLatestFabetLaunch: sessionServices.withLatestFabetLaunch
-    });
-    requestAutomaticSourceRecovery = (accountId) => {
-      void automaticSourceRecovery.recover(accountId);
-    };
-  }
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,

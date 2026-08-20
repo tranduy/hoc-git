@@ -15,10 +15,6 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly freshnessMs?: number;
   readonly maxEnvelopeAgeMs?: number;
   readonly publish?: (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void;
-  readonly recoveryAfterMs?: number;
-  readonly recoveryCooldownMs?: number;
-  readonly missingTransportStartupGraceMs?: number;
-  readonly onSourceRecoveryNeeded?: (accountId: string) => void;
 }
 
 export class ChromeCatalogDataPlane {
@@ -26,11 +22,6 @@ export class ChromeCatalogDataPlane {
   readonly #freshnessMs: number;
   readonly #maxEnvelopeAgeMs: number;
   readonly #publish: ((catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void) | null;
-  readonly #recoveryAfterMs: number;
-  readonly #recoveryCooldownMs: number;
-  readonly #missingTransportStartupGraceMs: number;
-  readonly #startedAtMs: number;
-  readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
   readonly #router = new AdapterRouter([new CmdDomCatalogAdapter(), new ImHttpCatalogAdapter(),
     new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(), new TsportWsCatalogAdapter(),
     new BtiHttpCatalogAdapter()],
@@ -40,7 +31,6 @@ export class ChromeCatalogDataPlane {
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
   readonly #lastTransportAtMs = new Map<string, number>();
   readonly #transportStartedAtMs = new Map<string, number>();
-  readonly #lastRecoveryAtMs = new Map<string, number>();
   readonly #sourceEpochs = new Map<string, string>();
   readonly #activeSourceIds = new Map<string, string>();
   readonly #invalidatedAccounts = new Set<string>();
@@ -53,11 +43,6 @@ export class ChromeCatalogDataPlane {
     this.#freshnessMs = options.freshnessMs ?? 20_000;
     this.#maxEnvelopeAgeMs = options.maxEnvelopeAgeMs ?? 30_000;
     this.#publish = options.publish ?? null;
-    this.#recoveryAfterMs = options.recoveryAfterMs ?? 60_000;
-    this.#recoveryCooldownMs = options.recoveryCooldownMs ?? 300_000;
-    this.#missingTransportStartupGraceMs = options.missingTransportStartupGraceMs ?? 10_000;
-    this.#startedAtMs = this.#now();
-    this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
   }
 
   owns(accountId: string): boolean {
@@ -98,9 +83,6 @@ export class ChromeCatalogDataPlane {
         this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
       }
       this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
-      if (envelope.request.pathnameClass === "/__fieldline_heartbeat__") {
-        this.#requestRecoveryIfStalled(transportAccountId);
-      }
     }
     const assembled = this.#networkBodies.ingest(envelope);
     if (assembled === null) return stateChanged;
@@ -147,13 +129,6 @@ export class ChromeCatalogDataPlane {
       const fresh = !invalidated && catalog !== undefined && this.#now() - catalog.observedAtMs <= this.#freshnessMs;
       const transportAtMs = this.#lastTransportAtMs.get(status.id);
       const transportFresh = transportAtMs !== undefined && this.#now() - transportAtMs <= this.#freshnessMs;
-      if (!fresh && status.sessionState === "ACTIVE") {
-        const startupGraceElapsed = this.#now() - this.#startedAtMs >= this.#missingTransportStartupGraceMs;
-        const missingTransportFallback = status.id === "catalog-source:BTI:FOOTBALL" && startupGraceElapsed
-          ? status.acquiredAtMs ?? undefined
-          : undefined;
-        this.#requestRecoveryIfStalled(status.id, missingTransportFallback);
-      }
       if (fresh || (!invalidated && catalog !== undefined && transportFresh)) {
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTIVE",
           acquiredAtMs: catalog.observedAtMs, reason: null });
@@ -168,17 +143,6 @@ export class ChromeCatalogDataPlane {
       }
       return status;
     });
-  }
-
-  #requestRecoveryIfStalled(accountId: string, fallbackStalledSinceMs?: number): void {
-    const catalog = this.#catalogs.get(accountId);
-    const stalledSinceMs = catalog?.observedAtMs ?? this.#transportStartedAtMs.get(accountId) ??
-      fallbackStalledSinceMs;
-    if (stalledSinceMs === undefined || this.#now() - stalledSinceMs < this.#recoveryAfterMs) return;
-    const lastRecoveryAtMs = this.#lastRecoveryAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY;
-    if (this.#now() - lastRecoveryAtMs < this.#recoveryCooldownMs) return;
-    this.#lastRecoveryAtMs.set(accountId, this.#now());
-    try { this.#onSourceRecoveryNeeded?.(accountId); } catch { /* recovery is best-effort */ }
   }
 
   #invalidate(accountId: string): boolean {

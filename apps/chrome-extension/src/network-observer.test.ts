@@ -25,7 +25,7 @@ describe("NetworkObserver", () => {
     expect(String(evaluations[0]?.[2]?.expression)).toContain("slice(0, 12)");
   });
 
-  it("refreshes only IM's public football/live navigation without touching an odds cell", async () => {
+  it("keeps IM active without racing its explicit two-part snapshot recovery", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, _params?: Record<string, unknown>) => method === "Page.getFrameTree"
       ? { frameTree: { frame: { id: "top" } } }
       : method === "Page.createIsolatedWorld" ? { executionContextId: 9 } : {});
@@ -33,12 +33,13 @@ describe("NetworkObserver", () => {
 
     await observer.maintain({ lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 });
 
-    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate");
-    expect(evaluation?.[2]?.expression).toBe(IM_CATALOG_DISCOVERY_EXPRESSION);
+    expect(sendCommand).toHaveBeenCalledWith(8, "Emulation.setFocusEmulationEnabled", { enabled: true });
+    expect(sendCommand).toHaveBeenCalledWith(8, "Page.setWebLifecycleState", { state: "active" });
+    const evaluations = sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate");
+    expect(evaluations).toHaveLength(0);
     // IM's request signer and platform globals live in the page's main world.
     // An isolated world can see the DOM but cannot call that signer, which
     // silently leaves the catalog on StatusCode 500 responses.
-    expect(evaluation?.[2]).not.toHaveProperty("contextId");
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Page.createIsolatedWorld")).toHaveLength(0);
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("truc tiep");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("bong da");
@@ -61,6 +62,87 @@ describe("NetworkObserver", () => {
     expect(() => new Function(`return ${IM_CATALOG_DISCOVERY_EXPRESSION}`)).not.toThrow();
   });
 
+  it("requests both IM catalog partitions in page when snapshot recovery is requested", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "top" }, childFrames: [{ frame: { id: "im-app" } }] } }
+      : method === "Runtime.evaluate"
+        ? { result: { value: params?.contextId === 82
+          ? { status: "catalog-requested", responses: [
+            { market: 1, body: '{"sel":[],"StatusCode":100}' },
+            { market: 2, body: '{"sel":[],"StatusCode":100}' }
+          ] }
+          : { status: "navigation-not-found", responses: [] } } }
+        : {});
+    const forward = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(im, "Runtime.executionContextCreated", {
+      context: { id: 81, auxData: { frameId: "top", isDefault: true } }
+    });
+    await observer.handleEvent(im, "Runtime.executionContextCreated", {
+      context: { id: 82, auxData: { frameId: "im-app", isDefault: true } }
+    });
+
+    await observer.refreshCatalog(im);
+
+    expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.evaluate", {
+      expression: IM_CATALOG_DISCOVERY_EXPRESSION,
+      returnByValue: true,
+      awaitPromise: true
+    });
+    expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.evaluate", {
+      expression: IM_CATALOG_DISCOVERY_EXPRESSION,
+      contextId: 82,
+      returnByValue: true,
+      awaitPromise: true
+    });
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      transport: "TAB_STATE",
+      request: expect.objectContaining({ pathnameClass: "/__fieldline_im_catalog_refresh__" }),
+      payload: expect.objectContaining({
+        body: JSON.stringify({ results: ["top:navigation-not-found", "im-app:catalog-requested"] })
+      })
+    }));
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      transport: "HTTP_RESPONSE",
+      request: expect.objectContaining({
+        pathnameClass: "/api/EventV6/GetSE", providerPartition: "IM_MARKET_1"
+      }),
+      payload: expect.objectContaining({ body: '{"sel":[],"StatusCode":100}' })
+    }));
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      transport: "HTTP_RESPONSE",
+      request: expect.objectContaining({
+        pathnameClass: "/api/EventV6/GetSE", providerPartition: "IM_MARKET_2"
+      }),
+      payload: expect.objectContaining({ body: '{"sel":[],"StatusCode":100}' })
+    }));
+  });
+
+  it("coalesces concurrent IM snapshot recovery so both large partitions are fetched once", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Runtime.evaluate") {
+        await pending;
+        return { result: { value: { status: "catalog-requested", responses: [] } } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+
+    const first = observer.refreshCatalog(im);
+    const second = observer.refreshCatalog(im);
+    await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate"))
+      .toHaveLength(1));
+    release();
+    await Promise.all([first, second]);
+
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
+  });
+
   it("requests only IM prematch events in the next 48-hour UTC window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-19T00:00:00.000Z"));
@@ -76,24 +158,31 @@ describe("NetworkObserver", () => {
         }
       };
       const execute = new Function("document", "location", "window", "sessionStorage", "CustomEvent", "fetch",
-        `return ${IM_CATALOG_DISCOVERY_EXPRESSION}`) as (...args: unknown[]) => string;
+        `return ${IM_CATALOG_DISCOVERY_EXPRESSION}`) as (...args: unknown[]) => Promise<unknown>;
 
-      expect(execute(
+      const result = await execute(
         { documentElement: { dataset: {} }, querySelectorAll: () => [] },
         { hostname: "imsports.directsb.net", search: "" },
         windowStub,
         { getItem: () => "token" },
         class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
           get detail(): { c: string } { return this.init.detail; } },
-        async (_path: string, init: { body: string }) => { requests.push(JSON.parse(init.body)); return {}; }
-      )).toBe("catalog-requested");
-      await vi.runAllTimersAsync();
+        async (_path: string, init: { body: string }) => {
+          const request = JSON.parse(init.body) as Record<string, unknown>;
+          requests.push(request);
+          return { text: async () => JSON.stringify({ Market: request.Market, StatusCode: 100 }) };
+        }
+      );
 
       expect(requests).toHaveLength(2);
       expect(requests.map(({ DateFrom, DateTo, Market }) => ({ DateFrom, DateTo, Market }))).toEqual([
         { DateFrom: "2026/08/19", DateTo: "2026/08/21", Market: 1 },
         { DateFrom: "2026/08/19", DateTo: "2026/08/21", Market: 2 }
       ]);
+      expect(result).toEqual({ status: "catalog-requested", responses: [
+        { market: 1, body: '{"Market":1,"StatusCode":100}' },
+        { market: 2, body: '{"Market":2,"StatusCode":100}' }
+      ] });
     } finally {
       vi.useRealTimers();
     }
@@ -625,6 +714,95 @@ describe("NetworkObserver", () => {
       request: expect.objectContaining({ providerPartition: "IM_MARKET_2" })
     }));
     expect(JSON.stringify(forward.mock.calls)).not.toContain("must-not-leak");
+  });
+
+  it("recovers an omitted IM partition from CDP request post data", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Network.getRequestPostData") {
+        return { postData: JSON.stringify({ SportId: 1, Market: 1, token: "must-not-leak" }) };
+      }
+      if (method === "Network.getResponseBody") {
+        return { body: JSON.stringify({ StatusCode: 100, sel: [] }), base64Encoded: false };
+      }
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000,
+      monotonicNow: () => 50 });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "xhr-im",
+      request: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.responseReceived", { requestId: "xhr-im", type: "Fetch",
+      response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.loadingFinished", { requestId: "xhr-im" });
+
+    expect(sendCommand).toHaveBeenCalledWith(8, "Network.getRequestPostData", { requestId: "xhr-im" });
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      request: expect.objectContaining({ providerPartition: "IM_MARKET_1" })
+    }));
+    expect(JSON.stringify(forward.mock.calls)).not.toContain("must-not-leak");
+  });
+
+  it("emits a credential-free diagnostic when Chrome evicts an IM snapshot body", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Network.getRequestPostData") {
+        return { postData: JSON.stringify({ Market: 1 }) };
+      }
+      if (method === "Network.getResponseBody") throw new Error("body evicted");
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000,
+      monotonicNow: () => 50 });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+
+    await observer.handleEvent(im, "Network.responseReceived", { requestId: "xhr-im", type: "Fetch",
+      response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.loadingFinished", {
+      requestId: "xhr-im", encodedDataLength: 13 * 1024 * 1024
+    });
+
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      transport: "TAB_STATE",
+      request: expect.objectContaining({ pathnameClass: "/__fieldline_http_body_unavailable__" }),
+      payload: { encoding: "UTF8", body: JSON.stringify({
+        path: "/api/EventV6/GetSE", providerPartition: "IM_MARKET_1", encodedDataLength: 13 * 1024 * 1024
+      }) }
+    }));
+    expect(JSON.stringify(forward.mock.calls)).not.toContain("body evicted");
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Network.getResponseBody"))
+      .toHaveLength(3);
+  });
+
+  it("retries a transient IM body miss without reloading its tab", async () => {
+    let bodyAttempts = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Network.getRequestPostData") {
+        return { postData: JSON.stringify({ Market: 1 }) };
+      }
+      if (method === "Network.getResponseBody" && ++bodyAttempts < 3) throw new Error("body not ready");
+      if (method === "Network.getResponseBody") {
+        return { body: JSON.stringify({ StatusCode: 100, sel: [] }), base64Encoded: false };
+      }
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000,
+      monotonicNow: () => 50 });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+
+    await observer.handleEvent(im, "Network.responseReceived", { requestId: "xhr-im", type: "Fetch",
+      response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.loadingFinished", { requestId: "xhr-im", encodedDataLength: 471_781 });
+
+    expect(bodyAttempts).toBe(3);
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      transport: "HTTP_RESPONSE",
+      request: expect.objectContaining({ providerPartition: "IM_MARKET_1" })
+    }));
+    expect(forward.mock.calls.some(([message]) =>
+      message.request.pathnameClass === "/__fieldline_http_body_unavailable__")).toBe(false);
   });
 
   it("redacts and forwards a large UTF8 HTTP response as ordered wire-safe chunks", async () => {

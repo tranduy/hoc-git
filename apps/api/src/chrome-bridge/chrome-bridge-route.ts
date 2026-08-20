@@ -101,16 +101,11 @@ export function registerChromeBridgeRoute(
         if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") { socket.close(); return; }
         if (control.kind === "ACK" && !requestedSnapshots.has(parsed.data.sourceId)) {
           requestedSnapshots.add(parsed.data.sourceId);
-          // BTI launch URLs are one-time credentials. Its extension poller
-          // already performs an authenticated in-page catalog refresh, so a
-          // reconnect must not turn a healthy tab into a reload of a consumed
-          // launch. If no fresh catalog arrives, the data plane requests a
-          // newly issued launch through targeted source recovery.
-          if (parsed.data.lobby === "BTI") return;
-          // SABA needs a complete socket reset/done replay. Other sources can
-          // provide their current baseline without a new Fabet navigation.
-          const kind = parsed.data.lobby === "SABA" ? "RELOAD_SOURCE" : "REQUEST_SNAPSHOT";
-          socket.send(JSON.stringify({ version: 1, kind, sourceId: parsed.data.sourceId }));
+          // A loopback reconnect is not authorization to hard-reload a provider
+          // tab. CMD can recapture its DOM and IM can request both signed GetSE
+          // partitions in page; continuously streaming sources resume naturally.
+          if (parsed.data.lobby !== "CMD" && parsed.data.lobby !== "IM") return;
+          socket.send(JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: parsed.data.sourceId }));
         }
       });
     });

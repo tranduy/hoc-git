@@ -3,23 +3,26 @@ import { vi } from "vitest";
 import { recoverAttachedSource, snapshotRecoveryMode } from "./snapshot-recovery.js";
 
 describe("snapshotRecoveryMode", () => {
-  it("captures public DOM providers and reloads network-only providers after bridge state loss", () => {
+  it("recovers IM in page instead of hard-reloading its two-part catalog", () => {
     expect(snapshotRecoveryMode("CMD")).toBe("DOM_CAPTURE");
     expect(snapshotRecoveryMode("BTI")).toBe("CATALOG_REFRESH");
-    for (const lobby of ["SABA", "IM", "KSPORT", "TSPORT", "SBO"] as const) {
+    expect(snapshotRecoveryMode("IM")).toBe("CATALOG_REFRESH");
+    for (const lobby of ["SABA", "KSPORT", "TSPORT", "SBO"] as const) {
       expect(snapshotRecoveryMode(lobby)).toBe("TAB_RELOAD");
     }
   });
 
-  it("refreshes BTI in place without consuming its one-time launch again", async () => {
+  it.each(["BTI", "IM"] as const)("refreshes %s in place without replacing its source", async (lobby) => {
     const capture = vi.fn(async () => undefined);
     const reload = vi.fn(async () => undefined);
     const refresh = vi.fn(async () => undefined);
 
-    await recoverAttachedSource({ lobby: "BTI", tabId: 13, hostname: "prod20091.fxf774.com" },
+    await recoverAttachedSource({ lobby, tabId: 13, hostname: lobby === "BTI"
+      ? "prod20091.fxf774.com" : "imsports.directsb.net" },
       { capture, reload, refresh });
 
-    expect(refresh).toHaveBeenCalledWith({ lobby: "BTI", tabId: 13, hostname: "prod20091.fxf774.com" });
+    expect(refresh).toHaveBeenCalledWith({ lobby, tabId: 13, hostname: lobby === "BTI"
+      ? "prod20091.fxf774.com" : "imsports.directsb.net" });
     expect(capture).not.toHaveBeenCalled();
     expect(reload).not.toHaveBeenCalled();
   });
@@ -31,11 +34,8 @@ describe("snapshotRecoveryMode", () => {
 
     await recoverAttachedSource({ lobby: "SABA", tabId: 11, hostname: "c0z0oc.bp8newhost.com" },
       { capture, refresh, reload });
-    await recoverAttachedSource({ lobby: "IM", tabId: 12, hostname: "imsports.directsb.net" },
-      { capture, refresh, reload });
-
     expect(capture).not.toHaveBeenCalled();
     expect(refresh).not.toHaveBeenCalled();
-    expect(reload.mock.calls).toEqual([[11], [12]]);
+    expect(reload.mock.calls).toEqual([[11]]);
   });
 });

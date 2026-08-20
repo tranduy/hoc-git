@@ -42,24 +42,17 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
-  it("reloads SABA so its socket replays a full catalog on a new bridge connection", async () => {
+  it("does not hard-reload SABA merely because the local bridge reconnects", async () => {
     const { app, registry } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
       headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
       socket: loopbackSocket
     });
-    const firstControls = new Promise<unknown[]>((resolve) => {
-      const controls: unknown[] = [];
-      socket.on("message", (data) => {
-        controls.push(JSON.parse(data.toString("utf8")));
-        if (controls.length === 2) resolve(controls);
-      });
-    });
+    const controls: unknown[] = [];
+    socket.on("message", (data) => controls.push(JSON.parse(data.toString("utf8"))));
     socket.send(JSON.stringify(validEnvelope));
-    await expect(firstControls).resolves.toEqual([
-      expect.objectContaining({ kind: "ACK", sourceId: "chrome:SABA:7" }),
-      { version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:7" }
-    ]);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(controls).toEqual([expect.objectContaining({ kind: "ACK", sourceId: "chrome:SABA:7" })]);
     socket.send(JSON.stringify({ ...validEnvelope, sequence: 1 }));
     await expect(nextMessage(socket)).resolves.toMatchObject({ kind: "ACK", sequence: 1 });
     socket.terminate();

@@ -47,9 +47,9 @@ const registry = new TabRegistry({
 const observer = new NetworkObserver({
   sendCommand: async (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params),
   recoverImBaseline: async (source) => {
-    // Reload only the affected IM tab, and only when deltas prove that the
-    // extension has no replayable GetSE base. NetworkObserver rate-limits it.
-    await chrome.tabs.reload(source.tabId);
+    // Obtain both signed GetSE partitions inside the current authenticated IM
+    // page. Reloading changes source state and can discard the first partition.
+    await observer.refreshCatalog(source);
   },
   forward: async (envelope) => {
     if (!bridge) throw new Error("BRIDGE_NOT_CONFIGURED");

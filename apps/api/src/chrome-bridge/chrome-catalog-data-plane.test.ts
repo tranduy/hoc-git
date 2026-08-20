@@ -134,11 +134,9 @@ describe("ChromeCatalogDataPlane", () => {
     }]);
   });
 
-  it("requests one bounded recovery when IM transport stays live but its decoded catalog stops", async () => {
+  it("reports stale IM without starting an unauthorized source replacement", async () => {
     let now = 1_500;
-    const onSourceRecoveryNeeded = vi.fn();
-    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
-      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000 });
     const authenticated: CatalogSourceStatus = {
       ...fallbackStatus,
       id: "catalog-source:IM:FOOTBALL",
@@ -155,19 +153,13 @@ describe("ChromeCatalogDataPlane", () => {
       request: { hostname: "imsports.directsb.net", pathnameClass: "/__fieldline_heartbeat__",
         resourceType: "Other" },
       payload: { encoding: "UTF8", body: "{}" } })).toBe(false);
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
     await plane.overlayStatuses([authenticated]);
     await plane.overlayStatuses([authenticated]);
-
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledWith("catalog-source:IM:FOOTBALL");
   });
 
-  it("requests recovery when a bridge keeps heartbeating but never produces its first catalog", () => {
+  it("does not replace a source that keeps heartbeating without its first catalog", () => {
     let now = 1_000;
-    const onSourceRecoveryNeeded = vi.fn();
-    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
-      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000 });
     const heartbeat = (sequence: number): ChromeBridgeEnvelope => ({
       ...envelope(sequence), observedAtMs: now, transport: "TAB_STATE",
       request: { hostname: "prod20091.fxf774.com", pathnameClass: "/__fieldline_heartbeat__",
@@ -179,18 +171,12 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(heartbeat(1))).toBe(false);
     now = 60_999;
     expect(plane.ingest(heartbeat(2))).toBe(false);
-    expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
     now = 61_001;
     expect(plane.ingest(heartbeat(3))).toBe(false);
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledWith("catalog-source:BTI:FOOTBALL");
   });
 
-  it("requests recovery when an authenticated BTI source loses its tab and all transport", async () => {
-    const onSourceRecoveryNeeded = vi.fn();
-    const plane = new ChromeCatalogDataPlane({ now: () => 61_001, freshnessMs: 20_000,
-      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, missingTransportStartupGraceMs: 0,
-      onSourceRecoveryNeeded });
+  it("reports a missing BTI transport without automatically replacing its tab", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 61_001, freshnessMs: 20_000 });
     const authenticated: CatalogSourceStatus = {
       ...fallbackStatus,
       id: "catalog-source:BTI:FOOTBALL",
@@ -205,14 +191,10 @@ describe("ChromeCatalogDataPlane", () => {
       sessionState: "ACTION_REQUIRED",
       reason: "PROVIDER_VALIDATION_FAILED"
     }]);
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledWith("catalog-source:BTI:FOOTBALL");
   });
 
   it("does not replace another provider tab only because the API has not received its first transport yet", async () => {
-    const onSourceRecoveryNeeded = vi.fn();
-    const plane = new ChromeCatalogDataPlane({ now: () => 61_001, freshnessMs: 20_000,
-      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+    const plane = new ChromeCatalogDataPlane({ now: () => 61_001, freshnessMs: 20_000 });
     const authenticated: CatalogSourceStatus = {
       ...fallbackStatus,
       id: "catalog-source:IM:FOOTBALL",
@@ -224,15 +206,11 @@ describe("ChromeCatalogDataPlane", () => {
     };
 
     await plane.overlayStatuses([authenticated]);
-
-    expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
   });
 
-  it("gives an existing BTI tab time to reconnect after an API restart before replacing it", async () => {
+  it("does not replace an existing BTI tab after an API restart", async () => {
     let now = 61_001;
-    const onSourceRecoveryNeeded = vi.fn();
-    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
-      recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000 });
     const authenticated: CatalogSourceStatus = {
       ...fallbackStatus,
       id: "catalog-source:BTI:FOOTBALL",
@@ -244,11 +222,9 @@ describe("ChromeCatalogDataPlane", () => {
     };
 
     await plane.overlayStatuses([authenticated]);
-    expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
 
     now += 10_001;
     await plane.overlayStatuses([authenticated]);
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
   });
 
   it("owns every configured Football source while the Chrome bridge is enabled", () => {

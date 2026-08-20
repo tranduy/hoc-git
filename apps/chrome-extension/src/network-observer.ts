@@ -261,11 +261,9 @@ export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
 // IM does not always request its GetSE catalog when a restored tab is left on
 // an event/detail route. Refresh only an exact public navigation label; never
 // use coordinates or selectors that can resolve to an odds cell.
-export const IM_CATALOG_DISCOVERY_EXPRESSION = `(() => {
+export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
   const root = document.documentElement;
   const now = Date.now();
-  const prior = Number(root.dataset.fieldlineImCatalogRefreshAt || 0);
-  if (Number.isFinite(prior) && now - prior < 15000) return 'rate-limited';
   // Read the same authenticated catalog endpoint used by the IM page. The
   // relative URL reuses the tab's existing session and never exports auth.
   // Network observation captures the response exactly like a normal UI read.
@@ -301,26 +299,26 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(() => {
       ['O' + 'ddsType']: 2, DateFrom: dateFrom, DateTo: dateTo, CompetitionIds: [],
       SortType: 2, ProgrammeIds: []
     };
-    void (async () => {
-      const path = '/api/EventV6/GetSE';
-      const token = sessionStorage.getItem('to' + 'ken') ||
-        new URLSearchParams(location.search).get('to' + 'ken');
-      if (!token) return;
-      for (const Market of [1, 2]) {
-        const signature = String(await sign(path));
-        await fetch(path, {
-          method: 'POST', credentials: 'omit', cache: 'no-store',
-          headers: {
-            Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8',
-            'x-sc': encodeURI(signature), 'x-v': '91460',
-            'x-platform': String(window.global?.PlatForm || ''),
-            ['x-' + 'token']: token
-          },
-          body: JSON.stringify({ ...common, Market })
-        });
-      }
-    })().catch(() => undefined);
-    return 'catalog-requested';
+    const path = '/api/EventV6/GetSE';
+    const token = sessionStorage.getItem('to' + 'ken') ||
+      new URLSearchParams(location.search).get('to' + 'ken');
+    if (!token) return { status: 'token-unavailable', responses: [] };
+    const responses = [];
+    for (const Market of [1, 2]) {
+      const signature = String(await sign(path));
+      const response = await fetch(path, {
+        method: 'POST', credentials: 'omit', cache: 'no-store',
+        headers: {
+          Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8',
+          'x-sc': encodeURI(signature), 'x-v': '91460',
+          'x-platform': String(window.global?.PlatForm || ''),
+          ['x-' + 'token']: token
+        },
+        body: JSON.stringify({ ...common, Market })
+      });
+      responses.push({ market: Market, body: await response.text() });
+    }
+    return { status: 'catalog-requested', responses };
   }
   const normalize = (value) => String(value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
     .trim().toLowerCase().replace(/\\s+/g, ' ');
@@ -334,9 +332,9 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(() => {
     if (!element) continue;
     root.dataset.fieldlineImCatalogRefreshAt = String(now);
     element.click();
-    return label;
+    return { status: label, responses: [] };
   }
-  return 'navigation-not-found';
+  return { status: 'navigation-not-found', responses: [] };
 })()`;
 
 // BTI's event-list is a same-origin authenticated GET. Trigger the same
@@ -433,6 +431,7 @@ export class NetworkObserver {
   readonly #tsportSnapshots = new Map<string, Map<string, ReplayableWsEvent>>();
   readonly #cmdCapturesInFlight = new Set<string>();
   readonly #imLastRecoveryAtMs = new Map<string, number>();
+  readonly #imCatalogRefreshes = new Map<string, Promise<void>>();
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, number>>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
@@ -498,6 +497,7 @@ export class NetworkObserver {
       this.#tsportSnapshots.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
+      this.#imCatalogRefreshes.delete(sourceId);
       this.#activeCmdHiddenProbes.delete(sourceId);
     }
     for (const [key, socket] of this.#webSockets) {
@@ -515,18 +515,13 @@ export class NetworkObserver {
     await this.#runPeriodicDomWork(async () => {
       await this.#sendCommand(source.tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => ({}));
       await this.#sendCommand(source.tabId, "Page.setWebLifecycleState", { state: "active" }).catch(() => ({}));
-      const expression = source.lobby === "IM" ? IM_CATALOG_DISCOVERY_EXPRESSION :
-        source.lobby === "CMD" ? CMD_CATALOG_DISCOVERY_EXPRESSION :
+      const expression = source.lobby === "CMD" ? CMD_CATALOG_DISCOVERY_EXPRESSION :
           source.lobby === "TSPORT" ? TSPORT_CATALOG_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
       if (source.lobby === "IM") {
-        // GetSE is signed by IM's page-owned helo/halo_ event handler and uses
-        // page globals. Evaluating in an isolated world can still read the DOM,
-        // but it cannot invoke that signer, so the request silently degrades to
-        // StatusCode 500. The expression is read-only and runs in the top page's
-        // main world; Network observation captures its resulting response.
-        await this.#sendCommand(source.tabId, "Runtime.evaluate", {
-          expression, returnByValue: true, awaitPromise: false
-        }).catch(() => ({}));
+        // IM's baseline is large and two-part. Request it only from the explicit
+        // recovery path below; running the same fetch here can consume the
+        // recovery window and leave Market 1 unavailable when Chrome evicts its
+        // debugger body. Focus/lifecycle commands above are enough for deltas.
         return;
       }
       const frameTree = await this.#withFrameCommandTimeout(
@@ -553,6 +548,23 @@ export class NetworkObserver {
   }
 
   async refreshCatalog(source: ObservedSource): Promise<void> {
+    if (source.lobby === "IM") {
+      const existing = this.#imCatalogRefreshes.get(source.sourceId);
+      if (existing !== undefined) return existing;
+      const operation = this.#runPeriodicDomWork(async () => {
+        const results = await this.#evaluateImCatalogMainWorlds(source, true);
+        await this.#emit(source, "https://imsports.directsb.net/__fieldline_im_catalog_refresh__",
+          "Diagnostic", "TAB_STATE", {
+            encoding: "UTF8", body: JSON.stringify({ results })
+          });
+      }).finally(() => {
+        if (this.#imCatalogRefreshes.get(source.sourceId) === operation) {
+          this.#imCatalogRefreshes.delete(source.sourceId);
+        }
+      });
+      this.#imCatalogRefreshes.set(source.sourceId, operation);
+      return operation;
+    }
     if (source.lobby !== "BTI") return;
     await this.#runPeriodicDomWork(async () => {
       const frameTree = await this.#withFrameCommandTimeout(
@@ -586,6 +598,41 @@ export class NetworkObserver {
         })).catch(() => ({}));
       }));
     });
+  }
+
+  async #evaluateImCatalogMainWorlds(source: ObservedSource, awaitPromise: boolean): Promise<string[]> {
+    const frameTree = await this.#withFrameCommandTimeout(
+      this.#sendCommand(source.tabId, "Page.getFrameTree")
+    ).catch(() => ({}));
+    const frameIds = collectFrameIds(frameTree);
+    const contexts = this.#mainWorldContexts.get(source.tabId);
+    const evaluate = async (label: string, contextId?: number): Promise<string> => {
+      const response = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression: IM_CATALOG_DISCOVERY_EXPRESSION, ...(contextId === undefined ? {} : { contextId }),
+          returnByValue: true, awaitPromise
+        }), awaitPromise ? 20_000 : this.#frameCommandTimeoutMs
+      ).catch(() => null);
+      const value = nestedValue(response, "result", "value");
+      if (awaitPromise && isRecord(value) && Array.isArray(value.responses)) {
+        for (const item of value.responses) {
+          if (!isRecord(item) || (item.market !== 1 && item.market !== 2) || typeof item.body !== "string") continue;
+          await this.ingestHttpResponse(source, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
+            item.body, item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2");
+        }
+      }
+      const status = isRecord(value) ? value.status : null;
+      const safeValue = typeof status === "string" && /^(?:catalog-requested|rate-limited|token-unavailable|navigation-not-found|truc tiep|live|bong da|football)$/u
+        .test(status) ? status : "unavailable";
+      return `${label}:${safeValue}`;
+    };
+    const evaluations: Array<Promise<string>> = [evaluate("top")];
+    for (const frameId of frameIds.slice(1)) {
+      const contextId = contexts?.get(frameId);
+      if (contextId === undefined) continue;
+      evaluations.push(evaluate(frameId.slice(0, 64), contextId));
+    }
+    return Promise.all(evaluations);
   }
 
   async heartbeat(source: ObservedSource, hostname: string): Promise<void> {
@@ -703,13 +750,26 @@ export class NetworkObserver {
       return;
     }
     if (method === "Network.loadingFinished" && key) {
-      const pending = this.#pending.get(key);
+      let pending = this.#pending.get(key);
       this.#pending.delete(key);
       this.#requestPartitions.delete(key);
-      if (!pending) return;
+      if (!pending || requestId === null) return;
+      let responseBodyRead = false;
       try {
-        const response = await this.#sendCommand(source.tabId, "Network.getResponseBody", { requestId });
+        if (pending.providerPartition === undefined && isImGetSeUrl(pending.source, pending.url)) {
+          const requestPostData = await this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId })
+            .catch(() => ({}));
+          const postData = isRecord(requestPostData) && typeof requestPostData.postData === "string"
+            ? requestPostData.postData : null;
+          const providerPartition = postData === null ? null : imPartitionFromRequest(pending.source, {
+            url: pending.url, postData
+          });
+          if (providerPartition !== null) pending = { ...pending, providerPartition };
+        }
+        const response = await this.#readResponseBody(source.tabId, requestId,
+          isImGetSeUrl(pending.source, pending.url));
         if (!isRecord(response) || typeof response.body !== "string") return;
+        responseBodyRead = true;
         if (response.base64Encoded === true) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "BASE64", body: response.body
@@ -728,16 +788,43 @@ export class NetworkObserver {
           return;
         }
         const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
+        const emissionPending = pending;
         const emissions = fragments.map((bodyFragment, chunkIndex) =>
-          this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
+          this.#emit(emissionPending.source, emissionPending.url, emissionPending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
               chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-          }, { request: { providerPartition: pending.providerPartition }, ...clocks }));
+          }, { request: { providerPartition: emissionPending.providerPartition }, ...clocks }));
         await Promise.all(emissions);
       } catch {
+        if (!responseBodyRead && isImGetSeUrl(pending.source, pending.url)) {
+          const encodedDataLength = typeof params.encodedDataLength === "number" &&
+            Number.isSafeInteger(params.encodedDataLength) && params.encodedDataLength >= 0
+            ? params.encodedDataLength : 0;
+          await this.#emit(pending.source,
+            "https://imsports.directsb.net/__fieldline_http_body_unavailable__", "Diagnostic", "TAB_STATE", {
+              encoding: "UTF8",
+              body: JSON.stringify({ path: "/api/EventV6/GetSE",
+                ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
+                encodedDataLength })
+            }).catch(() => undefined);
+        }
         // A response body can be evicted by Chrome; isolate it from the stream.
       }
     }
+  }
+
+  async #readResponseBody(tabId: number, requestId: string, retryTransientMiss: boolean): Promise<unknown> {
+    const retryDelaysMs = retryTransientMiss ? [0, 50, 150] : [0];
+    let lastError: unknown = new Error("RESPONSE_BODY_UNAVAILABLE");
+    for (const delayMs of retryDelaysMs) {
+      if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      try {
+        return await this.#sendCommand(tabId, "Network.getResponseBody", { requestId });
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
   }
 
   async ingestWebSocketFrame(source: ObservedSource, url: string, payloadData: string,
@@ -753,16 +840,19 @@ export class NetworkObserver {
   }
 
   async ingestHttpResponse(source: ObservedSource, url: string, resourceType: "XHR" | "Fetch",
-    body: string): Promise<void> {
+    body: string, providerPartition?: ImProviderPartition): Promise<void> {
     if (!/^https?:\/\//iu.test(url)) return;
-    const pending: PendingRequest = { source, url, resourceType };
+    const pending: PendingRequest = { source, url, resourceType,
+      ...(providerPartition === undefined ? {} : { providerPartition }) };
     const safeBody = redactNetworkBody(body);
     await this.#recoverMissingImBaseline(pending);
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
     const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
+    const request = providerPartition === undefined ? {} : { request: { providerPartition } };
     if (fragments.length === 1) {
-      await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody }, clocks);
+      await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
+        { ...request, ...clocks });
       return;
     }
     const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
@@ -771,7 +861,7 @@ export class NetworkObserver {
         encoding: "UTF8",
         body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex, chunkCount: fragments.length,
           bodyEncoding: "UTF8", bodyFragment })
-      }, clocks);
+      }, { ...request, ...clocks });
     }
   }
 
@@ -864,10 +954,10 @@ export class NetworkObserver {
     return result;
   }
 
-  async #withFrameCommandTimeout<T>(operation: Promise<T>): Promise<T> {
+  async #withFrameCommandTimeout<T>(operation: Promise<T>, timeoutMs = this.#frameCommandTimeoutMs): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error("frame-command-timeout")), this.#frameCommandTimeoutMs);
+      timer = setTimeout(() => reject(new Error("frame-command-timeout")), timeoutMs);
     });
     try {
       return await Promise.race([operation, timeout]);
@@ -1115,15 +1205,23 @@ export class NetworkObserver {
 function imPartitionFromRequest(source: ObservedSource,
   request: Record<string, unknown>): ImProviderPartition | null {
   if (source.lobby !== "IM" || typeof request.url !== "string" || typeof request.postData !== "string") return null;
-  let url: URL;
-  try { url = new URL(request.url); } catch { return null; }
-  if (url.hostname !== "imsports.directsb.net" || url.pathname !== "/api/EventV6/GetSE") return null;
+  if (!isImGetSeUrl(source, request.url)) return null;
   try {
     const body: unknown = JSON.parse(request.postData);
     if (!isRecord(body)) return null;
     return body.Market === 1 ? "IM_MARKET_1" : body.Market === 2 ? "IM_MARKET_2" : null;
   } catch {
     return null;
+  }
+}
+
+function isImGetSeUrl(source: ObservedSource, value: string): boolean {
+  if (source.lobby !== "IM") return false;
+  try {
+    const url = new URL(value);
+    return url.hostname === "imsports.directsb.net" && url.pathname === "/api/EventV6/GetSE";
+  } catch {
+    return false;
   }
 }
 
