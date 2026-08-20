@@ -220,6 +220,7 @@ async function configureBridgeOnce(): Promise<boolean> {
         }
       },
       socketFactory: (url, protocols) => new WebSocket(url, protocols) as unknown as BridgeSocket,
+      onOpen: async () => { await observer.replaySnapshots(); },
       onSnapshotRequest: async (sourceId) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
         if (!attached) return;

@@ -429,6 +429,7 @@ export class NetworkObserver {
   readonly #cmdSnapshotHosts = new Map<string, string>();
   readonly #httpSnapshots = new Map<string, ReplayableHttpSnapshot[]>();
   readonly #tsportSnapshots = new Map<string, Map<string, ReplayableWsEvent>>();
+  readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #cmdCapturesInFlight = new Set<string>();
   readonly #imLastRecoveryAtMs = new Map<string, number>();
   readonly #imCatalogRefreshes = new Map<string, Promise<void>>();
@@ -485,6 +486,7 @@ export class NetworkObserver {
     for (const sourceId of this.#cmdSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#httpSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#tsportSnapshots.keys()) remember(sourceId);
+    for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of sourceIds) {
       this.#sourceGenerations.set(sourceId, (this.#sourceGenerations.get(sourceId) ?? 0) + 1);
       this.#sequences.delete(sourceId);
@@ -495,6 +497,7 @@ export class NetworkObserver {
       this.#cmdSnapshotHosts.delete(sourceId);
       this.#httpSnapshots.delete(sourceId);
       this.#tsportSnapshots.delete(sourceId);
+      this.#catalogWsSnapshots.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
       this.#imCatalogRefreshes.delete(sourceId);
@@ -565,16 +568,11 @@ export class NetworkObserver {
       this.#imCatalogRefreshes.set(source.sourceId, operation);
       return operation;
     }
-    if (source.lobby === "KSPORT") {
-      const conditions = { latency: 0, downloadThroughput: -1, uploadThroughput: -1 };
-      const disconnected = await this.#sendCommand(source.tabId, "Network.emulateNetworkConditions", {
-        ...conditions, offline: true
-      }).then(() => true).catch(() => false);
-      if (!disconnected) return;
-      await new Promise<void>((resolve) => setTimeout(resolve, 250));
-      await this.#sendCommand(source.tabId, "Network.emulateNetworkConditions", {
-        ...conditions, offline: false
-      }).catch(() => ({}));
+    if (source.lobby === "KSPORT" || source.lobby === "SABA" || source.lobby === "TSPORT") {
+      // Rebuild API-side decoder state from the provider frames already
+      // observed in this unchanged tab. Preserve their clocks; replay is state
+      // recovery, never evidence that an old quote was observed just now.
+      await this.replaySnapshots(source.sourceId);
       return;
     }
     if (source.lobby !== "BTI") return;
@@ -739,8 +737,10 @@ export class NetworkObserver {
       if (!socket || !response || typeof response.payloadData !== "string") return;
       const opcode = typeof response.opcode === "number" ? response.opcode : 1;
       const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
-      if (opcode !== 2) this.#rememberTsportWsEvent(socket.source, socket.url, response.payloadData,
-        socket.streamId, clocks);
+      if (opcode !== 2) {
+        this.#rememberTsportWsEvent(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
+        this.#rememberCatalogWsFrame(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
+      }
       await this.#emit(socket.source, socket.url, "WebSocket", "WS_FRAME", {
         encoding: opcode === 2 ? "BASE64" : "UTF8",
         body: response.payloadData
@@ -844,7 +844,10 @@ export class NetworkObserver {
     if (!/^wss?:\/\//iu.test(url) || !Number.isInteger(opcode) || (opcode !== 1 && opcode !== 2)) return;
     const streamId = "manual";
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
-    if (opcode !== 2) this.#rememberTsportWsEvent(source, url, payloadData, streamId, clocks);
+    if (opcode !== 2) {
+      this.#rememberTsportWsEvent(source, url, payloadData, streamId, clocks);
+      this.#rememberCatalogWsFrame(source, url, payloadData, streamId, clocks);
+    }
     await this.#emit(source, url, "WebSocket", "WS_FRAME", {
       encoding: opcode === 2 ? "BASE64" : "UTF8",
       body: payloadData
@@ -1106,7 +1109,68 @@ export class NetworkObserver {
         replayed = true;
       }
     }
+    for (const [sourceId, partitions] of this.#catalogWsSnapshots) {
+      if (requestedSourceId !== undefined && sourceId !== requestedSourceId) continue;
+      for (const snapshots of partitions.values()) {
+        for (const snapshot of snapshots) {
+          await this.#emit(snapshot.source, snapshot.url, "WebSocket", "WS_FRAME", {
+            encoding: "UTF8", body: snapshot.body
+          }, { request: { streamId: snapshot.streamId, replayed: true },
+            observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
+          replayed = true;
+        }
+      }
+    }
     return replayed;
+  }
+
+  #rememberCatalogWsFrame(source: ObservedSource, url: string, body: string, streamId: string,
+    clocks: { readonly observedAtMs: number; readonly receivedMonotonicMs: number }): void {
+    if (source.lobby !== "SABA" && source.lobby !== "KSPORT") return;
+    let parsedUrl: URL;
+    try { parsedUrl = new URL(url); } catch { return; }
+    let partition = streamId;
+    let startsBaseline = source.lobby === "KSPORT";
+    if (source.lobby === "SABA") {
+      if (!/\/socket\.io\/?$/u.test(parsedUrl.pathname) || !body.startsWith("42")) return;
+      try {
+        const payload: unknown = JSON.parse(body.slice(2));
+        if (!Array.isArray(payload) || payload[0] !== "m" || typeof payload[1] !== "string" ||
+          !Array.isArray(payload[2])) return;
+        partition = `${streamId}:${payload[1]}`;
+        startsBaseline = payload[2].some((row) => Array.isArray(row) &&
+          (row[1] === "reset" || row[1] === "empty"));
+      } catch { return; }
+    } else if (!/\/sport\//u.test(parsedUrl.pathname) ||
+      !body.includes("destination:/topic/sports/")) return;
+    const partitions = this.#catalogWsSnapshots.get(source.sourceId) ?? new Map<string, ReplayableWsEvent[]>();
+    if (startsBaseline && source.lobby === "SABA") partitions.set(partition, []);
+    const retained = partitions.get(partition);
+    if (retained === undefined && source.lobby === "SABA") return;
+    const frames = retained ?? [];
+    frames.push({ source, url, body, streamId, ...clocks });
+    partitions.set(partition, frames);
+    const totals = () => [...partitions.values()].reduce((result, values) => ({
+      frames: result.frames + values.length,
+      bytes: result.bytes + values.reduce((sum, frame) => sum + frame.body.length, 0)
+    }), { frames: 0, bytes: 0 });
+    let usage = totals();
+    while (usage.frames > 2_048 || usage.bytes > 24_000_000) {
+      const candidates = [...partitions.entries()].flatMap(([key, values]) =>
+        values.slice(source.lobby === "SABA" ? 1 : 0).map((frame, index) => ({
+          key, index: index + (source.lobby === "SABA" ? 1 : 0), observedAtMs: frame.observedAtMs
+        })));
+      const oldest = candidates.sort((left, right) => left.observedAtMs - right.observedAtMs)[0];
+      if (oldest !== undefined) partitions.get(oldest.key)?.splice(oldest.index, 1);
+      else {
+        const oldestPartition = [...partitions.entries()].sort((left, right) =>
+          (left[1][0]?.observedAtMs ?? 0) - (right[1][0]?.observedAtMs ?? 0))[0]?.[0];
+        if (oldestPartition === undefined) break;
+        partitions.delete(oldestPartition);
+      }
+      usage = totals();
+    }
+    this.#catalogWsSnapshots.set(source.sourceId, partitions);
   }
 
   #rememberTsportWsEvent(source: ObservedSource, url: string, body: string, streamId: string,

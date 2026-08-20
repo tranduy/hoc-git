@@ -54,7 +54,9 @@ export class ChromeCatalogDataPlane {
 
   ingest(envelope: ChromeBridgeEnvelope): boolean {
     const ageMs = this.#now() - envelope.observedAtMs;
-    if (!Number.isFinite(ageMs) || ageMs > this.#maxEnvelopeAgeMs) return false;
+    const replayed = envelope.request.replayed === true;
+    if (!Number.isFinite(ageMs) ||
+      (ageMs > this.#maxEnvelopeAgeMs && (!replayed || ageMs > 86_400_000))) return false;
     const transportAccountId = accountIdForLobby(envelope.lobby);
     let stateChanged = false;
     if (transportAccountId !== null) {
@@ -72,7 +74,6 @@ export class ChromeCatalogDataPlane {
         this.#router.resetSource(envelope.sourceId);
         this.#networkBodies.resetSource(envelope.sourceId);
         if (transportAccountId !== null) {
-          this.#coverage.reset(transportAccountId);
           stateChanged = this.#invalidate(transportAccountId) || stateChanged;
         }
       }
@@ -108,8 +109,10 @@ export class ChromeCatalogDataPlane {
     if (!this.#coverage.accept(update.value.accountId,
       update.value.events.map((event) => event.providerEventId))) return stateChanged;
     this.#catalogs.set(update.value.accountId, update.value);
-    this.#invalidatedAccounts.delete(update.value.accountId);
-    this.#publish?.(update.value, "FRESH");
+    const snapshotState = this.#now() - update.value.observedAtMs <= this.#freshnessMs ? "FRESH" : "STALE";
+    if (snapshotState === "FRESH") this.#invalidatedAccounts.delete(update.value.accountId);
+    else this.#invalidatedAccounts.add(update.value.accountId);
+    this.#publish?.(update.value, snapshotState);
     return true;
   }
 
@@ -120,6 +123,23 @@ export class ChromeCatalogDataPlane {
       throw new Error("CHROME_CATALOG_STALE");
     }
     return catalog;
+  }
+
+  restore(catalog: ObservedProviderCatalog): void {
+    if (!this.owns(catalog.accountId) || catalog.category !== "FOOTBALL" ||
+      catalog.events.length === 0 || catalog.markets.length === 0 || catalog.quotes.length === 0) return;
+    this.#catalogs.set(catalog.accountId, catalog);
+    this.#coverage.accept(catalog.accountId, catalog.events.map((event) => event.providerEventId));
+    this.#invalidatedAccounts.add(catalog.accountId);
+    this.#publish?.(catalog, "STALE");
+  }
+
+  resetCoverage(accountId?: string): void {
+    if (accountId !== undefined) {
+      this.#coverage.reset(accountId);
+      return;
+    }
+    for (const id of this.#catalogs.keys()) this.#coverage.reset(id);
   }
 
   async overlayStatuses(statuses: readonly CatalogSourceStatus[]): Promise<readonly CatalogSourceStatus[]> {

@@ -3,17 +3,15 @@ import { vi } from "vitest";
 import { recoverAttachedSource, snapshotRecoveryMode } from "./snapshot-recovery.js";
 
 describe("snapshotRecoveryMode", () => {
-  it("recovers IM in page instead of hard-reloading its two-part catalog", () => {
+  it("recovers every provider in place instead of hard-reloading an attached tab", () => {
     expect(snapshotRecoveryMode("CMD")).toBe("DOM_CAPTURE");
-    expect(snapshotRecoveryMode("BTI")).toBe("CATALOG_REFRESH");
-    expect(snapshotRecoveryMode("IM")).toBe("CATALOG_REFRESH");
-    expect(snapshotRecoveryMode("KSPORT")).toBe("CATALOG_REFRESH");
-    for (const lobby of ["SABA", "TSPORT", "SBO"] as const) {
-      expect(snapshotRecoveryMode(lobby)).toBe("TAB_RELOAD");
+    for (const lobby of ["BTI", "IM", "KSPORT", "SABA", "TSPORT", "SBO"] as const) {
+      expect(snapshotRecoveryMode(lobby)).toBe("CATALOG_REFRESH");
     }
   });
 
-  it.each(["BTI", "IM", "KSPORT"] as const)("refreshes %s in place without replacing its source", async (lobby) => {
+  it.each(["BTI", "IM", "KSPORT", "SABA", "TSPORT", "SBO"] as const)(
+    "refreshes %s in place without replacing its source", async (lobby) => {
     const capture = vi.fn(async () => undefined);
     const reload = vi.fn(async () => undefined);
     const refresh = vi.fn(async () => undefined);
@@ -28,7 +26,7 @@ describe("snapshotRecoveryMode", () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
-  it("always performs a fresh recovery instead of replaying cached payload bytes", async () => {
+  it("performs a fresh SABA recovery without replaying cached payload bytes or reloading", async () => {
     const capture = vi.fn(async () => undefined);
     const refresh = vi.fn(async () => undefined);
     const reload = vi.fn(async () => undefined);
@@ -36,7 +34,7 @@ describe("snapshotRecoveryMode", () => {
     await recoverAttachedSource({ lobby: "SABA", tabId: 11, hostname: "c0z0oc.bp8newhost.com" },
       { capture, refresh, reload });
     expect(capture).not.toHaveBeenCalled();
-    expect(refresh).not.toHaveBeenCalled();
-    expect(reload.mock.calls).toEqual([[11]]);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(reload).not.toHaveBeenCalled();
   });
 });

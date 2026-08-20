@@ -102,11 +102,8 @@ export function registerChromeBridgeRoute(
         if (control.kind === "ACK" && !requestedSnapshots.has(parsed.data.sourceId)) {
           requestedSnapshots.add(parsed.data.sourceId);
           // A loopback reconnect is not authorization to hard-reload a provider
-          // tab. CMD can recapture its DOM, IM can request both signed GetSE
-          // partitions in page, and K-Sports can reconnect only its socket so
-          // the provider emits a new baseline without navigating the tab.
-          if (parsed.data.lobby !== "CMD" && parsed.data.lobby !== "IM" &&
-            parsed.data.lobby !== "KSPORT") return;
+          // tab. The extension resolves this command with a DOM capture,
+          // provider API call, or socket-only reconnect inside the current tab.
           socket.send(JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: parsed.data.sourceId }));
         }
       });

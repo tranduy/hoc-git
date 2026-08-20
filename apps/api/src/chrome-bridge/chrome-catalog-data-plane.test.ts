@@ -277,11 +277,36 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
 
     expect(plane.ingest({ ...envelope(3, [record], 0, 1, "cmd:9:dataplane-epoch-0002"),
+      sourceEpoch: "observer-b:0", observedAtMs: 1_200 })).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
+    plane.resetCoverage("catalog-source:CMD:FOOTBALL");
+    expect(plane.ingest({ ...envelope(4, [record], 0, 1, "cmd:9:dataplane-epoch-0003"),
       sourceEpoch: "observer-b:0", observedAtMs: 1_200 })).toBe(true);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH"]);
     const current = await plane.read("catalog-source:CMD:FOOTBALL");
     expect(current).toMatchObject({ observedAtMs: 1_200 });
     expect(current.events.map((event) => event.providerEventId)).toEqual(["event-1"]);
+  });
+
+  it("restores the last durable catalog as stale and refuses repeated partial reconnect frames", async () => {
+    const original = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    expect(original.ingest(sabaEnvelope(1, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))).toBe(true);
+    const complete = await original.read("catalog-source:SABA:FOOTBALL");
+    const publish = vi.fn();
+    const restarted = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+
+    restarted.restore(complete);
+
+    expect(publish).toHaveBeenCalledWith(complete, "STALE");
+    await expect(restarted.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
+    for (const sequence of [2, 3, 4, 5]) {
+      expect(restarted.ingest(sabaEnvelope(sequence, [1]))).toBe(false);
+    }
+    expect(publish).toHaveBeenCalledTimes(1);
+
+    restarted.resetCoverage("catalog-source:SABA:FOOTBALL");
+    expect(restarted.ingest(sabaEnvelope(6, [1]))).toBe(true);
+    expect(publish.mock.calls.at(-1)?.[1]).toBe("FRESH");
   });
 
   it("does not replace the latest verified catalog with malformed data", async () => {
@@ -339,6 +364,16 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(envelope())).toBe(false);
     expect(publish).not.toHaveBeenCalled();
     await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_NOT_FOUND");
+  });
+
+  it("rehydrates an expired retained frame as stale without pretending its timestamp is current", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 40_001, maxEnvelopeAgeMs: 30_000, publish });
+    const replayed = { ...envelope(), request: { ...envelope().request, replayed: true } };
+
+    expect(plane.ingest(replayed)).toBe(true);
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({ observedAtMs: 1_000 }), "STALE");
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
   });
 
   it("does not publish a partial chunked catalog", async () => {

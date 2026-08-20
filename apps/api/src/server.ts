@@ -245,8 +245,16 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs: 20_000 });
+      void catalogStore.save(`catalog-source|${catalog.provider}|${catalog.category}`, catalog)
+        .catch(() => undefined);
     } })
     : null;
+  if (chromeCatalogDataPlane !== null) {
+    await Promise.all(["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"].map(async (provider) => {
+      const catalog = await catalogStore.load(`catalog-source|${provider}|FOOTBALL`);
+      if (catalog !== null) chromeCatalogDataPlane.restore(catalog);
+    }));
+  }
   if (chromeBridgeRegistry) {
     const allowedCaptureLobbies = captureLobbies(env.CHROME_BRIDGE_CAPTURE_LOBBIES);
     const captureStore = new CaptureStore({
@@ -267,24 +275,30 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       reader: sessionServices.catalogReader,
       chrome: chromeCatalogDataPlane
     });
-  const maintenance = new SessionRefreshControl({ refresh: () => refreshCatalogSources({
-    legacyRefresh: () => sessionServices.refreshAll(),
-    ...(chromeBridgeControlPlane === null ? {} : {
-      prepareSources: async () => {
-        await sessionServices.renewAll();
-      }
-    }),
-    ...(chromeBridgeControlPlane === null
-      ? {}
-      : { requestBridgeSnapshots: async (freshAfterMs) => {
-        return refreshBridgeProviderSources({
-          controlPlane: chromeBridgeControlPlane,
-          withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
-          minAcquiredAtMs: freshAfterMs
-        });
-      } }),
-    statuses: () => catalogAccess.sources.listStatuses()
-  }),
+  const maintenance = new SessionRefreshControl({ refresh: async () => {
+    // Only the explicit Reset button and scheduled 03:00 run enter this path.
+    // They are the sole authority to replace a complete catalog with a much
+    // smaller provider baseline after a real day/view transition.
+    chromeCatalogDataPlane?.resetCoverage();
+    return refreshCatalogSources({
+      legacyRefresh: () => sessionServices.refreshAll(),
+      ...(chromeBridgeControlPlane === null ? {} : {
+        prepareSources: async () => {
+          await sessionServices.renewAll();
+        }
+      }),
+      ...(chromeBridgeControlPlane === null
+        ? {}
+        : { requestBridgeSnapshots: async (freshAfterMs) => {
+          return refreshBridgeProviderSources({
+            controlPlane: chromeBridgeControlPlane,
+            withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
+            minAcquiredAtMs: freshAfterMs
+          });
+        } }),
+      statuses: () => catalogAccess.sources.listStatuses()
+    });
+  },
     journal: new MaintenanceJournal({ nowMs: Date.now },
       join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
   const app = buildApp(runtime, {

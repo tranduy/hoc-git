@@ -3,12 +3,11 @@ import type { ChromeLobbyId } from "@tool-chenh/contracts";
 export type SnapshotRecoveryMode = "DOM_CAPTURE" | "CATALOG_REFRESH" | "TAB_RELOAD";
 
 export function snapshotRecoveryMode(lobby: ChromeLobbyId): SnapshotRecoveryMode {
-  // CMD's table is authoritative in the rendered DOM. SABA's DOM is only the
-  // currently visible viewport; a tab reload is required to make its socket
-  // replay the complete reset/done snapshot after bridge state is lost.
+  // CMD's table is authoritative in the rendered DOM. Every other attached
+  // provider must recover inside the current authenticated page. A loopback
+  // API reconnect is never permission to navigate or hard-reload a source.
   if (lobby === "CMD") return "DOM_CAPTURE";
-  if (lobby === "BTI" || lobby === "IM" || lobby === "KSPORT") return "CATALOG_REFRESH";
-  return "TAB_RELOAD";
+  return "CATALOG_REFRESH";
 }
 
 export interface RecoverableSource {

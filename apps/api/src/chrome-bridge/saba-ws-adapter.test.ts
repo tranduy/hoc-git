@@ -84,7 +84,7 @@ describe("SabaWsCatalogAdapter", () => {
       .toEqual([expect.objectContaining({ providerEventId: "202" })]);
   });
 
-  it("decodes the SABA public DOM when the socket field table predates attachment", () => {
+  it("does not publish a viewport-only SABA DOM before a complete socket baseline", () => {
     const adapter = new SabaWsCatalogAdapter();
     const input: ChromeBridgeEnvelope = { ...envelope(""), transport: "DOM_SNAPSHOT",
       request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
@@ -95,10 +95,7 @@ describe("SabaWsCatalogAdapter", () => {
               { marketOddsId: "o", priceText: "0.92", status: null, greyedOut: null, lineText: "0.5" },
               { marketOddsId: "o", priceText: "-0.98", status: null, greyedOut: null }
             ] }] }] }) } };
-    const value = adapter.decode(input)[0]!.value as { events: unknown[]; markets: unknown[]; quotes: unknown[] };
-    expect(value.events).toHaveLength(1);
-    expect(value.markets).toHaveLength(1);
-    expect(value.quotes).toHaveLength(2);
+    expect(adapter.decode(input)).toEqual([]);
   });
 
   it("renews a quiet socket catalog from the current SABA DOM after the socket bootstrap", () => {

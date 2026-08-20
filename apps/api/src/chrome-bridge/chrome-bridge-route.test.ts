@@ -42,7 +42,7 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
-  it("does not hard-reload SABA merely because the local bridge reconnects", async () => {
+  it("requests an in-page SABA baseline without hard-reloading on bridge reconnect", async () => {
     const { app, registry } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
       headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
@@ -52,7 +52,10 @@ describe("Chrome bridge route", () => {
     socket.on("message", (data) => controls.push(JSON.parse(data.toString("utf8"))));
     socket.send(JSON.stringify(validEnvelope));
     await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(controls).toEqual([expect.objectContaining({ kind: "ACK", sourceId: "chrome:SABA:7" })]);
+    expect(controls).toEqual([
+      expect.objectContaining({ kind: "ACK", sourceId: "chrome:SABA:7" }),
+      { version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:7" }
+    ]);
     socket.send(JSON.stringify({ ...validEnvelope, sequence: 1 }));
     await expect(nextMessage(socket)).resolves.toMatchObject({ kind: "ACK", sequence: 1 });
     socket.terminate();
@@ -107,7 +110,7 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
-  it("does not reload or replay BTI's one-time launch when the bridge reconnects", async () => {
+  it("requests an in-page BTI refresh without reusing its one-time launch when the bridge reconnects", async () => {
     const { app } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
       headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
@@ -120,7 +123,10 @@ describe("Chrome bridge route", () => {
       transport: "TAB_STATE", request: { ...validEnvelope.request, pathnameClass: "/__fieldline_heartbeat__" } }));
     await new Promise((resolve) => setTimeout(resolve, 25));
 
-    expect(received).toEqual([expect.objectContaining({ kind: "ACK", sourceId: "chrome:BTI:7" })]);
+    expect(received).toEqual([
+      expect.objectContaining({ kind: "ACK", sourceId: "chrome:BTI:7" }),
+      { version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:BTI:7" }
+    ]);
     socket.terminate();
     await app.close();
   });

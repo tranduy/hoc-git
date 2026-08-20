@@ -53,6 +53,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
     if (envelope.transport === "DOM_SNAPSHOT") {
+      // The DOM is only the visible viewport, never an authoritative baseline.
+      // Publishing it before reset/done makes a healthy reconnect look LIVE
+      // with only a handful of events and overwrites the complete catalog.
+      if (![...this.#readyPartitions].some((key) => key.startsWith(`${envelope.sourceId}|`))) return [];
       // Keep accepting the current visible DOM after the socket bootstrap. A
       // quiet SABA socket may not publish another catalog frame for minutes;
       // dropping these snapshots made an otherwise healthy catalog expire.

@@ -268,7 +268,7 @@ describe("provider catalog route", () => {
       .toMatchObject({ snapshotState: "FRESH" });
   });
 
-  it("keeps sampling a rejected coverage regression without entering provider failure backoff", async () => {
+  it("keeps sampling a rejected coverage regression without overwriting the complete catalog", async () => {
     let reads = 0;
     const catalog = (count: number): ObservedProviderCatalog => ({
       dataMode: "LIVE", accountId: "account-1", provider: "SABA", category: "FOOTBALL",
@@ -292,7 +292,7 @@ describe("provider catalog route", () => {
       .toHaveLength(100);
     await vi.waitFor(() => expect(reads).toBeGreaterThanOrEqual(4), { timeout: 250 });
     expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/account-1" })).json().events)
-      .toHaveLength(20);
+      .toHaveLength(100);
   });
 
   it("keeps health and another source responsive while one source reader is hung", async () => {

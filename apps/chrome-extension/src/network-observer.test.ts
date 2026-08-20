@@ -143,33 +143,17 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
   });
 
-  it("reconnects the K-Sports network in place to recover its missing baseline without reloading the tab", async () => {
-    vi.useFakeTimers();
-    try {
+  it.each(["KSPORT", "SABA", "TSPORT"] as const)(
+    "recovers %s decoder state without toggling the provider network or reloading the tab", async (lobby) => {
       const sendCommand = vi.fn(async (_tabId: number, _method: string,
         _params?: Record<string, unknown>) => ({}));
       const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
-      const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
+      const provider = { lobby, sourceId: `chrome:${lobby}:8`, tabId: 8 } as const;
 
-      const recovery = observer.refreshCatalog(ksport);
-      await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledWith(8, "Network.emulateNetworkConditions", {
-        offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1
-      }));
-      await vi.advanceTimersByTimeAsync(250);
-      await recovery;
+      await observer.refreshCatalog(provider);
 
-      expect(sendCommand.mock.calls).toEqual([
-        [8, "Network.emulateNetworkConditions", {
-          offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1
-        }],
-        [8, "Network.emulateNetworkConditions", {
-          offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1
-        }]
-      ]);
+      expect(sendCommand).not.toHaveBeenCalled();
       expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("requests only IM prematch events in the next 48-hour UTC window", async () => {
@@ -1147,6 +1131,37 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls[0]![0]).toMatchObject({ lobby: "TSPORT", sourceId: tsport.sourceId,
       observedAtMs: 1_000, transport: "WS_FRAME", request: expect.objectContaining({ replayed: true }),
       payload: { encoding: "UTF8", body } });
+  });
+
+  it.each([
+    { lobby: "SABA" as const, sourceId: "chrome:SABA:13", url: "wss://sports.example/socket.io/",
+      bodies: [
+        `42${JSON.stringify(["m", "b1", [["f", 0, ["type"]], [0, "reset"], [0, "done"]], "r1"])}`,
+        `42${JSON.stringify(["m", "b1", [[0, "o", 1, 2]], "r2"])}`
+      ] },
+    { lobby: "KSPORT" as const, sourceId: "chrome:KSPORT:14", url: "wss://sports.example/sport/socket",
+      bodies: [
+        "MESSAGE\ndestination:/topic/sports/live/1\n\n{\"event\":1}\u0000",
+        "MESSAGE\ndestination:/topic/sports/live/2\n\n{\"event\":2}\u0000"
+      ] }
+  ])("replays retained $lobby baseline and deltas after only the local API restarts", async (input) => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    let now = 1_000;
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward,
+      now: () => now, monotonicNow: () => now / 10 });
+    const observed = { lobby: input.lobby, sourceId: input.sourceId, tabId: 13 } as const;
+    for (const body of input.bodies) {
+      await observer.ingestWebSocketFrame(observed, input.url, body);
+      now += 100;
+    }
+    forward.mockClear();
+    now = 120_000;
+
+    await observer.replaySnapshots(input.sourceId);
+
+    expect(forward.mock.calls.map(([message]) => message.payload.body)).toEqual(input.bodies);
+    expect(forward.mock.calls.every(([message]) => message.request.replayed === true)).toBe(true);
+    expect(forward.mock.calls.map(([message]) => message.observedAtMs)).toEqual([1_000, 1_100]);
   });
 
   it("replays retained T-Sports frames after the provider rotates to racern.com", async () => {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CatalogCoverageGuard } from "./catalog-coverage-guard.js";
 
 describe("CatalogCoverageGuard", () => {
-  it("rejects oscillating partial snapshots but accepts a stable smaller catalog", () => {
+  it("rejects a catastrophic shrink until an explicit source reset authorizes a new baseline", () => {
     const guard = new CatalogCoverageGuard();
     const ids = (count: number) => Array.from({ length: count }, (_, index) => `event-${index}`);
 
@@ -14,6 +14,9 @@ describe("CatalogCoverageGuard", () => {
 
     expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(false);
     expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(false);
+    expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(false);
+
+    guard.reset("SABA|FOOTBALL");
     expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(true);
   });
 
