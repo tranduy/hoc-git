@@ -144,6 +144,26 @@ describe("FabetBrowserDriver", () => {
     expect(JSON.stringify(driver.redactedDiagnostics())).not.toContain("token=secret");
   });
 
+  it("classifies an ambiguous T-Sports launch by its verified APSPORT hostname", async () => {
+    const context = await setup();
+    context.automation.authenticatedNavigations = [{
+      label: "T-SPORTS",
+      url: "https://sport.asportsb.com/launch?token=secret",
+    }];
+    const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 20 }, idFactory: () => "1" });
+    const egress: AuthEgress = { name: "WARP", async acquire() { throw new Error("unused"); } };
+
+    await driver.authenticateWithEgresses({ username: "development-user", password: "development-pass",
+      egresses: [egress], timeoutMs: 1_000 });
+    const launches = await driver.captureLobbyLaunches(["FOOTBALL"]);
+
+    expect(launches).toEqual([expect.objectContaining({
+      category: "FOOTBALL",
+      providerHint: "APSPORT",
+      hostname: "sport.asportsb.com",
+    })]);
+  });
+
   it("fails closed without falling back to a trusted mirror or leaking the last path error", async () => {
     const context = await setup();
     context.automation.failedEgresses.add("DIRECT");

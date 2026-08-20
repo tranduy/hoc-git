@@ -214,6 +214,13 @@ export function isProviderLaunchResponseForCurrentCard<TRequest extends LaunchRe
 
 function providerHint(label: string, hostname: string): string {
   const upper = label.trim().toUpperCase();
+  const normalizedHostname = hostname.toLowerCase();
+  // Fabet currently renders APSPORT with the ambiguous T-Sports label. The
+  // launch hostname is the authoritative identity and is also the hostname
+  // recognized by the Chrome TSPORT adapter. Without this override a fresh
+  // APSPORT launch is stored as CMD and Reset can never preflight all sources.
+  if (normalizedHostname === "sport.asportsb.com" ||
+    /^pacific\.(?:agenate|racern)\.com$/u.test(normalizedHostname)) return "APSPORT";
   if (upper.includes("SABA") || upper === "C-SPORTS") return "SABA";
   if (upper === "CMD" || upper === "T-SPORTS") return "CMD";
   if (upper === "K-SPORTS") return "SBOBET";
@@ -221,7 +228,7 @@ function providerHint(label: string, hostname: string): string {
   if (/^APS?PORT$/u.test(upper)) return "APSPORT";
   if (upper === "BTI") return "BTI";
   if (upper === "I-SPORTS") return "IM";
-  if (hostname.toLowerCase() === "imesports.techplay.com") return "IM";
+  if (normalizedHostname === "imesports.techplay.com") return "IM";
   return "UNKNOWN";
 }
 
