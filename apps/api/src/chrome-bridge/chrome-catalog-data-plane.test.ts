@@ -70,6 +70,15 @@ function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds:
     payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
 }
 
+const btiPaths = ["live", "live/initial", "prematch", "prematch/initial"] as const;
+function btiEnvelope(sequence: number, path: typeof btiPaths[number], generation = "bti:1000:1"): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "BTI", sourceId: "chrome:BTI:9", tabId: 9, sequence,
+    observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
+    request: { hostname: "bti.example", pathnameClass: `/api/eventlist/asia/leagues/v2/1/${path}`,
+      resourceType: "Fetch", streamId: generation },
+    payload: { encoding: "UTF8", body: JSON.stringify({ serializedData: [] }) } };
+}
+
 const fallbackStatus: CatalogSourceStatus = { id: "catalog-source:CMD:FOOTBALL", alias: "T-Sports · CMD",
   provider: "CMD", category: "FOOTBALL", sessionState: "UNCONFIGURED", acquiredAtMs: null, reason: null };
 
@@ -224,6 +233,26 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(heartbeat(2))).toBe(false);
     now = 61_001;
     expect(plane.ingest(heartbeat(3))).toBe(false);
+  });
+
+  it("does not mistake a BTI tab heartbeat for a fresh event-list response", async () => {
+    let now = 1_500;
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000 });
+    const authenticated: CatalogSourceStatus = { ...fallbackStatus,
+      id: "catalog-source:BTI:FOOTBALL", alias: "BTI Football", provider: "BTI",
+      sessionState: "ACTIVE", acquiredAtMs: 900, reason: null };
+    for (const [index, path] of btiPaths.entries()) {
+      expect(plane.ingest(btiEnvelope(index + 1, path))).toBe(index === 3);
+    }
+    now = 21_005;
+    expect(plane.ingest({ ...btiEnvelope(5, "live", "bti:2000:1"), observedAtMs: now,
+      transport: "TAB_STATE",
+      request: { hostname: "bti.example", pathnameClass: "/__fieldline_heartbeat__", resourceType: "Tab" },
+      payload: { encoding: "UTF8", body: "{}" } })).toBe(false);
+
+    await expect(plane.overlayStatuses([authenticated])).resolves.toMatchObject([{
+      sessionState: "ACTION_REQUIRED", acquiredAtMs: 1_004, reason: "PROVIDER_VALIDATION_FAILED"
+    }]);
   });
 
   it("reports a missing BTI transport without automatically replacing its tab", async () => {

@@ -82,7 +82,7 @@ export class ChromeCatalogDataPlane {
     // KSPORT heartbeats and analytics only prove that the tab exists. Its
     // catalog transport is the sportsbook STOMP socket, so only a routed
     // WebSocket frame may refresh transport liveness for this provider.
-    if (transportAccountId !== null && envelope.lobby !== "KSPORT") {
+    if (transportAccountId !== null && envelope.lobby !== "KSPORT" && envelope.lobby !== "BTI") {
       if (!this.#lastTransportAtMs.has(transportAccountId)) {
         this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
       }
@@ -94,7 +94,7 @@ export class ChromeCatalogDataPlane {
     if (route.status !== "TRUSTED" || route.adapter === null) return stateChanged;
     const update = route.adapter.decode(assembled).at(-1);
     if (update === undefined) return stateChanged;
-    if (transportAccountId !== null && envelope.lobby === "KSPORT") {
+    if (transportAccountId !== null && (envelope.lobby === "KSPORT" || envelope.lobby === "BTI")) {
       if (!this.#lastTransportAtMs.has(transportAccountId)) {
         this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
       }

@@ -315,32 +315,73 @@ export function buildBtiSelectionPriceExpression(identity: SelectionPriceProbeId
     if (authorization) headers.authorization = authorization;
     if (serviceContext) headers['service-context'] = serviceContext;
     let response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7500);
     try {
       response = await fetch('/api/eventpage/events/' + encodeURIComponent(input.providerEventId) +
-        '?hideX25X75Selections=false', { method: 'GET', credentials: 'include', cache: 'no-store', headers });
+        '?hideX25X75Selections=false', { method: 'GET', credentials: 'include', cache: 'no-store',
+          headers, signal: controller.signal });
     } catch {
       return { ok: false, reason: 'BTI_DETAIL_REQUEST_FAILED' };
-    }
+    } finally { clearTimeout(timeout); }
     if (!response.ok) return { ok: false, reason: 'BTI_DETAIL_HTTP_' + String(response.status) };
     let payload;
     try { payload = await response.json(); }
     catch { return { ok: false, reason: 'BTI_DETAIL_INVALID_JSON' }; }
+    const normalize = (value) => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/gu, '')
+      .toLocaleLowerCase('en').replace(/[^a-z0-9]+/gu, ' ').trim().replace(/\\s+/gu, ' ');
+    const localized = (value) => value && typeof value === 'object' && !Array.isArray(value)
+      ? String(value.VI ?? value.EN ?? '').trim() : '';
+    const participantNames = (event) => (Array.isArray(event?.[8]) ? event[8] : []).slice(0, 2)
+      .map((participant) => Array.isArray(participant)
+        ? localized(participant[1]) || String(participant[2] ?? '').trim() : '');
     const events = Array.isArray(payload?.data) ? payload.data : [];
-    const eventMatches = events.filter((event) => Array.isArray(event) && String(event[0] ?? '') === input.providerEventId);
-    if (eventMatches.length !== 1) return { ok: false, reason: 'BTI_EVENT_NOT_FOUND' };
+    const eventMatches = events.filter((event) => {
+      if (!Array.isArray(event) || String(event[0] ?? '') !== input.providerEventId) return false;
+      const names = participantNames(event);
+      return names.length === 2 && normalize(names[0]) === normalize(input.participantA) &&
+        normalize(names[1]) === normalize(input.participantB);
+    });
+    if (eventMatches.length !== 1) return { ok: false, reason: eventMatches.length === 0 ?
+      'BTI_EVENT_NOT_FOUND' : 'BTI_EVENT_AMBIGUOUS' };
     const separator = input.providerMarketId.lastIndexOf(':');
     const marketId = separator > 0 ? input.providerMarketId.slice(0, separator) : input.providerMarketId;
-    const markets = [];
-    const visit = (value) => {
-      if (!Array.isArray(value)) return;
-      if (String(value[0] ?? '') === marketId && Array.isArray(value[13])) markets.push(value);
-      for (const child of value) if (Array.isArray(child)) visit(child);
+    const requestedLine = Number(input.line);
+    const classifyMarket = (market) => {
+      const metadata = Array.isArray(market?.[5]) ? market[5] : [];
+      const code = String(metadata[0] ?? metadata[1] ?? market?.[1] ?? '').trim().toUpperCase();
+      const label = normalize(String(market?.[1] ?? '') + ' ' + String(metadata[1] ?? ''));
+      const handicap = /^HC(?:39|0|1)$/u.test(code) || /\\b(?:asian handicap|handicap|ah)\\b/u.test(label);
+      const total = /^OU(?:39|0|1|201|249)$/u.test(code) || /\\b(?:total|over under|ou)\\b/u.test(label);
+      if (handicap === total) return null;
+      const firstHalf = code === 'HC1' || code === 'OU1' || code === 'OU201' ||
+        /\\b(?:first half|1st half|1h)\\b/u.test(label);
+      const type = (firstHalf ? 'FH_' : 'FT_') + (handicap ? 'AH' : 'TOTAL');
+      return { type, scope: firstHalf ? 'FIRST_HALF' : 'FULL_TIME', handicap };
     };
-    visit(eventMatches[0]);
+    const rawMarkets = [...(Array.isArray(eventMatches[0][20]) ? eventMatches[0][20] : []),
+      ...(Array.isArray(eventMatches[0][33]) ? eventMatches[0][33] : [])];
+    const markets = rawMarkets.filter((market) => {
+      if (!Array.isArray(market) || String(market[0] ?? '') !== marketId || !Array.isArray(market[13])) return false;
+      const identity = classifyMarket(market);
+      if (!identity || identity.type !== input.marketType || identity.scope !== input.scope ||
+        !Number.isFinite(requestedLine)) return false;
+      const lines = market[13].flatMap((selection) => {
+        if (!Array.isArray(selection) || typeof selection[16] !== 'number') return [];
+        return [identity.handicap && selection[9] === 3 ? -selection[16] : selection[16]];
+      });
+      return lines.some((line) => Math.abs(line - requestedLine) < 0.000001);
+    });
     if (markets.length !== 1) return { ok: false, reason: markets.length === 0 ?
       'BTI_MARKET_NOT_FOUND' : 'BTI_MARKET_AMBIGUOUS' };
+    const marketIdentity = classifyMarket(markets[0]);
+    const expectedSide = input.selection === 'HOME' || input.selection === 'OVER' ? 1 :
+      input.selection === 'AWAY' || input.selection === 'UNDER' ? 3 : null;
+    const expectedLine = marketIdentity?.handicap && expectedSide === 3 ? -requestedLine : requestedLine;
     const selections = markets[0][13].filter((selection) => Array.isArray(selection) &&
-      String(selection[0] ?? '') === input.providerSelectionId);
+      String(selection[0] ?? '') === input.providerSelectionId && expectedSide !== null &&
+      selection[9] === expectedSide && typeof selection[16] === 'number' &&
+      Math.abs(selection[16] - expectedLine) < 0.000001 && selection[5] !== true && selection[13] !== true);
     if (selections.length !== 1) return { ok: false, reason: selections.length === 0 ?
       'BTI_SELECTION_NOT_FOUND' : 'BTI_SELECTION_AMBIGUOUS' };
     const formats = Array.isArray(selections[0][8]) ? selections[0][8] : [];

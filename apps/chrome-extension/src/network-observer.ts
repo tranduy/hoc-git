@@ -370,6 +370,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   if (Number.isFinite(prior) && now - prior < 1800) return 'rate-limited';
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   root.dataset.fieldlineBtiCatalogRefreshAt = String(now);
+  const generation = 'bti:' + now + ':' + Math.floor(Math.random() * 1000000000);
   const listPaths = [
     '/api/eventlist/asia/leagues/v2/1/live',
     '/api/eventlist/asia/leagues/v2/1/live/initial',
@@ -377,8 +378,14 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
     '/api/eventlist/asia/leagues/v2/1/prematch/initial'
   ];
   const listResponses = await Promise.all(listPaths.map(async (path) => {
-    const response = await fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
-      headers: { Accept: 'application/json' } }).catch(() => null);
+    let timeoutId;
+    const timeout = new Promise((resolve) => { timeoutId = setTimeout(() => resolve(null), 5000); });
+    const response = await Promise.race([
+      fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
+        headers: { Accept: 'application/json', 'X-Fieldline-Generation': generation } }).catch(() => null),
+      timeout
+    ]);
+    clearTimeout(timeoutId);
     if (!response || !response.ok) return null;
     return response.json().catch(() => null);
   }));
@@ -418,7 +425,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   root.dataset.fieldlineBtiDetailVisits = JSON.stringify(nextVisits);
   const authName = ['author', 'ization'].join('');
   const contextName = ['service', '-', 'context'].join('');
-  const detailHeaders = { Accept: 'application/json' };
+  const detailHeaders = { Accept: 'application/json', 'X-Fieldline-Generation': generation };
   const authValue = localStorage.getItem(['CT_APP_', 'AUTH', 'ORIZATION'].join(''));
   const contextValue = localStorage.getItem(['CT_APP_', 'SERVICE', '_CONTEXT'].join(''));
   if (authValue) detailHeaders[authName] = authValue;
@@ -448,6 +455,7 @@ export class NetworkObserver {
   readonly #emissionTails = new Map<string, Promise<void>>();
   readonly #webSockets = new Map<string, { source: ObservedSource; url: string; streamId: string }>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
+  readonly #requestStreamIds = new Map<string, string>();
   readonly #pending = new Map<string, PendingRequest>();
   readonly #cmdSnapshots = new Map<string, { readonly body: string; readonly sentAtMs: number;
     readonly receivedMonotonicMs: number }>();
@@ -765,6 +773,14 @@ export class NetworkObserver {
       const partition = request === null ? null : imPartitionFromRequest(source, request);
       if (partition === null) this.#requestPartitions.delete(key);
       else this.#requestPartitions.set(key, partition);
+      const requestHeaders = request !== null && isRecord(request.headers) ? request.headers : {};
+      const btiGeneration = Object.entries(requestHeaders).find(([name]) =>
+        name.toLowerCase() === "x-fieldline-generation")?.[1];
+      if (source.lobby === "BTI" && typeof btiGeneration === "string" && /^bti:\d+:\d+$/u.test(btiGeneration)) {
+        this.#requestStreamIds.set(key, btiGeneration);
+      } else {
+        this.#requestStreamIds.delete(key);
+      }
       if (source.lobby === "KSPORT" && request !== null && typeof request.url === "string") {
         try {
           const url = new URL(request.url);
@@ -869,19 +885,23 @@ export class NetworkObserver {
       const resourceType = typeof params.type === "string" ? params.type : "";
       if (!response || !/^(?:XHR|Fetch)$/u.test(resourceType) || typeof response.url !== "string") return;
       const providerPartition = this.#requestPartitions.get(key);
+      const streamId = this.#requestStreamIds.get(key);
       this.#pending.set(key, { source, url: response.url, resourceType,
-        ...(providerPartition === undefined ? {} : { providerPartition }) });
+        ...(providerPartition === undefined ? {} : { providerPartition }),
+        ...(streamId === undefined ? {} : { streamId }) });
       return;
     }
     if (method === "Network.loadingFailed" && key) {
       this.#pending.delete(key);
       this.#requestPartitions.delete(key);
+      this.#requestStreamIds.delete(key);
       return;
     }
     if (method === "Network.loadingFinished" && key) {
       let pending = this.#pending.get(key);
       this.#pending.delete(key);
       this.#requestPartitions.delete(key);
+      this.#requestStreamIds.delete(key);
       if (!pending || requestId === null) return;
       let responseBodyRead = false;
       try {
@@ -902,7 +922,7 @@ export class NetworkObserver {
         if (response.base64Encoded === true) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "BASE64", body: response.body
-          });
+          }, { request: { providerPartition: pending.providerPartition, streamId: pending.streamId } });
           return;
         }
         const safeBody = redactNetworkBody(response.body);
@@ -913,7 +933,7 @@ export class NetworkObserver {
         if (fragments.length === 1) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: safeBody
-          }, { request: { providerPartition: pending.providerPartition }, ...clocks });
+          }, { request: { providerPartition: pending.providerPartition, streamId: pending.streamId }, ...clocks });
           return;
         }
         const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
@@ -922,7 +942,8 @@ export class NetworkObserver {
           this.#emit(emissionPending.source, emissionPending.url, emissionPending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
               chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-          }, { request: { providerPartition: emissionPending.providerPartition }, ...clocks }));
+          }, { request: { providerPartition: emissionPending.providerPartition,
+            streamId: emissionPending.streamId }, ...clocks }));
         await Promise.all(emissions);
       } catch {
         if (!responseBodyRead && isImGetSeUrl(pending.source, pending.url)) {
@@ -1191,18 +1212,26 @@ export class NetworkObserver {
         return [top, ...nested];
       }
       if (source.lobby === "BTI") {
+        const results: unknown[] = [];
         const top = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression, returnByValue: true, awaitPromise: true
         }), 5_000).catch(() => ({}));
+        results.push(top);
+        const topValue = nestedValue(top, "result", "value");
+        if (isRecord(topValue) && (topValue.ok === true ||
+          String(topValue.reason ?? "").endsWith("_AMBIGUOUS"))) return results;
         const contexts = this.#mainWorldContexts.get(source.tabId);
-        const nested = await Promise.all(frameIds.slice(1).flatMap((frameId) => {
+        for (const frameId of frameIds.slice(1)) {
           const contextId = contexts?.get(frameId);
-          return contextId === undefined ? [] : [this.#withFrameCommandTimeout(
-            this.#sendCommand(source.tabId, "Runtime.evaluate", {
-              expression, contextId, returnByValue: true, awaitPromise: true
-            }), 5_000).catch(() => ({}))];
-        }));
-        return [top, ...nested];
+          if (contextId === undefined) continue;
+          const result = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            expression, contextId, returnByValue: true, awaitPromise: true
+          }), 5_000).catch(() => ({}));
+          results.push(result);
+          const value = nestedValue(result, "result", "value");
+          if (isRecord(value) && (value.ok === true || String(value.reason ?? "").endsWith("_AMBIGUOUS"))) break;
+        }
+        return results;
       }
       return frameIds.length === 0
         ? [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
@@ -1239,7 +1268,9 @@ export class NetworkObserver {
     const found = foundCandidates.length === 1 ? foundCandidates[0] : undefined;
     const ambiguous = foundCandidates.length > 1 ||
       candidates.some((value) => value.reason === "VISIBLE_PRICE_AMBIGUOUS" ||
-        value.reason === "IM_DIRECT_SELECTION_AMBIGUOUS" || value.reason === "SBOBET_SELECTION_AMBIGUOUS");
+        value.reason === "IM_DIRECT_SELECTION_AMBIGUOUS" || value.reason === "SBOBET_SELECTION_AMBIGUOUS" ||
+        value.reason === "BTI_EVENT_AMBIGUOUS" || value.reason === "BTI_MARKET_AMBIGUOUS" ||
+        value.reason === "BTI_SELECTION_AMBIGUOUS");
     const diagnosticReason = foundCandidates.length > 1 ? "VISIBLE_PRICE_AMBIGUOUS" :
       candidates.find((value) => typeof value.reason === "string")?.reason;
     const observedAtMs = typeof found?.observedAtMs === "number" ? found.observedAtMs : this.#now();

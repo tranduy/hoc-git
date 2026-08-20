@@ -474,6 +474,31 @@ describe("NetworkObserver", () => {
       method: "IN_PAGE_FETCH" });
   });
 
+  it("stops BTI after one authoritative same-origin detail result instead of double-counting frames", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
+        childFrames: [{ frame: { id: "child" } }] } };
+      if (method === "Runtime.evaluate") return {
+        result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100 } }
+      };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+    const source = { lobby: "BTI", sourceId: "chrome:BTI:7", tabId: 7 } as const;
+    await observer.handleEvent(source, "Runtime.executionContextCreated", {
+      context: { id: 72, auxData: { frameId: "child", isDefault: true } }
+    });
+    await observer.probeSelectionPrice(source, { requestId: "price-bti-one", providerEventId: "event-1",
+      providerMarketId: "market-1:2.5", providerSelectionId: "selection-1",
+      eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "2.5" });
+
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "0.17" });
+  });
+
   it("checks SBOBET's exact selection across every sportsbook frame", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
@@ -574,9 +599,38 @@ describe("NetworkObserver", () => {
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("hideX25X75Selections=false");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("credentials: 'include'");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("cache: 'no-store'");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("X-Fieldline-Generation");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("slice(0, 12)");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).not.toMatch(/cookie|authorization|password/iu);
     expect(() => new Function(`return ${BTI_CATALOG_REFRESH_EXPRESSION}`)).not.toThrow();
+  });
+
+  it("bounds a hung BTI list request so a partial refresh cannot block the next generation", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = { dataset: {} as Record<string, string> };
+      const requests: Array<{ path: string; generation?: string }> = [];
+      const fetcher = (path: string, init?: { headers?: Record<string, string> }) => {
+        const generation = init?.headers?.["X-Fieldline-Generation"];
+        requests.push({ path, ...(generation === undefined ? {} : { generation }) });
+        if (path.endsWith("/live")) return new Promise<never>(() => undefined);
+        return Promise.resolve({ ok: true, json: async () => ({ serializedData: [] }) });
+      };
+      const evaluate = new Function("document", "location", "fetch", "localStorage",
+        `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (document: { documentElement: typeof root },
+          location: { pathname: string; hostname: string }, fetch: typeof fetcher,
+          localStorage: { getItem: (_key: string) => null }) => Promise<string>;
+      const refresh = evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" },
+        fetcher, { getItem: () => null });
+      await vi.advanceTimersByTimeAsync(5_001);
+      await expect(refresh).resolves.toBe("catalog-requested");
+      const listRequests = requests.filter(({ path }) => path.startsWith("/api/eventlist/"));
+      expect(listRequests).toHaveLength(4);
+      expect(new Set(listRequests.map(({ generation }) => generation)).size).toBe(1);
+      expect(listRequests[0]!.generation).toMatch(/^bti:\d+:\d+$/u);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not starve a BTI event when the provider reorders the event list between detail batches", async () => {
@@ -980,6 +1034,26 @@ describe("NetworkObserver", () => {
     });
     await expect(observer.handleEvent(source, "Network.loadingFinished", { requestId: "xhr-2" })).resolves.toBeUndefined();
     expect(forward).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the BTI refresh generation from request headers into the HTTP response envelope", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
+      ? { body: JSON.stringify({ serializedData: [] }), base64Encoded: false }
+      : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000, monotonicNow: () => 50 });
+    const bti = { lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 } as const;
+    await observer.handleEvent(bti, "Network.requestWillBeSent", { requestId: "bti-list", type: "Fetch",
+      request: { method: "GET", url: "https://bti.test/api/eventlist/asia/leagues/v2/1/live",
+        headers: { "X-Fieldline-Generation": "bti:2000:7" } } });
+    await observer.handleEvent(bti, "Network.responseReceived", { requestId: "bti-list", type: "Fetch",
+      response: { url: "https://bti.test/api/eventlist/asia/leagues/v2/1/live" } });
+    await observer.handleEvent(bti, "Network.loadingFinished", { requestId: "bti-list" });
+
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      lobby: "BTI", transport: "HTTP_RESPONSE",
+      request: expect.objectContaining({ streamId: "bti:2000:7" })
+    }));
   });
 
   it("retains only the safe IM Market partition from request post data", async () => {

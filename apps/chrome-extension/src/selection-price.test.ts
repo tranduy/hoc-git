@@ -58,17 +58,25 @@ describe("visible provider price probe", () => {
       const selection = (id: string, price: string) => {
         const value: unknown[] = [];
         value[0] = id;
+        value[2] = { VI: id.includes("OMM") ? "Over" : "Under" };
+        value[5] = false;
         value[8] = [null, null, null, null, null, price];
+        value[9] = id.includes("OMM") ? 1 : 3;
+        value[13] = false;
+        value[16] = 2.5;
         return value;
       };
       const market: unknown[] = [];
       market[0] = "0OU877857669225148454";
+      market[1] = "Over Under";
+      market[5] = ["OU0", "full time"];
       market[13] = [
         selection("wrong-selection", "0.91"),
         selection("0OU877857669225148454OMM", "-0.29")
       ];
       const event: unknown[] = [];
       event[0] = "877857668386287616";
+      event[8] = [["home", { VI: "Polisi Tanzania" }], ["away", { VI: "JKT Tanzania" }]];
       event[20] = [market];
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: [event] }) });
     });
@@ -84,6 +92,96 @@ describe("visible provider price probe", () => {
     })) as { ok: boolean; rawOdds?: string; reason?: string };
 
     expect(value).toEqual(expect.objectContaining({ ok: true, rawOdds: "-0.29" }));
+    await page.close();
+  });
+
+  it("fails BTI detail checks closed when participants, line, outcome, or event identity differs", async () => {
+    const page = await browser.newPage();
+    await page.route("https://bti-identity.example/", async (route) => route.fulfill({ contentType: "text/html",
+      body: "<p>BTI identity probe</p>" }));
+    const selection = Array<unknown>(20).fill(null);
+    selection[0] = "under-selection"; selection[2] = { VI: "Under" }; selection[5] = false;
+    selection[8] = [null, null, null, null, null, "0.17"]; selection[9] = 3;
+    selection[13] = false; selection[16] = 2.5;
+    const market = Array<unknown>(24).fill(null);
+    market[0] = "total-market"; market[1] = "Over Under"; market[5] = ["OU0", "full time"];
+    market[13] = [selection];
+    const event = Array<unknown>(34).fill(null);
+    event[0] = "event-1"; event[8] = [["h", { VI: "Alpha" }], ["a", { VI: "Beta" }]];
+    event[20] = [market];
+    let responseEvents: unknown[] = [event];
+    await page.route("https://bti-identity.example/api/eventpage/events/event-1**", async (route) =>
+      route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: responseEvents }) }));
+    await page.goto("https://bti-identity.example/");
+    const base = { providerEventId: "event-1", providerMarketId: "total-market:2.5",
+      providerSelectionId: "under-selection", eventLabel: "Alpha vs Beta", participantA: "Alpha",
+      participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "UNDER", line: "2.5" };
+    const evaluate = (overrides: Partial<typeof base>) => page.evaluate(
+      buildBtiSelectionPriceExpression({ ...base, ...overrides }));
+
+    await expect(evaluate({ participantA: "Beta", participantB: "Alpha" })).resolves.toEqual(
+      expect.objectContaining({ ok: false, reason: "BTI_EVENT_NOT_FOUND" }));
+    await expect(evaluate({ line: "3.5", providerMarketId: "total-market:3.5" })).resolves.toEqual(
+      expect.objectContaining({ ok: false, reason: "BTI_MARKET_NOT_FOUND" }));
+    await expect(evaluate({ selection: "OVER" })).resolves.toEqual(
+      expect.objectContaining({ ok: false, reason: "BTI_SELECTION_NOT_FOUND" }));
+    responseEvents = [event, [...event]];
+    await expect(evaluate({})).resolves.toEqual(
+      expect.objectContaining({ ok: false, reason: "BTI_EVENT_AMBIGUOUS" }));
+    await page.close();
+  });
+
+  it("reads each BTI two-way outcome and rejects duplicate exact markets or selections", async () => {
+    const page = await browser.newPage();
+    await page.route("https://bti-outcomes.example/", async (route) => route.fulfill({ contentType: "text/html",
+      body: "<p>BTI outcome probe</p>" }));
+    const makeSelection = (id: string, name: string, side: 1 | 3, line: number, price: string) => {
+      const value = Array<unknown>(20).fill(null);
+      value[0] = id; value[2] = { VI: name }; value[5] = false;
+      value[8] = [null, null, null, null, null, price]; value[9] = side;
+      value[13] = false; value[16] = line; return value;
+    };
+    const makeMarket = (id: string, code: string, selections: unknown[]) => {
+      const value = Array<unknown>(24).fill(null);
+      value[0] = id; value[1] = code === "HC0" ? "Asian Handicap" : "Over Under";
+      value[5] = [code, "full time"]; value[13] = selections; return value;
+    };
+    const ah = makeMarket("ah-market", "HC0", [
+      makeSelection("home-selection", "Alpha", 1, -0.25, "0.81"),
+      makeSelection("away-selection", "Beta", 3, 0.25, "-0.91")]);
+    const total = makeMarket("total-market", "OU0", [
+      makeSelection("over-selection", "Over", 1, 2.5, "0.82"),
+      makeSelection("under-selection", "Under", 3, 2.5, "-0.92")]);
+    const event = Array<unknown>(34).fill(null);
+    event[0] = "event-2"; event[8] = [["h", { VI: "Alpha" }], ["a", { VI: "Beta" }]];
+    event[20] = [ah, total];
+    await page.route("https://bti-outcomes.example/api/eventpage/events/event-2**", async (route) =>
+      route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: [event] }) }));
+    await page.goto("https://bti-outcomes.example/");
+    const base = { providerEventId: "event-2", eventLabel: "Alpha vs Beta", participantA: "Alpha",
+      participantB: "Beta", scope: "FULL_TIME" };
+    const cases = [
+      { providerMarketId: "ah-market:-0.25", providerSelectionId: "home-selection",
+        marketType: "FT_AH", selection: "HOME", line: "-0.25", rawOdds: "0.81" },
+      { providerMarketId: "ah-market:-0.25", providerSelectionId: "away-selection",
+        marketType: "FT_AH", selection: "AWAY", line: "-0.25", rawOdds: "-0.91" },
+      { providerMarketId: "total-market:2.5", providerSelectionId: "over-selection",
+        marketType: "FT_TOTAL", selection: "OVER", line: "2.5", rawOdds: "0.82" },
+      { providerMarketId: "total-market:2.5", providerSelectionId: "under-selection",
+        marketType: "FT_TOTAL", selection: "UNDER", line: "2.5", rawOdds: "-0.92" }
+    ] as const;
+    for (const expected of cases) {
+      const { rawOdds, ...identity } = expected;
+      await expect(page.evaluate(buildBtiSelectionPriceExpression({ ...base, ...identity }))).resolves.toEqual(
+        expect.objectContaining({ ok: true, rawOdds }));
+    }
+    event[20] = [ah, [...ah]];
+    await expect(page.evaluate(buildBtiSelectionPriceExpression({ ...base, ...cases[0] }))).resolves.toEqual(
+      expect.objectContaining({ ok: false, reason: "BTI_MARKET_AMBIGUOUS" }));
+    const duplicateSelection = (ah[13] as unknown[])[0];
+    event[20] = [makeMarket("ah-market", "HC0", [duplicateSelection, duplicateSelection])];
+    await expect(page.evaluate(buildBtiSelectionPriceExpression({ ...base, ...cases[0] }))).resolves.toEqual(
+      expect.objectContaining({ ok: false, reason: "BTI_SELECTION_AMBIGUOUS" }));
     await page.close();
   });
 
