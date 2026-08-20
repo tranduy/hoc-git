@@ -4,6 +4,9 @@ import { refreshBridgeProviderSources } from "./provider-source-refresh.js";
 describe("refreshBridgeProviderSources", () => {
   it("ensures CMD and every Fabet-derived provider from newly acquired launches", async () => {
     const ensureLobby = vi.fn((_lobby: string, _url: string) => 1);
+    const operations: string[] = [];
+    ensureLobby.mockImplementation((lobby) => { operations.push(`ensure:${lobby}`); return 1; });
+    const beforeDelivery = vi.fn(async () => { operations.push("before-delivery"); });
     const launchProviders: string[] = [];
     const withLatestFabetLaunch = async <T>(provider: "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI",
       _category: "FOOTBALL", consume: (url: string) => Promise<T>, minAcquiredAtMs: number): Promise<T> => {
@@ -14,18 +17,22 @@ describe("refreshBridgeProviderSources", () => {
     await expect(refreshBridgeProviderSources({
       controlPlane: { ensureLobby, restoreLobby: vi.fn(() => 1) },
       withLatestFabetLaunch,
-      minAcquiredAtMs: 123
+      minAcquiredAtMs: 123,
+      beforeDelivery
     })).resolves.toBe(6);
 
     expect(launchProviders).toEqual(["SABA", "IM", "SBOBET", "APSPORT", "BTI"]);
     expect(ensureLobby.mock.calls.map((call) => call[0])).toEqual([
       "SABA", "IM", "KSPORT", "TSPORT", "BTI"
     ]);
+    expect(operations[0]).toBe("before-delivery");
+    expect(beforeDelivery).toHaveBeenCalledOnce();
   });
 
   it("does not replace any provider when one fresh launch is missing", async () => {
     const ensureLobby = vi.fn((_lobby: string, _url: string) => 1);
     const restoreLobby = vi.fn(() => 1);
+    const beforeDelivery = vi.fn(async () => undefined);
     const withLatestFabetLaunch = async <T>(provider: "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI",
       _category: "FOOTBALL", consume: (url: string) => Promise<T>): Promise<T> => {
       if (provider === "IM") throw new Error("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
@@ -35,10 +42,31 @@ describe("refreshBridgeProviderSources", () => {
     await expect(refreshBridgeProviderSources({
       controlPlane: { ensureLobby, restoreLobby },
       withLatestFabetLaunch,
-      minAcquiredAtMs: 123
+      minAcquiredAtMs: 123,
+      beforeDelivery
     })).rejects.toThrow("FABET_PROVIDER_LAUNCH_UNAVAILABLE:IM");
     expect(ensureLobby).not.toHaveBeenCalled();
     expect(restoreLobby).not.toHaveBeenCalled();
+    expect(beforeDelivery).not.toHaveBeenCalled();
+  });
+
+  it("uses an existing K-Sports marker because the portal acquires its fresh popup", async () => {
+    const minimums = new Map<string, number>();
+    const withLatestFabetLaunch = async <T>(provider: "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI",
+      _category: "FOOTBALL", consume: (url: string) => Promise<T>, minAcquiredAtMs: number): Promise<T> => {
+      minimums.set(provider, minAcquiredAtMs);
+      if (provider === "SBOBET" && minAcquiredAtMs > 0) throw new Error("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
+      return consume(`https://${provider.toLowerCase()}.provider.test/fresh`);
+    };
+
+    await expect(refreshBridgeProviderSources({
+      controlPlane: { ensureLobby: () => 1, restoreLobby: () => 1 },
+      withLatestFabetLaunch,
+      minAcquiredAtMs: 123
+    })).resolves.toBe(6);
+
+    expect(minimums.get("SBOBET")).toBe(0);
+    expect(minimums.get("APSPORT")).toBe(123);
   });
 
   it("recaptures Fabet launches before replacing tabs when the first preflight is incomplete", async () => {

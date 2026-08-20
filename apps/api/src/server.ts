@@ -279,7 +279,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     // Only the explicit Reset button and scheduled 03:00 run enter this path.
     // They are the sole authority to replace a complete catalog with a much
     // smaller provider baseline after a real day/view transition.
-    chromeCatalogDataPlane?.resetCoverage();
     return refreshCatalogSources({
       legacyRefresh: () => sessionServices.refreshAll(),
       ...(chromeBridgeControlPlane === null ? {} : {
@@ -295,7 +294,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
             withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
             minAcquiredAtMs: freshAfterMs,
             refreshLaunches: () => sessionServices.refreshFabetLaunches(),
-            maxLaunchAttempts: 3
+            maxLaunchAttempts: 3,
+            // Do not discard healthy catalogs when launch preflight fails.
+            // Reset coverage only once every provider can be delivered.
+            beforeDelivery: () => chromeCatalogDataPlane?.resetCoverage()
           });
         } }),
       statuses: () => catalogAccess.sources.listStatuses(),

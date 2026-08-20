@@ -16,6 +16,7 @@ interface RefreshOptions {
   readonly restoreCmd?: boolean;
   readonly refreshLaunches?: () => Promise<void>;
   readonly maxLaunchAttempts?: number;
+  readonly beforeDelivery?: () => void | Promise<void>;
 }
 
 const PROVIDER_LOBBIES = [
@@ -44,6 +45,8 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
     }
     await options.refreshLaunches();
   }
+
+  await options.beforeDelivery?.();
 
   let requested = 0;
   let firstFailure: Error | null = null;
@@ -75,8 +78,12 @@ async function collectLaunches(
 ) {
   return Promise.all(selected.map(async ([provider, lobby]) => {
     try {
+      // K-Sports is launched through the authenticated Fabet portal. Its
+      // stored sportsbook URL is only an identity marker; the portal obtains
+      // a fresh one-time popup URL when the reset is delivered.
+      const minAcquiredAtMs = provider === "SBOBET" ? 0 : options.minAcquiredAtMs;
       const launch = await options.withLatestFabetLaunch(provider, "FOOTBALL",
-        async (url) => ({ lobby, url }), options.minAcquiredAtMs);
+        async (url) => ({ lobby, url }), minAcquiredAtMs);
       return { ok: true, provider, launch } as const;
     } catch (error) {
       return { ok: false, provider, error } as const;
