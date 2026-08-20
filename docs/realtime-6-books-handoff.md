@@ -457,3 +457,120 @@ Verification on 2026-08-21:
   15-minute API/UI verifiers. Final PASS requires monotonic generation/quote
   evidence, a BTI quote change reflected in UI without F5, no false zero, and
   fresh AH/TOTAL detail checks.
+
+## 2026-08-21 final matching/revision integration
+
+### Commit and files
+
+- Integration commit: `dca9a2a` (`fix(web): harden exact ticket integration`).
+- Files changed by this integration:
+  - `apps/web/src/catalog/comparison.ts`
+  - `apps/web/src/catalog/comparison.test.ts`
+  - `apps/web/src/catalog/comparison-worker-engine.ts`
+  - `apps/web/src/catalog/comparison-worker-engine.test.ts`
+  - `apps/web/src/catalog/catalog-revision-coordinator.test.ts`
+  - `docs/superpowers/plans/2026-08-21-final-realtime-integration.md`
+- No provider collector, provider tab, URL, reset path or extension lifecycle
+  was changed by this integration session. Existing unrelated worktree changes
+  were not staged.
+
+### Matching and revision behavior now covered
+
+- Football pre-match identity requires exact normalized participants, kickoff
+  tolerance and a compatible competition identity. Cross-language competition
+  names are accepted only through an explicit verified alias table; arbitrary
+  fuzzy league text is not accepted.
+- Market grouping canonicalizes numeric lines (`-0.250` and `-0.25` are one
+  line), and still requires exact market type, scope and settlement profile.
+- A verified two-way cell requires the exact opposing domain (`HOME/AWAY` or
+  `OVER/UNDER`), unique provider selection IDs, complete provenance, and one
+  equal non-null provider sequence for both outcomes. Unknown or mixed
+  generations fail closed.
+- Reversed participants swap HOME/AWAY and invert the canonical home handicap
+  exactly once. The UI derives the away display sign from that canonical home
+  line; it does not invert the provider line a second time.
+- The Coquimbo Unido / CA Platense regression proves `HOME -0.25` is displayed
+  against `AWAY +0.25` after provider orientation.
+- The worker now keeps a separate last-complete display catalog. A partial,
+  mixed-generation, duplicate-outcome or wrong-identity UPSERT is excluded from
+  executable output but cannot erase the last complete displayed row and cause
+  a disappear/reappear blink.
+- Reconnect/API-restart coverage proves a new baseline may reset sequence from
+  `500` to `6`, after which revision `7` is accepted. Existing StrictMode and
+  overlapping-refresh regressions also pass.
+
+### Verification
+
+- TDD red phase reproduced three initial defects: raw numeric line keys,
+  mixed-generation opposing quotes, and same teams/time across incompatible
+  competitions. Independent review then found and drove regressions for exact
+  localized competition aliases, null generations, retaining the last complete
+  display snapshot, and same-sequence duplicate outcomes.
+- Final independent review: no remaining Critical or Important finding.
+- Focused matcher/worker red-green suite after all review fixes: 60/60 passed.
+- Final full web suite: 45 files, 363 passed / 4 intentionally skipped.
+- `npm run typecheck --workspace @tool-chenh/web`: PASS.
+- `npm run build --workspace @tool-chenh/web`: PASS.
+- `git diff --check`: PASS for the integration diff.
+
+### Passive 20-minute final soak
+
+- Evidence: `.auth/run/final-integration-soak.json` (untracked runtime artifact).
+- Window: `1787263019548 -> 1787264220373` (1,200,825 ms), 589 samples at a
+  two-second interval. No reset, reload, close or provider-tab URL change was
+  performed.
+- Realtime WebSocket: one connection, 9,724 messages, sequence `14448 -> 19540`,
+  zero gaps, zero backward sequences, zero errors; the only close was the
+  verifier's normal code-1000 shutdown.
+- Every bridge reported LIVE in all 589 samples and no catalog returned zero
+  events while its bridge was LIVE. Bridge heartbeat/sequence movement is not
+  counted as proof that provider odds were current.
+- The verifier's `activeCatalogSamples` field is invalid because that running
+  verifier read `state` instead of the API field `sessionState`; it must not be
+  used. The authoritative end snapshot at `1787264228387` is recorded below.
+
+| Provider | End catalog status | Source sequence | Revision changes | Quote changes observed | Events min-max | End catalog age | Final runtime result |
+|---|---|---:|---:|---:|---:|---:|---|
+| CMD | ACTIVE | `2327 -> 2839` | 222 | >=50 | 18-28 | 4.7 s | PASS |
+| SABA | ACTION_REQUIRED / `PROVIDER_VALIDATION_FAILED` | `3505 -> 4173` | 0 | 0 | 82-82 | 6,796.7 s | FAIL |
+| APSPORT | ACTION_REQUIRED / `PROVIDER_VALIDATION_FAILED` | `2869 -> 3591` | 0 | 0 | 65-65 | 6,795.2 s | FAIL |
+| IM | ACTIVE | `4281 -> 5119` | 34 | >=50 | 415-417 | 43.7 s | PASS |
+| SBOBET | ACTION_REQUIRED / `PROVIDER_VALIDATION_FAILED` | `4229 -> 5192` | 0 | 0 | 62-62 | 6,795.3 s | FAIL |
+| BTI | ACTIVE | `94345 -> 114136` | 555 | >=50 | 29-36 | 5.1 s | FAIL (new BTI bundle still not runtime-proven) |
+
+### Direct AH/TOTAL and UI evidence
+
+The final button-equivalent API calls used the exact displayed event, market,
+selection IDs and invoked the same `/api/preflight/realtime-check` flow as the
+UI. Evidence is in `.auth/run/final-direct-checks.json` and
+`.auth/run/final-missing-direct-checks.json`.
+
+| Provider | AH direct check | TOTAL direct check | UI without F5 | Identity / latency evidence | Result |
+|---|---|---|---|---|---|
+| CMD | MATCH, DOM | MATCH, DOM | Prior same-day 10-minute UI run: 50 quote changes, one navigation, no page error | Current exact checks 16-721 ms; TOOL equals direct | PASS |
+| SABA | NOT_FOUND, DOM | NOT_FOUND, DOM | Final soak: no revision; prior SABA UI run had 0 catalog responses/changes | `VISIBLE_PRICE_NOT_FOUND`, 3-4 ms; no direct odds returned | FAIL |
+| APSPORT | NOT_FOUND, DOM | NOT_FOUND, DOM | Earlier clean UI run proved changes, but current catalog is ACTION_REQUIRED and frozen | `TSPORT_SELECTION_NOT_RENDERED`, 12-31 ms | FAIL current session |
+| IM | MATCH, IN_PAGE_FETCH | MATCH, IN_PAGE_FETCH | Prior same-day 10-minute UI run: 36 quote changes, one navigation, no page error | Current exact checks 1.4-7.1 s; TOOL equals direct | PASS |
+| SBOBET | SOURCE_UNAVAILABLE | SOURCE_UNAVAILABLE | Final soak: no revision or quote change | `SBOBET_DIRECT_HTTP_404`, 50-64 ms | FAIL |
+| BTI | Prior installed-runtime MATCH | Prior installed-runtime MATCH | Prior UI run observed changes without F5, but the new atomic-generation bundle was not activated under this session's no-reload rule | Prior exact detail checks 202/707 ms; no exact BTI row was available for a new final button check | FAIL / not final-proven |
+
+The in-app browser control surface rejected the final-session connection before
+it exposed the existing tool tab. A standalone Playwright browser was not used
+as a substitute, because that would not prove behavior in the user's live tab.
+Therefore final-session UI-freeze/blink proof comes from deterministic
+StrictMode/reconnect/overlap/atomic-display regressions; provider UI movement is
+only credited where the same-day handoff already contains a valid one-navigation
+UI soak. This is why the final result is **2/6 PASS (CMD and IM), not 6/6**.
+
+### Remaining provider work
+
+- SABA: restore a validating live catalog epoch, then rerun socket -> revision ->
+  UI and direct AH/TOTAL checks without using stale persisted catalog data.
+- APSPORT: restore validation and make virtualized selections fall through to
+  the fresh in-page request path instead of ending at
+  `TSPORT_SELECTION_NOT_RENDERED`.
+- SBOBET: restore a valid sportsbook/STOMP source and a working direct endpoint;
+  current direct fetch returns HTTP 404.
+- BTI: activate the already-committed atomic-generation bundle only when an
+  explicitly permitted extension lifecycle action is available, then rerun the
+  15-minute API/UI/direct acceptance. No hard reset was performed here.
