@@ -61,8 +61,15 @@ export class SourceTabRecovery {
       // and hand off to a child sportsbook. Let the signed-in Fabet portal
       // create and follow that popup chain instead of navigating a standalone
       // extension-created tab that dies shortly after its first snapshot.
-      await this.#waitForLobby(await this.#options.launchFromPortal(lobby, url), lobby);
-      return;
+      try {
+        await this.#waitForLobby(await this.#options.launchFromPortal(lobby, url), lobby);
+        return;
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "FABET_PORTAL_TAB_UNAVAILABLE") throw error;
+        // Fabet login/launcher capture runs in the API's isolated browser. A
+        // signed-in portal tab therefore need not exist in user Chrome. The
+        // freshly captured token URL is still safe to consume directly below.
+      }
     }
     const pending = await this.#options.create("about:blank", false);
     try {

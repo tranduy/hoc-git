@@ -105,6 +105,34 @@ describe("SourceTabRecovery", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("uses the fresh K-Sports launch directly when the signed-in portal lives outside user Chrome", async () => {
+    const operations: string[] = [];
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "KSPORT", tabId: 7 }],
+      query: async () => [{ id: 7, url: "https://zenandfe.com/?token=old", title: "Sportsbook" }],
+      create: async (url) => {
+        operations.push(`create:${url}`);
+        return { id: 8, url };
+      },
+      attach: async (tab) => { operations.push(`attach:${tab.id}:${tab.url}`); },
+      update: async (tabId, url) => {
+        operations.push(`update:${tabId}:${url}`);
+        return { id: tabId, url, title: "Sportsbook" };
+      },
+      remove: async (tabId) => { operations.push(`remove:${tabId}`); },
+      launchFromPortal: async () => { throw new Error("FABET_PORTAL_TAB_UNAVAILABLE"); }
+    });
+
+    await recovery.ensure("KSPORT", "https://zenandfe.com/?token=fresh");
+
+    expect(operations).toEqual([
+      "remove:7",
+      "create:about:blank",
+      "attach:8:https://zenandfe.com/?token=fresh",
+      "update:8:https://zenandfe.com/?token=fresh"
+    ]);
+  });
+
   it("rejects an empty K-Sports token before closing the current source", async () => {
     const remove = vi.fn(async () => undefined);
     const launchFromPortal = vi.fn(async () => ({ id: 11, url: "https://zenandfe.com/?token=", title: "Sportsbook" }));
