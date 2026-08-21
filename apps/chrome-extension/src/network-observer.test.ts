@@ -605,6 +605,38 @@ describe("NetworkObserver", () => {
     expect(() => new Function(`return ${BTI_CATALOG_REFRESH_EXPRESSION}`)).not.toThrow();
   });
 
+  it("forwards one complete BTI generation directly when CDP does not retain the fetch bodies", async () => {
+    const generation = "bti:1720000000000:17";
+    const responses = [
+      "/api/eventlist/asia/leagues/v2/1/live",
+      "/api/eventlist/asia/leagues/v2/1/live/initial",
+      "/api/eventlist/asia/leagues/v2/1/prematch",
+      "/api/eventlist/asia/leagues/v2/1/prematch/initial"
+    ].map((url, index) => ({ url, body: JSON.stringify({ serializedData: [], index }) }));
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Runtime.evaluate") return {
+        result: { value: { status: "catalog-requested", generation, origin: "https://sports.bti.test", responses } }
+      };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 2_001,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+
+    await observer.refreshCatalog({ lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 });
+
+    expect(forwarded).toHaveLength(4);
+    expect(forwarded.map(({ transport }) => transport)).toEqual([
+      "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE"
+    ]);
+    expect(forwarded.map(({ request }) => request.pathnameClass)).toEqual(responses.map(({ url }) => url));
+    expect(forwarded.map(({ request }) => request.streamId)).toEqual([
+      generation, generation, generation, generation
+    ]);
+    expect(forwarded.map(({ payload }) => payload.body)).toEqual(responses.map(({ body }) => body));
+  });
+
   it("bounds a hung BTI list request so a partial refresh cannot block the next generation", async () => {
     vi.useFakeTimers();
     try {
@@ -623,7 +655,10 @@ describe("NetworkObserver", () => {
       const refresh = evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" },
         fetcher, { getItem: () => null });
       await vi.advanceTimersByTimeAsync(5_001);
-      await expect(refresh).resolves.toBe("catalog-requested");
+      await expect(refresh).resolves.toMatchObject({ status: "catalog-requested",
+        responses: expect.arrayContaining([expect.objectContaining({
+          url: "/api/eventlist/asia/leagues/v2/1/prematch"
+        })]) });
       const listRequests = requests.filter(({ path }) => path.startsWith("/api/eventlist/"));
       expect(listRequests).toHaveLength(4);
       expect(new Set(listRequests.map(({ generation }) => generation)).size).toBe(1);

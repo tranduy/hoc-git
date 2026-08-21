@@ -387,11 +387,17 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
     ]);
     clearTimeout(timeoutId);
     if (!response || !response.ok) return null;
-    return response.json().catch(() => null);
+    try {
+      const body = typeof response.text === 'function'
+        ? await response.text()
+        : JSON.stringify(await response.json());
+      return { path, body, payload: JSON.parse(body) };
+    } catch { return null; }
   }));
   const eventIds = [];
   const seen = new Set();
-  for (const payload of listResponses) {
+  for (const entry of listResponses) {
+    const payload = entry?.payload;
     const leagues = Array.isArray(payload?.serializedData) ? payload.serializedData : [];
     for (const league of leagues) {
       const events = Array.isArray(league?.[12]) ? league[12] : [];
@@ -434,7 +440,12 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
     '/api/eventpage/events/' + encodeURIComponent(eventId) + '?hideX25X75Selections=false',
     { method: 'GET', credentials: 'include', cache: 'no-store', headers: detailHeaders }
   )));
-  return 'catalog-requested';
+  return {
+    status: 'catalog-requested',
+    generation,
+    origin: location.origin || ('https://' + location.hostname),
+    responses: listResponses.filter(Boolean).map(({ path, body }) => ({ url: path, body }))
+  };
 })()`;
 
 export class NetworkObserver {
@@ -664,17 +675,19 @@ export class NetworkObserver {
       // Always address the current top-level main world directly. Cached CDP
       // execution-context ids are invalidated on provider-side redirects and a
       // stale id otherwise makes every later refresh a silent no-op.
-      await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+      const topEvaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
         expression: BTI_CATALOG_REFRESH_EXPRESSION, returnByValue: true, awaitPromise: true
       })).catch(() => ({}));
+      await this.#ingestBtiRefreshEvaluation(source, topEvaluation);
       if (frameIds.length <= 1) return;
       await Promise.all(frameIds.slice(1).map(async (frameId) => {
         const mainContextId = this.#mainWorldContexts.get(source.tabId)?.get(frameId);
         if (mainContextId !== undefined) {
-          await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
             expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId: mainContextId,
             returnByValue: true, awaitPromise: true
           })).catch(() => ({}));
+          await this.#ingestBtiRefreshEvaluation(source, evaluation);
           return;
         }
         const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
@@ -683,11 +696,39 @@ export class NetworkObserver {
         })).catch(() => ({}));
         const contextId = nestedNumber(world, "executionContextId");
         if (contextId === null) return;
-        await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+        const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId, returnByValue: true, awaitPromise: true
         })).catch(() => ({}));
+        await this.#ingestBtiRefreshEvaluation(source, evaluation);
       }));
     });
+  }
+
+  async #ingestBtiRefreshEvaluation(source: ObservedSource, evaluation: unknown): Promise<void> {
+    const value = nestedValue(evaluation, "result", "value");
+    if (!isRecord(value) || value.status !== "catalog-requested" ||
+      typeof value.generation !== "string" || !/^bti:\d{10,16}:\d{1,9}$/u.test(value.generation) ||
+      typeof value.origin !== "string" || !Array.isArray(value.responses)) return;
+    let origin: URL;
+    try { origin = new URL(value.origin); } catch { return; }
+    if (origin.protocol !== "https:" || origin.username !== "" || origin.password !== "") return;
+    const allowedPaths = new Set([
+      "/api/eventlist/asia/leagues/v2/1/live",
+      "/api/eventlist/asia/leagues/v2/1/live/initial",
+      "/api/eventlist/asia/leagues/v2/1/prematch",
+      "/api/eventlist/asia/leagues/v2/1/prematch/initial"
+    ]);
+    const unique = new Map<string, string>();
+    for (const response of value.responses) {
+      if (!isRecord(response) || typeof response.url !== "string" || typeof response.body !== "string" ||
+        !allowedPaths.has(response.url) || response.body.length > 12 * 1024 * 1024) continue;
+      unique.set(response.url, response.body);
+    }
+    if (unique.size !== allowedPaths.size) return;
+    for (const path of allowedPaths) {
+      await this.ingestHttpResponse(source, new URL(path, origin).href, "Fetch", unique.get(path)!,
+        undefined, value.generation);
+    }
   }
 
   async #evaluateImCatalogMainWorlds(source: ObservedSource, awaitPromise: boolean): Promise<string[]> {
@@ -1003,7 +1044,11 @@ export class NetworkObserver {
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
     const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
-    const request = providerPartition === undefined ? {} : { request: { providerPartition, streamId } };
+    const requestMetadata = {
+      ...(providerPartition === undefined ? {} : { providerPartition }),
+      ...(streamId === undefined ? {} : { streamId })
+    };
+    const request = Object.keys(requestMetadata).length === 0 ? {} : { request: requestMetadata };
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
         { ...request, ...clocks });
