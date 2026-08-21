@@ -707,3 +707,17 @@ the requested five providers is therefore **4/5 current runtime PASS**, not
   `CHROME_BRIDGE_TAB_REPLACEMENT_INCOMPLETE:CMD,KSPORT,TSPORT,BTI`.
   After completion SABA, IM, APSPORT and BTI catalogs were ACTIVE; CMD and
   SBOBET were ACTION_REQUIRED. Do not report this runtime as 6/6.
+
+### KSPORT Reset follow-up
+
+- Commit `a42a327` removes the false dependency on a signed-in Fabet portal
+  tab inside user Chrome. When the API's isolated Fabet browser has already
+  captured a fresh tokenized KSPORT launch, the extension falls back to that
+  launch only for `FABET_PORTAL_TAB_UNAVAILABLE`; other portal failures still
+  fail closed.
+- Runtime Reset `1787298288093` created KSPORT tab `2105812446`. Its source
+  stayed LIVE and sequence advanced `0 -> 161 -> 1052 -> 2794`; SBOBET changed
+  from ACTION_REQUIRED to ACTIVE and its catalog acquiredAt continued to
+  advance. The final Reset error was only
+  `CHROME_BRIDGE_REFRESH_INCOMPLETE:CMD`, matching the provider maintenance
+  page. SBOBET/KSPORT passed this Reset.
