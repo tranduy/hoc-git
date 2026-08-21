@@ -1405,9 +1405,34 @@ describe("NetworkObserver", () => {
       maxResourceBufferSize: 12 * 1024 * 1024
     }));
     expect(sendCommand).toHaveBeenCalledWith(7, "Page.setLifecycleEventsEnabled", { enabled: true });
+    expect(sendCommand).toHaveBeenCalledWith(7, "Target.setAutoAttach", {
+      autoAttach: true, waitForDebuggerOnStart: false, flatten: true
+    });
     const evaluateCall = sendCommand.mock.calls.find((call) => call[1] === "Runtime.evaluate");
     expect(evaluateCall?.[2]).toMatchObject({ returnByValue: true });
     expect(JSON.stringify(evaluateCall?.[2])).not.toMatch(/\.click\(|dispatchEvent|\[data-odds/iu);
+  });
+
+  it("enables and routes KSPORT sportsbook traffic from an OOPIF child CDP session", async () => {
+    const sendCommand = vi.fn(async () => ({}));
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
+
+    await observer.handleEvent(ksport, "Target.attachedToTarget", {
+      sessionId: "sportsbook-child", targetInfo: { type: "iframe" }
+    });
+    await observer.handleEvent(ksport, "Network.webSocketCreated", {
+      requestId: "socket-1", url: "wss://d42.sb21.net/sport/538/session/websocket"
+    }, "sportsbook-child");
+    await observer.handleEvent(ksport, "Network.webSocketFrameReceived", {
+      requestId: "socket-1", response: { opcode: 1, payloadData: "a[\"MESSAGE\\ndestination:/topic/sports/1_1/live/ma/event/vi\\n\\n{}\\u0000\"]" }
+    }, "sportsbook-child");
+
+    expect(sendCommand).toHaveBeenCalledWith(8, "Network.enable", expect.any(Object), "sportsbook-child");
+    expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.enable", {}, "sportsbook-child");
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "KSPORT", transport: "WS_FRAME",
+      payload: expect.objectContaining({ body: expect.stringContaining("/topic/sports/1_1/live/") }) }));
   });
 
   it("does not re-enable debugger network buffers for an already started tab", async () => {

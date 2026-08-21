@@ -100,6 +100,7 @@ export class ChromeCatalogDataPlane {
       }
       this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
     }
+    if (update.transportAlive === true) return stateChanged;
     if (update.invalidateAccountId !== undefined) {
       return this.#invalidate(update.invalidateAccountId) || stateChanged;
     }

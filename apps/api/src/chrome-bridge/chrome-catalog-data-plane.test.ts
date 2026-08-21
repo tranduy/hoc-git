@@ -189,8 +189,9 @@ describe("ChromeCatalogDataPlane", () => {
     })).toBe(false);
 
     await expect(plane.overlayStatuses([authenticated])).resolves.toMatchObject([{
-      sessionState: "ACTION_REQUIRED",
-      reason: "PROVIDER_VALIDATION_FAILED"
+      sessionState: "ACTIVE",
+      acquiredAtMs: 1_002,
+      reason: null
     }]);
   });
 

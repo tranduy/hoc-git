@@ -26,6 +26,14 @@ function receiptEnvelope(payload: unknown, partition: "live" | "today", sequence
 }
 
 describe("KsportWsCatalogAdapter", () => {
+  it("rejects the auxiliary Volta root socket even when it shares an sb21 host", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    const input = envelope([]);
+    expect(adapter.fingerprint({ ...input, request: {
+      ...input.request, hostname: "novoga.sb21.net", pathnameClass: "/"
+    } })).toBe(false);
+  });
+
   it("does not publish a partial epoch before both live and today receipts form the baseline", () => {
     const event = (id: number) => ({ "0": "2026-08-20T16:00:00Z", "2": `Home ${id}`, "3": `Away ${id}`,
       "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
@@ -36,6 +44,20 @@ describe("KsportWsCatalogAdapter", () => {
     const catalog = adapter.decode(receiptEnvelope([{ "1": "Today", "2": [event(5643424)] }],
       "today", 11))[0]!.value as { events: Array<{ providerEventId: string }> };
 
+    expect(catalog.events.map((item) => item.providerEventId).sort()).toEqual(["5643423", "5643424"]);
+  });
+
+  it("treats the provider's current 1_11 hot-match channel as the today partition", () => {
+    const event = (id: number) => ({ "0": "2026-08-21T16:00:00Z", "2": `Home ${id}`, "3": `Away ${id}`,
+      "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(5643423)] }], "live", 10));
+    const currentToday = receiptEnvelope([{ "1": "Hot", "2": [event(5643424)] }], "today", 11);
+    const body = currentToday.payload.body
+      .replace("/sports/1_1/today/", "/sports/1_11/today/")
+      .replace("subSportBookToday", "subSportHotMatch");
+    const catalog = adapter.decode({ ...currentToday, payload: { encoding: "UTF8", body } })[0]!.value as {
+      events: Array<{ providerEventId: string }> };
     expect(catalog.events.map((item) => item.providerEventId).sort()).toEqual(["5643423", "5643424"]);
   });
 
@@ -112,6 +134,31 @@ describe("KsportWsCatalogAdapter", () => {
     expect(adapter.fingerprint(envelope({ pong: 1 }, "/topic/jackpot/ws"))).toBe(false);
   });
 
+  it("reports transport liveness for a heartbeat on the current completed sportsbook socket", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(receiptEnvelope([], "live", 4));
+    adapter.decode(receiptEnvelope([], "today", 5));
+    const heartbeat = { ...receiptEnvelope([], "today", 6),
+      payload: { encoding: "UTF8" as const, body: `a${JSON.stringify(["\n"])}` } };
+
+    expect(adapter.decode(heartbeat)).toEqual([expect.objectContaining({
+      transportAlive: true, sourceId: "chrome:KSPORT:8", sequence: 6
+    })]);
+  });
+
+  it("ignores heartbeats from a retired sportsbook socket", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(receiptEnvelope([], "live", 4));
+    adapter.decode(receiptEnvelope([], "today", 5));
+    const opened: ChromeBridgeEnvelope = { ...receiptEnvelope([], "live", 6, 1, "ksport-stream-2"),
+      transport: "WS_STATE", payload: { encoding: "UTF8", body: JSON.stringify({ state: "OPEN" }) } };
+    adapter.decode(opened);
+    const oldHeartbeat = { ...receiptEnvelope([], "today", 7, 7, "ksport-stream-1"),
+      payload: { encoding: "UTF8" as const, body: `a${JSON.stringify(["\n"])}` } };
+
+    expect(adapter.decode(oldHeartbeat)).toEqual([]);
+  });
+
   it("does not use the direct-price HTTP response as catalog authority", () => {
     const adapter = new KsportWsCatalogAdapter();
     const input: ChromeBridgeEnvelope = {
@@ -121,6 +168,22 @@ describe("KsportWsCatalogAdapter", () => {
     };
     expect(adapter.fingerprint(input)).toBe(false);
     expect(adapter.decode(input)).toEqual([]);
+  });
+
+  it("publishes the current page getEvent snapshot while ignoring untagged direct probes", () => {
+    const event = { "0": "2026-08-21T16:00:00Z", "2": "Kashiwa", "3": "V Varen Nagasaki", "8": 5643423,
+      "7": { "5": ["0.5 0.92*56434230050000005h -0.98*56434230050000005a h 735502668161000 0 0 1 1 0"] } };
+    const adapter = new KsportWsCatalogAdapter();
+    const input: ChromeBridgeEnvelope = {
+      ...envelope([]), transport: "HTTP_RESPONSE", sequence: 20,
+      request: { hostname: "zenandfe.com", pathnameClass: "/api/v2/getEvent", resourceType: "Fetch",
+        streamId: "ksport-http:today" },
+      payload: { encoding: "UTF8", body: JSON.stringify([{ "1": "J League", "2": [event] }]) }
+    };
+    const catalog = adapter.decode(input)[0]?.value as { events: unknown[]; quotes: unknown[] };
+    expect(adapter.fingerprint(input)).toBe(true);
+    expect(catalog.events).toHaveLength(1);
+    expect(catalog.quotes).toHaveLength(2);
   });
 
   it("atomically replaces a completed partition by provider event ID", () => {

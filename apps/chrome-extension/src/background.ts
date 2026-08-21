@@ -49,7 +49,8 @@ const registry = new TabRegistry({
 const sbobetEventRequestStorageKey = "sbobetEventRequestTemplate";
 const sabaWsSnapshotsStorageKey = "sabaWsSnapshotsV1";
 const observer = new NetworkObserver({
-  sendCommand: async (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params),
+  sendCommand: async (tabId, method, params, sessionId) => chrome.debugger.sendCommand(
+    sessionId === undefined ? { tabId } : { tabId, sessionId }, method, params),
   loadSbobetEventRequest: async () => {
     const value = (await chrome.storage.session.get(sbobetEventRequestStorageKey))[sbobetEventRequestStorageKey];
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -400,7 +401,7 @@ chrome.debugger.onDetach.addListener((debuggee) => {
 chrome.debugger.onEvent.addListener((debuggee, method, params) => {
   if (debuggee.tabId === undefined) return;
   const source = sourceForTab(debuggee.tabId);
-  if (source) void observer.handleEvent(source, method, params);
+  if (source) void observer.handleEvent(source, method, params, debuggee.sessionId);
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url || changeInfo.status === "loading") {

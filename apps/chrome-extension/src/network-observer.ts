@@ -18,6 +18,10 @@ const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
 const SABA_SNAPSHOT_PERSIST_INTERVAL_MS = 5_000;
 
+function isKsportCatalogSocket(url: URL): boolean {
+  return url.protocol === "wss:" && /\/sport\//u.test(url.pathname);
+}
+
 export interface ObservedSource {
   readonly lobby: ChromeLobbyId;
   readonly sourceId: string;
@@ -25,7 +29,8 @@ export interface ObservedSource {
 }
 
 export interface NetworkObserverDependencies {
-  readonly sendCommand: (tabId: number, method: string, params?: Record<string, unknown>) => Promise<unknown>;
+  readonly sendCommand: (tabId: number, method: string, params?: Record<string, unknown>,
+    sessionId?: string) => Promise<unknown>;
   readonly forward: (envelope: ChromeBridgeEnvelope) => Promise<void>;
   readonly now?: () => number;
   readonly monotonicNow?: () => number;
@@ -46,6 +51,7 @@ type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
 
 interface PendingRequest {
   readonly source: ObservedSource;
+  readonly sessionId?: string;
   readonly url: string;
   readonly resourceType: string;
   readonly providerPartition?: ImProviderPartition;
@@ -522,6 +528,11 @@ export class NetworkObserver {
 
   async start(source: ObservedSource): Promise<void> {
     if (this.#startedTabs.has(source.tabId)) return;
+    await this.#sendCommand(source.tabId, "Target.setAutoAttach", {
+      autoAttach: true,
+      waitForDebuggerOnStart: false,
+      flatten: true
+    });
     await this.#sendCommand(source.tabId, "Network.enable", {
       maxTotalBufferSize: 16 * 1024 * 1024,
       maxResourceBufferSize: 12 * 1024 * 1024,
@@ -839,8 +850,22 @@ export class NetworkObserver {
     });
   }
 
-  async handleEvent(source: ObservedSource, method: string, rawParams: unknown): Promise<void> {
+  async handleEvent(source: ObservedSource, method: string, rawParams: unknown,
+    sessionId?: string): Promise<void> {
     const params = isRecord(rawParams) ? rawParams : {};
+    if (method === "Target.attachedToTarget") {
+      const childSessionId = typeof params.sessionId === "string" ? params.sessionId : null;
+      const targetInfo = isRecord(params.targetInfo) ? params.targetInfo : null;
+      if (childSessionId !== null && targetInfo?.type === "iframe") {
+        await this.#sendCommand(source.tabId, "Network.enable", {
+          maxTotalBufferSize: 16 * 1024 * 1024,
+          maxResourceBufferSize: 12 * 1024 * 1024,
+          maxPostDataSize: 0
+        }, childSessionId);
+        await this.#sendCommand(source.tabId, "Runtime.enable", {}, childSessionId);
+      }
+      return;
+    }
     if (method === "Runtime.executionContextCreated") {
       const context = isRecord(params.context) ? params.context : null;
       const auxData = context && isRecord(context.auxData) ? context.auxData : null;
@@ -872,7 +897,7 @@ export class NetworkObserver {
       return;
     }
     const requestId = typeof params.requestId === "string" ? params.requestId : null;
-    const key = requestId ? `${source.tabId}:${requestId}` : null;
+    const key = requestId ? `${source.tabId}:${sessionId ?? "root"}:${requestId}` : null;
 
     if (method === "Network.requestWillBeSent" && key) {
       const request = isRecord(params.request) ? params.request : null;
@@ -891,6 +916,10 @@ export class NetworkObserver {
         try {
           const url = new URL(request.url);
           if (url.protocol === "https:" && url.pathname === "/api/v2/getEvent") {
+            const timeRange = url.searchParams.get("timeRange")?.toLowerCase();
+            if (timeRange === "live" || timeRange === "today") {
+              this.#requestStreamIds.set(key, `ksport-http:${timeRange}`);
+            }
             const rawHeaders = isRecord(request.headers) ? request.headers : {};
             const headers = Object.fromEntries(Object.entries(rawHeaders).flatMap(([name, value]) =>
               /^(?:cookie|host|content-length|accept-encoding|connection|origin|referer|user-agent|sec-|:)/iu.test(name) ||
@@ -943,7 +972,7 @@ export class NetworkObserver {
       this.#webSockets.set(key, { source, url: params.url, streamId });
       if (source.lobby === "KSPORT") {
         try {
-          if (/\/sport\//u.test(new URL(params.url).pathname)) {
+          if (isKsportCatalogSocket(new URL(params.url))) {
             this.#activeKsportStreams.set(source.sourceId, streamId);
             this.#catalogWsSnapshots.set(source.sourceId, new Map());
           }
@@ -996,6 +1025,7 @@ export class NetworkObserver {
       const providerPartition = this.#requestPartitions.get(key);
       const streamId = this.#requestStreamIds.get(key);
       this.#pending.set(key, { source, url: response.url, resourceType,
+        ...(sessionId === undefined ? {} : { sessionId }),
         ...(providerPartition === undefined ? {} : { providerPartition }),
         ...(streamId === undefined ? {} : { streamId }) });
       return;
@@ -1015,7 +1045,9 @@ export class NetworkObserver {
       let responseBodyRead = false;
       try {
         if (pending.providerPartition === undefined && isImGetSeUrl(pending.source, pending.url)) {
-          const requestPostData = await this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId })
+          const requestPostData = await (pending.sessionId === undefined
+            ? this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId })
+            : this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId }, pending.sessionId))
             .catch(() => ({}));
           const postData = isRecord(requestPostData) && typeof requestPostData.postData === "string"
             ? requestPostData.postData : null;
@@ -1025,7 +1057,7 @@ export class NetworkObserver {
           if (providerPartition !== null) pending = { ...pending, providerPartition };
         }
         const response = await this.#readResponseBody(source.tabId, requestId,
-          isImGetSeUrl(pending.source, pending.url));
+          isImGetSeUrl(pending.source, pending.url), pending.sessionId);
         if (!isRecord(response) || typeof response.body !== "string") return;
         responseBodyRead = true;
         if (response.base64Encoded === true) {
@@ -1072,13 +1104,16 @@ export class NetworkObserver {
     }
   }
 
-  async #readResponseBody(tabId: number, requestId: string, retryTransientMiss: boolean): Promise<unknown> {
+  async #readResponseBody(tabId: number, requestId: string, retryTransientMiss: boolean,
+    sessionId?: string): Promise<unknown> {
     const retryDelaysMs = retryTransientMiss ? [0, 50, 150] : [0];
     let lastError: unknown = new Error("RESPONSE_BODY_UNAVAILABLE");
     for (const delayMs of retryDelaysMs) {
       if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
       try {
-        return await this.#sendCommand(tabId, "Network.getResponseBody", { requestId });
+        return await (sessionId === undefined
+          ? this.#sendCommand(tabId, "Network.getResponseBody", { requestId })
+          : this.#sendCommand(tabId, "Network.getResponseBody", { requestId }, sessionId));
       } catch (error) {
         lastError = error;
       }
@@ -1561,7 +1596,7 @@ export class NetworkObserver {
         completesBaseline = payload[2].some((row) => Array.isArray(row) && row[1] === "done");
       } catch { return; }
     } else {
-      if (!/\/sport\//u.test(parsedUrl.pathname) || body.includes("destination:/topic/jackpot/")) return;
+      if (!isKsportCatalogSocket(parsedUrl) || body.includes("destination:/topic/jackpot/")) return;
       const activeStream = this.#activeKsportStreams.get(source.sourceId);
       if (activeStream !== undefined && activeStream !== streamId) return;
       if (activeStream === undefined) this.#activeKsportStreams.set(source.sourceId, streamId);

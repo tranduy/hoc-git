@@ -30,7 +30,14 @@ interface SocketEpoch {
 
 function receiptPartition(receipt: SbobetStompProviderReceipt): CatalogPartition | null {
   if (receipt.subscription === "subSportBookLive" || /\/1_1\/live\//u.test(receipt.destination)) return "live";
-  if (receipt.subscription === "subSportBookToday" || /\/1_1\/today\//u.test(receipt.destination)) return "today";
+  if (receipt.subscription === "subSportBookToday" || receipt.subscription === "subSportHotMatch" ||
+    /\/sports\/1_\d+\/today\//u.test(receipt.destination)) return "today";
+  return null;
+}
+
+function httpPartition(streamId: string | undefined): CatalogPartition | null {
+  if (streamId === "ksport-http:live") return "live";
+  if (streamId === "ksport-http:today") return "today";
   return null;
 }
 
@@ -43,6 +50,17 @@ function isFullPartitionSnapshot(body: unknown): boolean {
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function isSportsbookHeartbeat(body: string): boolean {
+  if (body === "h" || body.trim() === "") return true;
+  const candidate = body.startsWith("a[") ? body.slice(1) : body.startsWith("[") ? body : null;
+  if (candidate === null) return false;
+  try {
+    const values = JSON.parse(candidate) as unknown;
+    return Array.isArray(values) && values.length > 0 &&
+      values.every((value) => typeof value === "string" && value.trim() === "");
+  } catch { return false; }
 }
 
 function bootstrapRecords(body: unknown, live: boolean): readonly SbobetCatalogInputRecord[] {
@@ -73,17 +91,24 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly providerFamily = "SBOBET";
   readonly #decoders = new Map<string, SbobetStompReceiptDecoder>();
   readonly #epochs = new Map<string, SocketEpoch>();
+  readonly #httpPartitions = new Map<string, Map<CatalogPartition, PartitionSnapshot>>();
   readonly #retiredStreams = new Map<string, Set<string>>();
 
   resetSource(sourceId: string): void {
     this.#epochs.delete(sourceId);
+    this.#httpPartitions.delete(sourceId);
     this.#retiredStreams.delete(sourceId);
     for (const key of this.#decoders.keys()) if (key.startsWith(`${sourceId}|`)) this.#decoders.delete(key);
   }
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "KSPORT" || envelope.payload.encoding !== "UTF8") return false;
-    if (!envelope.request.pathnameClass.startsWith("/sport/") || envelope.request.streamId === undefined) return false;
+    if (envelope.transport === "HTTP_RESPONSE") {
+      return envelope.request.pathnameClass === "/api/v2/getEvent" &&
+        httpPartition(envelope.request.streamId) !== null;
+    }
+    const providerSocket = envelope.request.pathnameClass.startsWith("/sport/");
+    if (!providerSocket || envelope.request.streamId === undefined) return false;
     if (envelope.transport === "WS_STATE") return websocketLifecycleState(envelope) !== null;
     if (envelope.transport !== "WS_FRAME" || envelope.payload.body.includes("destination:/topic/jackpot/")) return false;
     return envelope.payload.body.includes("destination:/topic/sports/") || !envelope.payload.body.includes("destination:");
@@ -91,6 +116,40 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
+    if (envelope.transport === "HTTP_RESPONSE") {
+      const partition = httpPartition(envelope.request.streamId);
+      if (partition === null) return [];
+      let body: unknown;
+      try { body = JSON.parse(envelope.payload.body) as unknown; } catch { return []; }
+      if (!isFullPartitionSnapshot(body)) return [];
+      const bootstrap = bootstrapRecords(body, partition === "live");
+      const changed = extractSbobetDirectCatalogRecords(body, bootstrap);
+      if (changed.length === 0) return [];
+      const partitions = this.#httpPartitions.get(envelope.sourceId) ?? new Map();
+      const prior = partitions.get(partition);
+      if (prior !== undefined && envelope.sequence <= prior.receiptSequence) return [];
+      const records = new Map<string, RetainedRecord>();
+      for (const record of changed) records.set(record.eventId, { record,
+        seenAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
+        sequence: envelope.sequence });
+      partitions.set(partition, { records, receiptSequence: envelope.sequence });
+      this.#httpPartitions.set(envelope.sourceId, partitions);
+      const retained = new Map<string, RetainedRecord>();
+      for (const current of partitions.values()) {
+        for (const [eventId, entry] of current.records) retained.set(eventId, entry);
+      }
+      const parts: NormalizedCatalogPart[] = [];
+      for (const entry of retained.values()) parts.push(normalizeSbobetCatalog([entry.record], {
+        observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
+        sequence: entry.sequence, provider: "SBOBET",
+        settlementProfile: "football-regulation-including-added-time"
+      }));
+      const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET",
+        observedAtMs: envelope.observedAtMs, parts });
+      if (catalog.events.length === 0 || catalog.markets.length === 0 || catalog.quotes.length === 0) return [];
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+        observedAtMs: envelope.observedAtMs, value: catalog, authoritativeBaseline: true }];
+    }
     const streamKey = `${envelope.sourceId}|${envelope.request.streamId ?? "legacy"}`;
     if (envelope.transport === "WS_STATE") {
       const state = websocketLifecycleState(envelope);
@@ -118,10 +177,18 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     const decoder = this.#decoders.get(streamKey) ?? new SbobetStompReceiptDecoder();
     this.#decoders.set(streamKey, decoder);
+    const streamId = envelope.request.streamId ?? "legacy";
+    const epochBeforeDecode = this.#epochs.get(envelope.sourceId);
+    if (isSportsbookHeartbeat(envelope.payload.body)) {
+      if (this.#retiredStreams.get(envelope.sourceId)?.has(streamId) === true ||
+        epochBeforeDecode?.streamId !== streamId || !epochBeforeDecode.partitions.has("live") ||
+        !epochBeforeDecode.partitions.has("today")) return [];
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+        observedAtMs: envelope.observedAtMs, transportAlive: true }];
+    }
     const receipts = decoder.push(envelope.payload.body);
     if (receipts.length === 0) return [];
     let epoch = this.#epochs.get(envelope.sourceId);
-    const streamId = envelope.request.streamId ?? "legacy";
     if (this.#retiredStreams.get(envelope.sourceId)?.has(streamId) === true) return [];
     if (epoch === undefined) {
       epoch = { streamId: envelope.request.streamId ?? "legacy", partitions: new Map() };

@@ -649,3 +649,46 @@ tests, but this runtime cannot be marked PASS until the attached authenticated
 tab is the actual KSPORT/SBOBET sportsbook product. Final truthful status for
 the requested five providers is therefore **4/5 current runtime PASS**, not
 5/5.
+
+## 2026-08-21 CMD rerun and SBOBET OOPIF/heartbeat correction
+
+### Corrected diagnosis
+
+- The attached KSPORT tab is a real sportsbook shell. Its odds transport runs
+  inside an OOPIF child CDP session on `wss://*.sb21.net/sport/.../websocket`.
+  The root page also owns auxiliary Volta sockets; those are rejected and no
+  longer allowed to select the catalog epoch.
+- The current prematch partition uses destination
+  `/topic/sports/1_11/today/ma/event/vi` and subscription
+  `subSportHotMatch`; the adapter now accepts this together with the live
+  partition and still waits for both partitions before publishing.
+- A quiet, valid sportsbook socket sends SockJS/STOMP heartbeats. Previously
+  those frames produced no decoded update, so the data plane falsely marked a
+  healthy SBOBET catalog dead after the 20-second freshness interval. A
+  liveness-only update now refreshes transport health only for the current,
+  non-retired `/sport/` socket after a complete live+today baseline. It never
+  republishes odds or creates a revision.
+
+### Runtime evidence
+
+- `sbobet-runtime-evidence-heartbeat-fix.json`: 60/60 bridge LIVE samples,
+  60/60 provider ACTIVE samples, zero false-zero catalogs, source sequence
+  `10474 -> 12810`, 30 catalog revision changes and 30 SBOBET WebSocket
+  revisions. Multiple provider selection prices changed during the run.
+- The currently deployed API stayed ACTIVE beyond the 20-second quiet-feed
+  boundary. Focused adapter/data-plane tests are 40/40 PASS; API typecheck and
+  build PASS.
+- Direct SBOBET AH/TOTAL verification is still not credited in this section:
+  the direct-price runtime probe timed out. Catalog realtime and direct-price
+  verification are separate acceptance gates.
+
+### CMD current blocker
+
+- The exact CMD tab was rerun, but the provider page rendered `System
+  Maintenance`. A subsequent 30-second sample had 30/30 bridge LIVE samples
+  and sequence `110 -> 118`, while the catalog revision stayed unchanged and
+  no quote changed. The displayed 172-event catalog is retained stale data,
+  not current provider odds.
+- CMD therefore remains `ACTION_REQUIRED / PROVIDER_VALIDATION_FAILED` until
+  the provider tab serves its sportsbook again. No collector change can
+  manufacture realtime prices from the maintenance page.

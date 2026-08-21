@@ -8,6 +8,7 @@ export type DecodedCatalogUpdate = {
   readonly authoritativeBaseline?: boolean;
   readonly invalidateAccountId?: never;
   readonly reason?: never;
+  readonly transportAlive?: never;
 } | {
   readonly sourceId: string;
   readonly sequence: number;
@@ -15,6 +16,16 @@ export type DecodedCatalogUpdate = {
   readonly invalidateAccountId: string;
   readonly reason: "PROVIDER_STREAM_CLOSED" | "PROVIDER_STREAM_GAP";
   readonly value?: never;
+  readonly transportAlive?: never;
+} | {
+  readonly sourceId: string;
+  readonly sequence: number;
+  readonly observedAtMs: number;
+  readonly transportAlive: true;
+  readonly value?: never;
+  readonly authoritativeBaseline?: never;
+  readonly invalidateAccountId?: never;
+  readonly reason?: never;
 };
 
 export interface ChromeTrafficAdapter {
