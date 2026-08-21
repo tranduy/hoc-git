@@ -225,6 +225,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (!virtualOnly && (catalog.events.length === 0 || catalog.markets.length === 0 ||
       catalog.quotes.length === 0)) return [];
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-      observedAtMs: envelope.observedAtMs, value: catalog }];
+      observedAtMs: envelope.observedAtMs, value: catalog,
+      ...(envelope.transport === "DOM_SNAPSHOT" ? { authoritativeBaseline: true } : {}) }];
   }
 }

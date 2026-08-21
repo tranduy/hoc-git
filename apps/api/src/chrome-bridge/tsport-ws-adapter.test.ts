@@ -188,6 +188,24 @@ describe("TsportWsCatalogAdapter", () => {
     expect(merged.events).toHaveLength(3);
   });
 
+  it("marks a completed DOM generation as an authoritative baseline", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const baseline = [{
+      eventId: "current-1", leagueName: "Current league", timeText: "LIVE", scoreText: "0 - 0",
+      teamNames: ["Current home", "Current away"], markets: [{
+        marketId: "current-total", marketType: "FT_TOTAL", lineText: "2.5", selections: [
+          { selectionId: "current-over", selection: "OVER", priceText: "0.8", locked: false },
+          { selectionId: "current-under", selection: "UNDER", priceText: "-0.9", locked: false }
+        ]
+      }]
+    }];
+
+    expect(adapter.decode(domEnvelope(baseline))[0]).toMatchObject({
+      authoritativeBaseline: true,
+      value: { accountId: "catalog-source:APSPORT:FOOTBALL" }
+    });
+  });
+
   it("uses a newer DOM price without erasing socket-only APSPORT markets", () => {
     const adapter = new TsportWsCatalogAdapter();
     const socketCatalog = adapter.decode(envelope(event(2, "Socket Home")))[0]!.value as { markets: unknown[] };

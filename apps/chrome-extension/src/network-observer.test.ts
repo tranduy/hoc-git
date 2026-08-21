@@ -942,6 +942,41 @@ describe("NetworkObserver", () => {
     expect(startedTabs).toEqual([9, 11, 6]);
   });
 
+  it.each(["Emulation.setFocusEmulationEnabled", "Page.setWebLifecycleState",
+    "Page.createIsolatedWorld", "Runtime.evaluate"])(
+    "releases the shared provider lane when %s never settles", async (blockedMethod) => {
+    vi.useFakeTimers();
+    try {
+      const records = JSON.stringify([{ eventId: "event-1", leagueName: "League", timeText: "LIVE",
+        scoreText: "0 - 0", teamNames: ["Home", "Away"], markets: [{ marketId: "market-1",
+          marketType: "FT_TOTAL", lineText: "2.5", selections: [
+            { selectionId: "over", selection: "OVER", priceText: "0.82", locked: false },
+            { selectionId: "under", selection: "UNDER", priceText: "-0.9", locked: false }
+          ] }] }]);
+      const sendCommand = vi.fn(async (tabId: number, method: string) => {
+        if (tabId === 9 && method === blockedMethod) {
+          return await new Promise<never>(() => undefined);
+        }
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: `top-${tabId}` } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: tabId };
+        if (method === "Runtime.evaluate") return { result: { type: "string", value: records } };
+        return {};
+      });
+      const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+      const observer = new NetworkObserver({ sendCommand, forward, frameCommandTimeoutMs: 10 });
+
+      const blocked = observer.maintain({ lobby: "SABA", sourceId: "chrome:SABA:9", tabId: 9 });
+      const capture = observer.captureCmdSnapshot(
+        { lobby: "TSPORT", sourceId: "chrome:TSPORT:11", tabId: 11 }, "pacific.agenate.com");
+      await vi.advanceTimersByTimeAsync(11);
+      await Promise.all([blocked, capture]);
+
+      expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "TSPORT", transport: "DOM_SNAPSHOT" }));
+    } finally {
+      vi.useRealTimers();
+    }
+    });
+
   it("captures a complete T-Sports DOM baseline instead of waiting for WebSocket price deltas", async () => {
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain(".match__team-name");
     expect(TSPORT_PUBLIC_CATALOG_EXPRESSION).toContain("25|5|75");

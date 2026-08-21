@@ -63,10 +63,30 @@ const observer = new NetworkObserver({
   saveSbobetEventRequest: async (request) => {
     await chrome.storage.session.set({ [sbobetEventRequestStorageKey]: request });
   },
-  loadSabaWsSnapshots: async () =>
-    (await chrome.storage.session.get(sabaWsSnapshotsStorageKey))[sabaWsSnapshotsStorageKey] ?? null,
+  loadSabaWsSnapshots: async (sourceId) => {
+    const stored = (await chrome.storage.local.get(sabaWsSnapshotsStorageKey))[sabaWsSnapshotsStorageKey];
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return null;
+    const values = stored as Record<string, unknown>;
+    return values[sourceId] ?? (values.sourceId === sourceId ? stored : null);
+  },
   saveSabaWsSnapshots: async (snapshots) => {
-    await chrome.storage.session.set({ [sabaWsSnapshotsStorageKey]: snapshots });
+    const stored = (await chrome.storage.local.get(sabaWsSnapshotsStorageKey))[sabaWsSnapshotsStorageKey];
+    const values = stored && typeof stored === "object" && !Array.isArray(stored) && !("sourceId" in stored)
+      ? stored as Record<string, unknown> : {};
+    await chrome.storage.local.set({ [sabaWsSnapshotsStorageKey]: {
+      ...values, [snapshots.sourceId]: snapshots
+    } });
+  },
+  clearSabaWsSnapshots: async (sourceId) => {
+    const stored = (await chrome.storage.local.get(sabaWsSnapshotsStorageKey))[sabaWsSnapshotsStorageKey];
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
+    const values = { ...stored as Record<string, unknown> };
+    if (values.sourceId === sourceId) {
+      await chrome.storage.local.remove(sabaWsSnapshotsStorageKey);
+      return;
+    }
+    delete values[sourceId];
+    await chrome.storage.local.set({ [sabaWsSnapshotsStorageKey]: values });
   },
   recoverImBaseline: async (source) => {
     // Obtain both signed GetSE partitions inside the current authenticated IM
