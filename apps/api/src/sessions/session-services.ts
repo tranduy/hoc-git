@@ -128,7 +128,7 @@ export function createFabetAuthEgresses(options: {
   const egresses: AuthEgress[] = [new DirectAuthEgress()];
   if (options.proxyUrl?.trim()) egresses.push(new ConfiguredProxyAuthEgress(options.proxyUrl.trim()));
   const warpCliPath = options.warpCliPath ?? "C:\\Program Files\\Cloudflare\\Cloudflare WARP\\warp-cli.exe";
-  const localWarpEnabled = options.enableLocalWarp ?? process.platform === "win32";
+  const localWarpEnabled = options.enableLocalWarp === true;
   if (localWarpEnabled && (options.fileExists ?? existsSync)(warpCliPath)) {
     egresses.push(new WarpSocksAuthEgress({
       cli: new ProcessWarpCli({ executable: warpCliPath }),

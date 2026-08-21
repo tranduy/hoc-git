@@ -721,3 +721,20 @@ the requested five providers is therefore **4/5 current runtime PASS**, not
   advance. The final Reset error was only
   `CHROME_BRIDGE_REFRESH_INCOMPLETE:CMD`, matching the provider maintenance
   page. SBOBET/KSPORT passed this Reset.
+
+## 2026-08-21 disable implicit Cloudflare/WARP during Reset
+
+- Root cause: Windows implicitly enabled `FABET_LOCAL_WARP_AUTH` when the
+  variable was absent, so every Reset called the WARP connection path before
+  Fabet authentication. This contradicted the operator's no-Cloudflare mode.
+- WARP is now opt-in only: both server configuration and auth-egress creation
+  require the explicit value `FABET_LOCAL_WARP_AUTH=1`. An absent value or `0`
+  leaves Reset on direct authentication and never invokes WARP.
+- TDD evidence: the new regression first failed with
+  `DIRECT,WARP_SOCKS`, then passed with `DIRECT` only. Focused WARP/session
+  suite: 17/17 PASS; API typecheck and build PASS.
+- Runtime dev evidence: WARP was manually disconnected and the persistent
+  repository `cloudflared` tunnel was stopped. During a real Reset started at
+  `1787299102740`, WARP remained `Disconnected` across repeated observations
+  for more than three minutes and the `cloudflared` process count remained 0.
+  Reset provider completion is a separate gate and is not claimed here.

@@ -36,6 +36,15 @@ describe("createSessionServices", () => {
       fileExists: () => true,
     }).map((egress) => egress.name)).toEqual(["DIRECT", "CONFIGURED_PROXY", "WARP_SOCKS"]);
   });
+
+  it("does not add WARP when local WARP authentication is not explicitly enabled", () => {
+    expect(createFabetAuthEgresses({
+      authRoot: "C:\\safe-auth-root",
+      warpCliPath: "C:\\Cloudflare\\warp-cli.exe",
+      fileExists: () => true,
+    }).map((egress) => egress.name)).toEqual(["DIRECT"]);
+  });
+
   it("persists encrypted state below local app data and closes browser resources", async () => {
     const localAppData = await mkdtemp(join(tmpdir(), "tool-chenh-services-"));
     directories.push(localAppData);

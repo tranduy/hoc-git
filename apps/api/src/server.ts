@@ -210,9 +210,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     localAppData,
     providerFees: resolveProviderFees(env),
     ...(env.FABET_AUTH_PROXY_URL?.trim() ? { fabetAuthProxyUrl: env.FABET_AUTH_PROXY_URL.trim() } : {}),
-    enableLocalWarpAuth: env.FABET_LOCAL_WARP_AUTH === undefined
-      ? process.platform === "win32"
-      : env.FABET_LOCAL_WARP_AUTH === "1",
+    enableLocalWarpAuth: localWarpAuthEnabled(env.FABET_LOCAL_WARP_AUTH),
     ...(env.FABET_WARP_CLI_PATH?.trim() ? { warpCliPath: env.FABET_WARP_CLI_PATH.trim() } : {}),
     ...(env.FABET_WARP_PROXY_PORT?.trim()
       ? { warpProxyPort: positiveNumber(env.FABET_WARP_PROXY_PORT, 40_000, "FABET_WARP_PROXY_PORT") }
@@ -369,6 +367,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       await sessionServices.close();
     }
   };
+}
+
+export function localWarpAuthEnabled(value: string | undefined): boolean {
+  return value === "1";
 }
 
 const entryPath = process.argv[1];
