@@ -95,6 +95,40 @@ describe("visible provider price probe", () => {
     await page.close();
   });
 
+  it("reads BTI detail arrays wrapped in value/Count as returned by the live provider", async () => {
+    const page = await browser.newPage();
+    await page.route("https://bti-wrapped.example/", async (route) => route.fulfill({ contentType: "text/html",
+      body: "<p>BTI wrapped detail</p>" }));
+    await page.route("https://bti-wrapped.example/api/eventpage/events/event-wrapped**", async (route) => {
+      const home = Array<unknown>(20).fill(null);
+      home[0] = "home-wrapped"; home[5] = false;
+      home[8] = { value: [null, null, null, null, null, "0.81"], Count: 6 };
+      home[9] = 1; home[13] = false; home[16] = -0.25;
+      const away = [...home]; away[0] = "away-wrapped"; away[9] = 3; away[16] = 0.25;
+      const market = Array<unknown>(24).fill(null);
+      market[0] = "market-wrapped"; market[1] = "Asian Handicap";
+      market[5] = { value: ["HC0", "Asian Handicap", 2, "Asian Handicap", "Full"], Count: 5 };
+      market[13] = { value: [home, away], Count: 2 };
+      const event = Array<unknown>(34).fill(null);
+      event[0] = "event-wrapped";
+      event[8] = { value: [
+        { value: ["home", "Alpha", "Home"], Count: 3 },
+        { value: ["away", "Beta", "Away"], Count: 3 }
+      ], Count: 2 };
+      event[20] = { value: [market], Count: 1 };
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ data: [event] }) });
+    });
+    await page.goto("https://bti-wrapped.example/");
+
+    await expect(page.evaluate(buildBtiSelectionPriceExpression({
+      providerEventId: "event-wrapped", providerMarketId: "market-wrapped:-0.25",
+      providerSelectionId: "home-wrapped", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FT_AH", scope: "FULL_TIME",
+      selection: "HOME", line: "-0.25"
+    }))).resolves.toEqual(expect.objectContaining({ ok: true, rawOdds: "0.81" }));
+    await page.close();
+  });
+
   it("fails BTI detail checks closed when participants, line, outcome, or event identity differs", async () => {
     const page = await browser.newPage();
     await page.route("https://bti-identity.example/", async (route) => route.fulfill({ contentType: "text/html",

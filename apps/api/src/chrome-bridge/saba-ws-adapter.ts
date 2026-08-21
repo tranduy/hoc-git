@@ -23,6 +23,15 @@ function selectStableSabaEvent(current: CatalogEvent, candidate: CatalogEvent): 
   return liveIdentityScore(candidate) > liveIdentityScore(current) ? candidate : current;
 }
 
+function stableDomCoverage(previous: ReadonlySet<string>, current: ReadonlySet<string>): boolean {
+  if (previous.size === 0 || current.size === 0) return false;
+  let shared = 0;
+  for (const identity of current) if (previous.has(identity)) shared += 1;
+  const smaller = Math.min(previous.size, current.size);
+  const sizeDrift = Math.abs(previous.size - current.size);
+  return shared / smaller >= 0.95 && sizeDrift <= Math.max(5, Math.ceil(previous.size * 0.1));
+}
+
 export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "saba-ws-catalog-v1";
   readonly lobby = "SABA" as const;
@@ -31,12 +40,16 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #parts = new Map<string, NormalizedCatalogPart>();
   readonly #readyPartitions = new Set<string>();
+  readonly #domCandidates = new Map<string, ReadonlySet<string>>();
+  readonly #domReadySources = new Set<string>();
 
   resetSource(sourceId: string): void {
     for (const key of this.#decoders.keys()) if (key.startsWith(`${sourceId}|`)) this.#decoders.delete(key);
     this.#assembler.resetSource(sourceId);
     for (const key of this.#parts.keys()) if (key.startsWith(`${sourceId}|`)) this.#parts.delete(key);
     for (const key of this.#readyPartitions) if (key.startsWith(`${sourceId}|`)) this.#readyPartitions.delete(key);
+    this.#domCandidates.delete(sourceId);
+    this.#domReadySources.delete(sourceId);
   }
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
@@ -56,7 +69,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       // The DOM is only the visible viewport, never an authoritative baseline.
       // Publishing it before reset/done makes a healthy reconnect look LIVE
       // with only a handful of events and overwrites the complete catalog.
-      if (![...this.#readyPartitions].some((key) => key.startsWith(`${envelope.sourceId}|`))) return [];
+      const socketReady = [...this.#readyPartitions].some((key) => key.startsWith(`${envelope.sourceId}|`));
       // Keep accepting the current visible DOM after the socket bootstrap. A
       // quiet SABA socket may not publish another catalog frame for minutes;
       // dropping these snapshots made an otherwise healthy catalog expire.
@@ -64,6 +77,26 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       // stay in the union while overlapping visible prices are refreshed.
       const records = decodePublicDomRecords(this.#assembler, envelope);
       if (records === null) return [];
+      const usable = records.filter((record) => record.groups.length > 0);
+      if (!socketReady) {
+        // Some SABA deployments expose the complete current event table in the
+        // page but do not recreate their Socket.IO transport after a service
+        // worker restart. Promote that table only after two atomic generations
+        // have nearly identical event coverage. A scrolling viewport or a
+        // half-rendered generation cannot satisfy this quorum and cannot erase
+        // the last good catalog.
+        if (usable.length < 20) return [];
+        const identities = new Set(usable.map((record) => record.matchId));
+        const previous = this.#domCandidates.get(envelope.sourceId);
+        if (!this.#domReadySources.has(envelope.sourceId)) {
+          this.#domCandidates.set(envelope.sourceId, identities);
+          if (previous === undefined || !stableDomCoverage(previous, identities)) return [];
+          this.#domReadySources.add(envelope.sourceId);
+        } else if (previous !== undefined && !stableDomCoverage(previous, identities)) {
+          return [];
+        }
+        this.#domCandidates.set(envelope.sourceId, identities);
+      }
       const normalized = normalizeObservedFootballCatalog("SABA", records, {
         observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
         timezoneOffsetMinutes: 480, sequence: envelope.sequence

@@ -330,11 +330,16 @@ export function buildBtiSelectionPriceExpression(identity: SelectionPriceProbeId
     catch { return { ok: false, reason: 'BTI_DETAIL_INVALID_JSON' }; }
     const normalize = (value) => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/gu, '')
       .toLocaleLowerCase('en').replace(/[^a-z0-9]+/gu, ' ').trim().replace(/\\s+/gu, ' ');
-    const localized = (value) => value && typeof value === 'object' && !Array.isArray(value)
-      ? String(value.VI ?? value.EN ?? '').trim() : '';
-    const participantNames = (event) => (Array.isArray(event?.[8]) ? event[8] : []).slice(0, 2)
-      .map((participant) => Array.isArray(participant)
-        ? localized(participant[1]) || String(participant[2] ?? '').trim() : '');
+    const asArray = (value) => Array.isArray(value) ? value : value && typeof value === 'object' &&
+      Array.isArray(value.value) ? value.value : [];
+    const localized = (value) => typeof value === 'string' ? value.trim() :
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? String(value.VI ?? value.EN ?? '').trim() : '';
+    const participantNames = (event) => asArray(event?.[8]).slice(0, 2)
+      .map((participant) => {
+        const values = asArray(participant);
+        return localized(values[1]) || String(values[2] ?? '').trim();
+      });
     const events = Array.isArray(payload?.data) ? payload.data : [];
     const eventMatches = events.filter((event) => {
       if (!Array.isArray(event) || String(event[0] ?? '') !== input.providerEventId) return false;
@@ -348,7 +353,7 @@ export function buildBtiSelectionPriceExpression(identity: SelectionPriceProbeId
     const marketId = separator > 0 ? input.providerMarketId.slice(0, separator) : input.providerMarketId;
     const requestedLine = Number(input.line);
     const classifyMarket = (market) => {
-      const metadata = Array.isArray(market?.[5]) ? market[5] : [];
+      const metadata = asArray(market?.[5]);
       const code = String(metadata[0] ?? metadata[1] ?? market?.[1] ?? '').trim().toUpperCase();
       const label = normalize(String(market?.[1] ?? '') + ' ' + String(metadata[1] ?? ''));
       const handicap = /^HC(?:39|0|1)$/u.test(code) || /\\b(?:asian handicap|handicap|ah)\\b/u.test(label);
@@ -359,14 +364,13 @@ export function buildBtiSelectionPriceExpression(identity: SelectionPriceProbeId
       const type = (firstHalf ? 'FH_' : 'FT_') + (handicap ? 'AH' : 'TOTAL');
       return { type, scope: firstHalf ? 'FIRST_HALF' : 'FULL_TIME', handicap };
     };
-    const rawMarkets = [...(Array.isArray(eventMatches[0][20]) ? eventMatches[0][20] : []),
-      ...(Array.isArray(eventMatches[0][33]) ? eventMatches[0][33] : [])];
+    const rawMarkets = [...asArray(eventMatches[0][20]), ...asArray(eventMatches[0][33])];
     const markets = rawMarkets.filter((market) => {
-      if (!Array.isArray(market) || String(market[0] ?? '') !== marketId || !Array.isArray(market[13])) return false;
+      if (!Array.isArray(market) || String(market[0] ?? '') !== marketId || asArray(market[13]).length === 0) return false;
       const identity = classifyMarket(market);
       if (!identity || identity.type !== input.marketType || identity.scope !== input.scope ||
         !Number.isFinite(requestedLine)) return false;
-      const lines = market[13].flatMap((selection) => {
+      const lines = asArray(market[13]).flatMap((selection) => {
         if (!Array.isArray(selection) || typeof selection[16] !== 'number') return [];
         return [identity.handicap && selection[9] === 3 ? -selection[16] : selection[16]];
       });
@@ -378,13 +382,13 @@ export function buildBtiSelectionPriceExpression(identity: SelectionPriceProbeId
     const expectedSide = input.selection === 'HOME' || input.selection === 'OVER' ? 1 :
       input.selection === 'AWAY' || input.selection === 'UNDER' ? 3 : null;
     const expectedLine = marketIdentity?.handicap && expectedSide === 3 ? -requestedLine : requestedLine;
-    const selections = markets[0][13].filter((selection) => Array.isArray(selection) &&
+    const selections = asArray(markets[0][13]).filter((selection) => Array.isArray(selection) &&
       String(selection[0] ?? '') === input.providerSelectionId && expectedSide !== null &&
       selection[9] === expectedSide && typeof selection[16] === 'number' &&
       Math.abs(selection[16] - expectedLine) < 0.000001 && selection[5] !== true && selection[13] !== true);
     if (selections.length !== 1) return { ok: false, reason: selections.length === 0 ?
       'BTI_SELECTION_NOT_FOUND' : 'BTI_SELECTION_AMBIGUOUS' };
-    const formats = Array.isArray(selections[0][8]) ? selections[0][8] : [];
+    const formats = asArray(selections[0][8]);
     const rawOdds = typeof formats[5] === 'string' ? formats[5].trim() : '';
     if (!/^[+-]?\\d+(?:\\.\\d+)?$/u.test(rawOdds) || Number(rawOdds) === 0) {
       return { ok: false, reason: 'BTI_PRICE_INVALID' };

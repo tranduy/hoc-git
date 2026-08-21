@@ -98,6 +98,36 @@ describe("SabaWsCatalogAdapter", () => {
     expect(adapter.decode(input)).toEqual([]);
   });
 
+  it("promotes two stable full-page DOM generations when the SABA socket is absent and rejects a later partial view", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    const records = (priceText: string, count = 24) => Array.from({ length: count }, (_, index) => ({
+      sportId: "1", leagueId: String(10_000 + index), leagueName: `League ${index}`,
+      matchId: String(20_000 + index), timeText: "1H0'", teamNames: [`Home ${index}`, `Away ${index}`],
+      groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
+        { marketOddsId: String(30_000 + index), priceText, status: null, greyedOut: null, lineText: "0.5" },
+        { marketOddsId: String(30_000 + index), priceText: "-0.98", status: null, greyedOut: null }
+      ] }]
+    }));
+    const dom = (snapshotId: string, sequence: number, values: readonly unknown[]): ChromeBridgeEnvelope => ({
+      ...envelope(""), sequence, observedAtMs: 1_786_449_540_000 + sequence * 1_000,
+      transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2, snapshotId,
+        chunkIndex: 0, chunkCount: 1, records: values }) }
+    });
+
+    expect(adapter.decode(dom("saba-full-generation-0001", 10, records("0.92")))).toEqual([]);
+    const baseline = adapter.decode(dom("saba-full-generation-0002", 11, records("0.92")));
+    expect(baseline).toHaveLength(1);
+    expect((baseline[0]!.value as { events: unknown[] }).events).toHaveLength(24);
+
+    expect(adapter.decode(dom("saba-partial-generation-0003", 12, records("0.10", 6)))).toEqual([]);
+    const changed = adapter.decode(dom("saba-full-generation-0004", 13, records("0.81")));
+    expect(changed).toHaveLength(1);
+    expect((changed[0]!.value as { quotes: Array<{ rawOdds: string }> }).quotes)
+      .toContainEqual(expect.objectContaining({ rawOdds: "0.81" }));
+  });
+
   it("renews a quiet socket catalog from the current SABA DOM after the socket bootstrap", () => {
     const rows = [["f", 0, fields], [0, "reset"],
       encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),

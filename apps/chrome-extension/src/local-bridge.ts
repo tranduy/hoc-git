@@ -29,6 +29,8 @@ export interface LocalBridgeOptions {
   readonly readinessProbe?: () => boolean | Promise<boolean>;
   readonly installationKey: string;
   readonly maxQueueBytes?: number;
+  readonly now?: () => number;
+  readonly livenessTimeoutMs?: number;
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer?: (handle: unknown) => void;
   readonly onOpen?: () => void | Promise<void>;
@@ -50,6 +52,8 @@ export class LocalBridge {
   readonly #readinessProbe: NonNullable<LocalBridgeOptions["readinessProbe"]>;
   readonly #installationKey: string;
   readonly #maxQueueBytes: number;
+  readonly #now: () => number;
+  readonly #livenessTimeoutMs: number;
   readonly #setTimer: (callback: () => void, delayMs: number) => unknown;
   readonly #clearTimer: (handle: unknown) => void;
   readonly #onOpen: () => void | Promise<void>;
@@ -70,6 +74,7 @@ export class LocalBridge {
   #probeInFlight = false;
   #connectToken = 0;
   #sourceRecoveryTail: Promise<void> | null = null;
+  #lastServerContactAtMs = 0;
 
   constructor(options: LocalBridgeOptions) {
     if (!options.installationKey.trim()) throw new Error("INSTALLATION_KEY_REQUIRED");
@@ -77,6 +82,11 @@ export class LocalBridge {
     this.#readinessProbe = options.readinessProbe ?? (() => true);
     this.#installationKey = options.installationKey;
     this.#maxQueueBytes = options.maxQueueBytes ?? 16 * 1024 * 1024;
+    this.#now = options.now ?? Date.now;
+    this.#livenessTimeoutMs = options.livenessTimeoutMs ?? 25_000;
+    if (!Number.isFinite(this.#livenessTimeoutMs) || this.#livenessTimeoutMs < 1_000) {
+      throw new Error("BRIDGE_LIVENESS_TIMEOUT_INVALID");
+    }
     this.#setTimer = options.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     this.#onOpen = options.onOpen ?? (() => undefined);
@@ -128,7 +138,12 @@ export class LocalBridge {
   }
 
   connect(): void {
-    if (this.#socket && (this.#socket.readyState === 0 || this.#socket.readyState === 1)) return;
+    if (this.#socket && (this.#socket.readyState === 0 || this.#socket.readyState === 1)) {
+      if (this.#now() - this.#lastServerContactAtMs <= this.#livenessTimeoutMs) return;
+      const staleSocket = this.#socket;
+      this.#socket = null;
+      staleSocket.close();
+    }
     if (this.#probeInFlight) return;
     if (this.#timer !== null) {
       this.#clearTimer(this.#timer);
@@ -172,6 +187,7 @@ export class LocalBridge {
       return;
     }
     this.#socket = socket;
+    this.#lastServerContactAtMs = this.#now();
     const generation = ++this.#generation;
     socket.onopen = () => {
       if (this.#socket !== socket) return;
@@ -229,6 +245,7 @@ export class LocalBridge {
     try {
       const parsed = ChromeBridgeControlMessageSchema.safeParse(JSON.parse(raw));
       if (!parsed.success) return;
+      this.#lastServerContactAtMs = this.#now();
       if (parsed.data.kind === "REQUEST_SNAPSHOT") {
         try { void Promise.resolve(this.#onSnapshotRequest(parsed.data.sourceId)).catch(() => undefined); }
         catch { /* source recovery must not disrupt the bridge */ }

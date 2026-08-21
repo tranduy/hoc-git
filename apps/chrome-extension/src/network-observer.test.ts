@@ -474,6 +474,29 @@ describe("NetworkObserver", () => {
       method: "IN_PAGE_FETCH" });
   });
 
+  it("reports a timed-out BTI detail request as unavailable instead of a false identity miss", async () => {
+    vi.useFakeTimers();
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Runtime.evaluate") return new Promise<never>(() => undefined);
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, frameCommandTimeoutMs: 5, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+
+    const pending = observer.probeSelectionPrice({ lobby: "BTI", sourceId: "chrome:BTI:7", tabId: 7 },
+      { requestId: "price-bti-timeout", providerEventId: "event-1", providerMarketId: "market-1:2.5",
+        providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta", participantA: "Alpha",
+        participantB: "Beta", marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "2.5" });
+    await vi.advanceTimersByTimeAsync(8_001);
+    await pending;
+
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "NOT_FOUND",
+      reason: "BTI_DETAIL_REQUEST_FAILED", method: "IN_PAGE_FETCH" });
+    vi.useRealTimers();
+  });
+
   it("stops BTI after one authoritative same-origin detail result instead of double-counting frames", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
@@ -1658,6 +1681,37 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls.map(([message]) => message.payload.body)).toEqual(input.bodies);
     expect(forward.mock.calls.every(([message]) => message.request.replayed === true)).toBe(true);
     expect(forward.mock.calls.map(([message]) => message.observedAtMs)).toEqual([1_000, 1_100]);
+  });
+
+  it.each([
+    { lobby: "SABA" as const, sourceId: "chrome:SABA:13", url: "wss://sports.example/socket.io/" },
+    { lobby: "KSPORT" as const, sourceId: "chrome:KSPORT:14", url: "wss://sports.example/sport/socket" }
+  ])("requests a fresh $lobby baseline by reconnecting only its provider socket", async (input) => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes(".prototype")) return { result: { objectId: "prototype-1" } };
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "instances-1" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 1_000, monotonicNow: () => 60 });
+    const observed = { lobby: input.lobby, sourceId: input.sourceId, tabId: 13 } as const;
+    await observer.handleEvent(observed, "Runtime.executionContextCreated", { context: { id: 17,
+      auxData: { frameId: "sports-frame", isDefault: true } } });
+    await observer.handleEvent(observed, "Network.webSocketCreated", { requestId: "provider-ws", url: input.url });
+    sendCommand.mockClear();
+
+    await observer.refreshCatalog(observed);
+
+    expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.queryObjects", expect.objectContaining({
+      prototypeObjectId: "prototype-1"
+    }));
+    expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.callFunctionOn", expect.objectContaining({
+      objectId: "instances-1", functionDeclaration: expect.stringContaining(input.lobby === "SABA"
+        ? "socket.disconnect()" : "socket.close(4000")
+    }));
+    expect(sendCommand).not.toHaveBeenCalledWith(13, "Page.reload", expect.anything());
   });
 
   it("retains every fragment of the current SBOBET STOMP stream and drops a retired stream", async () => {

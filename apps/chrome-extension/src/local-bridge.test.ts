@@ -79,6 +79,29 @@ describe("LocalBridge", () => {
     expect(sockets[1]!.sent.map((value) => JSON.parse(value).sequence)).toEqual([1]);
   });
 
+  it("replaces a half-open socket when the wake-up alarm observes no server acknowledgement", () => {
+    const sockets = [new FakeSocket(), new FakeSocket()];
+    let socketIndex = 0;
+    let nowMs = 1_000;
+    const bridge = new LocalBridge({
+      socketFactory: () => sockets[socketIndex++]!,
+      installationKey: "local-key",
+      now: () => nowMs,
+      livenessTimeoutMs: 25_000
+    });
+    bridge.enqueue(envelope(0));
+    bridge.connect();
+    sockets[0]!.open();
+
+    nowMs += 25_001;
+    bridge.connect();
+
+    expect(sockets[0]!.readyState).toBe(3);
+    expect(socketIndex).toBe(2);
+    sockets[1]!.open();
+    expect(sockets[1]!.sent.map((value) => JSON.parse(value).sequence)).toEqual([0]);
+  });
+
   it("drops a source's gapped backlog and requests a fresh snapshot instead of reconnecting forever", () => {
     const socket = new FakeSocket();
     const onSnapshotRequest = vi.fn();

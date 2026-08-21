@@ -23,7 +23,7 @@ function imEnvelope(providerPartition: "IM_MARKET_1" | "IM_MARKET_2" = "IM_MARKE
   return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence,
     observedAtMs: 1_200, receivedMonotonicMs: 55, transport: "HTTP_RESPONSE",
     request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR",
-      providerPartition },
+      providerPartition, streamId: "im:8:dataplane-generation-1" },
     payload: { encoding: "UTF8", body: JSON.stringify({ StatusCode: 100, sel: [{ eid: 22,
       htn: "Home", atn: "Away", cn: "League", edt: "1970-01-01T00:00:02Z", isrbt: false,
       iscyb: false, mls: [{ mi: 220, bti: 1, gp: 1, ws: [

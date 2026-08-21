@@ -469,6 +469,7 @@ export class NetworkObserver {
   readonly #streamOrdinals = new Map<string, number>();
   readonly #emissionTails = new Map<string, Promise<void>>();
   readonly #webSockets = new Map<string, { source: ObservedSource; url: string; streamId: string }>();
+  readonly #socketBaselineRecoveryAtMs = new Map<string, number>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #pending = new Map<string, PendingRequest>();
@@ -657,16 +658,18 @@ export class NetworkObserver {
     if (source.lobby === "SABA") {
       if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
       await this.#restoreSabaWsSnapshots(source);
-      await this.#replayCatalogWsSnapshots(source.sourceId);
+      if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
+      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
       return;
     }
     if (source.lobby === "KSPORT") {
       // KSPORT's catalog authority is its observed sportsbook STOMP feed.
-      // Rebuild API decoder state only from retained provider frames; never
-      // invent a polling endpoint or touch the authenticated tab here.
+      // Prefer retained complete frames; if none exist, reconnect only that
+      // socket so the unchanged authenticated page republishes its baseline.
       if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
       await this.#restoreSabaWsSnapshots(source);
-      await this.#replayCatalogWsSnapshots(source.sourceId);
+      if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
+      await this.#requestFreshSocketBaseline(source, (url) => /\/sport\//u.test(url.pathname));
       return;
     }
     if (source.lobby === "TSPORT") {
@@ -712,6 +715,56 @@ export class NetworkObserver {
         await this.#ingestBtiRefreshEvaluation(source, evaluation);
       }));
     });
+  }
+
+  async #requestFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean): Promise<void> {
+    const nowMs = this.#now();
+    const previous = this.#socketBaselineRecoveryAtMs.get(source.sourceId);
+    if (previous !== undefined && nowMs - previous < 60_000) return;
+    const active = [...this.#webSockets.values()].find((socket) => {
+      if (socket.source.sourceId !== source.sourceId) return false;
+      try { return matches(new URL(socket.url)); } catch { return false; }
+    });
+    if (active === undefined) return;
+    this.#socketBaselineRecoveryAtMs.set(source.sourceId, nowMs);
+    const contexts = [...new Set(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])];
+    const prototypeExpression = source.lobby === "SABA"
+      ? "window.io && window.io.Socket && window.io.Socket.prototype"
+      : "window.WebSocket && window.WebSocket.prototype";
+    const reconnect = source.lobby === "SABA"
+      ? `function() { let count = 0; for (const socket of this) { try {
+          if (!socket || !socket.connected || !socket.io) continue;
+          socket.disconnect(); socket.connect(); count += 1;
+        } catch {} } return count; }`
+      : `function() { let count = 0; for (const socket of this) { try {
+          if (!socket || socket.readyState !== 1) continue;
+          const url = new URL(socket.url, location.href);
+          if (!/\\/sport\\//u.test(url.pathname)) continue;
+          socket.close(4000, "fieldline-baseline-recovery"); count += 1;
+        } catch {} } return count; }`;
+    for (const contextId of contexts) {
+      const group = `fieldline-baseline-recovery-${source.tabId}`;
+      try {
+        const prototype = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression: prototypeExpression, contextId, objectGroup: group, returnByValue: false
+        })).catch(() => null);
+        const prototypeId = nestedValue(prototype, "result", "objectId");
+        if (typeof prototypeId !== "string") continue;
+        const queried = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.queryObjects", {
+          prototypeObjectId: prototypeId, objectGroup: group
+        })).catch(() => null);
+        const instancesId = nestedValue(queried, "objects", "objectId");
+        if (typeof instancesId !== "string") continue;
+        const result = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.callFunctionOn", {
+          objectId: instancesId, functionDeclaration: reconnect, returnByValue: true
+        })).catch(() => null);
+        const count = nestedValue(result, "result", "value");
+        if (typeof count === "number" && count > 0) return;
+      } finally {
+        await this.#sendCommand(source.tabId, "Runtime.releaseObjectGroup", { objectGroup: group })
+          .catch(() => undefined);
+      }
+    }
   }
 
   async #ingestBtiRefreshEvaluation(source: ObservedSource, evaluation: unknown): Promise<void> {
@@ -1250,9 +1303,26 @@ export class NetworkObserver {
         return results;
       }
       if (source.lobby === "SABA") {
-        return [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+        const results: unknown[] = [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression, returnByValue: true, awaitPromise: false
         }), 5_000).catch(() => ({}))];
+        const topValue = nestedValue(results[0], "result", "value");
+        if (isRecord(topValue) && (topValue.ok === true ||
+          String(topValue.reason ?? "").endsWith("_AMBIGUOUS"))) return results;
+        const frameTree = await this.#withFrameCommandTimeout(
+          this.#sendCommand(source.tabId, "Page.getFrameTree")).catch(() => ({}));
+        const contexts = this.#mainWorldContexts.get(source.tabId);
+        for (const frameId of collectFrameIds(frameTree).slice(1)) {
+          const contextId = contexts?.get(frameId);
+          if (contextId === undefined) continue;
+          const result = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            expression, contextId, returnByValue: true, awaitPromise: false
+          }), 5_000).catch(() => ({}));
+          results.push(result);
+          const value = nestedValue(result, "result", "value");
+          if (isRecord(value) && (value.ok === true || String(value.reason ?? "").endsWith("_AMBIGUOUS"))) break;
+        }
+        return results;
       }
       const frameTree = await this.#withFrameCommandTimeout(
         this.#sendCommand(source.tabId, "Page.getFrameTree")).catch(() => ({}));
@@ -1275,7 +1345,7 @@ export class NetworkObserver {
         const results: unknown[] = [];
         const top = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression, returnByValue: true, awaitPromise: true
-        }), 5_000).catch(() => ({}));
+        }), 8_000).catch(() => ({ result: { value: { ok: false, reason: "BTI_DETAIL_REQUEST_FAILED" } } }));
         results.push(top);
         const topValue = nestedValue(top, "result", "value");
         if (isRecord(topValue) && (topValue.ok === true ||
@@ -1286,7 +1356,7 @@ export class NetworkObserver {
           if (contextId === undefined) continue;
           const result = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
             expression, contextId, returnByValue: true, awaitPromise: true
-          }), 5_000).catch(() => ({}));
+          }), 8_000).catch(() => ({ result: { value: { ok: false, reason: "BTI_DETAIL_REQUEST_FAILED" } } }));
           results.push(result);
           const value = nestedValue(result, "result", "value");
           if (isRecord(value) && (value.ok === true || String(value.reason ?? "").endsWith("_AMBIGUOUS"))) break;
