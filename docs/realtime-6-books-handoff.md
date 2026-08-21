@@ -574,3 +574,78 @@ UI soak. This is why the final result is **2/6 PASS (CMD and IM), not 6/6**.
 - BTI: activate the already-committed atomic-generation bundle only when an
   explicitly permitted extension lifecycle action is available, then rerun the
   15-minute API/UI/direct acceptance. No hard reset was performed here.
+
+## 2026-08-21 five-book realtime recovery (CMD excluded)
+
+### Commits and scope
+
+- Recovery commit: `d2d7066` (`fix: harden five-book realtime recovery`).
+- Exact ticket matching remains in `dca9a2a`; this recovery did not change CMD
+  collection or matching semantics.
+- Files in `d2d7066`:
+  - `apps/chrome-extension/src/local-bridge.ts` and test
+  - `apps/chrome-extension/src/network-observer.ts` and tests
+  - `apps/chrome-extension/src/selection-price.ts` and test
+  - `apps/chrome-extension/src/saba-selection-price.test.ts`
+  - `apps/api/src/chrome-bridge/saba-ws-adapter.ts` and test
+  - `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- Dirty CMD/reset files belonging to another task were not staged or committed.
+
+### Corrections
+
+- The extension bridge now replaces a half-open local WebSocket after 25 seconds
+  without a server control message, so an API restart cannot leave all catalogs
+  apparently connected but frozen.
+- SABA promotes a DOM catalog without a socket only after two complete atomic
+  generations have stable event coverage. A partial/viewport generation cannot
+  replace the last complete catalog. Direct SABA checks now search the nested
+  sportsbook frame instead of only the launcher document.
+- BTI direct detail parsing now handles the provider's live `value`/`Count`
+  array wrappers. A detail timeout is reported as
+  `BTI_DETAIL_REQUEST_FAILED`, not a false identity `NOT_FOUND`.
+- SABA/KSPORT recovery requests only a lightweight provider-socket baseline;
+  it does not reload, close or navigate the provider tab.
+
+### Verification
+
+- Extension full suite: 28 files, **255/255 passed**; typecheck and build PASS.
+- API focused five-book/data-plane suite: **70/70 passed**; typecheck PASS.
+- Web exact matching/revision/StrictMode suite: **78 passed / 4 intentionally
+  skipped**; typecheck PASS.
+- `git diff --check`: PASS for the recovery commit.
+
+### Current runtime evidence
+
+- SABA direct AH: event `132214611`, market
+  `132214611__1052429579`, selection
+  `132214611__1052429579:home`; TOOL/direct both `-0.82 MALAY`, DOM `MATCH`
+  in 227 ms.
+- SABA direct TOTAL: event `132214611`, market
+  `132214611__1050989298`, selection
+  `132214611__1050989298:over`; TOOL/direct both `0.99 MALAY`, DOM `MATCH`
+  in 6 ms. Evidence: `saba-direct-price-evidence-final-fixed.json`.
+- BTI direct AH and TOTAL both returned `MATCH` from a fresh detail
+  `IN_PAGE_FETCH` in 1,447 ms and 1,690 ms respectively. Evidence:
+  `bti-direct-price-evidence-deployed.json`.
+- Existing current-bundle evidence remains valid for APSPORT AH/TOTAL DOM
+  `MATCH` and IM AH/TOTAL fresh GetSE `MATCH`.
+- A 30-second post-deployment sample observed:
+
+| Provider | Source sequence | Distinct catalog revisions | Event range | Quote range | Result |
+|---|---:|---:|---:|---:|---|
+| SABA | `221 -> 262` | 7 | 161-162 | 1406-1408 | PASS |
+| IM | `283 -> 309` | 3 | 497 | 2436-2470 | PASS |
+| APSPORT | `60 -> 70` | 7 | 29 | 62 | PASS |
+| BTI | `809 -> 946` | 5 | 22-23 | 258-278 | PASS |
+| SBOBET | `4868 -> 6731` | 1 | 25 | 286 | FAIL closed |
+
+The SBOBET transport sequence above is not sportsbook proof. Inspection of the
+attached KSPORT tab showed raw Volta messages (`t=current`, `t=top`) rather than
+the required SBOBET sportsbook STOMP destinations. The catalog correctly
+remains `ACTION_REQUIRED / PROVIDER_VALIDATION_FAILED`; stale persisted odds are
+not treated as realtime. Software support for fragmented STOMP, duplicate and
+out-of-order receipts, reconnect epochs and exact direct identity is covered by
+tests, but this runtime cannot be marked PASS until the attached authenticated
+tab is the actual KSPORT/SBOBET sportsbook product. Final truthful status for
+the requested five providers is therefore **4/5 current runtime PASS**, not
+5/5.
