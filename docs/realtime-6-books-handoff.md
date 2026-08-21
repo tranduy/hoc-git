@@ -692,3 +692,18 @@ the requested five providers is therefore **4/5 current runtime PASS**, not
 - CMD therefore remains `ACTION_REQUIRED / PROVIDER_VALIDATION_FAILED` until
   the provider tab serves its sportsbook again. No collector change can
   manufacture realtime prices from the maintenance page.
+
+## 2026-08-21 Fabet canonical-origin migration
+
+- Reset/login now uses `https://fabet.monster/`; successful renewal also
+  migrates the legacy encrypted parent entry and trusted hostname from
+  `fabet.com` to `fabet.monster` without changing the saved credentials.
+- Verification: 99/99 focused API tests PASS; API typecheck and build PASS.
+- Runtime Reset started at `1787297611711` and completed at `1787297698189`.
+  The Fabet parent became ACTIVE on `fabet.monster`, and fresh Football
+  launches were captured for SABA, IM, SBOBET, APSPORT and BTI.
+- The same Reset was still FAILED at the Chrome replacement/freshness gate:
+  `CHROME_BRIDGE_REFRESH_INCOMPLETE:CMD,SBOBET` and
+  `CHROME_BRIDGE_TAB_REPLACEMENT_INCOMPLETE:CMD,KSPORT,TSPORT,BTI`.
+  After completion SABA, IM, APSPORT and BTI catalogs were ACTIVE; CMD and
+  SBOBET were ACTION_REQUIRED. Do not report this runtime as 6/6.

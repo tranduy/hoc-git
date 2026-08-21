@@ -124,8 +124,8 @@ export function registerSessionRoutes(
     if (!parsed.success) return invalid(reply);
     try {
       return await services.manager.configureFabet({
-        entryUrl: "https://fabet.com/",
-        trustedHostname: "fabet.com",
+        entryUrl: "https://fabet.monster/",
+        trustedHostname: "fabet.monster",
         username: parsed.data.username,
         password: parsed.data.password,
       });

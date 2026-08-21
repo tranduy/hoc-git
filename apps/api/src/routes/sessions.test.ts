@@ -37,7 +37,7 @@ async function createServices() {
   });
   const discovery = new DomainDiscovery({
     trustStore,
-    fetch: async (input) => String(input) === "https://fabet.com/"
+    fetch: async (input) => String(input) === "https://fabet.monster/"
       ? new Response(null, { status: 302, headers: { location: "https://fabet.party/" } })
       : new Response("ok", { status: 200 })
   });
@@ -113,7 +113,7 @@ describe("session routes", () => {
 
     const discovered = await app.inject({
       method: "POST", url: "/api/sessions/fabet/discover", headers,
-      payload: { entryUrl: "https://fabet.com/" }
+      payload: { entryUrl: "https://fabet.monster/" }
     });
     expect(discovered.statusCode).toBe(200);
     expect(discovered.json()).toMatchObject({ finalHostname: "fabet.party", trusted: false });
@@ -133,7 +133,8 @@ describe("session routes", () => {
       }
     });
     expect(configured.statusCode).toBe(200);
-    expect(configured.json()).toMatchObject({ provider: "FABET", state: "ACTIVE", secretConfigured: true });
+    expect(configured.json()).toMatchObject({ provider: "FABET", state: "ACTIVE", secretConfigured: true,
+      trustedHostname: "fabet.monster" });
     expect(configured.body).not.toMatch(/route-user-canary|route-password-canary/u);
     expect(configured.headers["cache-control"]).toBe("no-store");
 

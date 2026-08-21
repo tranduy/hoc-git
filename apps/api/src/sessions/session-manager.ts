@@ -68,7 +68,7 @@ export type FabetDerivedProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
 export interface FabetCredentialSource {
   readonly id: string;
   readonly priority: number;
-  readonly rootUrl: "https://fabet.com/";
+  readonly rootUrl: "https://fabet.monster/";
 }
 
 export interface SessionRecoveryRequest {
@@ -225,14 +225,14 @@ export class SessionManager {
       category: null,
       source: "FABET_LOGIN",
       state: "VALIDATING",
-      trustedHostname: "fabet.com",
+      trustedHostname: "fabet.monster",
       acquiredAtMs: nowMs,
       lastValidatedAtMs: null,
       renewAfterMs: nowMs + renewalIntervalMs,
       reason: null,
       secret: {
         kind: "FABET_CREDENTIALS",
-        value: JSON.stringify({ entryUrl: "https://fabet.com/", username: input.username, password: input.password })
+        value: JSON.stringify({ entryUrl: "https://fabet.monster/", username: input.username, password: input.password })
       }
     };
     await this.#save(record);
@@ -555,6 +555,15 @@ export class SessionManager {
       const nowMs = this.#clock.nowMs();
       const active: StoredSession = {
         ...renewing,
+        trustedHostname: "fabet.monster",
+        secret: {
+          kind: "FABET_CREDENTIALS",
+          value: JSON.stringify({
+            entryUrl: "https://fabet.monster/",
+            username: credentials.username,
+            password: credentials.password
+          })
+        },
         state: "ACTIVE",
         acquiredAtMs: nowMs,
         lastValidatedAtMs: nowMs,
@@ -606,7 +615,7 @@ export class SessionManager {
       });
       return;
     }
-    await this.#fabetDriver.login({ entryUrl: "https://fabet.com/", username, password });
+    await this.#fabetDriver.login({ entryUrl: "https://fabet.monster/", username, password });
   }
 
   #renewDue(id: string, nowMs: number): Promise<RedactedSessionStatus> {

@@ -65,7 +65,7 @@ describe("SessionManager", () => {
         resetProfile: async () => undefined,
       },
     });
-    await manager.configureFabet({ entryUrl: "https://fabet.com/", trustedHostname: "fabet.com",
+    await manager.configureFabet({ entryUrl: "https://fabet.monster/", trustedHostname: "fabet.monster",
       username: "development-user", password: "development-pass" });
     failLogin = true;
 
@@ -111,7 +111,7 @@ describe("SessionManager", () => {
       }),
     ]);
 
-    expect(roots).toEqual(["https://fabet.com/"]);
+    expect(roots).toEqual(["https://fabet.monster/"]);
     expect(statuses).toEqual([
       expect.objectContaining({ state: "ACTION_REQUIRED", reason: "PROVIDER_VALIDATION_FAILED" }),
       expect.objectContaining({ state: "ACTION_REQUIRED", reason: "PROVIDER_VALIDATION_FAILED" }),
@@ -134,7 +134,7 @@ describe("SessionManager", () => {
           resetProfile: async () => undefined,
         },
       });
-      await manager.configureFabet({ entryUrl: "https://fabet.com/", trustedHostname: "fabet.com",
+      await manager.configureFabet({ entryUrl: "https://fabet.monster/", trustedHostname: "fabet.monster",
         username: "development-user", password: "development-pass" });
       logins = 0;
 
@@ -193,8 +193,8 @@ describe("SessionManager", () => {
       },
     });
     await manager.configureFabet({
-      entryUrl: "https://fabet.com/",
-      trustedHostname: "fabet.com",
+      entryUrl: "https://fabet.monster/",
+      trustedHostname: "fabet.monster",
       username: "development-user",
       password: "development-pass",
     });
@@ -476,7 +476,7 @@ describe("SessionManager", () => {
     });
 
     const configured = await manager.configureFabet({
-      entryUrl: "https://fabet.com/",
+      entryUrl: "https://fabet.monster/",
       username: "development-user",
       password: "development-pass",
       trustedHostname: "fabet.party"
@@ -499,7 +499,7 @@ describe("SessionManager", () => {
     clock.wallClockNowMs = 86_400_040;
     await manager.tick();
     expect(loginCalls).toBe(2);
-    expect(loginEntryUrls).toEqual(["https://fabet.com/", "https://fabet.com/"]);
+    expect(loginEntryUrls).toEqual(["https://fabet.monster/", "https://fabet.monster/"]);
     expect(captureCalls).toBe(2);
     expect((await manager.listStatuses()).sessions.find((session) => session.provider === "FABET")).toMatchObject({
       state: "ACTIVE", acquiredAtMs: 86_400_040, renewAfterMs: 172_800_040
@@ -783,13 +783,19 @@ describe("SessionManager", () => {
     const stored = await vault.load("session-fabet");
     expect(stored).not.toBeNull();
     await vault.save("session-fabet", { ...stored, state: "INVALID", reason: "UNREACHABLE",
-      nextRetryAtMs: null } as SecretRecord);
+      trustedHostname: "fabet.com", secret: { kind: "FABET_CREDENTIALS",
+        value: JSON.stringify({ entryUrl: "https://fabet.com/", username: "development-user",
+          password: "development-pass" }) }, nextRetryAtMs: null } as SecretRecord);
 
     const restarted = create();
     await restarted.tick();
 
     expect((await restarted.listStatuses()).sessions.find((session) => session.id === "fabet"))
-      .toMatchObject({ state: "ACTIVE", reason: null, acquiredAtMs: 50 });
+      .toMatchObject({ state: "ACTIVE", reason: null, acquiredAtMs: 50,
+        trustedHostname: "fabet.monster" });
+    expect(JSON.parse(String(((await vault.load("session-fabet")) as Record<string, unknown>).secret &&
+      (((await vault.load("session-fabet")) as Record<string, unknown>).secret as Record<string, unknown>).value)))
+      .toMatchObject({ entryUrl: "https://fabet.monster/" });
     expect(loginCalls).toBe(2);
   });
 
@@ -816,8 +822,8 @@ describe("SessionManager", () => {
     clock.wallClockNowMs = 86_400_000;
     const renewal = manager.tick();
     await entered;
-    const replacement = manager.configureFabet({ entryUrl: "https://fabet.com/", username: "new-user",
-      password: "new-pass", trustedHostname: "fabet.com" });
+    const replacement = manager.configureFabet({ entryUrl: "https://fabet.monster/", username: "new-user",
+      password: "new-pass", trustedHostname: "fabet.monster" });
     const beforeRelease = await Promise.race([
       replacement.then(() => "resolved" as const),
       new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 20))
@@ -829,7 +835,7 @@ describe("SessionManager", () => {
     const stored = await vault.load("session-fabet");
     expect(JSON.parse(String((stored as Record<string, unknown>).secret &&
       ((stored as Record<string, unknown>).secret as Record<string, unknown>).value))).toMatchObject({
-      username: "new-user", password: "new-pass", entryUrl: "https://fabet.com/"
+      username: "new-user", password: "new-pass", entryUrl: "https://fabet.monster/"
     });
   });
 

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { attestFabetOrigin, type FabetOriginEvidence } from "./fabet-origin-attestation.js";
 
 const validEvidence: FabetOriginEvidence = {
-  entryUrl: "https://fabet.com/",
+  entryUrl: "https://fabet.monster/" as FabetOriginEvidence["entryUrl"],
   finalUrl: "https://current-fabet-mirror.example/home",
   finalHostname: "current-fabet-mirror.example",
   loginFormPresent: true,
@@ -21,7 +21,7 @@ describe("attestFabetOrigin", () => {
   });
 
   it.each([
-    [{ ...validEvidence, entryUrl: "https://old-mirror.example/" }, "root"],
+    [{ ...validEvidence, entryUrl: "https://fabet.com/" }, "root"],
     [{ ...validEvidence, finalUrl: "http://current-fabet-mirror.example/home" }, "HTTPS"],
     [{ ...validEvidence, finalUrl: "https://user:pass@current-fabet-mirror.example/home" }, "credentials"],
     [{ ...validEvidence, finalUrl: "https://127.0.0.1/home", finalHostname: "127.0.0.1" }, "IP"],

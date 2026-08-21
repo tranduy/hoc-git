@@ -1,7 +1,7 @@
 import { isIP } from "node:net";
 
 export interface FabetOriginEvidence {
-  readonly entryUrl: "https://fabet.com/";
+  readonly entryUrl: "https://fabet.monster/";
   readonly finalUrl: string;
   readonly finalHostname: string;
   readonly loginFormPresent: boolean;
@@ -16,7 +16,7 @@ export interface AttestedFabetOrigin {
 }
 
 export function attestFabetOrigin(evidence: FabetOriginEvidence): AttestedFabetOrigin {
-  if (evidence.entryUrl !== "https://fabet.com/") {
+  if (evidence.entryUrl !== "https://fabet.monster/") {
     throw new Error("Fabet authentication must start at the canonical root");
   }
 

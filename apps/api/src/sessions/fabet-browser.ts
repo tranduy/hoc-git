@@ -9,7 +9,7 @@ import { installCatalogResourcePolicy } from "../providers/browser-resource-poli
 import type { AuthEgress } from "./auth-egress.js";
 import { attestFabetOrigin, type FabetOriginEvidence } from "./fabet-origin-attestation.js";
 
-const FABET_ROOT_URL = "https://fabet.com/" as const;
+const FABET_ROOT_URL = "https://fabet.monster/" as const;
 
 export interface FabetAuthenticationResult {
   readonly finalUrl: string;

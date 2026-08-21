@@ -71,7 +71,7 @@ class FakeAutomation implements FabetBrowserAutomation {
     this.closed = true;
   }
 
-  async authenticate(input: { rootUrl: "https://fabet.com/"; username: string; password: string;
+  async authenticate(input: { rootUrl: "https://fabet.monster/"; username: string; password: string;
     egress: AuthEgress; signal: AbortSignal }) {
     this.authEgressCalls.push(input.egress.name);
     if (this.failedEgresses.has(input.egress.name)) throw new Error("AUTH_PATH_FAILED");
@@ -324,12 +324,12 @@ describe("FabetBrowserDriver", () => {
 
   it("uses the trusted final origin after Fabet redirects to its current domain", async () => {
     const context = await setup();
-    await context.trustStore.approve("fabet.com");
+    await context.trustStore.approve("fabet.monster");
     await context.trustStore.approve("fabet.party");
     context.automation.authenticatedUrlValue = "https://fabet.party/home";
     const driver = new FabetBrowserDriver({ ...context, clock: { nowMs: () => 30 }, idFactory: () => "1" });
 
-    await driver.login({ entryUrl: "https://fabet.com/", username: "development-user", password: "development-pass" });
+    await driver.login({ entryUrl: "https://fabet.monster/", username: "development-user", password: "development-pass" });
     await driver.captureLobbyLaunches();
 
     expect(context.automation.lobbyCalls).toEqual([
