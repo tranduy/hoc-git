@@ -31,6 +31,7 @@ export interface NetworkObserverDependencies {
   readonly monotonicNow?: () => number;
   readonly recoverImBaseline?: (source: ObservedSource) => Promise<void>;
   readonly frameCommandTimeoutMs?: number;
+  readonly btiCatalogRefreshTimeoutMs?: number;
   readonly observerSessionId?: string;
   readonly loadSbobetEventRequest?: () => Promise<{ readonly url: string;
     readonly headers: Readonly<Record<string, string>> } | null>;
@@ -371,10 +372,16 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   root.dataset.fieldlineBtiCatalogRefreshAt = String(now);
   const generation = 'bti:' + now + ':' + Math.floor(Math.random() * 1000000000);
+  const authName = ['author', 'ization'].join('');
+  const contextName = ['service', '-', 'context'].join('');
+  const authValue = localStorage.getItem(['CT_APP_', 'AUTH', 'ORIZATION'].join(''));
+  const contextValue = localStorage.getItem(['CT_APP_', 'SERVICE', '_CONTEXT'].join(''));
+  const listHeaders = { Accept: 'application/json', 'X-Fieldline-Generation': generation };
+  if (authValue) listHeaders[authName] = authValue;
+  if (contextValue) listHeaders[contextName] = contextValue;
   const listPaths = [
     '/api/eventlist/asia/leagues/v2/1/live',
     '/api/eventlist/asia/leagues/v2/1/live/initial',
-    '/api/eventlist/asia/leagues/v2/1/prematch',
     '/api/eventlist/asia/leagues/v2/1/prematch/initial'
   ];
   const listResponses = await Promise.all(listPaths.map(async (path) => {
@@ -382,7 +389,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
     const timeout = new Promise((resolve) => { timeoutId = setTimeout(() => resolve(null), 5000); });
     const response = await Promise.race([
       fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
-        headers: { Accept: 'application/json', 'X-Fieldline-Generation': generation } }).catch(() => null),
+        headers: listHeaders }).catch(() => null),
       timeout
     ]);
     clearTimeout(timeoutId);
@@ -429,14 +436,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   }
   for (const eventId of selected) nextVisits[eventId] = now;
   root.dataset.fieldlineBtiDetailVisits = JSON.stringify(nextVisits);
-  const authName = ['author', 'ization'].join('');
-  const contextName = ['service', '-', 'context'].join('');
-  const detailHeaders = { Accept: 'application/json', 'X-Fieldline-Generation': generation };
-  const authValue = localStorage.getItem(['CT_APP_', 'AUTH', 'ORIZATION'].join(''));
-  const contextValue = localStorage.getItem(['CT_APP_', 'SERVICE', '_CONTEXT'].join(''));
-  if (authValue) detailHeaders[authName] = authValue;
-  if (contextValue) detailHeaders[contextName] = contextValue;
-  await Promise.allSettled(selected.map((eventId) => fetch(
+  const detailHeaders = { ...listHeaders };
+  void Promise.allSettled(selected.map((eventId) => fetch(
     '/api/eventpage/events/' + encodeURIComponent(eventId) + '?hideX25X75Selections=false',
     { method: 'GET', credentials: 'include', cache: 'no-store', headers: detailHeaders }
   )));
@@ -455,6 +456,7 @@ export class NetworkObserver {
   readonly #monotonicNow: () => number;
   readonly #recoverImBaseline: ((source: ObservedSource) => Promise<void>) | null;
   readonly #frameCommandTimeoutMs: number;
+  readonly #btiCatalogRefreshTimeoutMs: number;
   readonly #observerSessionId: string;
   readonly #loadSbobetEventRequest: NonNullable<NetworkObserverDependencies["loadSbobetEventRequest"]>;
   readonly #saveSbobetEventRequest: NonNullable<NetworkObserverDependencies["saveSbobetEventRequest"]>;
@@ -503,6 +505,7 @@ export class NetworkObserver {
     this.#monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.#recoverImBaseline = dependencies.recoverImBaseline ?? null;
     this.#frameCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 2_500;
+    this.#btiCatalogRefreshTimeoutMs = dependencies.btiCatalogRefreshTimeoutMs ?? 8_000;
     this.#observerSessionId = dependencies.observerSessionId ?? crypto.randomUUID();
     this.#loadSbobetEventRequest = dependencies.loadSbobetEventRequest ?? (async () => null);
     this.#saveSbobetEventRequest = dependencies.saveSbobetEventRequest ?? (async () => undefined);
@@ -677,7 +680,7 @@ export class NetworkObserver {
       // stale id otherwise makes every later refresh a silent no-op.
       const topEvaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
         expression: BTI_CATALOG_REFRESH_EXPRESSION, returnByValue: true, awaitPromise: true
-      })).catch(() => ({}));
+      }), this.#btiCatalogRefreshTimeoutMs).catch(() => ({}));
       await this.#ingestBtiRefreshEvaluation(source, topEvaluation);
       if (frameIds.length <= 1) return;
       await Promise.all(frameIds.slice(1).map(async (frameId) => {
@@ -686,7 +689,7 @@ export class NetworkObserver {
           const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
             expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId: mainContextId,
             returnByValue: true, awaitPromise: true
-          })).catch(() => ({}));
+          }), this.#btiCatalogRefreshTimeoutMs).catch(() => ({}));
           await this.#ingestBtiRefreshEvaluation(source, evaluation);
           return;
         }
@@ -698,7 +701,7 @@ export class NetworkObserver {
         if (contextId === null) return;
         const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId, returnByValue: true, awaitPromise: true
-        })).catch(() => ({}));
+        }), this.#btiCatalogRefreshTimeoutMs).catch(() => ({}));
         await this.#ingestBtiRefreshEvaluation(source, evaluation);
       }));
     });
@@ -715,7 +718,6 @@ export class NetworkObserver {
     const allowedPaths = new Set([
       "/api/eventlist/asia/leagues/v2/1/live",
       "/api/eventlist/asia/leagues/v2/1/live/initial",
-      "/api/eventlist/asia/leagues/v2/1/prematch",
       "/api/eventlist/asia/leagues/v2/1/prematch/initial"
     ]);
     const unique = new Map<string, string>();

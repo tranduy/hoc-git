@@ -610,7 +610,6 @@ describe("NetworkObserver", () => {
     const responses = [
       "/api/eventlist/asia/leagues/v2/1/live",
       "/api/eventlist/asia/leagues/v2/1/live/initial",
-      "/api/eventlist/asia/leagues/v2/1/prematch",
       "/api/eventlist/asia/leagues/v2/1/prematch/initial"
     ].map((url, index) => ({ url, body: JSON.stringify({ serializedData: [], index }) }));
     const sendCommand = vi.fn(async (_tabId: number, method: string) => {
@@ -626,15 +625,46 @@ describe("NetworkObserver", () => {
 
     await observer.refreshCatalog({ lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 });
 
-    expect(forwarded).toHaveLength(4);
+    expect(forwarded).toHaveLength(3);
     expect(forwarded.map(({ transport }) => transport)).toEqual([
-      "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE"
+      "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE"
     ]);
     expect(forwarded.map(({ request }) => request.pathnameClass)).toEqual(responses.map(({ url }) => url));
     expect(forwarded.map(({ request }) => request.streamId)).toEqual([
-      generation, generation, generation, generation
+      generation, generation, generation
     ]);
     expect(forwarded.map(({ payload }) => payload.body)).toEqual(responses.map(({ body }) => body));
+  });
+
+  it("waits long enough for a bounded BTI fetch generation that completes after the generic frame timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const paths = [
+        "/api/eventlist/asia/leagues/v2/1/live",
+        "/api/eventlist/asia/leagues/v2/1/live/initial",
+        "/api/eventlist/asia/leagues/v2/1/prematch/initial"
+      ];
+      const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+        if (method !== "Runtime.evaluate") return {};
+        return await new Promise((resolve) => setTimeout(() => resolve({ result: { value: {
+          status: "catalog-requested", generation: "bti:1720000000000:19",
+          origin: "https://sports.bti.test", responses: paths.map((url) => ({
+            url, body: '{"serializedData":[]}'
+          }))
+        } } }), 3_000));
+      });
+      const forward = vi.fn(async () => undefined);
+      const observer = new NetworkObserver({ sendCommand, forward });
+
+      const refresh = observer.refreshCatalog({ lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 });
+      await vi.advanceTimersByTimeAsync(3_001);
+      await refresh;
+
+      expect(forward).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bounds a hung BTI list request so a partial refresh cannot block the next generation", async () => {
@@ -657,15 +687,62 @@ describe("NetworkObserver", () => {
       await vi.advanceTimersByTimeAsync(5_001);
       await expect(refresh).resolves.toMatchObject({ status: "catalog-requested",
         responses: expect.arrayContaining([expect.objectContaining({
-          url: "/api/eventlist/asia/leagues/v2/1/prematch"
+          url: "/api/eventlist/asia/leagues/v2/1/prematch/initial"
         })]) });
       const listRequests = requests.filter(({ path }) => path.startsWith("/api/eventlist/"));
-      expect(listRequests).toHaveLength(4);
+      expect(listRequests).toHaveLength(3);
       expect(new Set(listRequests.map(({ generation }) => generation)).size).toBe(1);
       expect(listRequests[0]!.generation).toMatch(/^bti:\d+:\d+$/u);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("returns the complete BTI list generation without waiting for slow detail requests", async () => {
+    const root = { dataset: {} as Record<string, string> };
+    const league: unknown[] = [];
+    league[12] = [["event-1"]];
+    const fetcher = (path: string) => path.startsWith("/api/eventpage/")
+      ? new Promise<never>(() => undefined)
+      : Promise.resolve({ ok: true, status: 200,
+        json: async () => ({ serializedData: [league] }) });
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string }, fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }) => Promise<unknown>;
+
+    const refresh = evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" },
+      fetcher, { getItem: () => null });
+
+    await expect(Promise.race([refresh, new Promise((resolve) => setTimeout(() => resolve("timed-out"), 25))]))
+      .resolves.toMatchObject({ status: "catalog-requested", responses: expect.any(Array) });
+  });
+
+  it("uses the current in-page BTI session headers for every fresh event-list request", async () => {
+    const root = { dataset: {} as Record<string, string> };
+    const listHeaders: Array<Record<string, string>> = [];
+    const fetcher = async (path: string, init?: { headers?: Record<string, string> }) => {
+      if (path.startsWith("/api/eventlist/")) listHeaders.push(init?.headers ?? {});
+      return { ok: true, json: async () => ({ serializedData: [] }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (
+        document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string },
+        fetch: typeof fetcher,
+        localStorage: { getItem: (key: string) => string | null }
+      ) => Promise<unknown>;
+
+    await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher, {
+      getItem: (key) => key === "CT_APP_AUTHORIZATION" ? "opaque-session-token"
+        : key === "CT_APP_SERVICE_CONTEXT" ? "opaque-service-context" : null
+    });
+
+    expect(listHeaders).toHaveLength(3);
+    expect(listHeaders).toEqual(Array.from({ length: 3 }, () => expect.objectContaining({
+      authorization: "opaque-session-token",
+      "service-context": "opaque-service-context"
+    })));
   });
 
   it("does not starve a BTI event when the provider reorders the event list between detail batches", async () => {
@@ -779,7 +856,7 @@ describe("NetworkObserver", () => {
       return {};
     });
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
-      frameCommandTimeoutMs: 10 });
+      frameCommandTimeoutMs: 10, btiCatalogRefreshTimeoutMs: 10 });
     const bti = { lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 } as const;
 
     await observer.refreshCatalog(bti);

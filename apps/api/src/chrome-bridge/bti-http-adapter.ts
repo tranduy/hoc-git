@@ -9,7 +9,6 @@ const DETAIL_TTL_MS = 10_000;
 const LIST_PATHS = new Set([
   "/api/eventlist/asia/leagues/v2/1/live",
   "/api/eventlist/asia/leagues/v2/1/live/initial",
-  "/api/eventlist/asia/leagues/v2/1/prematch",
   "/api/eventlist/asia/leagues/v2/1/prematch/initial"
 ]);
 

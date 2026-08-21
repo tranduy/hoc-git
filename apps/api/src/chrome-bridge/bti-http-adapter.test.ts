@@ -80,6 +80,18 @@ describe("BtiHttpCatalogAdapter", () => {
         providerEventId: "event" })] }) })]);
   });
 
+  it("publishes an atomic generation when the provider rejects the optional non-initial prematch route", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const required = [listPaths[0], listPaths[1], listPaths[3]] as const;
+
+    const updates = required.map((path, index) =>
+      adapter.decode(generationEnvelope(path, "bti:2100:1", 30 + index)));
+
+    expect(updates.slice(0, 2)).toEqual([[], []]);
+    expect(updates[2]).toEqual([expect.objectContaining({ authoritativeBaseline: true,
+      value: expect.objectContaining({ events: expect.any(Array), quotes: expect.any(Array) }) })]);
+  });
+
   it("does not roll back when an older generation completes after a newer snapshot", () => {
     const adapter = new BtiHttpCatalogAdapter();
     for (const [index, path] of listPaths.slice(0, 3).entries()) {
