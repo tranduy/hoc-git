@@ -13,3 +13,8 @@ captures/raw/
 *.session.json
 *.vault.json
 vault.v1.json*
+
+# local tooling / OS
+.omc/
+.DS_Store
+fieldline-chrome-feed.zip
