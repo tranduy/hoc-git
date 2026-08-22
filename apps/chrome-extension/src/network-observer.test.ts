@@ -2305,6 +2305,31 @@ describe("NetworkObserver", () => {
       expect(fullRecoveryCalls()).toBeGreaterThan(afterFirst);
     });
 
+    it("keeps the sportsbook socket as catalog authority when a newer jackpot socket opens", async () => {
+      const now = { value: 1_000 };
+      const { sendCommand, observer } = setup(now);
+      await openSocket(observer, [liveFrame, todayFrame]);
+      expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(true);
+
+      await observer.handleEvent(ksport, "Network.webSocketCreated", { requestId: "jackpot-ws",
+        url: "wss://d42.sb21.net/sport/377/jackpot/websocket" }, "sportsbook-child");
+      for (let i = 0; i < 5; i += 1) {
+        await observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "jackpot-ws",
+          response: { opcode: 1, payloadData: "MESSAGE\ndestination:/topic/jackpot/ws\n\n{}\u0000" } },
+          "sportsbook-child");
+      }
+      expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(true);
+
+      sendCommand.mockClear();
+      now.value = 20_000;
+      await observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "provider-ws",
+        response: { opcode: 1, payloadData: liveFrame } }, "sportsbook-child");
+      await observer.maintainKsportFeed(ksport);
+      expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.callFunctionOn" ||
+        (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh"))))
+        .toBe(false);
+    });
+
     it("closes the sportsbook sockets of a detached OOPIF so the stream is retired", async () => {
       const now = { value: 1_000 };
       const { forward, observer } = setup(now);

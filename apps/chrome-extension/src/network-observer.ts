@@ -1476,8 +1476,14 @@ export class NetworkObserver {
       if (source.lobby === "KSPORT") {
         try {
           if (isKsportCatalogSocket(new URL(params.url))) {
-            this.#activeKsportStreams.set(source.sourceId, streamId);
-            this.#catalogWsSnapshots.set(source.sourceId, new Map());
+            // The page opens several /sport/ sockets (sportsbook, jackpot,
+            // menu counters). Creation order says nothing about which one is
+            // the catalog authority, so do not adopt it here; the newest socket
+            // that actually delivers /topic/sports/ frames is adopted in
+            // #rememberCatalogWsFrame. A jackpot-only socket never wins.
+            if (!this.#activeKsportStreams.has(source.sourceId)) {
+              this.#catalogWsSnapshots.set(source.sourceId, new Map());
+            }
           }
         } catch { /* malformed socket URL cannot be a catalog authority */ }
       }
@@ -2159,8 +2165,15 @@ export class NetworkObserver {
     } else {
       if (!isKsportCatalogSocket(parsedUrl) || body.includes("destination:/topic/jackpot/")) return;
       const activeStream = this.#activeKsportStreams.get(source.sourceId);
-      if (activeStream !== undefined && activeStream !== streamId) return;
-      if (activeStream === undefined) this.#activeKsportStreams.set(source.sourceId, streamId);
+      if (activeStream !== streamId) {
+        // Only a frame that carries a sportsbook destination can make a
+        // socket the catalog authority; continuation fragments and auxiliary
+        // sockets (jackpot, menu counters) never do. A newer sportsbook socket
+        // supersedes the old one even without a CLOSED event.
+        if (!/destination:\/topic\/sports\//u.test(body)) return;
+        this.#activeKsportStreams.set(source.sourceId, streamId);
+        this.#catalogWsSnapshots.set(source.sourceId, new Map());
+      }
       this.#ksportCatalogFrameAtMs.set(source.sourceId, clocks.observedAtMs);
     }
     const partitions = this.#catalogWsSnapshots.get(source.sourceId) ?? new Map<string, ReplayableWsEvent[]>();

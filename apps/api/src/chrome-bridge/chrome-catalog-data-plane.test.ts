@@ -513,6 +513,29 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
   });
 
+  it("accepts a smaller live baseline after a catalog restored from disk or a stale retained floor", async () => {
+    let now = 1_500;
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
+      coverageFloorMaxAgeMs: 600_000, publish });
+    const big = new ChromeCatalogDataPlane({ now: () => 1_500, publish: (catalog) => plane.restore(catalog) });
+    expect(big.ingest(sabaEnvelope(1, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))).toBe(true);
+    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ provider: "SABA" }), "STALE");
+
+    // Hours later the provider genuinely lists far fewer matches.
+    now = 5_000_000;
+    expect(plane.ingest({ ...sabaEnvelope(2, [1, 2]), observedAtMs: now })).toBe(true);
+    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ provider: "SABA" }), "FRESH");
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({ events: [
+      { providerEventId: "1" }, { providerEventId: "2" }] });
+
+    // A partial read moments after a complete one is still rejected.
+    now += 1_000;
+    expect(plane.ingest({ ...sabaEnvelope(3, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), observedAtMs: now })).toBe(true);
+    now += 1_000;
+    expect(plane.ingest({ ...sabaEnvelope(4, [1]), observedAtMs: now })).toBe(false);
+  });
+
   describe("automatic stall recovery", () => {
     const sbobetStatus: CatalogSourceStatus = { ...fallbackStatus, id: "catalog-source:SBOBET:FOOTBALL",
       alias: "K-Sports · SBOBET", provider: "SBOBET", sessionState: "ACTIVE", acquiredAtMs: 900, reason: null };

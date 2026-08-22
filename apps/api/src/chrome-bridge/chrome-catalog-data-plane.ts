@@ -27,6 +27,12 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly recoveryCooldownMs?: number;
   readonly recoverableAccountIds?: ReadonlySet<string>;
   readonly onSourceRecoveryNeeded?: (accountId: string) => void;
+  /**
+   * A retained catalog older than this no longer represents the provider's
+   * current event count (matches finish, new days open), so it must not be
+   * used as the coverage floor that rejects a smaller fresh catalog.
+   */
+  readonly coverageFloorMaxAgeMs?: number;
 }
 
 const DEFAULT_RECOVERABLE_ACCOUNTS: ReadonlySet<string> = new Set([
@@ -62,6 +68,7 @@ export class ChromeCatalogDataPlane {
   readonly #lastRecoveryAtMs = new Map<string, number>();
   readonly #lastDecodedAtMs = new Map<string, number>();
   readonly #startedAtMs: number;
+  readonly #coverageFloorMaxAgeMs: number;
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -76,6 +83,7 @@ export class ChromeCatalogDataPlane {
     this.#recoverableAccountIds = options.recoverableAccountIds ?? DEFAULT_RECOVERABLE_ACCOUNTS;
     this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
     this.#startedAtMs = this.#now();
+    this.#coverageFloorMaxAgeMs = options.coverageFloorMaxAgeMs ?? 600_000;
   }
 
   owns(accountId: string): boolean {
@@ -178,6 +186,15 @@ export class ChromeCatalogDataPlane {
     // identical reads; this prevents a transient partial update erasing most
     // of a provider's prices.
     if (update.authoritativeBaseline === true) this.#coverage.reset(nextCatalog.accountId);
+    // The guard exists to stop a partial viewport from replacing a complete
+    // catalog that was current moments ago. A floor that is itself stale
+    // (restored from disk at startup, or left over from a long outage) only
+    // encodes how many matches the provider had hours ago and would reject
+    // every legitimately smaller live baseline forever.
+    const retainedCatalog = this.#catalogs.get(nextCatalog.accountId);
+    if (retainedCatalog !== undefined && this.#now() - retainedCatalog.observedAtMs > this.#coverageFloorMaxAgeMs) {
+      this.#coverage.reset(nextCatalog.accountId);
+    }
     if (!this.#coverage.accept(nextCatalog.accountId,
       nextCatalog.events.map((event) => event.providerEventId))) return stateChanged;
     this.#catalogs.set(nextCatalog.accountId, nextCatalog);
@@ -201,6 +218,8 @@ export class ChromeCatalogDataPlane {
     if (!this.owns(catalog.accountId) || catalog.category !== "FOOTBALL" ||
       catalog.events.length === 0 || catalog.markets.length === 0 || catalog.quotes.length === 0) return;
     this.#catalogs.set(catalog.accountId, catalog);
+    // The restored catalog seeds the coverage floor only while it is recent;
+    // ingest() drops a floor older than coverageFloorMaxAgeMs.
     this.#coverage.accept(catalog.accountId, catalog.events.map((event) => event.providerEventId));
     this.#invalidatedAccounts.add(catalog.accountId);
     this.#publish?.(catalog, "STALE");
