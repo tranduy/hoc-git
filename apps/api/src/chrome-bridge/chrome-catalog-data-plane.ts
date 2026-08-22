@@ -53,6 +53,7 @@ export class ChromeCatalogDataPlane {
   readonly #transportStartedAtMs = new Map<string, number>();
   readonly #sourceEpochs = new Map<string, string>();
   readonly #activeSourceIds = new Map<string, string>();
+  readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
   readonly #invalidatedAccounts = new Set<string>();
   readonly #recoveryAfterMs: number;
   readonly #recoveryCooldownMs: number;
@@ -94,11 +95,26 @@ export class ChromeCatalogDataPlane {
     if (transportAccountId !== null) {
       const previousSourceId = this.#activeSourceIds.get(transportAccountId);
       if (previousSourceId !== undefined && previousSourceId !== envelope.sourceId) {
+        // Two attached tabs can feed one account (e.g. a KSPORT tab and an SBO
+        // tab both map to SBOBET). Alternating between them reset each
+        // other's decoder on every envelope, so neither ever completed a
+        // baseline. Keep the pinned source while it is still talking and
+        // ignore the other tab; hand over only once the pinned tab is silent.
+        // A replacement tab of the same lobby (Reset/recovery) takes over at
+        // once: the old tab was closed by the extension. Only a different
+        // lobby competing for the same account is held back.
+        const previousSeenAtMs = this.#lastEnvelopeAtMsBySource.get(previousSourceId);
+        const sameLobby = previousSourceId.split(":")[1] === envelope.lobby;
+        if (!sameLobby && previousSeenAtMs !== undefined && this.#now() - previousSeenAtMs <= this.#freshnessMs) {
+          return false;
+        }
         this.#router.resetSource(previousSourceId);
         this.#networkBodies.resetSource(previousSourceId);
         this.#sourceEpochs.delete(previousSourceId);
+        this.#lastEnvelopeAtMsBySource.delete(previousSourceId);
       }
       this.#activeSourceIds.set(transportAccountId, envelope.sourceId);
+      this.#lastEnvelopeAtMsBySource.set(envelope.sourceId, this.#now());
     }
     if (envelope.sourceEpoch !== undefined) {
       const priorEpoch = this.#sourceEpochs.get(envelope.sourceId);

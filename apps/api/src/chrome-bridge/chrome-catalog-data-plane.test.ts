@@ -121,6 +121,32 @@ describe("ChromeCatalogDataPlane", () => {
     });
   });
 
+  it("keeps one pinned tab per account while it is talking and hands over only after it goes silent", async () => {
+    let now = 1_500;
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000, publish });
+    const ksportLive = ksportEnvelope(1, "live", [101]);
+    const ksportToday = ksportEnvelope(2, "today", [102]);
+    const sboFrame: ChromeBridgeEnvelope = { ...ksportEnvelope(1, "live", []), lobby: "SBO",
+      sourceId: "chrome:SBO:9", tabId: 9, transport: "TAB_STATE",
+      request: { hostname: "sports-sbomaind-play.jjsskktt.com", pathnameClass: "/__fieldline_heartbeat__",
+        resourceType: "Tab" }, payload: { encoding: "UTF8", body: "{}" } };
+
+    expect(plane.ingest(ksportLive)).toBe(false);
+    // A second tab for the same account must not reset the pinned decoder.
+    expect(plane.ingest({ ...sboFrame, observedAtMs: now })).toBe(false);
+    expect(plane.ingest(ksportToday)).toBe(true);
+    expect(publish).toHaveBeenCalledTimes(1);
+    await expect(plane.read("catalog-source:SBOBET:FOOTBALL")).resolves.toMatchObject({ provider: "SBOBET" });
+
+    // Once the pinned tab has been silent past the freshness window, the
+    // other tab may take over.
+    now = 30_000;
+    expect(plane.ingest({ ...sboFrame, sequence: 5, observedAtMs: now })).toBe(false);
+    now = 30_100;
+    expect(plane.ingest({ ...ksportEnvelope(3, "live", [103]), observedAtMs: now })).toBe(false);
+  });
+
   it("does not report an authenticated bridge source as active until it has a fresh decoded catalog", async () => {
     let now = 1_500;
     const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000 });
