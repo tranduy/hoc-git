@@ -42,6 +42,18 @@ const event = (id: number, home: string) => ({
 });
 
 describe("TsportWsCatalogAdapter", () => {
+  it("accepts the live/market-group variants of the football socket path (p/2, mg/1)", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const input = envelope(event(5557168, "Perugia"));
+    const live = { ...input, request: { ...input.request,
+      pathnameClass: "/ln/en/p/2/u/MxcZnFVvGKUOdnHngKzURw==/s/1/mg/1/tr/0" } };
+    expect(adapter.fingerprint(live)).toBe(true);
+    expect(adapter.decode(live)).toHaveLength(1);
+    // Other sports stay rejected.
+    expect(adapter.fingerprint({ ...input, request: { ...input.request,
+      pathnameClass: "/ln/en/p/2/u/x/s/2/mg/1/tr/0" } })).toBe(false);
+  });
+
   it("publishes the authenticated T-Sports football socket as APSPORT", () => {
     const adapter = new TsportWsCatalogAdapter();
     const input = envelope(event(5557168, "Perugia"));

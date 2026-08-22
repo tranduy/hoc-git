@@ -2345,7 +2345,7 @@ export class NetworkObserver {
     let parsedUrl: URL;
     try { parsedUrl = new URL(url); } catch { return; }
     if (!/^spws\.(?:agenate|racern)\.com$/iu.test(parsedUrl.hostname) ||
-      !/^\/ln\/[^/]+\/(?:p\/1\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/0\/tr\/0$/u.test(parsedUrl.pathname)) return;
+      !/^\/ln\/[^/]+\/(?:p\/\d+\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/\d+\/tr\/0$/u.test(parsedUrl.pathname)) return;
     try {
       const outer: unknown = JSON.parse(body);
       if (!isRecord(outer) || outer.s !== 1 || outer.t !== "eu" || typeof outer.d !== "string") return;

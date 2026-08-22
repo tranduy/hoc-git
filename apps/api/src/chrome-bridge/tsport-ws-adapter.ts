@@ -148,7 +148,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       envelope.request.pathnameClass === "/__fieldline_dom_snapshot__";
     if ((envelope.transport !== "WS_FRAME" && envelope.transport !== "WS_STATE") ||
       !/^spws\.(?:agenate|racern)\.com$/iu.test(envelope.request.hostname) ||
-      !/^\/ln\/[^/]+\/(?:p\/1\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/0\/tr\/0$/u.test(
+      !/^\/ln\/[^/]+\/(?:p\/\d+\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/\d+\/tr\/0$/u.test(
         envelope.request.pathnameClass)) return false;
     if (envelope.transport === "WS_STATE") return envelope.request.streamId !== undefined &&
       websocketLifecycleState(envelope) !== null;
