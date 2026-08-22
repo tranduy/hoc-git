@@ -108,7 +108,11 @@ const snapshotPoller = new CmdSnapshotPoller({
   capture: async (source, hostname) => observer.captureCmdSnapshot(source, hostname),
   maintain: async (source) => observer.maintain(source),
   pollSabaDomChanges: async (source, hostname) => observer.pollSabaDomChanges(source, hostname),
-  refreshCatalog: async (source) => observer.refreshCatalog(source)
+  // KSPORT's periodic path must not reset a healthy sportsbook socket; only
+  // explicit snapshot requests and recovery use the full refreshCatalog.
+  refreshCatalog: async (source) => source.lobby === "KSPORT"
+    ? observer.maintainKsportFeed(source)
+    : observer.refreshCatalog(source)
 });
 snapshotPoller.start();
 

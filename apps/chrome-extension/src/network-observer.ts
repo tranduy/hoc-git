@@ -582,6 +582,11 @@ export class NetworkObserver {
   readonly #ksportRefreshesInFlight = new Set<string>();
   readonly #ksportTodayRequested = new Set<string>();
   readonly #ksportLiveRestored = new Set<string>();
+  // Periodic KSPORT maintenance must stay non-destructive while the sportsbook
+  // STOMP socket is alive. These clocks gate the heavier recovery paths.
+  readonly #ksportCatalogFrameAtMs = new Map<string, number>();
+  readonly #ksportMaintenanceRecoveryAtMs = new Map<string, number>();
+  readonly #ksportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
     readonly headers: Readonly<Record<string, string>> }>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
@@ -742,6 +747,9 @@ export class NetworkObserver {
       this.#ksportRefreshesInFlight.delete(sourceId);
       this.#ksportTodayRequested.delete(sourceId);
       this.#ksportLiveRestored.delete(sourceId);
+      this.#ksportCatalogFrameAtMs.delete(sourceId);
+      this.#ksportMaintenanceRecoveryAtMs.delete(sourceId);
+      this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
       this.#imCatalogRefreshes.delete(sourceId);
@@ -818,6 +826,39 @@ export class NetworkObserver {
     }
     if (!evaluations.some((evaluation) => nestedValue(evaluation, "result", "value") === true)) return;
     await this.#capturePublicCatalogSnapshot(source, hostname, CMD_PUBLIC_CATALOG_EXPRESSION, false);
+  }
+
+  /**
+   * Two-second KSPORT maintenance. Unlike `refreshCatalog`, this never closes
+   * the sportsbook socket, never replays retained frames and never issues the
+   * in-page getEvent fallback while the live STOMP feed is healthy. Doing that
+   * every poll repeatedly reset the provider socket to a partial baseline and
+   * flooded the local API with replayed frames. Only a missing/incomplete
+   * baseline triggers the lightweight time-tab selection, and only a socket
+   * that has been silent for the whole quiet window escalates to full recovery.
+   */
+  async maintainKsportFeed(source: ObservedSource, options: { readonly quietMs?: number;
+    readonly recoveryIntervalMs?: number } = {}): Promise<void> {
+    if (source.lobby !== "KSPORT") return;
+    const quietMs = options.quietMs ?? 30_000;
+    const recoveryIntervalMs = options.recoveryIntervalMs ?? 30_000;
+    const nowMs = this.#now();
+    const activeStream = this.#activeKsportStreams.get(source.sourceId);
+    const socketAlive = activeStream !== undefined && [...this.#webSockets.values()].some((socket) =>
+      socket.source.sourceId === source.sourceId && socket.streamId === activeStream);
+    const lastFrameAtMs = this.#ksportCatalogFrameAtMs.get(source.sourceId);
+    const recentlyActive = lastFrameAtMs !== undefined && nowMs - lastFrameAtMs <= quietMs;
+    if (socketAlive && recentlyActive) {
+      if (this.hasCompleteKsportBaseline(source.sourceId)) return;
+      // The socket streams one partition only; request the other by clicking
+      // the provider's own time tab. No reload, no socket reset.
+      await this.ensureCompleteKsportBaseline(source);
+      return;
+    }
+    const lastRecoveryAtMs = this.#ksportMaintenanceRecoveryAtMs.get(source.sourceId);
+    if (lastRecoveryAtMs !== undefined && nowMs - lastRecoveryAtMs < recoveryIntervalMs) return;
+    this.#ksportMaintenanceRecoveryAtMs.set(source.sourceId, nowMs);
+    await this.refreshCatalog(source);
   }
 
   async refreshCatalog(source: ObservedSource): Promise<void> {
@@ -935,6 +976,28 @@ export class NetworkObserver {
         await this.#ingestBtiRefreshEvaluation(source, evaluation);
       }));
     });
+  }
+
+  async #closeSocketsForSession(source: ObservedSource, sessionId: string): Promise<void> {
+    for (const [key, socket] of [...this.#webSockets.entries()]) {
+      if (socket.source.sourceId !== source.sourceId || socket.sessionId !== sessionId) continue;
+      this.#webSockets.delete(key);
+      await this.#emit(socket.source, socket.url, "WebSocket", "WS_STATE", {
+        encoding: "UTF8", body: '{"state":"CLOSED"}'
+      }, { request: { streamId: socket.streamId } });
+      if (socket.source.lobby === "KSPORT" &&
+        this.#activeKsportStreams.get(socket.source.sourceId) === socket.streamId) {
+        this.#activeKsportStreams.delete(socket.source.sourceId);
+        this.#catalogWsSnapshots.delete(socket.source.sourceId);
+        await this.#clearSabaWsSnapshots(socket.source.sourceId).catch(() => undefined);
+      }
+    }
+    const attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId);
+    if (attachedTargets !== undefined) {
+      for (const [targetId, attachedSessionId] of attachedTargets) {
+        if (attachedSessionId === sessionId) attachedTargets.delete(targetId);
+      }
+    }
   }
 
   async #requestFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean): Promise<void> {
@@ -1276,6 +1339,14 @@ export class NetworkObserver {
       }
       return;
     }
+    if (method === "Target.detachedFromTarget") {
+      // A destroyed sportsbook iframe never emits webSocketClosed for the
+      // sockets it owned. Close them explicitly so the API retires that stream
+      // instead of treating the silence as a healthy quiet feed.
+      const childSessionId = typeof params.sessionId === "string" ? params.sessionId : null;
+      if (childSessionId !== null) await this.#closeSocketsForSession(source, childSessionId);
+      return;
+    }
     if (method === "Runtime.executionContextCreated") {
       const context = isRecord(params.context) ? params.context : null;
       const auxData = context && isRecord(context.auxData) ? context.auxData : null;
@@ -1450,6 +1521,17 @@ export class NetworkObserver {
           await this.refreshCatalog(source);
         } else if (source.lobby === "SBO") {
           await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+        } else if (source.lobby === "KSPORT") {
+          // The sportsbook OOPIF opened its STOMP socket before this worker
+          // enabled Network on that child session, so the frames cannot be
+          // attributed to a stream. Ask the page to reconnect once so the new
+          // socket is observed from its creation; do not loop on every frame.
+          const nowMs = this.#now();
+          const previous = this.#ksportOrphanFrameRecoveryAtMs.get(source.sourceId);
+          if (previous === undefined || nowMs - previous >= 30_000) {
+            this.#ksportOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
+            await this.#requestFreshSocketBaseline(source, (url) => /\/sport\//u.test(url.pathname));
+          }
         }
         return;
       }
@@ -2065,6 +2147,7 @@ export class NetworkObserver {
       const activeStream = this.#activeKsportStreams.get(source.sourceId);
       if (activeStream !== undefined && activeStream !== streamId) return;
       if (activeStream === undefined) this.#activeKsportStreams.set(source.sourceId, streamId);
+      this.#ksportCatalogFrameAtMs.set(source.sourceId, clocks.observedAtMs);
     }
     const partitions = this.#catalogWsSnapshots.get(source.sourceId) ?? new Map<string, ReplayableWsEvent[]>();
     const readyKey = `${source.sourceId}|${partition}`;

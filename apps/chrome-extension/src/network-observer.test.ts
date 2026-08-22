@@ -2216,6 +2216,142 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls.every(([message]) => message.request.streamId === "2")).toBe(true);
   });
 
+  describe("KSPORT periodic maintenance", () => {
+    const url = "wss://d42.sb21.net/sport/538/session/websocket";
+    const liveFrame = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\nsubscription:subSportBookLive\n\n{}\u0000";
+    const todayFrame = "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\nsubscription:subSportBookToday\n\n{}\u0000";
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+
+    function setup(now: { value: number }) {
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+        if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+          params.expression.includes("sport-menu-tab")) return { result: { value: { status: "time-tab-selected" } } };
+        return {};
+      });
+      const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+      const observer = new NetworkObserver({ sendCommand, forward, now: () => now.value,
+        monotonicNow: () => now.value });
+      return { sendCommand, forward, observer };
+    }
+
+    async function openSocket(observer: NetworkObserver, frames: readonly string[]): Promise<void> {
+      await observer.handleEvent(ksport, "Target.attachedToTarget", {
+        sessionId: "sportsbook-child", targetInfo: { type: "iframe" } });
+      await observer.handleEvent(ksport, "Network.webSocketCreated", { requestId: "provider-ws", url },
+        "sportsbook-child");
+      for (const body of frames) {
+        await observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "provider-ws",
+          response: { opcode: 1, payloadData: body } }, "sportsbook-child");
+      }
+    }
+
+    it("leaves a healthy complete sportsbook feed untouched", async () => {
+      const now = { value: 1_000 };
+      const { sendCommand, forward, observer } = setup(now);
+      await openSocket(observer, [liveFrame, todayFrame]);
+      sendCommand.mockClear();
+      forward.mockClear();
+
+      now.value = 20_000;
+      await observer.maintainKsportFeed(ksport);
+
+      expect(sendCommand).not.toHaveBeenCalled();
+      expect(forward).not.toHaveBeenCalled();
+    });
+
+    it("only selects the missing time tab while the socket streams a single partition", async () => {
+      const now = { value: 1_000 };
+      const { sendCommand, forward, observer } = setup(now);
+      await openSocket(observer, [liveFrame]);
+      sendCommand.mockClear();
+      forward.mockClear();
+
+      now.value = 5_000;
+      await observer.maintainKsportFeed(ksport);
+
+      expect(sendCommand).toHaveBeenCalledWith(14, "Runtime.evaluate", expect.objectContaining({
+        expression: expect.stringContaining("sport-menu-tab")
+      }));
+      expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.callFunctionOn" ||
+        (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh"))))
+        .toBe(false);
+      expect(forward.mock.calls.some(([envelope]) => envelope.request.replayed === true)).toBe(false);
+    });
+
+    it("escalates to full recovery only after the socket has been silent for the quiet window, once per interval", async () => {
+      const now = { value: 1_000 };
+      const { sendCommand, observer } = setup(now);
+      await openSocket(observer, [liveFrame, todayFrame]);
+      sendCommand.mockClear();
+
+      const fullRecoveryCalls = () => sendCommand.mock.calls.filter(([, method, params]) =>
+        method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh")).length;
+
+      now.value = 20_000;
+      await observer.maintainKsportFeed(ksport);
+      expect(fullRecoveryCalls()).toBe(0);
+
+      now.value = 40_000;
+      await observer.maintainKsportFeed(ksport);
+      expect(fullRecoveryCalls()).toBeGreaterThan(0);
+      const afterFirst = fullRecoveryCalls();
+
+      now.value = 50_000;
+      await observer.maintainKsportFeed(ksport);
+      expect(fullRecoveryCalls()).toBe(afterFirst);
+
+      now.value = 80_000;
+      await observer.maintainKsportFeed(ksport);
+      expect(fullRecoveryCalls()).toBeGreaterThan(afterFirst);
+    });
+
+    it("closes the sportsbook sockets of a detached OOPIF so the stream is retired", async () => {
+      const now = { value: 1_000 };
+      const { forward, observer } = setup(now);
+      await openSocket(observer, [liveFrame, todayFrame]);
+      expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(true);
+      forward.mockClear();
+
+      await observer.handleEvent(ksport, "Target.detachedFromTarget", { sessionId: "sportsbook-child" });
+
+      expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "KSPORT", transport: "WS_STATE",
+        payload: expect.objectContaining({ body: '{"state":"CLOSED"}' }) }));
+      expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(false);
+    });
+
+    it("requests one socket reconnect when frames arrive for a socket created before Network was enabled", async () => {
+      const now = { value: 1_000 };
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>,
+        sessionId?: string) => {
+        if (sessionId !== "sportsbook-child") return {};
+        if (method === "Runtime.evaluate" && String(params?.expression).includes("WebSocket.prototype")) {
+          return { result: { objectId: "prototype-child" } };
+        }
+        if (method === "Runtime.queryObjects") return { objects: { objectId: "instances-child" } };
+        if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+        return {};
+      });
+      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+        now: () => now.value, monotonicNow: () => now.value });
+      await observer.handleEvent(ksport, "Target.attachedToTarget", {
+        sessionId: "sportsbook-child", targetInfo: { type: "iframe" } });
+      await observer.handleEvent(ksport, "Runtime.executionContextCreated", { context: { id: 23,
+        auxData: { frameId: "sportsbook-frame", isDefault: true } } }, "sportsbook-child");
+      sendCommand.mockClear();
+
+      const orphan = () => observer.handleEvent(ksport, "Network.webSocketFrameReceived", {
+        requestId: "pre-existing-ws", response: { opcode: 1, payloadData: liveFrame } }, "sportsbook-child");
+      await orphan();
+      await orphan();
+      now.value = 10_000;
+      await orphan();
+
+      const reconnects = sendCommand.mock.calls.filter(([, method, params]) =>
+        method === "Runtime.callFunctionOn" && String(params?.functionDeclaration).includes("socket.close(4000"));
+      expect(reconnects).toHaveLength(1);
+    });
+  });
+
   it("reports KSPORT ready only after the current socket has both live and today baselines", async () => {
     const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
       forward: vi.fn(async () => undefined), now: () => 1_000, monotonicNow: () => 60 });
