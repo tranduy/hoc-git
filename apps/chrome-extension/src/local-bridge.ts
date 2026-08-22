@@ -1,3 +1,4 @@
+import { utf8ByteLength } from "./utf8-length.js";
 import {
   ChromeBridgeControlMessageSchema,
   type ChromeBridgeEnvelope,
@@ -101,8 +102,15 @@ export class LocalBridge {
     this.#onCmdHiddenMarketProbe = options.onCmdHiddenMarketProbe ?? (() => undefined);
   }
 
+  #queueBytes = 0;
+
   get queueBytes(): number {
-    return this.#queue.reduce((total, entry) => total + entry.bytes, 0);
+    return this.#queueBytes;
+  }
+
+  #removeAt(index: number): void {
+    const [removed] = this.#queue.splice(index, 1);
+    if (removed !== undefined) this.#queueBytes -= removed.bytes;
   }
 
   pendingSequences(): number[] {
@@ -114,7 +122,7 @@ export class LocalBridge {
     const entry: QueueEntry = {
       envelope,
       serialized,
-      bytes: new TextEncoder().encode(serialized).byteLength,
+      bytes: utf8ByteLength(serialized),
       priority,
       insertedAt: this.#insertCounter++,
       sentGeneration: null
@@ -123,7 +131,7 @@ export class LocalBridge {
     while (this.queueBytes + entry.bytes > this.#maxQueueBytes) {
       const diagnosticIndex = this.#queue.findIndex((queued) => queued.priority === "DIAGNOSTIC");
       if (diagnosticIndex >= 0) {
-        this.#queue.splice(diagnosticIndex, 1);
+        this.#removeAt(diagnosticIndex);
         continue;
       }
       if (priority === "DIAGNOSTIC") return;
@@ -132,9 +140,10 @@ export class LocalBridge {
       const quoteIndex = sameSourceIndex >= 0 ? sameSourceIndex :
         this.#queue.findIndex((queued) => queued.priority === "QUOTE");
       if (quoteIndex < 0) return;
-      this.#queue.splice(quoteIndex, 1);
+      this.#removeAt(quoteIndex);
     }
     this.#queue.push(entry);
+    this.#queueBytes += entry.bytes;
     this.#flush();
   }
 
@@ -225,17 +234,20 @@ export class LocalBridge {
     socket?.close();
   }
 
-  #ordered(): QueueEntry[] {
-    return [...this.#queue].sort((left, right) =>
-      left.envelope.sourceId.localeCompare(right.envelope.sourceId)
+  #ordered(entries: readonly QueueEntry[] = this.#queue): QueueEntry[] {
+    return [...entries].sort((left, right) =>
+      (left.envelope.sourceId < right.envelope.sourceId ? -1 : left.envelope.sourceId > right.envelope.sourceId ? 1 : 0)
       || left.envelope.sequence - right.envelope.sequence
       || left.insertedAt - right.insertedAt);
   }
 
   #flush(generation = this.#generation): void {
     if (!this.#socket || this.#socket.readyState !== 1) return;
-    for (const entry of this.#ordered()) {
-      if (entry.sentGeneration === generation) continue;
+    // Entries already sent in this generation wait for their ACK; only the
+    // unsent tail needs ordering, not the whole queue on every enqueue.
+    const unsent = this.#queue.filter((entry) => entry.sentGeneration !== generation);
+    if (unsent.length === 0) return;
+    for (const entry of unsent.length === 1 ? unsent : this.#ordered(unsent)) {
       this.#socket.send(entry.serialized);
       entry.sentGeneration = generation;
     }
@@ -305,7 +317,7 @@ export class LocalBridge {
           // Drop only the rejected source and republish its authoritative
           // snapshot; healthy sources remain queued and connected.
           for (let index = this.#queue.length - 1; index >= 0; index--) {
-            if (this.#queue[index]?.envelope.sourceId === rejection.sourceId) this.#queue.splice(index, 1);
+            if (this.#queue[index]?.envelope.sourceId === rejection.sourceId) this.#removeAt(index);
           }
           try { void Promise.resolve(this.#onSnapshotRequest(rejection.sourceId)).catch(() => undefined); }
           catch { /* source recovery must not disrupt the bridge */ }
@@ -314,7 +326,7 @@ export class LocalBridge {
         if (rejection.sequence !== null) {
           const index = this.#queue.findIndex((entry) => entry.envelope.sourceId === rejection.sourceId
             && entry.envelope.sequence === rejection.sequence);
-          if (index >= 0) this.#queue.splice(index, 1);
+          if (index >= 0) this.#removeAt(index);
         }
         return;
       }
@@ -323,9 +335,7 @@ export class LocalBridge {
       const index = this.#queue.findIndex((entry) =>
         entry.envelope.sourceId === acknowledgement.sourceId
         && entry.envelope.sequence === acknowledgement.sequence);
-      if (index >= 0) {
-        this.#queue.splice(index, 1);
-      }
+      if (index >= 0) this.#removeAt(index);
     } catch {
       // Invalid control traffic cannot mutate the send queue.
     }

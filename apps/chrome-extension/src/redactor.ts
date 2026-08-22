@@ -1,3 +1,5 @@
+import { utf8ByteLength } from "./utf8-length.js";
+
 const MAX_PAYLOAD_BYTES = 256 * 1024;
 const MAX_NETWORK_BODY_BYTES = 24 * 1024 * 1024;
 
@@ -15,7 +17,7 @@ function serializedBytes(value: unknown): number {
     throw new Error("BRIDGE_PAYLOAD_INVALID");
   }
   if (serialized === undefined) throw new Error("BRIDGE_PAYLOAD_INVALID");
-  return new TextEncoder().encode(serialized).byteLength;
+  return utf8ByteLength(serialized);
 }
 
 function sanitizeUrl(value: string): { hostname: string; pathnameClass: string } | null {
@@ -72,7 +74,8 @@ function redactValue(value: unknown, seen: WeakSet<object>): unknown {
 }
 
 export function redactNetworkEnvelope(value: unknown): RedactedNetworkEnvelope {
-  if (serializedBytes(value) > MAX_PAYLOAD_BYTES) throw new Error("BRIDGE_PAYLOAD_TOO_LARGE");
+  // Redaction only removes or shortens fields, so the post-redaction size
+  // check is sufficient; a pre-check would serialize every envelope twice.
   const redacted = redactValue(value, new WeakSet<object>());
   if (redacted === null || typeof redacted !== "object" || Array.isArray(redacted)) {
     throw new Error("BRIDGE_PAYLOAD_INVALID");
@@ -82,7 +85,7 @@ export function redactNetworkEnvelope(value: unknown): RedactedNetworkEnvelope {
 }
 
 export function redactNetworkBody(body: string): string {
-  if (new TextEncoder().encode(body).byteLength > MAX_NETWORK_BODY_BYTES) {
+  if (utf8ByteLength(body) > MAX_NETWORK_BODY_BYTES) {
     throw new Error("BRIDGE_PAYLOAD_TOO_LARGE");
   }
   try {

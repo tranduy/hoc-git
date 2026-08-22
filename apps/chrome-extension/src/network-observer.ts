@@ -1,4 +1,5 @@
 import type { ChromeBridgeEnvelope, ChromeLobbyId } from "@tool-chenh/contracts";
+import { splitUtf8Text } from "./utf8-length.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
@@ -587,6 +588,7 @@ export class NetworkObserver {
   readonly #ksportCatalogFrameAtMs = new Map<string, number>();
   readonly #ksportMaintenanceRecoveryAtMs = new Map<string, number>();
   readonly #ksportOrphanFrameRecoveryAtMs = new Map<string, number>();
+  readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
     readonly headers: Readonly<Record<string, string>> }>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
@@ -750,6 +752,7 @@ export class NetworkObserver {
       this.#ksportCatalogFrameAtMs.delete(sourceId);
       this.#ksportMaintenanceRecoveryAtMs.delete(sourceId);
       this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
+      this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
       this.#imCatalogRefreshes.delete(sourceId);
@@ -763,6 +766,9 @@ export class NetworkObserver {
     }
     for (const key of this.#requestPartitions.keys()) {
       if (key.startsWith(`${tabId}:`)) this.#requestPartitions.delete(key);
+    }
+    for (const key of this.#requestStreamIds.keys()) {
+      if (key.startsWith(`${tabId}:`)) this.#requestStreamIds.delete(key);
     }
   }
 
@@ -1518,7 +1524,15 @@ export class NetworkObserver {
         // CDP then delivers frames without replaying webSocketCreated, so use
         // that traffic as the signal to request a fresh in-page SABA baseline.
         if (source.lobby === "SABA") {
-          await this.refreshCatalog(source);
+          // After a worker restart every surviving-socket frame lands here.
+          // One recovery per window; otherwise each frame replays the whole
+          // retained baseline (up to 24 MB) through the bridge.
+          const nowMs = this.#now();
+          const previous = this.#sabaOrphanFrameRecoveryAtMs.get(source.sourceId);
+          if (previous === undefined || nowMs - previous >= 30_000) {
+            this.#sabaOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
+            await this.refreshCatalog(source);
+          }
         } else if (source.lobby === "SBO") {
           await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
         } else if (source.lobby === "KSPORT") {
@@ -2163,34 +2177,48 @@ export class NetworkObserver {
     if (source.lobby === "SABA" && completesBaseline && sabaFramesContainCompleteBaseline(frames)) {
       this.#sabaReadySnapshotPartitions.add(readyKey);
     }
-    const totals = () => [...partitions.values()].reduce((result, values) => ({
-      frames: result.frames + values.length,
-      bytes: result.bytes + values.reduce((sum, frame) => sum + frame.body.length, 0)
-    }), { frames: 0, bytes: 0 });
-    let usage = totals();
-    while (usage.frames > 2_048 || usage.bytes > 24_000_000) {
+    // Frames are appended in arrival order per partition, so the oldest
+    // retained frame is always at the head of some partition. Keep running
+    // totals and evict by comparing partition heads: O(partitions) per evicted
+    // frame instead of materialising and sorting every retained frame on
+    // every incoming WebSocket message.
+    let usageFrames = 0;
+    let usageBytes = 0;
+    for (const values of partitions.values()) {
+      usageFrames += values.length;
+      for (const frame of values) usageBytes += frame.body.length;
+    }
+    while (usageFrames > 2_048 || usageBytes > 24_000_000) {
       if (source.lobby === "SABA") {
-        const oldestPartition = [...partitions.entries()].sort((left, right) =>
-          (left[1][0]?.observedAtMs ?? 0) - (right[1][0]?.observedAtMs ?? 0))[0]?.[0];
+        // SABA partitions are only usable as a whole reset..done baseline, so
+        // drop the oldest partition entirely.
+        let oldestPartition: string | undefined;
+        let oldestAtMs = Number.POSITIVE_INFINITY;
+        for (const [key, values] of partitions) {
+          const at = values[0]?.observedAtMs ?? 0;
+          if (at < oldestAtMs) { oldestAtMs = at; oldestPartition = key; }
+        }
         if (oldestPartition === undefined) break;
+        const removed = partitions.get(oldestPartition) ?? [];
+        usageFrames -= removed.length;
+        for (const frame of removed) usageBytes -= frame.body.length;
         partitions.delete(oldestPartition);
         this.#sabaReadySnapshotPartitions.delete(`${source.sourceId}|${oldestPartition}`);
-        usage = totals();
         continue;
       }
-      const candidates = [...partitions.entries()].flatMap(([key, values]) =>
-        values.slice(source.lobby === "SABA" ? 1 : 0).map((frame, index) => ({
-          key, index: index + (source.lobby === "SABA" ? 1 : 0), observedAtMs: frame.observedAtMs
-        })));
-      const oldest = candidates.sort((left, right) => left.observedAtMs - right.observedAtMs)[0];
-      if (oldest !== undefined) partitions.get(oldest.key)?.splice(oldest.index, 1);
-      else {
-        const oldestPartition = [...partitions.entries()].sort((left, right) =>
-          (left[1][0]?.observedAtMs ?? 0) - (right[1][0]?.observedAtMs ?? 0))[0]?.[0];
-        if (oldestPartition === undefined) break;
-        partitions.delete(oldestPartition);
+      let oldestKey: string | undefined;
+      let oldestAtMs = Number.POSITIVE_INFINITY;
+      for (const [key, values] of partitions) {
+        const head = values[0];
+        if (head !== undefined && head.observedAtMs < oldestAtMs) { oldestAtMs = head.observedAtMs; oldestKey = key; }
       }
-      usage = totals();
+      if (oldestKey === undefined) break;
+      const bucket = partitions.get(oldestKey)!;
+      const evicted = bucket.shift();
+      if (evicted === undefined) { partitions.delete(oldestKey); continue; }
+      usageFrames -= 1;
+      usageBytes -= evicted.body.length;
+      if (bucket.length === 0) partitions.delete(oldestKey);
     }
     this.#catalogWsSnapshots.set(source.sourceId, partitions);
     if (source.lobby === "SABA" && this.#sabaReadySnapshotPartitions.has(readyKey)) {
@@ -2427,27 +2455,6 @@ function isImGetSeUrl(source: ObservedSource, value: string): boolean {
   }
 }
 
-function splitUtf8Text(value: string, maxBytes: number): string[] {
-  if (new TextEncoder().encode(value).byteLength <= maxBytes) return [value];
-  const encoder = new TextEncoder();
-  const output: string[] = [];
-  let start = 0;
-  while (start < value.length) {
-    let low = start + 1;
-    let high = value.length;
-    let best = low;
-    while (low <= high) {
-      const middle = Math.floor((low + high) / 2);
-      const bytes = encoder.encode(value.slice(start, middle)).byteLength;
-      if (bytes <= maxBytes) { best = middle; low = middle + 1; } else high = middle - 1;
-    }
-    if (best < value.length && /[\uD800-\uDBFF]/u.test(value[best - 1] ?? "")) best--;
-    if (best <= start) throw new Error("BRIDGE_PAYLOAD_INVALID");
-    output.push(value.slice(start, best));
-    start = best;
-  }
-  return output;
-}
 
 function isReplayableCmdCatalog(records: readonly unknown[]): boolean {
   return records.some((record) => {
