@@ -35,6 +35,30 @@ describe("CmdSnapshotPoller", () => {
     ]);
   });
 
+  it("re-requests IM's signed GetSE catalog on its slower cadence instead of once per reconnect", async () => {
+    let now = 1_000;
+    const refreshCatalog = vi.fn(async (_source: { readonly lobby: string; readonly sourceId: string;
+      readonly tabId: number }) => undefined);
+    const poller = new CmdSnapshotPoller({
+      list: () => [{ lobby: "IM", tabId: 7, hostname: "imsports.directsb.net", state: "ATTACHED" }],
+      capture: vi.fn(async () => undefined), refreshCatalog, now: () => now, imDiscoveryIntervalMs: 15_000
+    });
+
+    poller.pollNow();
+    await Promise.resolve();
+    expect(refreshCatalog).toHaveBeenCalledExactlyOnceWith({ lobby: "IM", sourceId: "chrome:IM:7", tabId: 7 });
+
+    now = 11_000;
+    poller.pollNow();
+    await Promise.resolve();
+    expect(refreshCatalog).toHaveBeenCalledTimes(1);
+
+    now = 16_500;
+    poller.pollNow();
+    await Promise.resolve();
+    expect(refreshCatalog).toHaveBeenCalledTimes(2);
+  });
+
   it("coalesces a heartbeat wake-up with a just-completed scheduled catalog poll", async () => {
     let callback: (() => void) | undefined;
     let now = 1_000;

@@ -98,9 +98,17 @@ export class CmdSnapshotPoller {
         void this.#dependencies.pollSabaDomChanges(source, tab.hostname).catch(() => undefined)
           .finally(() => this.#catalogRefreshInFlight.delete(tab.tabId));
       }
-      if ((tab.lobby === "BTI" || tab.lobby === "KSPORT") && this.#dependencies.refreshCatalog !== undefined &&
+      // IM's catalog is a two-part signed GetSE that only the explicit refresh
+      // path requests (maintain() deliberately skips it). Without a periodic
+      // refresh the provider delivers exactly one baseline per bridge
+      // reconnect and then never updates, so schedule it here on its own
+      // slower cadence.
+      const catalogRefreshIntervalMs = tab.lobby === "IM"
+        ? this.#dependencies.imDiscoveryIntervalMs ?? 15_000
+        : tab.lobby === "BTI" || tab.lobby === "KSPORT" ? 2_000 : null;
+      if (catalogRefreshIntervalMs !== null && this.#dependencies.refreshCatalog !== undefined &&
         !this.#catalogRefreshInFlight.has(tab.tabId) &&
-        now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >= 2_000) {
+        now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >= catalogRefreshIntervalMs) {
         this.#lastCatalogRefreshAtMs.set(tab.tabId, now);
         this.#catalogRefreshInFlight.add(tab.tabId);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
