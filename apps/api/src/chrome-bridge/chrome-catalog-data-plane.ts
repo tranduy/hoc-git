@@ -16,7 +16,25 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly freshnessMs?: number;
   readonly maxEnvelopeAgeMs?: number;
   readonly publish?: (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void;
+  /**
+   * Automatic stall recovery. CMD and IM re-request their catalog in page on
+   * every bridge reconnect, so they are excluded by default. The streaming
+   * providers (SABA, SBOBET, APSPORT, BTI) cannot replay a WebSocket baseline
+   * through CDP once it is lost, so a stalled catalog stays stale until the
+   * provider tab is replaced with a fresh launch.
+   */
+  readonly recoveryAfterMs?: number;
+  readonly recoveryCooldownMs?: number;
+  readonly recoverableAccountIds?: ReadonlySet<string>;
+  readonly onSourceRecoveryNeeded?: (accountId: string) => void;
 }
+
+const DEFAULT_RECOVERABLE_ACCOUNTS: ReadonlySet<string> = new Set([
+  "catalog-source:SABA:FOOTBALL",
+  "catalog-source:SBOBET:FOOTBALL",
+  "catalog-source:APSPORT:FOOTBALL",
+  "catalog-source:BTI:FOOTBALL"
+]);
 
 export class ChromeCatalogDataPlane {
   readonly #now: () => number;
@@ -36,6 +54,13 @@ export class ChromeCatalogDataPlane {
   readonly #sourceEpochs = new Map<string, string>();
   readonly #activeSourceIds = new Map<string, string>();
   readonly #invalidatedAccounts = new Set<string>();
+  readonly #recoveryAfterMs: number;
+  readonly #recoveryCooldownMs: number;
+  readonly #recoverableAccountIds: ReadonlySet<string>;
+  readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
+  readonly #lastRecoveryAtMs = new Map<string, number>();
+  readonly #lastDecodedAtMs = new Map<string, number>();
+  readonly #startedAtMs: number;
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -45,6 +70,11 @@ export class ChromeCatalogDataPlane {
     this.#freshnessMs = options.freshnessMs ?? 20_000;
     this.#maxEnvelopeAgeMs = options.maxEnvelopeAgeMs ?? 30_000;
     this.#publish = options.publish ?? null;
+    this.#recoveryAfterMs = options.recoveryAfterMs ?? 60_000;
+    this.#recoveryCooldownMs = options.recoveryCooldownMs ?? 300_000;
+    this.#recoverableAccountIds = options.recoverableAccountIds ?? DEFAULT_RECOVERABLE_ACCOUNTS;
+    this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
+    this.#startedAtMs = this.#now();
   }
 
   owns(accountId: string): boolean {
@@ -90,12 +120,20 @@ export class ChromeCatalogDataPlane {
       }
       this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
     }
+    if (transportAccountId !== null && envelope.request.pathnameClass === "/__fieldline_heartbeat__") {
+      // A tab that keeps heartbeating while its catalog stays stale is exactly
+      // the lost-WebSocket-baseline case: the renderer is alive, the feed is not.
+      this.#requestRecoveryIfStalled(transportAccountId);
+    }
     const assembled = this.#networkBodies.ingest(envelope);
     if (assembled === null) return stateChanged;
     const route = this.#router.route(assembled);
     if (route.status !== "TRUSTED" || route.adapter === null) return stateChanged;
     const update = route.adapter.decode(assembled).at(-1);
     if (update === undefined) return stateChanged;
+    // Any frame the provider adapter understood (including a liveness-only
+    // STOMP/socket heartbeat) proves the sportsbook feed itself is alive.
+    if (transportAccountId !== null) this.#lastDecodedAtMs.set(transportAccountId, envelope.observedAtMs);
     if (transportAccountId !== null && (envelope.lobby === "KSPORT" || envelope.lobby === "BTI")) {
       if (!this.#lastTransportAtMs.has(transportAccountId)) {
         this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
@@ -167,6 +205,7 @@ export class ChromeCatalogDataPlane {
       const fresh = !invalidated && catalog !== undefined && this.#now() - catalog.observedAtMs <= this.#freshnessMs;
       const transportAtMs = this.#lastTransportAtMs.get(status.id);
       const transportFresh = transportAtMs !== undefined && this.#now() - transportAtMs <= this.#freshnessMs;
+      if (!fresh && status.sessionState === "ACTIVE") this.#requestRecoveryIfStalled(status.id);
       if (fresh || (!invalidated && catalog !== undefined && transportFresh)) {
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTIVE",
           acquiredAtMs: catalog.observedAtMs, reason: null });
@@ -181,6 +220,33 @@ export class ChromeCatalogDataPlane {
       }
       return status;
     });
+  }
+
+  /**
+   * Requests a targeted tab replacement when a recoverable provider that once
+   * delivered a catalog (or at least opened its transport) has been silent for
+   * longer than `recoveryAfterMs`. A source that never produced anything is
+   * left alone: after an API restart the tab may simply not have emitted its
+   * first baseline yet, and replacing it would consume a one-time launch.
+   */
+  #requestRecoveryIfStalled(accountId: string): void {
+    if (this.#onSourceRecoveryNeeded === null || !this.#recoverableAccountIds.has(accountId)) return;
+    const candidates = [this.#catalogs.get(accountId)?.observedAtMs, this.#lastDecodedAtMs.get(accountId),
+      this.#transportStartedAtMs.get(accountId)].filter((value): value is number => value !== undefined);
+    if (candidates.length === 0) return;
+    const lastSeenMs = Math.max(...candidates);
+    // A catalog restored from disk at startup is old by definition; give the
+    // attached tabs one full window to deliver their first live baseline.
+    const stalledSinceMs = Math.max(lastSeenMs, this.#startedAtMs);
+    // Tab heartbeats also count as transport for SABA/APSPORT, so transport
+    // liveness must not gate recovery: the decisive signal is that no decoded
+    // catalog has arrived for the whole recovery window.
+    const now = this.#now();
+    if (now - stalledSinceMs < this.#recoveryAfterMs) return;
+    const lastRecoveryAtMs = this.#lastRecoveryAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY;
+    if (now - lastRecoveryAtMs < this.#recoveryCooldownMs) return;
+    this.#lastRecoveryAtMs.set(accountId, now);
+    try { this.#onSourceRecoveryNeeded(accountId); } catch { /* recovery is best-effort */ }
   }
 
   #invalidate(accountId: string): boolean {

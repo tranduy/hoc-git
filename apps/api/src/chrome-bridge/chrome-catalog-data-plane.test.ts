@@ -487,6 +487,110 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow("CHROME_CATALOG_STALE");
   });
 
+  describe("automatic stall recovery", () => {
+    const sbobetStatus: CatalogSourceStatus = { ...fallbackStatus, id: "catalog-source:SBOBET:FOOTBALL",
+      alias: "K-Sports · SBOBET", provider: "SBOBET", sessionState: "ACTIVE", acquiredAtMs: 900, reason: null };
+    const sabaStatus: CatalogSourceStatus = { ...fallbackStatus, id: "catalog-source:SABA:FOOTBALL",
+      alias: "SABA", provider: "SABA", sessionState: "ACTIVE", acquiredAtMs: 900, reason: null };
+    const sabaHeartbeat = (sequence: number, observedAtMs: number): ChromeBridgeEnvelope => ({
+      ...sabaEnvelope(sequence, []), observedAtMs, transport: "TAB_STATE",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_heartbeat__", resourceType: "Tab" },
+      payload: { encoding: "UTF8", body: "{}" } });
+
+    it("requests a targeted replacement once a streaming provider stays stale for the recovery window", async () => {
+      let now = 1_500;
+      const onSourceRecoveryNeeded = vi.fn();
+      const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
+        recoveryAfterMs: 60_000, recoveryCooldownMs: 300_000, onSourceRecoveryNeeded });
+      expect(plane.ingest(sabaEnvelope(1, [1]))).toBe(true);
+
+      now = 50_000;
+      expect(plane.ingest(sabaHeartbeat(2, now))).toBe(false);
+      await plane.overlayStatuses([sabaStatus]);
+      expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+
+      now = 61_600;
+      expect(plane.ingest(sabaHeartbeat(3, now))).toBe(false);
+      expect(onSourceRecoveryNeeded).toHaveBeenCalledExactlyOnceWith("catalog-source:SABA:FOOTBALL");
+
+      // Cooldown: repeated status reads and heartbeats do not thrash the tab.
+      now = 120_000;
+      await plane.overlayStatuses([sabaStatus]);
+      expect(plane.ingest(sabaHeartbeat(4, now))).toBe(false);
+      expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
+
+      now = 361_700;
+      await plane.overlayStatuses([sabaStatus]);
+      expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not request recovery for CMD or IM, which re-request their catalog in page", async () => {
+      let now = 1_500;
+      const onSourceRecoveryNeeded = vi.fn();
+      const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000, onSourceRecoveryNeeded });
+      expect(plane.ingest(envelope(1))).toBe(true);
+      expect(plane.ingest(imEnvelope("IM_MARKET_1", 1))).toBe(false);
+      expect(plane.ingest(imEnvelope("IM_MARKET_2", 2))).toBe(true);
+
+      now = 200_000;
+      await plane.overlayStatuses([
+        { ...fallbackStatus, sessionState: "ACTIVE", acquiredAtMs: 900 },
+        { ...fallbackStatus, id: "catalog-source:IM:FOOTBALL", provider: "IM", sessionState: "ACTIVE",
+          acquiredAtMs: 900 }
+      ]);
+      expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+    });
+
+    it("treats a quiet KSPORT sportsbook heartbeat as a live feed instead of a stall", async () => {
+      let now = 1_500;
+      const onSourceRecoveryNeeded = vi.fn();
+      const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
+        recoveryAfterMs: 60_000, onSourceRecoveryNeeded });
+      expect(plane.ingest(ksportEnvelope(1, "live", [101]))).toBe(false);
+      expect(plane.ingest(ksportEnvelope(2, "today", [102]))).toBe(true);
+
+      for (let sequence = 3; sequence <= 12; sequence += 1) {
+        now += 15_000;
+        expect(plane.ingest({ ...ksportEnvelope(sequence, "today", []), observedAtMs: now,
+          payload: { encoding: "UTF8", body: `a${JSON.stringify(["\n"])}` } })).toBe(false);
+        await plane.overlayStatuses([sbobetStatus]);
+      }
+      expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+
+      // Once the sportsbook socket itself goes silent, recovery is requested.
+      now += 61_000;
+      await plane.overlayStatuses([sbobetStatus]);
+      expect(onSourceRecoveryNeeded).toHaveBeenCalledExactlyOnceWith("catalog-source:SBOBET:FOOTBALL");
+    });
+
+    it("gives a catalog restored from disk a full window after startup before replacing its tab", async () => {
+      let now = 500_000;
+      const onSourceRecoveryNeeded = vi.fn();
+      const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000,
+        recoveryAfterMs: 60_000, onSourceRecoveryNeeded });
+      const durable = new ChromeCatalogDataPlane({ now: () => 1_500,
+        publish: (catalog) => plane.restore(catalog) });
+      expect(durable.ingest(sabaEnvelope(1, [1]))).toBe(true);
+
+      now = 559_999;
+      await plane.overlayStatuses([sabaStatus]);
+      expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+
+      now = 560_000;
+      await plane.overlayStatuses([sabaStatus]);
+      expect(onSourceRecoveryNeeded).toHaveBeenCalledExactlyOnceWith("catalog-source:SABA:FOOTBALL");
+    });
+
+    it("never replaces a tab that has not yet produced any transport or catalog", async () => {
+      const onSourceRecoveryNeeded = vi.fn();
+      const plane = new ChromeCatalogDataPlane({ now: () => 900_000, freshnessMs: 20_000, onSourceRecoveryNeeded });
+      await plane.overlayStatuses([sabaStatus, sbobetStatus,
+        { ...fallbackStatus, id: "catalog-source:BTI:FOOTBALL", provider: "BTI", sessionState: "ACTIVE",
+          acquiredAtMs: 1_000 }]);
+      expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+    });
+  });
+
   it("drops an expired replay before decoding or publishing it", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 40_001, maxEnvelopeAgeMs: 30_000, publish });
