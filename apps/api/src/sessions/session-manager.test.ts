@@ -924,4 +924,34 @@ describe("SessionManager", () => {
     await expect(manager.withLatestFabetLaunch("SABA", "FOOTBALL", async (url) => url, 50))
       .resolves.toBe("https://c0z0ob.bpd3a3fn.com/fresh");
   });
+
+  it("uses an operator-configured SBOBET launch instead of replacing it with Fabet capture", async () => {
+    const vault = await createVault();
+    let nowMs = 10;
+    const manager = new SessionManager({
+      vault,
+      validators: new SessionValidatorRegistry([{ provider: "SBOBET", validate: async () => ({ ok: true }) }]),
+      clock: { nowMs: () => nowMs },
+      idFactory: () => "manual-sbobet",
+      fabetDriver: {
+        login: async () => undefined,
+        captureLobbyLaunches: async () => {
+          await vault.save("fabet-sbobet", {
+            kind: "LAUNCH_URL", value: "https://zenandfe.com/?token=fabet", capturedAtMs: nowMs
+          });
+          return [{ category: "FOOTBALL" as const, providerHint: "SBOBET" as const,
+            hostname: "zenandfe.com", capturedAtMs: nowMs, vaultRecordId: "fabet-sbobet" }];
+        },
+        resetProfile: async () => undefined
+      }
+    });
+    await manager.configureManual({ provider: "SBOBET", category: "FOOTBALL", kind: "LAUNCH_URL",
+      secret: "https://zenandfe.com/?token=manual&sportId=1&lng=vi" });
+    nowMs = 50;
+    await manager.configureFabet({ entryUrl: "https://fabet.party/", username: "development-user",
+      password: "development-pass", trustedHostname: "fabet.party" });
+
+    await expect(manager.withLatestFabetLaunch("SBOBET", "FOOTBALL", async (url) => url, 50))
+      .resolves.toBe("https://zenandfe.com/?token=manual&sportId=1&lng=vi");
+  });
 });

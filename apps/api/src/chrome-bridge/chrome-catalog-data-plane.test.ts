@@ -55,6 +55,21 @@ function sabaEnvelope(sequence: number, matchIds: readonly number[]): ChromeBrid
     payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", "b1", rows, sequence])}` } };
 }
 
+function sabaDomEnvelope(sequence: number, matchIds: readonly number[], homePrice = "0.77"): ChromeBridgeEnvelope {
+  const records = matchIds.map((matchId) => ({ sportId: "1", leagueId: String(matchId),
+    leagueName: `League ${matchId}`, matchId: String(matchId), timeText: "1H0'",
+    teamNames: [`Home ${matchId}`, `Away ${matchId}`], groups: [{ betTypeIds: ["1"], labels: ["0.5"],
+      odds: [{ marketOddsId: String(matchId * 10), priceText: homePrice, status: null,
+        greyedOut: null, lineText: "0.5" },
+      { marketOddsId: String(matchId * 10), priceText: "-0.87", status: null, greyedOut: null,
+        lineText: null }] }] }));
+  return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
+    sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence, transport: "DOM_SNAPSHOT",
+    request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+      snapshotId: `saba:7:dom-generation-${sequence}`, chunkIndex: 0, chunkCount: 1, records }) } };
+}
+
 function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds: readonly number[]): ChromeBridgeEnvelope {
   const events = eventIds.map((eventId) => ({ "2": `Home ${eventId}`, "3": `Away ${eventId}`, "8": eventId,
     "7": { "3": [`2.5 0.92*${eventId}0030002005h -0.98*${eventId}0030002005a ${eventId}181025`] } }));
@@ -388,6 +403,28 @@ describe("ChromeCatalogDataPlane", () => {
     restarted.resetCoverage("catalog-source:SABA:FOOTBALL");
     expect(restarted.ingest(sabaEnvelope(6, [1]))).toBe(true);
     expect(publish.mock.calls.at(-1)?.[1]).toBe("FRESH");
+  });
+
+  it("overlays a stable SABA DOM price generation onto the durable full catalog after restart", async () => {
+    const original = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    const ids = Array.from({ length: 30 }, (_, index) => index + 1);
+    expect(original.ingest(sabaEnvelope(1, ids))).toBe(true);
+    const complete = await original.read("catalog-source:SABA:FOOTBALL");
+    const restarted = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    restarted.restore(complete);
+
+    const visible = ids.slice(0, 20);
+    expect(restarted.ingest(sabaDomEnvelope(2, visible))).toBe(false);
+    expect(restarted.ingest(sabaDomEnvelope(3, visible))).toBe(true);
+
+    const current = await restarted.read("catalog-source:SABA:FOOTBALL");
+    expect(current.events).toHaveLength(30);
+    expect(current.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "30" })
+    ]));
+    expect(current.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerSelectionId: "10:home", rawOdds: "0.77", sequence: 3 })
+    ]));
   });
 
   it("does not replace the latest verified catalog with malformed data", async () => {

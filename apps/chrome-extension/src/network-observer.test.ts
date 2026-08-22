@@ -14,7 +14,7 @@ describe("NetworkObserver", () => {
       : method === "Page.createIsolatedWorld" ? { executionContextId: 9 } : {});
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
 
-    await observer.maintain(source);
+    await observer.maintain({ lobby: "BTI", sourceId: "chrome:BTI:7", tabId: 7 });
 
     expect(sendCommand).toHaveBeenCalledWith(7, "Emulation.setFocusEmulationEnabled", { enabled: true });
     expect(sendCommand).toHaveBeenCalledWith(7, "Page.setWebLifecycleState", { state: "active" });
@@ -103,7 +103,7 @@ describe("NetworkObserver", () => {
       payload: expect.objectContaining({
         body: JSON.stringify({ results: ["top:navigation-not-found", "im-app:catalog-requested"] })
       })
-    }));
+      }));
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({
       transport: "HTTP_RESPONSE",
       request: expect.objectContaining({
@@ -149,8 +149,9 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
   });
 
-  it("replays retained SBOBET STOMP partitions without issuing a catalog request or touching the tab", async () => {
-    const sendCommand = vi.fn(async () => ({}));
+  it("falls back to retained SBOBET STOMP partitions when a fresh same-tab request is unavailable", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>) => ({}));
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward });
     const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
@@ -162,10 +163,14 @@ describe("NetworkObserver", () => {
 
     await observer.refreshCatalog(source);
 
-    expect(sendCommand).not.toHaveBeenCalled();
-    expect(forward).toHaveBeenCalledTimes(2);
-    expect(forward.mock.calls.map(([envelope]) => envelope.transport)).toEqual(["WS_FRAME", "WS_FRAME"]);
-    expect(forward.mock.calls.every(([envelope]) => envelope.request.replayed === true)).toBe(true);
+    expect(sendCommand.mock.calls.map(([, method]) => method))
+      .toEqual(["Runtime.evaluate", "Page.getFrameTree", "Target.getTargets"]);
+    expect(sendCommand).not.toHaveBeenCalledWith(8, "Page.reload", expect.anything());
+    expect(forward).toHaveBeenCalledTimes(3);
+    expect(forward.mock.calls.map(([envelope]) => envelope.transport))
+      .toEqual(["TAB_STATE", "WS_FRAME", "WS_FRAME"]);
+    expect(forward.mock.calls[0]![0].payload.body).toContain("KSPORT_REFRESH_FAILED");
+    expect(forward.mock.calls.slice(1).every(([envelope]) => envelope.request.replayed === true)).toBe(true);
   });
 
   it("recovers TSPORT decoder state without toggling the provider network or reloading the tab", async () => {
@@ -188,7 +193,32 @@ describe("NetworkObserver", () => {
 
     await observer.refreshCatalog(source);
 
-    expect(sendCommand.mock.calls.map(([, method]) => method)).toEqual(["Runtime.evaluate"]);
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+    expect(sendCommand).not.toHaveBeenCalledWith(8, "Page.reload", expect.anything());
+  });
+
+  it("does not treat SABA c0 configuration reset/done as a football catalog baseline", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>) => ({}));
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000,
+      monotonicNow: () => 60 });
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const configOnly = `42${JSON.stringify(["m", "b0", [
+      ["c", "c0", "session"], ["f", 0, ["type", "siteid"]],
+      [0, "reset"], [0, 15, 1], [0, "done"]
+    ], "r1"])}`;
+    await observer.ingestWebSocketFrame(source, "wss://sports.example/socket.io/", configOnly);
+    forward.mockClear();
+    sendCommand.mockClear();
+
+    await observer.refreshCatalog(source);
+
+    expect(forward.mock.calls.some(([message]) => message.request.replayed === true)).toBe(false);
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
   });
 
   it("does not mistake a partial SABA DOM cache for a complete socket baseline", async () => {
@@ -209,7 +239,10 @@ describe("NetworkObserver", () => {
 
       await observer.refreshCatalog(source);
 
-      expect(sendCommand.mock.calls.map(([, method]) => method)).toEqual(["Runtime.evaluate"]);
+      expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+        params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
+      expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+      expect(sendCommand).not.toHaveBeenCalledWith(8, "Page.reload", expect.anything());
   });
 
   it("requests only IM prematch events in the next 48-hour UTC window", async () => {
@@ -598,6 +631,33 @@ describe("NetworkObserver", () => {
     expect(String(evaluation?.expression)).toContain("restored-session");
   });
 
+  it("does not persist a failed request issued by KSPORT catalog recovery as the provider template", async () => {
+    let finishRefresh!: (value: unknown) => void;
+    const refreshEvaluation = new Promise<unknown>((resolve) => { finishRefresh = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && String(params?.expression)
+        .includes("fieldline-ksport-catalog-refresh")) return refreshEvaluation;
+      return {};
+    });
+    const saveSbobetEventRequest = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({ sendCommand, saveSbobetEventRequest,
+      loadSbobetEventRequest: async () => null, forward: vi.fn(async () => undefined), now: () => 1_000 });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(source, "Runtime.executionContextCreated", { context: { id: 71,
+      auxData: { frameId: "root", isDefault: true } } });
+
+    const refresh = observer.refreshCatalog(source);
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([, method, params]) =>
+      method === "Runtime.evaluate" && String(params?.expression)
+        .includes("fieldline-ksport-catalog-refresh"))).toBe(true));
+    await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "self-refresh", type: "Fetch",
+      request: { method: "GET", url: "https://zenandfe.com/api/v2/getEvent?timeRange=live", headers: {} } });
+    finishRefresh({ result: { value: { status: "fieldline-ksport-catalog-refresh-failed" } } });
+    await refresh;
+
+    expect(saveSbobetEventRequest).not.toHaveBeenCalled();
+  });
+
   it("requests a fresh BTI football catalog in the attached authenticated tab", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
@@ -902,6 +962,67 @@ describe("NetworkObserver", () => {
     expect(sendCommand).toHaveBeenCalledWith(6, "Runtime.evaluate", expect.objectContaining({
       expression: BTI_CATALOG_REFRESH_EXPRESSION
     }));
+  });
+
+  it("does not run the CMD DOM collector for websocket-authoritative SABA", async () => {
+    const sendCommand = vi.fn(async () => ({}));
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+
+    await observer.captureCmdSnapshot(
+      { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 }, "sports.example"
+    );
+
+    expect(sendCommand).not.toHaveBeenCalled();
+    expect(forward).not.toHaveBeenCalled();
+  });
+
+  it("keeps SABA active without scanning, scrolling, or clicking its entire DOM", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>) => ({}));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.maintain(saba);
+
+    expect(sendCommand).toHaveBeenCalledWith(10, "Emulation.setFocusEmulationEnabled", { enabled: true });
+    expect(sendCommand).toHaveBeenCalledWith(10, "Page.setWebLifecycleState", { state: "active" });
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Page.getFrameTree")).toBe(false);
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      typeof params?.expression === "string" && params.expression.includes("querySelectorAll('body *')"))).toBe(false);
+  });
+
+  it("captures SABA only after its page-side odds observer reports a price mutation", async () => {
+    const records = JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [{ betTypeIds: ["3"], labels: ["2.5"],
+        odds: [{ marketOddsId: `market-${index}`, priceText: "0.91", status: null, greyedOut: null },
+          { marketOddsId: `market-${index}`, priceText: "0.99", status: null, greyedOut: null }] }]
+    })));
+    let dirty = false;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: dirty } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") return { result: { value: records } };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    expect(forward).not.toHaveBeenCalled();
+    const watcherExpression = String(sendCommand.mock.calls.find(([, method, params]) => method ===
+      "Runtime.evaluate" && String(params?.expression).includes("fieldline-saba-odds-mutation"))?.[2]?.expression);
+    expect(watcherExpression).toContain("characterData: true");
+    expect(watcherExpression).not.toContain("'class'");
+
+    dirty = true;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "SABA", transport: "DOM_SNAPSHOT" }));
   });
 
   it("reads independent CMD frames concurrently so one slow frame cannot expire the catalog", async () => {
@@ -1408,6 +1529,8 @@ describe("NetworkObserver", () => {
     expect(sendCommand).toHaveBeenCalledWith(7, "Target.setAutoAttach", {
       autoAttach: true, waitForDebuggerOnStart: false, flatten: true
     });
+    const autoAttachCalls = sendCommand.mock.calls.filter(([, method]) => method === "Target.setAutoAttach");
+    expect(autoAttachCalls.map(([, , params]) => params?.autoAttach)).toEqual([false, true]);
     const evaluateCall = sendCommand.mock.calls.find((call) => call[1] === "Runtime.evaluate");
     expect(evaluateCall?.[2]).toMatchObject({ returnByValue: true });
     expect(JSON.stringify(evaluateCall?.[2])).not.toMatch(/\.click\(|dispatchEvent|\[data-odds/iu);
@@ -1433,6 +1556,23 @@ describe("NetworkObserver", () => {
     expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.enable", {}, "sportsbook-child");
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "KSPORT", transport: "WS_FRAME",
       payload: expect.objectContaining({ body: expect.stringContaining("/topic/sports/1_1/live/") }) }));
+  });
+
+  it("selects KSPORT's main Football group on attach without touching an odds control", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>) => ({}));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
+
+    await observer.start(ksport);
+
+    const evaluation = sendCommand.mock.calls.find(([, method]) => method === "Runtime.evaluate")?.[2];
+    const expression = String(evaluation?.expression);
+    expect(expression).toContain(".sport-type-group-item");
+    expect(expression).toContain("active-type");
+    expect(expression).toContain("control.click()");
+    expect(expression).toContain("sport-odds-boosts");
+    expect(expression).not.toContain(".c-odds");
   });
 
   it("does not re-enable debugger network buffers for an already started tab", async () => {
@@ -1680,13 +1820,19 @@ describe("NetworkObserver", () => {
   it.each([
     { lobby: "SABA" as const, sourceId: "chrome:SABA:13", url: "wss://sports.example/socket.io/",
       bodies: [
-        `42${JSON.stringify(["m", "b1", [["f", 0, ["type"]], [0, "reset"], [0, "done"]], "r1"])}`,
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type"]], [0, "reset"],
+          [0, "o"], [0, "done"]], "r1"])}`,
         `42${JSON.stringify(["m", "b1", [[0, "o", 1, 2]], "r2"])}`
       ] },
     { lobby: "KSPORT" as const, sourceId: "chrome:KSPORT:14", url: "wss://sports.example/sport/socket",
       bodies: [
         "MESSAGE\ndestination:/topic/sports/live/1\n\n{\"event\":1}\u0000",
         "MESSAGE\ndestination:/topic/sports/live/2\n\n{\"event\":2}\u0000"
+      ] }
+    ,{ lobby: "SBO" as const, sourceId: "chrome:SBO:15", url: "wss://sports.example/socket.io/",
+      bodies: [
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 1, ["matchid"]]], 1])}`,
+        `42${JSON.stringify(["m", "b1", [[0, "m", 1, 99]], 2])}`
       ] }
   ])("replays retained $lobby baseline and deltas after only the local API restarts", async (input) => {
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
@@ -1708,9 +1854,160 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls.map(([message]) => message.observedAtMs)).toEqual([1_000, 1_100]);
   });
 
+  it("recovers a SABA baseline after worker restart without reconnecting the existing socket", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("window.io.Socket.prototype")) return { result: { objectId: "prototype-1" } };
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "instances-1" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 1_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+    await observer.handleEvent(saba, "Runtime.executionContextCreated", { context: { id: 17,
+      auxData: { frameId: "sports-frame", isDefault: true } } });
+    sendCommand.mockClear();
+
+    await observer.refreshCatalog(saba);
+
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+  });
+
+  it("does not close SABA's native Socket.IO transport when window.io is not global", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("window.WebSocket.prototype")) {
+        return { result: { objectId: "native-websocket-prototype" } };
+      }
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "native-websockets" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 1_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+
+    await observer.refreshCatalog(saba);
+
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+  });
+
+  it("does not change SABA time filters while requesting a recovery snapshot", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("fieldline-saba-time-baseline")) {
+        return { result: { value: { status: "requested", clicked: ["truc tiep", "hom nay"] } } };
+      }
+      if (method === "Runtime.evaluate") return { result: { value: "1787250000000.5" } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+
+    await observer.refreshCatalog(saba);
+
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      typeof params?.expression === "string" && params.expression.includes("fieldline-saba-time-baseline"))).toBe(false);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+  });
+
+  it("takes only two bounded SABA DOM snapshots without changing the current provider view", async () => {
+    const records = JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
+      sportId: "1", leagueId: "league", leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["1"], labels: ["0.25"], odds: [
+          { marketOddsId: `home-${index}`, priceText: "0.91", lineText: "-0.25" },
+          { marketOddsId: `away-${index}`, priceText: "0.95" }
+        ]
+      }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("fieldline-saba-time-baseline")) {
+        return { result: { value: { status: "requested", clicked: ["ngay mai", "hom nay"] } } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 71 };
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { type: "string", value: records } };
+      }
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 10_000,
+      monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+
+    await observer.refreshCatalog(saba);
+
+    expect(forward.mock.calls.filter(([message]) => message.transport === "DOM_SNAPSHOT")).toHaveLength(2);
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      typeof params?.expression === "string" && params.expression.includes("fieldline-saba-time-baseline"))).toBe(false);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+  });
+
+  it("recovers a missed SABA baseline inside the owning OOPIF without reconnecting", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (sessionId !== "saba-child") return {};
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("window.io.Socket.prototype")) {
+        return { result: { objectId: "prototype-child" } };
+      }
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "instances-child" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 1_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+    await observer.handleEvent(saba, "Target.attachedToTarget", {
+      sessionId: "saba-child", targetInfo: { type: "iframe" }
+    });
+    await observer.handleEvent(saba, "Runtime.executionContextCreated", { context: { id: 31,
+      auxData: { frameId: "saba-frame", isDefault: true } } }, "saba-child");
+    sendCommand.mockClear();
+
+    await observer.refreshCatalog(saba);
+
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+  });
+
+  it("uses bounded SABA DOM recovery when a post-restart frame arrives without its creation event", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("window.io.Socket.prototype")) return { result: { objectId: "prototype-1" } };
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "instances-1" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+    await observer.handleEvent(saba, "Runtime.executionContextCreated", { context: { id: 17,
+      auxData: { frameId: "sports-frame", isDefault: true } } });
+    sendCommand.mockClear();
+
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "socket-created-before-worker", response: { opcode: 1, payloadData: "42[]" }
+    });
+
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+  });
+
   it.each([
-    { lobby: "SABA" as const, sourceId: "chrome:SABA:13", url: "wss://sports.example/socket.io/" },
-    { lobby: "KSPORT" as const, sourceId: "chrome:KSPORT:14", url: "wss://sports.example/sport/socket" }
+    { lobby: "KSPORT" as const, sourceId: "chrome:KSPORT:14", url: "wss://sports.example/sport/socket" },
+    { lobby: "SBO" as const, sourceId: "chrome:SBO:15", url: "wss://sports.example/socket.io/" }
   ])("requests a fresh $lobby baseline by reconnecting only its provider socket", async (input) => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
@@ -1733,10 +2030,165 @@ describe("NetworkObserver", () => {
       prototypeObjectId: "prototype-1"
     }));
     expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.callFunctionOn", expect.objectContaining({
-      objectId: "instances-1", functionDeclaration: expect.stringContaining(input.lobby === "SABA"
+      objectId: "instances-1", functionDeclaration: expect.stringContaining(input.lobby !== "KSPORT"
         ? "socket.disconnect()" : "socket.close(4000")
     }));
     expect(sendCommand).not.toHaveBeenCalledWith(13, "Page.reload", expect.anything());
+  });
+
+  it("reconnects the KSPORT catalog socket inside its OOPIF CDP session", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (sessionId !== "sportsbook-child") return {};
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("WebSocket.prototype")) return { result: { objectId: "prototype-child" } };
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "instances-child" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 1_000, monotonicNow: () => 60 });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    await observer.handleEvent(ksport, "Target.attachedToTarget", {
+      sessionId: "sportsbook-child", targetInfo: { type: "iframe" }
+    });
+    await observer.handleEvent(ksport, "Runtime.executionContextCreated", { context: { id: 23,
+      auxData: { frameId: "sportsbook-frame", isDefault: true } } }, "sportsbook-child");
+    await observer.handleEvent(ksport, "Network.webSocketCreated", {
+      requestId: "provider-ws", url: "wss://d42.sb21.net/sport/538/session/websocket"
+    }, "sportsbook-child");
+    sendCommand.mockClear();
+
+    await observer.refreshCatalog(ksport);
+
+    expect(sendCommand).toHaveBeenCalledWith(14, "Runtime.evaluate", expect.objectContaining({
+      expression: expect.stringContaining("WebSocket.prototype")
+    }), "sportsbook-child");
+    expect(sendCommand).toHaveBeenCalledWith(14, "Runtime.queryObjects", expect.objectContaining({
+      prototypeObjectId: "prototype-child"
+    }), "sportsbook-child");
+    expect(sendCommand).toHaveBeenCalledWith(14, "Runtime.callFunctionOn", expect.objectContaining({
+      objectId: "instances-child", functionDeclaration: expect.stringContaining("socket.close(4000")
+    }), "sportsbook-child");
+  });
+
+  it("discovers and reconnects the KSPORT OOPIF after worker restart even when the root context exists", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (method === "Target.getTargets") return { targetInfos: [{ targetId: "sportsbook-target",
+        type: "iframe", url: "https://d42.sb21.net/sport/538/session", attached: false }] };
+      if (method === "Target.attachToTarget") return { sessionId: "sportsbook-child" };
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh")) {
+        return { result: { value: { status: "fieldline-ksport-catalog-refresh-failed" } } };
+      }
+      if (sessionId === "sportsbook-child" && method === "Runtime.evaluate" &&
+        String(params?.expression).includes("WebSocket.prototype")) {
+        return { result: { objectId: "prototype-child" } };
+      }
+      if (sessionId === "sportsbook-child" && method === "Runtime.queryObjects") {
+        return { objects: { objectId: "instances-child" } };
+      }
+      if (sessionId === "sportsbook-child" && method === "Runtime.callFunctionOn") {
+        return { result: { value: 1 } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 1_000, monotonicNow: () => 60, loadSbobetEventRequest: async () => null });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    await observer.handleEvent(ksport, "Runtime.executionContextCreated", { context: { id: 7,
+      auxData: { frameId: "root", isDefault: true } } });
+    sendCommand.mockClear();
+
+    await observer.refreshCatalog(ksport);
+
+    expect(sendCommand).toHaveBeenCalledWith(14, "Target.getTargets");
+    expect(sendCommand).toHaveBeenCalledWith(14, "Runtime.callFunctionOn", expect.objectContaining({
+      objectId: "instances-child", functionDeclaration: expect.stringContaining("socket.close(4000")
+    }), "sportsbook-child");
+    expect(sendCommand).not.toHaveBeenCalledWith(14, "Page.reload", expect.anything());
+  });
+
+  it("recovers a fresh KSPORT live and today baseline inside its OOPIF without reloading the tab", async () => {
+    const liveBody = JSON.stringify([{ "1": "Live league", "2": [{ "8": "live-event" }] }]);
+    const todayBody = JSON.stringify([{ "1": "Today league", "2": [{ "8": "today-event" }] }]);
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 21 };
+      if (method === "Target.getTargets") return { targetInfos: [{ targetId: "sportsbook-target",
+        type: "iframe", url: "https://d42.sb21.net/sport/538/session", attached: false }] };
+      if (method === "Target.attachToTarget" && params?.targetId === "sportsbook-target") {
+        return { sessionId: "sportsbook-child" };
+      }
+      if (method === "Runtime.evaluate" && sessionId === "sportsbook-child" &&
+        String(params?.expression).includes("fieldline-ksport-catalog-refresh")) {
+        return { result: { value: { status: "catalog-requested", origin: "https://api.sb.example", responses: [
+          { timeRange: "live", url: "https://api.sb.example/api/v2/getEvent?timeRange=live", body: liveBody },
+          { timeRange: "today", url: "https://api.sb.example/api/v2/getEvent?timeRange=today", body: todayBody }
+        ] } } };
+      }
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 2_000,
+      loadSbobetEventRequest: async () => null });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    await observer.ingestWebSocketFrame(ksport, "wss://sports.example/sport/socket",
+      "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\n{\"event\":\"stale-live\"}\u0000");
+    await observer.ingestWebSocketFrame(ksport, "wss://sports.example/sport/socket",
+      "MESSAGE\ndestination:/topic/sports/1_1/today/ma/event/vi\n\n{\"event\":\"stale-today\"}\u0000");
+    forward.mockClear();
+    sendCommand.mockClear();
+
+    await observer.refreshCatalog(ksport);
+
+    expect(sendCommand).toHaveBeenCalledWith(14, "Target.attachToTarget", {
+      targetId: "sportsbook-target", flatten: true
+    });
+    expect(sendCommand).toHaveBeenCalledWith(14, "Runtime.evaluate", expect.objectContaining({
+      expression: expect.stringContaining("fieldline-ksport-catalog-refresh"), awaitPromise: true
+    }), "sportsbook-child");
+    const childEvaluation = sendCommand.mock.calls.find(([, method, , sessionId]) =>
+      method === "Runtime.evaluate" && sessionId === "sportsbook-child")?.[2];
+    expect(String(childEvaluation?.expression)).toContain("observedRange.toLowerCase()");
+    expect(String(childEvaluation?.expression)).toContain("providerRangeStyle");
+    const catalogResponses = forward.mock.calls.map(([message]) => message)
+      .filter((message) => message.transport === "HTTP_RESPONSE");
+    expect(catalogResponses.map((message) => message.request.streamId))
+      .toEqual(["ksport-http:live", "ksport-http:today"]);
+    expect(catalogResponses.map((message) => message.payload.body)).toEqual([liveBody, todayBody]);
+    expect(forward.mock.calls.some(([message]) => message.request.replayed === true)).toBe(false);
+    expect(sendCommand).not.toHaveBeenCalledWith(14, "Page.reload", expect.anything());
+  });
+
+  it("retries the structural KSPORT football selection before catalog recovery", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" &&
+        String(params?.expression).includes(".sport-type-group-item")) {
+        return { result: { value: { status: "football-selected" } } };
+      }
+      if (method === "Runtime.evaluate" &&
+        String(params?.expression).includes("fieldline-ksport-catalog-refresh")) {
+        return { result: { value: { status: "fieldline-ksport-catalog-refresh-failed" } } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 2_000, loadSbobetEventRequest: async () => null });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+
+    await observer.refreshCatalog(ksport);
+
+    expect(sendCommand).toHaveBeenCalledWith(14, "Runtime.evaluate", expect.objectContaining({
+      expression: expect.stringContaining(".sport-type-group-item")
+    }));
+    const selection = sendCommand.mock.calls.find(([, method, params]) => method === "Runtime.evaluate" &&
+      String(params?.expression).includes(".sport-type-group-item"))?.[2];
+    expect(String(selection?.expression)).toContain("[data-sport-id]");
+    expect(String(selection?.expression)).toContain("sport-odds-boosts");
+    expect(sendCommand).not.toHaveBeenCalledWith(14, "Page.reload", expect.anything());
   });
 
   it("retains every fragment of the current SBOBET STOMP stream and drops a retired stream", async () => {
@@ -1762,6 +2214,63 @@ describe("NetworkObserver", () => {
 
     expect(forward.mock.calls.map(([message]) => message.payload.body)).toEqual(fragments);
     expect(forward.mock.calls.every(([message]) => message.request.streamId === "2")).toBe(true);
+  });
+
+  it("reports KSPORT ready only after the current socket has both live and today baselines", async () => {
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => undefined), now: () => 1_000, monotonicNow: () => 60 });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    const url = "wss://d42.sb21.net/sport/538/session/websocket";
+
+    await observer.ingestWebSocketFrame(source, url,
+      "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\nsubscription:subSportBookLive\n\n{}\u0000");
+    expect(observer.hasCompleteKsportBaseline(source.sourceId)).toBe(false);
+
+    await observer.ingestWebSocketFrame(source, url,
+      "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\nsubscription:subSportBookToday\n\n{}\u0000");
+    expect(observer.hasCompleteKsportBaseline(source.sourceId)).toBe(true);
+  });
+
+  it("selects KSPORT today once live is present, then restores the live tab after baseline completion", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>) => ({ result: { value: { status: "time-tab-selected" } } }));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 1_000, monotonicNow: () => 60 });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    const url = "wss://d42.sb21.net/sport/538/session/websocket";
+    await observer.ingestWebSocketFrame(source, url,
+      "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\nsubscription:subSportBookLive\n\n{}\u0000");
+
+    await expect(observer.ensureCompleteKsportBaseline(source)).resolves.toBe(false);
+    expect(String(sendCommand.mock.calls.at(-1)?.[2]?.expression)).toContain("hom nay");
+
+    await observer.ingestWebSocketFrame(source, url,
+      "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\nsubscription:subSportBookToday\n\n{}\u0000");
+    await expect(observer.ensureCompleteKsportBaseline(source)).resolves.toBe(true);
+    expect(String(sendCommand.mock.calls.at(-1)?.[2]?.expression)).toContain("truc tiep");
+  });
+
+  it("selects KSPORT live when the provider opens on today and retries a failed tab lookup", async () => {
+    let attempts = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("truc tiep")) {
+        attempts += 1;
+        return { result: { value: { status: attempts === 1 ? "time-tab-not-found" : "time-tab-selected" } } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 1_000, monotonicNow: () => 60 });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    const url = "wss://d42.sb21.net/sport/538/session/websocket";
+    await observer.ingestWebSocketFrame(source, url,
+      "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\nsubscription:subSportBookToday\n\n{}\u0000");
+
+    await expect(observer.ensureCompleteKsportBaseline(source)).resolves.toBe(false);
+    await expect(observer.ensureCompleteKsportBaseline(source)).resolves.toBe(false);
+
+    expect(attempts).toBe(2);
   });
 
   it("does not replay a closed SBOBET socket baseline", async () => {

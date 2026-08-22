@@ -72,6 +72,40 @@ afterEach(() => {
 });
 
 describe("MatchWatchDetail", () => {
+  it("resets the detail provider selection when a different match is opened", () => {
+    const firstSaba = totalCatalog("SABA", "saba-account", "2.20", "1.70");
+    const firstSbobet = totalCatalog("SBOBET", "sbo-account", "1.75", "2.20");
+    const nextCatalog = (source: LiveCatalogResponse): LiveCatalogResponse => ({ ...source,
+      events: source.events.map((item) => ({ ...item, providerEventId: `${item.providerEventId}-next`,
+        participantA: "Next Home", participantB: "Next Away" })),
+      markets: source.markets.map((item) => ({ ...item, providerEventId: `${item.providerEventId}-next`,
+        providerMarketId: `${item.providerMarketId}-next` })),
+      quotes: source.quotes.map((item) => ({ ...item, providerEventId: `${item.providerEventId}-next`,
+        providerMarketId: `${item.providerMarketId}-next`, providerSelectionId: `${item.providerSelectionId}-next` }))
+    });
+    const nextSaba = nextCatalog(firstSaba);
+    const nextSbobet = nextCatalog(firstSbobet);
+    const firstComparison = buildComparisonEvents([firstSaba, firstSbobet])[0]!;
+    const nextComparison = buildComparisonEvents([nextSaba, nextSbobet])[0]!;
+    const books: readonly ComparisonBook[] = [
+      { provider: "SABA", connected: true, selected: true, hasExactEvent: true },
+      { provider: "SBOBET", connected: true, selected: true, hasExactEvent: true }
+    ];
+    const view = render(<MatchWatchDetail accountId="saba-account" books={books} catalogApi={{ read: vi.fn() }}
+      comparisonCatalogs={[firstSaba, firstSbobet]} comparisonEvent={firstComparison} initialCatalog={firstSaba}
+      onBack={() => undefined} providerEventId="SABA-total-event" externallyRefreshed />);
+    const saba = screen.getByRole("checkbox", { name: "SABA available for this match" }) as HTMLInputElement;
+    fireEvent.click(saba);
+    expect(saba.checked).toBe(false);
+
+    view.rerender(<MatchWatchDetail accountId="saba-account" books={books} catalogApi={{ read: vi.fn() }}
+      comparisonCatalogs={[nextSaba, nextSbobet]} comparisonEvent={nextComparison} initialCatalog={nextSaba}
+      onBack={() => undefined} providerEventId="SABA-total-event-next" externallyRefreshed />);
+
+    expect((screen.getByRole("checkbox", { name: "SABA available for this match" }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText("Comparing SABA vs SBOBET")).toBeTruthy();
+  });
+
   it("uses the compact selected-match layout inside the comparison workspace", () => {
     const { container } = render(<MatchWatchDetail accountId="private-account" catalogApi={{ read: vi.fn() }}
       initialCatalog={catalog(1_000)} onBack={() => undefined} providerEventId="event-1" />);

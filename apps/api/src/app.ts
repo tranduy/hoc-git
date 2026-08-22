@@ -20,7 +20,7 @@ import type { CatalogStoreLike } from "./catalog/durable-catalog-store.js";
 import { registerChromeBridgeRoute } from "./chrome-bridge/chrome-bridge-route.js";
 import type { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
 import type { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
-import { registerMaintenanceRoutes } from "./routes/maintenance.js";
+import { registerMaintenanceRoutes, type RefreshableProvider } from "./routes/maintenance.js";
 import type { SessionRefreshControl } from "./session-maintenance.js";
 import type { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 import { registerCmdHiddenMarketProbeRoute, type CmdHiddenMarketProbeLike } from "./routes/cmd-hidden-market-probe.js";
@@ -49,6 +49,7 @@ export interface AppOptions {
     readonly controlPlane?: ChromeBridgeControlPlane;
   };
   readonly maintenance?: SessionRefreshControl;
+  readonly refreshProvider?: (provider: RefreshableProvider) => Promise<number>;
   readonly cmdHiddenMarketProbe?: CmdHiddenMarketProbeLike;
 }
 
@@ -175,7 +176,8 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight, options.betHistory);
   if (options.receiptProtocol !== undefined) registerReceiptProtocolRoute(app, options.receiptProtocol);
   if (options.betHistory !== undefined) registerBetHistoryRoute(app, options.betHistory);
-  if (options.maintenance !== undefined) registerMaintenanceRoutes(app, options.maintenance);
+  if (options.maintenance !== undefined) registerMaintenanceRoutes(app, options.maintenance,
+    options.refreshProvider === undefined ? {} : { refreshProvider: options.refreshProvider });
   if (options.cmdHiddenMarketProbe !== undefined) {
     registerCmdHiddenMarketProbeRoute(app, options.cmdHiddenMarketProbe);
   }

@@ -54,6 +54,28 @@ describe("SabaPushDecoder", () => {
     expect(result.records).toEqual([expect.objectContaining({ type: "o", oddsid: 88, odds: 1.91 })]);
   });
 
+  it("shares the provider field table across rotating bridge ids for the same channel", () => {
+    const decoder = new SabaPushDecoder();
+    const schema = decoder.apply({ bridgeId: "b100", revision: "schema-1", rows: [
+      ["c", "c2", "subscription", "hash"], ["f", 0, fields]
+    ] });
+    expect(schema.records).toEqual([]);
+
+    const snapshot = decoder.apply({ bridgeId: "b101", revision: "data-1", rows: [
+      ["c", "c2", "subscription-2", "hash-2"],
+      [0, "reset"],
+      [0, "m", 1, 41385687, 4, "T", 5, "running"],
+      [0, "o", 2, 90001, 1, 41385687, 3, 1, 6, 2.2, 7, 1],
+      [0, "done"]
+    ] });
+
+    expect(snapshot).toMatchObject({ fullSnapshot: true, duplicate: false });
+    expect(snapshot.records).toEqual([
+      expect.objectContaining({ type: "m", matchid: 41385687, marketid: "T" }),
+      expect.objectContaining({ type: "o", oddsid: 90001, matchid: 41385687, odds: 2.2 })
+    ]);
+  });
+
   it("fails closed without mutating accepted state on malformed field indexes or incomplete snapshots", () => {
     const decoder = new SabaPushDecoder();
     decoder.apply({ bridgeId: "b1", revision: "r1", rows: [

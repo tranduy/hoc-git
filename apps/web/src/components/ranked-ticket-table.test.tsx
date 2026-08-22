@@ -6,6 +6,7 @@ import type { ComparisonCell, ComparisonRow } from "../catalog/comparison.js";
 import type { FixedBaseStakePlan } from "../watch/fixed-base-stake.js";
 import type { RankedTicket } from "../watch/ranked-tickets.js";
 import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
+import type { TicketReportRequest } from "../api/ticket-report.js";
 import { RankedTicketTable } from "./ranked-ticket-table.js";
 import "../styles.css";
 
@@ -393,5 +394,34 @@ describe("RankedTicketTable", () => {
     expect(within(within(sabaComparison).getByLabelText("Giá tool SABA")).getByText("2.2 DECIMAL")).toBeTruthy();
     expect(within(within(sabaComparison).getByLabelText("Giá sàn SABA")).getByText("2.2 DECIMAL")).toBeTruthy();
     expect(within(audit).getByText(/Đã ghi JSONL/u)).toBeTruthy();
+  });
+
+  it("submits an operator reason with the complete ticket snapshot and shows it in report history", async () => {
+    const created: unknown[] = [];
+    const reportApi = {
+      list: async () => ({ reports: [] }),
+      create: async (request: TicketReportRequest) => {
+        const entry = { reportId: "report-1", createdAtMs: 20_000, request };
+        created.push(entry); return entry;
+      }
+    };
+    render(<RankedTicketTable compact event={event} providers={["SABA", "IM"]} tickets={[ticket(1)]}
+      providerCatalogEvidence={{ SABA: { accountId: "saba-account", observedAtMs: 9_900 },
+        IM: { accountId: "im-account", observedAtMs: 9_910 } }} ticketReportApi={reportApi} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Report vé series-1" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Nguyên nhân report series-1" }),
+      { target: { value: "Giá trên sàn khác giá tool" } });
+    fireEvent.click(screen.getByRole("button", { name: "Gửi report series-1" }));
+
+    const history = await screen.findByRole("region", { name: "Lịch sử report" });
+    expect(within(history).getByText("Giá trên sàn khác giá tool")).toBeTruthy();
+    expect(created[0]).toMatchObject({ request: { eventKey: "event-key", ticketKey: "series-1",
+      reason: "Giá trên sàn khác giá tool", competition: "LCK",
+      display: { eventLabel: "Nongshim Academy vs Dplus Challengers", legs: [
+        { provider: "SABA", providerSelectionId: "SABA-TEAM_A", rawOdds: "2.2", sequence: 1 },
+        { provider: "IM", providerSelectionId: "IM-TEAM_B", rawOdds: "2.5", sequence: 1 }
+      ] }, estimate: { roi: "-0.005", worstCaseProfit: "-1000", totalStake: "188000" },
+      realtimeCheck: null } });
   });
 });

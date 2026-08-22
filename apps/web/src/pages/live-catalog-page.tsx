@@ -31,6 +31,7 @@ import { loadSoundEnabled, saveSoundEnabled } from "../watch/sound-settings.js";
 import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from "../watch/stable-scroll-anchor.js";
 import { TicketPreflightCoordinator, type VerifiedTicketEvidence } from "../watch/ticket-preflight-coordinator.js";
 import { ProviderTicketApi, type ProviderTicketApiLike, type ProviderTicketIdentity } from "../api/provider-ticket.js";
+import type { TicketReportApiLike } from "../api/ticket-report.js";
 import { CatalogRevisionCoordinator } from "../catalog/catalog-revision-coordinator.js";
 import { ComparisonWorkerClient, type HydratedComparisonWorkerOutput } from "../catalog/comparison-worker-client.js";
 
@@ -366,12 +367,13 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
 
 export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi,
   catalogSourceApi, providerPreflightApi = defaultProviderPreflightApi,
-  providerTicketApi = defaultProviderTicketApi, fixedCategory, catalogRealtime }: {
+  providerTicketApi = defaultProviderTicketApi, ticketReportApi, fixedCategory, catalogRealtime }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
   readonly catalogSourceApi?: CatalogSourceApiLike;
   readonly providerPreflightApi?: ProviderPreflightApiLike;
   readonly providerTicketApi?: ProviderTicketApiLike;
+  readonly ticketReportApi?: TicketReportApiLike;
   readonly fixedCategory?: CatalogCategory;
   readonly catalogRealtime?: CatalogRealtimeFeed;
 }) {
@@ -848,6 +850,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       baseStake={baseStake} books={detailBooks} comparisonCatalogs={freshCatalogs} comparisonEvent={selectedEvent} externallyRefreshed
       highlightTicketKey={highlightTicketKey} rankedTickets={rankedByEvent.get(selectedEvent.key)?.tickets ?? []}
       onOpenProviderTicket={openProviderTicketEnabled ? openProviderTicket : undefined}
+      ticketReportApi={ticketReportApi}
       lagSignals={signals.filter((signal) => signal.event.key === selectedEvent.key)}
       onBack={() => { window.history.replaceState({}, "", window.location.pathname); setSelectedKey(null); setPinnedEvent(null); setPinnedEventIdentity(null); setHighlightTicketKey(null); }}
       providerEventId={selectedEvent.providerEventIds[primary.provider]!} />;

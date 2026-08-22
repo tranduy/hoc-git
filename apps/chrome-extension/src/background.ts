@@ -1,7 +1,8 @@
 import type { ChromeLobbyId } from "@tool-chenh/contracts";
 import { LocalBridge, type BridgeSocket } from "./local-bridge.js";
 import { NetworkObserver, type ObservedSource } from "./network-observer.js";
-import { recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
+import { recognizeLobbyTab, shouldPreserveKsportObserver,
+  type TabDescriptor } from "./lobby-signatures.js";
 import { TabRegistry } from "./tab-registry.js";
 import { resolveInstallationKey } from "./bridge-key.js";
 import { BridgeWakeup } from "./bridge-wakeup.js";
@@ -13,6 +14,7 @@ import { CmdSnapshotPoller } from "./cmd-snapshot-poller.js";
 import { SourceTabRecovery } from "./source-tab-recovery.js";
 import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
 import { retryImBootstrapRefresh } from "./im-bootstrap-refresh.js";
+import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 
@@ -20,6 +22,7 @@ let bridge: LocalBridge | null = null;
 let configureInFlight: Promise<boolean> | null = null;
 let restoreInFlight: Promise<void> | null = null;
 const sourceLaunchUrlsKey = "sourceLaunchUrls";
+const bootstrappingSourceTabs = new Set<number>();
 
 const sourceTabKeepAlive = new SourceTabKeepAlive({
   attach: async (tabId) => chrome.debugger.attach({ tabId }, "1.3"),
@@ -104,6 +107,7 @@ const snapshotPoller = new CmdSnapshotPoller({
   list: () => registry.list(),
   capture: async (source, hostname) => observer.captureCmdSnapshot(source, hostname),
   maintain: async (source) => observer.maintain(source),
+  pollSabaDomChanges: async (source, hostname) => observer.pollSabaDomChanges(source, hostname),
   refreshCatalog: async (source) => observer.refreshCatalog(source)
 });
 snapshotPoller.start();
@@ -117,6 +121,10 @@ const tabBootstrapper = new TabBootstrapper({
 async function attachRecoveredTab(tab: TabDescriptor): Promise<void> {
   await rememberRecognizedUrl(tab);
   const attached = await registry.attachSelected(tab);
+  await startAttachedSource(attached);
+}
+
+async function startAttachedSource(attached: { readonly lobby: ChromeLobbyId; readonly tabId: number }): Promise<void> {
   const source: ObservedSource = {
     lobby: attached.lobby,
     tabId: attached.tabId,
@@ -128,6 +136,13 @@ async function attachRecoveredTab(tab: TabDescriptor): Promise<void> {
     // GetSE partitions become callable. Retry in-page capture during this
     // bounded bootstrap window; never navigate or reload the provider tab.
     void retryImBootstrapRefresh(() => observer.refreshCatalog(source));
+  }
+  if (source.lobby === "SABA") {
+    // A Manifest V3 worker can restart while SABA's Socket.IO connection and
+    // provider tab stay alive. CDP then misses the original socket creation
+    // and baseline frames. Retry a same-tab lightweight baseline request while
+    // the owning main-world/OOPIF contexts finish attaching; never reload the tab.
+    void retrySabaBootstrapRefresh(() => observer.refreshCatalog(source));
   }
   // A recovered provider launch can be one-time. Reloading it here consumes
   // the restored navigation and can make the provider close the tab again.
@@ -177,10 +192,29 @@ const sourceTabRecovery = new SourceTabRecovery({
   remove: async (tabId) => chrome.tabs.remove(tabId),
   get: async (tabId) => chrome.tabs.get(tabId),
   attach: attachRecoveredTab,
+  attachBootstrap: async (tab, lobby) => {
+    const attached = await registry.attachBootstrap(tab, lobby);
+    await startAttachedSource(attached);
+  },
+  onBootstrapStart: (tabId) => {
+    bootstrappingSourceTabs.add(tabId);
+    setTimeout(() => bootstrappingSourceTabs.delete(tabId), 30_000);
+  },
+  onBootstrapFailure: (tabId) => { bootstrappingSourceTabs.delete(tabId); },
+  validateReady: async (tab, lobby) => {
+    if (lobby !== "KSPORT") return true;
+    if (tab.id === undefined) return false;
+    return observer.ensureCompleteKsportBaseline({ lobby: "KSPORT", tabId: tab.id,
+      sourceId: `chrome:KSPORT:${tab.id}` });
+  },
   launchFromPortal: async (lobby, sourceMarkerUrl) => {
     if (lobby !== "KSPORT") throw new Error("FABET_PORTAL_LAUNCH_UNSUPPORTED");
     return fabetPortalLauncher.launchKsport(sourceMarkerUrl);
   },
+  // The operator supplied a working signed KSPORT launch directly. Consume
+  // that URL in the provider tab; do not route this reset through Fabet or a
+  // Cloudflare/login bootstrap first.
+  usePortalLaunch: false,
   recentlyClosed: async () => (await chrome.sessions.getRecentlyClosed({ maxResults: 25 })).map((session) => {
     const sessionId = session.tab?.sessionId ?? session.window?.sessionId;
     return {
@@ -249,6 +283,10 @@ async function configureBridgeOnce(): Promise<boolean> {
   bridge = installationKey
     ? new LocalBridge({
       installationKey,
+      // A fresh API process can legitimately spend tens of seconds parsing
+      // the first large provider baselines. Do not mistake that bootstrap for
+      // a dead socket and replay the same work in a reconnect loop.
+      livenessTimeoutMs: 120_000,
       readinessProbe: async () => {
         try {
           const response = await fetch("http://127.0.0.1:4310/api/health", {
@@ -261,7 +299,10 @@ async function configureBridgeOnce(): Promise<boolean> {
         }
       },
       socketFactory: (url, protocols) => new WebSocket(url, protocols) as unknown as BridgeSocket,
-      onOpen: async () => { await observer.replaySnapshots(); },
+      // A reconnect must resume from new page traffic. Replaying every cached
+      // provider payload floods a fresh API process with stale multi-megabyte
+      // baselines and can exhaust its heap before live frames are accepted.
+      onOpen: () => undefined,
       onSnapshotRequest: async (sourceId) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
         if (!attached) return;
@@ -389,6 +430,7 @@ void (async () => {
 })();
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  bootstrappingSourceTabs.delete(tabId);
   observer.releaseTab(tabId);
   void registry.handleRemoved(tabId);
 });
@@ -406,12 +448,28 @@ chrome.debugger.onEvent.addListener((debuggee, method, params) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url || changeInfo.status === "loading") {
     const descriptor = { id: tabId, url: tab.url, title: tab.title };
+    const recognized = recognizeLobbyTab(descriptor);
+    // Reset attaches the debugger while the replacement tab is still blank so
+    // no one-time provider bootstrap response can be missed. Chrome may emit a
+    // delayed about:blank loading event after that attachment; it is an
+    // intermediate state, not a navigation away from the provider.
+    if (bootstrappingSourceTabs.has(tabId) && recognized === null) return;
+    if (recognized !== null) bootstrappingSourceTabs.delete(tabId);
     void rememberRecognizedUrl(descriptor);
     const source = sourceForTab(tabId);
-    if (source && recognizeLobbyTab(descriptor) === null) {
+    // The KSPORT sportsbook lives in a child target. Its outer one-time shell
+    // can replace its own URL/title after the real live+today baseline is
+    // already flowing. Do not tear down the child CDP observer on that shell
+    // transition; a genuine unbaselined Volta/error tab is still rejected.
+    if (source !== null && recognized === null && shouldPreserveKsportObserver(source.lobby,
+      observer.hasCompleteKsportBaseline(source.sourceId))) return;
+    if (source && recognized === null) {
       void observer.stop(source).finally(() => registry.handleNavigation(descriptor));
     } else {
-      void registry.handleNavigation(descriptor);
+      void registry.handleNavigation(descriptor).then(async () => {
+        const recovered = sourceForTab(tabId);
+        if (recovered !== null) await observer.start(recovered);
+      });
     }
   }
 });
@@ -440,6 +498,15 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       await observer.start(source);
       await tabBootstrapper.ensure(attached);
       return sendResponse({ ok: true, attached });
+    }
+    if (request.kind === "ENSURE_KSPORT") {
+      const stored = await chrome.storage.session.get(sourceLaunchUrlsKey);
+      const launches = stored[sourceLaunchUrlsKey];
+      const url = launches && typeof launches === "object"
+        ? (launches as Record<string, unknown>).KSPORT : null;
+      if (typeof url !== "string") return sendResponse({ ok: false, reason: "KSPORT_LAUNCH_UNAVAILABLE" });
+      await sourceTabRecovery.ensure("KSPORT", url);
+      return sendResponse({ ok: true });
     }
     if (request.kind === "ATTACH_ALL") {
       const tabs = await chrome.tabs.query({});

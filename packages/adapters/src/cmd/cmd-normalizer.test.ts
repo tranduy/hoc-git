@@ -4,7 +4,7 @@ import { normalizeCmdCatalog, normalizeObservedFootballCatalog, type CmdCatalogI
 
 describe("normalizeCmdCatalog", () => {
   it("accepts correctly decoded live labels from provider DOM snapshots", () => {
-    for (const timeText of ["TRỰC TIẾP", "LIVE"]) {
+    for (const timeText of ["TRỰC TIẾP", "TRỰC TIẾP 01:45AM", "LIVE"]) {
       const result = normalizeCmdCatalog([{ ...record, timeText }], {
         observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 1, timezoneOffsetMinutes: 480, sequence: 1
       });

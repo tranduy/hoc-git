@@ -464,7 +464,13 @@ export class SessionManager {
 
   async withLatestFabetLaunch<T>(provider: FabetDerivedProvider, category: Category,
     consume: (url: string) => Promise<T>, minAcquiredAtMs = 0): Promise<T> {
-    const candidates = (await this.#listRecords()).filter((record) =>
+    const records = await this.#listRecords();
+    const manualOverride = provider === "SBOBET" ? records.filter((record) =>
+      record.source === "MANUAL_PROVIDER_SESSION" && record.provider === provider && record.category === category &&
+      record.secret.kind === "LAUNCH_URL" && this.#isUsable(record))
+      .sort((left, right) => (right.acquiredAtMs ?? -1) - (left.acquiredAtMs ?? -1))[0] : undefined;
+    if (manualOverride !== undefined) return consume(manualOverride.secret.value);
+    const candidates = records.filter((record) =>
       record.source === "FABET_LOGIN" && record.provider === provider && record.category === category &&
       record.secret.kind === "LAUNCH_URL" && record.acquiredAtMs !== null &&
       record.acquiredAtMs >= minAcquiredAtMs)

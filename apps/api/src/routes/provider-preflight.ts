@@ -7,6 +7,62 @@ import { ProviderTicketPreflightRequestSchema, ProviderTicketPreflightSchema,
 import { Decimal, toDecimal } from "@tool-chenh/core";
 import type { FastifyInstance } from "fastify";
 
+export interface TicketReportRequest {
+  readonly eventKey: string;
+  readonly ticketKey: string;
+  readonly reason: string;
+  readonly reportedAtMs: number;
+  readonly competition: string;
+  readonly startAtUtcMs: number;
+  readonly display: TicketRealtimeCheckRequest;
+  readonly estimate: { readonly state: string; readonly roi: string | null;
+    readonly worstCaseProfit: string | null; readonly totalStake: string | null;
+    readonly movementMagnitude: string };
+  readonly realtimeCheck: TicketRealtimeCheckResponse | null;
+}
+export interface TicketReportEntry {
+  readonly reportId: string;
+  readonly createdAtMs: number;
+  readonly request: TicketReportRequest;
+}
+export interface TicketReportJournal {
+  append(entry: TicketReportEntry): Promise<void>;
+  list(eventKey: string): Promise<readonly TicketReportEntry[]>;
+}
+
+function boundedString(value: unknown, max: number): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= max ? normalized : null;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : null;
+}
+
+function parseTicketReportRequest(value: unknown): TicketReportRequest | null {
+  const input = record(value); const estimate = record(input?.estimate);
+  if (input === null || estimate === null) return null;
+  const eventKey = boundedString(input.eventKey, 512); const ticketKey = boundedString(input.ticketKey, 512);
+  const reason = boundedString(input.reason, 2_000); const competition = boundedString(input.competition, 512);
+  const state = boundedString(estimate.state, 64); const movementMagnitude = boundedString(estimate.movementMagnitude, 128);
+  const optional = (candidate: unknown): string | null | undefined => candidate === null ? null : boundedString(candidate, 128) ?? undefined;
+  const roi = optional(estimate.roi); const worstCaseProfit = optional(estimate.worstCaseProfit);
+  const totalStake = optional(estimate.totalStake);
+  const display = TicketRealtimeCheckRequestSchema.safeParse(input.display);
+  const realtimeCheck = input.realtimeCheck === null ? null : TicketRealtimeCheckResponseSchema.safeParse(input.realtimeCheck);
+  if (eventKey === null || ticketKey === null || reason === null || competition === null || state === null ||
+    movementMagnitude === null || roi === undefined || worstCaseProfit === undefined || totalStake === undefined ||
+    typeof input.reportedAtMs !== "number" || !Number.isFinite(input.reportedAtMs) || input.reportedAtMs < 0 ||
+    typeof input.startAtUtcMs !== "number" || !Number.isFinite(input.startAtUtcMs) || input.startAtUtcMs < 0 ||
+    !display.success || (realtimeCheck !== null && !realtimeCheck.success)) return null;
+  return { eventKey, ticketKey, reason, reportedAtMs: input.reportedAtMs, competition,
+    startAtUtcMs: input.startAtUtcMs, display: display.data,
+    estimate: { state, roi, worstCaseProfit, totalStake, movementMagnitude },
+    realtimeCheck: realtimeCheck === null ? null : realtimeCheck.data };
+}
+
 export interface ProviderPreflightLike {
   preflight(request: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight>;
 }
@@ -23,6 +79,7 @@ export interface TicketRealtimeAuditJournal {
 
 export interface ProviderPreflightRouteOptions {
   readonly journal?: TicketRealtimeAuditJournal;
+  readonly reportJournal?: TicketReportJournal;
   readonly clock?: { nowMs(): number };
   readonly idFactory?: () => string;
   readonly requestTimeoutMs?: number;
@@ -191,6 +248,30 @@ export function registerProviderPreflightRoutes(app: FastifyInstance, preflight:
       return await checkTicket(preflight, parsed.data, options);
     } catch {
       return reply.code(503).send({ error: "REALTIME_CHECK_UNAVAILABLE" });
+    }
+  });
+  app.post("/api/ticket-reports", async (request, reply) => {
+    const parsed = parseTicketReportRequest(request.body);
+    if (parsed === null) return reply.code(400).send({ error: "INVALID_TICKET_REPORT" });
+    if (options.reportJournal === undefined) return reply.code(503).send({ error: "TICKET_REPORT_UNAVAILABLE" });
+    const clock = options.clock ?? { nowMs: Date.now };
+    const entry: TicketReportEntry = { reportId: options.idFactory?.() ?? randomUUID(),
+      createdAtMs: clock.nowMs(), request: parsed };
+    try {
+      await options.reportJournal.append(entry);
+      return reply.code(201).send(entry);
+    } catch {
+      return reply.code(503).send({ error: "TICKET_REPORT_UNAVAILABLE" });
+    }
+  });
+  app.get("/api/ticket-reports", async (request, reply) => {
+    const eventKey = boundedString(record(request.query)?.eventKey, 512);
+    if (eventKey === null) return reply.code(400).send({ error: "INVALID_TICKET_REPORT_QUERY" });
+    if (options.reportJournal === undefined) return reply.code(503).send({ error: "TICKET_REPORT_UNAVAILABLE" });
+    try {
+      return { reports: await options.reportJournal.list(eventKey) };
+    } catch {
+      return reply.code(503).send({ error: "TICKET_REPORT_UNAVAILABLE" });
     }
   });
 }

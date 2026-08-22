@@ -6,6 +6,7 @@ import { CmdDomCatalogAdapter } from "./cmd-dom-adapter.js";
 import { ImHttpCatalogAdapter } from "./im-http-adapter.js";
 import { SabaWsCatalogAdapter } from "./saba-ws-adapter.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
+import { SbobetSocketIoCatalogAdapter } from "./sbobet-socketio-adapter.js";
 import { BtiHttpCatalogAdapter } from "./bti-http-adapter.js";
 import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
 import { NetworkBodyAssembler } from "./network-body-assembler.js";
@@ -23,7 +24,8 @@ export class ChromeCatalogDataPlane {
   readonly #maxEnvelopeAgeMs: number;
   readonly #publish: ((catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void) | null;
   readonly #router = new AdapterRouter([new CmdDomCatalogAdapter(), new ImHttpCatalogAdapter(),
-    new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(), new TsportWsCatalogAdapter(),
+    new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(),
+    new SbobetSocketIoCatalogAdapter("KSPORT"), new SbobetSocketIoCatalogAdapter("SBO"), new TsportWsCatalogAdapter(),
     new BtiHttpCatalogAdapter()],
     { confirmationsRequired: 1 });
   readonly #networkBodies = new NetworkBodyAssembler();
@@ -105,25 +107,30 @@ export class ChromeCatalogDataPlane {
       return this.#invalidate(update.invalidateAccountId) || stateChanged;
     }
     if (!isObservedCatalog(update.value)) return stateChanged;
-    if (update.value.category !== "FOOTBALL") return stateChanged;
+    let nextCatalog = update.value;
+    if (envelope.lobby === "SABA" && envelope.transport === "DOM_SNAPSHOT") {
+      const retained = this.#catalogs.get(nextCatalog.accountId);
+      if (retained !== undefined) nextCatalog = overlaySabaDomCatalog(retained, nextCatalog);
+    }
+    if (nextCatalog.category !== "FOOTBALL") return stateChanged;
     // A provider page can briefly render the event shell before its market
     // rows. Such a snapshot is transport-valid but unusable for comparison;
     // publishing it would erase the last complete catalog on every refresh.
-    if (update.value.events.length > 0 &&
-      (update.value.markets.length === 0 || update.value.quotes.length === 0)) return stateChanged;
+    if (nextCatalog.events.length > 0 &&
+      (nextCatalog.markets.length === 0 || nextCatalog.quotes.length === 0)) return stateChanged;
     // A reconnecting delta-only feed can briefly publish a small viewport or
     // one channel before its full reset/done snapshot. Retain the last
     // complete catalog until the smaller event set is stable across three
     // identical reads; this prevents a transient partial update erasing most
     // of a provider's prices.
-    if (update.authoritativeBaseline === true) this.#coverage.reset(update.value.accountId);
-    if (!this.#coverage.accept(update.value.accountId,
-      update.value.events.map((event) => event.providerEventId))) return stateChanged;
-    this.#catalogs.set(update.value.accountId, update.value);
-    const snapshotState = this.#now() - update.value.observedAtMs <= this.#freshnessMs ? "FRESH" : "STALE";
-    if (snapshotState === "FRESH") this.#invalidatedAccounts.delete(update.value.accountId);
-    else this.#invalidatedAccounts.add(update.value.accountId);
-    this.#publish?.(update.value, snapshotState);
+    if (update.authoritativeBaseline === true) this.#coverage.reset(nextCatalog.accountId);
+    if (!this.#coverage.accept(nextCatalog.accountId,
+      nextCatalog.events.map((event) => event.providerEventId))) return stateChanged;
+    this.#catalogs.set(nextCatalog.accountId, nextCatalog);
+    const snapshotState = this.#now() - nextCatalog.observedAtMs <= this.#freshnessMs ? "FRESH" : "STALE";
+    if (snapshotState === "FRESH") this.#invalidatedAccounts.delete(nextCatalog.accountId);
+    else this.#invalidatedAccounts.add(nextCatalog.accountId);
+    this.#publish?.(nextCatalog, snapshotState);
     return true;
   }
 
@@ -198,4 +205,19 @@ function isObservedCatalog(value: unknown): value is ObservedProviderCatalog {
   const catalog = value as Partial<ObservedProviderCatalog>;
   return catalog.dataMode === "LIVE" && typeof catalog.accountId === "string" &&
     Array.isArray(catalog.events) && Array.isArray(catalog.markets) && Array.isArray(catalog.quotes);
+}
+
+function overlaySabaDomCatalog(retained: ObservedProviderCatalog,
+  current: ObservedProviderCatalog): ObservedProviderCatalog {
+  if (retained.provider !== "SABA" || current.provider !== "SABA" || retained.accountId !== current.accountId) {
+    return current;
+  }
+  const events = new Map(retained.events.map((event) => [event.providerEventId, event]));
+  const markets = new Map(retained.markets.map((market) => [market.providerMarketId, market]));
+  const quotes = new Map(retained.quotes.map((quote) => [quote.providerSelectionId, quote]));
+  for (const event of current.events) events.set(event.providerEventId, event);
+  for (const market of current.markets) markets.set(market.providerMarketId, market);
+  for (const quote of current.quotes) quotes.set(quote.providerSelectionId, quote);
+  return { ...current, rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
+    events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()] };
 }

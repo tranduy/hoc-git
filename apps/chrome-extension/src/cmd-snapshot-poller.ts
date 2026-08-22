@@ -6,6 +6,7 @@ export interface CmdSnapshotPollerDependencies {
   readonly capture: (source: ObservedSource, hostname: string) => Promise<void>;
   readonly maintain?: (source: ObservedSource) => Promise<void>;
   readonly refreshCatalog?: (source: ObservedSource) => Promise<void>;
+  readonly pollSabaDomChanges?: (source: ObservedSource, hostname: string) => Promise<void>;
   readonly replaySnapshots?: () => Promise<boolean>;
   readonly now?: () => number;
   readonly replayIntervalMs?: number;
@@ -20,11 +21,9 @@ export class CmdSnapshotPoller {
   readonly #dependencies: CmdSnapshotPollerDependencies;
   readonly #inFlight = new Set<number>();
   #timer: unknown = null;
-  #lastReplayAtMs: number | null = null;
   #lastMaintenanceAtMs: number | null = null;
   readonly #lastFastMaintenanceAtMs = new Map<number, number>();
   readonly #lastCatalogRefreshAtMs = new Map<number, number>();
-  #replayInFlight = false;
   readonly #maintenanceInFlight = new Set<number>();
   readonly #catalogRefreshInFlight = new Set<number>();
   #lastScheduledPollAtMs: number | null = null;
@@ -88,14 +87,18 @@ export class CmdSnapshotPoller {
           .finally(() => this.#maintenanceInFlight.delete(tab.tabId));
       }
     }
-    if (!this.#replayInFlight && this.#dependencies.replaySnapshots !== undefined &&
-      (this.#lastReplayAtMs === null || now - this.#lastReplayAtMs >= (this.#dependencies.replayIntervalMs ?? 60_000))) {
-      this.#lastReplayAtMs = now;
-      this.#replayInFlight = true;
-      void this.#dependencies.replaySnapshots().catch(() => false).finally(() => { this.#replayInFlight = false; });
-    }
     for (const tab of tabs) {
-      if (tab.lobby === "BTI" && this.#dependencies.refreshCatalog !== undefined &&
+      if (tab.lobby === "SABA" && this.#dependencies.pollSabaDomChanges !== undefined &&
+        !this.#catalogRefreshInFlight.has(tab.tabId) &&
+        now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >=
+          (this.#dependencies.intervalMs ?? 2_000)) {
+        this.#lastCatalogRefreshAtMs.set(tab.tabId, now);
+        this.#catalogRefreshInFlight.add(tab.tabId);
+        const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
+        void this.#dependencies.pollSabaDomChanges(source, tab.hostname).catch(() => undefined)
+          .finally(() => this.#catalogRefreshInFlight.delete(tab.tabId));
+      }
+      if ((tab.lobby === "BTI" || tab.lobby === "KSPORT") && this.#dependencies.refreshCatalog !== undefined &&
         !this.#catalogRefreshInFlight.has(tab.tabId) &&
         now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >= 2_000) {
         this.#lastCatalogRefreshAtMs.set(tab.tabId, now);
@@ -104,7 +107,7 @@ export class CmdSnapshotPoller {
         void this.#dependencies.refreshCatalog(source).catch(() => undefined)
           .finally(() => this.#catalogRefreshInFlight.delete(tab.tabId));
       }
-      if ((tab.lobby !== "CMD" && tab.lobby !== "SABA" && tab.lobby !== "TSPORT") ||
+      if ((tab.lobby !== "CMD" && tab.lobby !== "TSPORT") ||
         this.#inFlight.has(tab.tabId)) continue;
       this.#inFlight.add(tab.tabId);
       const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;

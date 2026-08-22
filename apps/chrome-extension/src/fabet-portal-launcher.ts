@@ -1,4 +1,4 @@
-import { recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
+import { isReadyKsportSportsbookTab, recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
 
 interface PortalTab extends TabDescriptor {
   readonly windowId?: number | undefined;
@@ -54,7 +54,10 @@ export class FabetPortalLauncher {
 
   constructor(options: FabetPortalLauncherOptions) { this.#options = options; }
 
-  async launchKsport(_sourceMarkerUrl: string): Promise<TabDescriptor> {
+  async launchKsport(sourceMarkerUrl: string): Promise<TabDescriptor> {
+    if (recognizeLobbyTab({ id: 0, url: sourceMarkerUrl })?.lobby !== "KSPORT") {
+      throw new Error("UNTRUSTED_LAUNCH_URL");
+    }
     const initialTabs = await this.#options.query();
     const initialTabIds = new Set(initialTabs.flatMap((tab) => tab.id === undefined ? [] : [tab.id]));
     const portal = initialTabs.find(isFabetPortalTab);
@@ -90,7 +93,13 @@ export class FabetPortalLauncher {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         await this.#clickKsportControl(portal.id);
         try {
-          return await this.#waitForStableKsportDescendant(descendants, initialTabIds);
+          const source = await this.#waitForStableKsportDescendant(descendants, initialTabIds);
+          if (source.id === undefined) throw new Error("FABET_KSPORT_POPUP_UNAVAILABLE");
+          // Consume the freshly issued one-time launch only after Fabet has
+          // created a stable child. This preserves the provider opener/session
+          // chain; navigating an unrelated standalone tab yields one snapshot
+          // and then the K-Sports shell closes itself.
+          return await this.#options.update(source.id, ksportFootballLaunchUrl(sourceMarkerUrl), false);
         } catch (error) {
           lastError = error;
         }
@@ -140,7 +149,11 @@ export class FabetPortalLauncher {
     let stableTabId: number | null = null;
     let stablePolls = 0;
     const attachedTabIds = new Set<number>();
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    // K-Sports can show a valid Sportsbook shell for ~3 seconds and then hand
+    // off to a second child tab. Eight polls accepted that disposable shell,
+    // removed the popup listeners, and left the final child unattached. Keep
+    // the bounded handoff window open until the same tab survives five seconds.
+    for (let attempt = 0; attempt < 60; attempt += 1) {
       // Provider popups created with `noopener` have no openerTabId. Discover
       // them by bounded before/after tab identity as well as the opener chain.
       const queried = await this.#options.query().catch(() => []);
@@ -149,17 +162,17 @@ export class FabetPortalLauncher {
       const latest = candidates.sort((left, right) => (left.id ?? -1) - (right.id ?? -1)).at(-1);
       let current: PortalTab | null = null;
       if (latest?.id !== undefined) current = await this.#options.get(latest.id).catch(() => null);
-      if (current !== null && recognizeLobbyTab(current)?.lobby === "KSPORT") {
+      if (current !== null && isReadyKsportSportsbookTab(current)) {
         if (current.id !== undefined && !attachedTabIds.has(current.id)) {
-          // Attach at the first recognized provider URL, before waiting for a
-          // stable title. K-Sports publishes its initial STOMP catalog during
-          // this bootstrap window; attaching after stability misses it.
+          // A zenandfe root tab can host Volta as well as K-Sports. Attach only
+          // after the product identifies itself as Sportsbook; the observer can
+          // recover a light baseline after attachment without reloading it.
           await this.#options.attachSource(current);
           attachedTabIds.add(current.id);
         }
         if (stableTabId === current.id) stablePolls++;
         else { stableTabId = current.id ?? null; stablePolls = 1; }
-        if (stablePolls >= 8) {
+        if (stablePolls >= 20) {
           return current;
         }
       } else {
@@ -178,6 +191,14 @@ function isFabetPortalTab(tab: PortalTab): boolean {
     const url = new URL(tab.url);
     return url.protocol === "https:" && /(?:^|\.)fabet\.[a-z0-9.-]+$/iu.test(url.hostname);
   } catch { return false; }
+}
+
+function ksportFootballLaunchUrl(sourceMarkerUrl: string): string {
+  const url = new URL(sourceMarkerUrl);
+  url.searchParams.set("sportId", "1");
+  url.searchParams.set("lng", "vi");
+  url.searchParams.set("t", String(Date.now()));
+  return url.href;
 }
 
 function evaluationPoint(value: unknown): { readonly x: number; readonly y: number; readonly ready: boolean } | null {

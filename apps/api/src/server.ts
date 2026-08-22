@@ -10,6 +10,7 @@ import { createSessionServices } from "./sessions/session-services.js";
 import { CatalogTelemetryRegistry } from "./routes/catalog-telemetry.js";
 import { JsonlCatalogJournal } from "./routes/catalog-jsonl-journal.js";
 import { FileTicketRealtimeAuditJournal } from "./routes/ticket-realtime-audit-journal.js";
+import { FileTicketReportJournal } from "./routes/ticket-report-journal.js";
 import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
 import { resolveProviderFees } from "./providers/provider-fees.js";
 import { FileBetHistory } from "./history/file-bet-history.js";
@@ -26,6 +27,7 @@ import { createChromeCatalogOverlay } from "./chrome-bridge/chrome-catalog-overl
 import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-feature-flags.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
 import { refreshBridgeProviderSources } from "./chrome-bridge/provider-source-refresh.js";
+import { LatestCatalogPersister } from "./catalog/latest-catalog-persister.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 
@@ -232,7 +234,11 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const ticketRealtimeAudit = new FileTicketRealtimeAuditJournal(
     join(localAppData, "tool-chenh", "logs", "realtime-ticket-checks.jsonl")
   );
+  const ticketReports = new FileTicketReportJournal(
+    join(localAppData, "tool-chenh", "logs", "ticket-reports.jsonl")
+  );
   const catalogStore = new DurableCatalogStore(join(localAppData, "tool-chenh", "catalog-cache"));
+  const catalogPersister = new LatestCatalogPersister(catalogStore);
   const catalogRevisions = new CatalogRevisionStore();
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
@@ -248,8 +254,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs: 20_000 });
-      void catalogStore.save(`catalog-source|${catalog.provider}|${catalog.category}`, catalog)
-        .catch(() => undefined);
+      catalogPersister.schedule(`catalog-source|${catalog.provider}|${catalog.category}`, catalog);
     } })
     : null;
   if (chromeCatalogDataPlane !== null) {
@@ -327,12 +332,20 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     catalogStore,
     catalogRevisions,
     providerPreflight: sessionServices.providerPreflight,
-    providerPreflightOptions: { journal: ticketRealtimeAudit,
+    providerPreflightOptions: { journal: ticketRealtimeAudit, reportJournal: ticketReports,
       ...(selectionPriceProbe === null ? {} : { visiblePriceProbe: selectionPriceProbe }) },
     twoLegPreflight,
     receiptProtocol: sessionServices.receiptProtocol,
     betHistory,
     maintenance,
+    ...(chromeBridgeControlPlane === null ? {} : { refreshProvider: (provider: "SABA" | "IM" | "SBOBET" |
+      "APSPORT" | "BTI") => refreshBridgeProviderSources({
+        controlPlane: chromeBridgeControlPlane,
+        withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
+        minAcquiredAtMs: 0,
+        providers: [provider],
+        restoreCmd: false
+      }) }),
     ...(cmdHiddenMarketProbe === null ? {} : { cmdHiddenMarketProbe }),
     ...(chromeBridgeRegistry && chromeBridgeKey
       ? { chromeBridge: {

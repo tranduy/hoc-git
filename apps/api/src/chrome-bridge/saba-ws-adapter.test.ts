@@ -36,6 +36,26 @@ describe("SabaWsCatalogAdapter", () => {
     expect((update.value as { quotes: unknown[] }).quotes).toHaveLength(2);
   });
 
+  it("preserves Today lifecycle in a mixed socket baseline instead of marking future events live", () => {
+    const rows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "Japan J-League Division 1", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Kashiwa Reysol",
+        ateamnameen: "V-Varen Nagasaki", kickofftime: 1_786_306_400, marketid: "T", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const update = new SabaWsCatalogAdapter()
+      .decode(envelope(`42${JSON.stringify(["m", "b2", rows, 1])}`))[0]!.value as {
+        events: Array<{ isLive: boolean; startAtUtcMs: number; liveState: unknown }>;
+        quotes: Array<{ isLive: boolean }>;
+      };
+
+    expect(update.events).toEqual([expect.objectContaining({
+      isLive: false, startAtUtcMs: 1_786_306_400_000, liveState: null
+    })]);
+    expect(update.quotes.every((quote) => quote.isLive === false)).toBe(true);
+  });
+
   it("ignores unrelated Socket.IO traffic", () => {
     const adapter = new SabaWsCatalogAdapter();
     expect(adapter.fingerprint(envelope('42["notice",{}]'))).toBe(false);

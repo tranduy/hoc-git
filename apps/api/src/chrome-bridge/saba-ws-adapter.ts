@@ -1,7 +1,6 @@
 import { normalizeObservedFootballCatalog, normalizeSabaFootballRecords } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
-import { markSabaLiveContextRecords } from "../providers/saba/saba-football-push-browser-manager.js";
 import { SabaPushDecoder } from "../providers/saba/saba-push-decoder.js";
 import { parseSabaSocketFrame } from "../providers/saba/saba-socket-frame.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
@@ -42,6 +41,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #readyPartitions = new Set<string>();
   readonly #domCandidates = new Map<string, ReadonlySet<string>>();
   readonly #domReadySources = new Set<string>();
+  readonly #lastWsPublishAtMs = new Map<string, number>();
 
   resetSource(sourceId: string): void {
     for (const key of this.#decoders.keys()) if (key.startsWith(`${sourceId}|`)) this.#decoders.delete(key);
@@ -50,6 +50,9 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     for (const key of this.#readyPartitions) if (key.startsWith(`${sourceId}|`)) this.#readyPartitions.delete(key);
     this.#domCandidates.delete(sourceId);
     this.#domReadySources.delete(sourceId);
+    for (const key of this.#lastWsPublishAtMs.keys()) if (key.startsWith(`${sourceId}|`)) {
+      this.#lastWsPublishAtMs.delete(key);
+    }
   }
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
@@ -60,7 +63,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       envelope.request.pathnameClass !== "/socket.io/") return false;
     if (envelope.transport === "WS_STATE") return envelope.request.streamId !== undefined &&
       websocketLifecycleState(envelope) !== null;
-    try { return parseSabaSocketFrame(envelope.payload.body) !== null; } catch { return false; }
+    // Parsing large Socket.IO frames here and again in decode doubled the hot
+    // path cost. The route and lobby already identify SABA; decode performs
+    // the strict provider-frame validation once.
+    return /^42\["m",/u.test(envelope.payload.body);
   }
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
@@ -126,7 +132,17 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const readyKey = `${decoderKey}|${frame.bridgeId}`;
       if (applied.fullSnapshot) this.#readyPartitions.add(readyKey);
       if (!this.#readyPartitions.has(readyKey)) return [];
-      const normalized = normalizeSabaFootballRecords(markSabaLiveContextRecords(applied.records), {
+      // Price deltas must be published immediately: a time-only throttle can
+      // swallow the final odds change in a burst forever when no later frame
+      // arrives. Only coalesce rapid metadata-only changes; the next metadata
+      // or price frame materializes the decoder's complete current state.
+      const publishKey = `${decoderKey}|${frame.bridgeId}`;
+      const lastPublishedAtMs = this.#lastWsPublishAtMs.get(publishKey) ?? Number.NEGATIVE_INFINITY;
+      const changesPrice = applied.changes.some((change) => change.record?.type === "o" ||
+        change.record?.type === "do" || change.record?.type === "-o");
+      if (!applied.fullSnapshot && !changesPrice && envelope.observedAtMs - lastPublishedAtMs < 500) return [];
+      this.#lastWsPublishAtMs.set(publishKey, envelope.observedAtMs);
+      const normalized = normalizeSabaFootballRecords(applied.records, {
         observedAtMs: envelope.observedAtMs,
         receivedMonotonicMs: envelope.receivedMonotonicMs,
         sequence: envelope.sequence
@@ -164,6 +180,9 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     for (const key of this.#readyPartitions) {
       if (key.startsWith(`${decoderKey}|`)) this.#readyPartitions.delete(key);
+    }
+    for (const key of this.#lastWsPublishAtMs.keys()) {
+      if (key.startsWith(`${decoderKey}|`)) this.#lastWsPublishAtMs.delete(key);
     }
   }
 }

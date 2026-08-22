@@ -15,6 +15,26 @@ describe("CmdSnapshotPoller", () => {
     expect(refreshCatalog).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps both BTI and the current HTTP-based SBOBET catalog fresh", async () => {
+    const refreshCatalog = vi.fn(async (_source: { readonly lobby: string; readonly sourceId: string;
+      readonly tabId: number }) => undefined);
+    const poller = new CmdSnapshotPoller({
+      list: () => [
+        { lobby: "BTI", tabId: 6, hostname: "prod.example.com", state: "ATTACHED" },
+        { lobby: "KSPORT", tabId: 8, hostname: "sbobet.example", state: "ATTACHED" }
+      ],
+      capture: vi.fn(async () => undefined), refreshCatalog, now: () => 1_000
+    });
+
+    poller.pollNow();
+    await Promise.resolve();
+
+    expect(refreshCatalog.mock.calls.map(([source]) => source)).toEqual([
+      { lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 },
+      { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 }
+    ]);
+  });
+
   it("coalesces a heartbeat wake-up with a just-completed scheduled catalog poll", async () => {
     let callback: (() => void) | undefined;
     let now = 1_000;
@@ -38,7 +58,7 @@ describe("CmdSnapshotPoller", () => {
     expect(capture).toHaveBeenCalledTimes(2);
   });
 
-  it("polls attached CMD/SABA/TSPORT public catalogs and keeps one read per tab in flight", async () => {
+  it("does not DOM-poll websocket-authoritative SABA while polling CMD/TSPORT once per tab", async () => {
     let callback: (() => void) | undefined;
     let scheduledDelayMs: number | undefined;
     let release: (() => void) | undefined;
@@ -59,24 +79,24 @@ describe("CmdSnapshotPoller", () => {
     callback?.();
     callback?.();
     await Promise.resolve();
-    expect(capture).toHaveBeenCalledTimes(3);
+    expect(capture).toHaveBeenCalledTimes(2);
     expect(capture).toHaveBeenCalledWith(
       { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 }, "cgnew.fts368.com"
     );
     expect(capture).toHaveBeenCalledWith(
-      { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 }, "sports.example"
-    );
-    expect(capture).toHaveBeenCalledWith(
       { lobby: "TSPORT", sourceId: "chrome:TSPORT:11", tabId: 11 }, "pacific.agenate.com"
+    );
+    expect(capture).not.toHaveBeenCalledWith(
+      { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 }, "sports.example"
     );
     release?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
     callback?.();
     await Promise.resolve();
-    expect(capture).toHaveBeenCalledTimes(6);
+    expect(capture).toHaveBeenCalledTimes(4);
   });
 
-  it("replays cached provider snapshots on a bounded freshness cadence", async () => {
+  it("does not replay cached provider snapshots during periodic live polling", async () => {
     let callback: (() => void) | undefined;
     let now = 1_000;
     const replaySnapshots = vi.fn(async () => true);
@@ -89,15 +109,15 @@ describe("CmdSnapshotPoller", () => {
     poller.start();
     callback?.();
     await Promise.resolve();
-    expect(replaySnapshots).toHaveBeenCalledTimes(1);
+    expect(replaySnapshots).not.toHaveBeenCalled();
     now = 59_999;
     callback?.();
     await Promise.resolve();
-    expect(replaySnapshots).toHaveBeenCalledTimes(1);
+    expect(replaySnapshots).not.toHaveBeenCalled();
     now = 61_000;
     callback?.();
     await Promise.resolve();
-    expect(replaySnapshots).toHaveBeenCalledTimes(2);
+    expect(replaySnapshots).not.toHaveBeenCalled();
   });
 
   it("keeps every attached provider tab active on a bounded cadence", async () => {
@@ -183,6 +203,32 @@ describe("CmdSnapshotPoller", () => {
       expect.objectContaining({ lobby: "CMD", tabId: 9 }),
       expect.objectContaining({ lobby: "TSPORT", tabId: 11 })
     ]);
+  });
+
+  it("checks SABA's page-side odds mutation flag on the fast cadence without running the full collector", async () => {
+    let callback: (() => void) | undefined;
+    let now = 1_000;
+    const maintain = vi.fn(async () => undefined);
+    const pollSabaDomChanges = vi.fn(async () => undefined);
+    const capture = vi.fn(async () => undefined);
+    const poller = new CmdSnapshotPoller({
+      list: () => [{ lobby: "SABA", tabId: 10, hostname: "sports.example", state: "ATTACHED" }],
+      capture, maintain, pollSabaDomChanges, now: () => now,
+      setInterval: (next) => { callback = next; return 1; }
+    });
+
+    poller.start();
+    callback?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(maintain).toHaveBeenCalledTimes(1);
+    expect(pollSabaDomChanges).toHaveBeenCalledTimes(1);
+    expect(capture).not.toHaveBeenCalled();
+
+    now = 3_000;
+    callback?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(maintain).toHaveBeenCalledTimes(1);
+    expect(pollSabaDomChanges).toHaveBeenCalledTimes(2);
   });
 
   it("requests genuine provider catalogs every two seconds without overlapping a tab", async () => {

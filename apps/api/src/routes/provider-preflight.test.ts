@@ -17,6 +17,48 @@ const result: ProviderTicketPreflight = { accountId: "account-1", provider: "SAB
     verifiedAsOfMs: 1000, expiresAtMs: 3000 }, eligible: true, reasons: [] };
 
 describe("provider preflight route", () => {
+  it("persists a complete operator report and lists it by canonical event", async () => {
+    const entries: unknown[] = [];
+    const reportJournal = {
+      append: async (entry: unknown) => { entries.push(entry); },
+      list: async (eventKey: string) => entries.filter((entry) =>
+        (entry as { request: { eventKey: string } }).request.eventKey === eventKey)
+    };
+    const app = Fastify();
+    const register = registerProviderPreflightRoutes as unknown as (target: typeof app,
+      service: { preflight(request: ProviderTicketPreflightRequest): Promise<ProviderTicketPreflight> },
+      options: unknown) => void;
+    register(app, { preflight: async () => result }, { reportJournal, idFactory: () => "report-1",
+      clock: { nowMs: () => 2_000 } });
+    const displayed = { provider: "SABA", accountId: "saba-account", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-home", selection: "HOME", line: "-0.5",
+      rawOdds: "0.91", rawFormat: "MALAY", decimalOdds: "1.91", quoteStatus: "OPEN",
+      providerObservedAtMs: 1_900, receivedMonotonicMs: 70, sequence: 17, requestedStake: "100000" };
+    const payload = { eventKey: "canonical-event-1", ticketKey: "FT_AH|FULL_TIME|-0.5",
+      reason: "Giá trên sàn khác giá tool", reportedAtMs: 1_950, competition: "Premier Test",
+      startAtUtcMs: 3_000, display: { eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+        marketType: "FT_AH", scope: "FULL_TIME", capturedAtMs: 1_950,
+        legs: [displayed, { ...displayed, provider: "CMD", accountId: "cmd-account",
+          providerEventId: "event-2", providerMarketId: "market-2", providerSelectionId: "selection-away",
+          selection: "AWAY", rawOdds: "0.95", decimalOdds: "1.95" }] },
+      estimate: { state: "OBSERVATION", roi: "-0.02", worstCaseProfit: "-2000", totalStake: "200000",
+        movementMagnitude: "0.04" }, realtimeCheck: null };
+
+    const created = await app.inject({ method: "POST", url: "/api/ticket-reports", payload });
+    const listed = await app.inject({ method: "GET",
+      url: "/api/ticket-reports?eventKey=canonical-event-1" });
+
+    expect(created.statusCode, created.body).toBe(201);
+    expect(created.json()).toMatchObject({ reportId: "report-1", createdAtMs: 2_000,
+      request: { reason: "Giá trên sàn khác giá tool", display: { legs: [
+        { providerSelectionId: "selection-home", rawOdds: "0.91", sequence: 17 },
+        { providerSelectionId: "selection-away", rawOdds: "0.95", sequence: 17 }
+      ] }, realtimeCheck: null } });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toEqual({ reports: [created.json()] });
+    await app.close();
+  });
+
   it("returns strict no-store read-only ticket evidence", async () => {
     const app = Fastify(); registerProviderPreflightRoutes(app, { preflight: async () => result });
     const response = await app.inject({ method: "POST", url: "/api/preflight/provider", payload: request });

@@ -43,6 +43,16 @@ export class TabRegistry {
   async attachSelected(tab: TabDescriptor): Promise<AttachedLobbyTab> {
     const candidate = recognizeLobbyTab(tab);
     if (!candidate) throw new Error("TAB_NOT_RECOGNIZED");
+    return this.#attachCandidate(candidate);
+  }
+
+  async attachBootstrap(tab: TabDescriptor, lobby: ChromeLobbyId): Promise<AttachedLobbyTab> {
+    const candidate = recognizeLobbyTab(tab);
+    if (candidate?.lobby !== lobby) throw new Error("TAB_NOT_RECOGNIZED");
+    return this.#attachCandidate(candidate);
+  }
+
+  async #attachCandidate(candidate: NonNullable<ReturnType<typeof recognizeLobbyTab>>): Promise<AttachedLobbyTab> {
     this.#preferred.set(candidate.tabId, candidate.lobby);
     await this.#persist();
     const existing = this.#attached.get(candidate.tabId);
@@ -70,7 +80,11 @@ export class TabRegistry {
       }
       return;
     }
-    if (!this.#preferred.has(tab.id) || this.#preferred.get(tab.id) !== candidate.lobby) return;
+    if (!this.#preferred.has(tab.id)) {
+      this.#preferred.set(tab.id, candidate.lobby);
+      await this.#persist();
+    }
+    if (this.#preferred.get(tab.id) !== candidate.lobby) return;
     if (!existing) await this.attachSelected(tab);
   }
 

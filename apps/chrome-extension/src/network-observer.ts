@@ -101,6 +101,76 @@ const DISCOVERY_EXPRESSION = `(() => {
   return roots.length;
 })()`;
 
+const SABA_ODDS_MUTATION_EXPRESSION = `(() => {
+  // fieldline-saba-odds-mutation
+  const key = '__fieldlineSabaOddsMutationV1';
+  let state = globalThis[key];
+  if (!state || !state.observer) {
+    state = { dirty: true, observer: null };
+    const touchesOdds = (node) => {
+      const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+      return Boolean(element?.closest?.('.odds, .c-odds, [data-moid]') ||
+        element?.querySelector?.('.odds, .c-odds, [data-moid]'));
+    };
+    state.observer = new MutationObserver((mutations) => {
+      if (mutations.some((mutation) => touchesOdds(mutation.target) ||
+        [...mutation.addedNodes].some(touchesOdds) || [...mutation.removedNodes].some(touchesOdds))) {
+        state.dirty = true;
+      }
+    });
+    state.observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true,
+      // Do not observe the class attribute: SABA continuously toggles hover/animation
+      // classes inside odds cells even when the price is unchanged, which
+      // caused a full catalog read every two seconds. Text/child changes cover
+      // prices; these two data attributes cover availability changes.
+      attributes: true, attributeFilter: ['data-odds-status', 'data-grey-out'] });
+    globalThis[key] = state;
+  }
+  const dirty = state.dirty === true;
+  state.dirty = false;
+  return dirty;
+})()`;
+
+export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
+  const normalize = (value) => String(value || '').normalize('NFD')
+    .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+  const primary = [...document.querySelectorAll('.sport-type-group-item')];
+  const fallback = [...document.querySelectorAll(
+    '[data-sport-id], [data-sport], button, [role="button"], [class*="sport-type"], [class*="sport-menu"]'
+  )].filter((candidate) => {
+    const text = normalize(candidate.textContent);
+    return text.length > 0 && text.length < 80 && /^bong da(?:\\s|live|\\d|$)/u.test(text);
+  });
+  const controls = [...new Set([...primary, ...fallback])]
+    .filter((control) => !control.classList.contains('sport-odds-boosts') &&
+      !control.closest('.sport-odds-boosts, [class*="odds-boost"]'));
+  const control = controls.find((candidate) => {
+    const header = candidate.querySelector('.sport-type-item-header') || candidate;
+    const text = normalize(header.textContent);
+    return /^bong da(?:\\s|live|\\d|$)/u.test(text) && !/^bong da\\s*2(?:\\s|$)/u.test(text);
+  });
+  if (!control) return { status: 'football-control-not-found' };
+  if (control.classList.contains('active-type')) return { status: 'football-active' };
+  control.click();
+  return { status: 'football-selected' };
+})()`;
+
+const KSPORT_TODAY_BASELINE_EXPRESSION = ksportTimeTabExpression("hom nay");
+const KSPORT_LIVE_BASELINE_EXPRESSION = ksportTimeTabExpression("truc tiep");
+
+function ksportTimeTabExpression(label: string): string {
+  return `(() => {
+    const normalize = (value) => String(value || '').normalize('NFD')
+      .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+    const tab = [...document.querySelectorAll('.sport-menu-tab, [class*="sport-menu-tab"]')]
+      .find((candidate) => normalize(candidate.textContent) === ${JSON.stringify(label)});
+    if (!tab) return { status: 'time-tab-not-found' };
+    if (tab.classList.contains('active') || tab.classList.contains('selected')) return { status: 'time-tab-active' };
+    tab.click();
+    return { status: 'time-tab-selected' };
+  })()`;
+}
+
 export const KEEP_ACTIVE_EXPRESSION = `(() => {
   const candidates = [document.scrollingElement, ...document.querySelectorAll('body *')]
     .filter((element) => element && element.scrollHeight - element.clientHeight > 200);
@@ -474,8 +544,11 @@ export class NetworkObserver {
   readonly #sourceGenerations = new Map<string, number>();
   readonly #streamOrdinals = new Map<string, number>();
   readonly #emissionTails = new Map<string, Promise<void>>();
-  readonly #webSockets = new Map<string, { source: ObservedSource; url: string; streamId: string }>();
+  readonly #webSockets = new Map<string, {
+    source: ObservedSource; url: string; streamId: string; sessionId?: string
+  }>();
   readonly #socketBaselineRecoveryAtMs = new Map<string, number>();
+  readonly #sabaDomBootstrapAtMs = new Map<string, number>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #pending = new Map<string, PendingRequest>();
@@ -484,6 +557,7 @@ export class NetworkObserver {
   readonly #cmdLastBodies = new Map<string, string>();
   readonly #cmdLastSentAtMs = new Map<string, number>();
   readonly #cmdSnapshotHosts = new Map<string, string>();
+  readonly #domSnapshotOrdinals = new Map<string, number>();
   readonly #httpSnapshots = new Map<string, ReplayableHttpSnapshot[]>();
   readonly #tsportSnapshots = new Map<string, Map<string, ReplayableWsEvent>>();
   readonly #tsportRequestUrls = new Map<string, string[]>();
@@ -502,6 +576,12 @@ export class NetworkObserver {
   readonly #imSnapshotOrdinals = new Map<string, number>();
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, number>>();
+  readonly #mainWorldContextSessions = new Map<number, Map<number, string | undefined>>();
+  readonly #ksportAttachedTargetSessions = new Map<string, Map<string, string>>();
+  readonly #ksportDiagnosticAtMs = new Map<string, number>();
+  readonly #ksportRefreshesInFlight = new Set<string>();
+  readonly #ksportTodayRequested = new Set<string>();
+  readonly #ksportLiveRestored = new Set<string>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
     readonly headers: Readonly<Record<string, string>> }>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
@@ -526,8 +606,68 @@ export class NetworkObserver {
     }
   }
 
+  hasCompleteKsportBaseline(sourceId: string): boolean {
+    const activeStream = this.#activeKsportStreams.get(sourceId);
+    if (activeStream === undefined) return false;
+    const frames = this.#catalogWsSnapshots.get(sourceId)?.get(activeStream);
+    return frames !== undefined && ksportFramesContainCompleteBaseline(frames);
+  }
+
+  async ensureCompleteKsportBaseline(source: ObservedSource): Promise<boolean> {
+    if (source.lobby !== "KSPORT") return false;
+    const activeStream = this.#activeKsportStreams.get(source.sourceId);
+    const frames = activeStream === undefined
+      ? undefined : this.#catalogWsSnapshots.get(source.sourceId)?.get(activeStream);
+    const state = ksportBaselineState(frames ?? []);
+    if (state.live && state.today) {
+      if (!this.#ksportLiveRestored.has(source.sourceId)) {
+        if (await this.#selectKsportTimeTab(source, KSPORT_LIVE_BASELINE_EXPRESSION)) {
+          this.#ksportLiveRestored.add(source.sourceId);
+        }
+      }
+      return true;
+    }
+    if (!state.live) {
+      await this.#selectKsportTimeTab(source, KSPORT_LIVE_BASELINE_EXPRESSION);
+    } else if (!state.today) {
+      if (await this.#selectKsportTimeTab(source, KSPORT_TODAY_BASELINE_EXPRESSION)) {
+        this.#ksportTodayRequested.add(source.sourceId);
+      }
+    }
+    return false;
+  }
+
+  async #selectKsportTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
+    const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> = [{}];
+    const sessionByContext = this.#mainWorldContextSessions.get(source.tabId);
+    for (const contextId of new Set(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])) {
+      const sessionId = sessionByContext?.get(contextId);
+      targets.push({ contextId, ...(sessionId === undefined ? {} : { sessionId }) });
+    }
+    for (const sessionId of this.#ksportAttachedTargetSessions.get(source.sourceId)?.values() ?? []) {
+      if (!targets.some((target) => target.sessionId === sessionId)) targets.push({ sessionId });
+    }
+    for (const target of targets) {
+      const params = { expression, ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
+        returnByValue: true, awaitPromise: false };
+      const evaluation = await this.#withFrameCommandTimeout(target.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId)).catch(() => null);
+      const status = nestedValue(evaluation, "result", "value", "status");
+      if (status === "time-tab-selected" || status === "time-tab-active") return true;
+    }
+    return false;
+  }
+
   async start(source: ObservedSource): Promise<void> {
     if (this.#startedTabs.has(source.tabId)) return;
+    // MV3 may restart after an OOPIF was auto-attached by the previous worker.
+    // Reset only the child-target observation boundary so Chrome emits fresh
+    // session ids for already-existing sportsbook frames. This does not reload,
+    // navigate, close or otherwise mutate the provider page.
+    await this.#sendCommand(source.tabId, "Target.setAutoAttach", {
+      autoAttach: false, waitForDebuggerOnStart: false, flatten: true
+    });
     await this.#sendCommand(source.tabId, "Target.setAutoAttach", {
       autoAttach: true,
       waitForDebuggerOnStart: false,
@@ -542,7 +682,7 @@ export class NetworkObserver {
     this.#startedTabs.add(source.tabId);
     await this.#sendCommand(source.tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
     await this.#sendCommand(source.tabId, "Runtime.evaluate", {
-      expression: DISCOVERY_EXPRESSION,
+      expression: source.lobby === "KSPORT" ? KSPORT_FOOTBALL_DISCOVERY_EXPRESSION : DISCOVERY_EXPRESSION,
       returnByValue: true,
       awaitPromise: false
     });
@@ -558,6 +698,7 @@ export class NetworkObserver {
   releaseTab(tabId: number): void {
     this.#startedTabs.delete(tabId);
     this.#mainWorldContexts.delete(tabId);
+    this.#mainWorldContextSessions.delete(tabId);
     const sourceIds = new Set<string>();
     const remember = (sourceId: string): void => {
       if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
@@ -577,6 +718,7 @@ export class NetworkObserver {
       this.#cmdLastBodies.delete(sourceId);
       this.#cmdLastSentAtMs.delete(sourceId);
       this.#cmdSnapshotHosts.delete(sourceId);
+      this.#domSnapshotOrdinals.delete(sourceId);
       this.#httpSnapshots.delete(sourceId);
       this.#imSnapshotOrdinals.delete(sourceId);
       this.#tsportSnapshots.delete(sourceId);
@@ -593,7 +735,13 @@ export class NetworkObserver {
       this.#sabaSnapshotSaveTimers.delete(sourceId);
       this.#sabaSnapshotLastSavedAtMs.delete(sourceId);
       this.#sabaDocumentMarkers.delete(sourceId);
+      this.#sabaDomBootstrapAtMs.delete(sourceId);
       this.#sbobetEventRequests.delete(sourceId);
+      this.#ksportAttachedTargetSessions.delete(sourceId);
+      this.#ksportDiagnosticAtMs.delete(sourceId);
+      this.#ksportRefreshesInFlight.delete(sourceId);
+      this.#ksportTodayRequested.delete(sourceId);
+      this.#ksportLiveRestored.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
       this.#imCatalogRefreshes.delete(sourceId);
@@ -617,12 +765,16 @@ export class NetworkObserver {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Page.setWebLifecycleState", { state: "active" })).catch(() => ({}));
       const expression = source.lobby === "CMD" ? CMD_CATALOG_DISCOVERY_EXPRESSION :
-          source.lobby === "TSPORT" ? TSPORT_CATALOG_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
-      if (source.lobby === "IM") {
+          source.lobby === "TSPORT" ? TSPORT_CATALOG_DISCOVERY_EXPRESSION :
+            source.lobby === "KSPORT" ? KSPORT_FOOTBALL_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
+      if (source.lobby === "IM" || source.lobby === "SABA") {
         // IM's baseline is large and two-part. Request it only from the explicit
         // recovery path below; running the same fetch here can consume the
         // recovery window and leave Market 1 unavailable when Chrome evicts its
-        // debugger body. Focus/lifecycle commands above are enough for deltas.
+        // debugger body. SABA is WebSocket-authoritative; walking every DOM node
+        // and clicking expansion controls only burns renderer CPU and cannot
+        // replace its reset/done baseline. Focus/lifecycle commands above are
+        // enough to keep both providers active.
         return;
       }
       const frameTree = await this.#withFrameCommandTimeout(
@@ -648,6 +800,26 @@ export class NetworkObserver {
     });
   }
 
+  async pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
+    if (source.lobby !== "SABA" || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    const evaluations: unknown[] = [];
+    evaluations.push(await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+      expression: SABA_ODDS_MUTATION_EXPRESSION, returnByValue: true, awaitPromise: false
+    })).catch(() => ({})));
+    const contexts = [...new Set(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])];
+    const sessionByContext = this.#mainWorldContextSessions.get(source.tabId);
+    for (const contextId of contexts) {
+      const params = { expression: SABA_ODDS_MUTATION_EXPRESSION, contextId,
+        returnByValue: true, awaitPromise: false };
+      const sessionId = sessionByContext?.get(contextId);
+      evaluations.push(await this.#withFrameCommandTimeout(sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, sessionId)).catch(() => ({})));
+    }
+    if (!evaluations.some((evaluation) => nestedValue(evaluation, "result", "value") === true)) return;
+    await this.#capturePublicCatalogSnapshot(source, hostname, CMD_PUBLIC_CATALOG_EXPRESSION, false);
+  }
+
   async refreshCatalog(source: ObservedSource): Promise<void> {
     if (source.lobby === "IM") {
       const existing = this.#imCatalogRefreshes.get(source.sourceId);
@@ -670,17 +842,54 @@ export class NetworkObserver {
       if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
       await this.#restoreSabaWsSnapshots(source);
       if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
-      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+      const nowMs = this.#now();
+      if (nowMs - (this.#sabaDomBootstrapAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) < 4_000) return;
+      this.#sabaDomBootstrapAtMs.set(source.sourceId, nowMs);
+      // A service-worker/API restart can attach after SABA announced the
+      // c1/c2/c3 field tables. Reconnecting its Socket.IO transport does not
+      // replay those tables (the provider replies A003) and can create a CPU-
+      // heavy reconnect loop. Take exactly two atomic DOM generations on this
+      // explicit snapshot request instead. The adapter requires stable >=20
+      // event coverage across both generations before it can publish, so a
+      // virtualized/half-rendered table still fails closed. This is never part
+      // of the 2-second poller.
+      await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true);
       return;
     }
     if (source.lobby === "KSPORT") {
-      // KSPORT's catalog authority is its observed sportsbook STOMP feed.
-      // Prefer retained complete frames; if none exist, reconnect only that
-      // socket so the unchanged authenticated page republishes its baseline.
+      // The portal can initially land on the promotional "Bóng đá 2" group.
+      // That page opens only the jackpot socket, so a source heartbeat alone is
+      // not evidence that the football catalog is subscribed. Select the main
+      // structural Football group again on every recovery attempt. If this
+      // click changed the provider view, let its own SPA establish the sport
+      // subscriptions instead of immediately closing the newly-created socket.
+      const footballSelection = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression: KSPORT_FOOTBALL_DISCOVERY_EXPRESSION,
+          returnByValue: true,
+          awaitPromise: false
+        })
+      ).catch(() => ({}));
+      if (nestedValue(footballSelection, "result", "value", "status") === "football-selected") return;
+      // A retained STOMP baseline can be hours old after the extension worker
+      // or local API restarts. Prefer a new same-tab getEvent generation and
+      // use retained frames only as a fail-safe when the provider request is
+      // temporarily unavailable. Never replace fresh evidence with replay.
+      this.#ksportRefreshesInFlight.add(source.sourceId);
+      try {
+        if (await this.#requestFreshKsportHttpBaseline(source)) return;
+      } finally {
+        this.#ksportRefreshesInFlight.delete(source.sourceId);
+      }
       if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
       await this.#restoreSabaWsSnapshots(source);
       if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
       await this.#requestFreshSocketBaseline(source, (url) => /\/sport\//u.test(url.pathname));
+      return;
+    }
+    if (source.lobby === "SBO") {
+      if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
+      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
       return;
     }
     if (source.lobby === "TSPORT") {
@@ -731,51 +940,252 @@ export class NetworkObserver {
   async #requestFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean): Promise<void> {
     const nowMs = this.#now();
     const previous = this.#socketBaselineRecoveryAtMs.get(source.sourceId);
-    if (previous !== undefined && nowMs - previous < 60_000) return;
+    if (previous !== undefined && nowMs - previous < 5_000) return;
     const active = [...this.#webSockets.values()].find((socket) => {
       if (socket.source.sourceId !== source.sourceId) return false;
       try { return matches(new URL(socket.url)); } catch { return false; }
     });
-    if (active === undefined) return;
+    if (active === undefined && source.lobby !== "SABA" && source.lobby !== "KSPORT" && source.lobby !== "SBO") return;
     this.#socketBaselineRecoveryAtMs.set(source.sourceId, nowMs);
-    const contexts = [...new Set(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])];
-    const prototypeExpression = source.lobby === "SABA"
-      ? "window.io && window.io.Socket && window.io.Socket.prototype"
-      : "window.WebSocket && window.WebSocket.prototype";
-    const reconnect = source.lobby === "SABA"
-      ? `function() { let count = 0; for (const socket of this) { try {
-          if (!socket || !socket.connected || !socket.io) continue;
-          socket.disconnect(); socket.connect(); count += 1;
-        } catch {} } return count; }`
-      : `function() { let count = 0; for (const socket of this) { try {
-          if (!socket || socket.readyState !== 1) continue;
-          const url = new URL(socket.url, location.href);
-          if (!/\\/sport\\//u.test(url.pathname)) continue;
-          socket.close(4000, "fieldline-baseline-recovery"); count += 1;
-        } catch {} } return count; }`;
-    for (const contextId of contexts) {
+    const knownContexts = [...new Set(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])];
+    const sessionByContext = this.#mainWorldContextSessions.get(source.tabId);
+    const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> =
+      knownContexts.length > 0
+        ? knownContexts.map((contextId) => {
+            const sessionId = sessionByContext?.get(contextId);
+            return { contextId, ...(sessionId === undefined ? {} : { sessionId }) };
+          })
+        : [{ ...(active?.sessionId === undefined ? {} : { sessionId: active.sessionId }) }];
+    if (source.lobby === "KSPORT") {
+      for (const sessionId of this.#ksportAttachedTargetSessions.get(source.sourceId)?.values() ?? []) {
+        if (!targets.some((target) => target.sessionId === sessionId)) targets.push({ sessionId });
+      }
+    }
+    const socketIo = source.lobby === "SABA" || source.lobby === "SBO";
+    const strategies = socketIo ? [{
+      prototypeExpression: "window.io && window.io.Socket && window.io.Socket.prototype",
+      reconnect: `function() { let count = 0; for (const socket of this) { try {
+        if (!socket || !socket.connected || !socket.io) continue;
+        socket.disconnect(); socket.connect(); count += 1;
+      } catch {} } return count; }`
+    }, {
+      // Production bundles do not have to publish Socket.IO as window.io. Its
+      // native Engine.IO socket is still discoverable by prototype; closing it
+      // makes the page-owned manager reconnect and request subscriptions again.
+      prototypeExpression: "window.WebSocket && window.WebSocket.prototype",
+      reconnect: `function() { let count = 0; for (const socket of this) { try {
+        if (!socket || socket.readyState !== 1) continue;
+        const url = new URL(socket.url, location.href);
+        if (!/\\/socket\\.io\\/?$/u.test(url.pathname)) continue;
+        socket.close(4000, "fieldline-baseline-recovery"); count += 1;
+      } catch {} } return count; }`
+    }] : [{
+      prototypeExpression: "window.WebSocket && window.WebSocket.prototype",
+      reconnect: `function() { let count = 0; for (const socket of this) { try {
+        if (!socket || socket.readyState !== 1) continue;
+        const url = new URL(socket.url, location.href);
+        if (!/\\/sport\\//u.test(url.pathname)) continue;
+        socket.close(4000, "fieldline-baseline-recovery"); count += 1;
+      } catch {} } return count; }`
+    }];
+    for (const target of targets) {
+      const sendToSocketTarget = (method: string, params: Record<string, unknown>): Promise<unknown> =>
+        target.sessionId === undefined
+          ? this.#sendCommand(source.tabId, method, params)
+          : this.#sendCommand(source.tabId, method, params, target.sessionId);
       const group = `fieldline-baseline-recovery-${source.tabId}`;
       try {
-        const prototype = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-          expression: prototypeExpression, contextId, objectGroup: group, returnByValue: false
-        })).catch(() => null);
-        const prototypeId = nestedValue(prototype, "result", "objectId");
-        if (typeof prototypeId !== "string") continue;
-        const queried = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.queryObjects", {
-          prototypeObjectId: prototypeId, objectGroup: group
-        })).catch(() => null);
-        const instancesId = nestedValue(queried, "objects", "objectId");
-        if (typeof instancesId !== "string") continue;
-        const result = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.callFunctionOn", {
-          objectId: instancesId, functionDeclaration: reconnect, returnByValue: true
-        })).catch(() => null);
-        const count = nestedValue(result, "result", "value");
-        if (typeof count === "number" && count > 0) return;
+        for (const strategy of strategies) {
+          const prototype = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.evaluate", {
+            expression: strategy.prototypeExpression,
+            ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
+            objectGroup: group, returnByValue: false
+          })).catch(() => null);
+          const prototypeId = nestedValue(prototype, "result", "objectId");
+          if (typeof prototypeId !== "string") continue;
+          const queried = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.queryObjects", {
+            prototypeObjectId: prototypeId, objectGroup: group
+          })).catch(() => null);
+          const instancesId = nestedValue(queried, "objects", "objectId");
+          if (typeof instancesId !== "string") continue;
+          const result = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.callFunctionOn", {
+            objectId: instancesId, functionDeclaration: strategy.reconnect, returnByValue: true
+          })).catch(() => null);
+          const count = nestedValue(result, "result", "value");
+          if (typeof count === "number" && count > 0) return;
+        }
       } finally {
-        await this.#sendCommand(source.tabId, "Runtime.releaseObjectGroup", { objectGroup: group })
+        await sendToSocketTarget("Runtime.releaseObjectGroup", { objectGroup: group })
           .catch(() => undefined);
       }
     }
+  }
+
+  async #requestFreshKsportHttpBaseline(source: ObservedSource): Promise<boolean> {
+    if (!this.#sbobetEventRequests.has(source.sourceId)) {
+      const stored = await this.#loadSbobetEventRequest().catch(() => null);
+      if (stored !== null) this.#sbobetEventRequests.set(source.sourceId, stored);
+    }
+    const template = this.#sbobetEventRequests.get(source.sourceId);
+    let templateUrl: URL | null = null;
+    if (template !== undefined) {
+      try { templateUrl = new URL(template.url); } catch { return false; }
+      if (templateUrl.protocol !== "https:" || templateUrl.pathname !== "/api/v2/getEvent" ||
+        templateUrl.username !== "" || templateUrl.password !== "") return false;
+    }
+    const active = [...this.#webSockets.values()].find((socket) => {
+      if (socket.source.sourceId !== source.sourceId) return false;
+      try { return isKsportCatalogSocket(new URL(socket.url)); } catch { return false; }
+    });
+    const knownContexts = [...new Set(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])];
+    const sessionByContext = this.#mainWorldContextSessions.get(source.tabId);
+    const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> = knownContexts.map(
+      (contextId) => {
+        const contextSessionId = sessionByContext?.get(contextId);
+        return { contextId, ...(contextSessionId === undefined ? {} : { sessionId: contextSessionId }) };
+      });
+    if (targets.length === 0 && active !== undefined) targets.push({
+      ...(active.sessionId === undefined ? {} : { sessionId: active.sessionId })
+    });
+    if (targets.length === 0) {
+      const frameTree = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Page.getFrameTree")
+      ).catch(() => ({}));
+      for (const frameId of collectFrameIds(frameTree)) {
+        const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+          "Page.createIsolatedWorld", {
+            frameId, worldName: "fieldline-ksport-catalog-refresh", grantUniveralAccess: false
+          })).catch(() => ({}));
+        const contextId = nestedNumber(world, "executionContextId");
+        if (contextId !== null) targets.push({ contextId });
+      }
+    }
+    let attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId);
+    if (attachedTargets === undefined) {
+      attachedTargets = new Map<string, string>();
+      this.#ksportAttachedTargetSessions.set(source.sourceId, attachedTargets);
+    }
+    if (attachedTargets.size === 0 && active === undefined) {
+      const discovered = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Target.getTargets")
+      ).catch(() => ({}));
+      const infos = isRecord(discovered) && Array.isArray(discovered.targetInfos)
+        ? discovered.targetInfos : [];
+      for (const info of infos.slice(0, 32)) {
+        if (!isRecord(info) || info.type !== "iframe" || typeof info.targetId !== "string" ||
+          typeof info.url !== "string") continue;
+        try {
+          const url = new URL(info.url);
+          if (url.protocol !== "https:" || (url.hostname !== "sb21.net" &&
+            !url.hostname.endsWith(".sb21.net"))) continue;
+        } catch { continue; }
+        const attached = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+          "Target.attachToTarget", { targetId: info.targetId, flatten: true })).catch(() => ({}));
+        const sessionId = nestedValue(attached, "sessionId");
+        if (typeof sessionId !== "string") continue;
+        attachedTargets.set(info.targetId, sessionId);
+        await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.enable", {}, sessionId))
+          .catch(() => undefined);
+      }
+    }
+    for (const sessionId of attachedTargets.values()) targets.push({ sessionId });
+    const expression = `(async () => {
+      const marker = "fieldline-ksport-catalog-refresh";
+      const capturedUrl = ${JSON.stringify(templateUrl?.href ?? null)};
+      const performanceUrls = [...performance.getEntriesByType("resource")].map((entry) => entry.name)
+        .filter((value) => { try { const url = new URL(value); return url.protocol === "https:" &&
+          url.pathname === "/api/v2/getEvent"; } catch { return false; } });
+      const templateUrl = capturedUrl || performanceUrls.at(-1);
+      if (!templateUrl) return { status: marker + "-template-missing", page: location.origin + location.pathname };
+      const base = new URL(templateUrl);
+      if (base.protocol !== "https:" || base.pathname !== "/api/v2/getEvent") {
+        return { status: marker + "-url-invalid" };
+      }
+      const headers = ${JSON.stringify(template?.headers ?? {})};
+      const responses = [];
+      const exactUrls = new Map();
+      for (const value of [capturedUrl, ...performanceUrls]) {
+        if (!value) continue;
+        const candidate = new URL(value);
+        const observedRange = candidate.searchParams.get("timeRange");
+        if (observedRange && ["live", "today"].includes(observedRange.toLowerCase())) {
+          exactUrls.set(observedRange.toLowerCase(), candidate.href);
+        }
+      }
+      const observedStyle = base.searchParams.get("timeRange") || "live";
+      const providerRangeStyle = (value) => /^[A-Z]/u.test(observedStyle)
+        ? value[0].toUpperCase() + value.slice(1) : value;
+      for (const timeRange of ["live", "today"]) {
+        const url = new URL(exactUrls.get(timeRange) || templateUrl);
+        if (!exactUrls.has(timeRange)) url.searchParams.set("timeRange", providerRangeStyle(timeRange));
+        const response = await fetch(url.href, { method: "GET", headers, credentials: "include", cache: "no-store" });
+        if (!response.ok) {
+          const controls = [...document.querySelectorAll('.sport-menu-container *, button, a, [role="button"], [data-sport]')]
+            .map((node) => ({ tag: node.tagName,
+              text: String(node.textContent || '').trim().replace(/\\s+/gu, ' ').slice(0, 80),
+              className: String(node.className || '').slice(0, 120), id: String(node.id || '').slice(0, 80),
+              role: node.getAttribute('role') || '',
+              sport: node.getAttribute('data-sport') || node.getAttribute('data-sport-id') || '' }))
+            .filter((item) => item.className || item.id || item.role || item.sport)
+            .slice(0, 120);
+          return { status: marker + "-failed", timeRange, code: response.status,
+            page: location.origin + location.pathname, controls };
+        }
+        responses.push({ timeRange, url: url.href, body: await response.text() });
+      }
+      return { status: "catalog-requested", marker, origin: base.origin, responses };
+    })()`;
+    const attempts: Array<{ readonly target: "CONTEXT" | "SESSION" | "ROOT";
+      readonly status: string; readonly page?: string; readonly controls?: unknown }> = [];
+    for (const target of targets) {
+      const params = { expression, ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
+        returnByValue: true, awaitPromise: true };
+      const evaluation = await this.#withFrameCommandTimeout(target.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId),
+      15_000).catch(() => null);
+      const value = nestedValue(evaluation, "result", "value");
+      attempts.push({ target: target.sessionId !== undefined ? "SESSION" : target.contextId !== undefined
+        ? "CONTEXT" : "ROOT", status: isRecord(value) && typeof value.status === "string"
+          ? value.status.slice(0, 96) : evaluation === null ? "CDP_TIMEOUT_OR_ERROR" : "NO_RESULT",
+        ...(isRecord(value) && typeof value.page === "string" ? { page: value.page.slice(0, 256) } : {}),
+        ...(isRecord(value) && Array.isArray(value.controls) ? { controls: value.controls.slice(0, 12) } : {}) });
+      if (!isRecord(value) || value.status !== "catalog-requested" || !Array.isArray(value.responses) ||
+        value.responses.length !== 2 || typeof value.origin !== "string") continue;
+      let responseOrigin: string;
+      try {
+        const origin = new URL(value.origin);
+        if (origin.protocol !== "https:" || origin.username !== "" || origin.password !== "") continue;
+        responseOrigin = origin.origin;
+      } catch { continue; }
+      const accepted = new Map<"live" | "today", { readonly url: string; readonly body: string }>();
+      for (const candidate of value.responses) {
+        if (!isRecord(candidate) || (candidate.timeRange !== "live" && candidate.timeRange !== "today") ||
+          typeof candidate.url !== "string" || typeof candidate.body !== "string" ||
+          candidate.body.length > 12 * 1024 * 1024) continue;
+        try {
+          const url = new URL(candidate.url);
+          if (url.origin !== responseOrigin || url.pathname !== "/api/v2/getEvent" ||
+            url.searchParams.get("timeRange")?.toLowerCase() !== candidate.timeRange) continue;
+        } catch { continue; }
+        accepted.set(candidate.timeRange, { url: candidate.url, body: candidate.body });
+      }
+      if (accepted.size !== 2) continue;
+      for (const partition of ["live", "today"] as const) {
+        const response = accepted.get(partition)!;
+        await this.ingestHttpResponse(source, response.url, "Fetch", response.body,
+          undefined, `ksport-http:${partition}`);
+      }
+      return true;
+    }
+    const nowMs = this.#now();
+    if (nowMs - (this.#ksportDiagnosticAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) >= 10_000) {
+      this.#ksportDiagnosticAtMs.set(source.sourceId, nowMs);
+      await this.#emit(source, "https://sb21.net/__fieldline_ksport_refresh__", "Diagnostic", "TAB_STATE", {
+        encoding: "UTF8", body: JSON.stringify({ kind: "KSPORT_REFRESH_FAILED", attempts })
+      });
+    }
+    return false;
   }
 
   async #ingestBtiRefreshEvaluation(source: ObservedSource, evaluation: unknown): Promise<void> {
@@ -875,13 +1285,26 @@ export class NetworkObserver {
         const contexts = this.#mainWorldContexts.get(source.tabId) ?? new Map<string, number>();
         contexts.set(frameId, contextId);
         this.#mainWorldContexts.set(source.tabId, contexts);
+        const sessions = this.#mainWorldContextSessions.get(source.tabId) ??
+          new Map<number, string | undefined>();
+        sessions.set(contextId, sessionId);
+        this.#mainWorldContextSessions.set(source.tabId, sessions);
       }
       return;
     }
     if (method === "Runtime.executionContextsCleared") {
       this.#mainWorldContexts.delete(source.tabId);
+      this.#mainWorldContextSessions.delete(source.tabId);
       this.#sourceGenerations.set(source.sourceId, (this.#sourceGenerations.get(source.sourceId) ?? 0) + 1);
-      if (source.lobby === "SABA" || source.lobby === "KSPORT") {
+      if (source.lobby === "SABA") {
+        // Runtime.enable can emit executionContextsCleared while an unchanged
+        // document is merely being reattached after an MV3 worker restart.
+        // Drop in-memory context-bound state, but retain the durable baseline:
+        // restore validates it against the page's performance.timeOrigin and
+        // therefore still rejects a genuinely navigated document.
+        this.#discardSabaWsSnapshots(source.sourceId);
+        this.#sabaSnapshotLoads.delete(source.sourceId);
+      } else if (source.lobby === "KSPORT") {
         this.#discardSabaWsSnapshots(source.sourceId);
         void this.#clearSabaWsSnapshots(source.sourceId);
       }
@@ -894,6 +1317,7 @@ export class NetworkObserver {
           if (contextId === params.executionContextId) contexts.delete(frameId);
         }
       }
+      this.#mainWorldContextSessions.get(source.tabId)?.delete(params.executionContextId);
       return;
     }
     const requestId = typeof params.requestId === "string" ? params.requestId : null;
@@ -912,7 +1336,8 @@ export class NetworkObserver {
       } else {
         this.#requestStreamIds.delete(key);
       }
-      if (source.lobby === "KSPORT" && request !== null && typeof request.url === "string") {
+      if (source.lobby === "KSPORT" && !this.#ksportRefreshesInFlight.has(source.sourceId) &&
+        request !== null && typeof request.url === "string") {
         try {
           const url = new URL(request.url);
           if (url.protocol === "https:" && url.pathname === "/api/v2/getEvent") {
@@ -969,11 +1394,19 @@ export class NetworkObserver {
     if (method === "Network.webSocketCreated" && key && typeof params.url === "string") {
       const streamId = String((this.#streamOrdinals.get(source.sourceId) ?? 0) + 1);
       this.#streamOrdinals.set(source.sourceId, Number(streamId));
-      this.#webSockets.set(key, { source, url: params.url, streamId });
+      this.#webSockets.set(key, { source, url: params.url, streamId,
+        ...(sessionId === undefined ? {} : { sessionId }) });
       if (source.lobby === "KSPORT") {
         try {
           if (isKsportCatalogSocket(new URL(params.url))) {
             this.#activeKsportStreams.set(source.sourceId, streamId);
+            this.#catalogWsSnapshots.set(source.sourceId, new Map());
+          }
+        } catch { /* malformed socket URL cannot be a catalog authority */ }
+      }
+      if (source.lobby === "SBO") {
+        try {
+          if (/\/socket\.io\/?$/u.test(new URL(params.url).pathname)) {
             this.#catalogWsSnapshots.set(source.sourceId, new Map());
           }
         } catch { /* malformed socket URL cannot be a catalog authority */ }
@@ -995,6 +1428,13 @@ export class NetworkObserver {
           this.#catalogWsSnapshots.delete(socket.source.sourceId);
           await this.#clearSabaWsSnapshots(socket.source.sourceId).catch(() => undefined);
         }
+        if (socket.source.lobby === "SBO") {
+          try {
+            if (/\/socket\.io\/?$/u.test(new URL(socket.url).pathname)) {
+              this.#catalogWsSnapshots.delete(socket.source.sourceId);
+            }
+          } catch { /* malformed socket URL cannot be a catalog authority */ }
+        }
       }
       this.#webSockets.delete(key);
       return;
@@ -1002,12 +1442,23 @@ export class NetworkObserver {
     if (method === "Network.webSocketFrameReceived" && key) {
       const socket = this.#webSockets.get(key);
       const response = isRecord(params.response) ? params.response : null;
-      if (!socket || !response || typeof response.payloadData !== "string") return;
+      if (!socket) {
+        // MV3 can restart while an existing Socket.IO connection survives.
+        // CDP then delivers frames without replaying webSocketCreated, so use
+        // that traffic as the signal to request a fresh in-page SABA baseline.
+        if (source.lobby === "SABA") {
+          await this.refreshCatalog(source);
+        } else if (source.lobby === "SBO") {
+          await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+        }
+        return;
+      }
+      if (!response || typeof response.payloadData !== "string") return;
       const opcode = typeof response.opcode === "number" ? response.opcode : 1;
       const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
       if (opcode !== 2) {
-        if (socket.source.lobby === "SABA" || socket.source.lobby === "KSPORT") {
-          await this.#sabaDocumentMarker(socket.source);
+        if (socket.source.lobby === "SABA" || socket.source.lobby === "KSPORT" || socket.source.lobby === "SBO") {
+          await this.#sabaDocumentMarker(socket.source, socket.sessionId);
         }
         this.#rememberTsportWsEvent(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
         this.#rememberCatalogWsFrame(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
@@ -1187,14 +1638,20 @@ export class NetworkObserver {
   }
 
   async captureCmdSnapshot(source: ObservedSource, hostname: string): Promise<void> {
-    if ((source.lobby !== "CMD" && source.lobby !== "SABA" && source.lobby !== "TSPORT") ||
-      this.#cmdCapturesInFlight.has(source.sourceId) ||
+    if ((source.lobby !== "CMD" && source.lobby !== "TSPORT") ||
       !/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    const expression = source.lobby === "TSPORT"
+      ? TSPORT_PUBLIC_CATALOG_EXPRESSION : CMD_PUBLIC_CATALOG_EXPRESSION;
+    await this.#capturePublicCatalogSnapshot(source, hostname, expression, false);
+  }
+
+  async #capturePublicCatalogSnapshot(source: ObservedSource, hostname: string, expression: string,
+    forceGeneration: boolean): Promise<void> {
+    if (this.#cmdCapturesInFlight.has(source.sourceId) || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
     this.#cmdCapturesInFlight.add(source.sourceId);
     try {
       await this.#runPeriodicDomWork(async () => {
-        const expression = source.lobby === "TSPORT"
-          ? TSPORT_PUBLIC_CATALOG_EXPRESSION : CMD_PUBLIC_CATALOG_EXPRESSION;
+        for (let generation = 0; generation < (forceGeneration ? 2 : 1); generation += 1) {
         const frameTree = await this.#withFrameCommandTimeout(
           this.#sendCommand(source.tabId, "Page.getFrameTree")
         ).catch(() => ({}));
@@ -1229,9 +1686,11 @@ export class NetworkObserver {
         // Transport heartbeats only prove that the tab is attached. Renew the
         // unchanged catalog before the API freshness TTL expires so a quiet
         // market cannot be misclassified as a dead data source.
-        if (previous === catalogBody && nowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0)
+        if (!forceGeneration && previous === catalogBody && nowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0)
           < CATALOG_REFRESH_INTERVAL_MS) return;
-        const snapshotId = `cmd:${source.tabId}:${nowMs}`;
+        const ordinal = (this.#domSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
+        this.#domSnapshotOrdinals.set(source.sourceId, ordinal);
+        const snapshotId = `cmd:${source.tabId}:${nowMs}:${ordinal}`;
         const chunks = chunkCmdSnapshot(records, snapshotId);
         for (const chunk of chunks) {
           await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
@@ -1243,6 +1702,7 @@ export class NetworkObserver {
         if (isReplayableCmdCatalog(records)) {
           this.#cmdSnapshots.set(source.sourceId, { body: catalogBody, sentAtMs: nowMs, receivedMonotonicMs });
           this.#cmdSnapshotHosts.set(source.sourceId, hostname);
+        }
         }
       });
     } finally {
@@ -1578,22 +2038,27 @@ export class NetworkObserver {
 
   #rememberCatalogWsFrame(source: ObservedSource, url: string, body: string, streamId: string,
     clocks: { readonly observedAtMs: number; readonly receivedMonotonicMs: number }): void {
-    if (source.lobby !== "SABA" && source.lobby !== "KSPORT") return;
+    if (source.lobby !== "SABA" && source.lobby !== "KSPORT" && source.lobby !== "SBO") return;
     let parsedUrl: URL;
     try { parsedUrl = new URL(url); } catch { return; }
     let partition = streamId;
     let startsBaseline = source.lobby === "KSPORT";
     let completesBaseline = false;
-    if (source.lobby === "SABA") {
+    if (source.lobby === "SABA" || source.lobby === "SBO") {
       if (!/\/socket\.io\/?$/u.test(parsedUrl.pathname) || !body.startsWith("42")) return;
       try {
         const payload: unknown = JSON.parse(body.slice(2));
         if (!Array.isArray(payload) || payload[0] !== "m" || typeof payload[1] !== "string" ||
           !Array.isArray(payload[2])) return;
         partition = `${streamId}:${payload[1]}`;
-        startsBaseline = payload[2].some((row) => Array.isArray(row) &&
-          (row[1] === "reset" || row[1] === "empty"));
-        completesBaseline = payload[2].some((row) => Array.isArray(row) && row[1] === "done");
+        if (source.lobby === "SABA") {
+          startsBaseline = payload[2].some((row) => Array.isArray(row) &&
+            (row[1] === "reset" || row[1] === "empty"));
+          completesBaseline = payload[2].some((row) => Array.isArray(row) && row[1] === "done");
+        } else {
+          startsBaseline = false;
+          completesBaseline = true;
+        }
       } catch { return; }
     } else {
       if (!isKsportCatalogSocket(parsedUrl) || body.includes("destination:/topic/jackpot/")) return;
@@ -1612,7 +2077,9 @@ export class NetworkObserver {
     const frames = retained ?? [];
     frames.push({ source, url, body, streamId, ...clocks });
     partitions.set(partition, frames);
-    if (source.lobby === "SABA" && completesBaseline) this.#sabaReadySnapshotPartitions.add(readyKey);
+    if (source.lobby === "SABA" && completesBaseline && sabaFramesContainCompleteBaseline(frames)) {
+      this.#sabaReadySnapshotPartitions.add(readyKey);
+    }
     const totals = () => [...partitions.values()].reduce((result, values) => ({
       frames: result.frames + values.length,
       bytes: result.bytes + values.reduce((sum, frame) => sum + frame.body.length, 0)
@@ -1726,12 +2193,13 @@ export class NetworkObserver {
     return JSON.stringify(value).length <= 4_000_000 ? value : null;
   }
 
-  async #sabaDocumentMarker(source: ObservedSource): Promise<string | null> {
+  async #sabaDocumentMarker(source: ObservedSource, sessionId?: string): Promise<string | null> {
     const retained = this.#sabaDocumentMarkers.get(source.sourceId);
     if (retained !== undefined) return retained;
-    const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-      expression: "String(performance.timeOrigin)", returnByValue: true, awaitPromise: false
-    })).catch(() => null);
+    const params = { expression: "String(performance.timeOrigin)", returnByValue: true, awaitPromise: false };
+    const evaluation = await this.#withFrameCommandTimeout(sessionId === undefined
+      ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+      : this.#sendCommand(source.tabId, "Runtime.evaluate", params, sessionId)).catch(() => null);
     const value = nestedValue(evaluation, "result", "value");
     if (typeof value !== "string" || !/^\d+(?:\.\d+)?$/u.test(value) || value.length > 64) return null;
     this.#sabaDocumentMarkers.set(source.sourceId, value);
@@ -1911,6 +2379,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function sabaFramesContainCompleteBaseline(frames: readonly ReplayableWsEvent[]): boolean {
   let reset = false;
+  let footballRecord = false;
   for (const frame of frames) {
     try {
       if (!frame.body.startsWith("42")) continue;
@@ -1918,8 +2387,15 @@ function sabaFramesContainCompleteBaseline(frames: readonly ReplayableWsEvent[])
       if (!Array.isArray(payload) || payload[0] !== "m" || !Array.isArray(payload[2])) continue;
       for (const row of payload[2]) {
         if (!Array.isArray(row)) continue;
-        if (row[1] === "reset" || row[1] === "empty") reset = true;
-        if (row[1] === "done" && reset) return true;
+        if (row[1] === "reset" || row[1] === "empty") {
+          reset = true;
+          footballRecord = false;
+          continue;
+        }
+        if (reset && (row[1] === "e" || row[1] === "l" || row[1] === "m" || row[1] === "o")) {
+          footballRecord = true;
+        }
+        if (row[1] === "done" && reset && footballRecord) return true;
       }
     } catch { return false; }
   }
@@ -1927,13 +2403,22 @@ function sabaFramesContainCompleteBaseline(frames: readonly ReplayableWsEvent[])
 }
 
 function ksportFramesContainCompleteBaseline(frames: readonly ReplayableWsEvent[]): boolean {
+  const state = ksportBaselineState(frames);
+  return state.live && state.today;
+}
+
+function ksportBaselineState(frames: readonly ReplayableWsEvent[]): { readonly live: boolean; readonly today: boolean } {
   let live = false;
   let today = false;
   for (const frame of frames) {
     if (/destination:\/topic\/sports\/1_1\/live\//u.test(frame.body)) live = true;
-    if (/destination:\/topic\/sports\/1_1\/today\//u.test(frame.body)) today = true;
+    // KSPORT uses sport group 1_1 for live and 1_11 (hot/today) for the
+    // second baseline partition. Older code only accepted 1_1/today, so a
+    // real complete baseline never satisfied readiness and Reset deleted the
+    // healthy replacement five seconds later.
+    if (/destination:\/topic\/sports\/1_(?:1|11)\/today\//u.test(frame.body)) today = true;
   }
-  return live && today;
+  return { live, today };
 }
 
 function nestedNumber(value: unknown, key: string): number | null {

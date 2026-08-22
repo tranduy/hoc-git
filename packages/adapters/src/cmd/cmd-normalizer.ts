@@ -180,7 +180,8 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
       clockMs: Number(stoppageClock[2]) * 60_000
     };
   }
-  if (normalized === "TRỰC TIẾP" || normalized === "LIVE" || /^\dH\d+'$/u.test(normalized)) {
+  if (/^TRỰC TIẾP(?:\s+\d{1,2}:\d{2}(?:AM|PM)?)?$/u.test(normalized) ||
+    normalized === "LIVE" || /^\dH\d+'$/u.test(normalized)) {
     const clock = /^(\d)H(\d+)'$/u.exec(normalized);
     return {
       startAtUtcMs: options.observedAtMs,

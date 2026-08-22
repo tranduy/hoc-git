@@ -44,6 +44,17 @@ describe("TabRegistry", () => {
     expect(attach).toHaveBeenCalledTimes(2);
   });
 
+  it("adopts a newly opened recognized provider tab without requiring a prior preference", async () => {
+    const { registry, attach } = createRegistry();
+
+    await registry.handleNavigation({ id: 21,
+      url: "https://zenandfe.com/?agentId=4&token=manual&sportId=1&lng=vi&t=1",
+      title: "Sportsbook" });
+
+    expect(attach).toHaveBeenCalledWith(21);
+    expect(registry.list()).toMatchObject([{ lobby: "KSPORT", tabId: 21 }]);
+  });
+
   it("restores only lobby-to-tab preferences and never persists a URL", async () => {
     const attach = vi.fn(async () => undefined);
     const save = vi.fn(async () => undefined);
@@ -76,7 +87,7 @@ describe("TabRegistry", () => {
     );
 
     await registry.restore([
-      { id: 7, url: "https://zenandfe.com/sports" },
+      { id: 7, url: "https://zenandfe.com/sports", title: "Sportsbook" },
       { id: 9, url: "https://zenandfe.com/volta" },
       { id: 8, url: "https://cgnew.fts368.com/live" }
     ]);
@@ -89,6 +100,21 @@ describe("TabRegistry", () => {
     // Volta is not a KSPORT candidate, so the registry neither attaches nor
     // mutates that unrelated product tab.
     expect(closed).toEqual([]);
+  });
+
+  it("restores an opaque K-Sports shell so CDP can validate its sportsbook OOPIF", async () => {
+    const attach = vi.fn(async () => undefined);
+    const registry = new TabRegistry(
+      { attach, detach: vi.fn(async () => undefined) },
+      { load: async () => ({ "7": "KSPORT" }), save: vi.fn(async () => undefined) }
+    );
+
+    await registry.restore([
+      { id: 7, url: "https://zenandfe.com/?agentId=4&token=opaque", title: "zenandfe.com/?agentId=4&token=opaque" }
+    ]);
+
+    expect(attach).toHaveBeenCalledWith(7);
+    expect(registry.list()).toEqual([expect.objectContaining({ lobby: "KSPORT", tabId: 7 })]);
   });
 
   it("rejects a persisted K-Sports error page in favour of the loaded Sportsbook tab", async () => {

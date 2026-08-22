@@ -738,3 +738,41 @@ the requested five providers is therefore **4/5 current runtime PASS**, not
   `1787299102740`, WARP remained `Disconnected` across repeated observations
   for more than three minutes and the `cloudflared` process count remained 0.
   Reset provider completion is a separate gate and is not claimed here.
+
+## 2026-08-21 KSPORT reset race and portal bootstrap follow-up
+
+- Fixed the readiness race where KSPORT's real today destination
+  `/topic/sports/1_11/today/ma/event/vi` completed after the generic
+  five-second source window. KSPORT now gets a bounded ten-second window while
+  still requiring a complete live+today baseline. The regression fails at 20
+  polls and passes at poll 25.
+- KSPORT now prefers the signed-in `fabet.monster` portal handoff and only then
+  consumes the fresh one-time launch URL in the stable child tab. The fallback
+  Football selector also accepts structural `data-sport-id` variants while
+  excluding `Bóng đá 2`/odds boosts. No Cloudflare/WARP path was enabled.
+- Verification: Chrome extension focused tests 132/132 PASS, extension
+  typecheck/build PASS; SBOBET/SABA adapter and data-plane tests 65/65 PASS,
+  API typecheck PASS; `git diff --check` reports no whitespace errors.
+- Runtime Reset `1787309495153 -> 1787309581413` still FAILED only at the
+  SBOBET catalog gate. KSPORT tab `2105813265` remained attached and heartbeat
+  sequence advanced, but it rendered only the `Yêu thích của tôi` shell,
+  emitted no `/sport/` WebSocket frame, and same-tab `/api/v2/getEvent`
+  attempts resolved against `zenandfe.com` with HTTP 404. Therefore SBOBET is
+  **not accepted as realtime** in this runtime; the remaining failure is the
+  provider bootstrap/handoff, not STOMP decoding or the reset wait race.
+- A delayed final child (`2105813277`) subsequently emitted a real sportsbook
+  baseline: catalog became FRESH with 25 events/164 quotes and source sequence
+  reached 341. A 50-second observation then caught the exact remaining fault:
+  the source stopped at sequence 341 after roughly 16 seconds and both source
+  and catalog became STALE. This disproves stable recovery; do not treat the
+  short FRESH interval as acceptance.
+- The extension now preserves the KSPORT child observer across an unrecognized
+  outer-shell navigation only after `hasCompleteKsportBaseline` is true. This
+  addresses the observed detach-without-`WS_STATE CLOSED` path while still
+  rejecting Volta/error shells before a baseline exists. Focused extension
+  verification is now 145/145 PASS.
+- Runtime Reset `1787309842056 -> 1787309927052` did not provide a sportsbook
+  baseline at all: source `chrome:KSPORT:2105813305` only emitted shell
+  heartbeats and the prior catalog remained STALE. The preservation branch
+  therefore could not be exercised on this provider run, and stable SBOBET
+  recovery remains unverified/FAIL.

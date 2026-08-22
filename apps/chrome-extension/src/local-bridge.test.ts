@@ -155,6 +155,31 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([0]);
   });
 
+  it("serializes provider snapshot recovery so large catalogs cannot flood the API together", async () => {
+    const socket = new FakeSocket();
+    let releaseFirst: (() => void) | undefined;
+    const started: string[] = [];
+    const onSnapshotRequest = vi.fn(async (sourceId: string) => {
+      started.push(sourceId);
+      if (sourceId === "chrome:SABA:7") {
+        await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      }
+    });
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key",
+      onSnapshotRequest });
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:SABA:7" }) });
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:IM:8" }) });
+    await vi.waitFor(() => expect(started).toEqual(["chrome:SABA:7"]));
+
+    releaseFirst?.();
+    await vi.waitFor(() => expect(started).toEqual(["chrome:SABA:7", "chrome:IM:8"]));
+  });
+
   it("forwards an explicit source reload command to the attached-tab controller", () => {
     const socket = new FakeSocket();
     const onSourceReload = vi.fn();

@@ -9,6 +9,7 @@ import { SessionsPage } from "./pages/sessions-page.js";
 import { LiveCatalogPage } from "./pages/live-catalog-page.js";
 import { CatalogSourceApi } from "./api/catalog-sources.js";
 import { BetHistoryPage } from "./pages/bet-history-page.js";
+import { defaultTicketReportApi } from "./api/ticket-report.js";
 
 type Route = "/" | "/football-live" | "/lol-live" | "/football" | "/lol" | "/opportunities" | "/mappings" | "/sessions" | "/bet-history";
 
@@ -88,7 +89,8 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
   const content = route === "/sessions" ? <SessionsPage />
     : route === "/bet-history" ? <BetHistoryPage />
     : route === "/football-live" ? <LiveCatalogPage catalogRealtime={catalogRealtime}
-      catalogSourceApi={catalogSourceApi} fixedCategory="FOOTBALL" key="FOOTBALL-LIVE" />
+      catalogSourceApi={catalogSourceApi} fixedCategory="FOOTBALL" key="FOOTBALL-LIVE"
+      ticketReportApi={defaultTicketReportApi} />
     : route === "/lol-live" ? <header className="page-header"><p className="eyebrow">League of Legends</p>
       <h1>LoL is temporarily disabled</h1><p>Football realtime detection is the only active data flow.</p></header>
     : snapshot === undefined

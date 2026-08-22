@@ -74,6 +74,7 @@ export class LocalBridge {
   #probeInFlight = false;
   #connectToken = 0;
   #sourceRecoveryTail: Promise<void> | null = null;
+  #snapshotRecoveryTail: Promise<void> | null = null;
   #lastServerContactAtMs = 0;
 
   constructor(options: LocalBridgeOptions) {
@@ -247,8 +248,7 @@ export class LocalBridge {
       if (!parsed.success) return;
       this.#lastServerContactAtMs = this.#now();
       if (parsed.data.kind === "REQUEST_SNAPSHOT") {
-        try { void Promise.resolve(this.#onSnapshotRequest(parsed.data.sourceId)).catch(() => undefined); }
-        catch { /* source recovery must not disrupt the bridge */ }
+        this.#enqueueSnapshotRecovery(parsed.data.sourceId);
         return;
       }
       if (parsed.data.kind === "RELOAD_SOURCE") {
@@ -342,6 +342,20 @@ export class LocalBridge {
       if (this.#sourceRecoveryTail === settled) this.#sourceRecoveryTail = null;
     });
     this.#sourceRecoveryTail = settled;
+  }
+
+  #enqueueSnapshotRecovery(sourceId: string): void {
+    const invoke = async (): Promise<void> => {
+      try { await this.#onSnapshotRequest(sourceId); }
+      catch { /* one snapshot failure must not block the next provider */ }
+    };
+    const operation = this.#snapshotRecoveryTail === null
+      ? invoke()
+      : this.#snapshotRecoveryTail.then(invoke, invoke);
+    const settled = operation.finally(() => {
+      if (this.#snapshotRecoveryTail === settled) this.#snapshotRecoveryTail = null;
+    });
+    this.#snapshotRecoveryTail = settled;
   }
 
 }

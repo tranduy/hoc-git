@@ -1082,10 +1082,12 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
     fireEvent.click(await screen.findByRole("button", { name: "Compare Alpha vs Beta" }));
     expect(await screen.findByRole("columnheader", { name: "SABA" })).toBeTruthy();
+    expect(screen.getAllByRole("row", { name: /Ticket /u }).length).toBeGreaterThan(0);
     await act(async () => vi.advanceTimersByTimeAsync(1_000));
 
     expect(screen.getByRole("columnheader", { name: "SABA" })).toBeTruthy();
     expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
+    expect(screen.getAllByRole("row", { name: /Ticket /u }).length).toBeGreaterThan(0);
     expect(screen.getAllByText("Alpha vs Beta").length).toBeGreaterThan(0);
     expect(screen.queryByRole("status")).toBeNull();
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();

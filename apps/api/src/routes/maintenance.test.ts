@@ -21,4 +21,32 @@ describe("maintenance routes", () => {
       .toMatchObject({ running: false, lastResult: "SUCCESS" }));
     await app.close();
   });
+
+  it("refreshes one explicitly selected provider without starting full maintenance", async () => {
+    const refreshProvider = vi.fn(async () => 1);
+    const refreshAll = vi.fn(async () => undefined);
+    const app = Fastify();
+    registerMaintenanceRoutes(app, new SessionRefreshControl({ refresh: refreshAll }), { refreshProvider });
+
+    const response = await app.inject({ method: "POST", url: "/api/maintenance/refresh-provider/SBOBET" });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ provider: "SBOBET", requested: 1 });
+    expect(refreshProvider).toHaveBeenCalledWith("SBOBET");
+    expect(refreshAll).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("rejects an unknown targeted provider", async () => {
+    const app = Fastify();
+    registerMaintenanceRoutes(app, new SessionRefreshControl({ refresh: async () => undefined }), {
+      refreshProvider: async () => 1
+    });
+
+    const response = await app.inject({ method: "POST", url: "/api/maintenance/refresh-provider/UNKNOWN" });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: "INVALID_PROVIDER" });
+    await app.close();
+  });
 });

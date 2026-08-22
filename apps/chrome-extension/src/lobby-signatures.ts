@@ -29,13 +29,25 @@ export interface TrafficMarker {
   readonly marker: string;
 }
 
+export function isReadyKsportSportsbookTab(tab: TabDescriptor): boolean {
+  return recognizeLobbyTab(tab)?.lobby === "KSPORT" && /\bsportsbook\b/iu.test(tab.title?.trim() ?? "");
+}
+
+export function shouldPreserveKsportObserver(
+  attachedLobby: ChromeLobbyId,
+  hasCompleteBaseline: boolean
+): boolean {
+  return attachedLobby === "KSPORT" && hasCompleteBaseline;
+}
+
 export function recognizeLobbyTab(tab: TabDescriptor): LobbyTabCandidate | null {
   if (!Number.isSafeInteger(tab.id) || (tab.id ?? -1) < 0 || !tab.url) return null;
   try {
     const parsed = new URL(tab.url);
     const hostname = parsed.hostname.toLowerCase();
     const lobby = HOST_TO_LOBBY.get(hostname) ??
-      (/^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/iu.test(hostname) ? "SABA" :
+      (/^c0z0o[a-z0-9]+\.(?:bpb7jrm5|bpf7t7s9)\.com$/iu.test(hostname) ? "SBO" :
+      /^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/iu.test(hostname) ? "SABA" :
         /^pacific\.(?:agenate|racern)\.com$/iu.test(hostname) ? "TSPORT" : undefined);
     if (!lobby) return null;
     if (lobby === "KSPORT" && (/\bvolta\b/iu.test(parsed.pathname) ||

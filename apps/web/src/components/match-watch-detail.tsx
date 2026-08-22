@@ -32,6 +32,7 @@ import { RoiBadge } from "./roi-badge.js";
 import type { ProviderTicketIdentity } from "../api/provider-ticket.js";
 import { sortProviderItems } from "../catalog/provider-order.js";
 import { defaultTicketRealtimeCheckApi, type TicketRealtimeCheckApiLike } from "../api/ticket-realtime-check.js";
+import type { TicketReportApiLike } from "../api/ticket-report.js";
 
 type WatcherState = "WATCHING" | "STALE" | "ERROR" | "STOPPED";
 const systemClock = (): number => Date.now();
@@ -134,6 +135,7 @@ export function MatchWatchDetail({
   highlightTicketKey = null,
   onOpenProviderTicket,
   ticketRealtimeCheckApi = defaultTicketRealtimeCheckApi,
+  ticketReportApi,
   externallyRefreshed = false,
   storage = window.localStorage,
   clock = systemClock
@@ -154,6 +156,7 @@ export function MatchWatchDetail({
   readonly highlightTicketKey?: string | null;
   readonly onOpenProviderTicket?: ((identity: ProviderTicketIdentity) => void) | undefined;
   readonly ticketRealtimeCheckApi?: TicketRealtimeCheckApiLike;
+  readonly ticketReportApi?: TicketReportApiLike | undefined;
   readonly externallyRefreshed?: boolean;
   readonly storage?: Storage;
   readonly clock?: () => number;
@@ -186,6 +189,13 @@ export function MatchWatchDetail({
   }
   const [selectedProviders, setSelectedProviders] = useState<ReadonlySet<ProviderId>>(() =>
     new Set<ProviderId>(visibleBooks.filter((book) => book.connected && book.selected).map((book) => book.provider)));
+  const selectedBookKey = visibleBooks.filter((book) => book.connected && book.selected)
+    .map((book) => book.provider).join("|");
+
+  useEffect(() => {
+    setSelectedProviders(new Set<ProviderId>(visibleBooks.filter((book) => book.connected && book.selected)
+      .map((book) => book.provider)));
+  }, [providerEventId, selectedBookKey]);
 
   const appendEntries = (newEntries: readonly MatchWatchEntry[]): void => {
     if (newEntries.length === 0) return;
@@ -353,7 +363,7 @@ export function MatchWatchDetail({
         <RankedTicketTable event={event} providers={selectedTicketProviders}
           compact tickets={visibleRankedTickets} highlightTicketKey={highlightTicketKey} stakePolicy={stakePolicy}
           onOpenProviderTicket={onOpenProviderTicket} providerCatalogEvidence={providerCatalogEvidence}
-          realtimeCheckApi={ticketRealtimeCheckApi} />
+          realtimeCheckApi={ticketRealtimeCheckApi} ticketReportApi={ticketReportApi} />
       </section>}
 
       <div className="match-watch__layout">

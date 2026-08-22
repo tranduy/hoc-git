@@ -11,6 +11,7 @@ import { ProviderBrand } from "./provider-brand.js";
 import { RoiBadge } from "./roi-badge.js";
 import { sortProviderItems, sortProviders } from "../catalog/provider-order.js";
 import type { TicketRealtimeCheckApiLike } from "../api/ticket-realtime-check.js";
+import type { TicketReportApiLike, TicketReportEntry, TicketReportRequest } from "../api/ticket-report.js";
 
 export type ProviderCatalogEvidence = Partial<Record<ProviderId, {
   readonly accountId: string;
@@ -52,7 +53,7 @@ export function ticketDomId(eventKey: string, ticketKey: string): string {
 }
 
 function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy, onOpenProviderTicket,
-  providerCatalogEvidence, realtimeCheckApi }: {
+  providerCatalogEvidence, realtimeCheckApi, onReport }: {
   readonly event: ProviderEvent;
   readonly providers: readonly ProviderId[];
   readonly ticket: RankedTicket;
@@ -62,12 +63,17 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
   readonly onOpenProviderTicket?: ((identity: ProviderTicketIdentity) => void) | undefined;
   readonly providerCatalogEvidence?: ProviderCatalogEvidence | undefined;
   readonly realtimeCheckApi?: TicketRealtimeCheckApiLike | undefined;
+  readonly onReport?: ((request: TicketReportRequest) => Promise<void>) | undefined;
 }) {
   const [anchor, setAnchor] = useState<{ readonly provider: ProviderId; readonly selection: string;
     readonly stake: string } | null>(null);
   const [audit, setAudit] = useState<{ readonly request: TicketRealtimeCheckRequest;
     readonly response: TicketRealtimeCheckResponse | null; readonly error: string | null;
     readonly pending: boolean } | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportReason, setReportReason] = useState("");
+  const [reportPending, setReportPending] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
   const pair = useMemo(() => pairForPlan(ticket, providers), [providers, ticket]);
   const adjustedPlan = useMemo(() => anchor === null ? ticket.plan : stakePolicy === undefined || pair === null ? null :
     buildObservedAnchoredStakeEstimate(ticket.row, pair, stakePolicy, anchor), [anchor, pair, stakePolicy, ticket]);
@@ -90,10 +96,10 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     return plan?.legs.find((leg) => leg.provider === provider && leg.selection === selection)?.stake ??
       ticket.plan?.legs.find((leg) => leg.provider === provider && leg.selection === selection)?.stake ?? "";
   };
-  const canCheckRealtime = realtimeCheckApi !== undefined && openableLegs.length === 2 && openableLegs.every(({ leg }) =>
+  const canCaptureTicket = openableLegs.length === 2 && openableLegs.every(({ leg }) =>
     providerCatalogEvidence?.[leg.provider] !== undefined && displayedStake(leg.provider, leg.selection) !== "");
-  const checkRealtime = async (): Promise<void> => {
-    if (!canCheckRealtime || realtimeCheckApi === undefined) return;
+  const captureDisplayedTicket = (): TicketRealtimeCheckRequest | null => {
+    if (!canCaptureTicket) return null;
     const capturedAtMs = Date.now();
     const toDisplayedLeg = ({ leg, quote }: (typeof openableLegs)[number]): TicketRealtimeCheckRequest["legs"][number] => {
       const evidence = providerCatalogEvidence![leg.provider]!;
@@ -106,12 +112,17 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
         receivedMonotonicMs: quote.receivedMonotonicMs, sequence: quote.sequence,
         requestedStake: displayedStake(leg.provider, leg.selection) };
     };
-    const legs: TicketRealtimeCheckRequest["legs"] = [toDisplayedLeg(openableLegs[0]!),
-      toDisplayedLeg(openableLegs[1]!)];
-    const request: TicketRealtimeCheckRequest = { eventLabel: `${event.participantA} vs ${event.participantB}`,
+    return { eventLabel: `${event.participantA} vs ${event.participantB}`,
       participantA: event.participantA, participantB: event.participantB,
       marketType: ticket.row.marketType as TicketRealtimeCheckRequest["marketType"],
-      scope: ticket.row.scope as TicketRealtimeCheckRequest["scope"], capturedAtMs, legs };
+      scope: ticket.row.scope as TicketRealtimeCheckRequest["scope"], capturedAtMs,
+      legs: [toDisplayedLeg(openableLegs[0]!), toDisplayedLeg(openableLegs[1]!)] };
+  };
+  const canCheckRealtime = realtimeCheckApi !== undefined && canCaptureTicket;
+  const checkRealtime = async (): Promise<void> => {
+    if (!canCheckRealtime || realtimeCheckApi === undefined) return;
+    const request = captureDisplayedTicket();
+    if (request === null) return;
     setAudit({ request, response: null, error: null, pending: true });
     try {
       const response = await realtimeCheckApi.check(request);
@@ -123,6 +134,23 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
         ? { request, response: null, error: message, pending: false } : current);
     }
   };
+  const submitReport = async (): Promise<void> => {
+    const display = captureDisplayedTicket();
+    const reason = reportReason.trim();
+    if (display === null || onReport === undefined || reason === "") return;
+    setReportPending(true); setReportError(null);
+    try {
+      await onReport({ eventKey: ticket.eventKey, ticketKey: ticket.key, reason, reportedAtMs: Date.now(),
+        competition: event.competition, startAtUtcMs: event.startAtUtcMs, display,
+        estimate: { state: ticket.state, roi: plan?.roi ?? null,
+          worstCaseProfit: plan?.worstCaseProfit ?? null, totalStake: plan?.totalStake ?? null,
+          movementMagnitude: ticket.movementMagnitude }, realtimeCheck: audit?.response ?? null });
+      setReportReason(""); setReportOpen(false);
+    } catch (error) {
+      setReportError(error instanceof Error ? error.message : "TICKET_REPORT_UNAVAILABLE");
+    } finally { setReportPending(false); }
+  };
+  const canReport = onReport !== undefined && canCaptureTicket;
   return <><tr aria-label={`Ticket ${ticket.key}`}
     className={`${profitable ? "ranked-ticket-row ranked-ticket-row--profitable" :
       "ranked-ticket-row ranked-ticket-row--neutral"}${compact ? " ranked-ticket-row--compact" : ""}${highlighted ? " ranked-ticket-row--highlight" : ""}`}
@@ -189,9 +217,20 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
       </small>)}
       <small>Move {ticket.movementMagnitude}</small></div>}
       {ticket.reason !== null && <p className="ranked-ticket-reason">{displayReason(ticket.reason)}</p>}</td>
-  </tr>{canCheckRealtime && <tr className="ticket-realtime-audit-row"><td colSpan={rowProviders.length + 5}>
+  </tr>{(canCheckRealtime || canReport) && <tr className="ticket-realtime-audit-row"><td colSpan={rowProviders.length + 5}>
     <button className="ticket-realtime-check" disabled={audit?.pending === true}
       onClick={() => { void checkRealtime(); }} type="button">{audit?.pending === true ? "Đang kiểm tra…" : "Kiểm tra giá thật"}</button>
+    {canReport && <button aria-label={`Report vé ${ticket.key}`} className="ticket-report-button"
+      onClick={() => setReportOpen((current) => !current)} type="button">Report</button>}
+    {reportOpen && <form className="ticket-report-form" onSubmit={(submitEvent) => {
+      submitEvent.preventDefault(); void submitReport();
+    }}><label>Nguyên nhân
+      <textarea aria-label={`Nguyên nhân report ${ticket.key}`} maxLength={2000}
+        onChange={(changeEvent) => setReportReason(changeEvent.currentTarget.value)} required value={reportReason} />
+    </label><button aria-label={`Gửi report ${ticket.key}`} disabled={reportPending || reportReason.trim() === ""}
+      type="submit">{reportPending ? "Đang lưu…" : "Gửi report"}</button>
+      {reportError !== null && <small className="ticket-report-error">{reportError}</small>}
+    </form>}
     {audit !== null && <section aria-label={`Kiểm tra giá thật ${ticket.key}`} className="ticket-realtime-audit">
       {audit.request.legs.map((displayed, index) => {
         const checked = audit.response?.legs[index];
@@ -223,7 +262,7 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
 }
 
 export function RankedTicketTable({ event, providers, tickets, compact = false, highlightTicketKey, stakePolicy,
-  onOpenProviderTicket, providerCatalogEvidence, realtimeCheckApi }: {
+  onOpenProviderTicket, providerCatalogEvidence, realtimeCheckApi, ticketReportApi }: {
   readonly event: ProviderEvent;
   readonly providers: readonly ProviderId[];
   readonly tickets: readonly RankedTicket[];
@@ -233,10 +272,30 @@ export function RankedTicketTable({ event, providers, tickets, compact = false, 
   readonly onOpenProviderTicket?: ((identity: ProviderTicketIdentity) => void) | undefined;
   readonly providerCatalogEvidence?: ProviderCatalogEvidence | undefined;
   readonly realtimeCheckApi?: TicketRealtimeCheckApiLike | undefined;
+  readonly ticketReportApi?: TicketReportApiLike | undefined;
 }) {
   const orderedProviders = useMemo(() => sortProviders(providers), [providers]);
   const visible = renderableRankedTickets(tickets, orderedProviders).slice(0, 5);
+  const reportEventKey = tickets[0]?.eventKey ?? null;
+  const [reports, setReports] = useState<readonly TicketReportEntry[]>([]);
+  const [reportHistoryError, setReportHistoryError] = useState<string | null>(null);
   const autoFocusedHighlight = useRef<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    setReports([]); setReportHistoryError(null);
+    if (ticketReportApi === undefined || reportEventKey === null) return () => { active = false; };
+    void ticketReportApi.list(reportEventKey).then((result) => {
+      if (active) setReports(result.reports);
+    }).catch((error) => {
+      if (active) setReportHistoryError(error instanceof Error ? error.message : "TICKET_REPORT_UNAVAILABLE");
+    });
+    return () => { active = false; };
+  }, [reportEventKey, ticketReportApi]);
+  const createReport = async (request: TicketReportRequest): Promise<void> => {
+    if (ticketReportApi === undefined) throw new Error("TICKET_REPORT_UNAVAILABLE");
+    const entry = await ticketReportApi.create(request);
+    setReports((current) => [entry, ...current.filter((item) => item.reportId !== entry.reportId)]);
+  };
   useEffect(() => {
     if (highlightTicketKey === null || highlightTicketKey === undefined) {
       autoFocusedHighlight.current = null;
@@ -259,7 +318,21 @@ export function RankedTicketTable({ event, providers, tickets, compact = false, 
         <th>Selected opposing legs</th><th>Stakes</th><th>Outcome profit</th><th>Guaranteed / ROI</th></tr></thead>
       <tbody>{visible.map((ticket) => <TicketRow compact={compact} event={event} highlighted={highlightTicketKey === ticket.key}
         key={ticket.key} onOpenProviderTicket={onOpenProviderTicket} providers={orderedProviders} stakePolicy={stakePolicy}
+        onReport={ticketReportApi === undefined ? undefined : createReport}
         providerCatalogEvidence={providerCatalogEvidence} realtimeCheckApi={realtimeCheckApi} ticket={ticket} />)}</tbody>
     </table>
+    {ticketReportApi !== undefined && <section aria-label="Lịch sử report" className="ticket-report-history">
+      <h3>Lịch sử report</h3>
+      {reports.length === 0 && reportHistoryError === null && <p>Chưa có report cho trận này.</p>}
+      {reports.map((report) => <article key={report.reportId}><header><strong>{report.request.reason}</strong>
+        <time dateTime={new Date(report.createdAtMs).toISOString()}>{new Date(report.createdAtMs).toLocaleString("vi-VN")}</time></header>
+        <p>{report.request.ticketKey} · {report.request.display.marketType} · {report.request.display.scope}</p>
+        <div>{report.request.display.legs.map((leg) => <span key={`${report.reportId}:${leg.provider}`}>
+          {leg.provider}: {leg.selection} {leg.line ?? ""} @ {leg.rawOdds} {leg.rawFormat} · seq {leg.sequence ?? "—"}
+        </span>)}</div>
+        {report.request.realtimeCheck !== null && <small>Kiểm tra giá: {report.request.realtimeCheck.checkId}</small>}
+      </article>)}
+      {reportHistoryError !== null && <p className="ticket-report-error">{reportHistoryError}</p>}
+    </section>}
   </div>;
 }

@@ -86,12 +86,18 @@ function recordKey(record: Readonly<Record<string, unknown>>): { readonly key: s
 
 export class SabaPushDecoder {
   readonly #channels = new Map<string, ChannelState>();
+  readonly #bridgeChannels = new Map<string, string>();
+  readonly #fieldTables = new Map<string, readonly (string | undefined)[]>();
 
   apply(frame: SabaPushFrame): SabaPushApplyResult {
     if (!/^b\d+$/u.test(frame.bridgeId) || (frame.revision !== null && frame.revision.length === 0) ||
       !Array.isArray(frame.rows)) protocolError();
+    const announcedChannel = frame.rows.find((row) => Array.isArray(row) && row[0] === "c" &&
+      typeof row[1] === "string")?.[1] as string | undefined;
+    const providerChannel = announcedChannel ?? this.#bridgeChannels.get(frame.bridgeId) ?? frame.bridgeId;
+    if (announcedChannel !== undefined) this.#bridgeChannels.set(frame.bridgeId, announcedChannel);
     const current = this.#channels.get(frame.bridgeId) ?? {
-      fields: [], records: new Map(), lastRevision: null, pending: null
+      fields: this.#fieldTables.get(providerChannel) ?? [], records: new Map(), lastRevision: null, pending: null
     };
     if (current.pending === null && frame.revision !== null && frame.revision === current.lastRevision) {
       return {
@@ -159,6 +165,12 @@ export class SabaPushDecoder {
       records.set(identity.key, merged);
       changes.push({ operation: "UPSERT", key: identity.key, record: publicRecord(merged) });
     }
+
+    // SABA rotates bridge ids (b5, b52, ...) independently from the logical
+    // provider channel (c1, c2, ...). The field table belongs to that logical
+    // channel and is commonly announced on one bridge before data arrives on
+    // another. Keeping it per bridge makes every later numeric row undecodable.
+    if (fields.length > 0) this.#fieldTables.set(providerChannel, [...fields]);
 
     const snapshotOpen = current.pending !== null || sawReset;
     if (snapshotOpen && !sawDone) {
