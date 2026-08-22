@@ -112,6 +112,39 @@ describe("KsportWsCatalogAdapter", () => {
     expect(catalog.events.map((item) => item.providerEventId)).toEqual(["2"]);
   });
 
+  it("keeps the sportsbook socket when an auxiliary jackpot socket opens after it", () => {
+    const event = (id: number) => ({ "0": "2026-08-20T16:00:00Z", "2": `Home ${id}`, "3": `Away ${id}`,
+      "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
+    const adapter = new KsportWsCatalogAdapter();
+    const open = (streamId: string, sequence: number): ChromeBridgeEnvelope => ({
+      ...receiptEnvelope([], "live", sequence, 1, streamId), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: JSON.stringify({ state: "OPEN" }) } });
+    adapter.decode(open("sportsbook", 1));
+    adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 2, 10, "sportsbook"));
+    expect(adapter.decode(receiptEnvelope([], "today", 3, 11, "sportsbook"))).toHaveLength(1);
+
+    // Jackpot/menu socket opens later and only ever carries non-sportsbook frames.
+    adapter.decode(open("jackpot", 4));
+    expect(adapter.decode({ ...envelope({ pong: 1 }, "/topic/menu/live/count"),
+      request: { ...envelope([]).request, streamId: "jackpot" }, sequence: 5 })).toEqual([]);
+
+    // The real feed keeps publishing.
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 6, 12, "sportsbook")))
+      .toEqual([]);
+    const catalog = adapter.decode(receiptEnvelope([], "today", 7, 13, "sportsbook"))[0]!.value as {
+      events: Array<{ providerEventId: string }> };
+    expect(catalog.events.map((item) => item.providerEventId)).toEqual(["1"]);
+
+    // A genuinely newer sportsbook socket still supersedes it.
+    adapter.decode(open("sportsbook-2", 8));
+    adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(2)] }], "live", 9, 1, "sportsbook-2"));
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 10, 14, "sportsbook")))
+      .toEqual([]);
+    const next = adapter.decode(receiptEnvelope([], "today", 11, 2, "sportsbook-2"))[0]!.value as {
+      events: Array<{ providerEventId: string }> };
+    expect(next.events.map((item) => item.providerEventId)).toEqual(["2"]);
+  });
+
   it("decodes the K-Sports STOMP catalog without needing DOM fallback", () => {
     const event = { "0": "2026-08-15T13:00:00Z", "2": "Home", "3": "Away", "7": {
       "5": ["0.5 0.92*55933920050000000h -0.98*55933920050000000a h 735502668161000 0 0 1 1 0"]

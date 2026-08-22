@@ -93,8 +93,21 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #epochs = new Map<string, SocketEpoch>();
   readonly #httpPartitions = new Map<string, Map<CatalogPartition, PartitionSnapshot>>();
   readonly #retiredStreams = new Map<string, Set<string>>();
+  readonly #streamOpenOrdinals = new Map<string, Map<string, number>>();
+
+  #openOrdinal(sourceId: string, streamId: string): number {
+    const ordinals = this.#streamOpenOrdinals.get(sourceId) ?? new Map<string, number>();
+    let ordinal = ordinals.get(streamId);
+    if (ordinal === undefined) {
+      ordinal = ordinals.size + 1;
+      ordinals.set(streamId, ordinal);
+      this.#streamOpenOrdinals.set(sourceId, ordinals);
+    }
+    return ordinal;
+  }
 
   resetSource(sourceId: string): void {
+    this.#streamOpenOrdinals.delete(sourceId);
     this.#epochs.delete(sourceId);
     this.#httpPartitions.delete(sourceId);
     this.#retiredStreams.delete(sourceId);
@@ -156,6 +169,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (state === null) return [];
       if (state === "OPEN") {
         const streamId = envelope.request.streamId ?? "legacy";
+        this.#openOrdinal(envelope.sourceId, streamId);
         const current = this.#epochs.get(envelope.sourceId);
         if (current !== undefined && current.streamId !== streamId) {
           const retired = this.#retiredStreams.get(envelope.sourceId) ?? new Set<string>();
@@ -189,12 +203,33 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     const receipts = decoder.push(envelope.payload.body);
     if (receipts.length === 0) return [];
     let epoch = this.#epochs.get(envelope.sourceId);
-    if (this.#retiredStreams.get(envelope.sourceId)?.has(streamId) === true) return [];
-    if (epoch === undefined) {
-      epoch = { streamId: envelope.request.streamId ?? "legacy", partitions: new Map() };
+    const carriesSportsbook = receipts.some((receipt) => receiptPartition(receipt) !== null);
+    const retired = this.#retiredStreams.get(envelope.sourceId) ?? new Set<string>();
+    const adopt = (): void => {
+      if (epoch !== undefined && epoch.streamId !== streamId) retired.add(epoch.streamId);
+      retired.delete(streamId);
+      this.#retiredStreams.set(envelope.sourceId, retired);
+      epoch = { streamId, partitions: new Map() };
       this.#epochs.set(envelope.sourceId, epoch);
+    };
+    if (retired.has(streamId)) {
+      // The page opens auxiliary /sport/ sockets (jackpot, menu counters) after
+      // the sportsbook socket. Opening one of those made it the epoch and
+      // retired the real feed. A sportsbook receipt on the retired stream while
+      // the adopted stream has never delivered one proves the adoption was
+      // wrong: reclaim the stream that actually carries the catalog.
+      if (epoch === undefined || epoch.partitions.size > 0 || !carriesSportsbook) return [];
+      adopt();
+    } else if (epoch === undefined) {
+      adopt();
+    } else if (epoch.streamId !== streamId) {
+      // A newer socket that delivers sportsbook receipts supersedes the
+      // current epoch (reconnect without a CLOSED event); an older one does not.
+      if (!carriesSportsbook || this.#openOrdinal(envelope.sourceId, streamId) <=
+        this.#openOrdinal(envelope.sourceId, epoch.streamId)) return [];
+      adopt();
     }
-    if (epoch.streamId !== streamId) return [];
+    if (epoch === undefined || epoch.streamId !== streamId) return [];
     let accepted = false;
     for (const receipt of receipts) {
       const partition = receiptPartition(receipt);
