@@ -1,0 +1,15 @@
+.worktrees/
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+artifacts/
+.env
+.auth/
+.run/
+browser-profiles/
+captures/raw/
+*.session.json
+*.vault.json
+vault.v1.json*

@@ -1,0 +1,31 @@
+{
+  "name": "@tool-chenh/api",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": "./dist/runtime.js",
+  "types": "./dist/runtime.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "npm run build && node dist/server.js",
+    "start": "node dist/server.js",
+    "inspect:launch": "npm run build && node dist/providers/inspect-launch.js",
+    "inspect:saba-push": "npm run build && node dist/providers/saba/inspect-saba-push.js",
+    "test": "vitest run --maxWorkers=4",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/websocket": "^11.3.0",
+    "@tool-chenh/adapters": "*",
+    "@tool-chenh/contracts": "*",
+    "@tool-chenh/core": "*",
+    "fastify": "^5.11.3",
+    "playwright": "^1.55.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.0",
+    "ws": "^8.21.3"
+  }
+}

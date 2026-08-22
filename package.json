@@ -1,0 +1,30 @@
+{
+  "name": "tool-chenh",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev": "npm run dev --workspace @tool-chenh/api",
+    "dev:web": "npm run dev --workspace @tool-chenh/web",
+    "start:live": "npm run build && node scripts/start-live-stack.mjs",
+    "dev:fixture": "npm run build && node scripts/start-fixture-stack.mjs",
+    "test": "npm run test --workspaces --if-present",
+    "test:fixture-stack": "node --test scripts/fixture-stack-readiness.test.mjs",
+    "test:managed-stack": "node --test scripts/managed-stack.test.mjs scripts/stack-paths.test.mjs scripts/stack-state.test.mjs scripts/automation-browser-cleanup.test.mjs scripts/resource-retention.test.mjs",
+    "test:watch-smoke": "node --test scripts/smoke-watch-match.test.mjs",
+    "test:integration": "vitest run tests/integration",
+    "test:e2e": "playwright test",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "verify": "npm run typecheck && npm test && npm run test:integration && npm run test:fixture-stack && npm run test:watch-smoke"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.1",
+    "@types/node": "^22.0.0",
+    "fast-check": "^4.9.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.0.0"
+  }
+}

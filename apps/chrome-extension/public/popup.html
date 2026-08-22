@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Fieldline Feed</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <header>
+      <strong>Fieldline Feed</strong>
+      <span>Read only</span>
+    </header>
+    <label for="installation-key">Local installation key</label>
+    <div class="key-row">
+      <input id="installation-key" type="password" autocomplete="off" spellcheck="false">
+      <button id="save-key" type="button">Save</button>
+    </div>
+    <p id="bridge-state" class="status">Bridge not configured</p>
+    <section>
+      <div class="section-heading">
+        <h2>Recognized tabs</h2>
+        <button id="attach-all" type="button">Attach all</button>
+      </div>
+      <div id="tabs" class="tabs"></div>
+    </section>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

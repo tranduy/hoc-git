@@ -1,0 +1,33 @@
+import { describe, expect, it } from "vitest";
+import { CatalogCoverageGuard } from "./catalog-coverage-guard.js";
+
+describe("CatalogCoverageGuard", () => {
+  it("rejects a catastrophic shrink until an explicit source reset authorizes a new baseline", () => {
+    const guard = new CatalogCoverageGuard();
+    const ids = (count: number) => Array.from({ length: count }, (_, index) => `event-${index}`);
+
+    expect(guard.accept("SABA|FOOTBALL", ids(293))).toBe(true);
+    expect(guard.accept("SABA|FOOTBALL", ids(100))).toBe(false);
+    expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(false);
+    expect(guard.accept("SABA|FOOTBALL", ids(100))).toBe(false);
+    expect(guard.accept("SABA|FOOTBALL", ids(293))).toBe(true);
+
+    expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(false);
+    expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(false);
+    expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(false);
+
+    guard.reset("SABA|FOOTBALL");
+    expect(guard.accept("SABA|FOOTBALL", ids(70))).toBe(true);
+  });
+
+  it("forgets prior coverage when a source generation is reset", () => {
+    const guard = new CatalogCoverageGuard();
+    const ids = (count: number) => Array.from({ length: count }, (_, index) => `event-${index}`);
+    expect(guard.accept("catalog-source:SABA:FOOTBALL", ids(10))).toBe(true);
+    expect(guard.accept("catalog-source:SABA:FOOTBALL", ids(1))).toBe(false);
+
+    guard.reset("catalog-source:SABA:FOOTBALL");
+
+    expect(guard.accept("catalog-source:SABA:FOOTBALL", ids(1))).toBe(true);
+  });
+});

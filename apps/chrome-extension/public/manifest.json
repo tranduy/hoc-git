@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Fieldline Chrome Feed",
+  "version": "0.2.18",
+  "description": "Read-only observer for explicitly selected sportsbook tabs.",
+  "permissions": ["alarms", "debugger", "sessions", "storage", "tabs"],
+  "host_permissions": ["http://127.0.0.1:4310/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Fieldline Chrome Feed",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src http://127.0.0.1:4310 ws://127.0.0.1:4310"
+  }
+}

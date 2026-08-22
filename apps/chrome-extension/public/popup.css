@@ -1,0 +1,15 @@
+:root { color-scheme: dark; font: 13px/1.4 system-ui, sans-serif; }
+body { width: 360px; margin: 0; padding: 14px; color: #edf7ff; background: #0c1117; }
+header, .key-row, .tab, .section-heading { display: flex; align-items: center; gap: 8px; }
+header { justify-content: space-between; margin-bottom: 14px; }
+header span { color: #55d99a; font-size: 11px; text-transform: uppercase; }
+label, h2 { display: block; margin: 8px 0 5px; font-size: 12px; color: #a9c6d8; }
+.section-heading { justify-content: space-between; }
+input { flex: 1; min-width: 0; padding: 8px; border: 1px solid #405365; border-radius: 6px; background: #111b24; color: inherit; }
+button { padding: 8px 10px; border: 1px solid #4c6b7d; border-radius: 6px; background: #182733; color: inherit; cursor: pointer; }
+button:hover { border-color: #54c7ff; }
+.status { margin: 8px 0; color: #ffca55; }
+.tabs { display: grid; gap: 6px; }
+.tab { justify-content: space-between; padding: 8px; border: 1px solid #283b49; border-radius: 7px; }
+.tab small { display: block; max-width: 225px; overflow: hidden; color: #8eacbd; text-overflow: ellipsis; white-space: nowrap; }
+.empty { color: #8eacbd; }
