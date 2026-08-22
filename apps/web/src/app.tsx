@@ -25,6 +25,7 @@ const routes: ReadonlyArray<{ readonly path: Route; readonly label: string }> = 
 ];
 
 const catalogSourceApi = new CatalogSourceApi();
+const freshnessApi = new CatalogSourceApi();
 
 function routeFor(pathname: string): Route {
   if (pathname === "/") return "/football-live";
@@ -89,7 +90,7 @@ export function App({ initialSnapshot }: { readonly initialSnapshot?: AppSnapsho
   const content = route === "/sessions" ? <SessionsPage />
     : route === "/bet-history" ? <BetHistoryPage />
     : route === "/football-live" ? <LiveCatalogPage catalogRealtime={catalogRealtime}
-      catalogSourceApi={catalogSourceApi} fixedCategory="FOOTBALL" key="FOOTBALL-LIVE"
+      catalogSourceApi={catalogSourceApi} freshnessApi={freshnessApi} fixedCategory="FOOTBALL" key="FOOTBALL-LIVE"
       ticketReportApi={defaultTicketReportApi} />
     : route === "/lol-live" ? <header className="page-header"><p className="eyebrow">League of Legends</p>
       <h1>LoL is temporarily disabled</h1><p>Football realtime detection is the only active data flow.</p></header>

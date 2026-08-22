@@ -5,6 +5,7 @@ import { CatalogApi, catalogRetryDelayMs, type CatalogApiLike, type CatalogReadR
   type LiveCatalogResponse } from "../api/catalog.js";
 import type { CatalogRealtimeFeed } from "../api/client.js";
 import type { CatalogSourceApiLike } from "../api/catalog-sources.js";
+import { ProviderFreshnessStrip } from "../components/provider-freshness-strip.js";
 import { defaultProviderPreflightApi, type ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import { loadCatalogCache, saveCatalogCache } from "../catalog/catalog-cache.js";
 import { decimalOdds, formatCountdown, formatMatchClock,
@@ -367,7 +368,7 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
 
 export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi,
   catalogSourceApi, providerPreflightApi = defaultProviderPreflightApi,
-  providerTicketApi = defaultProviderTicketApi, ticketReportApi, fixedCategory, catalogRealtime }: {
+  providerTicketApi = defaultProviderTicketApi, ticketReportApi, fixedCategory, catalogRealtime, freshnessApi }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
   readonly catalogSourceApi?: CatalogSourceApiLike;
@@ -376,6 +377,12 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   readonly ticketReportApi?: TicketReportApiLike;
   readonly fixedCategory?: CatalogCategory;
   readonly catalogRealtime?: CatalogRealtimeFeed;
+  /**
+   * Optional dedicated client for the provider freshness strip. It polls
+   * independently of the comparison read loop so it never competes with or
+   * alters the catalog source reads above.
+   */
+  readonly freshnessApi?: CatalogSourceApiLike;
 }) {
   const [accounts, setAccounts] = useState<readonly AccountStatus[]>([]);
   const [sources, setSources] = useState<readonly CatalogSourceStatus[]>([]);
@@ -860,6 +867,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     <header className="page-header page-header--compact"><p className="eyebrow">{category === "FOOTBALL" ? "Football" : "League of Legends"} · live gaps</p>
       <h1>{category === "FOOTBALL" ? "Football Live Price Gaps" : "LoL Live Price Gaps"}</h1>
     </header>
+    {freshnessApi === undefined ? null : <ProviderFreshnessStrip api={freshnessApi} category={category} />}
     <section className="catalog-toolbar" aria-label="Catalog controls">
       {fixedCategory === undefined && <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
         onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
