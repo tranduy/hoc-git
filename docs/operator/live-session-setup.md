@@ -45,6 +45,8 @@ Select **Reset Fabet session**, review the confirmation, then confirm. This clea
 
 Secrets are encrypted with Windows DPAPI for the current Windows user and stored below `%LOCALAPPDATA%\tool-chenh\.auth`. Do not copy the encrypted files to another Windows account and expect them to decrypt.
 
+On macOS and Linux the same flow works without `LOCALAPPDATA`: the data root defaults to `~/Library/Application Support` (macOS) or `$XDG_DATA_HOME`/`~/.local/share` (Linux), and secrets are encrypted with AES-256-GCM under a per-user key file `tool-chenh/.auth/local-vault.key` (mode 0600). Use `npm run ...` instead of `npm.cmd run ...`. The Cloudflare WARP helper defaults to `/usr/local/bin/warp-cli`; override with `FABET_WARP_CLI_PATH`.
+
 ## Betting safety
 
 This milestone is read-only. No balance is used and no wager is submitted. Any future execution feature must require explicit confirmation for each bet before either leg is placed.

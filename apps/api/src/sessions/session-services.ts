@@ -8,7 +8,7 @@ import {
   PlaywrightFabetAutomation,
   type FabetBrowserAutomation
 } from "./fabet-browser.js";
-import { DpapiProtector } from "./dpapi-protector.js";
+import { createPlatformSecretProtector, defaultWarpCliPath } from "./platform-secret-protector.js";
 import { SecretVault } from "./secret-vault.js";
 import { SessionManager } from "./session-manager.js";
 import { TrustedDomainStore } from "./trusted-domain-store.js";
@@ -127,7 +127,7 @@ export function createFabetAuthEgresses(options: {
 }): readonly AuthEgress[] {
   const egresses: AuthEgress[] = [new DirectAuthEgress()];
   if (options.proxyUrl?.trim()) egresses.push(new ConfiguredProxyAuthEgress(options.proxyUrl.trim()));
-  const warpCliPath = options.warpCliPath ?? "C:\\Program Files\\Cloudflare\\Cloudflare WARP\\warp-cli.exe";
+  const warpCliPath = options.warpCliPath ?? defaultWarpCliPath();
   const localWarpEnabled = options.enableLocalWarp === true;
   if (localWarpEnabled && (options.fileExists ?? existsSync)(warpCliPath)) {
     egresses.push(new WarpSocksAuthEgress({
@@ -145,7 +145,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
   const root = resolve(join(options.localAppData, "tool-chenh", ".auth"));
   const vault = new SecretVault({
     directory: join(root, "vault"),
-    protector: options.protector ?? new DpapiProtector()
+    protector: options.protector ?? createPlatformSecretProtector({ authRoot: root })
   });
   const trustStore = new TrustedDomainStore({ vault, clock });
   const profilesRoot = join(root, "browser-profiles");
@@ -198,7 +198,7 @@ export function createSessionServices(options: CreateSessionServicesOptions): Ma
     ...(options.warpCliPath === undefined ? {} : { warpCliPath: options.warpCliPath }),
     ...(options.warpProxyPort === undefined ? {} : { warpProxyPort: options.warpProxyPort }),
   });
-  const warpCliPath = options.warpCliPath ?? "C:\\Program Files\\Cloudflare\\Cloudflare WARP\\warp-cli.exe";
+  const warpCliPath = options.warpCliPath ?? defaultWarpCliPath();
   const maintenanceWarpCli = options.enableLocalWarpAuth === true && existsSync(warpCliPath)
     ? new ProcessWarpCli({ executable: warpCliPath })
     : null;

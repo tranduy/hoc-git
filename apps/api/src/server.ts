@@ -28,6 +28,7 @@ import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-featu
 import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
 import { refreshBridgeProviderSources } from "./chrome-bridge/provider-source-refresh.js";
 import { AutomaticSourceRecovery } from "./chrome-bridge/automatic-source-recovery.js";
+import { resolveLocalAppData } from "./local-app-data.js";
 import { LatestCatalogPersister } from "./catalog/latest-catalog-persister.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
@@ -205,10 +206,8 @@ export function createFixtureRuntime(speed: number): Runtime {
 
 export async function startServer(env: Readonly<Record<string, string | undefined>> = process.env) {
   const config = resolveServerConfig(env);
-  const localAppData = env.LOCALAPPDATA;
-  if (localAppData === undefined || localAppData.trim().length === 0) {
-    throw new Error("LOCAL_APP_DATA_REQUIRED");
-  }
+  const localAppData = resolveLocalAppData(env);
+  if (localAppData === null) throw new Error("LOCAL_APP_DATA_REQUIRED");
   const sessionServices = createSessionServices({
     localAppData,
     providerFees: resolveProviderFees(env),

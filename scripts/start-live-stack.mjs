@@ -10,6 +10,7 @@ import { ensureChromeBridgeKey } from "./chrome-bridge-key.mjs";
 import { resolveApiNodeArgs, resolveLiveStackEnvironment } from "./live-stack-config.mjs";
 import { cleanupOrphanedAutomationBrowsers } from "./automation-browser-cleanup.mjs";
 import { enforceToolResourceRetention } from "./resource-retention.mjs";
+import { resolveLocalAppData } from "./local-app-data.mjs";
 
 const host = "127.0.0.1";
 const apiPort = 4310;
@@ -36,7 +37,11 @@ try {
 // alive on Windows. Remove only those private profiles before creating a new
 // stack; the user's regular Chrome browser is never touched.
 await cleanupOrphanedAutomationBrowsers();
-const localToolRoot = resolve(process.env.LOCALAPPDATA ?? repositoryRoot, "tool-chenh");
+// Windows requires LOCALAPPDATA; macOS/Linux fall back to their own per-user
+// data directory so the same launcher works on every operator machine.
+const localAppData = resolveLocalAppData();
+if (localAppData === null) throw new Error("LOCAL_APP_DATA_REQUIRED");
+const localToolRoot = resolve(localAppData, "tool-chenh");
 const retention = await enforceToolResourceRetention({ repositoryRoot, localToolRoot });
 if (retention.removedFiles > 0) process.stdout.write(`[live-stack] resource cleanup removed ${retention.removedFiles} item(s), reclaimed ${Math.round(retention.reclaimedBytes / 1024 / 1024)} MB.\n`);
 const retentionTimer = setInterval(() => {
@@ -52,6 +57,7 @@ for (const entry of [apiEntry, viteEntry]) {
 
 const environment = {
   ...resolveLiveStackEnvironment(process.env, host, webPort),
+  LOCALAPPDATA: localAppData,
   CHROME_BRIDGE_KEY: chromeBridgeKey,
   CHROME_BRIDGE_CAPTURE: process.env.CHROME_BRIDGE_CAPTURE ?? "0"
 };

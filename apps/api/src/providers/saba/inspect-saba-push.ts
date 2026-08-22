@@ -1,7 +1,8 @@
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import { normalizeSabaLolRecords } from "@tool-chenh/adapters";
-import { DpapiProtector } from "../../sessions/dpapi-protector.js";
+import { createPlatformSecretProtector } from "../../sessions/platform-secret-protector.js";
+import { resolveLocalAppData } from "../../local-app-data.js";
 import { SecretVault } from "../../sessions/secret-vault.js";
 import { SabaPushDecoder } from "./saba-push-decoder.js";
 import { parseSabaSocketFrame } from "./saba-socket-frame.js";
@@ -24,14 +25,14 @@ async function main(): Promise<void> {
   const sessionId = process.argv[2];
   const durationMs = Number(process.argv[3] ?? "20000");
   const category = process.argv[4] ?? "LOL";
-  const localAppData = process.env.LOCALAPPDATA;
-  if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || localAppData === undefined ||
+  const localAppData = resolveLocalAppData(process.env);
+  if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || localAppData === null ||
     !Number.isSafeInteger(durationMs) || durationMs < 1_000 || durationMs > 60_000 ||
     !["FOOTBALL", "LOL"].includes(category)) {
     throw new Error("Usage: inspect-saba-push <redacted-session-id> [duration-ms] [FOOTBALL|LOL]");
   }
   const authRoot = resolve(join(localAppData, "tool-chenh", ".auth"));
-  const vault = new SecretVault({ directory: join(authRoot, "vault"), protector: new DpapiProtector() });
+  const vault = new SecretVault({ directory: join(authRoot, "vault"), protector: createPlatformSecretProtector({ authRoot }) });
   const record = await vault.load(`session-${sessionId}`);
   if (!inspectable(record)) throw new Error("Inspectable launch session not found");
 

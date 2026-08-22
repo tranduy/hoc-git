@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { chromium, type Page, type Response } from "playwright";
-import { DpapiProtector } from "../sessions/dpapi-protector.js";
+import { createPlatformSecretProtector } from "../sessions/platform-secret-protector.js";
+import { resolveLocalAppData } from "../local-app-data.js";
 import { SecretVault } from "../sessions/secret-vault.js";
 import {
   clickSafeStructuralCategories,
@@ -90,12 +91,12 @@ async function main(): Promise<void> {
   const sbobetMarketLabelsOnly = argumentsList.includes("--sbobet-market-labels");
   const sbobetMarketDomCorrelationOnly = argumentsList.includes("--sbobet-market-dom-correlation");
   const sbobetSocketCorrelationOnly = argumentsList.includes("--sbobet-socket-correlation");
-  const localAppData = process.env.LOCALAPPDATA;
-  if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || !localAppData) {
+  const localAppData = resolveLocalAppData(process.env);
+  if (sessionId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(sessionId) || localAppData === null) {
     throw new Error("Usage: npm run inspect:launch -- <redacted-session-id>");
   }
   const root = resolve(join(localAppData, "tool-chenh", ".auth"));
-  const vault = new SecretVault({ directory: join(root, "vault"), protector: new DpapiProtector() });
+  const vault = new SecretVault({ directory: join(root, "vault"), protector: createPlatformSecretProtector({ authRoot: root }) });
   const record = await vault.load(`session-${sessionId}`);
   if (!inspectable(record)) throw new Error("Inspectable launch session not found");
   const context = await chromium.launchPersistentContext(join(root, "browser-profiles", "fabet-inspector"), {

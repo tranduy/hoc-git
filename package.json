@@ -13,7 +13,7 @@
     "dev:fixture": "npm run build && node scripts/start-fixture-stack.mjs",
     "test": "npm run test --workspaces --if-present",
     "test:fixture-stack": "node --test scripts/fixture-stack-readiness.test.mjs",
-    "test:managed-stack": "node --test scripts/managed-stack.test.mjs scripts/stack-paths.test.mjs scripts/stack-state.test.mjs scripts/automation-browser-cleanup.test.mjs scripts/resource-retention.test.mjs",
+    "test:managed-stack": "node --test scripts/managed-stack.test.mjs scripts/stack-paths.test.mjs scripts/stack-state.test.mjs scripts/automation-browser-cleanup.test.mjs scripts/resource-retention.test.mjs scripts/local-app-data.test.mjs",
     "test:watch-smoke": "node --test scripts/smoke-watch-match.test.mjs",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "playwright test",
