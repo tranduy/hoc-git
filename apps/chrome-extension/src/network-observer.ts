@@ -1069,20 +1069,18 @@ export class NetworkObserver {
       return;
     }
     if (source.lobby === "SABA") {
-      if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
-      await this.#restoreSabaWsSnapshots(source);
-      if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
+      const replayed = await this.#replayCatalogWsSnapshots(source.sourceId);
+      if (!replayed) {
+        await this.#restoreSabaWsSnapshots(source);
+        await this.#replayCatalogWsSnapshots(source.sourceId);
+      }
       const nowMs = this.#now();
       if (nowMs - (this.#sabaDomBootstrapAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) < 4_000) return;
       this.#sabaDomBootstrapAtMs.set(source.sourceId, nowMs);
-      // A service-worker/API restart can attach after SABA announced the
-      // c1/c2/c3 field tables. Reconnecting its Socket.IO transport does not
-      // replay those tables (the provider replies A003) and can create a CPU-
-      // heavy reconnect loop. Take exactly two atomic DOM generations on this
-      // explicit snapshot request instead. The adapter requires stable >=20
-      // event coverage across both generations before it can publish, so a
-      // virtualized/half-rendered table still fails closed. This is never part
-      // of the 2-second poller.
+      // Durable frames prime decoder state only. Always follow them with two
+      // bounded current-document DOM generations; neither path is allowed to
+      // establish or renew network authority. A fresh Socket.IO OPEN plus
+      // reset/done remains the only SABA LIVE proof.
       await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true, true);
       return;
     }
@@ -1759,14 +1757,14 @@ export class NetworkObserver {
         // CDP then delivers frames without replaying webSocketCreated, so use
         // that traffic as the signal to request a fresh in-page SABA baseline.
         if (source.lobby === "SABA") {
-          // After a worker restart every surviving-socket frame lands here.
-          // One recovery per window; otherwise each frame replays the whole
-          // retained baseline (up to 24 MB) through the bridge.
-          const nowMs = this.#now();
-          const previous = this.#sabaOrphanFrameRecoveryAtMs.get(source.sourceId);
-          if (previous === undefined || nowMs - previous >= 30_000) {
-            this.#sabaOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
-            await this.refreshCatalog(source);
+          // After an MV3 restart the old request id is unattributed. Never
+          // forward that payload as a delta: reconnect only this provider's
+          // Socket.IO instance once in the public source epoch so CDP observes
+          // a new OPEN and complete reset/done baseline.
+          if (!this.#sabaOrphanFrameRecoveryAtMs.has(source.sourceId)) {
+            this.#sabaOrphanFrameRecoveryAtMs.set(source.sourceId, this.#now());
+            await this.#scheduleFreshSocketBaseline(source,
+              (url) => /\/socket\.io\/?$/u.test(url.pathname));
           }
         } else if (source.lobby === "SBO") {
           await this.#scheduleFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
@@ -1775,10 +1773,8 @@ export class NetworkObserver {
           // enabled Network on that child session, so the frames cannot be
           // attributed to a stream. Ask the page to reconnect once so the new
           // socket is observed from its creation; do not loop on every frame.
-          const nowMs = this.#now();
-          const previous = this.#ksportOrphanFrameRecoveryAtMs.get(source.sourceId);
-          if (previous === undefined || nowMs - previous >= 30_000) {
-            this.#ksportOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
+          if (!this.#ksportOrphanFrameRecoveryAtMs.has(source.sourceId)) {
+            this.#ksportOrphanFrameRecoveryAtMs.set(source.sourceId, this.#now());
             await this.#scheduleFreshSocketBaseline(source, (url) => /\/sport\//u.test(url.pathname));
           }
         }

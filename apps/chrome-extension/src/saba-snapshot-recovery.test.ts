@@ -1,17 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { NetworkObserver } from "./network-observer.js";
+import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 
 const source = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
 const baseline = `42${JSON.stringify(["m", "b1", [
   ["f", 0, ["type", "matchid"]], [0, "reset"], [0, "m", 1, 20], [0, "done"]
 ], "r0001"])}`;
+const domRecords = JSON.stringify([{ sportId: "1", leagueId: "l", leagueName: "League", matchId: "m",
+  timeText: "LIVE", teamNames: ["Home", "Away"], groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
+    { marketOddsId: "o", priceText: "0.92", lineText: "0.5" },
+    { marketOddsId: "o", priceText: "-0.98" }
+  ] }] }]);
+
+function recoveryCommand(_tabId: number, method: string, params?: Record<string, unknown>): Promise<unknown> {
+  if (method === "Page.getFrameTree") return Promise.resolve({ frameTree: { frame: { id: "top" } } });
+  if (method === "Page.createIsolatedWorld") return Promise.resolve({ executionContextId: 71 });
+  if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+    return Promise.resolve({ result: { type: "string", value: domRecords } });
+  }
+  if (method === "Runtime.evaluate") return Promise.resolve({ result: { value: "1787250000000.5" } });
+  return Promise.resolve({});
+}
 
 describe("SABA light snapshot recovery", () => {
   it("persists a completed socket baseline and replays it after extension worker restart without tab mutation", async () => {
     let stored: unknown = null;
-    const markerCommand = vi.fn(async (_tabId: number, method: string) => method === "Runtime.evaluate"
-      ? { result: { value: "1787250000000.5" } } : {});
+    const markerCommand = vi.fn(recoveryCommand);
     const first = new NetworkObserver({ sendCommand: markerCommand,
       forward: vi.fn(async () => undefined),
       saveSabaWsSnapshots: async (value) => { stored = value; } });
@@ -24,46 +39,50 @@ describe("SABA light snapshot recovery", () => {
     await vi.waitFor(() => expect(stored).not.toBeNull());
 
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
-    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Runtime.evaluate"
-      ? { result: { value: "1787250000000.5" } } : {});
+    const sendCommand = vi.fn(recoveryCommand);
     const restarted = new NetworkObserver({ sendCommand, forward,
       loadSabaWsSnapshots: async () => stored });
     await restarted.refreshCatalog(source);
 
-    expect(sendCommand.mock.calls.map(([, method]) => method)).toEqual(["Runtime.evaluate"]);
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toBe(true);
     expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({
       lobby: "SABA", sourceId: source.sourceId, tabId: source.tabId, transport: "WS_FRAME",
       request: expect.objectContaining({ replayed: true }),
       payload: expect.objectContaining({ body: baseline })
     }));
+    expect(forward.mock.calls.filter(([envelope]) => envelope.transport === "DOM_SNAPSHOT")).toHaveLength(2);
   });
 
   it("fails closed without a retained complete baseline and never reloads the tab", async () => {
-    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Runtime.evaluate"
-      ? { result: { value: "1787250000000.5" } } : {});
-    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+    const sendCommand = vi.fn(recoveryCommand);
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward,
       loadSabaWsSnapshots: async () => null });
 
     await observer.refreshCatalog(source);
 
-    expect(sendCommand.mock.calls.map(([, method]) => method)).toEqual([
-      "Runtime.evaluate", "Runtime.evaluate", "Runtime.evaluate", "Runtime.evaluate", "Runtime.releaseObjectGroup"
-    ]);
+    expect(forward.mock.calls.filter(([envelope]) => envelope.transport === "DOM_SNAPSHOT")).toHaveLength(2);
     expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
   });
 
   it("does not replay a baseline persisted by a different SABA page document", async () => {
-    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Runtime.evaluate"
-      ? { result: { value: "1787250000001.5" } } : {});
-    const forward = vi.fn(async () => undefined);
+    const sendCommand = vi.fn(async (tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && params?.expression !== CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: "1787250000001.5" } };
+      }
+      return recoveryCommand(tabId, method, params);
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward, loadSabaWsSnapshots: async () => ({
       version: 1, sourceId: source.sourceId, documentMarker: "1787250000000.5", partitions: []
     }) });
 
     await observer.refreshCatalog(source);
 
-    expect(forward).not.toHaveBeenCalled();
+    expect(forward.mock.calls.some(([envelope]) => envelope.transport === "WS_FRAME")).toBe(false);
+    expect(forward.mock.calls.filter(([envelope]) => envelope.transport === "DOM_SNAPSHOT")).toHaveLength(2);
     expect(sendCommand.mock.calls.every(([, method]) => method !== "Page.reload" &&
       method !== "Network.emulateNetworkConditions")).toBe(true);
   });
@@ -78,19 +97,16 @@ describe("SABA light snapshot recovery", () => {
     };
     const clear = vi.fn(async (_sourceId: string) => undefined);
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
-    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Runtime.evaluate"
-      ? { result: { value: "1787250000000.5" } } : {});
+    const sendCommand = vi.fn(recoveryCommand);
     const observer = new NetworkObserver({ sendCommand, forward,
       loadSabaWsSnapshots: async () => stored, clearSabaWsSnapshots: clear });
 
     await observer.handleEvent(source, "Runtime.executionContextsCleared", {});
     await observer.refreshCatalog(source);
 
-    expect(clear).not.toHaveBeenCalled();
-    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
-      transport: "WS_FRAME", payload: expect.objectContaining({ body: baseline }),
-      request: expect.objectContaining({ replayed: true })
-    }));
+    expect(clear).toHaveBeenCalledWith(source.sourceId);
+    expect(forward.mock.calls.some(([envelope]) => envelope.transport === "WS_FRAME")).toBe(false);
+    expect(forward.mock.calls.filter(([envelope]) => envelope.transport === "DOM_SNAPSHOT")).toHaveLength(2);
   });
 });
 

@@ -16,12 +16,14 @@ function envelope(payload: unknown, destination = "/topic/sports/1_1/live/ma/eve
 }
 
 function receiptEnvelope(payload: unknown, partition: "live" | "today", sequence: number,
-  receiptSequence = sequence, streamId = "ksport-stream-1"): ChromeBridgeEnvelope {
+  receiptSequence = sequence, streamId = "ksport-stream-1",
+  sourceEpoch?: string): ChromeBridgeEnvelope {
   const subscription = partition === "live" ? "subSportBookLive" : "subSportBookToday";
   const message = `MESSAGE\ndestination:/topic/sports/1_1/${partition}/ma/event/vi\n` +
     `content-type:application/json\nsubscription:${subscription}\nmessage-id:socket-${receiptSequence}\n\n` +
     `${JSON.stringify({ statusCode: "OK", statusCodeValue: 200, body: JSON.stringify(payload) })}\0`;
-  return { ...envelope(payload), sequence, request: { ...envelope(payload).request, streamId },
+  return { ...envelope(payload), ...(sourceEpoch === undefined ? {} : { sourceEpoch }), sequence,
+    request: { ...envelope(payload).request, streamId },
     payload: { encoding: "UTF8", body: `a${JSON.stringify([message])}` } };
 }
 
@@ -45,6 +47,21 @@ describe("KsportWsCatalogAdapter", () => {
       "today", 11))[0]!.value as { events: Array<{ providerEventId: string }> };
 
     expect(catalog.events.map((item) => item.providerEventId).sort()).toEqual(["5643423", "5643424"]);
+  });
+
+  it("does not combine live and today partitions from different source epochs", () => {
+    const event = (id: number) => ({ "0": "2026-08-20T16:00:00Z", "2": `Home ${id}`, "3": `Away ${id}`,
+      "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
+    const adapter = new KsportWsCatalogAdapter();
+
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(5643423)] }],
+      "live", 10, 10, "ksport-stream-1", "worker-a:0"))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 11, 11,
+      "ksport-stream-1", "worker-b:0"))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 12, 12,
+      "ksport-stream-1", "worker-a:0"))).toEqual([expect.objectContaining({
+        authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+      })]);
   });
 
   it("treats the provider's current 1_11 hot-match channel as the today partition", () => {
@@ -170,7 +187,7 @@ describe("KsportWsCatalogAdapter", () => {
     expect(adapter.decode(input)).toEqual([]);
   });
 
-  it("publishes the current page getEvent snapshot while ignoring untagged direct probes", () => {
+  it("publishes current page getEvent only after live and today form one HTTP baseline", () => {
     const event = { "0": "2026-08-21T16:00:00Z", "2": "Kashiwa", "3": "V Varen Nagasaki", "8": 5643423,
       "7": { "5": ["0.5 0.92*56434230050000005h -0.98*56434230050000005a h 735502668161000 0 0 1 1 0"] } };
     const adapter = new KsportWsCatalogAdapter();
@@ -178,12 +195,18 @@ describe("KsportWsCatalogAdapter", () => {
       ...envelope([]), transport: "HTTP_RESPONSE", sequence: 20,
       request: { hostname: "zenandfe.com", pathnameClass: "/api/v2/getEvent", resourceType: "Fetch",
         streamId: "ksport-http:today" },
-      payload: { encoding: "UTF8", body: JSON.stringify([{ "1": "J League", "2": [event] }]) }
+      payload: { encoding: "UTF8", body: JSON.stringify([]) }
     };
-    const catalog = adapter.decode(input)[0]?.value as { events: unknown[]; quotes: unknown[] };
     expect(adapter.fingerprint(input)).toBe(true);
+    expect(adapter.decode(input)).toEqual([]);
+    const update = adapter.decode({ ...input, sequence: 21,
+      request: { ...input.request, streamId: "ksport-http:live" },
+      payload: { encoding: "UTF8", body: JSON.stringify([{ "1": "J League", "2": [event] }]) } })[0]!;
+    const catalog = update.value as { events: unknown[]; quotes: unknown[] };
     expect(catalog.events).toHaveLength(1);
     expect(catalog.quotes).toHaveLength(2);
+    expect(update).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE",
+      provenance: "AUTHENTICATED_HTTP" });
   });
 
   it("atomically replaces a completed partition by provider event ID", () => {

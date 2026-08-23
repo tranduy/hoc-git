@@ -75,6 +75,33 @@ describe("SourceTabRecovery", () => {
     expect(operations).toEqual(["bootstrap-attach:KSPORT", "update"]);
   });
 
+  it("creates only the missing KSPORT target and preserves every non-KSPORT tab", async () => {
+    vi.setSystemTime(1_000);
+    const operations: string[] = [];
+    const tabs = [
+      { id: 3, url: "https://cgnew.fts368.com/live" },
+      { id: 4, url: "https://imsports.directsb.net/live" }
+    ];
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "CMD", tabId: 3 }, { lobby: "IM", tabId: 4 }],
+      query: async () => tabs,
+      create: async (url) => { operations.push(`create:${url}`); return { id: 8, url }; },
+      attachBootstrap: async (_tab, lobby) => { operations.push(`attach:${lobby}`); },
+      attach: async () => { operations.push("unexpected-normal-attach"); },
+      update: async (tabId, url) => {
+        operations.push(`navigate:${tabId}`);
+        return { id: tabId, url, title: "Sportsbook" };
+      },
+      remove: async (tabId) => { operations.push(`remove:${tabId}`); },
+      usePortalLaunch: false
+    });
+
+    await recovery.ensure("KSPORT", "https://zenandfe.com/?token=fresh");
+
+    expect(operations).toEqual(["create:about:blank", "attach:KSPORT", "navigate:8"]);
+    expect(tabs.map((tab) => tab.id)).toEqual([3, 4]);
+  });
+
   it("consumes a K-Sports launch once and never schedules periodic bootstrap navigation", async () => {
     vi.setSystemTime(1_000);
     const navigations: string[] = [];

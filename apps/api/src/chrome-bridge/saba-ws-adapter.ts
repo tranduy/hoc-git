@@ -10,6 +10,15 @@ import { decodePublicDomRecords } from "./cmd-dom-adapter.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:SABA:FOOTBALL";
+const MAX_RETAINED_PART_AGE_MS = 60_000;
+
+function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
+  return envelope.sourceEpoch ?? "legacy";
+}
+
+function sourceEpochKey(envelope: ChromeBridgeEnvelope): string {
+  return `${envelope.sourceId}|${sourceEpoch(envelope)}`;
+}
 
 function liveIdentityScore(event: CatalogEvent): number {
   if (event.category !== "FOOTBALL" || event.liveState === null) return 0;
@@ -38,20 +47,36 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #decoders = new Map<string, SabaPushDecoder>();
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #parts = new Map<string, NormalizedCatalogPart>();
+  readonly #partObservedAtMs = new Map<string, number>();
   readonly #readyPartitions = new Set<string>();
   readonly #domCandidates = new Map<string, ReadonlySet<string>>();
   readonly #domReadySources = new Set<string>();
   readonly #lastWsPublishAtMs = new Map<string, number>();
+  readonly #activeStreams = new Map<string, string>();
+  readonly #retiredStreams = new Map<string, Set<string>>();
+  readonly #authoritativeGenerations = new Map<string, string>();
+  readonly #authoritativeBaselineAtMs = new Map<string, number>();
 
   resetSource(sourceId: string): void {
     for (const key of this.#decoders.keys()) if (key.startsWith(`${sourceId}|`)) this.#decoders.delete(key);
     this.#assembler.resetSource(sourceId);
     for (const key of this.#parts.keys()) if (key.startsWith(`${sourceId}|`)) this.#parts.delete(key);
+    for (const key of this.#partObservedAtMs.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#partObservedAtMs.delete(key);
+    }
     for (const key of this.#readyPartitions) if (key.startsWith(`${sourceId}|`)) this.#readyPartitions.delete(key);
     this.#domCandidates.delete(sourceId);
     this.#domReadySources.delete(sourceId);
     for (const key of this.#lastWsPublishAtMs.keys()) if (key.startsWith(`${sourceId}|`)) {
       this.#lastWsPublishAtMs.delete(key);
+    }
+    for (const key of this.#activeStreams.keys()) if (key.startsWith(`${sourceId}|`)) this.#activeStreams.delete(key);
+    for (const key of this.#retiredStreams.keys()) if (key.startsWith(`${sourceId}|`)) this.#retiredStreams.delete(key);
+    for (const key of this.#authoritativeGenerations.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#authoritativeGenerations.delete(key);
+    }
+    for (const key of this.#authoritativeBaselineAtMs.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#authoritativeBaselineAtMs.delete(key);
     }
   }
 
@@ -107,25 +132,71 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
         timezoneOffsetMinutes: 480, sequence: envelope.sequence
       });
-      return this.#update(envelope, "DOM", normalized);
+      return this.#update(envelope, "DOM", normalized, {
+        evidenceMode: "DELTA", generation: `${sourceEpoch(envelope)}:dom:${envelope.sequence}`,
+        provenance: "DOM_FALLBACK"
+      });
     }
     const streamId = envelope.request.streamId ?? "legacy";
-    const decoderKey = `${envelope.sourceId}|${streamId}`;
+    const epochKey = sourceEpochKey(envelope);
+    const decoderKey = `${epochKey}|${streamId}`;
     if (envelope.transport === "WS_STATE") {
       const state = websocketLifecycleState(envelope);
       if (state === null) return [];
-      this.#dropStream(envelope.sourceId, streamId);
-      if (state === "OPEN") return [];
+      this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
+      if (state === "OPEN") {
+        const previous = this.#activeStreams.get(epochKey);
+        if (previous !== undefined && previous !== streamId) {
+          this.#dropStream(envelope.sourceId, sourceEpoch(envelope), previous);
+          const retired = this.#retiredStreams.get(epochKey) ?? new Set<string>();
+          retired.add(previous);
+          this.#retiredStreams.set(epochKey, retired);
+        }
+        this.#activeStreams.set(epochKey, streamId);
+        this.#authoritativeGenerations.delete(epochKey);
+        this.#authoritativeBaselineAtMs.delete(epochKey);
+        return [];
+      }
+      if (this.#activeStreams.get(epochKey) !== streamId) return [];
+      this.#activeStreams.delete(epochKey);
+      const retired = this.#retiredStreams.get(epochKey) ?? new Set<string>();
+      retired.add(streamId);
+      this.#retiredStreams.set(epochKey, retired);
+      this.#authoritativeGenerations.delete(epochKey);
+      this.#authoritativeBaselineAtMs.delete(epochKey);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }
+    if (this.#retiredStreams.get(epochKey)?.has(streamId) === true) return [];
     try {
       const frame = parseSabaSocketFrame(envelope.payload.body);
       if (frame === null) return [];
+      if (JSON.stringify(frame.rows).includes('"A003"')) {
+        this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
+        this.#authoritativeGenerations.delete(epochKey);
+        this.#authoritativeBaselineAtMs.delete(epochKey);
+        return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+          invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_GAP" }];
+      }
       let decoder = this.#decoders.get(decoderKey);
       if (decoder === undefined) {
         decoder = new SabaPushDecoder();
         this.#decoders.set(decoderKey, decoder);
+      }
+      const startsBaseline = (frame.rows as readonly unknown[]).some((row) => Array.isArray(row) &&
+        (row[1] === "reset" || row[1] === "empty"));
+      if (startsBaseline) {
+        this.#authoritativeGenerations.delete(epochKey);
+        this.#authoritativeBaselineAtMs.delete(epochKey);
+      } else {
+        const baselineAtMs = this.#authoritativeBaselineAtMs.get(epochKey);
+        if (baselineAtMs !== undefined && envelope.observedAtMs - baselineAtMs > MAX_RETAINED_PART_AGE_MS) {
+          this.#authoritativeGenerations.delete(epochKey);
+          this.#authoritativeBaselineAtMs.delete(epochKey);
+          for (const key of this.#readyPartitions) {
+            if (key.startsWith(`${epochKey}|`)) this.#readyPartitions.delete(key);
+          }
+        }
       }
       const applied = decoder.apply(frame);
       if (applied.duplicate || applied.records.length === 0) return [];
@@ -147,10 +218,24 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         receivedMonotonicMs: envelope.receivedMonotonicMs,
         sequence: envelope.sequence
       });
-      return this.#update(envelope, `WS:${streamId}:${frame.bridgeId}`, normalized);
+      if (applied.fullSnapshot && envelope.request.replayed !== true &&
+        this.#activeStreams.get(epochKey) === streamId) {
+        this.#authoritativeGenerations.set(epochKey,
+          `${sourceEpoch(envelope)}:saba:${streamId}:${envelope.sequence}`);
+        this.#authoritativeBaselineAtMs.set(epochKey, envelope.observedAtMs);
+      }
+      const generation = this.#authoritativeGenerations.get(epochKey);
+      const authoritative = applied.fullSnapshot && generation !== undefined &&
+        envelope.request.replayed !== true && this.#activeStreams.get(epochKey) === streamId;
+      return this.#update(envelope, `WS:${streamId}:${frame.bridgeId}`, normalized,
+        authoritative ? { authoritativeBaseline: true, evidenceMode: "BASELINE", generation, provenance: "WS" }
+          : generation !== undefined && this.#activeStreams.get(epochKey) === streamId
+            ? { evidenceMode: "DELTA", generation, provenance: "WS" } : {});
     } catch (error) {
       if (error instanceof Error && error.message.includes("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP")) {
-        this.#dropStream(envelope.sourceId, streamId);
+        this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
+        this.#authoritativeGenerations.delete(epochKey);
+        this.#authoritativeBaselineAtMs.delete(epochKey);
         return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
           invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_GAP" }];
       }
@@ -159,24 +244,36 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   }
 
   #update(envelope: ChromeBridgeEnvelope, partition: string,
-    normalized: NormalizedCatalogPart): readonly DecodedCatalogUpdate[] {
+    normalized: NormalizedCatalogPart,
+    evidence: Pick<Extract<DecodedCatalogUpdate, { readonly value: unknown }>, "authoritativeBaseline" |
+      "evidenceMode" | "generation" | "provenance"> = {}): readonly DecodedCatalogUpdate[] {
     if (normalized.events.length === 0 || normalized.markets.length === 0 || normalized.quotes.length === 0) return [];
-    const partitionKey = `${envelope.sourceId}|${partition}`;
+    const epochKey = sourceEpochKey(envelope);
+    const partitionKey = `${epochKey}|${partition}`;
     this.#parts.delete(partitionKey);
     this.#parts.set(partitionKey, normalized);
-    const sourceParts = [...this.#parts].filter(([key]) => key.startsWith(`${envelope.sourceId}|`))
+    this.#partObservedAtMs.set(partitionKey, envelope.observedAtMs);
+    for (const [key, observedAtMs] of this.#partObservedAtMs) {
+      if (!key.startsWith(`${epochKey}|`) || envelope.observedAtMs - observedAtMs <= MAX_RETAINED_PART_AGE_MS) continue;
+      this.#partObservedAtMs.delete(key);
+      this.#parts.delete(key);
+    }
+    const sourceParts = [...this.#parts].filter(([key]) => key.startsWith(`${epochKey}|`))
       .map(([, value]) => value);
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SABA",
       observedAtMs: envelope.observedAtMs, parts: sourceParts, selectEvent: selectStableSabaEvent });
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-      observedAtMs: envelope.observedAtMs, value: catalog }];
+      observedAtMs: envelope.observedAtMs, value: catalog, ...evidence }];
   }
 
-  #dropStream(sourceId: string, streamId: string): void {
-    const decoderKey = `${sourceId}|${streamId}`;
+  #dropStream(sourceId: string, epoch: string, streamId: string): void {
+    const decoderKey = `${sourceId}|${epoch}|${streamId}`;
     this.#decoders.delete(decoderKey);
     for (const key of this.#parts.keys()) {
-      if (key.startsWith(`${sourceId}|WS:${streamId}:`)) this.#parts.delete(key);
+      if (key.startsWith(`${sourceId}|${epoch}|WS:${streamId}:`)) {
+        this.#parts.delete(key);
+        this.#partObservedAtMs.delete(key);
+      }
     }
     for (const key of this.#readyPartitions) {
       if (key.startsWith(`${decoderKey}|`)) this.#readyPartitions.delete(key);

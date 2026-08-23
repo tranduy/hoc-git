@@ -2718,7 +2718,7 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
   });
 
-  it("uses bounded SABA DOM recovery when a post-restart frame arrives without its creation event", async () => {
+  it("requests one SABA socket reconnect when a post-restart frame has no creation event", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
         params.expression.includes("window.io.Socket.prototype")) return { result: { objectId: "prototype-1" } };
@@ -2726,7 +2726,8 @@ describe("NetworkObserver", () => {
       if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
       return {};
     });
-    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward,
       now: () => 10_000, monotonicNow: () => 60 });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
     await observer.handleEvent(saba, "Runtime.executionContextCreated", { context: { id: 17,
@@ -2736,10 +2737,17 @@ describe("NetworkObserver", () => {
     await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
       requestId: "socket-created-before-worker", response: { opcode: 1, payloadData: "42[]" }
     });
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "socket-created-before-worker", response: { opcode: 1, payloadData: "42[]" }
+    });
 
-    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
-      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
-    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.callFunctionOn")).toHaveLength(1);
+    expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.callFunctionOn", expect.objectContaining({
+      functionDeclaration: expect.stringContaining("socket.disconnect()")
+    }));
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toBe(false);
+    expect(forward).not.toHaveBeenCalled();
   });
 
   it.each([
