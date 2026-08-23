@@ -42,6 +42,19 @@ describe("CatalogCoverageGuard", () => {
     expect(guard.accept("source", candidate("A", true, ["a1", "a2"]))).toBe(false);
   });
 
+  it("rejects an old authoritative generation replay that is a superset of current coverage", () => {
+    const guard = new CatalogCoverageGuard();
+    expect(guard.accept("source", candidate("A", true, ["a", "b"]))).toBe(true);
+    expect(guard.accept("source", candidate("B", true, ["b"]))).toBe(true);
+    expect(guard.accept("source", candidate("A", true, ["a", "b"]))).toBe(false);
+  });
+
+  it("accepts an incremental DELTA that preserves current coverage", () => {
+    const guard = new CatalogCoverageGuard();
+    expect(guard.accept("source", candidate("A", true, ["a"]))).toBe(true);
+    expect(guard.accept("source", candidate("A", false, ["a", "b"]))).toBe(true);
+  });
+
   it("rejects a smaller non-authoritative candidate", () => {
     const guard = new CatalogCoverageGuard();
     const ids = (count: number) => Array.from({ length: count }, (_, index) => `event-${index}`);

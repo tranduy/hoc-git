@@ -21,8 +21,8 @@ export class CatalogCoverageGuard {
   allows(sourceKey: string, candidate: CatalogCoverageCandidate): boolean {
     const current = this.#states.get(sourceKey);
     if (current === undefined) return true;
-    if (candidate.authoritativeBaseline && !current.consumedAuthoritativeGenerations.has(candidate.generation)) {
-      return true;
+    if (candidate.authoritativeBaseline) {
+      return !current.consumedAuthoritativeGenerations.has(candidate.generation);
     }
     const proposed = new Set(candidate.providerEventIds);
     return [...current.acceptedEventIds].every((eventId) => proposed.has(eventId));
