@@ -423,3 +423,101 @@ All six compile/build commands exited 0. `git diff --check` exited 0 with only t
 - `packages/contracts/src/chrome-bridge.test.ts`
 
 Commit subject: `fix(feed): bind reconciliation to current documents`.
+
+---
+
+## Fix Round 4
+
+Status: DONE
+
+Review base: `981c3d4`
+
+### Review findings resolved
+
+- A malformed IM partition now permanently rejects its reconciliation generation for the source epoch. The adapter discards matching pending partitions immediately, rejects every later partition with the same generation, retains a bounded 64-generation rejection set, and keeps a scalar rejected-ordinal watermark so an evicted numeric generation still cannot return. Only a strictly newer numeric generation may reconcile, and `resetSource` clears both fences with the rest of the source state.
+- An IM generation whose completed nonempty input cannot authorize an accepted catalog is rejected through the same path. The shared 128-entry source delta log remains available to a later valid generation; a rejected generation has no remaining pending partition or generation-local replay state that can commit.
+- CMD no longer hashes a synthetic `document-unknown` identity. A frame with no authoritative loader, and the no-frame-tree top-world fallback, may emit only partial records without sweep ID, completion, frame, or document metadata. An unbound empty completion is suppressed, so it cannot tombstone retained rows.
+- A bound CMD capture re-reads the CDP loader after isolated-world creation, after evaluation, immediately before selecting emission groups, and before every emitted chunk. A missing or changed loader discards that frame result; a loader change between multi-chunk emits leaves an incomplete snapshot that the assembler cannot commit. Stable-loader captures retain normal completion and completed-empty behavior.
+- Existing adapter ownership tests continue to prove that a new loader-derived document key cannot complete or tombstone a prior document's sweep in the same frame/source generation.
+
+No browser, provider tab, runtime, or external service was touched in this round. No raw provider response, header, cookie, token, credential, account identifier, user data, or new authoritative fixture was added.
+
+### Fix Round 4 RED
+
+Tests were written before each production change and run against `981c3d4` plus only the new tests:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/im-http-adapter.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/network-observer.test.ts -t "loader is missing|loader changes during evaluation|no-frame-tree"
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/network-observer.test.ts -t "stops a bound multi-chunk"
+```
+
+```text
+IM: 2 failed / 18 passed.
+  A valid Market 1 followed by malformed Market 2 could still commit when a later valid Market 2 arrived.
+  A malformed first partition left no rejection state, so later same-generation partitions could commit.
+CMD document binding: 3 failed / 134 skipped.
+  Missing-loader and no-frame-tree captures carried bound completion metadata.
+  A loader replacement during evaluation emitted the old document result.
+CMD per-emit fence: 1 failed / 137 skipped.
+  Both chunks were forwarded after the first forward boundary changed the loader; only the first was permitted.
+```
+
+The IM reset test also proves the rejected generation becomes usable only after the source epoch is explicitly reset, while a strictly newer generation succeeds without a reset.
+
+### Fix Round 4 GREEN
+
+```powershell
+npm.cmd test --workspace @tool-chenh/contracts -- --run src/chrome-bridge.test.ts
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/cmd-http-adapter.test.ts src/chrome-bridge/cmd-dom-adapter.test.ts src/chrome-bridge/im-http-adapter.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/chrome-bridge/cmd-snapshot-assembler.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/cmd-dom-snapshot.test.ts src/cmd-snapshot-poller.test.ts src/cmd-snapshot-chunker.test.ts src/network-observer.test.ts
+```
+
+```text
+Contracts: 1 suite / 14 tests passed.
+Task 5 API: 5 suites / 66 tests passed.
+Task 5 extension: 4 suites / 163 tests passed.
+```
+
+Task 1-4 regressions:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/automatic-source-recovery.test.ts src/chrome-bridge/provider-source-refresh.test.ts src/chrome-bridge/chrome-bridge-control-plane.test.ts src/chrome-bridge/provider-feed-controller.test.ts src/chrome-bridge/provider-feed-registry.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/catalog/catalog-coverage-guard.test.ts src/server.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/provider-work-scheduler.test.ts src/local-bridge.test.ts src/network-observer.test.ts src/saba-snapshot-storage.test.ts src/cmd-snapshot-poller.test.ts src/bridge-wakeup.test.ts
+```
+
+```text
+API: 8 suites / 94 tests passed.
+Extension: 6 suites / 187 tests passed.
+```
+
+Compile/build and hygiene gates:
+
+```powershell
+npm.cmd run typecheck --workspace @tool-chenh/contracts
+npm.cmd run typecheck --workspace @tool-chenh/api
+npm.cmd run typecheck --workspace @tool-chenh/chrome-extension
+npm.cmd run build --workspace @tool-chenh/contracts
+npm.cmd run build --workspace @tool-chenh/api
+npm.cmd run build --workspace @tool-chenh/chrome-extension
+git diff --check
+git diff -- . ':!*.md' | rg -n -i "authorization|cookie|password|bearer|session[_-]?id|access[_-]?token|refresh[_-]?token|api[_-]?key"
+```
+
+All six compile/build commands exited 0. `git diff --check` exited 0 with only the checkout's existing LF-to-CRLF notices. The hygiene scan found only the intentional synthetic `observerSessionId: "worker-a"` test value and internal identifier; no secret value or authoritative provider payload was added.
+
+### Ordering, document authority, and remaining boundaries
+
+- IM rejection state is source-scoped and bounded. Numeric reconciliation ordinals provide the permanent same-epoch lower fence even after the exact-ID set evicts its oldest entry. The shared source delta log remains bounded at 128 and is replayed only by a later valid generation.
+- Unbound CMD data remains `DOM_FALLBACK` partial evidence and cannot carry `completeSweepEvidence`. Only an unchanged authoritative loader can produce a document key and completion/tombstone metadata.
+- Per-frame reads remain concurrent. Loader revalidation adds bounded CDP reads inside the existing CMD provider lane and introduces no global work tail or cross-provider wait.
+- Equal CMD cursor idempotence and AbortSignal-aware IM signer plumbing remain deferred exactly as previously ledgered.
+
+### Files changed in Fix Round 4
+
+- `apps/api/src/chrome-bridge/im-http-adapter.ts`
+- `apps/api/src/chrome-bridge/im-http-adapter.test.ts`
+- `apps/chrome-extension/src/network-observer.ts`
+- `apps/chrome-extension/src/network-observer.test.ts`
+
+Commit subject: `fix(feed): reject poisoned snapshots and stale documents`.

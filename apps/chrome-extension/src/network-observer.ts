@@ -2013,16 +2013,17 @@ export class NetworkObserver {
       const capture = async (): Promise<void> => {
         const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
         for (let generation = 0; generation < (forceGeneration ? 2 : 1); generation += 1) {
-        const frameTree = await this.#withFrameCommandTimeout(
+        const readFrameTree = () => this.#withFrameCommandTimeout(
           this.#sendCommand(source.tabId, "Page.getFrameTree")
         ).catch(() => ({}));
+        const frameTree = await readFrameTree();
         const frames = collectFrameDescriptors(frameTree);
-        const values: Array<{ readonly frameKey: string; readonly documentKey: string;
+        const values: Array<{ readonly frameKey: string; readonly frameId: string | null;
+          readonly loaderId: string | null; readonly documentKey: string | null;
           readonly value: unknown }> = [];
         if (frames.length === 0) {
-          values.push({ frameKey: "top",
-            documentKey: sweepDocumentKey(this.#observerSessionId, source.tabId, sourceGeneration,
-              "top", "document-unknown"), value: await this.#withFrameCommandTimeout(
+          values.push({ frameKey: "top", frameId: null, loaderId: null, documentKey: null,
+            value: await this.#withFrameCommandTimeout(
             this.#sendCommand(source.tabId, "Runtime.evaluate", {
               expression, returnByValue: true, awaitPromise: false
             })).catch(() => ({})) });
@@ -2034,17 +2035,22 @@ export class NetworkObserver {
             })).catch(() => ({}));
             const contextId = nestedNumber(world, "executionContextId");
             if (contextId === null) return null;
+            if (frame.loaderId !== null &&
+              currentFrameLoader(await readFrameTree(), frame.id) !== frame.loaderId) return null;
             const value = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
               expression, contextId, returnByValue: true, awaitPromise: false
             })).catch(() => ({}));
+            if (frame.loaderId !== null &&
+              currentFrameLoader(await readFrameTree(), frame.id) !== frame.loaderId) return null;
             const frameKey = safeFrameKey(frame.id, frameIndex);
-            return { frameKey, documentKey: sweepDocumentKey(this.#observerSessionId, source.tabId,
-              sourceGeneration, frame.id, frame.loaderId), value };
+            return { frameKey, frameId: frame.id, loaderId: frame.loaderId,
+              documentKey: frame.loaderId === null ? null : sweepDocumentKey(this.#observerSessionId,
+                source.tabId, sourceGeneration, frame.id, frame.loaderId), value };
           }));
           values.push(...frameValues.filter((value) => value !== null));
         }
         if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
-        const frameCaptures = values.map(({ frameKey, documentKey, value }) => {
+        const frameCaptures = values.map(({ frameKey, frameId, loaderId, documentKey, value }) => {
           const evaluated = readEvaluationRecords(value);
           const sweepMarker = evaluated.find((item) => isRecord(item) && "__fieldlineSweep" in item);
           const sweepValue = isRecord(sweepMarker) && isRecord(sweepMarker.__fieldlineSweep)
@@ -2054,20 +2060,27 @@ export class NetworkObserver {
             !isRecord(item) || !("__fieldlineDiagnostic" in item));
           const hasCatalog = catalogRecords.length > 0;
           const sweep = sweepValue !== null && typeof sweepValue.sweepId === "string" &&
-            /^[a-z0-9._:-]{1,128}$/iu.test(sweepValue.sweepId) && typeof sweepValue.complete === "boolean"
+            /^[a-z0-9._:-]{1,128}$/iu.test(sweepValue.sweepId) && typeof sweepValue.complete === "boolean" &&
+            documentKey !== null
             ? { sweepId: sweepValue.sweepId, sweepComplete: sweepValue.complete,
               sweepFrameKey: frameKey, sweepDocumentKey: documentKey }
             : undefined;
           const records = hasCatalog ? catalogRecords : sweep?.sweepComplete === true ? [] : withoutSweep;
-          return { frameKey, records, hasCatalog, sweep };
+          return { frameKey, frameId, loaderId, records, hasCatalog, sweep };
         }).filter((capture) => capture.records.length > 0 || capture.sweep?.sweepComplete === true);
         const hasCatalog = frameCaptures.some((capture) => capture.hasCatalog);
         const eligibleFrames = hasCatalog ? frameCaptures.filter((capture) =>
           capture.hasCatalog || (source.lobby === "CMD" && capture.sweep?.sweepComplete === true)) : frameCaptures;
         if (eligibleFrames.length === 0) return;
-        const emissionGroups = source.lobby === "CMD" ? eligibleFrames : [{ frameKey: "aggregate",
+        const emissionCandidates = source.lobby === "CMD" ? eligibleFrames : [{ frameKey: "aggregate",
+          frameId: null, loaderId: null,
           records: eligibleFrames.flatMap((capture) => capture.records), hasCatalog,
           sweep: undefined }];
+        const emissionGroups = (await Promise.all(emissionCandidates.map(async (group) =>
+          group.frameId !== null && group.loaderId !== null &&
+            currentFrameLoader(await readFrameTree(), group.frameId) !== group.loaderId ? null : group)))
+          .flatMap((group) => group === null ? [] : [group]);
+        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) || emissionGroups.length === 0) return;
         const records = emissionGroups.flatMap((capture) => capture.records);
         const catalogBody = JSON.stringify(records);
         const semanticBody = JSON.stringify(emissionGroups.map((group) => ({
@@ -2087,6 +2100,9 @@ export class NetworkObserver {
           const snapshotId = `cmd:${source.tabId}:${nowMs}:${ordinal}`;
           const chunks = chunkCmdSnapshot(group.records, snapshotId, undefined, group.sweep);
           for (const chunk of chunks) {
+            if (group.frameId !== null && group.loaderId !== null &&
+              currentFrameLoader(await readFrameTree(), group.frameId) !== group.loaderId) return;
+            if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
             await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
               encoding: "UTF8", body: JSON.stringify(chunk)
             }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration });
@@ -2995,19 +3011,26 @@ function collectFrameIds(value: unknown): string[] {
   return output;
 }
 
-function collectFrameDescriptors(value: unknown): Array<{ readonly id: string; readonly loaderId: string }> {
+function collectFrameDescriptors(value: unknown): Array<{
+  readonly id: string; readonly loaderId: string | null
+}> {
   if (!isRecord(value) || !isRecord(value.frameTree)) return [];
-  const output: Array<{ readonly id: string; readonly loaderId: string }> = [];
+  const output: Array<{ readonly id: string; readonly loaderId: string | null }> = [];
   const visit = (tree: unknown): void => {
     if (!isRecord(tree)) return;
     if (isRecord(tree.frame) && typeof tree.frame.id === "string") {
       output.push({ id: tree.frame.id,
-        loaderId: typeof tree.frame.loaderId === "string" ? tree.frame.loaderId : "document-unknown" });
+        loaderId: typeof tree.frame.loaderId === "string" && tree.frame.loaderId !== ""
+          ? tree.frame.loaderId : null });
     }
     if (Array.isArray(tree.childFrames)) tree.childFrames.forEach(visit);
   };
   visit(value.frameTree);
   return output;
+}
+
+function currentFrameLoader(value: unknown, frameId: string): string | null {
+  return collectFrameDescriptors(value).find((frame) => frame.id === frameId)?.loaderId ?? null;
 }
 
 function readEvaluationRecords(value: unknown): unknown[] {

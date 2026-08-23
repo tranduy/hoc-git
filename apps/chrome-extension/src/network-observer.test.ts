@@ -1111,7 +1111,7 @@ describe("NetworkObserver", () => {
       sweepId: "cmd:9:sweep-1", complete: true
     } }]);
     const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
-      ? { frameTree: { frame: { id: "top" } } }
+      ? { frameTree: { frame: { id: "top", loaderId: "loader-top" } } }
       : method === "Page.createIsolatedWorld" ? { executionContextId: 1 }
       : method === "Runtime.evaluate" ? { result: { value: body } } : {});
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
@@ -1124,12 +1124,102 @@ describe("NetworkObserver", () => {
     expect(JSON.stringify(chunk.records)).not.toContain("__fieldlineSweep");
   });
 
+  it("emits CMD records without completion metadata when the frame loader is missing", async () => {
+    const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "odds-event",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "odds-frame" } } }
+      : method === "Page.createIsolatedWorld" ? { executionContextId: 1 }
+      : method === "Runtime.evaluate" ? { result: { value: JSON.stringify([publicRecord,
+        { __fieldlineSweep: { sweepId: "cmd:odds:unbound", complete: true } }]) } } : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
+
+    await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+
+    expect(forward).toHaveBeenCalledOnce();
+    const chunk = JSON.parse(String(forward.mock.calls[0]![0].payload.body));
+    expect(JSON.stringify(chunk.records)).toContain("odds-event");
+    expect(chunk).not.toHaveProperty("sweepId");
+    expect(chunk).not.toHaveProperty("sweepComplete");
+    expect(chunk).not.toHaveProperty("sweepDocumentKey");
+  });
+
+  it("drops a CMD frame result when its loader changes during evaluation", async () => {
+    let loaderId = "loader-old";
+    const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "old-event",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "odds-frame", loaderId } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") {
+        loaderId = "loader-new";
+        return { result: { value: JSON.stringify([publicRecord,
+          { __fieldlineSweep: { sweepId: "cmd:odds:old", complete: true } }]) } };
+      }
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
+
+    await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+
+    expect(forward).not.toHaveBeenCalled();
+  });
+
+  it("stops a bound multi-chunk CMD snapshot when its loader changes between emits", async () => {
+    let loaderId = "loader-old";
+    const publicRecords = Array.from({ length: 300 }, (_, index) => ({
+      sportId: "1", leagueId: `l-${index}`, leagueName: `League ${index}`, matchId: `m-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [], padding: "x".repeat(500)
+    }));
+    const body = JSON.stringify([...publicRecords,
+      { __fieldlineSweep: { sweepId: "cmd:odds:multi", complete: true } }]);
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "odds-frame", loaderId } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") return { result: { value: body } };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => { loaderId = "loader-new"; });
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
+
+    await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+
+    expect(JSON.parse(String(forward.mock.calls[0]![0].payload.body)).chunkCount).toBeGreaterThan(1);
+    expect(forward).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a no-frame-tree CMD result partial and unbound", async () => {
+    const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "fallback-event",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? {}
+      : method === "Runtime.evaluate" ? { result: { value: JSON.stringify([publicRecord,
+        { __fieldlineSweep: { sweepId: "cmd:fallback:complete", complete: true } }]) } } : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
+
+    await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+
+    expect(forward).toHaveBeenCalledOnce();
+    const chunk = JSON.parse(String(forward.mock.calls[0]![0].payload.body));
+    expect(JSON.stringify(chunk.records)).toContain("fallback-event");
+    expect(chunk).not.toHaveProperty("sweepId");
+    expect(chunk).not.toHaveProperty("sweepComplete");
+    expect(chunk).not.toHaveProperty("sweepDocumentKey");
+  });
+
   it("does not let a top-frame sweep completion tombstone odds-frame records", async () => {
     const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "odds-event",
       timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
-        childFrames: [{ frame: { id: "odds-frame" } }] } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top", loaderId: "loader-top" },
+        childFrames: [{ frame: { id: "odds-frame", loaderId: "loader-odds" } }] } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: params?.frameId === "top" ? 1 : 2 };
       if (method === "Runtime.evaluate") return { result: { value: JSON.stringify(Number(params?.contextId) === 1
         ? [{ __fieldlineDiagnostic: { frame: "top" } },
@@ -1152,8 +1242,8 @@ describe("NetworkObserver", () => {
     const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "odds-event",
       timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
-        childFrames: [{ frame: { id: "odds-frame" } }] } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top", loaderId: "loader-top" },
+        childFrames: [{ frame: { id: "odds-frame", loaderId: "loader-odds" } }] } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: params?.frameId === "top" ? 1 : 2 };
       if (method === "Runtime.evaluate") return { result: { value: JSON.stringify(Number(params?.contextId) === 1
         ? [{ __fieldlineDiagnostic: { frame: "top" } },
@@ -1245,14 +1335,16 @@ describe("NetworkObserver", () => {
   it("does not emit an old-document sweep marker after the source epoch changes", async () => {
     let releaseOld!: () => void;
     const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
-    let scans = 0;
+    let evaluations = 0;
     const recordFor = (matchId: string) => ({ sportId: "1", leagueId: "l", leagueName: "League", matchId,
       timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] });
     const sendCommand = vi.fn(async (_tabId: number, method: string) => {
-      if (method === "Page.getFrameTree") { scans += 1; return { frameTree: { frame: { id: "top" } } }; }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: {
+        id: "top", loaderId: "loader-top" } } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
       if (method === "Runtime.evaluate") {
-        const old = scans === 1;
+        const old = evaluations === 0;
+        evaluations += 1;
         if (old) await oldBlocked;
         return { result: { value: JSON.stringify([recordFor(old ? "old-event" : "new-event"),
           { __fieldlineSweep: { sweepId: old ? "cmd:old:sweep" : "cmd:new:sweep", complete: old } }]) } };
@@ -1263,12 +1355,12 @@ describe("NetworkObserver", () => {
     const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
     const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
     const oldCapture = observer.captureCmdSnapshot(cmd, "cgnew.fts368.com");
-    await vi.waitFor(() => expect(scans).toBe(1));
+    await vi.waitFor(() => expect(evaluations).toBe(1));
     observer.beginSourceEpoch(cmd.sourceId);
     const replacement = observer.captureCmdSnapshot(cmd, "cgnew.fts368.com");
     releaseOld();
     await Promise.all([oldCapture, replacement]);
-    expect(scans).toBe(2);
+    expect(evaluations).toBe(2);
     expect(forward).toHaveBeenCalledOnce();
     const chunk = JSON.parse(String(forward.mock.calls[0]![0].payload.body));
     expect(chunk).toMatchObject({ sweepId: "cmd:new:sweep", sweepComplete: false, sweepFrameKey: "top",

@@ -161,6 +161,41 @@ describe("ImHttpCatalogAdapter", () => {
       "IM_MARKET_2", "im:8:1"))).toEqual([]);
   });
 
+  it("permanently rejects a generation when its second partition is malformed", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const malformed = { ...event, htn: "" };
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
+      "IM_MARKET_1", "im:8:2"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [malformed] }, 2, undefined,
+      "IM_MARKET_2", "im:8:2"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 3, undefined,
+      "IM_MARKET_2", "im:8:2"))).toEqual([]);
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 4, undefined,
+      "IM_MARKET_1", "im:8:3"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 5, undefined,
+      "IM_MARKET_2", "im:8:3"))).toHaveLength(1);
+  });
+
+  it("rejects every later partition after a malformed first partition until the source resets", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const malformed = { ...event, mls: [{ ...event.mls[0], ws: [] }] };
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [malformed] }, 1, undefined,
+      "IM_MARKET_1", "im:8:2"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
+      "IM_MARKET_2", "im:8:2"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 3, undefined,
+      "IM_MARKET_1", "im:8:2"))).toEqual([]);
+
+    adapter.resetSource("chrome:IM:8");
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
+      "IM_MARKET_1", "im:8:2", "observer-im:1"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
+      "IM_MARKET_2", "im:8:2", "observer-im:1"))).toHaveLength(1);
+  });
+
   it("reapplies a newer delta after a two-part baseline commits", () => {
     const adapter = new ImHttpCatalogAdapter();
     seedBothPartitions(adapter);

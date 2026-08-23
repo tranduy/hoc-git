@@ -40,9 +40,24 @@ interface SourceState {
   currentGeneration: string | null;
   pending: SnapshotGeneration | null;
   readonly obsoleteGenerations: Set<string>;
+  readonly rejectedGenerations: Set<string>;
+  newestRejectedGenerationOrdinal: number | null;
   newestGenerationOrdinal: number | null;
   readonly recentDeltas: ChromeBridgeEnvelope[];
   latestDeltaSequence: number | null;
+}
+
+function rememberRejected(state: SourceState, generation: string): void {
+  state.rejectedGenerations.add(generation);
+  while (state.rejectedGenerations.size > 64) {
+    const oldest = state.rejectedGenerations.values().next().value as string | undefined;
+    if (oldest === undefined) break;
+    state.rejectedGenerations.delete(oldest);
+  }
+  const ordinal = generationOrdinal(generation);
+  if (ordinal !== null && (state.newestRejectedGenerationOrdinal === null ||
+    ordinal > state.newestRejectedGenerationOrdinal)) state.newestRejectedGenerationOrdinal = ordinal;
+  if (state.pending?.id === generation) state.pending = null;
 }
 
 function rememberObsolete(state: SourceState, generation: string): void {
@@ -83,7 +98,8 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
     const root = this.#parsedBodies.get(envelope) ?? parseRecord(envelope.payload.body);
     if (root === null) return [];
     const state = this.#states.get(envelope.sourceId) ?? { current: null, currentGeneration: null,
-      pending: null, obsoleteGenerations: new Set<string>(), newestGenerationOrdinal: null,
+      pending: null, obsoleteGenerations: new Set<string>(), rejectedGenerations: new Set<string>(),
+      newestRejectedGenerationOrdinal: null, newestGenerationOrdinal: null,
       recentDeltas: [], latestDeltaSequence: null };
     if (envelope.request.pathnameClass === SNAPSHOT_PATH) {
       const partition = envelope.request.providerPartition;
@@ -91,7 +107,9 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       const cutoffSequence = envelope.request.reconcileCutoffSequence;
       const ordinal = generation === undefined ? null : generationOrdinal(generation);
       if (partition === undefined || generation === undefined || cutoffSequence === undefined ||
-        state.obsoleteGenerations.has(generation) ||
+        state.obsoleteGenerations.has(generation) || state.rejectedGenerations.has(generation) ||
+        (ordinal !== null && state.newestRejectedGenerationOrdinal !== null &&
+          ordinal <= state.newestRejectedGenerationOrdinal) ||
         (ordinal !== null && state.newestGenerationOrdinal !== null && ordinal < state.newestGenerationOrdinal) ||
         state.currentGeneration === generation) return [];
       if (ordinal !== null && (state.newestGenerationOrdinal === null || ordinal > state.newestGenerationOrdinal)) {
@@ -104,7 +122,11 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       }
       if (state.pending.cutoffSequence !== cutoffSequence) return [];
       const classified = classifySnapshot(root, envelope.observedAtMs);
-      if (classified === null) return [];
+      if (classified === null) {
+        rememberRejected(state, generation);
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
       const records = new Map<string, RetainedRecord>();
       for (const record of classified.records) {
         records.set(record.eventId, { record, observedAtMs: envelope.observedAtMs,
@@ -116,7 +138,11 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       const pendingPartitions = state.pending.partitions;
       const acceptedCount = [...pendingPartitions.values()].reduce((sum, value) => sum + value.records.size, 0);
       const inputCount = [...pendingPartitions.values()].reduce((sum, value) => sum + value.inputCount, 0);
-      if (acceptedCount === 0 && inputCount > 0) return [];
+      if (acceptedCount === 0 && inputCount > 0) {
+        rememberRejected(state, generation);
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
       if (state.currentGeneration !== null) rememberObsolete(state, state.currentGeneration);
       state.current = new Map([...pendingPartitions].map(([key, value]) => [key, value.records]));
       state.currentGeneration = state.pending.id;
