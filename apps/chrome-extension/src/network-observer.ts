@@ -54,6 +54,7 @@ type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
 
 interface PendingRequest {
   readonly source: ObservedSource;
+  readonly sourceGeneration: number;
   readonly sessionId?: string;
   readonly url: string;
   readonly resourceType: string;
@@ -550,12 +551,13 @@ export class NetworkObserver {
   readonly #streamOrdinals = new Map<string, number>();
   readonly #emissionTails = new Map<string, Promise<void>>();
   readonly #webSockets = new Map<string, {
-    source: ObservedSource; url: string; streamId: string; sessionId?: string
+    source: ObservedSource; sourceGeneration: number; url: string; streamId: string; sessionId?: string
   }>();
   readonly #socketBaselineRecoveryAtMs = new Map<string, number>();
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
+  readonly #requestGenerations = new Map<string, number>();
   readonly #pending = new Map<string, PendingRequest>();
   readonly #cmdSnapshots = new Map<string, { readonly body: string; readonly sentAtMs: number;
     readonly receivedMonotonicMs: number }>();
@@ -570,14 +572,17 @@ export class NetworkObserver {
   readonly #activeKsportStreams = new Map<string, string>();
   readonly #sabaReadySnapshotPartitions = new Set<string>();
   readonly #sabaSnapshotLoads = new Set<string>();
-  readonly #sabaSnapshotSaveRequested = new Set<string>();
-  readonly #sabaSnapshotSaveOperations = new Map<string, Promise<void>>();
+  readonly #sabaSnapshotStorageTails = new Map<string, Promise<void>>();
   readonly #sabaSnapshotSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #sabaSnapshotLastSavedAtMs = new Map<string, number>();
   readonly #sabaDocumentMarkers = new Map<string, string>();
-  readonly #cmdCapturesInFlight = new Set<string>();
+  readonly #cmdCapturesInFlight = new Map<string, { readonly token: symbol; readonly operation: Promise<void> }>();
   readonly #imLastRecoveryAtMs = new Map<string, number>();
-  readonly #imCatalogRefreshes = new Map<string, Promise<void>>();
+  readonly #catalogRefreshes = new Map<string, Promise<void>>();
+  readonly #sabaDomPolls = new Map<string, Promise<void>>();
+  readonly #ksportMaintenances = new Map<string, Promise<void>>();
+  readonly #ksportBaselineChecks = new Map<string, Promise<boolean>>();
+  readonly #snapshotReplays = new Map<string, Promise<boolean>>();
   readonly #imSnapshotOrdinals = new Map<string, number>();
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, number>>();
@@ -625,6 +630,19 @@ export class NetworkObserver {
   }
 
   async ensureCompleteKsportBaseline(source: ObservedSource): Promise<boolean> {
+    const existing = this.#ksportBaselineChecks.get(source.sourceId);
+    if (existing !== undefined) return existing;
+    const operation = this.#runPeriodicDomWork(source.sourceId,
+      () => this.#ensureCompleteKsportBaseline(source)).finally(() => {
+        if (this.#ksportBaselineChecks.get(source.sourceId) === operation) {
+          this.#ksportBaselineChecks.delete(source.sourceId);
+        }
+      });
+    this.#ksportBaselineChecks.set(source.sourceId, operation);
+    return operation;
+  }
+
+  async #ensureCompleteKsportBaseline(source: ObservedSource): Promise<boolean> {
     if (source.lobby !== "KSPORT") return false;
     const activeStream = this.#activeKsportStreams.get(source.sourceId);
     const frames = activeStream === undefined
@@ -730,8 +748,6 @@ export class NetworkObserver {
       if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
     }
     this.#sabaSnapshotLoads.delete(sourceId);
-    this.#sabaSnapshotSaveRequested.delete(sourceId);
-    this.#sabaSnapshotSaveOperations.delete(sourceId);
     const sabaSaveTimer = this.#sabaSnapshotSaveTimers.get(sourceId);
     if (sabaSaveTimer !== undefined) clearTimeout(sabaSaveTimer);
     this.#sabaSnapshotSaveTimers.delete(sourceId);
@@ -749,7 +765,11 @@ export class NetworkObserver {
     this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
     this.#cmdCapturesInFlight.delete(sourceId);
     this.#imLastRecoveryAtMs.delete(sourceId);
-    this.#imCatalogRefreshes.delete(sourceId);
+    this.#catalogRefreshes.delete(sourceId);
+    this.#sabaDomPolls.delete(sourceId);
+    this.#ksportMaintenances.delete(sourceId);
+    this.#ksportBaselineChecks.delete(sourceId);
+    this.#snapshotReplays.delete(sourceId);
     this.#activeCmdHiddenProbes.delete(sourceId);
     for (const [key, socket] of this.#webSockets) {
       if (socket.source.sourceId === sourceId) this.#webSockets.delete(key);
@@ -770,7 +790,7 @@ export class NetworkObserver {
         if (key.startsWith(`${tabId}:`)) this.#requestStreamIds.delete(key);
       }
     }
-    void this.#clearSabaWsSnapshots(sourceId).catch(() => undefined);
+    void this.#scheduleSabaWsSnapshotClear(sourceId);
     return `${this.#observerSessionId}:${generation}`;
   }
 
@@ -806,7 +826,6 @@ export class NetworkObserver {
         if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
       }
       this.#sabaSnapshotLoads.delete(sourceId);
-      this.#sabaSnapshotSaveRequested.delete(sourceId);
       const sabaSaveTimer = this.#sabaSnapshotSaveTimers.get(sourceId);
       if (sabaSaveTimer !== undefined) clearTimeout(sabaSaveTimer);
       this.#sabaSnapshotSaveTimers.delete(sourceId);
@@ -825,7 +844,11 @@ export class NetworkObserver {
       this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
-      this.#imCatalogRefreshes.delete(sourceId);
+      this.#catalogRefreshes.delete(sourceId);
+      this.#sabaDomPolls.delete(sourceId);
+      this.#ksportMaintenances.delete(sourceId);
+      this.#ksportBaselineChecks.delete(sourceId);
+      this.#snapshotReplays.delete(sourceId);
       this.#activeCmdHiddenProbes.delete(sourceId);
     }
     for (const [key, socket] of this.#webSockets) {
@@ -839,6 +862,9 @@ export class NetworkObserver {
     }
     for (const key of this.#requestStreamIds.keys()) {
       if (key.startsWith(`${tabId}:`)) this.#requestStreamIds.delete(key);
+    }
+    for (const key of this.#requestGenerations.keys()) {
+      if (key.startsWith(`${tabId}:`)) this.#requestGenerations.delete(key);
     }
   }
 
@@ -886,6 +912,17 @@ export class NetworkObserver {
 
   async pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
     if (source.lobby !== "SABA" || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    const existing = this.#sabaDomPolls.get(source.sourceId);
+    if (existing !== undefined) return existing;
+    const operation = this.#runPeriodicDomWork(source.sourceId,
+      () => this.#pollSabaDomChanges(source, hostname)).finally(() => {
+        if (this.#sabaDomPolls.get(source.sourceId) === operation) this.#sabaDomPolls.delete(source.sourceId);
+      });
+    this.#sabaDomPolls.set(source.sourceId, operation);
+    return operation;
+  }
+
+  async #pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
     const evaluations: unknown[] = [];
     evaluations.push(await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
       expression: SABA_ODDS_MUTATION_EXPRESSION, returnByValue: true, awaitPromise: false
@@ -901,7 +938,7 @@ export class NetworkObserver {
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, sessionId)).catch(() => ({})));
     }
     if (!evaluations.some((evaluation) => nestedValue(evaluation, "result", "value") === true)) return;
-    await this.#capturePublicCatalogSnapshot(source, hostname, CMD_PUBLIC_CATALOG_EXPRESSION, false);
+    await this.#capturePublicCatalogSnapshot(source, hostname, CMD_PUBLIC_CATALOG_EXPRESSION, false, true);
   }
 
   /**
@@ -914,6 +951,20 @@ export class NetworkObserver {
    * that has been silent for the whole quiet window escalates to full recovery.
    */
   async maintainKsportFeed(source: ObservedSource, options: { readonly quietMs?: number;
+    readonly recoveryIntervalMs?: number } = {}): Promise<void> {
+    const existing = this.#ksportMaintenances.get(source.sourceId);
+    if (existing !== undefined) return existing;
+    const operation = this.#runPeriodicDomWork(source.sourceId,
+      () => this.#maintainKsportFeed(source, options)).finally(() => {
+        if (this.#ksportMaintenances.get(source.sourceId) === operation) {
+          this.#ksportMaintenances.delete(source.sourceId);
+        }
+      });
+    this.#ksportMaintenances.set(source.sourceId, operation);
+    return operation;
+  }
+
+  async #maintainKsportFeed(source: ObservedSource, options: { readonly quietMs?: number;
     readonly recoveryIntervalMs?: number } = {}): Promise<void> {
     if (source.lobby !== "KSPORT") return;
     const quietMs = options.quietMs ?? 30_000;
@@ -928,32 +979,33 @@ export class NetworkObserver {
       if (this.hasCompleteKsportBaseline(source.sourceId)) return;
       // The socket streams one partition only; request the other by clicking
       // the provider's own time tab. No reload, no socket reset.
-      await this.ensureCompleteKsportBaseline(source);
+      await this.#ensureCompleteKsportBaseline(source);
       return;
     }
     const lastRecoveryAtMs = this.#ksportMaintenanceRecoveryAtMs.get(source.sourceId);
     if (lastRecoveryAtMs !== undefined && nowMs - lastRecoveryAtMs < recoveryIntervalMs) return;
     this.#ksportMaintenanceRecoveryAtMs.set(source.sourceId, nowMs);
-    await this.refreshCatalog(source);
+    await this.#refreshCatalog(source);
   }
 
   async refreshCatalog(source: ObservedSource): Promise<void> {
+    const existing = this.#catalogRefreshes.get(source.sourceId);
+    if (existing !== undefined) return existing;
+    const operation = this.#runPeriodicDomWork(source.sourceId, () => this.#refreshCatalog(source)).finally(() => {
+      if (this.#catalogRefreshes.get(source.sourceId) === operation) this.#catalogRefreshes.delete(source.sourceId);
+    });
+    this.#catalogRefreshes.set(source.sourceId, operation);
+    return operation;
+  }
+
+  async #refreshCatalog(source: ObservedSource): Promise<void> {
     if (source.lobby === "IM") {
-      const existing = this.#imCatalogRefreshes.get(source.sourceId);
-      if (existing !== undefined) return existing;
-      const operation = this.#runPeriodicDomWork(source.sourceId, async () => {
-        const results = await this.#evaluateImCatalogMainWorlds(source, true);
-        await this.#emit(source, "https://imsports.directsb.net/__fieldline_im_catalog_refresh__",
-          "Diagnostic", "TAB_STATE", {
-            encoding: "UTF8", body: JSON.stringify({ results })
-          });
-      }).finally(() => {
-        if (this.#imCatalogRefreshes.get(source.sourceId) === operation) {
-          this.#imCatalogRefreshes.delete(source.sourceId);
-        }
+      const results = await this.#evaluateImCatalogMainWorlds(source, true);
+      await this.#emit(source, "https://imsports.directsb.net/__fieldline_im_catalog_refresh__",
+        "Diagnostic", "TAB_STATE", {
+          encoding: "UTF8", body: JSON.stringify({ results })
       });
-      this.#imCatalogRefreshes.set(source.sourceId, operation);
-      return operation;
+      return;
     }
     if (source.lobby === "SABA") {
       if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
@@ -970,7 +1022,7 @@ export class NetworkObserver {
       // event coverage across both generations before it can publish, so a
       // virtualized/half-rendered table still fails closed. This is never part
       // of the 2-second poller.
-      await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true);
+      await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true, true);
       return;
     }
     if (source.lobby === "KSPORT") {
@@ -1010,15 +1062,14 @@ export class NetworkObserver {
       return;
     }
     if (source.lobby === "TSPORT") {
-      // Rebuild API-side decoder state from the provider frames already
-      // observed in this unchanged tab. Preserve their clocks; replay is state
-      // recovery, never evidence that an old quote was observed just now.
-      await this.replaySnapshots(source.sourceId);
+      // A replacement epoch requires new authority from the unchanged tab;
+      // retained frames belong to the retired epoch and cannot establish LIVE.
+      await this.#capturePublicCatalogSnapshot(source, "tsport.invalid",
+        TSPORT_PUBLIC_CATALOG_EXPRESSION, false, true);
       return;
     }
     if (source.lobby !== "BTI") return;
-    await this.#runPeriodicDomWork(source.sourceId, async () => {
-      const frameTree = await this.#withFrameCommandTimeout(
+    const frameTree = await this.#withFrameCommandTimeout(
         this.#sendCommand(source.tabId, "Page.getFrameTree")
       ).catch(() => ({}));
       const frameIds = collectFrameIds(frameTree);
@@ -1051,7 +1102,6 @@ export class NetworkObserver {
         }), this.#btiCatalogRefreshTimeoutMs).catch(() => ({}));
         await this.#ingestBtiRefreshEvaluation(source, evaluation);
       }));
-    });
   }
 
   async #closeSocketsForSession(source: ObservedSource, sessionId: string): Promise<void> {
@@ -1065,7 +1115,7 @@ export class NetworkObserver {
         this.#activeKsportStreams.get(socket.source.sourceId) === socket.streamId) {
         this.#activeKsportStreams.delete(socket.source.sourceId);
         this.#catalogWsSnapshots.delete(socket.source.sourceId);
-        await this.#clearSabaWsSnapshots(socket.source.sourceId).catch(() => undefined);
+        await this.#scheduleSabaWsSnapshotClear(socket.source.sourceId);
       }
     }
     const attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId);
@@ -1453,7 +1503,7 @@ export class NetworkObserver {
         this.#sabaSnapshotLoads.delete(source.sourceId);
       } else if (source.lobby === "KSPORT") {
         this.#discardSabaWsSnapshots(source.sourceId);
-        void this.#clearSabaWsSnapshots(source.sourceId);
+        void this.#scheduleSabaWsSnapshotClear(source.sourceId);
       }
       return;
     }
@@ -1471,6 +1521,7 @@ export class NetworkObserver {
     const key = requestId ? `${source.tabId}:${sessionId ?? "root"}:${requestId}` : null;
 
     if (method === "Network.requestWillBeSent" && key) {
+      this.#requestGenerations.set(key, this.#sourceGenerations.get(source.sourceId) ?? 0);
       const request = isRecord(params.request) ? params.request : null;
       const partition = request === null ? null : imPartitionFromRequest(source, request);
       if (partition === null) this.#requestPartitions.delete(key);
@@ -1539,9 +1590,10 @@ export class NetworkObserver {
     }
 
     if (method === "Network.webSocketCreated" && key && typeof params.url === "string") {
+      const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
       const streamId = String((this.#streamOrdinals.get(source.sourceId) ?? 0) + 1);
       this.#streamOrdinals.set(source.sourceId, Number(streamId));
-      this.#webSockets.set(key, { source, url: params.url, streamId,
+      this.#webSockets.set(key, { source, sourceGeneration, url: params.url, streamId,
         ...(sessionId === undefined ? {} : { sessionId }) });
       if (source.lobby === "KSPORT") {
         try {
@@ -1560,7 +1612,7 @@ export class NetworkObserver {
       }
       await this.#emit(source, params.url, "WebSocket", "WS_STATE", {
         encoding: "UTF8", body: '{"state":"OPEN"}'
-      }, { request: { streamId } });
+      }, { request: { streamId }, sourceGeneration });
       return;
     }
     if (method === "Network.webSocketClosed" && key) {
@@ -1568,12 +1620,12 @@ export class NetworkObserver {
       if (socket !== undefined) {
         await this.#emit(socket.source, socket.url, "WebSocket", "WS_STATE", {
           encoding: "UTF8", body: '{"state":"CLOSED"}'
-        }, { request: { streamId: socket.streamId } });
+        }, { request: { streamId: socket.streamId }, sourceGeneration: socket.sourceGeneration });
         if (socket.source.lobby === "KSPORT" &&
           this.#activeKsportStreams.get(socket.source.sourceId) === socket.streamId) {
           this.#activeKsportStreams.delete(socket.source.sourceId);
           this.#catalogWsSnapshots.delete(socket.source.sourceId);
-          await this.#clearSabaWsSnapshots(socket.source.sourceId).catch(() => undefined);
+          await this.#scheduleSabaWsSnapshotClear(socket.source.sourceId);
         }
         if (socket.source.lobby === "SBO") {
           try {
@@ -1620,11 +1672,13 @@ export class NetworkObserver {
         return;
       }
       if (!response || typeof response.payloadData !== "string") return;
+      if (!this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration)) return;
       const opcode = typeof response.opcode === "number" ? response.opcode : 1;
       const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
       if (opcode !== 2) {
         if (socket.source.lobby === "SABA" || socket.source.lobby === "KSPORT" || socket.source.lobby === "SBO") {
-          await this.#sabaDocumentMarker(socket.source, socket.sessionId);
+          await this.#sabaDocumentMarker(socket.source, socket.sessionId, socket.sourceGeneration);
+          if (!this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration)) return;
         }
         this.#rememberTsportWsEvent(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
         this.#rememberCatalogWsFrame(socket.source, socket.url, response.payloadData, socket.streamId, clocks);
@@ -1632,7 +1686,7 @@ export class NetworkObserver {
       await this.#emit(socket.source, socket.url, "WebSocket", "WS_FRAME", {
         encoding: opcode === 2 ? "BASE64" : "UTF8",
         body: response.payloadData
-      }, { request: { streamId: socket.streamId }, ...clocks });
+      }, { request: { streamId: socket.streamId }, ...clocks, sourceGeneration: socket.sourceGeneration });
       return;
     }
     if (method === "Network.responseReceived" && key) {
@@ -1641,7 +1695,9 @@ export class NetworkObserver {
       if (!response || !/^(?:XHR|Fetch)$/u.test(resourceType) || typeof response.url !== "string") return;
       const providerPartition = this.#requestPartitions.get(key);
       const streamId = this.#requestStreamIds.get(key);
-      this.#pending.set(key, { source, url: response.url, resourceType,
+      this.#pending.set(key, { source,
+        sourceGeneration: this.#requestGenerations.get(key) ?? this.#sourceGenerations.get(source.sourceId) ?? 0,
+        url: response.url, resourceType,
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(providerPartition === undefined ? {} : { providerPartition }),
         ...(streamId === undefined ? {} : { streamId }) });
@@ -1651,6 +1707,7 @@ export class NetworkObserver {
       this.#pending.delete(key);
       this.#requestPartitions.delete(key);
       this.#requestStreamIds.delete(key);
+      this.#requestGenerations.delete(key);
       return;
     }
     if (method === "Network.loadingFinished" && key) {
@@ -1658,7 +1715,9 @@ export class NetworkObserver {
       this.#pending.delete(key);
       this.#requestPartitions.delete(key);
       this.#requestStreamIds.delete(key);
+      this.#requestGenerations.delete(key);
       if (!pending || requestId === null) return;
+      if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
       let responseBodyRead = false;
       try {
         if (pending.providerPartition === undefined && isImGetSeUrl(pending.source, pending.url)) {
@@ -1666,6 +1725,7 @@ export class NetworkObserver {
             ? this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId })
             : this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId }, pending.sessionId))
             .catch(() => ({}));
+          if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
           const postData = isRecord(requestPostData) && typeof requestPostData.postData === "string"
             ? requestPostData.postData : null;
           const providerPartition = postData === null ? null : imPartitionFromRequest(pending.source, {
@@ -1675,23 +1735,27 @@ export class NetworkObserver {
         }
         const response = await this.#readResponseBody(source.tabId, requestId,
           isImGetSeUrl(pending.source, pending.url), pending.sessionId);
+        if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
         if (!isRecord(response) || typeof response.body !== "string") return;
         responseBodyRead = true;
         if (response.base64Encoded === true) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "BASE64", body: response.body
-          }, { request: { providerPartition: pending.providerPartition, streamId: pending.streamId } });
+          }, { request: { providerPartition: pending.providerPartition, streamId: pending.streamId },
+            sourceGeneration: pending.sourceGeneration });
           return;
         }
         const safeBody = redactNetworkBody(response.body);
         await this.#recoverMissingImBaseline(pending);
+        if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
         const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
         this.#rememberHttpSnapshot(pending, safeBody, clocks);
         const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
         if (fragments.length === 1) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: safeBody
-          }, { request: { providerPartition: pending.providerPartition, streamId: pending.streamId }, ...clocks });
+          }, { request: { providerPartition: pending.providerPartition, streamId: pending.streamId }, ...clocks,
+            sourceGeneration: pending.sourceGeneration });
           return;
         }
         const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
@@ -1701,10 +1765,12 @@ export class NetworkObserver {
             encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
               chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
           }, { request: { providerPartition: emissionPending.providerPartition,
-            streamId: emissionPending.streamId }, ...clocks }));
+            streamId: emissionPending.streamId }, ...clocks,
+            sourceGeneration: emissionPending.sourceGeneration }));
         await Promise.all(emissions);
       } catch {
-        if (!responseBodyRead && isImGetSeUrl(pending.source, pending.url)) {
+        if (!responseBodyRead && isImGetSeUrl(pending.source, pending.url) &&
+          this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) {
           const encodedDataLength = typeof params.encodedDataLength === "number" &&
             Number.isSafeInteger(params.encodedDataLength) && params.encodedDataLength >= 0
             ? params.encodedDataLength : 0;
@@ -1714,7 +1780,7 @@ export class NetworkObserver {
               body: JSON.stringify({ path: "/api/EventV6/GetSE",
                 ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
                 encodedDataLength })
-            }).catch(() => undefined);
+            }, { sourceGeneration: pending.sourceGeneration }).catch(() => undefined);
         }
         // A response body can be evicted by Chrome; isolate it from the stream.
       }
@@ -1741,6 +1807,8 @@ export class NetworkObserver {
   async ingestWebSocketFrame(source: ObservedSource, url: string, payloadData: string,
     opcode = 1): Promise<void> {
     if (!/^wss?:\/\//iu.test(url) || !Number.isInteger(opcode) || (opcode !== 1 && opcode !== 2)) return;
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
     const streamId = "manual";
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     if (opcode !== 2) {
@@ -1750,17 +1818,19 @@ export class NetworkObserver {
     await this.#emit(source, url, "WebSocket", "WS_FRAME", {
       encoding: opcode === 2 ? "BASE64" : "UTF8",
       body: payloadData
-    }, { request: { streamId }, ...clocks });
+    }, { request: { streamId }, ...clocks, sourceGeneration });
   }
 
   async ingestHttpResponse(source: ObservedSource, url: string, resourceType: "XHR" | "Fetch",
     body: string, providerPartition?: ImProviderPartition, streamId?: string): Promise<void> {
     if (!/^https?:\/\//iu.test(url)) return;
-    const pending: PendingRequest = { source, url, resourceType,
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const pending: PendingRequest = { source, sourceGeneration, url, resourceType,
       ...(providerPartition === undefined ? {} : { providerPartition }),
       ...(streamId === undefined ? {} : { streamId }) };
     const safeBody = redactNetworkBody(body);
     await this.#recoverMissingImBaseline(pending);
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
     const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
@@ -1771,7 +1841,7 @@ export class NetworkObserver {
     const request = Object.keys(requestMetadata).length === 0 ? {} : { request: requestMetadata };
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
-        { ...request, ...clocks });
+        { ...request, ...clocks, sourceGeneration });
       return;
     }
     const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
@@ -1780,7 +1850,7 @@ export class NetworkObserver {
         encoding: "UTF8",
         body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex, chunkCount: fragments.length,
           bodyEncoding: "UTF8", bodyFragment })
-      }, { ...request, ...clocks });
+      }, { ...request, ...clocks, sourceGeneration });
     }
   }
 
@@ -1789,14 +1859,16 @@ export class NetworkObserver {
     let records: unknown;
     try { records = JSON.parse(body); } catch { return; }
     if (!Array.isArray(records) || records.length === 0) return;
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const nowMs = this.#now();
     const receivedMonotonicMs = this.#monotonicNow();
     const snapshotId = `dom:${source.tabId}:${nowMs}`;
     for (const chunk of chunkCmdSnapshot(records, snapshotId)) {
       await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
         encoding: "UTF8", body: JSON.stringify(chunk)
-      }, { observedAtMs: nowMs, receivedMonotonicMs });
+      }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration });
     }
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
     if (isReplayableCmdCatalog(records)) {
       this.#cmdSnapshots.set(source.sourceId, { body, sentAtMs: nowMs, receivedMonotonicMs });
       this.#cmdSnapshotHosts.set(source.sourceId, hostname);
@@ -1812,11 +1884,15 @@ export class NetworkObserver {
   }
 
   async #capturePublicCatalogSnapshot(source: ObservedSource, hostname: string, expression: string,
-    forceGeneration: boolean): Promise<void> {
-    if (this.#cmdCapturesInFlight.has(source.sourceId) || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
-    this.#cmdCapturesInFlight.add(source.sourceId);
-    try {
-      await this.#runPeriodicDomWork(source.sourceId, async () => {
+    forceGeneration: boolean, alreadyScheduled = false): Promise<void> {
+    if (!/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    const existing = this.#cmdCapturesInFlight.get(source.sourceId);
+    if (existing !== undefined) return existing.operation;
+    const token = Symbol("provider-capture");
+    const operation = (async () => {
+      try {
+      const capture = async (): Promise<void> => {
+        const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
         for (let generation = 0; generation < (forceGeneration ? 2 : 1); generation += 1) {
         const frameTree = await this.#withFrameCommandTimeout(
           this.#sendCommand(source.tabId, "Page.getFrameTree")
@@ -1841,6 +1917,7 @@ export class NetworkObserver {
           }));
           values.push(...frameValues.filter((value) => value !== null));
         }
+        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
         const evaluated = values.flatMap(readEvaluationRecords);
         const catalogRecords = evaluated.filter((value) => !isRecord(value) || !("__fieldlineDiagnostic" in value));
         const records = catalogRecords.length > 0 ? catalogRecords : evaluated;
@@ -1861,8 +1938,9 @@ export class NetworkObserver {
         for (const chunk of chunks) {
           await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
             encoding: "UTF8", body: JSON.stringify(chunk)
-          }, { observedAtMs: nowMs, receivedMonotonicMs });
+          }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration });
         }
+        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
         this.#cmdLastBodies.set(source.sourceId, catalogBody);
         this.#cmdLastSentAtMs.set(source.sourceId, nowMs);
         if (isReplayableCmdCatalog(records)) {
@@ -1870,10 +1948,17 @@ export class NetworkObserver {
           this.#cmdSnapshotHosts.set(source.sourceId, hostname);
         }
         }
-      });
-    } finally {
-      this.#cmdCapturesInFlight.delete(source.sourceId);
-    }
+      };
+      if (alreadyScheduled) await capture();
+      else await this.#runPeriodicDomWork(source.sourceId, capture);
+      } finally {
+      if (this.#cmdCapturesInFlight.get(source.sourceId)?.token === token) {
+        this.#cmdCapturesInFlight.delete(source.sourceId);
+      }
+      }
+    })();
+    this.#cmdCapturesInFlight.set(source.sourceId, { token, operation });
+    return operation;
   }
 
   async #runPeriodicDomWork<T>(sourceId: string, operation: () => Promise<T>): Promise<T> {
@@ -2137,6 +2222,28 @@ export class NetworkObserver {
   }
 
   async replaySnapshots(requestedSourceId?: string): Promise<boolean> {
+    if (requestedSourceId !== undefined) {
+      const existing = this.#snapshotReplays.get(requestedSourceId);
+      if (existing !== undefined) return existing;
+      const operation = this.#runPeriodicDomWork(requestedSourceId,
+        () => this.#replaySnapshots(requestedSourceId)).finally(() => {
+          if (this.#snapshotReplays.get(requestedSourceId) === operation) {
+            this.#snapshotReplays.delete(requestedSourceId);
+          }
+        });
+      this.#snapshotReplays.set(requestedSourceId, operation);
+      return operation;
+    }
+    const sourceIds = new Set<string>([
+      ...this.#cmdSnapshots.keys(), ...this.#httpSnapshots.keys(), ...this.#tsportSnapshots.keys(),
+      ...this.#catalogWsSnapshots.keys()
+    ]);
+    const results = await Promise.all([...sourceIds].map((sourceId) =>
+      this.replaySnapshots(sourceId).catch(() => false)));
+    return results.some(Boolean);
+  }
+
+  async #replaySnapshots(requestedSourceId?: string): Promise<boolean> {
     let replayed = false;
     for (const [sourceId, snapshot] of this.#cmdSnapshots) {
       if (requestedSourceId !== undefined && sourceId !== requestedSourceId) continue;
@@ -2312,13 +2419,16 @@ export class NetworkObserver {
   async #restoreSabaWsSnapshots(source: ObservedSource): Promise<void> {
     if (this.#sabaSnapshotLoads.has(source.sourceId)) return;
     this.#sabaSnapshotLoads.add(source.sourceId);
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     // Durable frames are worker-bootstrap evidence only. Once this worker has
     // explicitly replaced the source epoch, accepting them would relabel an
     // old complete baseline as current and create false continuity.
-    if ((this.#sourceGenerations.get(source.sourceId) ?? 0) > 0) return;
-    const documentMarker = await this.#sabaDocumentMarker(source);
+    if (sourceGeneration > 0) return;
+    const documentMarker = await this.#sabaDocumentMarker(source, undefined, sourceGeneration);
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
     if (documentMarker === null) return;
     const raw = await this.#loadSabaWsSnapshots(source.sourceId).catch(() => null);
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
     if (!isRecord(raw) || raw.version !== 1 || raw.sourceId !== source.sourceId ||
       raw.documentMarker !== documentMarker || !Array.isArray(raw.partitions)) return;
     const restored = new Map<string, ReplayableWsEvent[]>();
@@ -2335,6 +2445,7 @@ export class NetworkObserver {
       if (frames.length === 0 || (source.lobby === "SABA"
         ? !sabaFramesContainCompleteBaseline(frames)
         : source.lobby === "KSPORT" ? !ksportFramesContainCompleteBaseline(frames) : true)) continue;
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
       restored.set(candidate.partition, frames);
       if (source.lobby === "SABA") {
         this.#sabaReadySnapshotPartitions.add(`${source.sourceId}|${candidate.partition}`);
@@ -2361,18 +2472,36 @@ export class NetworkObserver {
       }
       return;
     }
-    this.#sabaSnapshotSaveRequested.add(sourceId);
-    if (this.#sabaSnapshotSaveOperations.has(sourceId)) return;
-    const operation = Promise.resolve().then(async () => {
-      while (this.#sabaSnapshotSaveRequested.delete(sourceId)) {
-        const cache = this.#sabaWsSnapshotCache(sourceId);
-        if (cache !== null) {
-          await this.#saveSabaWsSnapshots!(cache).catch(() => undefined);
-          this.#sabaSnapshotLastSavedAtMs.set(sourceId, this.#now());
-        }
+    const cache = this.#sabaWsSnapshotCache(sourceId);
+    if (cache === null) return;
+    const sourceGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
+    const previous = this.#sabaSnapshotStorageTails.get(sourceId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(async () => {
+      if (!this.#isSourceGenerationCurrent(sourceId, sourceGeneration)) return;
+      await this.#saveSabaWsSnapshots!(cache).catch(() => undefined);
+      if (this.#isSourceGenerationCurrent(sourceId, sourceGeneration)) {
+        this.#sabaSnapshotLastSavedAtMs.set(sourceId, this.#now());
       }
-    }).finally(() => { this.#sabaSnapshotSaveOperations.delete(sourceId); });
-    this.#sabaSnapshotSaveOperations.set(sourceId, operation);
+    });
+    const settled = operation.finally(() => {
+      if (this.#sabaSnapshotStorageTails.get(sourceId) === settled) {
+        this.#sabaSnapshotStorageTails.delete(sourceId);
+      }
+    });
+    this.#sabaSnapshotStorageTails.set(sourceId, settled);
+  }
+
+  #scheduleSabaWsSnapshotClear(sourceId: string): Promise<void> {
+    const previous = this.#sabaSnapshotStorageTails.get(sourceId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined)
+      .then(() => this.#clearSabaWsSnapshots(sourceId).catch(() => undefined));
+    const settled = operation.finally(() => {
+      if (this.#sabaSnapshotStorageTails.get(sourceId) === settled) {
+        this.#sabaSnapshotStorageTails.delete(sourceId);
+      }
+    });
+    this.#sabaSnapshotStorageTails.set(sourceId, settled);
+    return settled;
   }
 
   #sabaWsSnapshotCache(sourceId: string): PersistedSabaWsSnapshots | null {
@@ -2389,13 +2518,15 @@ export class NetworkObserver {
     return JSON.stringify(value).length <= 4_000_000 ? value : null;
   }
 
-  async #sabaDocumentMarker(source: ObservedSource, sessionId?: string): Promise<string | null> {
+  async #sabaDocumentMarker(source: ObservedSource, sessionId?: string,
+    sourceGeneration = this.#captureSourceGeneration(source.sourceId)): Promise<string | null> {
     const retained = this.#sabaDocumentMarkers.get(source.sourceId);
     if (retained !== undefined) return retained;
     const params = { expression: "String(performance.timeOrigin)", returnByValue: true, awaitPromise: false };
     const evaluation = await this.#withFrameCommandTimeout(sessionId === undefined
       ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
       : this.#sendCommand(source.tabId, "Runtime.evaluate", params, sessionId)).catch(() => null);
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return null;
     const value = nestedValue(evaluation, "result", "value");
     if (typeof value !== "string" || !/^\d+(?:\.\d+)?$/u.test(value) || value.length > 64) return null;
     this.#sabaDocumentMarkers.set(source.sourceId, value);
@@ -2484,10 +2615,10 @@ export class NetworkObserver {
       readonly request?: Pick<ChromeBridgeEnvelope["request"], "streamId" | "providerPartition" | "replayed">;
       readonly observedAtMs?: number;
       readonly receivedMonotonicMs?: number;
+      readonly sourceGeneration?: number;
     } = {}
   ): Promise<void> {
-    const sourceGeneration = this.#activeWorkGenerations.get(source.sourceId) ??
-      this.#sourceGenerations.get(source.sourceId) ?? 0;
+    const sourceGeneration = metadata.sourceGeneration ?? this.#captureSourceGeneration(source.sourceId);
     const previous = this.#emissionTails.get(source.sourceId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(async () => {
       if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration) return;
@@ -2519,6 +2650,14 @@ export class NetworkObserver {
     } finally {
       if (this.#emissionTails.get(source.sourceId) === current) this.#emissionTails.delete(source.sourceId);
     }
+  }
+
+  #captureSourceGeneration(sourceId: string): number {
+    return this.#activeWorkGenerations.get(sourceId) ?? this.#sourceGenerations.get(sourceId) ?? 0;
+  }
+
+  #isSourceGenerationCurrent(sourceId: string, generation: number): boolean {
+    return (this.#sourceGenerations.get(sourceId) ?? 0) === generation;
   }
 }
 

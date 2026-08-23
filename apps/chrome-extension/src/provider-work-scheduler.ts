@@ -45,8 +45,7 @@ export class ProviderWorkScheduler {
   readonly #maxQueuedPerSource: number;
   readonly #onRejected: ((error: ProviderWorkQueueFullError) => void) | null;
   readonly #lanes = new Map<string, ProviderLane>();
-  readonly #readySources: string[] = [];
-  readonly #readySourceSet = new Set<string>();
+  readonly #readySources = new Map<string, true>();
   #activeCount = 0;
 
   constructor(options: ProviderWorkSchedulerOptions = {}) {
@@ -81,25 +80,28 @@ export class ProviderWorkScheduler {
     return lane !== undefined && (lane.active || lane.queue.length > 0);
   }
 
+  get readySourceCount(): number {
+    return this.#readySources.size;
+  }
+
   clear(sourceId: string): void {
     const lane = this.#lanes.get(sourceId);
     if (lane === undefined) return;
     const error = new ProviderWorkClearedError(sourceId);
     for (const work of lane.queue.splice(0)) work.reject(error);
-    this.#readySourceSet.delete(sourceId);
+    this.#readySources.delete(sourceId);
     if (!lane.active) this.#lanes.delete(sourceId);
   }
 
   #markReady(sourceId: string, lane: ProviderLane): void {
-    if (lane.active || lane.queue.length === 0 || this.#readySourceSet.has(sourceId)) return;
-    this.#readySourceSet.add(sourceId);
-    this.#readySources.push(sourceId);
+    if (lane.active || lane.queue.length === 0 || this.#readySources.has(sourceId)) return;
+    this.#readySources.set(sourceId, true);
   }
 
   #drain(): void {
-    while (this.#activeCount < this.#maxConcurrent && this.#readySources.length > 0) {
-      const sourceId = this.#readySources.shift()!;
-      if (!this.#readySourceSet.delete(sourceId)) continue;
+    while (this.#activeCount < this.#maxConcurrent && this.#readySources.size > 0) {
+      const sourceId = this.#readySources.keys().next().value as string;
+      this.#readySources.delete(sourceId);
       const lane = this.#lanes.get(sourceId);
       if (lane === undefined || lane.active) continue;
       const work = lane.queue.shift();

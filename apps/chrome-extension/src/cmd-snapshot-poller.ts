@@ -19,13 +19,13 @@ export interface CmdSnapshotPollerDependencies {
 
 export class CmdSnapshotPoller {
   readonly #dependencies: CmdSnapshotPollerDependencies;
-  readonly #inFlight = new Set<number>();
+  readonly #inFlight = new Map<number, symbol>();
   #timer: unknown = null;
   #lastMaintenanceAtMs: number | null = null;
   readonly #lastFastMaintenanceAtMs = new Map<number, number>();
   readonly #lastCatalogRefreshAtMs = new Map<number, number>();
-  readonly #maintenanceInFlight = new Set<number>();
-  readonly #catalogRefreshInFlight = new Set<number>();
+  readonly #maintenanceInFlight = new Map<number, symbol>();
+  readonly #catalogRefreshInFlight = new Map<number, symbol>();
   readonly #lastPolledSourceIds = new Set<string>();
   #lastScheduledPollAtMs: number | null = null;
 
@@ -49,18 +49,28 @@ export class CmdSnapshotPoller {
     this.#timer = null;
   }
 
-  pollNow(): void {
+  pollNow(forcedSourceIds: readonly string[] = []): void {
     const now = (this.#dependencies.now ?? Date.now)();
     const tabs = this.#dependencies.list();
+    const forced = new Set(forcedSourceIds);
     const hasNewSource = tabs.some((tab) =>
       !this.#lastPolledSourceIds.has(`chrome:${tab.lobby}:${tab.tabId}`));
     if (this.#lastScheduledPollAtMs !== null &&
-      now - this.#lastScheduledPollAtMs < (this.#dependencies.intervalMs ?? 2_000) && !hasNewSource) return;
-    this.#tick(tabs);
+      now - this.#lastScheduledPollAtMs < (this.#dependencies.intervalMs ?? 2_000) && !hasNewSource &&
+      forced.size === 0) return;
+    this.#tick(tabs, forced);
   }
 
-  #tick(tabs = this.#dependencies.list()): void {
+  #tick(tabs = this.#dependencies.list(), forcedSourceIds = new Set<string>()): void {
     const now = (this.#dependencies.now ?? Date.now)();
+    for (const tab of tabs) {
+      if (!forcedSourceIds.has(`chrome:${tab.lobby}:${tab.tabId}`)) continue;
+      this.#lastFastMaintenanceAtMs.delete(tab.tabId);
+      this.#lastCatalogRefreshAtMs.delete(tab.tabId);
+      this.#maintenanceInFlight.delete(tab.tabId);
+      this.#catalogRefreshInFlight.delete(tab.tabId);
+      this.#inFlight.delete(tab.tabId);
+    }
     this.#lastPolledSourceIds.clear();
     for (const tab of tabs) this.#lastPolledSourceIds.add(`chrome:${tab.lobby}:${tab.tabId}`);
     if (this.#dependencies.maintain !== undefined &&
@@ -71,10 +81,13 @@ export class CmdSnapshotPoller {
         if (tab.lobby === "CMD" || tab.lobby === "TSPORT" || tab.lobby === "IM") {
           this.#lastFastMaintenanceAtMs.set(tab.tabId, now);
         }
-        this.#maintenanceInFlight.add(tab.tabId);
+        const token = Symbol("maintenance");
+        this.#maintenanceInFlight.set(tab.tabId, token);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
         void this.#dependencies.maintain(source).catch(() => undefined)
-          .finally(() => this.#maintenanceInFlight.delete(tab.tabId));
+          .finally(() => {
+            if (this.#maintenanceInFlight.get(tab.tabId) === token) this.#maintenanceInFlight.delete(tab.tabId);
+          });
       }
     }
     if (this.#dependencies.maintain !== undefined) {
@@ -86,10 +99,13 @@ export class CmdSnapshotPoller {
         if (intervalMs === null || this.#maintenanceInFlight.has(tab.tabId) ||
           now - (this.#lastFastMaintenanceAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) < intervalMs) continue;
         this.#lastFastMaintenanceAtMs.set(tab.tabId, now);
-        this.#maintenanceInFlight.add(tab.tabId);
+        const token = Symbol("maintenance");
+        this.#maintenanceInFlight.set(tab.tabId, token);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
         void this.#dependencies.maintain(source).catch(() => undefined)
-          .finally(() => this.#maintenanceInFlight.delete(tab.tabId));
+          .finally(() => {
+            if (this.#maintenanceInFlight.get(tab.tabId) === token) this.#maintenanceInFlight.delete(tab.tabId);
+          });
       }
     }
     for (const tab of tabs) {
@@ -98,10 +114,13 @@ export class CmdSnapshotPoller {
         now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >=
           (this.#dependencies.intervalMs ?? 2_000)) {
         this.#lastCatalogRefreshAtMs.set(tab.tabId, now);
-        this.#catalogRefreshInFlight.add(tab.tabId);
+        const token = Symbol("catalog-refresh");
+        this.#catalogRefreshInFlight.set(tab.tabId, token);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
         void this.#dependencies.pollSabaDomChanges(source, tab.hostname).catch(() => undefined)
-          .finally(() => this.#catalogRefreshInFlight.delete(tab.tabId));
+          .finally(() => {
+            if (this.#catalogRefreshInFlight.get(tab.tabId) === token) this.#catalogRefreshInFlight.delete(tab.tabId);
+          });
       }
       // IM's catalog is a two-part signed GetSE that only the explicit refresh
       // path requests (maintain() deliberately skips it). Without a periodic
@@ -115,18 +134,24 @@ export class CmdSnapshotPoller {
         !this.#catalogRefreshInFlight.has(tab.tabId) &&
         now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >= catalogRefreshIntervalMs) {
         this.#lastCatalogRefreshAtMs.set(tab.tabId, now);
-        this.#catalogRefreshInFlight.add(tab.tabId);
+        const token = Symbol("catalog-refresh");
+        this.#catalogRefreshInFlight.set(tab.tabId, token);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
         void this.#dependencies.refreshCatalog(source).catch(() => undefined)
-          .finally(() => this.#catalogRefreshInFlight.delete(tab.tabId));
+          .finally(() => {
+            if (this.#catalogRefreshInFlight.get(tab.tabId) === token) this.#catalogRefreshInFlight.delete(tab.tabId);
+          });
       }
       if ((tab.lobby !== "CMD" && tab.lobby !== "TSPORT") ||
         this.#inFlight.has(tab.tabId)) continue;
-      this.#inFlight.add(tab.tabId);
+      const token = Symbol("capture");
+      this.#inFlight.set(tab.tabId, token);
       const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
       void this.#dependencies.capture(source, tab.hostname)
         .catch(() => undefined)
-        .finally(() => this.#inFlight.delete(tab.tabId));
+        .finally(() => {
+          if (this.#inFlight.get(tab.tabId) === token) this.#inFlight.delete(tab.tabId);
+        });
     }
   }
 }

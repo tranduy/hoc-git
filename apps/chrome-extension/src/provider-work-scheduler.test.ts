@@ -81,4 +81,22 @@ describe("ProviderWorkScheduler", () => {
     await active;
     expect(scheduler.isBusy("chrome:SABA:7")).toBe(false);
   });
+
+  it("removes cleared ready sources immediately while all permits are occupied", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const scheduler = new ProviderWorkScheduler({ maxConcurrent: 1 });
+    const active = scheduler.run("chrome:CMD:1", async () => blocked);
+    const cleared: Promise<unknown>[] = [];
+
+    for (let index = 0; index < 2_000; index += 1) {
+      const sourceId = `chrome:SABA:${index + 2}`;
+      cleared.push(scheduler.run(sourceId, async () => undefined).catch((error: unknown) => error));
+      scheduler.clear(sourceId);
+    }
+
+    expect(scheduler.readySourceCount).toBe(0);
+    release();
+    await Promise.all([active, ...cleared]);
+  });
 });

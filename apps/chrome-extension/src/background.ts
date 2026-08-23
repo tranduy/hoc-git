@@ -128,11 +128,9 @@ async function recoverSourceSnapshot(sourceId: string, beginEpoch: boolean): Pro
       sourceId,
       tabId: source.tabId
     }, source.hostname),
-    refresh: async (source) => observer.refreshCatalog({
-      lobby: source.lobby,
-      sourceId,
-      tabId: source.tabId
-    }),
+    refresh: async (source) => source.lobby === "TSPORT"
+      ? observer.captureCmdSnapshot({ lobby: source.lobby, sourceId, tabId: source.tabId }, source.hostname)
+      : observer.refreshCatalog({ lobby: source.lobby, sourceId, tabId: source.tabId }),
     reload: async (tabId) => chrome.tabs.reload(tabId)
   });
 }
@@ -402,7 +400,8 @@ async function reconcilePreferredTabs(): Promise<void> {
   await registry.restore(tabs);
 }
 
-async function reattachPreferredTabs(): Promise<void> {
+async function reattachPreferredTabs(): Promise<readonly string[]> {
+  const sourceIds: string[] = [];
   for (const attached of registry.list()) {
     const source: ObservedSource = {
       lobby: attached.lobby,
@@ -412,7 +411,9 @@ async function reattachPreferredTabs(): Promise<void> {
     await observer.start(source);
     await tabBootstrapper.ensure(attached);
     await sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
+    sourceIds.push(source.sourceId);
   }
+  return sourceIds;
 }
 
 const bridgeWakeup = new BridgeWakeup({
@@ -421,7 +422,7 @@ const bridgeWakeup = new BridgeWakeup({
   reconcileTabs: reconcilePreferredTabs,
   ensureConnected: ensureBridgeConnected,
   ensureAttached: reattachPreferredTabs,
-  pollNow: () => snapshotPoller.pollNow()
+  pollNow: (sourceIds) => snapshotPoller.pollNow(sourceIds)
 });
 bridgeWakeup.start();
 

@@ -26,6 +26,12 @@ interface QueueEntry {
   sentGeneration: number | null;
 }
 
+interface SourceEpochAdmission {
+  active: string | null;
+  readonly retired: Set<string>;
+  resyncing: boolean;
+}
+
 export interface LocalBridgeOptions {
   readonly socketFactory: (url: string, protocols: string[]) => BridgeSocket;
   readonly readinessProbe?: () => boolean | Promise<boolean>;
@@ -71,7 +77,7 @@ export class LocalBridge {
   readonly #onCmdHiddenMarketProbe: NonNullable<LocalBridgeOptions["onCmdHiddenMarketProbe"]>;
   readonly #queue: QueueEntry[] = [];
   readonly #recoveryScheduler = new ProviderWorkScheduler();
-  readonly #resyncingSources = new Map<string, string | null>();
+  readonly #sourceEpochs = new Map<string, SourceEpochAdmission>();
   #socket: BridgeSocket | null = null;
   #timer: unknown = null;
   #generation = 0;
@@ -123,14 +129,7 @@ export class LocalBridge {
   }
 
   async enqueue(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): Promise<void> {
-    const resyncEpoch = this.#resyncingSources.get(envelope.sourceId);
-    if (resyncEpoch !== undefined) {
-      if (envelope.sourceEpoch === undefined || envelope.sourceEpoch === resyncEpoch) return;
-      // The collector has begun the replacement snapshot under the epoch
-      // created by onSourceResync. The API still requires that generation's
-      // complete baseline before it can become LIVE.
-      this.#resyncingSources.delete(envelope.sourceId);
-    }
+    if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch ?? null)) return;
     const serialized = JSON.stringify(envelope);
     const entry: QueueEntry = {
       envelope,
@@ -141,16 +140,10 @@ export class LocalBridge {
       sentGeneration: null
     };
     if (entry.bytes > this.#maxQueueBytes) throw new Error("BRIDGE_QUEUE_ITEM_TOO_LARGE");
-    while (this.queueBytes + entry.bytes > this.#maxQueueBytes) {
-      const diagnosticIndex = this.#queue.findIndex((queued) => queued.priority === "DIAGNOSTIC");
-      if (diagnosticIndex >= 0) {
-        this.#removeAt(diagnosticIndex);
-        continue;
-      }
-      if (priority === "DIAGNOSTIC") return;
-      // Removing one quote would make later quotes look contiguous while a
-      // provider generation has a hole. Retire only the affected source and
-      // require a replacement epoch; never evict another provider's queue.
+    if (this.queueBytes + entry.bytes > this.#maxQueueBytes) {
+      // Every envelope is sequenced, including diagnostics. Dropping any one
+      // would manufacture continuity across a hole, so retire the incoming
+      // provider atomically. Another provider is never an eviction candidate.
       this.#requestSourceResync(envelope.sourceId, envelope.sourceEpoch ?? null);
       return;
     }
@@ -219,7 +212,10 @@ export class LocalBridge {
       try { void Promise.resolve(this.#onOpen()).catch(() => undefined); }
       catch { /* replay failure must not close the bridge */ }
     };
-    socket.onmessage = (event) => this.#handleMessage(event.data);
+    socket.onmessage = (event) => {
+      if (this.#socket !== socket || this.#generation !== generation) return;
+      this.#handleMessage(event.data, generation);
+    };
     socket.onclose = () => {
       if (this.#socket !== socket) return;
       this.#socket = null;
@@ -265,7 +261,7 @@ export class LocalBridge {
     }
   }
 
-  #handleMessage(raw: unknown): void {
+  #handleMessage(raw: unknown, generation: number): void {
     if (typeof raw !== "string") return;
     try {
       const parsed = ChromeBridgeControlMessageSchema.safeParse(JSON.parse(raw));
@@ -328,13 +324,15 @@ export class LocalBridge {
           // backlog would make the server close every new socket forever.
           // Drop only the rejected source and republish its authoritative
           // snapshot; healthy sources remain queued and connected.
-          const rejected = this.#queue.find((entry) => entry.envelope.sourceId === rejection.sourceId);
+          const rejected = this.#queue.find((entry) => entry.envelope.sourceId === rejection.sourceId
+            && entry.sentGeneration === generation);
+          if (rejected === undefined) return;
           this.#requestSourceResync(rejection.sourceId, rejected?.envelope.sourceEpoch ?? null);
           return;
         }
         if (rejection.sequence !== null) {
           const index = this.#queue.findIndex((entry) => entry.envelope.sourceId === rejection.sourceId
-            && entry.envelope.sequence === rejection.sequence);
+            && entry.envelope.sequence === rejection.sequence && entry.sentGeneration === generation);
           if (index >= 0) this.#removeAt(index);
         }
         return;
@@ -343,7 +341,8 @@ export class LocalBridge {
       const acknowledgement = parsed.data;
       const index = this.#queue.findIndex((entry) =>
         entry.envelope.sourceId === acknowledgement.sourceId
-        && entry.envelope.sequence === acknowledgement.sequence);
+        && entry.envelope.sequence === acknowledgement.sequence
+        && entry.sentGeneration === generation);
       if (index >= 0) this.#removeAt(index);
     } catch {
       // Invalid control traffic cannot mutate the send queue.
@@ -371,9 +370,15 @@ export class LocalBridge {
   }
 
   #requestSourceResync(sourceId: string, sourceEpoch: string | null): void {
-    if (this.#resyncingSources.has(sourceId)) return;
+    const state = this.#sourceEpochs.get(sourceId) ?? { active: sourceEpoch, retired: new Set<string>(),
+      resyncing: false };
+    this.#sourceEpochs.set(sourceId, state);
+    if (state.resyncing) return;
     const queuedEpoch = this.#queue.find((entry) => entry.envelope.sourceId === sourceId)?.envelope.sourceEpoch;
-    this.#resyncingSources.set(sourceId, queuedEpoch ?? sourceEpoch);
+    for (const candidate of [state.active, queuedEpoch ?? null, sourceEpoch]) {
+      if (candidate !== null && candidate !== undefined) state.retired.add(candidate);
+    }
+    state.resyncing = true;
     for (let index = this.#queue.length - 1; index >= 0; index--) {
       if (this.#queue[index]?.envelope.sourceId === sourceId) this.#removeAt(index);
     }
@@ -385,6 +390,29 @@ export class LocalBridge {
       try { await this.#onSourceResync(sourceId); }
       finally { this.#reconnectAfterResync(); }
     }).catch(() => undefined);
+  }
+
+  #admitSourceEpoch(sourceId: string, sourceEpoch: string | null): boolean {
+    const existing = this.#sourceEpochs.get(sourceId);
+    if (existing === undefined) {
+      this.#sourceEpochs.set(sourceId, { active: sourceEpoch, retired: new Set<string>(), resyncing: false });
+      return true;
+    }
+    if (sourceEpoch !== null && existing.retired.has(sourceEpoch)) return false;
+    if (existing.resyncing) {
+      if (sourceEpoch === null || sourceEpoch === existing.active) return false;
+      existing.active = sourceEpoch;
+      existing.resyncing = false;
+      return true;
+    }
+    if (existing.active === sourceEpoch) return true;
+    if (sourceEpoch === null) return false;
+    if (existing.active !== null) existing.retired.add(existing.active);
+    for (let index = this.#queue.length - 1; index >= 0; index--) {
+      if (this.#queue[index]?.envelope.sourceId === sourceId) this.#removeAt(index);
+    }
+    existing.active = sourceEpoch;
+    return true;
   }
 
   #reconnectAfterResync(): void {

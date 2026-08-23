@@ -7,8 +7,8 @@ describe("BridgeWakeup", () => {
     const calls: string[] = [];
     const reconcileTabs = vi.fn(async () => { calls.push("reconcile"); });
     const ensureConnected = vi.fn(async () => { calls.push("connect"); return true; });
-    const ensureAttached = vi.fn(async () => { calls.push("attach"); });
-    const pollNow = vi.fn(() => { calls.push("poll"); });
+    const ensureAttached = vi.fn(async () => { calls.push("attach"); return ["chrome:IM:7"]; });
+    const pollNow = vi.fn((_sourceIds?: readonly string[]) => { calls.push("poll"); });
     const createAlarm = vi.fn();
     new BridgeWakeup({
       createAlarm,
@@ -27,5 +27,7 @@ describe("BridgeWakeup", () => {
       "reconcile", "connect", "attach", "poll", "reconcile", "connect", "attach", "poll"
     ]));
     expect(pollNow).toHaveBeenCalledTimes(2);
+    expect(pollNow).toHaveBeenNthCalledWith(1, ["chrome:IM:7"]);
+    expect(pollNow).toHaveBeenNthCalledWith(2, ["chrome:IM:7"]);
   });
 });

@@ -83,6 +83,27 @@ describe("CmdSnapshotPoller", () => {
     expect(refreshCatalog).toHaveBeenCalledTimes(2);
   });
 
+  it("forces an explicitly reattached same-ID source despite recent cadence and in-flight attribution", async () => {
+    let now = 1_000;
+    let release!: () => void;
+    const oldRefresh = new Promise<void>((resolve) => { release = resolve; });
+    const refreshCatalog = vi.fn()
+      .mockImplementationOnce(async () => oldRefresh)
+      .mockImplementation(async () => undefined);
+    const sourceId = "chrome:IM:7";
+    const poller = new CmdSnapshotPoller({
+      list: () => [{ lobby: "IM", tabId: 7, hostname: "imsports.directsb.net", state: "ATTACHED" }],
+      capture: vi.fn(async () => undefined), refreshCatalog, now: () => now, imDiscoveryIntervalMs: 15_000
+    });
+
+    poller.pollNow();
+    await Promise.resolve();
+    now = 1_001;
+    poller.pollNow([sourceId]);
+    await vi.waitFor(() => expect(refreshCatalog).toHaveBeenCalledTimes(2));
+    release();
+  });
+
   it("coalesces a heartbeat wake-up with a just-completed scheduled catalog poll", async () => {
     let callback: (() => void) | undefined;
     let now = 1_000;

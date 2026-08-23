@@ -5,8 +5,8 @@ export interface BridgeWakeupDependencies {
   readonly addAlarmListener: (listener: (alarm: { readonly name: string }) => void) => void;
   readonly reconcileTabs?: () => Promise<void>;
   readonly ensureConnected: () => Promise<boolean>;
-  readonly ensureAttached?: () => Promise<void>;
-  readonly pollNow: () => void | Promise<void>;
+  readonly ensureAttached?: () => Promise<readonly string[] | void>;
+  readonly pollNow: (sourceIds?: readonly string[]) => void | Promise<void>;
 }
 
 export class BridgeWakeup {
@@ -31,8 +31,8 @@ export class BridgeWakeup {
     const operation = (async () => {
       await this.#dependencies.reconcileTabs?.().catch(() => undefined);
       await this.#dependencies.ensureConnected().catch(() => false);
-      await this.#dependencies.ensureAttached?.().catch(() => undefined);
-      await this.#dependencies.pollNow();
+      const reattached = await this.#dependencies.ensureAttached?.().catch(() => undefined);
+      await this.#dependencies.pollNow(reattached ?? []);
     })().finally(() => {
       if (this.#wakeInFlight === operation) this.#wakeInFlight = null;
     });

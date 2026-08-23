@@ -146,8 +146,64 @@ describe("LocalBridge", () => {
     await bridge.enqueue(envelope(1, "y".repeat(500), "chrome:SABA:7", "worker-a:0"));
     await bridge.enqueue(envelope(2, "old", "chrome:SABA:7", "worker-a:0"));
     await bridge.enqueue(envelope(0, "baseline", "chrome:SABA:7", "worker-a:1"));
+    await bridge.enqueue(envelope(1, "replacement", "chrome:SABA:7", "worker-a:1"));
+    await bridge.enqueue(envelope(3, "late-old", "chrome:SABA:7", "worker-a:0"));
+
+    expect(bridge.pendingSequences()).toEqual([0, 1]);
+  });
+
+  it("ignores acknowledgements delivered by a retired socket generation", () => {
+    const sockets = [new FakeSocket(), new FakeSocket()];
+    const scheduled: Array<() => void> = [];
+    let index = 0;
+    const bridge = new LocalBridge({
+      socketFactory: () => sockets[index++]!, installationKey: "local-key",
+      setTimer: (callback) => { scheduled.push(callback); return scheduled.length; }, clearTimer: () => undefined
+    });
+    void bridge.enqueue(envelope(0));
+    bridge.connect();
+    sockets[0]!.open();
+    const staleMessage = sockets[0]!.onmessage!;
+    sockets[0]!.close();
+    scheduled[0]!();
+    sockets[1]!.open();
+
+    staleMessage({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:SABA:7", sequence: 0
+    }) });
+    expect(bridge.pendingSequences()).toEqual([0]);
+    sockets[1]!.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:SABA:7", sequence: 0
+    }) });
+    expect(bridge.pendingSequences()).toEqual([]);
+  });
+
+  it("ignores rejects and gap recovery delivered by a retired socket generation", () => {
+    const sockets = [new FakeSocket(), new FakeSocket()];
+    const scheduled: Array<() => void> = [];
+    const onSourceResync = vi.fn();
+    let index = 0;
+    const bridge = new LocalBridge({
+      socketFactory: () => sockets[index++]!, installationKey: "local-key", onSourceResync,
+      setTimer: (callback) => { scheduled.push(callback); return scheduled.length; }, clearTimer: () => undefined
+    });
+    void bridge.enqueue(envelope(0));
+    bridge.connect();
+    sockets[0]!.open();
+    const staleMessage = sockets[0]!.onmessage!;
+    sockets[0]!.close();
+    scheduled[0]!();
+    sockets[1]!.open();
+
+    staleMessage({ data: JSON.stringify({
+      version: 1, kind: "REJECT", sourceId: "chrome:SABA:7", sequence: 0, reason: "INVALID_ENVELOPE"
+    }) });
+    staleMessage({ data: JSON.stringify({
+      version: 1, kind: "REJECT", sourceId: "chrome:SABA:7", sequence: 0, reason: "SEQUENCE_GAP"
+    }) });
 
     expect(bridge.pendingSequences()).toEqual([0]);
+    expect(onSourceResync).not.toHaveBeenCalled();
   });
 
   it("notifies the collector after every successful socket generation so snapshots can be replayed", () => {
@@ -342,15 +398,32 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([0]);
   });
 
-  it("evicts oldest diagnostics before quote frames when the queue reaches its bound", () => {
+  it("retires a same-provider epoch instead of removing a sequenced diagnostic", async () => {
+    const onSourceResync = vi.fn();
     const bridge = new LocalBridge({
-      socketFactory: () => new FakeSocket(), installationKey: "local-key", maxQueueBytes: 900
+      socketFactory: () => new FakeSocket(), installationKey: "local-key", maxQueueBytes: 900,
+      onSourceResync
     });
-    bridge.enqueue(envelope(0, "d".repeat(100)), "DIAGNOSTIC");
-    bridge.enqueue(envelope(1, "q".repeat(100)), "QUOTE");
-    bridge.enqueue(envelope(2, "q".repeat(100)), "QUOTE");
-    expect(bridge.pendingSequences()).toEqual([1, 2]);
+    await bridge.enqueue(envelope(0, "d".repeat(100)), "DIAGNOSTIC");
+    await bridge.enqueue(envelope(1, "q".repeat(100)), "QUOTE");
+    await bridge.enqueue(envelope(2, "q".repeat(100)), "QUOTE");
+    expect(bridge.pendingSequences()).toEqual([]);
     expect(bridge.queueBytes).toBeLessThanOrEqual(900);
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+  });
+
+  it("never evicts another provider's diagnostic to admit an overflowing source", async () => {
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({
+      socketFactory: () => new FakeSocket(), installationKey: "local-key", maxQueueBytes: 900,
+      onSourceResync
+    });
+    await bridge.enqueue(envelope(7, "d".repeat(100), "chrome:IM:7"), "DIAGNOSTIC");
+    await bridge.enqueue(envelope(0, "q".repeat(100), "chrome:SABA:8"), "QUOTE");
+    await bridge.enqueue(envelope(1, "q".repeat(100), "chrome:SABA:8"), "QUOTE");
+
+    expect(bridge.pendingSequences()).toEqual([7]);
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:8");
   });
 
   it("cleans up malformed control messages without acknowledging data", () => {
