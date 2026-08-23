@@ -2,7 +2,7 @@
 
 Date: 2026-08-23
 
-Status: approved in chat; awaiting written-spec review
+Status: approved for implementation
 
 Scope: CMD, IM, SABA, SBOBET/KSPORT, APSPORT/TSPORT, and BTI football catalogs
 
