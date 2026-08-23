@@ -3,6 +3,7 @@ import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-cata
 import { CatalogCoverageGuard } from "../catalog/catalog-coverage-guard.js";
 import { AdapterRouter } from "./adapter-router.js";
 import { CmdDomCatalogAdapter } from "./cmd-dom-adapter.js";
+import { CmdHttpCatalogAdapter } from "./cmd-http-adapter.js";
 import { ImHttpCatalogAdapter } from "./im-http-adapter.js";
 import { SabaWsCatalogAdapter } from "./saba-ws-adapter.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
@@ -39,7 +40,7 @@ export class ChromeCatalogDataPlane {
   readonly #freshnessMs: number;
   readonly #maxEnvelopeAgeMs: number;
   readonly #publish: ((catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void) | null;
-  readonly #router = new AdapterRouter([new CmdDomCatalogAdapter(), new ImHttpCatalogAdapter(),
+  readonly #router = new AdapterRouter([new CmdHttpCatalogAdapter(), new CmdDomCatalogAdapter(), new ImHttpCatalogAdapter(),
     new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(),
     new SbobetSocketIoCatalogAdapter("KSPORT"), new SbobetSocketIoCatalogAdapter("SBO"), new TsportWsCatalogAdapter(),
     new BtiHttpCatalogAdapter()],
@@ -137,6 +138,13 @@ export class ChromeCatalogDataPlane {
     }
     if (!isObservedCatalog(update.value)) return published;
     let nextCatalog = update.value;
+    if (envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
+      this.#feeds.snapshot(transportAccountId).lastCompleteBaselineAtMs !== null) {
+      // Visible/virtualized DOM is diagnostic overlay evidence only. Once the
+      // authenticated DataOdds baseline exists it must not replace or refresh
+      // network prices, even if the visible viewport was observed later.
+      return published;
+    }
     if (envelope.lobby === "SABA" && envelope.transport === "DOM_SNAPSHOT") {
       const retained = this.#catalogs.get(nextCatalog.accountId);
       if (retained !== undefined) nextCatalog = overlaySabaDomCatalog(retained, nextCatalog);

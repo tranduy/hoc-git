@@ -129,6 +129,7 @@ export class CmdSnapshotPoller {
       // slower cadence.
       const catalogRefreshIntervalMs = tab.lobby === "IM"
         ? this.#dependencies.imDiscoveryIntervalMs ?? 15_000
+        : tab.lobby === "CMD" ? 15_000
         : tab.lobby === "BTI" || tab.lobby === "KSPORT" ? 2_000 : null;
       if (catalogRefreshIntervalMs !== null && this.#dependencies.refreshCatalog !== undefined &&
         !this.#catalogRefreshInFlight.has(tab.tabId) &&

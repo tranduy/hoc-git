@@ -149,6 +149,46 @@ describe("ImHttpCatalogAdapter", () => {
       "IM_MARKET_2", "im:8:old"))).toEqual([]);
   });
 
+  it("rejects an unseen lower signed reconciliation ordinal after a newer generation commits", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined, "IM_MARKET_1", "im:8:2"));
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
+      "IM_MARKET_2", "im:8:2"))).toHaveLength(1);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 3, undefined,
+      "IM_MARKET_1", "im:8:1"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 4, undefined,
+      "IM_MARKET_2", "im:8:1"))).toEqual([]);
+  });
+
+  it("reapplies a newer delta after a two-part baseline commits", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    seedBothPartitions(adapter);
+    const replacement = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
+      ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 10, undefined,
+      "IM_MARKET_1", "im:8:generation-2"))).toEqual([]);
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
+      ws: event.mls[0]!.ws.map((selection) => ({ ...selection, o: selection.wsi === 101 ? 0.84 : -0.91 })) }] }] };
+    adapter.decode(envelope(delta, 11, "/api/EventV6/GetSEDelta"));
+    const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
+      "IM_MARKET_2", "im:8:generation-2")).at(-1)?.value as {
+        quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
+    expect(committed.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })
+    ]));
+  });
+
+  it("annotates atomic baselines and natural deltas with the current evidence generation", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
+      "IM_MARKET_1", "im:8:generation-1"));
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
+      "IM_MARKET_2", "im:8:generation-1")).at(-1)).toMatchObject({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", generation: "im:8:generation-1",
+      provenance: "AUTHENTICATED_HTTP"
+    });
+  });
+
   it("accepts a lower sequence only after the source epoch resets adapter state", () => {
     const adapter = new ImHttpCatalogAdapter();
     adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 900, undefined,

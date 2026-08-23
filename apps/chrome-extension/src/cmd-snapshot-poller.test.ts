@@ -83,6 +83,26 @@ describe("CmdSnapshotPoller", () => {
     expect(refreshCatalog).toHaveBeenCalledTimes(2);
   });
 
+  it("reconciles CMD's authenticated full baseline before its twenty-second authority deadline", async () => {
+    let now = 1_000;
+    const refreshCatalog = vi.fn(async () => undefined);
+    const poller = new CmdSnapshotPoller({
+      list: () => [{ lobby: "CMD", tabId: 9, hostname: "cgnew.fts368.com", state: "ATTACHED" }],
+      capture: vi.fn(async () => undefined), refreshCatalog, now: () => now
+    });
+    poller.pollNow();
+    await Promise.resolve();
+    expect(refreshCatalog).toHaveBeenCalledTimes(1);
+    now = 15_999;
+    poller.pollNow();
+    await Promise.resolve();
+    expect(refreshCatalog).toHaveBeenCalledTimes(1);
+    now = 16_000;
+    poller.pollNow();
+    await Promise.resolve();
+    expect(refreshCatalog).toHaveBeenCalledTimes(2);
+  });
+
   it("forces an explicitly reattached same-ID source despite recent cadence and in-flight attribution", async () => {
     let now = 1_000;
     let release!: () => void;
@@ -348,5 +368,24 @@ describe("CmdSnapshotPoller", () => {
     expect(maintain).toHaveBeenCalledTimes(1);
     expect(refreshCatalog).toHaveBeenCalledTimes(1);
     releaseMaintenance?.();
+  });
+
+  it("does not let a hung IM reconciliation block CMD capture", async () => {
+    let releaseIm!: () => void;
+    const hungIm = new Promise<void>((resolve) => { releaseIm = resolve; });
+    const capture = vi.fn(async () => undefined);
+    const refreshCatalog = vi.fn(async (source: { readonly lobby: string }) => {
+      if (source.lobby === "IM") await hungIm;
+    });
+    const poller = new CmdSnapshotPoller({ list: () => [
+      { lobby: "IM", tabId: 7, hostname: "imsports.directsb.net", state: "ATTACHED" },
+      { lobby: "CMD", tabId: 9, hostname: "cgnew.fts368.com", state: "ATTACHED" }
+    ], capture, refreshCatalog, now: () => 1_000 });
+    poller.pollNow();
+    await Promise.resolve();
+    expect(refreshCatalog).toHaveBeenCalledWith({ lobby: "IM", sourceId: "chrome:IM:7", tabId: 7 });
+    expect(capture).toHaveBeenCalledWith({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+    releaseIm();
   });
 });

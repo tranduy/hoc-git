@@ -23,6 +23,20 @@ function cmdEnvelope(sequence = 1, records: readonly unknown[] = [record], chunk
       records }) } };
 }
 
+function cmdHttpEnvelope(sequence = 1): ChromeBridgeEnvelope {
+  const row = Array<unknown>(91).fill(null);
+  Object.assign(row, { 0: 24881365, 3: 318, 10: 0.5, 12: 3, 14: 0.25, 16: 1.25, 25: 0,
+    37: "ENGLISH PREMIER LEAGUE", 38: "Newcastle United", 39: "Liverpool",
+    40: -0.96, 41: 0.90, 42: 0.87, 43: -0.95, 44: 0.88, 45: -0.98, 46: 0.88, 47: -0.98,
+    53: "23:30", 56: "08/23", 79: 0 });
+  return { version: 1, kind: "NETWORK", lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
+    transport: "HTTP_RESPONSE", request: { hostname: "cgnew.fts368.com",
+      pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx", resourceType: "XHR" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ t: 8_281_247, a: true,
+      data: [], today: [row], f: [] }) } };
+}
+
 const sabaFields = ["type", "leagueid", "leaguenameen", "sporttype", "matchid", "hteamnameen",
   "ateamnameen", "kickofftime", "isrunning", "markettype", "bettype", "hdp", "odds", "selectionid"];
 
@@ -314,5 +328,15 @@ describe("ChromeCatalogDataPlane", () => {
     expect(partial.ingest(cmdEnvelope(1, [record], 0, 2, id))).toBe(false);
     expect(publish).not.toHaveBeenCalled();
     await expect(partial.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+  });
+
+  it("keeps a newer authenticated CMD baseline authoritative when a visible DOM fallback arrives", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    expect(plane.ingest(cmdHttpEnvelope())).toBe(true);
+    expect(plane.ingest({ ...cmdEnvelope(2), sourceEpoch: "worker-a:0" })).toBe(false);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ provider: "CMD",
+      events: [expect.objectContaining({ providerEventId: "24881365" })] }), "FRESH");
   });
 });

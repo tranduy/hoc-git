@@ -59,7 +59,6 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
     readonly receivedMonotonicMs: number;
     readonly sequence: number;
   }>>();
-  static readonly #viewportRetentionMs = 15_000;
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     return envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
@@ -80,15 +79,16 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
     const usableRecords = records.filter((record) => record.groups.length > 0);
     if (usableRecords.length === 0) return [];
     const cached = this.#recordsBySource.get(envelope.sourceId) ?? new Map();
-    const oldestAllowedMs = envelope.observedAtMs - CmdDomCatalogAdapter.#viewportRetentionMs;
-    for (const [matchId, entry] of cached) {
-      if (entry.observedAtMs < oldestAllowedMs) cached.delete(matchId);
-    }
+    let changed = false;
     for (const record of usableRecords) {
+      const prior = cached.get(record.matchId);
+      if (prior !== undefined && JSON.stringify(prior.record) === JSON.stringify(record)) continue;
       cached.set(record.matchId, { record, observedAtMs: envelope.observedAtMs,
         receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
+      changed = true;
     }
     this.#recordsBySource.set(envelope.sourceId, cached);
+    if (!changed) return [];
     const parts: NormalizedCatalogPart[] = [...cached.values()].map((entry) => {
       const normalized = normalizeObservedFootballCatalog("CMD", [entry.record], {
         observedAtMs: entry.observedAtMs,
@@ -104,7 +104,11 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
     });
     const catalog = mergeObservedCatalogParts({ accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD",
       observedAtMs: envelope.observedAtMs, parts });
+    let raw: unknown;
+    try { raw = JSON.parse(envelope.payload.body); } catch { return []; }
+    const snapshotId = CmdSnapshotChunkSchema.parse(raw).snapshotId;
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-      observedAtMs: envelope.observedAtMs, value: catalog }];
+      observedAtMs: envelope.observedAtMs, value: catalog, evidenceMode: "DELTA",
+      generation: snapshotId, provenance: "DOM_FALLBACK" }];
   }
 }

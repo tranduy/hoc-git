@@ -3,7 +3,8 @@ import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { BTI_CATALOG_REFRESH_EXPRESSION, CMD_CATALOG_DISCOVERY_EXPRESSION,
-  IM_CATALOG_DISCOVERY_EXPRESSION, KEEP_ACTIVE_EXPRESSION, NetworkObserver } from "./network-observer.js";
+  CMD_FULL_BASELINE_EXPRESSION, IM_CATALOG_DISCOVERY_EXPRESSION, KEEP_ACTIVE_EXPRESSION,
+  NetworkObserver } from "./network-observer.js";
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
 
 const source = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
@@ -59,6 +60,8 @@ describe("NetworkObserver", () => {
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SortType: 2");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("CompetitionIds: []");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("for (const Market of [1, 2])");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("new AbortController()");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("signal: controller.signal");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).not.toMatch(/odds?|price|stake/iu);
     expect(() => new Function(`return ${IM_CATALOG_DISCOVERY_EXPRESSION}`)).not.toThrow();
   });
@@ -148,6 +151,23 @@ describe("NetworkObserver", () => {
     await Promise.all([first, second]);
 
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
+  });
+
+  it("requests CMD's exact provider-defined running-plus-today full baseline without reloading", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Runtime.evaluate" && params?.expression === CMD_FULL_BASELINE_EXPRESSION) {
+        return { result: { value: "baseline-requested" } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    await observer.refreshCatalog({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 });
+    expect(sendCommand).toHaveBeenCalledWith(9, "Runtime.evaluate", expect.objectContaining({
+      expression: CMD_FULL_BASELINE_EXPRESSION, awaitPromise: false
+    }));
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
+    expect(CMD_FULL_BASELINE_EXPRESSION).toContain("LoadFullRunningTodayData()");
   });
 
   it("falls back to retained SBOBET STOMP partitions when a fresh same-tab request is unavailable", async () => {
@@ -1019,7 +1039,8 @@ describe("NetworkObserver", () => {
     const watcherExpression = String(sendCommand.mock.calls.find(([, method, params]) => method ===
       "Runtime.evaluate" && String(params?.expression).includes("fieldline-saba-odds-mutation"))?.[2]?.expression);
     expect(watcherExpression).toContain("characterData: true");
-    expect(watcherExpression).not.toContain("'class'");
+    expect(watcherExpression).toContain("'class'");
+    expect(watcherExpression).toContain("'aria-disabled'");
 
     dirty = true;
     await observer.pollSabaDomChanges(saba, "sports.example");
@@ -1079,6 +1100,34 @@ describe("NetworkObserver", () => {
 
     releaseFirstScan?.();
     await Promise.all([tsportMaintenance, btiRefresh]);
+  });
+
+  it("aborts a hung IM partition at the bounded deadline before a later generation starts", async () => {
+    vi.useFakeTimers();
+    try {
+      const listeners = new Map<string, (event: { detail: string }) => void>();
+      let aborted = false;
+      const windowStub: Record<string, unknown> & { global: { PlatForm: string } } = {
+        global: { PlatForm: "web" },
+        addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
+        removeEventListener: (name: string) => listeners.delete(name),
+        dispatchEvent: (event: { type: string; detail: { c: string } }) => {
+          if (event.type === "helo") listeners.get(`halo_${event.detail.c}`)?.({ detail: "signed" });
+        }
+      };
+      const execute = new Function("document", "location", "window", "sessionStorage", "CustomEvent", "fetch",
+        `return ${IM_CATALOG_DISCOVERY_EXPRESSION}`) as (...args: unknown[]) => Promise<unknown>;
+      const pending = execute({ documentElement: { dataset: {} }, querySelectorAll: () => [] },
+        { hostname: "imsports.directsb.net", search: "" }, windowStub, { getItem: () => "public-test-value" },
+        class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
+          get detail(): { c: string } { return this.init.detail; } },
+        async (_path: string, init: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => { aborted = true; reject(new DOMException("aborted", "AbortError")); });
+        }));
+      await vi.advanceTimersByTimeAsync(8_001);
+      await expect(pending).resolves.toEqual({ status: "request-timeout", responses: [] });
+      expect(aborted).toBe(true);
+    } finally { vi.useRealTimers(); }
   });
 
   it("begins a new public epoch and discards pending old-epoch bodies", async () => {

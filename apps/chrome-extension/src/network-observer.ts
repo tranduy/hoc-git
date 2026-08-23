@@ -123,11 +123,8 @@ const SABA_ODDS_MUTATION_EXPRESSION = `(() => {
       }
     });
     state.observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true,
-      // Do not observe the class attribute: SABA continuously toggles hover/animation
-      // classes inside odds cells even when the price is unchanged, which
-      // caused a full catalog read every two seconds. Text/child changes cover
-      // prices; these two data attributes cover availability changes.
-      attributes: true, attributeFilter: ['data-odds-status', 'data-grey-out'] });
+      attributes: true,
+      attributeFilter: ['data-odds-status', 'data-grey-out', 'class', 'aria-disabled'] });
     globalThis[key] = state;
   }
   const dirty = state.dirty === true;
@@ -374,6 +371,13 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
   // Network observation captures the response exactly like a normal UI read.
   if (location.hostname === 'imsports.directsb.net') {
     root.dataset.fieldlineImCatalogRefreshAt = String(now);
+    const controllerKey = '__fieldlineImCatalogAbortV1';
+    const priorController = window[controllerKey];
+    if (priorController && typeof priorController.abort === 'function') priorController.abort();
+    const controller = new AbortController();
+    window[controllerKey] = controller;
+    const requestTimer = setTimeout(() => controller.abort(), 8000);
+    try {
     const providerDate = (value) => new Date(value).toISOString().slice(0, 10).replace(/-/g, '/');
     const dateFrom = providerDate(now);
     const dateTo = providerDate(now + 48 * 60 * 60 * 1000);
@@ -412,7 +416,7 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
     for (const Market of [1, 2]) {
       const signature = String(await sign(path));
       const response = await fetch(path, {
-        method: 'POST', credentials: 'omit', cache: 'no-store',
+        method: 'POST', credentials: 'omit', cache: 'no-store', signal: controller.signal,
         headers: {
           Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8',
           'x-sc': encodeURI(signature), 'x-v': '91460',
@@ -424,6 +428,13 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
       responses.push({ market: Market, body: await response.text() });
     }
     return { status: 'catalog-requested', responses };
+    } catch (error) {
+      if (controller.signal.aborted) return { status: 'request-timeout', responses: [] };
+      return { status: 'request-failed', responses: [] };
+    } finally {
+      clearTimeout(requestTimer);
+      if (window[controllerKey] === controller) delete window[controllerKey];
+    }
   }
   const normalize = (value) => String(value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
     .trim().toLowerCase().replace(/\\s+/g, ' ');
@@ -440,6 +451,19 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
     return { status: label, responses: [] };
   }
   return { status: 'navigation-not-found', responses: [] };
+})()`;
+
+// Observed provider startup contract: this exact function issues fc=1 and the
+// provider callback atomically replaces both running and today before setting
+// their full-data flags. It is deliberately invoked only in the known odds
+// frame; no URL, filter, or tab navigation is changed.
+export const CMD_FULL_BASELINE_EXPRESSION = `(() => {
+  if (location.hostname !== 'cgnew.fts368.com' ||
+    location.pathname !== '/Member/BetOdds/HdpDouble.aspx') return 'frame-unavailable';
+  if (typeof globalThis.LoadFullRunningTodayData !== 'function') return 'function-unavailable';
+  if (globalThis.RunningDataUpdating === true || globalThis.TodayDataUpdating === true) return 'busy';
+  globalThis.LoadFullRunningTodayData();
+  return 'baseline-requested';
 })()`;
 
 // BTI's event-list is a same-origin authenticated GET. Trigger the same
@@ -1003,6 +1027,12 @@ export class NetworkObserver {
   }
 
   async #refreshCatalog(source: ObservedSource): Promise<void> {
+    if (source.lobby === "CMD") {
+      const results = await this.#evaluateCmdFullBaselineMainWorlds(source);
+      await this.#emit(source, "https://cgnew.fts368.com/__fieldline_cmd_catalog_refresh__",
+        "Diagnostic", "TAB_STATE", { encoding: "UTF8", body: JSON.stringify({ results }) });
+      return;
+    }
     if (source.lobby === "IM") {
       const results = await this.#evaluateImCatalogMainWorlds(source, true);
       await this.#emit(source, "https://imsports.directsb.net/__fieldline_im_catalog_refresh__",
@@ -1997,6 +2027,29 @@ export class NetworkObserver {
     })();
     this.#cmdCapturesInFlight.set(source.sourceId, { token, operation });
     return operation;
+  }
+
+  async #evaluateCmdFullBaselineMainWorlds(source: ObservedSource): Promise<string[]> {
+    const frameTree = await this.#withFrameCommandTimeout(
+      this.#sendCommand(source.tabId, "Page.getFrameTree")
+    ).catch(() => ({}));
+    const frameIds = collectFrameIds(frameTree);
+    const contexts = this.#mainWorldContexts.get(source.tabId);
+    const evaluate = async (label: string, contextId?: number): Promise<string> => {
+      const response = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+        expression: CMD_FULL_BASELINE_EXPRESSION, ...(contextId === undefined ? {} : { contextId }),
+        returnByValue: true, awaitPromise: false
+      })).catch(() => null);
+      const value = nestedValue(response, "result", "value");
+      return typeof value === "string" && /^(?:baseline-requested|busy|frame-unavailable|function-unavailable)$/u
+        .test(value) ? `${label}:${value}` : `${label}:unavailable`;
+    };
+    const evaluations: Array<Promise<string>> = [evaluate("top")];
+    for (const frameId of frameIds.slice(1)) {
+      const contextId = contexts?.get(frameId);
+      if (contextId !== undefined) evaluations.push(evaluate(frameId.slice(0, 64), contextId));
+    }
+    return Promise.all(evaluations);
   }
 
   async #runPeriodicDomWork<T>(sourceId: string, operation: () => Promise<T>): Promise<T> {

@@ -45,6 +45,8 @@ describe("CmdDomCatalogAdapter", () => {
     const updates = adapter.decode(input);
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({ sourceId: "chrome:CMD:9", sequence: 12 });
+    expect(updates[0]).toMatchObject({ evidenceMode: "DELTA", provenance: "DOM_FALLBACK",
+      generation: "cmd:9:snapshot-0001" });
     expect(updates[0]!.value).toMatchObject({
       accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD", category: "FOOTBALL",
       events: [{ providerEventId: "event-1", participantA: "Alpha FC", participantB: "Beta FC",
@@ -133,7 +135,7 @@ describe("CmdDomCatalogAdapter", () => {
       .toEqual(expect.arrayContaining([expect.objectContaining({ receivedMonotonicMs: 80, sequence: 13 })]));
   });
 
-  it("expires CMD viewport rows that have not been observed within fifteen seconds", () => {
+  it("does not let an elapsed timer turn a partial viewport into a false complete sweep", () => {
     const adapter = new CmdDomCatalogAdapter();
     const nextRecord = { ...record, matchId: "event-2", teamNames: ["Gamma FC", "Delta FC"] };
     const startedAtMs = Date.UTC(2026, 7, 15, 5);
@@ -141,6 +143,17 @@ describe("CmdDomCatalogAdapter", () => {
     const update = adapter.decode(envelope(snapshotBody([nextRecord], { snapshotId: "cmd:9:snapshot-expiry" }),
       { sequence: 13, observedAtMs: startedAtMs + 15_001, receivedMonotonicMs: 80 }))[0]!;
     expect((update.value as { events: readonly { providerEventId: string }[] }).events)
-      .toEqual([expect.objectContaining({ providerEventId: "event-2" })]);
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ providerEventId: "event-1" }),
+        expect.objectContaining({ providerEventId: "event-2" })
+      ]));
+  });
+
+  it("does not turn an identical visible DOM row into fresh quote evidence", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    adapter.decode(envelope(snapshotBody([record]), { sequence: 1, observedAtMs: 1_000,
+      receivedMonotonicMs: 10 }));
+    expect(adapter.decode(envelope(snapshotBody([record], { snapshotId: "cmd:9:snapshot-identical-0002" }),
+      { sequence: 2, observedAtMs: 5_000, receivedMonotonicMs: 20 }))).toEqual([]);
   });
 });
