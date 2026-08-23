@@ -31,6 +31,8 @@ const SanitizedRequestSchema = z.strictObject({
   resourceType: z.string().trim().min(1).max(64),
   streamId: PublicGenerationIdSchema.optional(),
   providerPartition: z.enum(["IM_MARKET_1", "IM_MARKET_2"]).optional(),
+  providerFunctionCode: z.number().int().min(1).max(7).optional(),
+  reconcileCutoffSequence: SafeIntegerSchema.optional(),
   replayed: z.boolean().optional()
 });
 
@@ -63,10 +65,15 @@ export const CmdSnapshotChunkSchema = z.strictObject({
   snapshotId: z.string().trim().min(16).max(128).regex(/^[a-z0-9._:-]+$/iu),
   chunkIndex: SafeIntegerSchema,
   chunkCount: z.number().int().min(1).max(64),
+  sweepId: PublicGenerationIdSchema.optional(),
+  sweepComplete: z.boolean().optional(),
   records: z.array(z.unknown()).min(1).max(5_000)
 }).superRefine((value, context) => {
   if (value.chunkIndex >= value.chunkCount) {
     context.addIssue({ code: "custom", path: ["chunkIndex"], message: "chunkIndex must be below chunkCount" });
+  }
+  if ((value.sweepId === undefined) !== (value.sweepComplete === undefined)) {
+    context.addIssue({ code: "custom", path: ["sweepId"], message: "sweep metadata must be paired" });
   }
 });
 

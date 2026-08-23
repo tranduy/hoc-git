@@ -60,6 +60,8 @@ interface PendingRequest {
   readonly resourceType: string;
   readonly providerPartition?: ImProviderPartition;
   readonly streamId?: string;
+  readonly providerFunctionCode?: number;
+  readonly reconcileCutoffSequence?: number;
 }
 
 interface ReplayableHttpSnapshot {
@@ -69,6 +71,8 @@ interface ReplayableHttpSnapshot {
   readonly body: string;
   readonly providerPartition?: ImProviderPartition;
   readonly streamId?: string;
+  readonly providerFunctionCode?: number;
+  readonly reconcileCutoffSequence?: number;
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
 }
@@ -117,13 +121,20 @@ const SABA_ODDS_MUTATION_EXPRESSION = `(() => {
         element?.querySelector?.('.odds, .c-odds, [data-moid]'));
     };
     state.observer = new MutationObserver((mutations) => {
-      if (mutations.some((mutation) => touchesOdds(mutation.target) ||
-        [...mutation.addedNodes].some(touchesOdds) || [...mutation.removedNodes].some(touchesOdds))) {
+      const semanticAttributeChanged = (mutation) => {
+        if (mutation.type !== 'attributes' || !touchesOdds(mutation.target)) return false;
+        if (mutation.attributeName !== 'class') return true;
+        const disabled = (value) => /(?:^|\\s)(?:disabled|no-hover|suspended|locked)(?:\\s|$)/iu.test(String(value || ''));
+        return disabled(mutation.oldValue) !== disabled(mutation.target?.getAttribute?.('class'));
+      };
+      if (mutations.some((mutation) => semanticAttributeChanged(mutation) ||
+        (mutation.type !== 'attributes' && (touchesOdds(mutation.target) ||
+          [...mutation.addedNodes].some(touchesOdds) || [...mutation.removedNodes].some(touchesOdds))))) {
         state.dirty = true;
       }
     });
     state.observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true,
-      attributes: true,
+      attributes: true, attributeOldValue: true,
       attributeFilter: ['data-odds-status', 'data-grey-out', 'class', 'aria-disabled'] });
     globalThis[key] = state;
   }
@@ -291,6 +302,11 @@ export const TSPORT_CATALOG_DISCOVERY_EXPRESSION = `(() => {
 // no price cell or ticket control is ever clicked.
 export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
   const root = document.documentElement;
+  const beginSweep = () => {
+    root.dataset.fieldlineCmdSweepId = 'cmd-sweep-' + Date.now();
+    root.dataset.fieldlineCmdSweepComplete = 'false';
+  };
+  if (!/^cmd-sweep-\\d+$/u.test(root.dataset.fieldlineCmdSweepId || '')) beginSweep();
   const normalize = (value) => String(value || '').normalize('NFD')
     .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
   const search = [...document.querySelectorAll("input[type='search'], input[placeholder], input[aria-label]")]
@@ -318,12 +334,15 @@ export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
   const candidates = [document.scrollingElement, ...document.querySelectorAll('body *')]
     .filter((element) => element && element.scrollHeight - element.clientHeight > 200);
   let moved = 0;
+  const sweepComplete = candidates.length > 0 && candidates.every((element) =>
+    element.scrollTop >= element.scrollHeight - element.clientHeight - 4);
   for (const element of candidates) {
     const maximum = element.scrollHeight - element.clientHeight;
     const next = element.scrollTop >= maximum - 4 ? 0 :
       Math.min(maximum, element.scrollTop + Math.max(240, element.clientHeight * 0.8));
     if (next !== element.scrollTop) { element.scrollTop = next; moved += 1; }
   }
+  if (sweepComplete) root.dataset.fieldlineCmdSweepComplete = 'true';
   const priorExpand = Number(root.dataset.fieldlineCmdMarketExpandedAt || 0);
   let expanded = 0;
   if (!Number.isFinite(priorExpand) || now - priorExpand >= 8000) {
@@ -357,7 +376,8 @@ export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
     }
     root.dataset.fieldlineCmdMarketExpandedAt = String(now);
   }
-  return { moved, expanded };
+  return { moved, expanded, sweepId: root.dataset.fieldlineCmdSweepId,
+    sweepComplete: root.dataset.fieldlineCmdSweepComplete === 'true' };
 })()`;
 
 // IM does not always request its GetSE catalog when a restored tab is left on
@@ -583,6 +603,7 @@ export class NetworkObserver {
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
+  readonly #requestFunctionCodes = new Map<string, number>();
   readonly #requestGenerations = new Map<string, number>();
   readonly #pending = new Map<string, PendingRequest>();
   readonly #cmdSnapshots = new Map<string, { readonly body: string; readonly sentAtMs: number;
@@ -816,6 +837,9 @@ export class NetworkObserver {
       for (const key of this.#requestStreamIds.keys()) {
         if (key.startsWith(`${tabId}:`)) this.#requestStreamIds.delete(key);
       }
+      for (const key of this.#requestFunctionCodes.keys()) {
+        if (key.startsWith(`${tabId}:`)) this.#requestFunctionCodes.delete(key);
+      }
     }
     void this.#scheduleSabaWsSnapshotClear(sourceId);
     return `${this.#observerSessionId}:${generation}`;
@@ -890,6 +914,9 @@ export class NetworkObserver {
     }
     for (const key of this.#requestStreamIds.keys()) {
       if (key.startsWith(`${tabId}:`)) this.#requestStreamIds.delete(key);
+    }
+    for (const key of this.#requestFunctionCodes.keys()) {
+      if (key.startsWith(`${tabId}:`)) this.#requestFunctionCodes.delete(key);
     }
     for (const key of this.#requestGenerations.keys()) {
       if (key.startsWith(`${tabId}:`)) this.#requestGenerations.delete(key);
@@ -1464,6 +1491,17 @@ export class NetworkObserver {
   }
 
   async #evaluateImCatalogMainWorlds(source: ObservedSource, awaitPromise: boolean): Promise<string[]> {
+    let generation: string | undefined;
+    let reconcileCutoffSequence: number | undefined;
+    if (awaitPromise) {
+      const ordinal = (this.#imSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
+      this.#imSnapshotOrdinals.set(source.sourceId, ordinal);
+      generation = `im:${source.tabId}:${ordinal}`;
+      reconcileCutoffSequence = this.#sequences.get(source.sourceId) ?? 0;
+      await this.#emit(source, "https://imsports.directsb.net/__fieldline_im_reconciliation_start__",
+        "Diagnostic", "TAB_STATE", { encoding: "UTF8", body: "{}" },
+        { request: { streamId: generation, reconcileCutoffSequence } });
+    }
     const frameTree = await this.#withFrameCommandTimeout(
       this.#sendCommand(source.tabId, "Page.getFrameTree")
     ).catch(() => ({}));
@@ -1478,13 +1516,11 @@ export class NetworkObserver {
       ).catch(() => null);
       const value = nestedValue(response, "result", "value");
       if (awaitPromise && isRecord(value) && Array.isArray(value.responses)) {
-        const ordinal = (this.#imSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
-        this.#imSnapshotOrdinals.set(source.sourceId, ordinal);
-        const generation = `im:${source.tabId}:${ordinal}`;
         for (const item of value.responses) {
           if (!isRecord(item) || (item.market !== 1 && item.market !== 2) || typeof item.body !== "string") continue;
           await this.ingestHttpResponse(source, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
-            item.body, item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2", generation);
+            item.body, item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2", generation,
+            { reconcileCutoffSequence: reconcileCutoffSequence! });
         }
       }
       const status = isRecord(value) ? value.status : null;
@@ -1583,6 +1619,15 @@ export class NetworkObserver {
     if (method === "Network.requestWillBeSent" && key) {
       this.#requestGenerations.set(key, this.#sourceGenerations.get(source.sourceId) ?? 0);
       const request = isRecord(params.request) ? params.request : null;
+      if (source.lobby === "CMD" && request !== null && typeof request.url === "string") {
+        try {
+          const url = new URL(request.url);
+          const rawFc = url.hostname === "cgnew.fts368.com" &&
+            url.pathname === "/Member/BetsView/BetLight/DataOdds.ashx" ? url.searchParams.get("fc") : null;
+          if (rawFc !== null && /^[1-7]$/u.test(rawFc)) this.#requestFunctionCodes.set(key, Number(rawFc));
+          else this.#requestFunctionCodes.delete(key);
+        } catch { this.#requestFunctionCodes.delete(key); }
+      } else this.#requestFunctionCodes.delete(key);
       const partition = request === null ? null : imPartitionFromRequest(source, request);
       if (partition === null) this.#requestPartitions.delete(key);
       else this.#requestPartitions.set(key, partition);
@@ -1763,18 +1808,21 @@ export class NetworkObserver {
       if (!response || !/^(?:XHR|Fetch)$/u.test(resourceType) || typeof response.url !== "string") return;
       const providerPartition = this.#requestPartitions.get(key);
       const streamId = this.#requestStreamIds.get(key);
+      const providerFunctionCode = this.#requestFunctionCodes.get(key);
       this.#pending.set(key, { source,
         sourceGeneration: this.#requestGenerations.get(key) ?? this.#sourceGenerations.get(source.sourceId) ?? 0,
         url: response.url, resourceType,
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(providerPartition === undefined ? {} : { providerPartition }),
-        ...(streamId === undefined ? {} : { streamId }) });
+        ...(streamId === undefined ? {} : { streamId }),
+        ...(providerFunctionCode === undefined ? {} : { providerFunctionCode }) });
       return;
     }
     if (method === "Network.loadingFailed" && key) {
       this.#pending.delete(key);
       this.#requestPartitions.delete(key);
       this.#requestStreamIds.delete(key);
+      this.#requestFunctionCodes.delete(key);
       this.#requestGenerations.delete(key);
       return;
     }
@@ -1783,6 +1831,7 @@ export class NetworkObserver {
       this.#pending.delete(key);
       this.#requestPartitions.delete(key);
       this.#requestStreamIds.delete(key);
+      this.#requestFunctionCodes.delete(key);
       this.#requestGenerations.delete(key);
       if (!pending || requestId === null) return;
       if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
@@ -1809,7 +1858,7 @@ export class NetworkObserver {
         if (response.base64Encoded === true) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "BASE64", body: response.body
-          }, { request: { providerPartition: pending.providerPartition, streamId: pending.streamId },
+          }, { request: pendingRequestMetadata(pending),
             sourceGeneration: pending.sourceGeneration });
           return;
         }
@@ -1822,7 +1871,7 @@ export class NetworkObserver {
         if (fragments.length === 1) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: safeBody
-          }, { request: { providerPartition: pending.providerPartition, streamId: pending.streamId }, ...clocks,
+          }, { request: pendingRequestMetadata(pending), ...clocks,
             sourceGeneration: pending.sourceGeneration });
           return;
         }
@@ -1832,8 +1881,7 @@ export class NetworkObserver {
           this.#emit(emissionPending.source, emissionPending.url, emissionPending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
               chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-          }, { request: { providerPartition: emissionPending.providerPartition,
-            streamId: emissionPending.streamId }, ...clocks,
+          }, { request: pendingRequestMetadata(emissionPending), ...clocks,
             sourceGeneration: emissionPending.sourceGeneration }));
         await Promise.all(emissions);
       } catch {
@@ -1890,23 +1938,26 @@ export class NetworkObserver {
   }
 
   async ingestHttpResponse(source: ObservedSource, url: string, resourceType: "XHR" | "Fetch",
-    body: string, providerPartition?: ImProviderPartition, streamId?: string): Promise<void> {
+    body: string, providerPartition?: ImProviderPartition, streamId?: string,
+    requestMetadata: Pick<ChromeBridgeEnvelope["request"], "providerFunctionCode" |
+      "reconcileCutoffSequence"> = {}): Promise<void> {
     if (!/^https?:\/\//iu.test(url)) return;
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const pending: PendingRequest = { source, sourceGeneration, url, resourceType,
       ...(providerPartition === undefined ? {} : { providerPartition }),
-      ...(streamId === undefined ? {} : { streamId }) };
+      ...(streamId === undefined ? {} : { streamId }),
+      ...(requestMetadata.providerFunctionCode === undefined ? {} :
+        { providerFunctionCode: requestMetadata.providerFunctionCode }),
+      ...(requestMetadata.reconcileCutoffSequence === undefined ? {} :
+        { reconcileCutoffSequence: requestMetadata.reconcileCutoffSequence }) };
     const safeBody = redactNetworkBody(body);
     await this.#recoverMissingImBaseline(pending);
     if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
     const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
-    const requestMetadata = {
-      ...(providerPartition === undefined ? {} : { providerPartition }),
-      ...(streamId === undefined ? {} : { streamId })
-    };
-    const request = Object.keys(requestMetadata).length === 0 ? {} : { request: requestMetadata };
+    const sanitizedRequestMetadata = pendingRequestMetadata(pending);
+    const request = Object.keys(sanitizedRequestMetadata).length === 0 ? {} : { request: sanitizedRequestMetadata };
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
         { ...request, ...clocks, sourceGeneration });
@@ -1987,8 +2038,15 @@ export class NetworkObserver {
         }
         if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
         const evaluated = values.flatMap(readEvaluationRecords);
-        const catalogRecords = evaluated.filter((value) => !isRecord(value) || !("__fieldlineDiagnostic" in value));
-        const records = catalogRecords.length > 0 ? catalogRecords : evaluated;
+        const sweepMarker = evaluated.find((value) => isRecord(value) && "__fieldlineSweep" in value);
+        const sweepValue = isRecord(sweepMarker) && isRecord(sweepMarker.__fieldlineSweep)
+          ? sweepMarker.__fieldlineSweep : null;
+        const sweep = sweepValue !== null && typeof sweepValue.sweepId === "string" &&
+          /^[a-z0-9._:-]{1,128}$/iu.test(sweepValue.sweepId) && typeof sweepValue.complete === "boolean"
+          ? { sweepId: sweepValue.sweepId, sweepComplete: sweepValue.complete } : undefined;
+        const withoutSweep = evaluated.filter((value) => !isRecord(value) || !("__fieldlineSweep" in value));
+        const catalogRecords = withoutSweep.filter((value) => !isRecord(value) || !("__fieldlineDiagnostic" in value));
+        const records = catalogRecords.length > 0 ? catalogRecords : withoutSweep;
         if (records.length === 0) return;
         const catalogBody = JSON.stringify(records);
         const nowMs = this.#now();
@@ -2002,7 +2060,7 @@ export class NetworkObserver {
         const ordinal = (this.#domSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
         this.#domSnapshotOrdinals.set(source.sourceId, ordinal);
         const snapshotId = `cmd:${source.tabId}:${nowMs}:${ordinal}`;
-        const chunks = chunkCmdSnapshot(records, snapshotId);
+        const chunks = chunkCmdSnapshot(records, snapshotId, undefined, sweep);
         for (const chunk of chunks) {
           await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
             encoding: "UTF8", body: JSON.stringify(chunk)
@@ -2363,7 +2421,7 @@ export class NetworkObserver {
         if (fragments.length === 1) {
           await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: snapshot.body
-          }, { request: { providerPartition: snapshot.providerPartition, streamId: snapshot.streamId, replayed: true },
+          }, { request: replayRequestMetadata(snapshot),
             observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
         } else {
           const snapshotId = `network-replay:${snapshot.source.tabId}:${this.#now()}:${this.#sequences.get(sourceId) ?? 0}`;
@@ -2371,7 +2429,7 @@ export class NetworkObserver {
             await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
               encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
                 chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
-            }, { request: { providerPartition: snapshot.providerPartition, streamId: snapshot.streamId, replayed: true },
+            }, { request: replayRequestMetadata(snapshot),
               observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
           }
         }
@@ -2670,7 +2728,10 @@ export class NetworkObserver {
       : entry.providerPartition !== pending.providerPartition);
     deduplicated.push({ source: pending.source, url: pending.url, resourceType: pending.resourceType, body,
       ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
-      ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }), ...clocks });
+      ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }),
+      ...(pending.providerFunctionCode === undefined ? {} : { providerFunctionCode: pending.providerFunctionCode }),
+      ...(pending.reconcileCutoffSequence === undefined ? {} :
+        { reconcileCutoffSequence: pending.reconcileCutoffSequence }), ...clocks });
     while (deduplicated.length > 4 || deduplicated.reduce((sum, entry) => sum + entry.body.length, 0) > 12_000_000) {
       deduplicated.shift();
     }
@@ -2703,7 +2764,8 @@ export class NetworkObserver {
     transport: ChromeBridgeEnvelope["transport"],
     payload: ChromeBridgeEnvelope["payload"],
     metadata: {
-      readonly request?: Pick<ChromeBridgeEnvelope["request"], "streamId" | "providerPartition" | "replayed">;
+      readonly request?: Pick<ChromeBridgeEnvelope["request"], "streamId" | "providerPartition" | "replayed" |
+        "providerFunctionCode" | "reconcileCutoffSequence">;
       readonly observedAtMs?: number;
       readonly receivedMonotonicMs?: number;
       readonly sourceGeneration?: number;
@@ -2763,6 +2825,22 @@ function imPartitionFromRequest(source: ObservedSource,
   } catch {
     return null;
   }
+}
+
+function pendingRequestMetadata(pending: PendingRequest): Pick<ChromeBridgeEnvelope["request"],
+  "streamId" | "providerPartition" | "providerFunctionCode" | "reconcileCutoffSequence"> {
+  return {
+    ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
+    ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }),
+    ...(pending.providerFunctionCode === undefined ? {} : { providerFunctionCode: pending.providerFunctionCode }),
+    ...(pending.reconcileCutoffSequence === undefined ? {} :
+      { reconcileCutoffSequence: pending.reconcileCutoffSequence })
+  };
+}
+
+function replayRequestMetadata(snapshot: ReplayableHttpSnapshot): Pick<ChromeBridgeEnvelope["request"],
+  "streamId" | "providerPartition" | "providerFunctionCode" | "reconcileCutoffSequence" | "replayed"> {
+  return { ...pendingRequestMetadata({ ...snapshot, sourceGeneration: 0 }), replayed: true };
 }
 
 function isImGetSeUrl(source: ObservedSource, value: string): boolean {

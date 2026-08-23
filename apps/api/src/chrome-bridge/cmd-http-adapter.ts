@@ -7,6 +7,7 @@ const ACCOUNT_ID = "catalog-source:CMD:FOOTBALL";
 const HOST = "cgnew.fts368.com";
 const PATH = "/Member/BetsView/BetLight/DataOdds.ashx";
 const FULL_ROW_LENGTH = 91;
+const KNOWN_METADATA_ROW_LENGTH = 3_046;
 
 interface CmdRoot {
   readonly t: number;
@@ -27,6 +28,7 @@ interface SourceState {
   rows: Map<string, RetainedRow> | null;
   generation: string | null;
   providerVersion: number | null;
+  gap: boolean;
 }
 
 const marketPositions = {
@@ -57,7 +59,7 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "CMD" || envelope.transport !== "HTTP_RESPONSE" ||
       envelope.request.hostname !== HOST || envelope.request.pathnameClass !== PATH ||
-      envelope.payload.encoding !== "UTF8") return false;
+      envelope.payload.encoding !== "UTF8" || envelope.request.providerFunctionCode === undefined) return false;
     const root = parseRoot(envelope.payload.body);
     this.#parsedBodies.set(envelope, root);
     return root !== null;
@@ -68,27 +70,36 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     const root = this.#parsedBodies.get(envelope) ?? parseRoot(envelope.payload.body);
     if (root === null) return [];
     const state = this.#states.get(envelope.sourceId) ?? { rows: null, generation: null,
-      providerVersion: null };
+      providerVersion: null, gap: false };
+    if (state.providerVersion !== null && root.t < state.providerVersion) return [];
     if (!root.a) {
       state.rows = null;
       state.generation = null;
-      state.providerVersion = null;
+      state.providerVersion = root.t;
+      state.gap = true;
       this.#states.set(envelope.sourceId, state);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
         observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
         reason: "PROVIDER_STREAM_GAP" }];
     }
-    if (state.providerVersion !== null && root.t < state.providerVersion) return [];
 
-    const isAtomicFull = root.today !== undefined && root.f !== undefined;
+    const providerFunctionCode = envelope.request.providerFunctionCode;
+    const isFullFamily = providerFunctionCode === 1 || providerFunctionCode === 2 ||
+      providerFunctionCode === 4 || providerFunctionCode === 6;
+    const isDeltaFamily = providerFunctionCode === 3 || providerFunctionCode === 5 ||
+      providerFunctionCode === 7;
+    const isAtomicFull = providerFunctionCode === 1 && root.today !== undefined && root.f !== undefined;
     let evidenceMode: "BASELINE" | "DELTA";
     if (isAtomicFull) {
-      const fullRows = [...root.data, ...root.today!].filter(isFullRow);
+      const candidates = [...root.data, ...root.today!];
+      if (candidates.some((candidate) => !isKnownMetadataRow(candidate) &&
+        (!isFullRow(candidate) || decodeRecord(candidate) === null))) return [];
+      const fullRows = candidates.filter(isFullRow);
       if (fullRows.length === 0) return [];
       const rows = new Map<string, RetainedRow>();
       for (const candidate of fullRows) {
         const eventId = providerId(candidate[0]);
-        if (eventId === null || decodeRecord(candidate) === null) continue;
+        if (eventId === null) return [];
         rows.set(eventId, { row: [...candidate], observedAtMs: envelope.observedAtMs,
           receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       }
@@ -96,9 +107,18 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
       state.rows = rows;
       state.generation = `cmd:${root.t}`;
       state.providerVersion = root.t;
+      state.gap = false;
       evidenceMode = "BASELINE";
     } else {
-      if (root.today !== undefined || root.f !== undefined || state.rows === null || state.generation === null) return [];
+      // Only fc=1 has an observed atomic running+today completion rule. Other
+      // full-family partitions remain fail-closed until their provider contract
+      // is characterized; a full-shaped body on a delta fc is never promoted.
+      if (isFullFamily || !isDeltaFamily || root.today !== undefined || root.f !== undefined ||
+        state.gap || state.rows === null || state.generation === null) {
+        state.providerVersion = root.t;
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
       let changed = false;
       for (const delta of root.data) changed = applyDelta(state.rows, delta, envelope) || changed;
       state.providerVersion = root.t;
@@ -138,6 +158,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isFullRow(value: readonly unknown[]): value is unknown[] { return value.length === FULL_ROW_LENGTH; }
+
+function isKnownMetadataRow(value: readonly unknown[]): boolean {
+  return value.length === KNOWN_METADATA_ROW_LENGTH;
+}
 
 function providerId(value: unknown): string | null {
   return (typeof value === "number" && Number.isSafeInteger(value) && value > 0) ||

@@ -26,6 +26,7 @@ interface SnapshotGeneration {
   readonly id: string;
   readonly partitions: Map<ImPartition, PartitionRecords>;
   readonly startedSequence: number;
+  readonly cutoffSequence: number;
   readonly bufferedDeltas: ChromeBridgeEnvelope[];
 }
 
@@ -35,6 +36,7 @@ interface SourceState {
   pending: SnapshotGeneration | null;
   readonly obsoleteGenerations: Set<string>;
   newestGenerationOrdinal: number | null;
+  readonly recentDeltas: ChromeBridgeEnvelope[];
 }
 
 function rememberObsolete(state: SourceState, generation: string): void {
@@ -62,7 +64,8 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       envelope.request.hostname !== HOST || envelope.payload.encoding !== "UTF8" ||
       (envelope.request.pathnameClass !== SNAPSHOT_PATH && envelope.request.pathnameClass !== DELTA_PATH)) return false;
     if (envelope.request.pathnameClass === SNAPSHOT_PATH &&
-      (envelope.request.providerPartition === undefined || envelope.request.streamId === undefined)) return false;
+      (envelope.request.providerPartition === undefined || envelope.request.streamId === undefined ||
+        envelope.request.reconcileCutoffSequence === undefined)) return false;
     const root = parseRecord(envelope.payload.body);
     this.#parsedBodies.set(envelope, root);
     return root?.StatusCode === 100 && (envelope.request.pathnameClass === SNAPSHOT_PATH
@@ -74,12 +77,15 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
     const root = this.#parsedBodies.get(envelope) ?? parseRecord(envelope.payload.body);
     if (root === null) return [];
     const state = this.#states.get(envelope.sourceId) ?? { current: null, currentGeneration: null,
-      pending: null, obsoleteGenerations: new Set<string>(), newestGenerationOrdinal: null };
+      pending: null, obsoleteGenerations: new Set<string>(), newestGenerationOrdinal: null,
+      recentDeltas: [] };
     if (envelope.request.pathnameClass === SNAPSHOT_PATH) {
       const partition = envelope.request.providerPartition;
       const generation = envelope.request.streamId;
+      const cutoffSequence = envelope.request.reconcileCutoffSequence;
       const ordinal = generation === undefined ? null : generationOrdinal(generation);
-      if (partition === undefined || generation === undefined || state.obsoleteGenerations.has(generation) ||
+      if (partition === undefined || generation === undefined || cutoffSequence === undefined ||
+        state.obsoleteGenerations.has(generation) ||
         (ordinal !== null && state.newestGenerationOrdinal !== null && ordinal < state.newestGenerationOrdinal) ||
         state.currentGeneration === generation) return [];
       if (ordinal !== null && (state.newestGenerationOrdinal === null || ordinal > state.newestGenerationOrdinal)) {
@@ -88,13 +94,14 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       if (state.pending === null || state.pending.id !== generation) {
         if (state.pending !== null) rememberObsolete(state, state.pending.id);
         state.pending = { id: generation, partitions: new Map<ImPartition, PartitionRecords>(),
-          startedSequence: envelope.sequence, bufferedDeltas: [] };
+          startedSequence: envelope.sequence, cutoffSequence,
+          bufferedDeltas: state.recentDeltas.filter((delta) => delta.sequence > cutoffSequence) };
       }
+      if (state.pending.cutoffSequence !== cutoffSequence) return [];
+      const classified = classifySnapshot(root, envelope.observedAtMs);
+      if (classified === null) return [];
       const records = new Map<string, RetainedRecord>();
-      for (const record of extractImFootballCatalog(root, {
-        nowMs: envelope.observedAtMs,
-        prematchHorizonMs: PREMATCH_HORIZON_MS
-      })) {
+      for (const record of classified) {
         records.set(record.eventId, { record, observedAtMs: envelope.observedAtMs,
           receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       }
@@ -109,7 +116,9 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
     } else {
       const sourcePartitions = state.current;
       if (sourcePartitions === null) return [];
-      if (state.pending !== null && envelope.sequence > state.pending.startedSequence) {
+      state.recentDeltas.push(envelope);
+      while (state.recentDeltas.length > 128) state.recentDeltas.shift();
+      if (state.pending !== null && envelope.sequence > state.pending.cutoffSequence) {
         state.pending.bufferedDeltas.push(envelope);
       }
       const changed = this.#applyDelta(sourcePartitions, envelope);
@@ -162,6 +171,59 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
   }
 }
 
+function classifySnapshot(root: Record<string, unknown>, nowMs: number): readonly ImRecord[] | null {
+  const candidates = root.sel;
+  if (!Array.isArray(candidates)) return null;
+  const accepted: ImRecord[] = [];
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) return null;
+    if (candidate.iscyb === true) continue;
+    const eventId = candidate.eid;
+    const eventAtMs = typeof candidate.edt === "string" ? Date.parse(candidate.edt) : Number.NaN;
+    if (!((typeof eventId === "number" && Number.isSafeInteger(eventId) && eventId > 0) ||
+      (typeof eventId === "string" && /^\d+$/u.test(eventId))) ||
+      typeof candidate.htn !== "string" || candidate.htn.trim() === "" ||
+      typeof candidate.atn !== "string" || candidate.atn.trim() === "" ||
+      candidate.htn.trim() === candidate.atn.trim() ||
+      typeof candidate.cn !== "string" || candidate.cn.trim() === "" ||
+      typeof candidate.isrbt !== "boolean" || !Number.isFinite(eventAtMs) || !Array.isArray(candidate.mls)) return null;
+    if (!(candidate.mls as unknown[]).every(isClassifiedImMarket)) return null;
+    const extracted = extractImFootballCatalog({ StatusCode: 100, sel: [candidate] }, {
+      nowMs, prematchHorizonMs: PREMATCH_HORIZON_MS
+    });
+    if (extracted.length > 0) accepted.push(...extracted);
+    else if (candidate.isrbt !== true && (eventAtMs < nowMs || eventAtMs > nowMs + PREMATCH_HORIZON_MS)) continue;
+    // Structurally valid but unsupported market/period/line records are an
+    // explained provider-domain exclusion rather than malformed evidence.
+  }
+  return accepted;
+}
+
+function isClassifiedImMarket(value: unknown): boolean {
+  if (!isRecord(value) || providerIdentifier(value.mi) === null || !Number.isSafeInteger(Number(value.bti)) ||
+    !Number.isSafeInteger(Number(value.gp)) || !Array.isArray(value.ws)) return false;
+  const supportedDomain = [1, 2].includes(Number(value.bti)) && [1, 2, 3].includes(Number(value.gp));
+  if (!supportedDomain) return true;
+  if (value.ws.length !== 2) return false;
+  const expectedSelections = Number(value.bti) === 1 ? new Set([1, 2]) : new Set([3, 4]);
+  const actualSelections = new Set<number>();
+  for (const selection of value.ws) {
+    if (!isRecord(selection) || providerIdentifier(selection.wsi) === null ||
+      !expectedSelections.has(Number(selection.si)) || actualSelections.has(Number(selection.si)) ||
+      typeof selection.hdp !== "number" || !Number.isFinite(selection.hdp) || Math.abs(selection.hdp) > 100 ||
+      typeof selection.dih !== "string" || selection.dih.trim() === "" ||
+      typeof selection.o !== "number" || !Number.isFinite(selection.o) || selection.o === 0 ||
+      Math.abs(selection.o) > 1) return false;
+    actualSelections.add(Number(selection.si));
+  }
+  return actualSelections.size === 2;
+}
+
+function providerIdentifier(value: unknown): string | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? String(value)
+    : typeof value === "string" && /^\d+$/u.test(value) && value !== "0" ? value : null;
+}
+
 function generationOrdinal(generation: string): number | null {
   const match = /:(\d+)$/u.exec(generation);
   if (match === null) return null;
@@ -177,4 +239,8 @@ function parseRecord(body: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

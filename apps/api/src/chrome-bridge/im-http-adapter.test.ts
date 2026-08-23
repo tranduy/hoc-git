@@ -10,13 +10,14 @@ const event = { eid: 112516390, htn: "Monterrey Rayados", atn: "Nashville SC", c
 
 function envelope(body: unknown, sequence = 1, path = "/api/EventV6/GetSE",
   providerPartition?: "IM_MARKET_1" | "IM_MARKET_2", generation = "im:8:generation-1",
-  sourceEpoch = "observer-im:0"): ChromeBridgeEnvelope {
+  sourceEpoch = "observer-im:0", reconcileCutoffSequence = 0): ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence,
     sourceEpoch,
     observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + sequence,
     receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
     request: { hostname: "imsports.directsb.net", pathnameClass: path, resourceType: "XHR",
-      ...(providerPartition === undefined ? {} : { providerPartition, streamId: generation }) },
+      ...(providerPartition === undefined ? {} : { providerPartition, streamId: generation,
+        reconcileCutoffSequence }) },
     payload: { encoding: "UTF8", body: JSON.stringify(body) } };
 }
 
@@ -172,6 +173,25 @@ describe("ImHttpCatalogAdapter", () => {
     adapter.decode(envelope(delta, 11, "/api/EventV6/GetSEDelta"));
     const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
       "IM_MARKET_2", "im:8:generation-2")).at(-1)?.value as {
+        quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
+    expect(committed.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })
+    ]));
+  });
+
+  it("reapplies a delta that arrives after the signed cutoff but before the first partition", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    seedBothPartitions(adapter);
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
+      ws: event.mls[0]!.ws.map((selection) => ({ ...selection,
+        o: selection.wsi === 101 ? 0.84 : -0.91 })) }] }] };
+    expect(adapter.decode(envelope(delta, 10, "/api/EventV6/GetSEDelta"))).toHaveLength(1);
+    const replacement = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
+      ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 11, undefined,
+      "IM_MARKET_1", "im:8:generation-2", "observer-im:0", 9))).toEqual([]);
+    const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
+      "IM_MARKET_2", "im:8:generation-2", "observer-im:0", 9)).at(-1)?.value as {
         quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
     expect(committed.quotes).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })

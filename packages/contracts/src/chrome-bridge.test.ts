@@ -84,6 +84,23 @@ describe("ChromeBridgeEnvelopeSchema", () => {
     expect(schema.safeParse({ ...lifecycle,
       request: { ...lifecycle.request, streamId: "socket?token=secret" } }).success).toBe(false);
   });
+
+  it("accepts only sanitized provider function and reconciliation cutoff metadata", () => {
+    const schema = contracts.ChromeBridgeEnvelopeSchema;
+    expect(schema.safeParse({ ...validEnvelope, lobby: "CMD", request: {
+      ...validEnvelope.request, providerFunctionCode: 1
+    } }).success).toBe(true);
+    expect(schema.safeParse({ ...validEnvelope, lobby: "IM", request: {
+      ...validEnvelope.request, streamId: "im:42:3", providerPartition: "IM_MARKET_1",
+      reconcileCutoffSequence: 17
+    } }).success).toBe(true);
+    for (const request of [
+      { ...validEnvelope.request, providerFunctionCode: 0 },
+      { ...validEnvelope.request, providerFunctionCode: 8 },
+      { ...validEnvelope.request, providerFunctionCode: "1" },
+      { ...validEnvelope.request, reconcileCutoffSequence: -1 }
+    ]) expect(schema.safeParse({ ...validEnvelope, request }).success).toBe(false);
+  });
 });
 
 describe("ChromeBridgeControlMessageSchema", () => {

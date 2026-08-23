@@ -106,3 +106,100 @@ Modified:
 ## Commit
 
 Production/test commit: `8fa4aca` (`fix(feed): make CMD and IM updates authoritative and ordered`).
+
+---
+
+## Fix Round 1
+
+Status: DONE
+
+Review base: `fc49184`
+
+### Review findings resolved
+
+- A CMD `a=false` gap now clears baseline authority without retiring the current source epoch. The adapter retains the provider cursor as the recovery lower bound, rejects all deltas while gapped, rejects a late pre-gap `fc=1`, and accepts a newer same-epoch complete `fc=1` baseline back to `LIVE`.
+- IM allocates and announces the reconciliation generation and bridge cutoff before the first signed Market 1 fetch starts. Deltas newer than that cutoff are retained in a bounded per-source log and replayed after both partitions commit, including a delta received before the first synthetic partition envelope exists.
+- The observer carries only sanitized numeric CMD `fc` metadata. The adapter explicitly separates full codes `1/2/4/6` from delta codes `3/5/7`, authorizes only the characterized atomic `fc=1` running-plus-today contract, and rejects a full body on the wrong code, partial bodies, and any unexplained malformed baseline row.
+- Nonempty IM partitions use accepted/rejected classification. Malformed events, supported-market entries, or selections reject the partition rather than filtering into an authoritative empty catalog; structurally valid out-of-window, cyborg, or unsupported-domain records remain explained exclusions.
+- CMD DOM evidence is silent while network authority is `LIVE`. Once that authority is stale, DOM can overlay visible event identity and status only; network prices, provider IDs, quote clocks, and catalog observation time retain precedence. The overlay remains `DOM_FALLBACK`, publishes `STALE`, and never renews authority.
+- CMD virtualized capture now carries an explicit sweep ID/completion boundary. The adapter retains partial viewport rows and their clocks, accumulates visited IDs for the sweep, and removes only pre-sweep omissions after a provider-side complete boundary.
+- SABA class mutations dirty the DOM observer only when semantic disabled/locked class state changes. Hover/animation class churn is ignored; `data-odds-status`, `data-grey-out`, and `aria-disabled` remain semantic triggers.
+
+The prior sanitized CMD evidence and hashes above are unchanged. No provider tab/runtime action was needed in this fix round, and no raw headers, cookies, tokens, credentials, user data, or response bodies were added.
+
+### Fix Round 1 RED
+
+Focused tests were added before production fixes and run against `fc49184`:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/contracts -- src/chrome-bridge.test.ts
+npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/cmd-http-adapter.test.ts src/chrome-bridge/im-http-adapter.test.ts src/chrome-bridge/cmd-dom-adapter.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- src/network-observer.test.ts
+```
+
+```text
+Contracts: 1 failed / 13 passed (new safe fc/cutoff/sweep metadata rejected).
+API: 6 failed / 43 passed after correcting one test-helper syntax error.
+  CMD fc/schema: 1 failed / 5 passed.
+  IM pre-first-partition race: 1 failed / 13 passed.
+  CMD DOM sweep: 1 failed / 8 passed.
+  Data plane gap/overlay/malformed IM: 3 failed / 17 passed.
+Extension observer: 4 failed / 124 passed.
+  Missing pre-fetch IM generation announcement, CMD fc propagation, sweep-boundary propagation,
+  and SABA hover-class filtering each failed once.
+```
+
+The end-to-end gap test exercised `fc=1 -> a=false/fc=3 -> late pre-gap fc=1 -> newer same-epoch fc=1`. The IM race held the page-side fetch promise before the first synthetic partition while injecting a newer natural delta.
+
+### Fix Round 1 GREEN
+
+```powershell
+npm.cmd test --workspace @tool-chenh/contracts -- src/chrome-bridge.test.ts
+npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/cmd-http-adapter.test.ts src/chrome-bridge/cmd-dom-adapter.test.ts src/chrome-bridge/im-http-adapter.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- src/cmd-dom-snapshot.test.ts src/cmd-snapshot-poller.test.ts src/network-observer.test.ts
+```
+
+```text
+Contracts: 1 suite / 14 tests passed.
+Task 5 API: 4 suites / 49 tests passed.
+Task 5 extension: 3 suites / 149 tests passed.
+```
+
+Task 1-4 regressions:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/automatic-source-recovery.test.ts src/chrome-bridge/provider-source-refresh.test.ts src/chrome-bridge/chrome-bridge-control-plane.test.ts src/chrome-bridge/provider-feed-controller.test.ts src/chrome-bridge/provider-feed-registry.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/catalog/catalog-coverage-guard.test.ts src/server.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- src/provider-work-scheduler.test.ts src/local-bridge.test.ts src/network-observer.test.ts src/saba-snapshot-storage.test.ts src/cmd-snapshot-poller.test.ts src/bridge-wakeup.test.ts
+```
+
+```text
+API: 8 suites / 92 tests passed.
+Extension: 6 suites / 177 tests passed.
+```
+
+Compile/build and hygiene gates:
+
+```powershell
+npm.cmd run build --workspace @tool-chenh/contracts
+npm.cmd run typecheck --workspace @tool-chenh/api
+npm.cmd run build --workspace @tool-chenh/api
+npm.cmd run typecheck --workspace @tool-chenh/chrome-extension
+npm.cmd run build --workspace @tool-chenh/chrome-extension
+rg -n -i "cookie|authorization|token|password|session|launch|query" apps/api/src/chrome-bridge/cmd-http-adapter.test.ts
+git diff --check
+```
+
+All compile/build commands exited 0. The fixture secret scan returned no matches. `git diff --check` exited 0 with only the checkout's existing LF-to-CRLF notices.
+
+### Ordering, cadence, and isolation after review
+
+- CMD natural delta cadence is unchanged. A gap is recoverable only by a complete, current, newer `fc=1`; generic transport and DOM evidence cannot end the gap or renew `LIVE`.
+- IM natural deltas remain the fast path. The cutoff is the last source bridge sequence before the reconciliation-start diagnostic; every later natural delta is replay-eligible even while both same-page signed requests are still pending. The retained delta log is bounded to 128 envelopes.
+- CMD DOM sweeps are explicit and provider-side. Partial captures never tombstone; a completion marker closes only its matching sweep generation. DOM overlays preserve network price/clocks and remain non-authoritative.
+- CMD and IM continue through the existing keyed provider scheduler lanes. No global heavy-work tail or cross-provider wait was introduced; the Task 1-4 scheduler regressions remain green.
+
+### Deferred minors and concerns
+
+- Equal CMD cursor idempotence and AbortSignal-aware IM signer plumbing remain deferred exactly as review ledgered; neither was broadened into this round.
+- Full-family CMD codes `2/4/6` are recognized but remain fail-closed because only `fc=1` has an observed atomic running-plus-today completion contract. No unobserved partition semantics were inferred.
+- Unsupported IM market domains and valid out-of-window events are excluded deliberately; malformed supported event/market/selection entries reject their entire nonempty partition.

@@ -170,6 +170,29 @@ describe("NetworkObserver", () => {
     expect(CMD_FULL_BASELINE_EXPRESSION).toContain("LoadFullRunningTodayData()");
   });
 
+  it("announces an IM generation cutoff before the signed page fetch begins", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Runtime.evaluate") {
+        await blocked;
+        return { result: { value: { status: "catalog-requested", responses: [] } } };
+      }
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 5_000,
+      monotonicNow: () => 50, observerSessionId: "observer-im" });
+    const refreshing = observer.refreshCatalog({ lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 });
+    for (let index = 0; index < 5; index += 1) await Promise.resolve();
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ transport: "TAB_STATE", sequence: 0,
+      request: expect.objectContaining({ pathnameClass: "/__fieldline_im_reconciliation_start__",
+        streamId: "im:8:1", reconcileCutoffSequence: 0 }) }));
+    release();
+    await refreshing;
+  });
+
   it("falls back to retained SBOBET STOMP partitions when a fresh same-tab request is unavailable", async () => {
     const sendCommand = vi.fn(async (_tabId: number, _method: string,
       _params?: Record<string, unknown>) => ({}));
@@ -1047,6 +1070,59 @@ describe("NetworkObserver", () => {
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "SABA", transport: "DOM_SNAPSHOT" }));
   });
 
+  it("ignores SABA hover animation classes but observes semantic disabled transitions", async () => {
+    let watcher = "";
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate") watcher = String(params?.expression ?? "");
+      return { result: { value: false } };
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    await observer.pollSabaDomChanges({ lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 }, "sports.example");
+    let mutationCallback!: (mutations: unknown[]) => void;
+    const MutationObserver = class {
+      constructor(callback: (mutations: unknown[]) => void) { mutationCallback = callback; }
+      observe(): void {}
+    };
+    const element = { nodeType: 1, className: "odds hover", ariaDisabled: "false",
+      closest: () => element, querySelector: () => null,
+      getAttribute(name: string) { return name === "class" ? this.className
+        : name === "aria-disabled" ? this.ariaDisabled : null; } };
+    const document = { documentElement: element };
+    const Node = { ELEMENT_NODE: 1 };
+    const execute = new Function("document", "MutationObserver", "Node", `return ${watcher}`) as
+      (...args: unknown[]) => boolean;
+    delete (globalThis as Record<string, unknown>).__fieldlineSabaOddsMutationV1;
+    expect(execute(document, MutationObserver, Node)).toBe(true);
+    expect(execute(document, MutationObserver, Node)).toBe(false);
+    mutationCallback([{ type: "attributes", attributeName: "class", oldValue: "odds",
+      target: element, addedNodes: [], removedNodes: [] }]);
+    expect(execute(document, MutationObserver, Node)).toBe(false);
+    element.className = "odds no-hover";
+    mutationCallback([{ type: "attributes", attributeName: "class", oldValue: "odds hover",
+      target: element, addedNodes: [], removedNodes: [] }]);
+    expect(execute(document, MutationObserver, Node)).toBe(true);
+    delete (globalThis as Record<string, unknown>).__fieldlineSabaOddsMutationV1;
+  });
+
+  it("propagates an explicit CMD DOM sweep boundary without retaining its diagnostic record", async () => {
+    const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "m",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
+    const body = JSON.stringify([publicRecord, { __fieldlineSweep: {
+      sweepId: "cmd:9:sweep-1", complete: true
+    } }]);
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "top" } } }
+      : method === "Page.createIsolatedWorld" ? { executionContextId: 1 }
+      : method === "Runtime.evaluate" ? { result: { value: body } } : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 5_000, monotonicNow: () => 50 });
+    await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+    const chunk = JSON.parse(String((forward.mock.calls[0]?.[0] as ChromeBridgeEnvelope).payload.body));
+    expect(chunk).toMatchObject({ sweepId: "cmd:9:sweep-1", sweepComplete: true });
+    expect(JSON.stringify(chunk.records)).not.toContain("__fieldlineSweep");
+  });
+
   it("reads independent CMD frames concurrently so one slow frame cannot expire the catalog", async () => {
     let evaluationsInFlight = 0;
     let maximumInFlight = 0;
@@ -1720,6 +1796,26 @@ describe("NetworkObserver", () => {
     });
     await expect(observer.handleEvent(source, "Network.loadingFinished", { requestId: "xhr-2" })).resolves.toBeUndefined();
     expect(forward).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates only CMD's numeric DataOdds fc request metadata", async () => {
+    const full = JSON.stringify({ t: 10, a: true, data: [], today: [], f: [] });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) =>
+      method === "Network.getResponseBody" ? { body: full, base64Encoded: false } : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000, monotonicNow: () => 50 });
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const providerUrl = "https://cgnew.fts368.com/Member/BetsView/BetLight/DataOdds.ashx?fc=1&opaque=secret";
+    await observer.handleEvent(cmd, "Network.requestWillBeSent", { requestId: "cmd-full", type: "XHR",
+      request: { url: providerUrl, method: "GET", headers: {} } });
+    await observer.handleEvent(cmd, "Network.responseReceived", { requestId: "cmd-full", type: "XHR",
+      response: { url: providerUrl, mimeType: "application/json" } });
+    await observer.handleEvent(cmd, "Network.loadingFinished", { requestId: "cmd-full" });
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ request: {
+      hostname: "cgnew.fts368.com", pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx",
+      resourceType: "XHR", providerFunctionCode: 1
+    } }));
+    expect(JSON.stringify(forward.mock.calls)).not.toContain("opaque=secret");
   });
 
   it("carries the BTI refresh generation from request headers into the HTTP response envelope", async () => {

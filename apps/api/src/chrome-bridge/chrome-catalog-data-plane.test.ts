@@ -23,18 +23,31 @@ function cmdEnvelope(sequence = 1, records: readonly unknown[] = [record], chunk
       records }) } };
 }
 
-function cmdHttpEnvelope(sequence = 1): ChromeBridgeEnvelope {
+function cmdHttpEnvelope(sequence = 1, options: { readonly t?: number; readonly a?: boolean;
+  readonly providerFunctionCode?: number; readonly row?: unknown[] } = {}): ChromeBridgeEnvelope {
   const row = Array<unknown>(91).fill(null);
   Object.assign(row, { 0: 24881365, 3: 318, 10: 0.5, 12: 3, 14: 0.25, 16: 1.25, 25: 0,
     37: "ENGLISH PREMIER LEAGUE", 38: "Newcastle United", 39: "Liverpool",
     40: -0.96, 41: 0.90, 42: 0.87, 43: -0.95, 44: 0.88, 45: -0.98, 46: 0.88, 47: -0.98,
     53: "23:30", 56: "08/23", 79: 0 });
+  const body = options.a === false ? { t: options.t ?? 8_281_247, a: false, data: [] }
+    : { t: options.t ?? 8_281_247, a: true, data: [], today: [options.row ?? row], f: [] };
   return { version: 1, kind: "NETWORK", lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9,
     sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
     transport: "HTTP_RESPONSE", request: { hostname: "cgnew.fts368.com",
-      pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx", resourceType: "XHR" },
-    payload: { encoding: "UTF8", body: JSON.stringify({ t: 8_281_247, a: true,
-      data: [], today: [row], f: [] }) } };
+      pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx", resourceType: "XHR",
+      providerFunctionCode: options.providerFunctionCode ?? 1 },
+    payload: { encoding: "UTF8", body: JSON.stringify(body) } } as ChromeBridgeEnvelope;
+}
+
+function imEnvelope(sequence: number, partition: "IM_MARKET_1" | "IM_MARKET_2",
+  body: unknown): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
+    transport: "HTTP_RESPONSE", request: { hostname: "imsports.directsb.net",
+      pathnameClass: "/api/EventV6/GetSE", resourceType: "Fetch", providerPartition: partition,
+      streamId: "im:8:1", reconcileCutoffSequence: 0 },
+    payload: { encoding: "UTF8", body: JSON.stringify(body) } } as ChromeBridgeEnvelope;
 }
 
 const sabaFields = ["type", "leagueid", "leaguenameen", "sporttype", "matchid", "hteamnameen",
@@ -338,5 +351,55 @@ describe("ChromeCatalogDataPlane", () => {
     expect(publish).toHaveBeenCalledTimes(1);
     expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ provider: "CMD",
       events: [expect.objectContaining({ providerEventId: "24881365" })] }), "FRESH");
+  });
+
+  it("recovers a CMD provider gap in the same source epoch and rejects a late pre-gap full", async () => {
+    let now = 1_100;
+    const registry = new ProviderFeedRegistry({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: registry });
+    expect(plane.ingest(cmdHttpEnvelope(1, { t: 100 }))).toBe(true);
+    expect(plane.ingest(cmdHttpEnvelope(2, { t: 110, a: false, providerFunctionCode: 3 }))).toBe(true);
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    expect(plane.ingest(cmdHttpEnvelope(3, { t: 105 }))).toBe(false);
+    now = 1_200;
+    expect(plane.ingest(cmdHttpEnvelope(4, { t: 111 }))).toBe(true);
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ provider: "CMD" });
+    expect(registry.snapshot("catalog-source:CMD:FOOTBALL")).toMatchObject({
+      state: "LIVE", sourceEpoch: "worker-a:0", activeGeneration: "cmd:111"
+    });
+  });
+
+  it("publishes a stale CMD DOM overlay with network prices after authority expires", async () => {
+    let now = 1_100;
+    const publish = vi.fn();
+    const registry = new ProviderFeedRegistry({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: registry, publish });
+    expect(plane.ingest(cmdHttpEnvelope(1))).toBe(true);
+    now = 5_100;
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    const visible = { ...record, matchId: "24881365", leagueId: "318", leagueName: "Visible Premier",
+      teamNames: ["Visible Newcastle", "Visible Liverpool"], groups: [{
+        ...record.groups[0]!, odds: record.groups[0]!.odds.map((odd) => ({ ...odd,
+          marketOddsId: "visible-ah", priceText: "0.55" }))
+      }] };
+    const dom = { ...cmdEnvelope(2, [visible], 0, 1, "cmd:9:visible-overlay-0001"),
+      sourceEpoch: "worker-a:0", observedAtMs: 5_100 };
+    expect(plane.ingest(dom)).toBe(true);
+    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({
+      events: [expect.objectContaining({ participantA: "Visible Newcastle" })],
+      quotes: expect.arrayContaining([expect.objectContaining({ rawOdds: "-0.96", sequence: 1 })])
+    }), "STALE");
+    const calls = publish.mock.calls.length;
+    expect(plane.ingest({ ...dom, sequence: 3, observedAtMs: 5_200 })).toBe(false);
+    expect(publish).toHaveBeenCalledTimes(calls);
+  });
+
+  it("does not authorize malformed nonempty IM reconciliation partitions", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    expect(plane.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100,
+      sel: [{ eid: 1, malformed: true }] }))).toBe(false);
+    expect(plane.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100, sel: [] }))).toBe(false);
+    await expect(plane.read("catalog-source:IM:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
 });

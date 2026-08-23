@@ -16,13 +16,15 @@ function envelope(body: string, overrides: Partial<Pick<ChromeBridgeEnvelope,
 }
 
 function snapshotBody(records: readonly unknown[], overrides: Partial<{
-  snapshotId: string; chunkIndex: number; chunkCount: number;
+  snapshotId: string; chunkIndex: number; chunkCount: number; sweepId: string; sweepComplete: boolean;
 }> = {}): string {
   return JSON.stringify({
     schemaVersion: 2,
     snapshotId: overrides.snapshotId ?? "cmd:9:snapshot-0001",
     chunkIndex: overrides.chunkIndex ?? 0,
     chunkCount: overrides.chunkCount ?? 1,
+    ...(overrides.sweepId === undefined ? {} : { sweepId: overrides.sweepId }),
+    ...(overrides.sweepComplete === undefined ? {} : { sweepComplete: overrides.sweepComplete }),
     records
   });
 }
@@ -155,5 +157,27 @@ describe("CmdDomCatalogAdapter", () => {
       receivedMonotonicMs: 10 }));
     expect(adapter.decode(envelope(snapshotBody([record], { snapshotId: "cmd:9:snapshot-identical-0002" }),
       { sequence: 2, observedAtMs: 5_000, receivedMonotonicMs: 20 }))).toEqual([]);
+  });
+
+  it("removes omitted rows only when an explicit complete sweep closes", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    const obsoleteRecord = { ...record, matchId: "event-obsolete", teamNames: ["Gone FC", "Old FC"] };
+    const nextRecord = { ...record, matchId: "event-2", teamNames: ["Gamma FC", "Delta FC"],
+      groups: [{ ...record.groups[0]!, odds: record.groups[0]!.odds.map((odd) => ({ ...odd,
+        marketOddsId: "ah-2" })) }] };
+    adapter.decode(envelope(snapshotBody([obsoleteRecord], { snapshotId: "cmd:9:before-sweep-0001" }),
+      { sequence: 0 }));
+    adapter.decode(envelope(snapshotBody([record], { snapshotId: "cmd:9:sweep-part-0001",
+      sweepId: "cmd:9:sweep-1", sweepComplete: false }), { sequence: 1 }));
+    const partial = adapter.decode(envelope(snapshotBody([nextRecord], {
+      snapshotId: "cmd:9:sweep-part-0002", sweepId: "cmd:9:sweep-1", sweepComplete: false
+    }), { sequence: 2 }))[0]!.value as { events: Array<{ providerEventId: string }> };
+    expect(partial.events.map((event) => event.providerEventId).sort())
+      .toEqual(["event-1", "event-2", "event-obsolete"]);
+
+    const complete = adapter.decode(envelope(snapshotBody([nextRecord], {
+      snapshotId: "cmd:9:sweep-part-0003", sweepId: "cmd:9:sweep-1", sweepComplete: true
+    }), { sequence: 3 }))[0]!.value as { events: Array<{ providerEventId: string }> };
+    expect(complete.events.map((event) => event.providerEventId).sort()).toEqual(["event-1", "event-2"]);
   });
 });

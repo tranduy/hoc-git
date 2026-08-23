@@ -24,12 +24,13 @@ const oddsChange = { t: 8_277_338, a: true, data: [
   [25299763, 1, 35, 0.80, -0.98, 1, 1, "S"]
 ] };
 
-function envelope(body: unknown, sequence: number): ChromeBridgeEnvelope {
-  return { version: 1, kind: "NETWORK", lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9,
+function envelope(body: unknown, sequence: number, providerFunctionCode = 1): ChromeBridgeEnvelope {
+  const value = { version: 1, kind: "NETWORK", lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9,
     sourceEpoch: "observer-cmd:0", sequence, observedAtMs: 1_787_494_070_000 + sequence,
     receivedMonotonicMs: 100 + sequence, transport: "HTTP_RESPONSE",
     request: { hostname: "cgnew.fts368.com", pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx",
-      resourceType: "XHR" }, payload: { encoding: "UTF8", body: JSON.stringify(body) } };
+      resourceType: "XHR", providerFunctionCode }, payload: { encoding: "UTF8", body: JSON.stringify(body) } };
+  return value as ChromeBridgeEnvelope;
 }
 
 describe("CmdHttpCatalogAdapter", () => {
@@ -45,14 +46,14 @@ describe("CmdHttpCatalogAdapter", () => {
   it("rejects a late odds generation instead of rolling back the current baseline", () => {
     const adapter = new CmdHttpCatalogAdapter();
     adapter.decode(envelope(fullResponse, 1));
-    expect(adapter.decode(envelope(oddsChange, 2))).toEqual([]);
+    expect(adapter.decode(envelope(oddsChange, 2, 3))).toEqual([]);
   });
 
   it("maps the characterized line and odds commands to stable provider selections", () => {
     const adapter = new CmdHttpCatalogAdapter();
     const earlier = { ...fullResponse, t: 8_277_000 };
     adapter.decode(envelope(earlier, 1));
-    const update = adapter.decode(envelope(oddsChange, 2)).at(-1);
+    const update = adapter.decode(envelope(oddsChange, 2, 3)).at(-1);
     expect(update).toMatchObject({ evidenceMode: "DELTA", provenance: "AUTHENTICATED_HTTP",
       generation: "cmd:8277000", providerTimestampMs: null });
     expect((update?.value as { quotes: Array<{ providerSelectionId: string; rawOdds: string }> }).quotes)
@@ -68,7 +69,7 @@ describe("CmdHttpCatalogAdapter", () => {
       hostname: "cgnew.fts368.com.evil.example" } })).toBe(false);
     expect(adapter.decode(envelope({ t: 1, a: true, data: [] }, 2))).toEqual([]);
     adapter.decode(envelope(fullResponse, 3));
-    expect(adapter.decode(envelope({ t: 8_281_248, a: false, data: [] }, 4))).toEqual([
+    expect(adapter.decode(envelope({ t: 8_281_248, a: false, data: [] }, 4, 3))).toEqual([
       expect.objectContaining({ invalidateAccountId: "catalog-source:CMD:FOOTBALL",
         reason: "PROVIDER_STREAM_GAP" })
     ]);
@@ -78,7 +79,17 @@ describe("CmdHttpCatalogAdapter", () => {
     const adapter = new CmdHttpCatalogAdapter();
     adapter.decode(envelope({ ...fullResponse, t: 8_277_000 }, 1));
     expect(adapter.decode(envelope({ t: 8_277_400, a: true,
-      data: [[25299763, 1, 9_999, "uncharacterized"]] }, 2))).toEqual([]);
-    expect(adapter.decode(envelope({ ...oddsChange, t: 8_277_300 }, 3))).toEqual([]);
+      data: [[25299763, 1, 9_999, "uncharacterized"]] }, 2, 3))).toEqual([]);
+    expect(adapter.decode(envelope({ ...oddsChange, t: 8_277_300 }, 3, 3))).toEqual([]);
+  });
+
+  it("requires the observed fc family and rejects a malformed atomic full generation", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    expect(adapter.decode(envelope(fullResponse, 1, 3))).toEqual([]);
+    expect(adapter.decode(envelope(fullResponse, 2, 2))).toEqual([]);
+    expect(adapter.decode(envelope({ ...fullResponse,
+      today: [...fullResponse.today, [25299764, "unknown-row"]] }, 3, 1))).toEqual([]);
+    expect(adapter.decode(envelope({ t: 8_281_247, a: true,
+      data: fullResponse.data, f: [] }, 4, 1))).toEqual([]);
   });
 });

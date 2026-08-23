@@ -230,5 +230,14 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
       }))
     } });
   }
+  const sweepId = document.documentElement?.dataset?.fieldlineCmdSweepId || '';
+  if (/^cmd-sweep-\\d+$/u.test(sweepId)) {
+    const complete = document.documentElement.dataset.fieldlineCmdSweepComplete === 'true';
+    result.push({ __fieldlineSweep: { sweepId, complete } });
+    if (complete) {
+      document.documentElement.dataset.fieldlineCmdSweepId = 'cmd-sweep-' + Date.now();
+      document.documentElement.dataset.fieldlineCmdSweepComplete = 'false';
+    }
+  }
   return JSON.stringify(result);
 })()`;

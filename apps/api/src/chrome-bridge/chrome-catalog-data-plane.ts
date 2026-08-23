@@ -138,12 +138,16 @@ export class ChromeCatalogDataPlane {
     }
     if (!isObservedCatalog(update.value)) return published;
     let nextCatalog = update.value;
-    if (envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
-      this.#feeds.snapshot(transportAccountId).lastCompleteBaselineAtMs !== null) {
-      // Visible/virtualized DOM is diagnostic overlay evidence only. Once the
-      // authenticated DataOdds baseline exists it must not replace or refresh
-      // network prices, even if the visible viewport was observed later.
-      return published;
+    if (envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT") {
+      const retained = this.#catalogs.get(nextCatalog.accountId);
+      if (retained !== undefined) {
+        const feed = this.#feeds.snapshot(transportAccountId);
+        // While network authority is current, DOM evidence is intentionally
+        // silent. Once authority stalls it can update visible identity/status
+        // fields, but never price clocks or LIVE freshness.
+        if (feed.state === "LIVE") return published;
+        nextCatalog = overlayCmdDomCatalog(retained, nextCatalog);
+      }
     }
     if (envelope.lobby === "SABA" && envelope.transport === "DOM_SNAPSHOT") {
       const retained = this.#catalogs.get(nextCatalog.accountId);
@@ -281,4 +285,40 @@ function overlaySabaDomCatalog(retained: ObservedProviderCatalog,
   for (const quote of current.quotes) quotes.set(quote.providerSelectionId, quote);
   return { ...current, rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
     events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()] };
+}
+
+function overlayCmdDomCatalog(retained: ObservedProviderCatalog,
+  current: ObservedProviderCatalog): ObservedProviderCatalog {
+  if (retained.provider !== "CMD" || current.provider !== "CMD" || retained.accountId !== current.accountId) {
+    return current;
+  }
+  const visibleEvents = new Map(current.events.map((event) => [event.providerEventId, event]));
+  const events = retained.events.map((event) => {
+    const visible = visibleEvents.get(event.providerEventId);
+    if (visible === undefined || event.category !== "FOOTBALL" || visible.category !== "FOOTBALL") return event;
+    return { ...event,
+      competition: visible.competition, startAtUtcMs: visible.startAtUtcMs,
+      participantA: visible.participantA, participantB: visible.participantB,
+      isLive: visible.isLive, liveState: visible.liveState };
+  });
+  const visibleMarkets = new Map(current.markets.map((market) => [marketSemanticKey(market), market]));
+  const markets = retained.markets.map((market) => {
+    const visible = visibleMarkets.get(marketSemanticKey(market));
+    return visible === undefined ? market : { ...market, status: visible.status };
+  });
+  const visibleQuotes = new Map(current.quotes.map((quote) => [quoteSemanticKey(quote), quote]));
+  const quotes = retained.quotes.map((quote) => {
+    const visible = visibleQuotes.get(quoteSemanticKey(quote));
+    return visible === undefined ? quote : { ...quote, status: visible.status, isLive: visible.isLive };
+  });
+  return { ...retained, rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
+    events, markets, quotes };
+}
+
+function marketSemanticKey(market: ObservedProviderCatalog["markets"][number]): string {
+  return `${market.providerEventId}|${market.marketType}|${market.scope}|${market.line ?? ""}`;
+}
+
+function quoteSemanticKey(quote: ObservedProviderCatalog["quotes"][number]): string {
+  return `${quote.providerEventId}|${quote.marketType}|${quote.scope}|${quote.line ?? ""}|${quote.selection}`;
 }

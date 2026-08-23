@@ -166,9 +166,12 @@ export class ProviderFeedController {
   }
 
   #invalidate(evidence: Extract<ProviderFeedEvidence, { readonly kind: "INVALIDATE" }>): FeedDecision {
-    this.#retiredEpochs.add(epochKey(evidence.sourceId, evidence.sourceEpoch));
-    this.#sourceId = null;
-    this.#sourceEpoch = null;
+    const recoverableGap = evidence.reason === "PROVIDER_STREAM_GAP";
+    if (!recoverableGap) {
+      this.#retiredEpochs.add(epochKey(evidence.sourceId, evidence.sourceEpoch));
+      this.#sourceId = null;
+      this.#sourceEpoch = null;
+    }
     this.#authoritativeCatalog = null;
     this.#lastAuthoritativeEvidenceAtMs = null;
     this.#lastCompleteBaselineAtMs = null;
