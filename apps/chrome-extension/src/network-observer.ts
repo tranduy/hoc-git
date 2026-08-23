@@ -2017,37 +2017,50 @@ export class NetworkObserver {
           this.#sendCommand(source.tabId, "Page.getFrameTree")
         ).catch(() => ({}));
         const frameIds = collectFrameIds(frameTree);
-        const values: unknown[] = [];
+        const values: Array<{ readonly frameKey: string; readonly value: unknown }> = [];
         if (frameIds.length === 0) {
-          values.push(await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-            expression, returnByValue: true, awaitPromise: false
-          })).catch(() => ({})));
+          values.push({ frameKey: "top", value: await this.#withFrameCommandTimeout(
+            this.#sendCommand(source.tabId, "Runtime.evaluate", {
+              expression, returnByValue: true, awaitPromise: false
+            })).catch(() => ({})) });
         } else {
-          const frameValues = await Promise.all(frameIds.map(async (frameId) => {
+          const frameValues = await Promise.all(frameIds.map(async (frameId, frameIndex) => {
             const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
               "Page.createIsolatedWorld", {
               frameId, worldName: "fieldline-read-only", grantUniveralAccess: false
             })).catch(() => ({}));
             const contextId = nestedNumber(world, "executionContextId");
             if (contextId === null) return null;
-            return this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            const value = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
               expression, contextId, returnByValue: true, awaitPromise: false
             })).catch(() => ({}));
+            return { frameKey: safeFrameKey(frameId, frameIndex), value };
           }));
           values.push(...frameValues.filter((value) => value !== null));
         }
         if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
-        const evaluated = values.flatMap(readEvaluationRecords);
-        const sweepMarker = evaluated.find((value) => isRecord(value) && "__fieldlineSweep" in value);
-        const sweepValue = isRecord(sweepMarker) && isRecord(sweepMarker.__fieldlineSweep)
-          ? sweepMarker.__fieldlineSweep : null;
-        const sweep = sweepValue !== null && typeof sweepValue.sweepId === "string" &&
-          /^[a-z0-9._:-]{1,128}$/iu.test(sweepValue.sweepId) && typeof sweepValue.complete === "boolean"
-          ? { sweepId: sweepValue.sweepId, sweepComplete: sweepValue.complete } : undefined;
-        const withoutSweep = evaluated.filter((value) => !isRecord(value) || !("__fieldlineSweep" in value));
-        const catalogRecords = withoutSweep.filter((value) => !isRecord(value) || !("__fieldlineDiagnostic" in value));
-        const records = catalogRecords.length > 0 ? catalogRecords : withoutSweep;
-        if (records.length === 0) return;
+        const frameCaptures = values.map(({ frameKey, value }) => {
+          const evaluated = readEvaluationRecords(value);
+          const sweepMarker = evaluated.find((item) => isRecord(item) && "__fieldlineSweep" in item);
+          const sweepValue = isRecord(sweepMarker) && isRecord(sweepMarker.__fieldlineSweep)
+            ? sweepMarker.__fieldlineSweep : null;
+          const withoutSweep = evaluated.filter((item) => !isRecord(item) || !("__fieldlineSweep" in item));
+          const catalogRecords = withoutSweep.filter((item) =>
+            !isRecord(item) || !("__fieldlineDiagnostic" in item));
+          const hasCatalog = catalogRecords.length > 0;
+          const sweep = hasCatalog && sweepValue !== null && typeof sweepValue.sweepId === "string" &&
+            /^[a-z0-9._:-]{1,128}$/iu.test(sweepValue.sweepId) && typeof sweepValue.complete === "boolean"
+            ? { sweepId: sweepValue.sweepId, sweepComplete: sweepValue.complete, sweepFrameKey: frameKey }
+            : undefined;
+          return { frameKey, records: hasCatalog ? catalogRecords : withoutSweep, hasCatalog, sweep };
+        }).filter((capture) => capture.records.length > 0);
+        const hasCatalog = frameCaptures.some((capture) => capture.hasCatalog);
+        const eligibleFrames = hasCatalog ? frameCaptures.filter((capture) => capture.hasCatalog) : frameCaptures;
+        if (eligibleFrames.length === 0) return;
+        const emissionGroups = source.lobby === "CMD" ? eligibleFrames : [{ frameKey: "aggregate",
+          records: eligibleFrames.flatMap((capture) => capture.records), hasCatalog,
+          sweep: undefined }];
+        const records = emissionGroups.flatMap((capture) => capture.records);
         const catalogBody = JSON.stringify(records);
         const nowMs = this.#now();
         const receivedMonotonicMs = this.#monotonicNow();
@@ -2057,14 +2070,16 @@ export class NetworkObserver {
         // market cannot be misclassified as a dead data source.
         if (!forceGeneration && previous === catalogBody && nowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0)
           < CATALOG_REFRESH_INTERVAL_MS) return;
-        const ordinal = (this.#domSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
-        this.#domSnapshotOrdinals.set(source.sourceId, ordinal);
-        const snapshotId = `cmd:${source.tabId}:${nowMs}:${ordinal}`;
-        const chunks = chunkCmdSnapshot(records, snapshotId, undefined, sweep);
-        for (const chunk of chunks) {
-          await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
-            encoding: "UTF8", body: JSON.stringify(chunk)
-          }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration });
+        for (const group of emissionGroups) {
+          const ordinal = (this.#domSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
+          this.#domSnapshotOrdinals.set(source.sourceId, ordinal);
+          const snapshotId = `cmd:${source.tabId}:${nowMs}:${ordinal}`;
+          const chunks = chunkCmdSnapshot(group.records, snapshotId, undefined, group.sweep);
+          for (const chunk of chunks) {
+            await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
+              encoding: "UTF8", body: JSON.stringify(chunk)
+            }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration });
+          }
         }
         if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
         this.#cmdLastBodies.set(source.sourceId, catalogBody);
@@ -2977,4 +2992,9 @@ function readEvaluationRecords(value: unknown): unknown[] {
   } catch {
     return [];
   }
+}
+
+function safeFrameKey(frameId: string, frameIndex: number): string {
+  const key = frameId.slice(0, 96);
+  return /^[a-z0-9._:-]+$/iu.test(key) ? key : `frame-${frameIndex}`;
 }

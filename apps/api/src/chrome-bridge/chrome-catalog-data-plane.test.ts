@@ -23,6 +23,14 @@ function cmdEnvelope(sequence = 1, records: readonly unknown[] = [record], chunk
       records }) } };
 }
 
+function cmdSweepEnvelope(sequence: number, records: readonly unknown[], sweepComplete: boolean,
+  snapshotId: string): ChromeBridgeEnvelope {
+  const base = cmdEnvelope(sequence, records, 0, 1, snapshotId);
+  return { ...base, observedAtMs: 1_000 + sequence, payload: { encoding: "UTF8",
+    body: JSON.stringify({ schemaVersion: 2, snapshotId, chunkIndex: 0, chunkCount: 1,
+      sweepId: "cmd:9:sweep-dom-only", sweepComplete, records }) } };
+}
+
 function cmdHttpEnvelope(sequence = 1, options: { readonly t?: number; readonly a?: boolean;
   readonly providerFunctionCode?: number; readonly row?: unknown[] } = {}): ChromeBridgeEnvelope {
   const row = Array<unknown>(91).fill(null);
@@ -401,5 +409,56 @@ describe("ChromeCatalogDataPlane", () => {
       sel: [{ eid: 1, malformed: true }] }))).toBe(false);
     expect(plane.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100, sel: [] }))).toBe(false);
     await expect(plane.read("catalog-source:IM:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+  });
+
+  it("does not authorize an unexplained iscyb-only IM partition or malformed Market 2", async () => {
+    const publish = vi.fn();
+    const onlyExcluded = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    expect(onlyExcluded.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100,
+      sel: [{ iscyb: true }] }))).toBe(false);
+    expect(onlyExcluded.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100, sel: [] }))).toBe(false);
+    expect(publish).not.toHaveBeenCalledWith(expect.anything(), "FRESH");
+    await expect(onlyExcluded.read("catalog-source:IM:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    const validEvent = { eid: 112516390, htn: "Monterrey", atn: "Nashville", cn: "Cup",
+      edt: "1970-01-01T00:00:02.000Z", isrbt: false, iscyb: false, mls: [{ mi: 10, bti: 1, gp: 1,
+        ws: [{ wsi: 101, si: 1, hdp: -0.5, dih: "+0.5", o: 0.67 },
+          { wsi: 102, si: 2, hdp: -0.5, dih: "-0.5", o: -0.79 }] }] };
+    const malformedSecond = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    expect(malformedSecond.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100,
+      sel: [validEvent] }))).toBe(false);
+    expect(malformedSecond.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100,
+      sel: [{ iscyb: true }] }))).toBe(false);
+    await expect(malformedSecond.read("catalog-source:IM:FOOTBALL"))
+      .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    const characterizedExclusion = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    expect(characterizedExclusion.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100,
+      sel: [{ ...validEvent, eid: 112516391, iscyb: true }] }))).toBe(false);
+    expect(characterizedExclusion.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100,
+      sel: [validEvent] }))).toBe(true);
+    await expect(characterizedExclusion.read("catalog-source:IM:FOOTBALL")).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "112516390" })]
+    });
+  });
+
+  it("keeps CMD DOM-only additions and complete-sweep tombstones without becoming LIVE", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    const second = { ...record, matchId: "event-2", teamNames: ["Gamma", "Delta"], groups: [{
+      ...record.groups[0]!, odds: record.groups[0]!.odds.map((odd) => ({ ...odd, marketOddsId: "market-2" }))
+    }] };
+    expect(plane.ingest(cmdEnvelope(1, [record], 0, 1, "cmd:9:dom-only-a-0001"))).toBe(true);
+    expect(plane.ingest(cmdEnvelope(2, [second], 0, 1, "cmd:9:dom-only-b-0002"))).toBe(true);
+    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ events: expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "event-1" }),
+      expect.objectContaining({ providerEventId: "event-2" })
+    ]) }), "STALE");
+
+    expect(plane.ingest(cmdSweepEnvelope(3, [record], true, "cmd:9:dom-only-sweep-0003"))).toBe(true);
+    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({
+      events: [expect.objectContaining({ providerEventId: "event-1" })]
+    }), "STALE");
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
 });

@@ -198,6 +198,50 @@ describe("ImHttpCatalogAdapter", () => {
     ]));
   });
 
+  it("replays a delta received during the first-ever signed reconciliation", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
+      ws: event.mls[0]!.ws.map((selection) => ({ ...selection,
+        o: selection.wsi === 101 ? 0.84 : -0.91 })) }] }] };
+    expect(adapter.decode(envelope(delta, 10, "/api/EventV6/GetSEDelta"))).toEqual([]);
+    const signedBaseline = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
+      ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 11, undefined,
+      "IM_MARKET_1", "im:8:first", "observer-im:0", 9))).toEqual([]);
+    const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
+      "IM_MARKET_2", "im:8:first", "observer-im:0", 9)).at(-1)?.value as {
+        quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
+    expect(committed.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })
+    ]));
+  });
+
+  it("does not replay a pre-cutoff delta or a delta from a retired source epoch", () => {
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
+      ws: event.mls[0]!.ws.map((selection) => ({ ...selection, o: 0.84 })) }] }] };
+    const signedBaseline = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
+      ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
+    const adapter = new ImHttpCatalogAdapter();
+    adapter.decode(envelope(delta, 8, "/api/EventV6/GetSEDelta"));
+    adapter.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 11, undefined,
+      "IM_MARKET_1", "im:8:first", "observer-im:0", 9));
+    const preCutoff = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
+      "IM_MARKET_2", "im:8:first", "observer-im:0", 9)).at(-1)?.value as {
+        quotes: Array<{ rawOdds: string }> };
+    expect(preCutoff.quotes.map((quote) => quote.rawOdds)).toEqual(["0.6", "0.6"]);
+
+    const replacement = new ImHttpCatalogAdapter();
+    replacement.decode(envelope(delta, 10, "/api/EventV6/GetSEDelta", undefined,
+      "im:8:first", "observer-im:0"));
+    replacement.resetSource("chrome:IM:8");
+    replacement.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 11, undefined,
+      "IM_MARKET_1", "im:8:first", "observer-im:1", 9));
+    const nextEpoch = replacement.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
+      "IM_MARKET_2", "im:8:first", "observer-im:1", 9)).at(-1)?.value as {
+        quotes: Array<{ rawOdds: string }> };
+    expect(nextEpoch.quotes.map((quote) => quote.rawOdds)).toEqual(["0.6", "0.6"]);
+  });
+
   it("annotates atomic baselines and natural deltas with the current evidence generation", () => {
     const adapter = new ImHttpCatalogAdapter();
     adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined,

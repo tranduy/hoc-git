@@ -55,11 +55,13 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #recordsBySource = new Map<string, Map<string, {
     readonly record: CmdCatalogInputRecord;
+    readonly sweepFrameKey: string;
     readonly observedAtMs: number;
     readonly receivedMonotonicMs: number;
     readonly sequence: number;
   }>>();
-  readonly #sweepsBySource = new Map<string, { id: string; readonly visited: Set<string> }>();
+  readonly #sweepsBySource = new Map<string,
+    Map<string, { id: string; readonly visited: Set<string> }>>();
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     return envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
@@ -85,26 +87,36 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
     const chunk = CmdSnapshotChunkSchema.parse(raw);
     const cached = this.#recordsBySource.get(envelope.sourceId) ?? new Map();
     let changed = false;
-    let sweep = this.#sweepsBySource.get(envelope.sourceId);
+    const sweepFrameKey = chunk.sweepFrameKey ?? "legacy";
+    const sourceSweeps = this.#sweepsBySource.get(envelope.sourceId) ?? new Map();
+    let sweep = sourceSweeps.get(sweepFrameKey);
     if (chunk.sweepId !== undefined && (sweep === undefined || sweep.id !== chunk.sweepId)) {
       sweep = { id: chunk.sweepId, visited: new Set<string>() };
-      this.#sweepsBySource.set(envelope.sourceId, sweep);
+      sourceSweeps.set(sweepFrameKey, sweep);
+      this.#sweepsBySource.set(envelope.sourceId, sourceSweeps);
     }
     for (const record of usableRecords) {
       if (chunk.sweepId !== undefined && sweep?.id === chunk.sweepId) sweep.visited.add(record.matchId);
       const prior = cached.get(record.matchId);
-      if (prior !== undefined && JSON.stringify(prior.record) === JSON.stringify(record)) continue;
-      cached.set(record.matchId, { record, observedAtMs: envelope.observedAtMs,
+      if (prior !== undefined && JSON.stringify(prior.record) === JSON.stringify(record)) {
+        if (prior.sweepFrameKey !== sweepFrameKey) {
+          cached.set(record.matchId, { ...prior, sweepFrameKey });
+        }
+        continue;
+      }
+      cached.set(record.matchId, { record, sweepFrameKey, observedAtMs: envelope.observedAtMs,
         receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       changed = true;
     }
     if (chunk.sweepComplete === true && chunk.sweepId !== undefined && sweep?.id === chunk.sweepId) {
-      for (const matchId of [...cached.keys()]) {
+      for (const [matchId, entry] of [...cached.entries()]) {
+        if (entry.sweepFrameKey !== sweepFrameKey) continue;
         if (sweep.visited.has(matchId)) continue;
         cached.delete(matchId);
         changed = true;
       }
-      this.#sweepsBySource.delete(envelope.sourceId);
+      sourceSweeps.delete(sweepFrameKey);
+      if (sourceSweeps.size === 0) this.#sweepsBySource.delete(envelope.sourceId);
     }
     this.#recordsBySource.set(envelope.sourceId, cached);
     if (!changed) return [];
@@ -126,6 +138,7 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
     const snapshotId = chunk.snapshotId;
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog, evidenceMode: "DELTA",
-      generation: snapshotId, provenance: "DOM_FALLBACK" }];
+      generation: snapshotId, provenance: "DOM_FALLBACK",
+      ...(chunk.sweepComplete === true ? { completeSweepEvidence: true } : {}) }];
   }
 }

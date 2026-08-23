@@ -22,9 +22,14 @@ interface RetainedRecord {
 
 type PartitionRecords = Map<string, RetainedRecord>;
 
+interface ClassifiedPartition {
+  readonly records: PartitionRecords;
+  readonly inputCount: number;
+}
+
 interface SnapshotGeneration {
   readonly id: string;
-  readonly partitions: Map<ImPartition, PartitionRecords>;
+  readonly partitions: Map<ImPartition, ClassifiedPartition>;
   readonly startedSequence: number;
   readonly cutoffSequence: number;
   readonly bufferedDeltas: ChromeBridgeEnvelope[];
@@ -37,6 +42,7 @@ interface SourceState {
   readonly obsoleteGenerations: Set<string>;
   newestGenerationOrdinal: number | null;
   readonly recentDeltas: ChromeBridgeEnvelope[];
+  latestDeltaSequence: number | null;
 }
 
 function rememberObsolete(state: SourceState, generation: string): void {
@@ -78,7 +84,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
     if (root === null) return [];
     const state = this.#states.get(envelope.sourceId) ?? { current: null, currentGeneration: null,
       pending: null, obsoleteGenerations: new Set<string>(), newestGenerationOrdinal: null,
-      recentDeltas: [] };
+      recentDeltas: [], latestDeltaSequence: null };
     if (envelope.request.pathnameClass === SNAPSHOT_PATH) {
       const partition = envelope.request.providerPartition;
       const generation = envelope.request.streamId;
@@ -93,7 +99,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       }
       if (state.pending === null || state.pending.id !== generation) {
         if (state.pending !== null) rememberObsolete(state, state.pending.id);
-        state.pending = { id: generation, partitions: new Map<ImPartition, PartitionRecords>(),
+        state.pending = { id: generation, partitions: new Map<ImPartition, ClassifiedPartition>(),
           startedSequence: envelope.sequence, cutoffSequence,
           bufferedDeltas: state.recentDeltas.filter((delta) => delta.sequence > cutoffSequence) };
       }
@@ -101,23 +107,30 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       const classified = classifySnapshot(root, envelope.observedAtMs);
       if (classified === null) return [];
       const records = new Map<string, RetainedRecord>();
-      for (const record of classified) {
+      for (const record of classified.records) {
         records.set(record.eventId, { record, observedAtMs: envelope.observedAtMs,
           receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       }
-      state.pending.partitions.set(partition, records);
+      state.pending.partitions.set(partition, { records, inputCount: classified.inputCount });
       this.#states.set(envelope.sourceId, state);
       if (!state.pending.partitions.has("IM_MARKET_1") || !state.pending.partitions.has("IM_MARKET_2")) return [];
+      const pendingPartitions = state.pending.partitions;
+      const acceptedCount = [...pendingPartitions.values()].reduce((sum, value) => sum + value.records.size, 0);
+      const inputCount = [...pendingPartitions.values()].reduce((sum, value) => sum + value.inputCount, 0);
+      if (acceptedCount === 0 && inputCount > 0) return [];
       if (state.currentGeneration !== null) rememberObsolete(state, state.currentGeneration);
-      state.current = state.pending.partitions;
+      state.current = new Map([...pendingPartitions].map(([key, value]) => [key, value.records]));
       state.currentGeneration = state.pending.id;
       for (const buffered of state.pending.bufferedDeltas) this.#applyDelta(state.current, buffered);
       state.pending = null;
     } else {
-      const sourcePartitions = state.current;
-      if (sourcePartitions === null) return [];
+      if (state.latestDeltaSequence !== null && envelope.sequence <= state.latestDeltaSequence) return [];
+      state.latestDeltaSequence = envelope.sequence;
       state.recentDeltas.push(envelope);
       while (state.recentDeltas.length > 128) state.recentDeltas.shift();
+      this.#states.set(envelope.sourceId, state);
+      const sourcePartitions = state.current;
+      if (sourcePartitions === null) return [];
       if (state.pending !== null && envelope.sequence > state.pending.cutoffSequence) {
         state.pending.bufferedDeltas.push(envelope);
       }
@@ -171,13 +184,13 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
   }
 }
 
-function classifySnapshot(root: Record<string, unknown>, nowMs: number): readonly ImRecord[] | null {
+function classifySnapshot(root: Record<string, unknown>, nowMs: number): {
+  readonly records: readonly ImRecord[]; readonly inputCount: number } | null {
   const candidates = root.sel;
   if (!Array.isArray(candidates)) return null;
   const accepted: ImRecord[] = [];
   for (const candidate of candidates) {
     if (!isRecord(candidate)) return null;
-    if (candidate.iscyb === true) continue;
     const eventId = candidate.eid;
     const eventAtMs = typeof candidate.edt === "string" ? Date.parse(candidate.edt) : Number.NaN;
     if (!((typeof eventId === "number" && Number.isSafeInteger(eventId) && eventId > 0) ||
@@ -187,6 +200,8 @@ function classifySnapshot(root: Record<string, unknown>, nowMs: number): readonl
       candidate.htn.trim() === candidate.atn.trim() ||
       typeof candidate.cn !== "string" || candidate.cn.trim() === "" ||
       typeof candidate.isrbt !== "boolean" || !Number.isFinite(eventAtMs) || !Array.isArray(candidate.mls)) return null;
+    if (candidate.iscyb === true) continue;
+    if (candidate.iscyb !== false) return null;
     if (!(candidate.mls as unknown[]).every(isClassifiedImMarket)) return null;
     const extracted = extractImFootballCatalog({ StatusCode: 100, sel: [candidate] }, {
       nowMs, prematchHorizonMs: PREMATCH_HORIZON_MS
@@ -196,7 +211,7 @@ function classifySnapshot(root: Record<string, unknown>, nowMs: number): readonl
     // Structurally valid but unsupported market/period/line records are an
     // explained provider-domain exclusion rather than malformed evidence.
   }
-  return accepted;
+  return { records: accepted, inputCount: candidates.length };
 }
 
 function isClassifiedImMarket(value: unknown): boolean {

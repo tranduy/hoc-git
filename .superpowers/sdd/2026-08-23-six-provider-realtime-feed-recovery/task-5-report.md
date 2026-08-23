@@ -203,3 +203,108 @@ All compile/build commands exited 0. The fixture secret scan returned no matches
 - Equal CMD cursor idempotence and AbortSignal-aware IM signer plumbing remain deferred exactly as review ledgered; neither was broadened into this round.
 - Full-family CMD codes `2/4/6` are recognized but remain fail-closed because only `fc=1` has an observed atomic running-plus-today completion contract. No unobserved partition semantics were inferred.
 - Unsupported IM market domains and valid out-of-window events are excluded deliberately; malformed supported event/market/selection entries reject their entire nonempty partition.
+
+---
+
+## Fix Round 2
+
+Status: DONE
+
+Review base: `4d89b04`
+
+### Review findings resolved
+
+- IM now retains a bounded, source-scoped log of ordered natural deltas even before the first catalog exists. When the first signed two-part reconciliation completes, only deltas newer than its announced bridge cutoff are replayed. A source reset discards the log, and non-increasing delta sequences are rejected.
+- IM validates the required event, identity, timing, flag, and market structure before treating `iscyb: true` as a characterized exclusion. An unexplained nonempty selection partition is rejected, and a two-part generation with input but no accepted or characterized catalog record cannot authorize an empty baseline.
+- CMD DOM-on-DOM updates now publish the adapter's accumulated fallback catalog directly. Identity/status overlay is used only when the retained basis is authenticated network evidence. A proven completed DOM sweep can remove omitted fallback records without making the catalog `LIVE` or refreshing authoritative freshness.
+- CMD sweep markers and records are paired per CDP frame. The extension emits frame-keyed CMD snapshots, the contract validates the frame key, and the adapter retains independent visited sets and record ownership per frame. A completion from one document cannot tombstone another frame's records; a source-epoch replacement rejects an in-flight old-document result.
+
+The previously captured CMD evidence and hashes are unchanged. This round performed no browser/provider/runtime action and added no response fixture, header, cookie, token, credential, account identifier, user data, or provider response body.
+
+### Fix Round 2 RED
+
+Focused tests were added before their production fixes and run against `4d89b04`:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/im-http-adapter.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts
+npm.cmd test --workspace @tool-chenh/contracts -- --run src/chrome-bridge.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/network-observer.test.ts
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/cmd-dom-adapter.test.ts -t "does not let one completed frame sweep tombstone records owned by another frame"
+```
+
+```text
+API IM/data-plane: 3 failed / 35 passed.
+  First-ever IM reconciliation committed baseline price 0.60 instead of replaying delta price 0.84.
+  An iscyb-only malformed partition authorized an empty baseline.
+  CMD DOM-only A -> A+B discarded B through the network-overlay path.
+Contracts: 1 failed / 13 passed because sweepFrameKey was not yet characterized.
+Extension observer: 2 focused failures because a global marker was paired with another frame's records.
+CMD adapter frame ownership: 1 failed / 9 skipped because frame B completion removed frame A.
+```
+
+The added tests also cover pre-cutoff and retired-source-epoch IM deltas, a malformed Market 2, a fully structured characterized cyborg exclusion, partial versus completed CMD DOM sweeps, same-frame completion, and rejection of an in-flight sweep after a source epoch changes.
+
+### Fix Round 2 GREEN
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/cmd-http-adapter.test.ts src/chrome-bridge/cmd-dom-adapter.test.ts src/chrome-bridge/im-http-adapter.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/cmd-dom-snapshot.test.ts src/cmd-snapshot-poller.test.ts src/network-observer.test.ts
+npm.cmd test --workspace @tool-chenh/contracts -- --run src/chrome-bridge.test.ts
+```
+
+```text
+Task 5 API: 4 suites / 54 tests passed.
+Task 5 extension: 3 suites / 152 tests passed.
+Contracts: 1 suite / 14 tests passed.
+```
+
+Task 1-4 regressions:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/automatic-source-recovery.test.ts src/chrome-bridge/provider-source-refresh.test.ts src/chrome-bridge/chrome-bridge-control-plane.test.ts src/chrome-bridge/provider-feed-controller.test.ts src/chrome-bridge/provider-feed-registry.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/catalog/catalog-coverage-guard.test.ts src/server.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/provider-work-scheduler.test.ts src/local-bridge.test.ts src/network-observer.test.ts src/saba-snapshot-storage.test.ts src/cmd-snapshot-poller.test.ts src/bridge-wakeup.test.ts
+```
+
+```text
+API: 8 suites / 94 tests passed.
+Extension: 6 suites / 180 tests passed.
+```
+
+Compile/build and hygiene gates:
+
+```powershell
+npm.cmd run typecheck --workspace @tool-chenh/contracts
+npm.cmd run typecheck --workspace @tool-chenh/api
+npm.cmd run typecheck --workspace @tool-chenh/chrome-extension
+npm.cmd run build --workspace @tool-chenh/contracts
+npm.cmd run build --workspace @tool-chenh/api
+npm.cmd run build --workspace @tool-chenh/chrome-extension
+git diff --check
+git diff -- . ':!*.md' | rg -n -i "authorization|cookie|password|bearer|session[_-]?id|access[_-]?token|refresh[_-]?token|api[_-]?key"
+```
+
+All six compile/build commands exited 0. `git diff --check` exited 0 with only the checkout's existing LF-to-CRLF notices. The hygiene scan found only the intentional synthetic field name `observerSessionId: "worker-a"`; no secret value or authoritative provider payload was added.
+
+### Ordering, freshness, and remaining boundaries
+
+- IM's pre-baseline replay log remains bounded to 128 envelopes. The reconciliation cutoff is still allocated before Market 1 fetch begins; replay never crosses a source reset and does not turn a generic heartbeat into freshness.
+- CMD DOM additions and proven same-frame omissions remain fallback evidence only. They publish `STALE`, cannot renew `LIVE`, and never take price or quote-clock precedence over a retained authenticated-network catalog.
+- Per-frame CMD capture remains inside the existing CMD keyed lane. No global heavy-work tail or cross-provider wait was introduced, so IM, BTI, TSPORT, and SABA isolation is unchanged.
+- Equal CMD cursor idempotence and AbortSignal-aware IM signer plumbing remain deferred as ledgered; this round did not broaden into either minor.
+
+### Files changed in Fix Round 2
+
+- `apps/api/src/chrome-bridge/adapter.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `apps/api/src/chrome-bridge/cmd-dom-adapter.ts`
+- `apps/api/src/chrome-bridge/cmd-dom-adapter.test.ts`
+- `apps/api/src/chrome-bridge/im-http-adapter.ts`
+- `apps/api/src/chrome-bridge/im-http-adapter.test.ts`
+- `apps/chrome-extension/src/cmd-snapshot-chunker.ts`
+- `apps/chrome-extension/src/network-observer.ts`
+- `apps/chrome-extension/src/network-observer.test.ts`
+- `packages/contracts/src/chrome-bridge.ts`
+- `packages/contracts/src/chrome-bridge.test.ts`
+
+Commit subject: `fix(feed): close CMD and IM reconciliation races`.

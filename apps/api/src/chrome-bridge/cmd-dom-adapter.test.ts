@@ -17,6 +17,7 @@ function envelope(body: string, overrides: Partial<Pick<ChromeBridgeEnvelope,
 
 function snapshotBody(records: readonly unknown[], overrides: Partial<{
   snapshotId: string; chunkIndex: number; chunkCount: number; sweepId: string; sweepComplete: boolean;
+  sweepFrameKey: string;
 }> = {}): string {
   return JSON.stringify({
     schemaVersion: 2,
@@ -25,6 +26,7 @@ function snapshotBody(records: readonly unknown[], overrides: Partial<{
     chunkCount: overrides.chunkCount ?? 1,
     ...(overrides.sweepId === undefined ? {} : { sweepId: overrides.sweepId }),
     ...(overrides.sweepComplete === undefined ? {} : { sweepComplete: overrides.sweepComplete }),
+    ...(overrides.sweepFrameKey === undefined ? {} : { sweepFrameKey: overrides.sweepFrameKey }),
     records
   });
 }
@@ -179,5 +181,18 @@ describe("CmdDomCatalogAdapter", () => {
       snapshotId: "cmd:9:sweep-part-0003", sweepId: "cmd:9:sweep-1", sweepComplete: true
     }), { sequence: 3 }))[0]!.value as { events: Array<{ providerEventId: string }> };
     expect(complete.events.map((event) => event.providerEventId).sort()).toEqual(["event-1", "event-2"]);
+  });
+
+  it("does not let one completed frame sweep tombstone records owned by another frame", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    const other = { ...record, matchId: "event-2", teamNames: ["Gamma FC", "Delta FC"], groups: [{
+      ...record.groups[0]!, odds: record.groups[0]!.odds.map((odd) => ({ ...odd, marketOddsId: "ah-2" }))
+    }] };
+    adapter.decode(envelope(snapshotBody([record], { snapshotId: "cmd:9:frame-a-0001",
+      sweepId: "cmd:9:sweep-a", sweepComplete: false, sweepFrameKey: "odds-frame-a" }), { sequence: 1 }));
+    const completedOther = adapter.decode(envelope(snapshotBody([other], { snapshotId: "cmd:9:frame-b-0002",
+      sweepId: "cmd:9:sweep-b", sweepComplete: true, sweepFrameKey: "odds-frame-b" }), { sequence: 2 }));
+    expect((completedOther[0]!.value as { events: Array<{ providerEventId: string }> }).events
+      .map((event) => event.providerEventId).sort()).toEqual(["event-1", "event-2"]);
   });
 });

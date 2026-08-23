@@ -189,6 +189,8 @@ describe("CmdSnapshotChunkSchema", () => {
 
   it("accepts a strict bounded chunk", () => {
     expect(contracts.CmdSnapshotChunkSchema.safeParse(valid).success).toBe(true);
+    expect(contracts.CmdSnapshotChunkSchema.safeParse({ ...valid, sweepId: "cmd:sweep:1",
+      sweepComplete: true, sweepFrameKey: "odds-frame" }).success).toBe(true);
   });
 
   it("rejects invalid indexes, excessive counts, empty records, and extra fields", () => {
@@ -197,6 +199,8 @@ describe("CmdSnapshotChunkSchema", () => {
       { ...valid, chunkIndex: -1 },
       { ...valid, chunkCount: 65 },
       { ...valid, records: [] },
+      { ...valid, sweepFrameKey: "odds-frame" },
+      { ...valid, sweepId: "cmd:sweep:1", sweepComplete: true, sweepFrameKey: "unsafe/frame" },
       { ...valid, credential: "secret" }
     ]) expect(contracts.CmdSnapshotChunkSchema.safeParse(invalid).success).toBe(false);
   });

@@ -11,6 +11,7 @@ export type DecodedCatalogUpdate = {
   readonly generation?: string;
   readonly provenance?: FeedProvenance;
   readonly providerTimestampMs?: number | null;
+  readonly completeSweepEvidence?: boolean;
   readonly invalidateAccountId?: never;
   readonly reason?: never;
   readonly transportAlive?: never;

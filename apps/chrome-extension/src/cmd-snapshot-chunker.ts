@@ -7,13 +7,15 @@ import { utf8ByteLength } from "./utf8-length.js";
 const DEFAULT_MAX_CHUNK_BODY_BYTES = 110_000;
 
 function envelope(snapshotId: string, chunkIndex: number, chunkCount: number,
-  records: readonly unknown[], sweep?: { readonly sweepId: string; readonly sweepComplete: boolean }): CmdSnapshotChunk {
+  records: readonly unknown[], sweep?: { readonly sweepId: string; readonly sweepComplete: boolean;
+    readonly sweepFrameKey?: string }): CmdSnapshotChunk {
   return { schemaVersion: 2, snapshotId, chunkIndex, chunkCount, records: [...records], ...sweep };
 }
 
 export function chunkCmdSnapshot(records: readonly unknown[], snapshotId: string,
   maxBytes = DEFAULT_MAX_CHUNK_BODY_BYTES,
-  sweep?: { readonly sweepId: string; readonly sweepComplete: boolean }): readonly CmdSnapshotChunk[] {
+  sweep?: { readonly sweepId: string; readonly sweepComplete: boolean;
+    readonly sweepFrameKey?: string }): readonly CmdSnapshotChunk[] {
   if (records.length === 0) return [];
   // Serialize each record exactly once. A chunk body is the fixed envelope
   // wrapper (measured with an empty records array, using the widest index

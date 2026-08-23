@@ -67,6 +67,7 @@ export const CmdSnapshotChunkSchema = z.strictObject({
   chunkCount: z.number().int().min(1).max(64),
   sweepId: PublicGenerationIdSchema.optional(),
   sweepComplete: z.boolean().optional(),
+  sweepFrameKey: PublicGenerationIdSchema.optional(),
   records: z.array(z.unknown()).min(1).max(5_000)
 }).superRefine((value, context) => {
   if (value.chunkIndex >= value.chunkCount) {
@@ -74,6 +75,9 @@ export const CmdSnapshotChunkSchema = z.strictObject({
   }
   if ((value.sweepId === undefined) !== (value.sweepComplete === undefined)) {
     context.addIssue({ code: "custom", path: ["sweepId"], message: "sweep metadata must be paired" });
+  }
+  if (value.sweepFrameKey !== undefined && value.sweepId === undefined) {
+    context.addIssue({ code: "custom", path: ["sweepFrameKey"], message: "sweep frame requires sweep metadata" });
   }
 });
 

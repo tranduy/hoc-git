@@ -1123,6 +1123,88 @@ describe("NetworkObserver", () => {
     expect(JSON.stringify(chunk.records)).not.toContain("__fieldlineSweep");
   });
 
+  it("does not let a top-frame sweep completion tombstone odds-frame records", async () => {
+    const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "odds-event",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
+        childFrames: [{ frame: { id: "odds-frame" } }] } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: params?.frameId === "top" ? 1 : 2 };
+      if (method === "Runtime.evaluate") return { result: { value: JSON.stringify(Number(params?.contextId) === 1
+        ? [{ __fieldlineDiagnostic: { frame: "top" } },
+          { __fieldlineSweep: { sweepId: "cmd:top:sweep-1", complete: true } }]
+        : [publicRecord, { __fieldlineSweep: { sweepId: "cmd:odds:sweep-1", complete: false } }]) } };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 5_000, monotonicNow: () => 50 });
+    await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+    const oddsChunk = forward.mock.calls.map(([message]) =>
+      JSON.parse(String(message.payload.body)) as Record<string, unknown>)
+      .find((chunk) => JSON.stringify(chunk.records).includes("odds-event"));
+    expect(oddsChunk).toMatchObject({ sweepId: "cmd:odds:sweep-1", sweepComplete: false,
+      sweepFrameKey: "odds-frame" });
+  });
+
+  it("accepts completion only from the same odds-frame document as its records", async () => {
+    const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "odds-event",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
+        childFrames: [{ frame: { id: "odds-frame" } }] } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: params?.frameId === "top" ? 1 : 2 };
+      if (method === "Runtime.evaluate") return { result: { value: JSON.stringify(Number(params?.contextId) === 1
+        ? [{ __fieldlineDiagnostic: { frame: "top" } },
+          { __fieldlineSweep: { sweepId: "cmd:top:sweep-1", complete: false } }]
+        : [publicRecord, { __fieldlineSweep: { sweepId: "cmd:odds:sweep-1", complete: true } }]) } };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 5_000, monotonicNow: () => 50 });
+    await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+    const oddsChunk = forward.mock.calls.map(([message]) =>
+      JSON.parse(String(message.payload.body)) as Record<string, unknown>)
+      .find((chunk) => JSON.stringify(chunk.records).includes("odds-event"));
+    expect(oddsChunk).toMatchObject({ sweepId: "cmd:odds:sweep-1", sweepComplete: true,
+      sweepFrameKey: "odds-frame" });
+  });
+
+  it("does not emit an old-document sweep marker after the source epoch changes", async () => {
+    let releaseOld!: () => void;
+    const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+    let scans = 0;
+    const recordFor = (matchId: string) => ({ sportId: "1", leagueId: "l", leagueName: "League", matchId,
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") { scans += 1; return { frameTree: { frame: { id: "top" } } }; }
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") {
+        const old = scans === 1;
+        if (old) await oldBlocked;
+        return { result: { value: JSON.stringify([recordFor(old ? "old-event" : "new-event"),
+          { __fieldlineSweep: { sweepId: old ? "cmd:old:sweep" : "cmd:new:sweep", complete: old } }]) } };
+      }
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const oldCapture = observer.captureCmdSnapshot(cmd, "cgnew.fts368.com");
+    await vi.waitFor(() => expect(scans).toBe(1));
+    observer.beginSourceEpoch(cmd.sourceId);
+    const replacement = observer.captureCmdSnapshot(cmd, "cgnew.fts368.com");
+    releaseOld();
+    await Promise.all([oldCapture, replacement]);
+    expect(scans).toBe(2);
+    expect(forward).toHaveBeenCalledOnce();
+    const chunk = JSON.parse(String(forward.mock.calls[0]![0].payload.body));
+    expect(chunk).toMatchObject({ sweepId: "cmd:new:sweep", sweepComplete: false, sweepFrameKey: "top" });
+    expect(JSON.stringify(chunk.records)).toContain("new-event");
+    expect(JSON.stringify(chunk)).not.toContain("old-event");
+  });
+
   it("reads independent CMD frames concurrently so one slow frame cannot expire the catalog", async () => {
     let evaluationsInFlight = 0;
     let maximumInFlight = 0;

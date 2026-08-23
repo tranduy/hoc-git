@@ -49,6 +49,7 @@ export class ChromeCatalogDataPlane {
   readonly #coverage = new CatalogCoverageGuard();
   readonly #feeds: ProviderFeedRegistry;
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
+  readonly #catalogBases = new Map<string, FeedProvenance>();
   readonly #sourceEpochs = new Map<string, string>();
   readonly #activeSourceIds = new Map<string, string>();
   readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
@@ -138,15 +139,18 @@ export class ChromeCatalogDataPlane {
     }
     if (!isObservedCatalog(update.value)) return published;
     let nextCatalog = update.value;
+    const provenance = update.provenance ?? catalogProvenance(envelope.transport);
+    let catalogBasis = provenance;
     if (envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT") {
       const retained = this.#catalogs.get(nextCatalog.accountId);
-      if (retained !== undefined) {
+      if (retained !== undefined && this.#catalogBases.get(nextCatalog.accountId) === "AUTHENTICATED_HTTP") {
         const feed = this.#feeds.snapshot(transportAccountId);
         // While network authority is current, DOM evidence is intentionally
         // silent. Once authority stalls it can update visible identity/status
         // fields, but never price clocks or LIVE freshness.
         if (feed.state === "LIVE") return published;
         nextCatalog = overlayCmdDomCatalog(retained, nextCatalog);
+        catalogBasis = "AUTHENTICATED_HTTP";
       }
     }
     if (envelope.lobby === "SABA" && envelope.transport === "DOM_SNAPSHOT") {
@@ -163,14 +167,16 @@ export class ChromeCatalogDataPlane {
     const generation = update.generation ?? (mode === "BASELINE" && update.authoritativeBaseline === true
       ? `${sourceEpoch}:${update.sequence}` : null);
     if (generation === null) return published;
-    const provenance = update.provenance ?? catalogProvenance(envelope.transport);
     const coverage = { generation, authoritativeBaseline: mode === "BASELINE",
       providerEventIds: nextCatalog.events.map((event) => event.providerEventId) };
-    if (!this.#coverage.allows(nextCatalog.accountId, coverage)) return published;
+    const explicitDomSweep = envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
+      update.completeSweepEvidence === true;
+    if (!explicitDomSweep && !this.#coverage.allows(nextCatalog.accountId, coverage)) return published;
     const decision = this.#feeds.accept({ kind: "CATALOG", accountId: nextCatalog.accountId,
       sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, generation, mode, provenance,
       providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog });
     if (decision.accepted) this.#coverage.commit(nextCatalog.accountId, coverage);
+    if (decision.accepted) this.#catalogBases.set(nextCatalog.accountId, catalogBasis);
     return this.#applyDecision(decision) || published;
   }
 
@@ -183,6 +189,7 @@ export class ChromeCatalogDataPlane {
       catalog.events.length === 0 || catalog.markets.length === 0 || catalog.quotes.length === 0) return;
     this.#coverage.accept(catalog.accountId, { generation: `restored:${catalog.observedAtMs}`,
       authoritativeBaseline: false, providerEventIds: catalog.events.map((event) => event.providerEventId) });
+    this.#catalogBases.set(catalog.accountId, "DOM_FALLBACK");
     this.#applyDecision(this.#feeds.restore(catalog));
   }
 
