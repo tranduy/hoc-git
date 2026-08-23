@@ -285,25 +285,106 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
 
-  it("invalidates the prior epoch before accepting a replacement source baseline", async () => {
+  it("keeps the current epoch live until a replacement source completes an authoritative baseline", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
     plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0"), { connectionGeneration: 1 });
     plane.ingest(ksportEnvelope(2, "today", [102], "worker-a:0"), { connectionGeneration: 1 });
 
     expect(plane.ingest(tabHeartbeat(ksportEnvelope(3, "today", [], "worker-a:0"),
-      1_100, 3, "worker-b:0"), { connectionGeneration: 2 })).toBe(true);
-    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
-    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+      1_100, 3, "worker-b:0"), { connectionGeneration: 2 })).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({ observedAtMs: 1_002,
+      events: [expect.objectContaining({ providerEventId: "101" })] });
 
     expect(plane.ingest(ksportEnvelope(4, "live", [103], "worker-b:0"),
       { connectionGeneration: 2 })).toBe(false);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({ observedAtMs: 1_002,
+      events: [expect.objectContaining({ providerEventId: "101" })] });
     expect(plane.ingest(ksportEnvelope(5, "today", [], "worker-b:0", 2),
       { connectionGeneration: 2 })).toBe(true);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "FRESH"]);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "103" })]
     });
   });
+
+  it("retains a same-lineage high-watermark across bridge connections and rejects rollback before mutation",
+    async () => {
+      const publish = vi.fn();
+      const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+      const current = { ...cmdHttpEnvelope(1, { t: 133 }), sourceEpoch: "observer-a:33" };
+      expect(plane.ingest(current, { connectionGeneration: 1 })).toBe(true);
+
+      const rollback = { ...cmdHttpEnvelope(2, { t: 100 }), sourceEpoch: "observer-a:0" };
+      expect(plane.ingest(rollback, { connectionGeneration: 2 })).toBe(false);
+      expect(plane.ingest(tabHeartbeat(rollback, 1_003, 3), { connectionGeneration: 2 })).toBe(false);
+      expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
+      await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_001 });
+    });
+
+  it("rejects an explicitly malformed epoch before state mutation but keeps the absent legacy path compatible",
+    async () => {
+      const malformedPlane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+      expect(malformedPlane.ingest({ ...cmdHttpEnvelope(1, { t: 100 }), sourceEpoch: "observer-a:01" },
+        { connectionGeneration: 1 })).toBe(false);
+      await expect(malformedPlane.read("catalog-source:CMD:FOOTBALL"))
+        .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+      expect(malformedPlane.ingest({ ...cmdHttpEnvelope(2, { t: 101 }), sourceEpoch: "observer-a:1" },
+        { connectionGeneration: 1 })).toBe(true);
+
+      const legacyPlane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+      const { sourceEpoch: _sourceEpoch, ...legacy } = cmdHttpEnvelope(1, { t: 100 });
+      expect(legacyPlane.ingest(legacy as ChromeBridgeEnvelope, { connectionGeneration: 1 })).toBe(true);
+      await expect(legacyPlane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_001 });
+    });
+
+  it("bounds account ownership across more than 128 source replacements and rejects the oldest connection", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    let current!: ChromeBridgeEnvelope;
+    for (let generation = 0; generation < 130; generation += 1) {
+      current = { ...cmdHttpEnvelope(generation + 1, { t: 1_000 + generation }),
+        sourceId: `chrome:CMD:${generation + 1}`, tabId: generation + 1,
+        sourceEpoch: `observer-${generation}:0` };
+      expect(plane.ingest(current, { connectionGeneration: generation + 1 })).toBe(true);
+    }
+
+    const oldest = { ...cmdHttpEnvelope(200, { t: 999 }), sourceId: "chrome:CMD:1", tabId: 1,
+      sourceEpoch: "observer-0:0" };
+    expect(plane.ingest(tabHeartbeat(oldest, 1_400, 201), { connectionGeneration: 1 })).toBe(false);
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_130 });
+  });
+
+  it("does not let source A re-enter after same-connection authoritative A to B to C recovery", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    for (let generation = 0; generation < 3; generation += 1) {
+      const baseline = { ...cmdHttpEnvelope(generation + 1, { t: 200 + generation }),
+        sourceId: `chrome:CMD:${generation + 7}`, tabId: generation + 7,
+        sourceEpoch: `observer-a:${generation}` };
+      expect(plane.ingest(baseline, { connectionGeneration: 1 })).toBe(true);
+    }
+    const lateA = { ...cmdHttpEnvelope(10, { t: 100 }), sourceId: "chrome:CMD:7", tabId: 7,
+      sourceEpoch: "observer-a:0" };
+    expect(plane.ingest(lateA, { connectionGeneration: 1 })).toBe(false);
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_003 });
+  });
+
+  it("allows a current replacement connection to reuse a legacy source only after fencing its old connection",
+    async () => {
+      const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+      const { sourceEpoch: _sourceEpoch, ...legacyBase } = cmdHttpEnvelope(1, { t: 100 });
+      const legacyA = legacyBase as ChromeBridgeEnvelope;
+      expect(plane.ingest(legacyA, { connectionGeneration: 1 })).toBe(true);
+      const baselineB = { ...cmdHttpEnvelope(2, { t: 200 }), sourceId: "chrome:CMD:10", tabId: 10,
+        sourceEpoch: "observer-b:0" };
+      expect(plane.ingest(baselineB, { connectionGeneration: 2 })).toBe(true);
+      expect(plane.ingest({ ...legacyA, sequence: 3 }, { connectionGeneration: 1 })).toBe(false);
+
+      const reconnectA = { ...legacyA, sequence: 4, observedAtMs: 1_004,
+        payload: { encoding: "UTF8" as const, body: cmdHttpEnvelope(4, { t: 300 }).payload.body } };
+      expect(plane.ingest(reconnectA, { connectionGeneration: 3 })).toBe(true);
+      await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_004 });
+    });
 
   it("rejects a retired source epoch before it can invalidate the current epoch", async () => {
     const publish = vi.fn();
@@ -323,7 +404,7 @@ describe("ChromeCatalogDataPlane", () => {
         data: [[24881365, 1, 35, 0.80, -0.98, 1, 1, "S"]] }) } };
     expect(plane.ingest(deltaB, { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_004 });
-    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH", "FRESH"]);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "FRESH", "FRESH"]);
   });
 
   it("rejects the oldest same-lineage epoch after more than 32 replacements without losing the current feed",
@@ -343,7 +424,7 @@ describe("ChromeCatalogDataPlane", () => {
       });
     });
 
-  it("keeps one pinned tab per account and invalidates before handing over", async () => {
+  it("keeps one pinned tab per account until a competing candidate completes a baseline", async () => {
     let now = 1_500;
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => now, freshnessMs: 20_000, publish });
@@ -354,8 +435,8 @@ describe("ChromeCatalogDataPlane", () => {
 
     expect(plane.ingest(sboHeartbeat)).toBe(false);
     now = 30_000;
-    expect(plane.ingest({ ...sboHeartbeat, observedAtMs: now, sequence: 4 })).toBe(true);
-    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
+    expect(plane.ingest({ ...sboHeartbeat, observedAtMs: now, sequence: 4 })).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
 

@@ -13,7 +13,7 @@ export class ProviderFeedController {
   readonly #policy: ProviderFeedPolicy;
   readonly #now: () => number;
   readonly #startedAtMs: number;
-  readonly #retiredEpochs = new Set<string>();
+  #retiredEpoch: string | null = null;
   #state: ProviderFeedState = "STARTING";
   #reason: string | null = null;
   #latestCatalog: ObservedProviderCatalog | null = null;
@@ -168,7 +168,11 @@ export class ProviderFeedController {
   #invalidate(evidence: Extract<ProviderFeedEvidence, { readonly kind: "INVALIDATE" }>): FeedDecision {
     const recoverableGap = evidence.reason === "PROVIDER_STREAM_GAP";
     if (!recoverableGap) {
-      this.#retiredEpochs.add(epochKey(evidence.sourceId, evidence.sourceEpoch));
+      // Older retirement history is fenced by the registry connection owner
+      // and the data plane's account-scoped epoch high-watermark. The
+      // controller only needs the exact handover tombstone while no new
+      // current owner has been accepted.
+      this.#retiredEpoch = epochKey(evidence.sourceId, evidence.sourceEpoch);
       this.#sourceId = null;
       this.#sourceEpoch = null;
     }
@@ -206,7 +210,7 @@ export class ProviderFeedController {
   }
 
   #isRetired(evidence: ProviderFeedEvidence): boolean {
-    return this.#retiredEpochs.has(epochKey(evidence.sourceId, evidence.sourceEpoch));
+    return this.#retiredEpoch === epochKey(evidence.sourceId, evidence.sourceEpoch);
   }
 
   #isAuthoritative(provenance: FeedProvenance): boolean {

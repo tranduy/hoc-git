@@ -14,6 +14,7 @@ interface RetainedRecord {
   readonly seenAtMs: number;
   readonly receivedMonotonicMs: number;
   readonly sequence: number;
+  readonly receiptSequence: number;
 }
 
 type CatalogPartition = "live" | "today";
@@ -173,7 +174,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       const records = new Map<string, RetainedRecord>();
       for (const record of changed) records.set(record.eventId, { record,
         seenAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
-        sequence: envelope.sequence });
+        sequence: envelope.sequence, receiptSequence: envelope.sequence });
       epoch.pendingBaseline.partitions.set(requestGeneration.partition,
         { records, receiptSequence: envelope.sequence });
       this.#httpPartitions.set(epochKey, epoch);
@@ -183,8 +184,10 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       epoch.generation = epoch.pendingBaseline.generation;
       epoch.pendingBaseline = null;
       const retained = new Map<string, RetainedRecord>();
-      for (const current of epoch.committedPartitions.values()) {
-        for (const [eventId, entry] of current.records) retained.set(eventId, entry);
+      for (const partition of ["today", "live"] as const) {
+        for (const [eventId, entry] of epoch.committedPartitions.get(partition)!.records) {
+          retainNewest(retained, eventId, entry);
+        }
       }
       const parts: NormalizedCatalogPart[] = [];
       for (const entry of retained.values()) parts.push(normalizeSbobetCatalog([entry.record], {
@@ -289,7 +292,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         };
         records.set(incoming.eventId, { record: mergedRecord,
           seenAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
-          sequence: envelope.sequence });
+          sequence: envelope.sequence, receiptSequence: order });
       }
       if (fullSnapshot) {
         epoch.pendingBaseline!.partitions.set(partition, { records, receiptSequence: order });
@@ -309,7 +312,9 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       !epoch.committedPartitions.has("today")) return [];
     const retained = new Map<string, RetainedRecord>();
     for (const partition of ["today", "live"] as const) {
-      for (const [eventId, entry] of epoch.committedPartitions.get(partition)!.records) retained.set(eventId, entry);
+      for (const [eventId, entry] of epoch.committedPartitions.get(partition)!.records) {
+        retainNewest(retained, eventId, entry);
+      }
     }
     const parts: NormalizedCatalogPart[] = [];
     for (const entry of retained.values()) {
@@ -328,5 +333,14 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       ...(completedBaseline ? { authoritativeBaseline: true as const, evidenceMode: "BASELINE" as const }
         : { evidenceMode: "DELTA" as const }),
       generation: epoch.generation, provenance: "WS" }];
+  }
+}
+
+function retainNewest(retained: Map<string, RetainedRecord>, eventId: string, incoming: RetainedRecord): void {
+  const current = retained.get(eventId);
+  // Iteration is today then live, so an exact receipt tie remains
+  // deterministically live-preferring while any newer evidence wins.
+  if (current === undefined || incoming.receiptSequence >= current.receiptSequence) {
+    retained.set(eventId, incoming);
   }
 }

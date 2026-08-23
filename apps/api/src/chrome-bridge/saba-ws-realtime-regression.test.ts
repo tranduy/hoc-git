@@ -105,8 +105,11 @@ describe("SABA websocket realtime regressions", () => {
 
     expect(plane.ingest(envelope([
       encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.01 })
-    ], "r0001", 1, "worker-b:0"), { connectionGeneration: 2 })).toBe(true);
-    await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow();
+    ], "r0001", 1, "worker-b:0"), { connectionGeneration: 2 })).toBe(false);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
+      quotes: expect.arrayContaining([expect.objectContaining({ providerSelectionId: "30:home", rawOdds: "0.91" })])
+    });
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
 
     expect(plane.ingest(socketState("OPEN", 2, "worker-b:0"), { connectionGeneration: 2 })).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.72, -0.82),

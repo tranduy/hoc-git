@@ -247,3 +247,74 @@ All contracts, API, and extension typechecks exited 0. All three builds exited 0
 No schema was guessed, no global reload/navigation/restart was introduced, and no browser/provider/runtime or external action was performed. The deliberate cost of exact connection ownership is fail-closed behavior for a noncanonical epoch transition on the same connection; the shipped observer emits the characterized canonical `<observer-session>:<generation>` form.
 
 Commit subject: `fix(feed): enforce exact recovery lineages`.
+
+---
+
+## Review Round 3
+
+Status: DONE
+
+Review base: `7c55c3a`
+
+### Findings resolved
+
+- Source admission is now account-scoped rather than retained per historical source ID. Each of the six provider accounts owns one current connection/source/epoch identity and at most one candidate identity. A canonical observer lineage retains one exact numeric high-watermark across bridge connection changes, so `observer-a:33` cannot be replaced by `observer-a:0` from a newer connection. Lower/equal retired epochs and older connection generations reject before decoder, feed, coverage, or catalog mutation.
+- Current and candidate decoding are isolated in separate per-account pipelines. Each pipeline owns its own adapter router and body assembler. Candidate `TAB_STATE`, partial baseline, delta, transport heartbeat, malformed payload, and close/gap callback cannot reset the current decoder, publish `STALE`, change coverage, or disturb a readable `LIVE` feed. A complete authoritative network baseline promotes the candidate pipeline and releases the old active/candidate references.
+- Explicit malformed epochs are distinct from absent epochs. An explicit noncanonical value such as `observer-a:01` rejects before any admission or decoder state is allocated. Envelopes that omit `sourceEpoch` use a separately tagged legacy compatibility owner and never pass through the canonical parser.
+- Public observer epoch ordinals are monotonically increasing across every source in one observer session. Per-source generations remain unchanged for callback cancellation, while the public suffix is now comparable across same-connection tab handovers. The scalar never rewinds or reuses an ordinal after release; only the current public ordinal for each live source is retained.
+- `ProviderFeedController` retirement memory is one exact current-handover tombstone rather than an append-only set. Older history is rejected upstream by the registry's connection fence and the data plane's account owner/high-watermark. Regressions cover same-connection A to B to C followed by late A, more than 128 source replacements followed by the oldest connection, and a legitimate current replacement connection reusing an absent-epoch legacy source after its old connection is fenced.
+- KSPORT retained records carry their provider receipt order. Overlapping `live` and `today` records resolve by the newest receipt, with `live` winning only an exact tie for deterministic compatibility. The reviewer sequence `live@100 0.80 + today@100 0.90`, followed by `today@101 0.95`, now publishes `0.95`.
+
+### Exact boundedness argument
+
+The data plane retains two decode pipelines and two ownership records at most per configured account: one active and one candidate. Candidate replacement drops only the candidate pipeline; promotion swaps the candidate into the active slot and drops the prior active reference. No retired source-ID or epoch-ID collection remains in the data plane. The controller retains one tombstone. The extension retains one monotonically increasing session scalar plus one current public ordinal per live source; source release deletes the lookup entry but never decrements or reuses the scalar. These are exact structures and do not probabilistically evict denial evidence.
+
+The registry remains the first ownership boundary: an older authenticated bridge connection is rejected before listeners run. Within the current connection, the observer-wide public suffix makes source handovers strictly ordered, so an earlier source cannot reclaim an account after A to B to C. A different observer lineage requires a newer connection and a complete authoritative baseline; it cannot enter through `TAB_STATE`, partial, delta, or transport evidence.
+
+### RED
+
+Tests were written and observed failing before production changes:
+
+```text
+Data-plane and KSPORT reviewer probes: 6 failed / 49 passed.
+  Candidate TAB_STATE invalidated current authority.
+  A newer connection admitted observer-a:0 after observer-a:33.
+  Explicit observer-a:01 authorized a complete baseline.
+  More than 128 source replacements let the oldest connection reclaim the account.
+  The append-only controller retirement path blocked a legitimate current legacy reconnect while the old connection was not fenced at account scope.
+  Fixed KSPORT partition order returned live 0.80 instead of newer today 0.95.
+Observer-wide public ordinal probe: 1 failed / 138 skipped.
+  Two source IDs reused the same per-source public suffix and the first handover returned worker-a:1 instead of worker-a:2.
+```
+
+The focused Task 6 matrix subsequently exposed one obsolete SABA expectation that a candidate delta should immediately invalidate the current epoch. It was updated to the reviewed invariant: the old catalog remains readable until the replacement `OPEN` plus reset/done baseline completes.
+
+### GREEN and verification matrix
+
+```text
+Task 6 focused API: 7 suites / 113 tests passed.
+Task 6 focused extension: 3 suites / 170 tests passed.
+Task 5 CMD/IM/data-plane API: 5 suites / 87 tests passed.
+Task 5 extension observer/CMD lanes: 4 suites / 164 tests passed.
+Task 1-4 recovery/control/registry/data-plane/coverage/server API: 8 suites / 103 tests passed.
+Task 1-5 extension observer/scheduler/bridge/storage/poller/wakeup: 6 suites / 188 tests passed.
+Contracts chrome-bridge: 1 suite / 14 tests passed.
+```
+
+All contracts, API, and extension typechecks exited 0. All three builds exited 0. `git diff --check` exited 0 with only the checkout's existing LF-to-CRLF notices. The scoped secret scan matched only the safe `observerSessionId` identifier and public epoch string construction; it found no credential, cookie, authorization value, token, provider response body, or account secret.
+
+### Files changed in Review Round 3
+
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `apps/api/src/chrome-bridge/ksport-ws-adapter.ts`
+- `apps/api/src/chrome-bridge/ksport-ws-adapter.test.ts`
+- `apps/api/src/chrome-bridge/provider-feed-controller.ts`
+- `apps/api/src/chrome-bridge/saba-ws-realtime-regression.test.ts`
+- `apps/chrome-extension/src/network-observer.ts`
+- `apps/chrome-extension/src/network-observer.test.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6-report.md`
+
+No schema was guessed, no provider mapping changed, and no global reload, navigation, browser restart, extension restart, API restart, provider runtime action, or external side effect was introduced. Legacy SBOBET Socket.IO remains non-authoritative; SBOBET authority remains limited to the fenced KSPORT WS/HTTP path. The Task 5 equal-CMD-cursor and AbortSignal-aware IM signer minors remain deferred.
+
+Commit subject: `fix(feed): bound provider recovery ownership`.

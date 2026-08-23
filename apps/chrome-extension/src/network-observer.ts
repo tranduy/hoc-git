@@ -591,6 +591,8 @@ export class NetworkObserver {
   readonly #workScheduler: ProviderWorkScheduler;
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
+  readonly #publicSourceEpochs = new Map<string, { readonly sourceGeneration: number; readonly ordinal: number }>();
+  #nextPublicEpochOrdinal = 0;
   readonly #activeWorkGenerations = new Map<string, number>();
   readonly #streamOrdinals = new Map<string, number>();
   readonly #emissionTails = new Map<string, Promise<void>>();
@@ -773,7 +775,9 @@ export class NetworkObserver {
   }
 
   beginSourceEpoch(sourceId: string): string {
-    const generation = (this.#sourceGenerations.get(sourceId) ?? 0) + 1;
+    const priorGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
+    this.#publicSourceEpochOrdinal(sourceId, priorGeneration);
+    const generation = priorGeneration + 1;
     this.#sourceGenerations.set(sourceId, generation);
     this.#workScheduler.clear(sourceId);
     this.#sequences.delete(sourceId);
@@ -844,7 +848,7 @@ export class NetworkObserver {
       }
     }
     void this.#scheduleSabaWsSnapshotClear(sourceId);
-    return `${this.#observerSessionId}:${generation}`;
+    return `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(sourceId, generation)}`;
   }
 
   releaseTab(tabId: number): void {
@@ -862,8 +866,10 @@ export class NetworkObserver {
     for (const sourceId of this.#tsportRequestUrls.keys()) remember(sourceId);
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
+    for (const sourceId of this.#publicSourceEpochs.keys()) remember(sourceId);
     for (const sourceId of sourceIds) {
       this.beginSourceEpoch(sourceId);
+      this.#publicSourceEpochs.delete(sourceId);
       this.#cmdSnapshots.delete(sourceId);
       this.#cmdLastBodies.delete(sourceId);
       this.#cmdLastSentAtMs.delete(sourceId);
@@ -2825,7 +2831,7 @@ export class NetworkObserver {
           version: 1,
           kind: "NETWORK",
           ...source,
-          sourceEpoch: `${this.#observerSessionId}:${sourceGeneration}`,
+          sourceEpoch: `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(source.sourceId, sourceGeneration)}`,
           sequence,
           observedAtMs: metadata.observedAtMs ?? this.#now(),
           receivedMonotonicMs: metadata.receivedMonotonicMs ?? this.#monotonicNow(),
@@ -2851,6 +2857,15 @@ export class NetworkObserver {
 
   #captureSourceGeneration(sourceId: string): number {
     return this.#activeWorkGenerations.get(sourceId) ?? this.#sourceGenerations.get(sourceId) ?? 0;
+  }
+
+  #publicSourceEpochOrdinal(sourceId: string, sourceGeneration: number): number {
+    const current = this.#publicSourceEpochs.get(sourceId);
+    if (current?.sourceGeneration === sourceGeneration) return current.ordinal;
+    const ordinal = this.#nextPublicEpochOrdinal;
+    this.#nextPublicEpochOrdinal += 1;
+    this.#publicSourceEpochs.set(sourceId, { sourceGeneration, ordinal });
+    return ordinal;
   }
 
   #isSourceGenerationCurrent(sourceId: string, generation: number): boolean {

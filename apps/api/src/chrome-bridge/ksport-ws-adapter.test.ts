@@ -344,6 +344,21 @@ describe("KsportWsCatalogAdapter", () => {
       quote.selection === "OVER")?.rawOdds).toBe("0.95");
   });
 
+  it("resolves an event present in both partitions by its newest receipt instead of fixed partition order", () => {
+    const event = (price: string) => ({ "0": "2026-08-20T16:00:00Z", "2": "Alpha", "3": "Beta",
+      "7": { "3": [`2.5 ${price}*56434230030002005h -0.98*56434230030002005a 730780068181025`] },
+      "8": 5643423 });
+    const adapter = new KsportWsCatalogAdapter();
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.80")] }],
+      "live", 10, 100))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([{ "1": "Today", "2": [event("0.90")] }],
+      "today", 11, 100))).toHaveLength(1);
+
+    const newest = adapter.decode(receiptEnvelope(event("0.95"), "today", 12, 101))[0]!.value as {
+      quotes: Array<{ selection: string; rawOdds: string }> };
+    expect(newest.quotes.find((quote) => quote.selection === "OVER")?.rawOdds).toBe("0.95");
+  });
+
   it("merges a one-market event delta without erasing the event's other markets", () => {
     const event = { "0": "2026-08-20T16:00:00Z", "2": "Home", "3": "Away", "8": 5643423,
       "7": { "3": ["2.5 0.80*56434230030002005h -0.98*56434230030002005a 5643423181025"],

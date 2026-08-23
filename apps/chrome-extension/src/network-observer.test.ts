@@ -1473,6 +1473,28 @@ describe("NetworkObserver", () => {
     ]);
   });
 
+  it("assigns public epoch ordinals across source handovers without changing provider-local cancellation", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward,
+      observerSessionId: "worker-a" });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+
+    await observer.heartbeat(im, "imsports.directsb.net");
+    await observer.heartbeat(cmd, "cgnew.fts368.com");
+    expect(observer.beginSourceEpoch(im.sourceId)).toBe("worker-a:2");
+    await observer.heartbeat(im, "imsports.directsb.net");
+    await observer.heartbeat(cmd, "cgnew.fts368.com");
+
+    expect(forward.mock.calls.map(([message]) => [message.sourceId, message.sourceEpoch, message.sequence]))
+      .toEqual([
+        ["chrome:IM:8", "worker-a:0", 0],
+        ["chrome:CMD:9", "worker-a:1", 0],
+        ["chrome:IM:8", "worker-a:2", 0],
+        ["chrome:CMD:9", "worker-a:1", 1]
+      ]);
+  });
+
   it("does not stamp a scan started in a retired epoch as replacement-epoch data", async () => {
     let releaseOldScan: (() => void) | undefined;
     const oldScanBlocked = new Promise<void>((resolve) => { releaseOldScan = resolve; });
