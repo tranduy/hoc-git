@@ -554,6 +554,8 @@ export class NetworkObserver {
     source: ObservedSource; sourceGeneration: number; url: string; streamId: string; sessionId?: string
   }>();
   readonly #socketBaselineRecoveryAtMs = new Map<string, number>();
+  readonly #socketBaselineRecoveries = new Map<string, { readonly token: symbol;
+    readonly operation: Promise<void> }>();
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
@@ -743,6 +745,7 @@ export class NetworkObserver {
     this.#catalogWsSnapshots.delete(sourceId);
     this.#activeKsportStreams.delete(sourceId);
     this.#socketBaselineRecoveryAtMs.delete(sourceId);
+    this.#socketBaselineRecoveries.delete(sourceId);
     this.#sabaDomBootstrapAtMs.delete(sourceId);
     for (const key of this.#sabaReadySnapshotPartitions) {
       if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
@@ -842,6 +845,7 @@ export class NetworkObserver {
       this.#ksportMaintenanceRecoveryAtMs.delete(sourceId);
       this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
+      this.#socketBaselineRecoveries.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
       this.#catalogRefreshes.delete(sourceId);
@@ -1127,6 +1131,9 @@ export class NetworkObserver {
   }
 
   async #requestFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean): Promise<void> {
+    const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
+    const isCurrent = (): boolean => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration);
+    if (!isCurrent()) return;
     const nowMs = this.#now();
     const previous = this.#socketBaselineRecoveryAtMs.get(source.sourceId);
     if (previous !== undefined && nowMs - previous < 5_000) return;
@@ -1135,6 +1142,7 @@ export class NetworkObserver {
       try { return matches(new URL(socket.url)); } catch { return false; }
     });
     if (active === undefined && source.lobby !== "SABA" && source.lobby !== "KSPORT" && source.lobby !== "SBO") return;
+    if (!isCurrent()) return;
     this.#socketBaselineRecoveryAtMs.set(source.sourceId, nowMs);
     const knownContexts = [...new Set(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])];
     const sessionByContext = this.#mainWorldContextSessions.get(source.tabId);
@@ -1185,29 +1193,51 @@ export class NetworkObserver {
       const group = `fieldline-baseline-recovery-${source.tabId}`;
       try {
         for (const strategy of strategies) {
+          if (!isCurrent()) return;
           const prototype = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.evaluate", {
             expression: strategy.prototypeExpression,
             ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
             objectGroup: group, returnByValue: false
           })).catch(() => null);
+          if (!isCurrent()) return;
           const prototypeId = nestedValue(prototype, "result", "objectId");
           if (typeof prototypeId !== "string") continue;
+          if (!isCurrent()) return;
           const queried = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.queryObjects", {
             prototypeObjectId: prototypeId, objectGroup: group
           })).catch(() => null);
+          if (!isCurrent()) return;
           const instancesId = nestedValue(queried, "objects", "objectId");
           if (typeof instancesId !== "string") continue;
+          if (!isCurrent()) return;
           const result = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.callFunctionOn", {
             objectId: instancesId, functionDeclaration: strategy.reconnect, returnByValue: true
           })).catch(() => null);
+          if (!isCurrent()) return;
           const count = nestedValue(result, "result", "value");
           if (typeof count === "number" && count > 0) return;
         }
       } finally {
-        await sendToSocketTarget("Runtime.releaseObjectGroup", { objectGroup: group })
-          .catch(() => undefined);
+        if (isCurrent()) {
+          await sendToSocketTarget("Runtime.releaseObjectGroup", { objectGroup: group })
+            .catch(() => undefined);
+        }
       }
     }
+  }
+
+  #scheduleFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean): Promise<void> {
+    const existing = this.#socketBaselineRecoveries.get(source.sourceId);
+    if (existing !== undefined) return existing.operation;
+    const token = Symbol(source.sourceId);
+    const operation = this.#runPeriodicDomWork(source.sourceId,
+      () => this.#requestFreshSocketBaseline(source, matches)).finally(() => {
+        if (this.#socketBaselineRecoveries.get(source.sourceId)?.token === token) {
+          this.#socketBaselineRecoveries.delete(source.sourceId);
+        }
+      });
+    this.#socketBaselineRecoveries.set(source.sourceId, { token, operation });
+    return operation;
   }
 
   async #requestFreshKsportHttpBaseline(source: ObservedSource): Promise<boolean> {
@@ -1621,11 +1651,16 @@ export class NetworkObserver {
         await this.#emit(socket.source, socket.url, "WebSocket", "WS_STATE", {
           encoding: "UTF8", body: '{"state":"CLOSED"}'
         }, { request: { streamId: socket.streamId }, sourceGeneration: socket.sourceGeneration });
+        const ownsSocket = (): boolean =>
+          this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration) &&
+          this.#webSockets.get(key) === socket;
+        if (!ownsSocket()) return;
         if (socket.source.lobby === "KSPORT" &&
           this.#activeKsportStreams.get(socket.source.sourceId) === socket.streamId) {
           this.#activeKsportStreams.delete(socket.source.sourceId);
           this.#catalogWsSnapshots.delete(socket.source.sourceId);
           await this.#scheduleSabaWsSnapshotClear(socket.source.sourceId);
+          if (!ownsSocket()) return;
         }
         if (socket.source.lobby === "SBO") {
           try {
@@ -1635,7 +1670,10 @@ export class NetworkObserver {
           } catch { /* malformed socket URL cannot be a catalog authority */ }
         }
       }
-      this.#webSockets.delete(key);
+      if (this.#webSockets.get(key) === socket && (socket === undefined ||
+        this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration))) {
+        this.#webSockets.delete(key);
+      }
       return;
     }
     if (method === "Network.webSocketFrameReceived" && key) {
@@ -1656,7 +1694,7 @@ export class NetworkObserver {
             await this.refreshCatalog(source);
           }
         } else if (source.lobby === "SBO") {
-          await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+          await this.#scheduleFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
         } else if (source.lobby === "KSPORT") {
           // The sportsbook OOPIF opened its STOMP socket before this worker
           // enabled Network on that child session, so the frames cannot be
@@ -1666,7 +1704,7 @@ export class NetworkObserver {
           const previous = this.#ksportOrphanFrameRecoveryAtMs.get(source.sourceId);
           if (previous === undefined || nowMs - previous >= 30_000) {
             this.#ksportOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
-            await this.#requestFreshSocketBaseline(source, (url) => /\/sport\//u.test(url.pathname));
+            await this.#scheduleFreshSocketBaseline(source, (url) => /\/sport\//u.test(url.pathname));
           }
         }
         return;

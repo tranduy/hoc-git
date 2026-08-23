@@ -2914,4 +2914,120 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls.map(([message]) => message.transport)).toEqual(["WS_FRAME", "HTTP_RESPONSE"]);
     expect(forward.mock.calls.map(([message]) => message.sequence)).toEqual([0, 1]);
   });
+
+  it("does not let a retired socket close delete a replacement KSPORT stream with the reused ordinal", async () => {
+    let releaseClosed!: () => void;
+    let closedObserved!: () => void;
+    const closedBlocked = new Promise<void>((resolve) => { releaseClosed = resolve; });
+    const sawClosed = new Promise<void>((resolve) => { closedObserved = resolve; });
+    const forward = vi.fn(async (envelope: ChromeBridgeEnvelope) => {
+      if (envelope.transport === "WS_STATE" && envelope.payload.body === '{"state":"CLOSED"}') {
+        closedObserved();
+        await closedBlocked;
+      }
+    });
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward,
+      now: () => 1_000, monotonicNow: () => 60 });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    const url = "wss://d42.sb21.net/sport/538/session/websocket";
+    const live = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\n{}\u0000";
+    const today = "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\n\n{}\u0000";
+
+    await observer.handleEvent(ksport, "Network.webSocketCreated", { requestId: "sports", url });
+    const retiredClose = observer.handleEvent(ksport, "Network.webSocketClosed", { requestId: "sports" });
+    await sawClosed;
+
+    observer.beginSourceEpoch(ksport.sourceId);
+    await observer.handleEvent(ksport, "Network.webSocketCreated", { requestId: "sports", url });
+    await observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "sports",
+      response: { opcode: 1, payloadData: live } });
+    await observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "sports",
+      response: { opcode: 1, payloadData: today } });
+    expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(true);
+
+    releaseClosed();
+    await retiredClose;
+
+    expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(true);
+    forward.mockClear();
+    await observer.handleEvent(ksport, "Network.webSocketFrameReceived", { requestId: "sports",
+      response: { opcode: 1, payloadData: live } });
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ transport: "WS_FRAME",
+      request: expect.objectContaining({ streamId: "1" }) }));
+  });
+
+  it("abandons a retired socket-baseline recovery before its next CDP operation", async () => {
+    let releaseEvaluation!: () => void;
+    let evaluationObserved!: () => void;
+    const evaluationBlocked = new Promise<void>((resolve) => { releaseEvaluation = resolve; });
+    const sawEvaluation = new Promise<void>((resolve) => { evaluationObserved = resolve; });
+    let blockFirstEvaluation = true;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("WebSocket.prototype") &&
+        blockFirstEvaluation) {
+        blockFirstEvaluation = false;
+        evaluationObserved();
+        await evaluationBlocked;
+        return { result: { objectId: "retired-prototype" } };
+      }
+      if (method === "Runtime.evaluate") return { result: { objectId: "replacement-prototype" } };
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-instances" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined), now: () => 1_000 });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    await observer.handleEvent(ksport, "Target.attachedToTarget", {
+      sessionId: "sportsbook-child", targetInfo: { type: "iframe" }
+    });
+    await observer.handleEvent(ksport, "Runtime.executionContextCreated", { context: { id: 23,
+      auxData: { frameId: "sportsbook-frame", isDefault: true } } }, "sportsbook-child");
+    sendCommand.mockClear();
+
+    const retiredRecovery = observer.handleEvent(ksport, "Network.webSocketFrameReceived", {
+      requestId: "orphan-old", response: { opcode: 1, payloadData: "old" }
+    }, "sportsbook-child");
+    await sawEvaluation;
+    observer.beginSourceEpoch(ksport.sourceId);
+    await observer.handleEvent(ksport, "Network.webSocketCreated", {
+      requestId: "replacement", url: "wss://d42.sb21.net/sport/538/session/websocket"
+    }, "sportsbook-child");
+    releaseEvaluation();
+    await retiredRecovery;
+
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.queryObjects" ||
+      method === "Runtime.callFunctionOn" || method === "Runtime.releaseObjectGroup")).toHaveLength(0);
+  });
+
+  it("queues orphan KSPORT recovery behind its lane while another provider still progresses", async () => {
+    let releaseKsport!: () => void;
+    let ksportObserved!: () => void;
+    const ksportBlocked = new Promise<void>((resolve) => { releaseKsport = resolve; });
+    const sawKsport = new Promise<void>((resolve) => { ksportObserved = resolve; });
+    let firstKsportEvaluation = true;
+    const sendCommand = vi.fn(async (tabId: number, method: string) => {
+      if (tabId === 14 && method === "Runtime.evaluate" && firstKsportEvaluation) {
+        firstKsportEvaluation = false;
+        ksportObserved();
+        await ksportBlocked;
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined), now: () => 1_000 });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    const bti = { lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 } as const;
+
+    const maintenance = observer.maintainKsportFeed(ksport);
+    await sawKsport;
+    const orphan = observer.handleEvent(ksport, "Network.webSocketFrameReceived", {
+      requestId: "pre-existing", response: { opcode: 1, payloadData: "orphan" }
+    });
+    const btiRefresh = observer.refreshCatalog(bti);
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([tabId]) => tabId === 6)).toBe(true));
+
+    expect(sendCommand.mock.calls.filter(([tabId]) => tabId === 14)).toHaveLength(1);
+    releaseKsport();
+    await Promise.all([maintenance, orphan, btiRefresh]);
+  });
 });

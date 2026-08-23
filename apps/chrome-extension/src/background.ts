@@ -15,6 +15,7 @@ import { SourceTabRecovery } from "./source-tab-recovery.js";
 import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
 import { retryImBootstrapRefresh } from "./im-bootstrap-refresh.js";
 import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
+import { SabaSnapshotStorage } from "./saba-snapshot-storage.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 
@@ -51,6 +52,11 @@ const registry = new TabRegistry({
 
 const sbobetEventRequestStorageKey = "sbobetEventRequestTemplate";
 const sabaWsSnapshotsStorageKey = "sabaWsSnapshotsV1";
+const sabaSnapshotStorage = new SabaSnapshotStorage({
+  get: async (key) => chrome.storage.local.get(key),
+  set: async (items) => chrome.storage.local.set(items),
+  remove: async (key) => chrome.storage.local.remove(key)
+}, sabaWsSnapshotsStorageKey);
 const observer = new NetworkObserver({
   sendCommand: async (tabId, method, params, sessionId) => chrome.debugger.sendCommand(
     sessionId === undefined ? { tabId } : { tabId, sessionId }, method, params),
@@ -67,31 +73,9 @@ const observer = new NetworkObserver({
   saveSbobetEventRequest: async (request) => {
     await chrome.storage.session.set({ [sbobetEventRequestStorageKey]: request });
   },
-  loadSabaWsSnapshots: async (sourceId) => {
-    const stored = (await chrome.storage.local.get(sabaWsSnapshotsStorageKey))[sabaWsSnapshotsStorageKey];
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return null;
-    const values = stored as Record<string, unknown>;
-    return values[sourceId] ?? (values.sourceId === sourceId ? stored : null);
-  },
-  saveSabaWsSnapshots: async (snapshots) => {
-    const stored = (await chrome.storage.local.get(sabaWsSnapshotsStorageKey))[sabaWsSnapshotsStorageKey];
-    const values = stored && typeof stored === "object" && !Array.isArray(stored) && !("sourceId" in stored)
-      ? stored as Record<string, unknown> : {};
-    await chrome.storage.local.set({ [sabaWsSnapshotsStorageKey]: {
-      ...values, [snapshots.sourceId]: snapshots
-    } });
-  },
-  clearSabaWsSnapshots: async (sourceId) => {
-    const stored = (await chrome.storage.local.get(sabaWsSnapshotsStorageKey))[sabaWsSnapshotsStorageKey];
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
-    const values = { ...stored as Record<string, unknown> };
-    if (values.sourceId === sourceId) {
-      await chrome.storage.local.remove(sabaWsSnapshotsStorageKey);
-      return;
-    }
-    delete values[sourceId];
-    await chrome.storage.local.set({ [sabaWsSnapshotsStorageKey]: values });
-  },
+  loadSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.load(sourceId),
+  saveSabaWsSnapshots: (snapshots) => sabaSnapshotStorage.save(snapshots),
+  clearSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.clear(sourceId),
   recoverImBaseline: async (source) => {
     // Obtain both signed GetSE partitions inside the current authenticated IM
     // page. Reloading changes source state and can discard the first partition.
