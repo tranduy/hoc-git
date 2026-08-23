@@ -205,6 +205,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
     const root = parseRecord(envelope.payload.body);
     if (root === null) return false;
     const target = envelope.request.providerPartition;
+    if (target !== undefined && !isImPartition(target)) return false;
     const partitions = target === undefined
       ? sourcePartitions.size === 2 ? [...sourcePartitions.entries()] : []
       : sourcePartitions.has(target) ? [[target, sourcePartitions.get(target)!] as const] : [];

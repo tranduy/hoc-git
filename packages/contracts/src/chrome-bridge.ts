@@ -25,16 +25,32 @@ export const ChromeBridgeTransportSchema = z.enum([
   "TAB_STATE"
 ]);
 
-const SanitizedRequestSchema = z.strictObject({
+const SanitizedRequestBaseShape = {
   hostname: z.string().trim().min(1).max(253).regex(/^[a-z0-9.-]+$/iu),
   pathnameClass: z.string().trim().min(1).max(512).startsWith("/"),
   resourceType: z.string().trim().min(1).max(64),
   streamId: PublicGenerationIdSchema.optional(),
-  providerPartition: z.enum(["IM_MARKET_1", "IM_MARKET_2"]).optional(),
   providerFunctionCode: z.number().int().min(1).max(7).optional(),
   reconcileCutoffSequence: SafeIntegerSchema.optional(),
   replayed: z.boolean().optional()
+};
+
+export const KsportRecoveryRequestMetadataSchema = z.strictObject({
+  providerPartition: z.enum(["KSPORT_LIVE", "KSPORT_TODAY"]),
+  providerContentIntent: z.literal("FOOTBALL_FULL_CATALOG"),
+  requestStartSequence: SafeIntegerSchema
 });
+
+const SanitizedRequestSchema = z.union([
+  z.strictObject({
+    ...SanitizedRequestBaseShape,
+    providerPartition: z.enum(["IM_MARKET_1", "IM_MARKET_2"]).optional()
+  }),
+  z.strictObject({
+    ...SanitizedRequestBaseShape,
+    ...KsportRecoveryRequestMetadataSchema.shape
+  })
+]);
 
 const BridgePayloadSchema = z.strictObject({
   encoding: z.enum(["UTF8", "BASE64"]),
@@ -241,6 +257,8 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
 
 export type ChromeLobbyId = z.infer<typeof ChromeLobbyIdSchema>;
 export type ChromeBridgeTransport = z.infer<typeof ChromeBridgeTransportSchema>;
+export type KsportRecoveryRequestMetadata = z.infer<typeof KsportRecoveryRequestMetadataSchema>;
+export type ChromeBridgeRequest = z.infer<typeof SanitizedRequestSchema>;
 export type ChromeBridgeEnvelope = z.infer<typeof ChromeBridgeEnvelopeSchema>;
 export type CmdSnapshotChunk = z.infer<typeof CmdSnapshotChunkSchema>;
 export type ChromeNetworkBodyChunk = z.infer<typeof ChromeNetworkBodyChunkSchema>;

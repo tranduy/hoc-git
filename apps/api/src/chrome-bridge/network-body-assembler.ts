@@ -29,11 +29,13 @@ interface QuarantinedBody {
   readonly sourceEpoch: string;
   readonly epochKey: string;
   readonly accountKey: ChromeBridgeAccountKey;
+  readonly createdAtMs: number;
 }
 
 interface BlockedSourceEpoch {
   readonly sourceId: string;
   readonly sourceEpoch: string;
+  readonly createdAtMs: number;
 }
 
 export interface NetworkBodyAssemblerOptions {
@@ -118,15 +120,15 @@ export class NetworkBodyAssembler {
     const snapshotOwnerKey = this.#snapshotOwners.get(chunk.snapshotId);
     if (snapshotOwnerKey !== undefined && snapshotOwnerKey !== key) {
       const snapshotOwner = this.#pending.get(snapshotOwnerKey);
-      if (snapshotOwner !== undefined) this.#quarantinePending(snapshotOwner);
-      this.#quarantine(key, envelope.sourceId, sourceEpoch, epochKey, accountKey);
+      if (snapshotOwner !== undefined) this.#quarantinePending(snapshotOwner, now);
+      this.#quarantine(key, envelope.sourceId, sourceEpoch, epochKey, accountKey, now);
       return null;
     }
 
     const identity = assemblyIdentity(envelope);
     let state = this.#pending.get(key);
     if (state !== undefined && (state.identity !== identity || state.chunkCount !== chunk.chunkCount)) {
-      this.#quarantinePending(state);
+      this.#quarantinePending(state, now);
       return null;
     }
 
@@ -137,7 +139,7 @@ export class NetworkBodyAssembler {
         this.#pendingCount(envelope.sourceId) >= this.#maxPendingBodiesPerSource ||
         this.#pendingBytes + fragmentBytes > this.#maxPendingBytes ||
         this.#pendingByteCount(envelope.sourceId) + fragmentBytes > this.#maxPendingBytesPerSource) {
-        this.#quarantine(key, envelope.sourceId, sourceEpoch, epochKey, accountKey);
+        this.#quarantine(key, envelope.sourceId, sourceEpoch, epochKey, accountKey, now);
         return null;
       }
       state = { key, snapshotId: chunk.snapshotId, sourceId: envelope.sourceId, sourceEpoch, epochKey,
@@ -149,13 +151,13 @@ export class NetworkBodyAssembler {
 
     const prior = state.fragments.get(chunk.chunkIndex);
     if (prior !== undefined) {
-      if (prior !== chunk.bodyFragment) this.#quarantinePending(state);
+      if (prior !== chunk.bodyFragment) this.#quarantinePending(state, now);
       return null;
     }
     if (state.byteCount + fragmentBytes > this.#maxBodyBytes ||
       this.#pendingBytes + fragmentBytes > this.#maxPendingBytes ||
       this.#pendingByteCount(envelope.sourceId) + fragmentBytes > this.#maxPendingBytesPerSource) {
-      this.#quarantinePending(state);
+      this.#quarantinePending(state, now);
       return null;
     }
     state.fragments.set(chunk.chunkIndex, chunk.bodyFragment);
@@ -214,27 +216,27 @@ export class NetworkBodyAssembler {
     }
   }
 
-  #quarantinePending(pending: PendingBody): void {
+  #quarantinePending(pending: PendingBody, now: number): void {
     this.#removePending(pending);
     this.#quarantine(pending.key, pending.sourceId, pending.sourceEpoch, pending.epochKey,
-      pending.accountKey);
+      pending.accountKey, now);
   }
 
   #quarantine(key: string, sourceId: string, sourceEpoch: string, epochKey: string,
-    accountKey: ChromeBridgeAccountKey): void {
+    accountKey: ChromeBridgeAccountKey, now: number): void {
     if (this.#quarantined.has(key) || this.#blockedByAccount.has(accountKey)) return;
     if (this.#quarantined.size >= this.#maxQuarantinedBodies ||
       this.#quarantinedCount(sourceId) >= this.#maxQuarantinedBodiesPerSource) {
-      this.#blockSourceEpoch(accountKey, sourceId, sourceEpoch);
+      this.#blockSourceEpoch(accountKey, sourceId, sourceEpoch, now);
       return;
     }
-    this.#quarantined.set(key, { sourceId, sourceEpoch, epochKey, accountKey });
+    this.#quarantined.set(key, { sourceId, sourceEpoch, epochKey, accountKey, createdAtMs: now });
   }
 
   #blockSourceEpoch(accountKey: ChromeBridgeAccountKey, sourceId: string,
-    sourceEpoch: string): void {
+    sourceEpoch: string, now: number): void {
     if (!this.#blockedByAccount.has(accountKey)) {
-      this.#blockedByAccount.set(accountKey, { sourceId, sourceEpoch });
+      this.#blockedByAccount.set(accountKey, { sourceId, sourceEpoch, createdAtMs: now });
     }
     // Escalation replaces many exact tombstones with one bounded epoch fence.
     for (const pending of [...this.#pending.values()]) {
@@ -257,8 +259,14 @@ export class NetworkBodyAssembler {
   }
 
   #sweep(now: number): void {
+    for (const [key, quarantined] of this.#quarantined) {
+      if (now - quarantined.createdAtMs >= this.#ttlMs) this.#quarantined.delete(key);
+    }
+    for (const [accountKey, blocked] of this.#blockedByAccount) {
+      if (now - blocked.createdAtMs >= this.#ttlMs) this.#blockedByAccount.delete(accountKey);
+    }
     for (const pending of [...this.#pending.values()]) {
-      if (now - pending.createdAtMs >= this.#ttlMs) this.#quarantinePending(pending);
+      if (now - pending.createdAtMs >= this.#ttlMs) this.#quarantinePending(pending, now);
     }
   }
 }
@@ -310,13 +318,6 @@ function assemblyIdentity(envelope: ChromeBridgeEnvelope): string {
     envelope.observedAtMs,
     envelope.receivedMonotonicMs,
     envelope.transport,
-    request.hostname,
-    request.pathnameClass,
-    request.resourceType,
-    request.streamId ?? null,
-    request.providerPartition ?? null,
-    request.providerFunctionCode ?? null,
-    request.reconcileCutoffSequence ?? null,
-    request.replayed ?? null
+    Object.entries(request).sort(([left], [right]) => left.localeCompare(right))
   ]);
 }

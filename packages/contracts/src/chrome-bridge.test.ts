@@ -101,6 +101,36 @@ describe("ChromeBridgeEnvelopeSchema", () => {
       { ...validEnvelope.request, reconcileCutoffSequence: -1 }
     ]) expect(schema.safeParse({ ...validEnvelope, request }).success).toBe(false);
   });
+
+  it("requires exact all-or-none KSPORT recovery metadata", () => {
+    const schema = contracts.ChromeBridgeEnvelopeSchema;
+    const recoveryMetadata = {
+      providerPartition: "KSPORT_LIVE",
+      providerContentIntent: "FOOTBALL_FULL_CATALOG",
+      requestStartSequence: 10
+    } as const;
+
+    const parsed = schema.parse({ ...validEnvelope, lobby: "KSPORT", request: {
+      ...validEnvelope.request, ...recoveryMetadata
+    } });
+    expect(parsed.request).toMatchObject(recoveryMetadata);
+
+    for (const request of [
+      { ...validEnvelope.request, providerPartition: "KSPORT_LIVE" },
+      { ...validEnvelope.request, providerContentIntent: "FOOTBALL_FULL_CATALOG" },
+      { ...validEnvelope.request, requestStartSequence: 10 },
+      { ...validEnvelope.request, providerPartition: "KSPORT_LIVE", requestStartSequence: 10 },
+      { ...validEnvelope.request, providerPartition: "KSPORT_TODAY",
+        providerContentIntent: "FOOTBALL_FULL_CATALOG" },
+      { ...validEnvelope.request, providerContentIntent: "FOOTBALL_FULL_CATALOG",
+        requestStartSequence: 10 },
+      { ...validEnvelope.request, ...recoveryMetadata, providerPartition: "KSPORT_UPCOMING" },
+      { ...validEnvelope.request, ...recoveryMetadata, providerContentIntent: "ALL_SPORTS" },
+      { ...validEnvelope.request, ...recoveryMetadata, requestStartSequence: -1 },
+      { ...validEnvelope.request, ...recoveryMetadata, requestStartSequence: 1.5 },
+      { ...validEnvelope.request, ...recoveryMetadata, requestStartSequence: Number.MAX_SAFE_INTEGER + 1 }
+    ]) expect(schema.safeParse({ ...validEnvelope, lobby: "KSPORT", request }).success).toBe(false);
+  });
 });
 
 describe("ChromeBridgeControlMessageSchema", () => {
