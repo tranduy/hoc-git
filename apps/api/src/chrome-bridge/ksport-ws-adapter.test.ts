@@ -27,9 +27,15 @@ function receiptEnvelope(payload: unknown, partition: "live" | "today", sequence
     payload: { encoding: "UTF8", body: `a${JSON.stringify([message])}` } };
 }
 
-function socketState(streamId: string, state: "OPEN" | "CLOSED", sequence: number): ChromeBridgeEnvelope {
-  return { ...receiptEnvelope([], "live", sequence, sequence, streamId), transport: "WS_STATE",
+function socketState(streamId: string, state: "OPEN" | "CLOSED", sequence: number,
+  sourceEpoch?: string): ChromeBridgeEnvelope {
+  return { ...receiptEnvelope([], "live", sequence, sequence, streamId, sourceEpoch), transport: "WS_STATE",
     payload: { encoding: "UTF8", body: JSON.stringify({ state }) } };
+}
+
+function batchedReceipts(...envelopes: readonly ChromeBridgeEnvelope[]): ChromeBridgeEnvelope {
+  const frames = envelopes.flatMap((envelope) => JSON.parse(envelope.payload.body.slice(1)) as string[]);
+  return { ...envelopes[0]!, payload: { encoding: "UTF8", body: `a${JSON.stringify(frames)}` } };
 }
 
 function httpEnvelope(payload: unknown, partition: "live" | "today", generation: number,
@@ -120,8 +126,8 @@ describe("KsportWsCatalogAdapter", () => {
       transport: "WS_STATE", payload: { encoding: "UTF8", body: JSON.stringify({ state: "OPEN" }) } };
     expect(adapter.decode(opened)).toEqual([]);
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(5643424)] }],
-      "live", 13, 1, "ksport-stream-2"))).toEqual([]);
-    const catalog = adapter.decode(receiptEnvelope([], "today", 14, 1, "ksport-stream-2"))[0]!.value as {
+      "live", 13, 201, "ksport-stream-2"))).toEqual([]);
+    const catalog = adapter.decode(receiptEnvelope([], "today", 14, 201, "ksport-stream-2"))[0]!.value as {
       events: Array<{ providerEventId: string }> };
     expect(catalog.events.map((item) => item.providerEventId)).toEqual(["5643424"]);
   });
@@ -135,11 +141,11 @@ describe("KsportWsCatalogAdapter", () => {
     const opened: ChromeBridgeEnvelope = { ...receiptEnvelope([], "live", 12, 1, "ksport-stream-2"),
       transport: "WS_STATE", payload: { encoding: "UTF8", body: JSON.stringify({ state: "OPEN" }) } };
     adapter.decode(opened);
-    adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(2)] }], "live", 13, 1, "ksport-stream-2"));
+    adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(2)] }], "live", 13, 101, "ksport-stream-2"));
 
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 14, 102,
       "ksport-stream-1"))).toEqual([]);
-    const catalog = adapter.decode(receiptEnvelope([], "today", 15, 1, "ksport-stream-2"))[0]!.value as {
+    const catalog = adapter.decode(receiptEnvelope([], "today", 15, 101, "ksport-stream-2"))[0]!.value as {
       events: Array<{ providerEventId: string }> };
     expect(catalog.events.map((item) => item.providerEventId)).toEqual(["2"]);
   });
@@ -183,6 +189,36 @@ describe("KsportWsCatalogAdapter", () => {
     expect(catalog.quotes.find((quote) => quote.selection === "OVER")?.rawOdds).toBe("0.95");
   });
 
+  it("rejects a full baseline older than an already applied delta receipt", () => {
+    const event = (price: string) => ({ "0": "2026-08-20T16:00:00Z", "2": "Alpha", "3": "Beta",
+      "7": { "3": [`2.5 ${price}*56434230030002005h -0.98*56434230030002005a 730780068181025`] },
+      "8": 5643423 });
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.80")] }], "live", 10, 100));
+    adapter.decode(receiptEnvelope([], "today", 11, 100));
+    const delta = adapter.decode(receiptEnvelope(event("0.95"), "live", 12, 201))[0]!.value as {
+      quotes: Array<{ selection: string; rawOdds: string }> };
+    expect(delta.quotes.find((quote) => quote.selection === "OVER")?.rawOdds).toBe("0.95");
+
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.70")] }],
+      "live", 13, 150))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 14, 150))).toEqual([]);
+  });
+
+  it("carries receipt evidence across a same-epoch stream handoff", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(receiptEnvelope([], "live", 10, 200, "1", "worker-a:0"));
+    adapter.decode(receiptEnvelope([], "today", 11, 200, "1", "worker-a:0"));
+    expect(adapter.decode(socketState("2", "OPEN", 12, "worker-a:0"))).toEqual([]);
+
+    expect(adapter.decode(receiptEnvelope([], "live", 13, 150, "2", "worker-a:0"))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 14, 150, "2", "worker-a:0"))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "live", 15, 201, "2", "worker-a:0"))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 16, 201, "2", "worker-a:0")))
+      .toEqual([expect.objectContaining({ authoritativeBaseline: true,
+        generation: "worker-a:0:ksport-ws:2:201" })]);
+  });
+
   it("rejects a KSPORT delta without a comparable provider receipt order", () => {
     const event = (price: string) => ({ "0": "2026-08-20T16:00:00Z", "2": "Alpha", "3": "Beta",
       "7": { "3": [`2.5 ${price}*56434230030002005h -0.98*56434230030002005a 730780068181025`] },
@@ -206,15 +242,26 @@ describe("KsportWsCatalogAdapter", () => {
     adapter.decode(receiptEnvelope([], "today", 11, 100));
     adapter.decode(receiptEnvelope([], "live", 12, 200));
 
-    for (let index = 0; index <= 256; index += 1) {
+    for (let index = 0; index < 256; index += 1) {
       expect(adapter.decode(receiptEnvelope(event(5_700_000 + index), "live", 20 + index, 201 + index)))
         .toEqual([]);
     }
+    const overflowWithSameFrameRecovery = batchedReceipts(
+      receiptEnvelope(event(5_700_256), "live", 276, 457),
+      receiptEnvelope([], "live", 277, 500),
+      receiptEnvelope([], "today", 278, 500));
+    expect(adapter.decode(overflowWithSameFrameRecovery))
+      .toEqual([expect.objectContaining({
+        invalidateAccountId: "catalog-source:SBOBET:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+      })]);
     expect(adapter.decode(receiptEnvelope([], "today", 500, 200))).toEqual([]);
-    expect(adapter.decode(receiptEnvelope([], "live", 501, 500))).toEqual([]);
-    expect(adapter.decode(receiptEnvelope([], "today", 502, 500))).toEqual([expect.objectContaining({
+    const heartbeat = { ...receiptEnvelope([], "today", 501, 458),
+      payload: { encoding: "UTF8" as const, body: `a${JSON.stringify(["\n"])}` } };
+    expect(adapter.decode(heartbeat)).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "live", 502, 501))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 503, 501))).toEqual([expect.objectContaining({
       authoritativeBaseline: true,
-      generation: "legacy:ksport-ws:ksport-stream-1:500"
+      generation: "legacy:ksport-ws:ksport-stream-1:501"
     })]);
   });
 

@@ -166,8 +166,9 @@ export class ProviderFeedController {
   }
 
   #invalidate(evidence: Extract<ProviderFeedEvidence, { readonly kind: "INVALIDATE" }>): FeedDecision {
-    const recoverableGap = evidence.reason === "PROVIDER_STREAM_GAP";
-    if (!recoverableGap) {
+    const recoverableStreamFault = evidence.reason === "PROVIDER_STREAM_GAP" ||
+      evidence.reason === "PROVIDER_STREAM_CLOSED";
+    if (!recoverableStreamFault) {
       // Older retirement history is fenced by the registry connection owner
       // and the data plane's account-scoped epoch high-watermark. The
       // controller only needs the exact handover tombstone while no new

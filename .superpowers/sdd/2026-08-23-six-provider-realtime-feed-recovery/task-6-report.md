@@ -387,3 +387,91 @@ All contracts, API, and extension typechecks exited 0. All three builds exited 0
 No provider mapping or contract was changed, and no navigation, reload, browser/extension/API restart, provider runtime action, or external side effect was performed.
 
 Commit subject: `fix(feed): bound reconnect and replay state`.
+
+---
+
+## Fix Round 5
+
+Status: DONE
+
+Review base: `9779f31dfad4987d05f7ac56f81f56595e4b76cd`
+
+### Authority and boundedness rulings
+
+- Network multipart assembly now binds every authority-bearing field across all chunks: source and epoch, snapshot/document identity, replay status, transport and request clocks, tab, URL/resource identity, stream/partition metadata, function/cutoff metadata, and envelope kind/version. A mismatch rejects and quarantines the exact source/epoch/snapshot assembly before provider decoding. Replayed network and lifecycle evidence is rejected before source admission, assembly, routing, or adapter state mutation; it can neither launder a fresh final chunk nor prime a future fresh receipt.
+- Multipart state is deterministically bounded by body size, per-source and global pending-body count, and per-source and global pending-byte count. Expired partial bodies become exact fail-closed tombstones, so their late chunks cannot resurrect after another TTL. Exact tombstones compact under churn to one source-epoch fence per provider account; the six-account map is fixed-cardinality. Quarantine/fences clear only on explicit reset/recovery or a strictly newer canonical source epoch. Cleanup is lazy and owns no timer handle.
+- KSPORT's provider receipt high-watermark includes both full and delta evidence and survives a same-epoch stream handoff. A full generation must be strictly newer than all committed receipt evidence, except its exact pending counterpart, so full@150 cannot roll back delta@201. Pending-delta loss/overflow emits a gap invalidation, suppresses heartbeat/transport freshness, and dominates the remainder of the same transport frame. Only a strictly newer complete full pair restores authority.
+- A socket `CLOSED` is a recoverable stream-authority fault rather than permanent source-epoch retirement. The controller immediately stalls and clears publication authority without tombstoning the whole epoch; adapter stream high-watermarks still reject the closed stream, while a strictly newer stream in the same epoch can establish a new complete baseline. This applies to KSPORT and SABA and never reports a false `LIVE` state during the gap.
+- An expired registry owner remains fenced to its authenticated connection generation. Generation order is fixed when the WebSocket passes authentication, not when its first envelope happens to arrive, so an older silent socket cannot speak late and manufacture newer authority. Authenticating the replacement immediately retires every source record from the revoked connection. The old connection cannot reclaim any provider account by presenting a higher source epoch; recovery requires a strictly newer authenticated connection.
+- Route and control-plane bookkeeping is account-scoped to the exact six providers. Replacing an account source removes the prior source atomically from socket, requested-snapshot, connection-source, and attached-source indexes. Close/detach callbacks carry identity guards, so a delayed close from the old socket cannot delete the newer owner. Source recovery targets only registry-active current mappings, and installation-level recovery retains and addresses only the newest authenticated socket.
+- SABA requires the producer's canonical positive-decimal stream ordinal and retains one active/high-watermark record per source epoch instead of an append-only retired-stream set. Replayed `OPEN`/`CLOSE` and frames return before lifecycle/decoder mutation. Fifty thousand stream handoffs therefore retain one exact high-watermark, reject every older stream, and allow ordinal 50001 to reopen legitimately. The extension producer's per-source numeric ordinal regression remains covered.
+
+The assembler limits are independent on both source and global axes. One provider can consume at most eight pending bodies and 24 MiB with defaults; all six providers together can consume at most 48 bodies and 144 MiB. Each body is independently limited to 24 MiB and 30 seconds. A 5,000-partial adversarial sequence cannot exceed the fixed pending/tombstone/account-fence bounds, and one abusive provider cannot consume another provider's reserved per-source capacity.
+
+### RED evidence
+
+Every finding was reproduced before its production change. Tests were returned to GREEN one invariant at a time:
+
+```text
+Multipart replay/provenance binding: 11 failed / 36 passed.
+KSPORT full-after-delta rollback: 2 failed / 29 passed.
+Same-epoch close/reopen (KSPORT and SABA): 2 failed / 44 passed.
+Pending-delta loss freshness: 2 failed / 66 passed.
+Expired-owner same-connection reclaim: 2 failed / 10 passed.
+Route/control-plane churn and identity-safe close: 3 failed / 25 passed.
+Multipart count/byte/TTL bounds: 3 failed / 12 passed.
+SABA replay/high-watermark boundedness: 2 failed / 64 passed.
+Same-frame KSPORT overflow refinement: 1 focused failure.
+Post-TTL multipart resurrection refinement: 1 focused failure.
+Authentication-time registry generation refinement: 1 focused failure.
+Silent-old-socket route integration refinement: 1 focused failure.
+Immediate revoked-source retirement refinement: 1 focused failure.
+Newest installation recovery socket refinement: 1 focused failure.
+```
+
+The refinement failures were retained as regressions: an overflow followed by a complete pair in the same frame emits only invalidation; an expired multipart key remains unable to complete after arbitrarily more wall-clock time; and authenticated connection authority can never be reordered by payload timing or a delayed close.
+
+### GREEN and verification matrix
+
+```text
+Fix Round 5 focused API: 9 suites / 166 tests passed.
+Task 5 API regression: 5 suites / 94 tests passed.
+Task 1-4 API regression: 8 suites / 114 tests passed.
+Task 6 extension regression: 3 suites / 170 tests passed.
+Task 5 extension regression: 4 suites / 164 tests passed.
+Task 1-4 extension regression: 6 suites / 188 tests passed.
+Contracts chrome-bridge: 1 suite / 14 tests passed.
+Whole contracts package: 2 suites / 95 tests passed.
+Whole extension package: 32 suites / 358 tests passed.
+Whole API package: 145 suites, 1,055 of 1,057 tests passed.
+```
+
+The whole API package's only two failures are the previously recorded Windows-host assumptions: `local-app-data.test.ts` expects POSIX separators for a macOS fixture path, and `local-key-protector.test.ts` expects POSIX `0600` mode from Windows `stat`. All changed and required API suites passed.
+
+Contracts, API, and extension typechecks exited 0. All three builds exited 0. `git diff --check` and the scoped secret/raw-payload scan are rerun immediately before commit.
+
+### Files changed in Fix Round 5
+
+- `apps/api/src/chrome-bridge/chrome-bridge-account.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-control-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-control-plane.test.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-registry.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-registry.test.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-route.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-route.test.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `apps/api/src/chrome-bridge/ksport-ws-adapter.ts`
+- `apps/api/src/chrome-bridge/ksport-ws-adapter.test.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.test.ts`
+- `apps/api/src/chrome-bridge/provider-feed-controller.ts`
+- `apps/api/src/chrome-bridge/saba-ws-adapter.ts`
+- `apps/api/src/chrome-bridge/saba-ws-adapter.test.ts`
+- `apps/api/src/chrome-bridge/saba-ws-realtime-regression.test.ts`
+- `apps/api/src/server.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6-report.md`
+
+No provider schema was guessed, no raw provider payload or credential was added, and no navigation, reload, browser/extension/API restart, provider runtime action, or external side effect was performed.
+
+Commit subject: `fix(feed): harden realtime authority bounds`.

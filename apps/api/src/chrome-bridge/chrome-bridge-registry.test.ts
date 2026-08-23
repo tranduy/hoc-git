@@ -89,6 +89,42 @@ describe("ChromeBridgeRegistry", () => {
     expect(registry.listSources()).toMatchObject([{ lastSequence: 0 }]);
   });
 
+  it("orders connection authority when the bridge authenticates, not when its first envelope arrives", () => {
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const silentOlderConnection = {};
+    const currentConnection = {};
+    registry.registerConnection(silentOlderConnection);
+    registry.registerConnection(currentConnection);
+
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" }, currentConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
+      sourceEpoch: "observer-a:999" }, silentOlderConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(registry.listSources()).toEqual([expect.objectContaining({
+      sourceId: "chrome:SABA:7", lastSequence: 0
+    })]);
+  });
+
+  it("retires every source from the revoked connection as soon as its replacement authenticates", () => {
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const olderConnection = {};
+    const replacementConnection = {};
+    registry.registerConnection(olderConnection);
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" }, olderConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.ingest({ ...envelope(0, "chrome:IM:8"), lobby: "IM", tabId: 8,
+      sourceEpoch: "observer-a:1" }, olderConnection)).toMatchObject({ kind: "ACK" });
+
+    registry.registerConnection(replacementConnection);
+
+    expect(registry.listSources()).toEqual([]);
+    expect(registry.ingest({ ...envelope(1), sourceEpoch: "observer-a:2" }, olderConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" }, replacementConnection))
+      .toMatchObject({ kind: "ACK" });
+  });
+
   it("keeps the six provider owners bounded when unproven source IDs flood one account", () => {
     const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
     const connection = {};
@@ -136,6 +172,44 @@ describe("ChromeBridgeRegistry", () => {
     now = 301_001;
 
     expect(registry.listSources()).toEqual([]);
+  });
+
+  it("requires a newer authenticated connection generation to reclaim a retired owner", () => {
+    let now = 1_000;
+    const registry = new ChromeBridgeRegistry({ now: () => now, retireAfterMs: 100 });
+    const retiredConnection = {};
+    const replacementConnection = {};
+
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" }, retiredConnection))
+      .toMatchObject({ kind: "ACK" });
+    now = 1_101;
+    expect(registry.listSources()).toEqual([]);
+
+    expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
+      sourceEpoch: "observer-a:1" }, retiredConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
+      sourceEpoch: "observer-a:1" }, replacementConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.listSources()).toEqual([expect.objectContaining({
+      sourceId: "chrome:SABA:8", lastSequence: 0
+    })]);
+  });
+
+  it("requires a newer connection generation after an explicit connection release", () => {
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const releasedConnection = {};
+    const replacementConnection = {};
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" }, releasedConnection))
+      .toMatchObject({ kind: "ACK" });
+    registry.releaseConnection(releasedConnection);
+
+    expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
+      sourceEpoch: "observer-a:1" }, releasedConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
+      sourceEpoch: "observer-a:1" }, replacementConnection))
+      .toMatchObject({ kind: "ACK" });
   });
 
   it("releases every source owned by a closed bridge connection", () => {

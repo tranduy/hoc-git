@@ -116,6 +116,9 @@ export class ChromeCatalogDataPlane {
     if (transportAccountId === null) return false;
     const epoch = envelopeEpoch(envelope);
     if (epoch === null) return false;
+    // Durable replay is display/bootstrap material only. It must not allocate
+    // source ownership or touch body, router, or adapter authority state.
+    if (replayed) return false;
     const connectionGeneration = context.connectionGeneration ?? 0;
     const admission = this.#admitSourceEpoch(transportAccountId, envelope, epoch, connectionGeneration);
     if (admission === null) return false;
@@ -139,10 +142,6 @@ export class ChromeCatalogDataPlane {
     if (route.status !== "TRUSTED" || route.adapter === null) return false;
     const update = route.adapter.decode(assembled).at(-1);
     if (update === undefined) return false;
-    // Retained bridge replay is decoder bootstrap only. Let adapters rebuild
-    // bounded recovery state, but never let replay renew transport, invalidate
-    // the live owner, publish authoritative data, or promote a candidate.
-    if (replayed) return false;
     if (update.transportAlive === true) {
       if (admission.kind === "CANDIDATE") return false;
       const provenance = transportProvenance(envelope.transport);
@@ -269,7 +268,7 @@ export class ChromeCatalogDataPlane {
     if (current === undefined) {
       const owner = proposed(false);
       this.#accountOwners.set(accountId, owner);
-      this.#activePipelines.set(accountId, createDecodePipeline());
+      this.#activePipelines.set(accountId, createDecodePipeline(this.#now));
       return { kind: "CURRENT", owner };
     }
     if (connectionGeneration < current.connectionGeneration) return null;
@@ -316,7 +315,7 @@ export class ChromeCatalogDataPlane {
   #activePipeline(accountId: string): DecodePipeline {
     const existing = this.#activePipelines.get(accountId);
     if (existing !== undefined) return existing;
-    const pipeline = createDecodePipeline();
+    const pipeline = createDecodePipeline(this.#now);
     this.#activePipelines.set(accountId, pipeline);
     return pipeline;
   }
@@ -325,7 +324,7 @@ export class ChromeCatalogDataPlane {
     const current = this.#candidatePipelines.get(accountId);
     if (current !== undefined && sameOwner(current.owner, owner)) return current.pipeline;
     if (current !== undefined && !candidateSupersedes(current.owner, owner)) return null;
-    const pipeline = createDecodePipeline();
+    const pipeline = createDecodePipeline(this.#now);
     this.#candidatePipelines.set(accountId, { owner, pipeline });
     return pipeline;
   }
@@ -405,11 +404,11 @@ function candidateSupersedes(current: AccountSourceOwner, proposed: AccountSourc
     proposed.identity.generation > current.identity.generation;
 }
 
-function createDecodePipeline(): DecodePipeline {
+function createDecodePipeline(now: () => number): DecodePipeline {
   return { router: new AdapterRouter([new CmdHttpCatalogAdapter(), new CmdDomCatalogAdapter(),
     new ImHttpCatalogAdapter(), new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(),
     new TsportWsCatalogAdapter(), new BtiHttpCatalogAdapter()], { confirmationsRequired: 1 }),
-  networkBodies: new NetworkBodyAssembler() };
+  networkBodies: new NetworkBodyAssembler({ now }) };
 }
 
 function catalogProvenance(transport: ChromeBridgeEnvelope["transport"]): FeedProvenance {

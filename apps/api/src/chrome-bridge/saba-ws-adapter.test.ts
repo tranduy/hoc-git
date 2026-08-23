@@ -12,7 +12,7 @@ function envelope(body: string, sourceId = "chrome:SABA:7"): ChromeBridgeEnvelop
   return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId, tabId: 7,
     sequence: 4, observedAtMs: 1_786_449_540_000, receivedMonotonicMs: 50, transport: "WS_FRAME",
     request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket",
-      streamId: "saba-stream-1" },
+      streamId: "1" },
     payload: { encoding: "UTF8", body } };
 }
 
@@ -304,12 +304,12 @@ describe("SabaWsCatalogAdapter", () => {
     };
     const adapter = new SabaWsCatalogAdapter();
 
-    adapter.decode(socketState("retired"));
-    expect(adapter.decode(snapshot("retired", 101, 5))).toHaveLength(1);
-    adapter.decode(socketState("replacement"));
-    expect(adapter.decode(snapshot("replacement", 202, 6))).toHaveLength(1);
+    adapter.decode(socketState("1"));
+    expect(adapter.decode(snapshot("1", 101, 5))).toHaveLength(1);
+    adapter.decode(socketState("2"));
+    expect(adapter.decode(snapshot("2", 202, 6))).toHaveLength(1);
 
-    expect(adapter.decode(snapshot("retired", 303, 7))).toEqual([]);
+    expect(adapter.decode(snapshot("1", 303, 7))).toEqual([]);
   });
 
   it("does not publish a new stream until reset/done establishes a complete baseline", () => {
@@ -320,9 +320,60 @@ describe("SabaWsCatalogAdapter", () => {
       encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
         oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 })];
     const input = { ...envelope(`42${JSON.stringify(["m", "b1", rows, 1])}`),
-      request: { ...envelope("").request, streamId: "fresh-stream-without-baseline" } };
+      request: { ...envelope("").request, streamId: "1" } };
     expect(new SabaWsCatalogAdapter().decode(input)).toEqual([]);
   });
+
+  it("ignores replayed lifecycle without mutating the active stream authority", () => {
+    const fullRows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const adapter = new SabaWsCatalogAdapter();
+    const opened = { ...envelope(""), transport: "WS_STATE" as const,
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ state: "OPEN" }) } };
+    expect(adapter.decode(opened)).toEqual([]);
+    expect(adapter.decode(envelope(`42${JSON.stringify(["m", "b1", fullRows, "r1"])}`)))
+      .toHaveLength(1);
+
+    const replayedOpen = { ...opened, request: { ...opened.request, streamId: "50001", replayed: true } };
+    expect(adapter.decode(replayedOpen)).toEqual([]);
+    const delta = [encoded({ type: "o", oddsid: 3, matchid: 2, odds1a: 0.72, odds2a: -0.82 })];
+    expect(adapter.decode({ ...envelope(`42${JSON.stringify(["m", "b1", delta, "r2"])}`), sequence: 6 }))
+      .toEqual([expect.objectContaining({ evidenceMode: "DELTA", provenance: "WS" })]);
+  });
+
+  it("keeps 50,000 canonical stream replacements in one bounded high-water state", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    const open = (streamId: string): ChromeBridgeEnvelope => ({ ...envelope(""), transport: "WS_STATE",
+      request: { ...envelope("").request, streamId },
+      payload: { encoding: "UTF8", body: JSON.stringify({ state: "OPEN" }) } });
+    for (let ordinal = 1; ordinal <= 50_000; ordinal += 1) {
+      expect(adapter.decode(open(String(ordinal)))).toEqual([]);
+    }
+    expect(adapter.streamStats()).toEqual({ sourceEpochs: 1, trackedStreamIds: 1 });
+    expect(adapter.decode(open("1"))).toEqual([]);
+    expect(adapter.fingerprint(open("opaque-stream"))).toBe(false);
+
+    const rows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const oldFrame = { ...envelope(`42${JSON.stringify(["m", "b1", rows, "r1"])}`),
+      request: { ...envelope("").request, streamId: "1" } };
+    expect(adapter.decode(oldFrame)).toEqual([]);
+    expect(adapter.decode(open("50001"))).toEqual([]);
+    const currentFrame = { ...oldFrame, request: { ...oldFrame.request, streamId: "50001" } };
+    expect(adapter.decode(currentFrame)).toEqual([expect.objectContaining({
+      authoritativeBaseline: true, evidenceMode: "BASELINE"
+    })]);
+  }, 15_000);
 
   it("invalidates SABA on a provider revision gap instead of retaining old prices", () => {
     const fullRows = [["f", 0, fields], [0, "reset"],

@@ -4,6 +4,7 @@ import type {
   ChromeBridgeSourceState,
   ChromeLobbyId
 } from "@tool-chenh/contracts";
+import { chromeBridgeAccountKeyForLobby, type ChromeBridgeAccountKey } from "./chrome-bridge-account.js";
 
 export interface ChromeBridgeSourceSnapshot {
   readonly lobby: ChromeLobbyId;
@@ -16,7 +17,7 @@ export interface ChromeBridgeSourceSnapshot {
 }
 
 interface SourceRecord extends ChromeBridgeSourceSnapshot {
-  readonly accountKey: BridgeAccountKey;
+  readonly accountKey: ChromeBridgeAccountKey;
   readonly connectionGeneration: number;
   state: ChromeBridgeSourceState;
   lastSequence: number;
@@ -25,8 +26,6 @@ interface SourceRecord extends ChromeBridgeSourceSnapshot {
   quarantined: boolean;
   connection: object | null;
 }
-
-type BridgeAccountKey = "CMD" | "IM" | "SABA" | "SBOBET" | "APSPORT" | "BTI";
 
 interface CanonicalEpochIdentity {
   readonly kind: "CANONICAL";
@@ -49,7 +48,7 @@ interface AccountSourceOwner {
 }
 
 type OwnerAdmission = { readonly kind: "CURRENT" | "REPLACEMENT";
-  readonly accountKey: BridgeAccountKey; readonly owner: AccountSourceOwner };
+  readonly accountKey: ChromeBridgeAccountKey; readonly owner: AccountSourceOwner };
 
 export interface ChromeBridgeRegistryOptions {
   readonly now?: () => number;
@@ -66,7 +65,7 @@ export class ChromeBridgeRegistry {
   readonly #staleAfterMs: number;
   readonly #retireAfterMs: number;
   readonly #sources = new Map<string, SourceRecord>();
-  readonly #accountOwners = new Map<BridgeAccountKey, AccountSourceOwner>();
+  readonly #accountOwners = new Map<ChromeBridgeAccountKey, AccountSourceOwner>();
   readonly #listeners = new Set<(envelope: ChromeBridgeEnvelope, context: ChromeBridgeIngestContext) => void>();
   readonly #connectionGenerations = new WeakMap<object, number>();
   #latestConnectionGeneration = 0;
@@ -80,6 +79,20 @@ export class ChromeBridgeRegistry {
   subscribe(listener: (envelope: ChromeBridgeEnvelope, context: ChromeBridgeIngestContext) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  registerConnection(connection: object): void {
+    // The route calls this immediately after the WebSocket passes bridge
+    // authentication. Ordering on first payload would let an older silent
+    // socket manufacture a newer generation merely by speaking later.
+    const generation = this.#connectionGeneration(connection);
+    for (const [sourceId, source] of this.#sources) {
+      if (source.connectionGeneration >= generation) continue;
+      this.#sources.delete(sourceId);
+      const owner = this.#accountOwners.get(source.accountKey);
+      if (owner !== undefined && owner.connectionGeneration === source.connectionGeneration &&
+        owner.sourceId === source.sourceId) owner.active = false;
+    }
   }
 
   releaseConnection(connection: object): void {
@@ -155,7 +168,7 @@ export class ChromeBridgeRegistry {
   }
 
   #admitOwner(envelope: ChromeBridgeEnvelope, connectionGeneration: number): OwnerAdmission | null {
-    const accountKey = accountKeyForLobby(envelope.lobby);
+    const accountKey = chromeBridgeAccountKeyForLobby(envelope.lobby);
     const identity = envelopeEpochIdentity(envelope.sourceEpoch);
     if (identity === null) return null;
     const owner = this.#accountOwners.get(accountKey);
@@ -163,6 +176,11 @@ export class ChromeBridgeRegistry {
       sourceEpoch: envelope.sourceEpoch ?? null, identity, active: true });
     if (owner === undefined) return { kind: "REPLACEMENT", accountKey, owner: proposed() };
     if (connectionGeneration < owner.connectionGeneration) return null;
+    // Retirement/release revokes the authenticated connection generation,
+    // not just the concrete source ID. A higher source epoch from the same
+    // closed socket must not resurrect ownership; only a newly authenticated
+    // bridge connection can re-establish this provider account.
+    if (!owner.active && connectionGeneration <= owner.connectionGeneration) return null;
     const sameSourceEpoch = owner.sourceId === envelope.sourceId &&
       owner.sourceEpoch === (envelope.sourceEpoch ?? null);
     if (sameSourceEpoch) {
@@ -206,11 +224,6 @@ export class ChromeBridgeRegistry {
       reason: source.reason
     }));
   }
-}
-
-function accountKeyForLobby(lobby: ChromeLobbyId): BridgeAccountKey {
-  return lobby === "KSPORT" || lobby === "SBO" ? "SBOBET"
-    : lobby === "TSPORT" ? "APSPORT" : lobby;
 }
 
 function envelopeEpochIdentity(sourceEpoch: string | undefined): EpochIdentity | null {

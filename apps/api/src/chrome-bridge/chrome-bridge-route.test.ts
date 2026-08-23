@@ -2,6 +2,7 @@ import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
+import { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
 import { registerChromeBridgeRoute } from "./chrome-bridge-route.js";
 import type { Socket } from "node:net";
 
@@ -18,9 +19,14 @@ async function appWithRoute(openProviderTicket = true) {
   const app = Fastify({ logger: false });
   await app.register(websocket, { options: { maxPayload: 262_144 } });
   const registry = new ChromeBridgeRegistry();
-  registerChromeBridgeRoute(app, registry, { installationKey: "local-key", openProviderTicket });
+  const controlPlane = new ChromeBridgeControlPlane({
+    activeSourceIds: () => new Set(registry.listSources().map((source) => source.sourceId))
+  });
+  registerChromeBridgeRoute(app, registry, {
+    installationKey: "local-key", openProviderTicket, controlPlane
+  });
   await app.ready();
-  return { app, registry };
+  return { app, registry, controlPlane };
 }
 
 function nextMessage(socket: { once(event: "message", callback: (data: Buffer) => void): void }): Promise<unknown> {
@@ -180,6 +186,29 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
+  it("fences an older authenticated socket even when it stays silent until after its replacement", async () => {
+    const { app, registry } = await appWithRoute();
+    const headers = {
+      origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key"
+    };
+    const silentOlderSocket = await app.injectWS("/api/chrome-bridge", { headers, socket: loopbackSocket });
+    const currentSocket = await app.injectWS("/api/chrome-bridge", { headers, socket: loopbackSocket });
+
+    const currentReply = nextMessage(currentSocket);
+    currentSocket.send(JSON.stringify({ ...validEnvelope, sourceEpoch: "observer-a:0" }));
+    await expect(currentReply).resolves.toMatchObject({ kind: "ACK" });
+
+    const olderReply = nextMessage(silentOlderSocket);
+    silentOlderSocket.send(JSON.stringify({ ...validEnvelope, sourceId: "chrome:SABA:8", tabId: 8,
+      sourceEpoch: "observer-a:999" }));
+    await expect(olderReply).resolves.toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(registry.listSources()).toEqual([expect.objectContaining({ sourceId: "chrome:SABA:7" })]);
+
+    silentOlderSocket.terminate();
+    currentSocket.terminate();
+    await app.close();
+  });
+
   it("closes a sequence-gapped connection so the client can reconnect and replay", async () => {
     const { app } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
@@ -261,4 +290,39 @@ describe("Chrome bridge route", () => {
     expect(response.statusCode).toBe(404);
     await app.close();
   });
+
+  it("compacts realistic same-connection source churn across route and control-plane indexes", async () => {
+    const { app, registry, controlPlane } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const accepted = new Promise<void>((resolve) => {
+      let acknowledgements = 0;
+      socket.on("message", (data) => {
+        const message = JSON.parse(data.toString("utf8")) as { kind?: string };
+        if (message.kind === "ACK" && ++acknowledgements === 1_000) resolve();
+      });
+    });
+    for (let ordinal = 0; ordinal < 1_000; ordinal += 1) {
+      const tabId = ordinal + 7;
+      socket.send(JSON.stringify({ ...validEnvelope, sourceId: `chrome:SABA:${tabId}`, tabId,
+        sourceEpoch: `observer-a:${ordinal}` }));
+    }
+    await accepted;
+
+    expect(registry.listSources()).toEqual([expect.objectContaining({ sourceId: "chrome:SABA:1006" })]);
+    expect(controlPlane.sourceCount()).toBe(1);
+    expect(controlPlane.requestAllSnapshots()).toBe(1);
+    const retired = await app.inject({ method: "POST", url: "/api/chrome-bridge/focus-selection",
+      payload: { sourceId: "chrome:SABA:7", providerEventId: "e", providerMarketId: "m",
+        providerSelectionId: "s" } });
+    expect(retired.statusCode).toBe(409);
+    const current = await app.inject({ method: "POST", url: "/api/chrome-bridge/focus-selection",
+      payload: { sourceId: "chrome:SABA:1006", providerEventId: "e", providerMarketId: "m",
+        providerSelectionId: "s" } });
+    expect(current.statusCode).toBe(202);
+    socket.terminate();
+    await app.close();
+  }, 15_000);
 });

@@ -159,4 +159,81 @@ describe("ChromeBridgeControlPlane", () => {
     plane.detach(socket);
     expect(plane.sourceCount()).toBe(0);
   });
+
+  it("compacts source churn by provider account and keeps exactly the six current providers", () => {
+    const socket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    for (let ordinal = 0; ordinal < 1_000; ordinal += 1) {
+      plane.attach(`chrome:SABA:${ordinal + 1}`, socket);
+    }
+    expect(plane.sourceCount()).toBe(1);
+    expect(plane.probeSelectionPrice("chrome:SABA:1", { requestId: "old", providerEventId: "e",
+      providerMarketId: "m", providerSelectionId: "s", eventLabel: "A vs B", participantA: "A",
+      participantB: "B", marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "2.5" }))
+      .toBe(false);
+
+    for (const sourceId of ["chrome:CMD:1", "chrome:IM:1", "chrome:KSPORT:1",
+      "chrome:TSPORT:1", "chrome:BTI:1"] as const) plane.attach(sourceId, socket);
+    expect(plane.sourceCount()).toBe(6);
+    expect(plane.requestAllSnapshots()).toBe(6);
+
+    // KSPORT and SBO are two capture surfaces for the same SBOBET account.
+    plane.attach("chrome:SBO:2", socket);
+    expect(plane.sourceCount()).toBe(6);
+    expect(plane.requestLobbySnapshot("KSPORT")).toBe(0);
+    expect(plane.requestLobbySnapshot("SBO")).toBe(1);
+  });
+
+  it("prunes sources retired by registry ownership before recovery targets are selected", () => {
+    const active = new Set(["chrome:SABA:2"]);
+    const oldSocket = { send: vi.fn(), readyState: 1 };
+    const currentSocket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane({ activeSourceIds: () => active });
+    plane.attach("chrome:SABA:1", oldSocket);
+    plane.attach("chrome:SABA:2", currentSocket);
+    plane.attach("chrome:CMD:1", oldSocket);
+
+    expect(plane.sourceCount()).toBe(1);
+    expect(plane.requestAllSnapshots()).toBe(1);
+    expect(currentSocket.send).toHaveBeenCalledWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:2"
+    }));
+    expect(oldSocket.send).not.toHaveBeenCalled();
+  });
+
+  it("does not let a late old-socket close detach the newer account owner", () => {
+    const oldSocket = { send: vi.fn(), readyState: 1 };
+    const currentSocket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attach("chrome:SABA:1", oldSocket);
+    plane.attach("chrome:SABA:2", currentSocket);
+
+    plane.detach(oldSocket);
+
+    expect(plane.sourceCount()).toBe(1);
+    expect(plane.requestAllSnapshots()).toBe(1);
+    expect(currentSocket.send).toHaveBeenCalledWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:2"
+    }));
+  });
+
+  it("sends installation recovery only to the newest authenticated socket after a late old close", () => {
+    const oldSocket = { send: vi.fn(), readyState: 1 };
+    const currentSocket = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attachInstallation(oldSocket);
+    plane.attachInstallation(currentSocket);
+
+    expect(plane.restoreLobby("SABA")).toBe(1);
+    expect(oldSocket.send).not.toHaveBeenCalled();
+    expect(currentSocket.send).toHaveBeenCalledTimes(1);
+    plane.detach(oldSocket);
+    currentSocket.send.mockClear();
+
+    expect(plane.restoreLobby("SABA")).toBe(1);
+    expect(oldSocket.send).not.toHaveBeenCalled();
+    expect(currentSocket.send).toHaveBeenCalledWith(JSON.stringify({
+      version: 1, kind: "RESTORE_SOURCE", lobby: "SABA"
+    }));
+  });
 });

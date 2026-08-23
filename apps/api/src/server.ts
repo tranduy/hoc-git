@@ -342,7 +342,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const catalogRevisions = new CatalogRevisionStore();
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
-  const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane() : null;
+  const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane({
+    activeSourceIds: () => new Set(chromeBridgeRegistry.listSources().map((source) => source.sourceId))
+  }) : null;
   const providerFeeds = chromeBridgeRegistry ? new ProviderFeedRegistry() : null;
   const cmdHiddenMarketProbe = chromeBridgeRegistry && chromeBridgeControlPlane
     ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),

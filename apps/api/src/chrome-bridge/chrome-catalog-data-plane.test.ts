@@ -72,7 +72,7 @@ function sabaEnvelope(sequence: number, matchIds: readonly number[]): ChromeBrid
   return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
     sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
     transport: "WS_FRAME", request: { hostname: "sports.example", pathnameClass: "/socket.io/",
-      resourceType: "WebSocket", streamId: "saba-stream-1" },
+      resourceType: "WebSocket", streamId: "1" },
     payload: { encoding: "UTF8", body: `42${JSON.stringify(["Data", { v: 2, revision: String(sequence),
       fields: sabaFields, rows }])}` } };
 }
@@ -92,6 +92,41 @@ function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds:
     transport: "WS_FRAME", request: { hostname: "sports.example", pathnameClass: "/sport/session/websocket",
       resourceType: "WebSocket", streamId: "ksport-stream-1" },
     payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
+}
+
+function ksportDeltaEnvelope(sequence: number, receiptGeneration: number,
+  eventId: number): ChromeBridgeEnvelope {
+  const event = { "2": `Home ${eventId}`, "3": `Away ${eventId}`, "8": eventId,
+    "7": { "3": [`2.5 0.95*${eventId}0030002005h -0.98*${eventId}0030002005a ${eventId}181025`] } };
+  const frame = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n" +
+    `subscription:subSportBookLive\nmessage-id:socket-${receiptGeneration}\n\n` +
+    `${JSON.stringify({ statusCode: "OK", statusCodeValue: 200, body: JSON.stringify(event) })}\0`;
+  const base = ksportEnvelope(sequence, "live", [], "worker-a:0", receiptGeneration);
+  return { ...base, payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
+}
+
+function ksportHttpEnvelope(sequence: number, partition: "live" | "today", generation: number,
+  eventIds: readonly number[], sourceId = "chrome:KSPORT:8", tabId = 8,
+  sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
+  const events = eventIds.map((eventId) => ({ "0": "2026-08-21T16:00:00Z",
+    "2": `Home ${eventId}`, "3": `Away ${eventId}`, "8": eventId,
+    "7": { "5": [`0.5 0.92*${eventId}0050000000h -0.98*${eventId}0050000000a h ` +
+      "735502668161000 0 0 1 1 0"] } }));
+  return { version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId, tabId, sourceEpoch,
+    sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
+    transport: "HTTP_RESPONSE", request: { hostname: "zenandfe.com", pathnameClass: "/api/v2/getEvent",
+      resourceType: "Fetch", streamId: `ksport-http:${tabId}:${generation}:${partition}` },
+    payload: { encoding: "UTF8", body: JSON.stringify(partition === "live"
+      ? [{ "1": "League", "2": events }] : []) } };
+}
+
+function chunkedNetworkBody(base: ChromeBridgeEnvelope, sequence: number, chunkIndex: number,
+  snapshotId: string): ChromeBridgeEnvelope {
+  const midpoint = Math.ceil(base.payload.body.length / 2);
+  const fragments = [base.payload.body.slice(0, midpoint), base.payload.body.slice(midpoint)];
+  return { ...base, sequence, observedAtMs: 1_400, receivedMonotonicMs: 140,
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId,
+      chunkIndex, chunkCount: 2, bodyEncoding: "UTF8", bodyFragment: fragments[chunkIndex]! }) } };
 }
 
 function legacySbobetSocketIoEnvelope(sequence: number): ChromeBridgeEnvelope {
@@ -227,6 +262,16 @@ describe("ChromeCatalogDataPlane", () => {
     });
   });
 
+  it("rejects replay before source admission, body assembly, routing, or adapter state", () => {
+    const decode = vi.spyOn(KsportWsCatalogAdapter.prototype, "decode");
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+
+    expect(plane.ingest(replayedEnvelope(ksportEnvelope(1, "live", [101], "worker-b:1", 100)),
+      { connectionGeneration: 2 })).toBe(false);
+
+    expect(decode).not.toHaveBeenCalled();
+  });
+
   it("does not promote a replacement candidate from replayed KSPORT partitions", async () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
     plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100), { connectionGeneration: 1 });
@@ -248,6 +293,43 @@ describe("ChromeCatalogDataPlane", () => {
       { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "103" })]
+    });
+  });
+
+  it("never assembles KSPORT HTTP authority from mixed current/candidate chunks in either direction", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100), { connectionGeneration: 1 });
+    plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100), { connectionGeneration: 1 });
+    const current = (sequence: number, generation: number, eventId: number) =>
+      ksportHttpEnvelope(sequence, "live", generation, [eventId]);
+    const candidate = (sequence: number, partition: "live" | "today", generation: number,
+      eventIds: readonly number[]) => ksportHttpEnvelope(sequence, partition, generation, eventIds,
+        "chrome:KSPORT:9", 9, "worker-a:1");
+
+    // Candidate first + current final cannot form a candidate baseline.
+    const candidateLive1 = candidate(3, "live", 1, [901]);
+    expect(plane.ingest(chunkedNetworkBody(candidateLive1, 3, 0, "network-mixed-candidate-1"),
+      { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(chunkedNetworkBody(current(4, 1, 901), 4, 1, "network-mixed-candidate-1"),
+      { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(candidate(5, "today", 1, []), { connectionGeneration: 1 })).toBe(false);
+
+    // Current first + candidate final is equally non-authorizing.
+    const currentLive2 = current(6, 2, 902);
+    expect(plane.ingest(chunkedNetworkBody(currentLive2, 6, 0, "network-mixed-current-2"),
+      { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(chunkedNetworkBody(candidate(7, "live", 2, [902]), 7, 1,
+      "network-mixed-current-2"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(candidate(8, "today", 2, []), { connectionGeneration: 1 })).toBe(false);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" })]
+    });
+
+    // Independent, wholly candidate-owned partitions still recover normally.
+    expect(plane.ingest(candidate(9, "live", 3, [903]), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(candidate(10, "today", 3, []), { connectionGeneration: 1 })).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "903" })]
     });
   });
 
@@ -526,6 +608,66 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(closed)).toBe(true);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+  });
+
+  it("re-baselines KSPORT on a strictly newer stream in the same source epoch after close", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100));
+    expect(plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100))).toBe(true);
+    const lifecycle = (state: "OPEN" | "CLOSED", streamId: string, sequence: number) => ({
+      ...ksportEnvelope(sequence, "live", [], "worker-a:0", 101), transport: "WS_STATE" as const,
+      request: { ...ksportEnvelope(sequence, "live", [], "worker-a:0", 101).request, streamId },
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ state }) }
+    });
+
+    expect(plane.ingest(lifecycle("CLOSED", "ksport-stream-1", 3))).toBe(true);
+    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(plane.ingest(lifecycle("OPEN", "2", 4))).toBe(false);
+    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    const replacement = (partition: "live" | "today", sequence: number) => {
+      const value = ksportEnvelope(sequence, partition, partition === "live" ? [202] : [],
+        "worker-a:0", 101);
+      return { ...value, request: { ...value.request, streamId: "2" } };
+    };
+    expect(plane.ingest(replacement("live", 5))).toBe(false);
+    expect(plane.ingest(replacement("today", 6))).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "202" })]
+    });
+    expect(plane.ingest(ksportEnvelope(7, "live", [999], "worker-a:0", 102))).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH"]);
+  });
+
+  it("fails closed through 59 seconds after pending-delta loss and ignores heartbeat freshness", async () => {
+    let now = 1_500;
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, publish });
+    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100));
+    expect(plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100))).toBe(true);
+    expect(plane.ingest(ksportEnvelope(3, "live", [102], "worker-a:0", 200))).toBe(false);
+    for (let index = 0; index <= 256; index += 1) {
+      plane.ingest(ksportDeltaEnvelope(10 + index, 201 + index, 5_700_000 + index));
+    }
+
+    now = 59_000;
+    const heartbeat = { ...ksportEnvelope(400, "today", [], "worker-a:0", 458), observedAtMs: now,
+      payload: { encoding: "UTF8" as const, body: `a${JSON.stringify(["\n"])}` } };
+    expect(plane.ingest(heartbeat)).toBe(false);
+    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
+
+    const replacement = (partition: "live" | "today", sequence: number, observedAtMs: number) => ({
+      ...ksportEnvelope(sequence, partition, partition === "live" ? [202] : [], "worker-a:0", 500),
+      observedAtMs
+    });
+    expect(plane.ingest(replacement("live", 500, 59_001))).toBe(false);
+    now = 59_002;
+    expect(plane.ingest(replacement("today", 501, 59_002))).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "202" })]
+    });
   });
 
   it("requests controller-governed recovery without heartbeat freshness maps", async () => {

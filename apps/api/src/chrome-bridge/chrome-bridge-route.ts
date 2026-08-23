@@ -5,6 +5,8 @@ import type { RawData } from "ws";
 import { z } from "zod";
 import type { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
 import type { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
+import { chromeBridgeAccountKeyForLobby, chromeBridgeSourceIdentity,
+  type ChromeBridgeAccountKey } from "./chrome-bridge-account.js";
 
 const MAX_FRAME_BYTES = 256 * 1024;
 
@@ -35,7 +37,10 @@ export function registerChromeBridgeRoute(
   if (!options.installationKey.trim()) throw new Error("CHROME_BRIDGE_KEY_REQUIRED");
 
   const openProviderTicket = options.openProviderTicket ?? true;
-  const socketsBySource = new Map<string, WritableBridgeSocket>();
+  const sourcesByAccount = new Map<ChromeBridgeAccountKey, {
+    readonly sourceId: string;
+    readonly socket: WritableBridgeSocket;
+  }>();
 
   app.get("/api/chrome-bridge/sources", async () => ({ sources: registry.listSources() }));
   app.get("/api/chrome-bridge/features", async () => ({ openProviderTicket }));
@@ -45,7 +50,9 @@ export function registerChromeBridgeRoute(
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_SELECTION_IDENTITY" });
     const source = registry.listSources().find((item) => item.sourceId === parsed.data.sourceId);
     if (source === undefined) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
-    const socket = socketsBySource.get(parsed.data.sourceId);
+    const identity = chromeBridgeSourceIdentity(parsed.data.sourceId);
+    const attached = identity === null ? undefined : sourcesByAccount.get(identity.accountKey);
+    const socket = attached?.sourceId === parsed.data.sourceId ? attached.socket : undefined;
     if (!socket || socket.readyState !== 1) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
     const control: ChromeBridgeControlMessage = { version: 1, kind: "FOCUS_SELECTION", ...parsed.data };
     socket.send(JSON.stringify(control));
@@ -64,11 +71,18 @@ export function registerChromeBridgeRoute(
     const writableSocket = socket as unknown as WritableBridgeSocket;
     options.controlPlane?.attachInstallation(writableSocket);
     const connection = {};
-    const requestedSnapshots = new Set<string>();
-    const connectionSources = new Set<string>();
+    registry.registerConnection(connection);
+    // All per-connection indexes are provider-account scoped. A tab/source
+    // replacement atomically overwrites its prior identity, keeping the route
+    // bounded to the six supported provider accounts even before socket close.
+    const requestedSnapshots = new Map<ChromeBridgeAccountKey, string>();
+    const connectionSources = new Map<ChromeBridgeAccountKey, string>();
     writableSocket.on("close", () => {
-      for (const sourceId of connectionSources) {
-        if (socketsBySource.get(sourceId) === writableSocket) socketsBySource.delete(sourceId);
+      for (const [accountKey, sourceId] of connectionSources) {
+        const current = sourcesByAccount.get(accountKey);
+        if (current?.socket === writableSocket && current.sourceId === sourceId) {
+          sourcesByAccount.delete(accountKey);
+        }
       }
       registry.releaseConnection(connection);
       options.controlPlane?.detach(writableSocket);
@@ -93,14 +107,16 @@ export function registerChromeBridgeRoute(
       }
       const control = registry.ingest(parsed.data, connection);
       if (control.kind === "ACK") {
-        socketsBySource.set(parsed.data.sourceId, writableSocket);
-        connectionSources.add(parsed.data.sourceId);
+        const accountKey = chromeBridgeAccountKeyForLobby(parsed.data.lobby);
+        sourcesByAccount.set(accountKey, { sourceId: parsed.data.sourceId, socket: writableSocket });
+        connectionSources.set(accountKey, parsed.data.sourceId);
         options.controlPlane?.attach(parsed.data.sourceId, writableSocket);
       }
       socket.send(JSON.stringify(control), () => {
         if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") { socket.close(); return; }
-        if (control.kind === "ACK" && !requestedSnapshots.has(parsed.data.sourceId)) {
-          requestedSnapshots.add(parsed.data.sourceId);
+        const accountKey = chromeBridgeAccountKeyForLobby(parsed.data.lobby);
+        if (control.kind === "ACK" && requestedSnapshots.get(accountKey) !== parsed.data.sourceId) {
+          requestedSnapshots.set(accountKey, parsed.data.sourceId);
           // A loopback reconnect is not authorization to hard-reload a provider
           // tab. The extension resolves this command with a DOM capture,
           // provider API call, or socket-only reconnect inside the current tab.

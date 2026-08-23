@@ -40,6 +40,13 @@ function stableDomCoverage(previous: ReadonlySet<string>, current: ReadonlySet<s
   return shared / smaller >= 0.95 && sizeDrift <= Math.max(5, Math.ceil(previous.size * 0.1));
 }
 
+interface SabaStreamState {
+  activeStreamId: string | null;
+  activeStreamOrdinal: number | null;
+  highWatermark: number;
+  authorizing: boolean;
+}
+
 export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "saba-ws-catalog-v1";
   readonly lobby = "SABA" as const;
@@ -52,8 +59,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #domCandidates = new Map<string, ReadonlySet<string>>();
   readonly #domReadySources = new Set<string>();
   readonly #lastWsPublishAtMs = new Map<string, number>();
-  readonly #activeStreams = new Map<string, string>();
-  readonly #retiredStreams = new Map<string, Set<string>>();
+  readonly #streamStates = new Map<string, SabaStreamState>();
   readonly #authoritativeGenerations = new Map<string, string>();
   readonly #authoritativeBaselineAtMs = new Map<string, number>();
 
@@ -70,8 +76,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     for (const key of this.#lastWsPublishAtMs.keys()) if (key.startsWith(`${sourceId}|`)) {
       this.#lastWsPublishAtMs.delete(key);
     }
-    for (const key of this.#activeStreams.keys()) if (key.startsWith(`${sourceId}|`)) this.#activeStreams.delete(key);
-    for (const key of this.#retiredStreams.keys()) if (key.startsWith(`${sourceId}|`)) this.#retiredStreams.delete(key);
+    for (const key of this.#streamStates.keys()) if (key.startsWith(`${sourceId}|`)) this.#streamStates.delete(key);
     for (const key of this.#authoritativeGenerations.keys()) {
       if (key.startsWith(`${sourceId}|`)) this.#authoritativeGenerations.delete(key);
     }
@@ -86,8 +91,9 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       envelope.request.pathnameClass === "/__fieldline_dom_snapshot__") return true;
     if ((envelope.transport !== "WS_FRAME" && envelope.transport !== "WS_STATE") ||
       envelope.request.pathnameClass !== "/socket.io/") return false;
-    if (envelope.transport === "WS_STATE") return envelope.request.streamId !== undefined &&
-      websocketLifecycleState(envelope) !== null;
+    const streamId = envelope.request.streamId;
+    if (streamId === undefined || sabaStreamOrdinal(streamId) === null) return false;
+    if (envelope.transport === "WS_STATE") return websocketLifecycleState(envelope) !== null;
     // Parsing large Socket.IO frames here and again in decode doubled the hot
     // path cost. The route and lobby already identify SABA; decode performs
     // the strict provider-frame validation once.
@@ -96,6 +102,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
+    // Replayed provider evidence is display/bootstrap material only. It must
+    // not allocate decoders, advance lifecycle high-water marks, or retire the
+    // active stream even when this adapter is called outside the data plane.
+    if (envelope.request.replayed === true) return [];
     if (envelope.transport === "DOM_SNAPSHOT") {
       // The DOM is only the visible viewport, never an authoritative baseline.
       // Publishing it before reset/done makes a healthy reconnect look LIVE
@@ -137,39 +147,56 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         provenance: "DOM_FALLBACK"
       });
     }
-    const streamId = envelope.request.streamId ?? "legacy";
+    const streamId = envelope.request.streamId!;
+    const streamOrdinal = sabaStreamOrdinal(streamId)!;
     const epochKey = sourceEpochKey(envelope);
     const decoderKey = `${epochKey}|${streamId}`;
     if (envelope.transport === "WS_STATE") {
       const state = websocketLifecycleState(envelope);
       if (state === null) return [];
       if (state === "OPEN") {
-        const previous = this.#activeStreams.get(epochKey);
-        if (this.#retiredStreams.get(epochKey)?.has(streamId) === true || previous === streamId) return [];
-        this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
-        if (previous !== undefined && previous !== streamId) {
-          this.#dropStream(envelope.sourceId, sourceEpoch(envelope), previous);
-          const retired = this.#retiredStreams.get(epochKey) ?? new Set<string>();
-          retired.add(previous);
-          this.#retiredStreams.set(epochKey, retired);
+        const current = this.#streamStates.get(epochKey);
+        if (current?.activeStreamId === streamId && current.activeStreamOrdinal === streamOrdinal) {
+          if (current.authorizing) return [];
+          this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
+          current.authorizing = true;
+          this.#authoritativeGenerations.delete(epochKey);
+          this.#authoritativeBaselineAtMs.delete(epochKey);
+          return [];
         }
-        this.#activeStreams.set(epochKey, streamId);
+        if (current !== undefined && streamOrdinal <= current.highWatermark) return [];
+        this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
+        if (current?.activeStreamId !== null && current?.activeStreamId !== undefined) {
+          this.#dropStream(envelope.sourceId, sourceEpoch(envelope), current.activeStreamId);
+        }
+        this.#streamStates.set(epochKey, { activeStreamId: streamId,
+          activeStreamOrdinal: streamOrdinal, highWatermark: streamOrdinal, authorizing: true });
         this.#authoritativeGenerations.delete(epochKey);
         this.#authoritativeBaselineAtMs.delete(epochKey);
         return [];
       }
+      const current = this.#streamStates.get(epochKey);
+      if (current?.activeStreamId !== streamId || current.activeStreamOrdinal !== streamOrdinal) return [];
       this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
-      if (this.#activeStreams.get(epochKey) !== streamId) return [];
-      this.#activeStreams.delete(epochKey);
-      const retired = this.#retiredStreams.get(epochKey) ?? new Set<string>();
-      retired.add(streamId);
-      this.#retiredStreams.set(epochKey, retired);
+      current.activeStreamId = null;
+      current.activeStreamOrdinal = null;
+      current.authorizing = false;
       this.#authoritativeGenerations.delete(epochKey);
       this.#authoritativeBaselineAtMs.delete(epochKey);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }
-    if (this.#retiredStreams.get(epochKey)?.has(streamId) === true) return [];
+    let stream = this.#streamStates.get(epochKey);
+    if (stream === undefined) {
+      // Characterized adapter fixtures may begin at the first provider frame;
+      // the real producer emits OPEN first. Only the first canonical ordinal
+      // may seed this bounded state. Once a lifecycle exists, frames cannot
+      // advance it implicitly.
+      stream = { activeStreamId: streamId, activeStreamOrdinal: streamOrdinal,
+        highWatermark: streamOrdinal, authorizing: false };
+      this.#streamStates.set(epochKey, stream);
+    }
+    if (stream.activeStreamId !== streamId || stream.activeStreamOrdinal !== streamOrdinal) return [];
     try {
       const frame = parseSabaSocketFrame(envelope.payload.body);
       if (frame === null) return [];
@@ -220,15 +247,16 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         receivedMonotonicMs: envelope.receivedMonotonicMs,
         sequence: envelope.sequence
       });
-      if (applied.fullSnapshot && envelope.request.replayed !== true &&
-        this.#activeStreams.get(epochKey) === streamId) {
+      if (applied.fullSnapshot && this.#streamStates.get(epochKey)?.activeStreamId === streamId &&
+        this.#streamStates.get(epochKey)?.authorizing === true) {
         this.#authoritativeGenerations.set(epochKey,
           `${sourceEpoch(envelope)}:saba:${streamId}:${envelope.sequence}`);
         this.#authoritativeBaselineAtMs.set(epochKey, envelope.observedAtMs);
       }
       const generation = this.#authoritativeGenerations.get(epochKey);
       const authoritative = applied.fullSnapshot && generation !== undefined &&
-        envelope.request.replayed !== true && this.#activeStreams.get(epochKey) === streamId;
+        this.#streamStates.get(epochKey)?.activeStreamId === streamId &&
+        this.#streamStates.get(epochKey)?.authorizing === true;
       if (authoritative && applied.records.length === 0) {
         // empty/done is a complete provider replacement, not an empty bridge
         // shard. Remove every retained epoch partition before publishing it.
@@ -247,7 +275,8 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       }
       return this.#update(envelope, `WS:${streamId}:${frame.bridgeId}`, normalized,
         authoritative ? { authoritativeBaseline: true, evidenceMode: "BASELINE", generation, provenance: "WS" }
-          : generation !== undefined && this.#activeStreams.get(epochKey) === streamId
+          : generation !== undefined && this.#streamStates.get(epochKey)?.activeStreamId === streamId &&
+              this.#streamStates.get(epochKey)?.authorizing === true
             ? { evidenceMode: "DELTA", generation, provenance: "WS" } : {},
         authoritative && applied.records.length === 0);
     } catch (error) {
@@ -288,6 +317,12 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       observedAtMs: envelope.observedAtMs, value: catalog, ...evidence }];
   }
 
+  streamStats(): { readonly sourceEpochs: number; readonly trackedStreamIds: number } {
+    let trackedStreamIds = 0;
+    for (const state of this.#streamStates.values()) if (state.activeStreamId !== null) trackedStreamIds += 1;
+    return { sourceEpochs: this.#streamStates.size, trackedStreamIds };
+  }
+
   #dropStream(sourceId: string, epoch: string, streamId: string): void {
     const decoderKey = `${sourceId}|${epoch}|${streamId}`;
     this.#decoders.delete(decoderKey);
@@ -304,4 +339,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       if (key.startsWith(`${decoderKey}|`)) this.#lastWsPublishAtMs.delete(key);
     }
   }
+}
+
+function sabaStreamOrdinal(streamId: string): number | null {
+  if (!/^[1-9]\d*$/u.test(streamId)) return null;
+  const ordinal = Number(streamId);
+  return Number.isSafeInteger(ordinal) ? ordinal : null;
 }

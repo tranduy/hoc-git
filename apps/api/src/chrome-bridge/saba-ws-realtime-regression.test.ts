@@ -23,12 +23,12 @@ ChromeBridgeEnvelope {
     sourceEpoch, sequence, observedAtMs: 1_786_449_540_000 + sequence,
     receivedMonotonicMs: sequence, transport: "WS_FRAME",
     request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket",
-      streamId: "stream-1" },
+      streamId: "1" },
     payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", bridgeId, rows, revision])}` } };
 }
 
 function socketState(state: "OPEN" | "CLOSED", sequence: number,
-  sourceEpoch = "worker-a:0", streamId = "stream-1"): ChromeBridgeEnvelope {
+  sourceEpoch = "worker-a:0", streamId = "1"): ChromeBridgeEnvelope {
   return { ...envelope([], "state", sequence, sourceEpoch), transport: "WS_STATE",
     request: { ...envelope([], "state", sequence, sourceEpoch).request, streamId },
     payload: { encoding: "UTF8", body: JSON.stringify({ state }) } };
@@ -165,14 +165,14 @@ describe("SABA websocket realtime regressions", () => {
 
   it("ignores delayed OPEN from a retired SABA stream", () => {
     const adapter = new SabaWsCatalogAdapter();
-    adapter.decode(socketState("OPEN", 1, "worker-a:0", "stream-1"));
-    adapter.decode(socketState("OPEN", 2, "worker-a:0", "stream-2"));
+    adapter.decode(socketState("OPEN", 1, "worker-a:0", "1"));
+    adapter.decode(socketState("OPEN", 2, "worker-a:0", "2"));
 
-    expect(adapter.decode(socketState("OPEN", 3, "worker-a:0", "stream-1"))).toEqual([]);
+    expect(adapter.decode(socketState("OPEN", 3, "worker-a:0", "1"))).toEqual([]);
     const replacement = envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.72, -0.82),
       [0, "done"]], "r0001", 4);
     const update = adapter.decode({ ...replacement,
-      request: { ...replacement.request, streamId: "stream-2" } });
+      request: { ...replacement.request, streamId: "2" } });
     expect(update).toEqual([expect.objectContaining({
       authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
     })]);
@@ -213,5 +213,30 @@ describe("SABA websocket realtime regressions", () => {
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
       events: [], markets: [], quotes: []
     });
+  });
+
+  it("re-baselines SABA on a newer stream in the same source epoch after close", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100, publish });
+    expect(plane.ingest(socketState("OPEN", 1, "worker-a:0", "1"))).toBe(false);
+    expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"],
+      ...eventRows(0.91, -0.99), [0, "done"]], "r0001", 2))).toBe(true);
+
+    expect(plane.ingest(socketState("CLOSED", 3, "worker-a:0", "1"))).toBe(true);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(plane.ingest(socketState("OPEN", 4, "worker-a:0", "2"))).toBe(false);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    const replacement = envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.72, -0.82),
+      [0, "done"]], "r0002", 5);
+    expect(plane.ingest({ ...replacement,
+      request: { ...replacement.request, streamId: "2" } })).toBe(true);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
+      quotes: expect.arrayContaining([expect.objectContaining({ providerSelectionId: "30:home", rawOdds: "0.72" })])
+    });
+    const late = envelope([encoded({ type: "o", oddsid: 30, matchid: 20,
+      odds1a: 0.01, odds2a: -0.01 })], "r0003", 6);
+    expect(plane.ingest(late)).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH"]);
   });
 });
