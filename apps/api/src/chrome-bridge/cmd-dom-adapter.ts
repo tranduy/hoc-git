@@ -40,7 +40,8 @@ export function decodePublicDomRecords(
   const assembled = assembler.ingest(envelope.sourceId, parsedChunk.data,
     envelope.receivedMonotonicMs, envelope.observedAtMs);
   if (!assembled) return null;
-  if (assembled.length === 0 || assembled.length > 5_000) return null;
+  if (assembled.length > 5_000) return null;
+  if (assembled.length === 0) return [];
   const records = assembled.flatMap((candidate): CmdCatalogInputRecord[] => {
     const parsed = recordSchema.safeParse(candidate);
     return parsed.success ? [parsed.data as CmdCatalogInputRecord] : [];
@@ -55,7 +56,7 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
   readonly #assembler = new CmdSnapshotAssembler();
   readonly #recordsBySource = new Map<string, Map<string, {
     readonly record: CmdCatalogInputRecord;
-    readonly sweepFrameKey: string;
+    readonly sweepOwnerKey: string;
     readonly observedAtMs: number;
     readonly receivedMonotonicMs: number;
     readonly sequence: number;
@@ -80,42 +81,43 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
     if (!this.fingerprint(envelope)) return [];
     const records = decodePublicDomRecords(this.#assembler, envelope);
     if (records === null) return [];
-    const usableRecords = records.filter((record) => record.groups.length > 0);
-    if (usableRecords.length === 0) return [];
     let raw: unknown;
     try { raw = JSON.parse(envelope.payload.body); } catch { return []; }
     const chunk = CmdSnapshotChunkSchema.parse(raw);
+    const usableRecords = records.filter((record) => record.groups.length > 0);
+    if (usableRecords.length === 0 && !(records.length === 0 && chunk.sweepComplete === true)) return [];
     const cached = this.#recordsBySource.get(envelope.sourceId) ?? new Map();
     let changed = false;
-    const sweepFrameKey = chunk.sweepFrameKey ?? "legacy";
+    const sweepOwnerKey = chunk.sweepId === undefined ? "legacy" :
+      `${chunk.sweepFrameKey}\u0000${chunk.sweepDocumentKey}`;
     const sourceSweeps = this.#sweepsBySource.get(envelope.sourceId) ?? new Map();
-    let sweep = sourceSweeps.get(sweepFrameKey);
+    let sweep = sourceSweeps.get(sweepOwnerKey);
     if (chunk.sweepId !== undefined && (sweep === undefined || sweep.id !== chunk.sweepId)) {
       sweep = { id: chunk.sweepId, visited: new Set<string>() };
-      sourceSweeps.set(sweepFrameKey, sweep);
+      sourceSweeps.set(sweepOwnerKey, sweep);
       this.#sweepsBySource.set(envelope.sourceId, sourceSweeps);
     }
     for (const record of usableRecords) {
       if (chunk.sweepId !== undefined && sweep?.id === chunk.sweepId) sweep.visited.add(record.matchId);
       const prior = cached.get(record.matchId);
       if (prior !== undefined && JSON.stringify(prior.record) === JSON.stringify(record)) {
-        if (prior.sweepFrameKey !== sweepFrameKey) {
-          cached.set(record.matchId, { ...prior, sweepFrameKey });
+        if (prior.sweepOwnerKey !== sweepOwnerKey) {
+          cached.set(record.matchId, { ...prior, sweepOwnerKey });
         }
         continue;
       }
-      cached.set(record.matchId, { record, sweepFrameKey, observedAtMs: envelope.observedAtMs,
+      cached.set(record.matchId, { record, sweepOwnerKey, observedAtMs: envelope.observedAtMs,
         receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       changed = true;
     }
     if (chunk.sweepComplete === true && chunk.sweepId !== undefined && sweep?.id === chunk.sweepId) {
       for (const [matchId, entry] of [...cached.entries()]) {
-        if (entry.sweepFrameKey !== sweepFrameKey) continue;
+        if (entry.sweepOwnerKey !== sweepOwnerKey) continue;
         if (sweep.visited.has(matchId)) continue;
         cached.delete(matchId);
         changed = true;
       }
-      sourceSweeps.delete(sweepFrameKey);
+      sourceSweeps.delete(sweepOwnerKey);
       if (sourceSweeps.size === 0) this.#sweepsBySource.delete(envelope.sourceId);
     }
     this.#recordsBySource.set(envelope.sourceId, cached);

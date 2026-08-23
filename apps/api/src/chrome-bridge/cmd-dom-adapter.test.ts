@@ -17,7 +17,7 @@ function envelope(body: string, overrides: Partial<Pick<ChromeBridgeEnvelope,
 
 function snapshotBody(records: readonly unknown[], overrides: Partial<{
   snapshotId: string; chunkIndex: number; chunkCount: number; sweepId: string; sweepComplete: boolean;
-  sweepFrameKey: string;
+  sweepFrameKey: string; sweepDocumentKey: string;
 }> = {}): string {
   return JSON.stringify({
     schemaVersion: 2,
@@ -26,7 +26,10 @@ function snapshotBody(records: readonly unknown[], overrides: Partial<{
     chunkCount: overrides.chunkCount ?? 1,
     ...(overrides.sweepId === undefined ? {} : { sweepId: overrides.sweepId }),
     ...(overrides.sweepComplete === undefined ? {} : { sweepComplete: overrides.sweepComplete }),
-    ...(overrides.sweepFrameKey === undefined ? {} : { sweepFrameKey: overrides.sweepFrameKey }),
+    ...(overrides.sweepId === undefined ? {} : {
+      sweepFrameKey: overrides.sweepFrameKey ?? "legacy-frame",
+      sweepDocumentKey: overrides.sweepDocumentKey ?? "worker-a:9:legacy-frame:document-1"
+    }),
     records
   });
 }
@@ -167,7 +170,8 @@ describe("CmdDomCatalogAdapter", () => {
     const nextRecord = { ...record, matchId: "event-2", teamNames: ["Gamma FC", "Delta FC"],
       groups: [{ ...record.groups[0]!, odds: record.groups[0]!.odds.map((odd) => ({ ...odd,
         marketOddsId: "ah-2" })) }] };
-    adapter.decode(envelope(snapshotBody([obsoleteRecord], { snapshotId: "cmd:9:before-sweep-0001" }),
+    adapter.decode(envelope(snapshotBody([obsoleteRecord], { snapshotId: "cmd:9:before-sweep-0001",
+      sweepId: "cmd:9:before-sweep", sweepComplete: true }),
       { sequence: 0 }));
     adapter.decode(envelope(snapshotBody([record], { snapshotId: "cmd:9:sweep-part-0001",
       sweepId: "cmd:9:sweep-1", sweepComplete: false }), { sequence: 1 }));
@@ -177,9 +181,10 @@ describe("CmdDomCatalogAdapter", () => {
     expect(partial.events.map((event) => event.providerEventId).sort())
       .toEqual(["event-1", "event-2", "event-obsolete"]);
 
-    const complete = adapter.decode(envelope(snapshotBody([nextRecord], {
+    const completionUpdates = adapter.decode(envelope(snapshotBody([nextRecord], {
       snapshotId: "cmd:9:sweep-part-0003", sweepId: "cmd:9:sweep-1", sweepComplete: true
-    }), { sequence: 3 }))[0]!.value as { events: Array<{ providerEventId: string }> };
+    }), { sequence: 3 }));
+    const complete = completionUpdates[0]!.value as { events: Array<{ providerEventId: string }> };
     expect(complete.events.map((event) => event.providerEventId).sort()).toEqual(["event-1", "event-2"]);
   });
 
@@ -194,5 +199,32 @@ describe("CmdDomCatalogAdapter", () => {
       sweepId: "cmd:9:sweep-b", sweepComplete: true, sweepFrameKey: "odds-frame-b" }), { sequence: 2 }));
     expect((completedOther[0]!.value as { events: Array<{ providerEventId: string }> }).events
       .map((event) => event.providerEventId).sort()).toEqual(["event-1", "event-2"]);
+  });
+
+  it("uses an empty completed sweep to tombstone records owned by the same document", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    adapter.decode(envelope(snapshotBody([record], { snapshotId: "cmd:9:empty-frame-0001",
+      sweepId: "cmd:9:empty-sweep", sweepComplete: false, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1" }), { sequence: 1 }));
+    const completed = adapter.decode(envelope(snapshotBody([], { snapshotId: "cmd:9:empty-frame-0002",
+      sweepId: "cmd:9:empty-sweep-next", sweepComplete: true, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1" }), { sequence: 2 }));
+    expect(completed).toHaveLength(1);
+    expect((completed[0]!.value as { events: unknown[] }).events).toEqual([]);
+  });
+
+  it("does not let a replacement document complete the prior document's sweep", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    adapter.decode(envelope(snapshotBody([record], { snapshotId: "cmd:9:document-old-0001",
+      sweepId: "cmd:9:shared-sweep", sweepComplete: false, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-old" }), { sequence: 1 }));
+    expect(adapter.decode(envelope(snapshotBody([], { snapshotId: "cmd:9:document-new-0002",
+      sweepId: "cmd:9:shared-sweep", sweepComplete: true, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-b:9:odds-frame:document-new" }), { sequence: 2 }))).toEqual([]);
+    const oldCompletion = adapter.decode(envelope(snapshotBody([], {
+      snapshotId: "cmd:9:document-old-0003", sweepId: "cmd:9:old-empty-sweep", sweepComplete: true,
+      sweepFrameKey: "odds-frame", sweepDocumentKey: "worker-a:9:odds-frame:document-old"
+    }), { sequence: 3 }));
+    expect((oldCompletion[0]!.value as { events: unknown[] }).events).toEqual([]);
   });
 });

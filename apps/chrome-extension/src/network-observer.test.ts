@@ -1119,7 +1119,8 @@ describe("NetworkObserver", () => {
     await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
       "cgnew.fts368.com");
     const chunk = JSON.parse(String((forward.mock.calls[0]?.[0] as ChromeBridgeEnvelope).payload.body));
-    expect(chunk).toMatchObject({ sweepId: "cmd:9:sweep-1", sweepComplete: true });
+    expect(chunk).toMatchObject({ sweepId: "cmd:9:sweep-1", sweepComplete: true,
+      sweepFrameKey: "top", sweepDocumentKey: expect.any(String) });
     expect(JSON.stringify(chunk.records)).not.toContain("__fieldlineSweep");
   });
 
@@ -1144,7 +1145,7 @@ describe("NetworkObserver", () => {
       JSON.parse(String(message.payload.body)) as Record<string, unknown>)
       .find((chunk) => JSON.stringify(chunk.records).includes("odds-event"));
     expect(oddsChunk).toMatchObject({ sweepId: "cmd:odds:sweep-1", sweepComplete: false,
-      sweepFrameKey: "odds-frame" });
+      sweepFrameKey: "odds-frame", sweepDocumentKey: expect.any(String) });
   });
 
   it("accepts completion only from the same odds-frame document as its records", async () => {
@@ -1168,7 +1169,77 @@ describe("NetworkObserver", () => {
       JSON.parse(String(message.payload.body)) as Record<string, unknown>)
       .find((chunk) => JSON.stringify(chunk.records).includes("odds-event"));
     expect(oddsChunk).toMatchObject({ sweepId: "cmd:odds:sweep-1", sweepComplete: true,
-      sweepFrameKey: "odds-frame" });
+      sweepFrameKey: "odds-frame", sweepDocumentKey: expect.any(String) });
+  });
+
+  it("emits false-to-true sweep completion with unchanged records and deduplicates its repeat", async () => {
+    let complete = false;
+    const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "odds-event",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: {
+        id: "odds-frame", loaderId: "loader-one" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") return { result: { value: JSON.stringify([publicRecord,
+        { __fieldlineSweep: { sweepId: "cmd:odds:sweep-1", complete } }]) } };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 5_000,
+      monotonicNow: () => 50, observerSessionId: "worker-a" });
+    const source = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    await observer.captureCmdSnapshot(source, "cgnew.fts368.com");
+    complete = true;
+    await observer.captureCmdSnapshot(source, "cgnew.fts368.com");
+    await observer.captureCmdSnapshot(source, "cgnew.fts368.com");
+    expect(forward).toHaveBeenCalledTimes(2);
+    const chunks = forward.mock.calls.map(([message]) => JSON.parse(String(message.payload.body)));
+    expect(chunks.map((chunk) => chunk.sweepComplete)).toEqual([false, true]);
+    expect(chunks[0].sweepDocumentKey).toBe(chunks[1].sweepDocumentKey);
+  });
+
+  it("emits an explicit zero-record completed sweep", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: {
+        id: "odds-frame", loaderId: "loader-one" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") return { result: { value: JSON.stringify([
+        { __fieldlineSweep: { sweepId: "cmd:odds:empty", complete: true } }
+      ]) } };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
+    await observer.captureCmdSnapshot({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      "cgnew.fts368.com");
+    expect(forward).toHaveBeenCalledOnce();
+    const chunk = JSON.parse(String(forward.mock.calls[0]![0].payload.body));
+    expect(chunk).toMatchObject({ records: [], sweepId: "cmd:odds:empty", sweepComplete: true,
+      sweepFrameKey: "odds-frame", sweepDocumentKey: expect.any(String) });
+  });
+
+  it("changes sweep document identity when the same frame gets a new loader", async () => {
+    let loaderId = "loader-old";
+    const publicRecord = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "odds-event",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [] };
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "odds-frame", loaderId } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") return { result: { value: JSON.stringify([publicRecord,
+        { __fieldlineSweep: { sweepId: "cmd:odds:sweep-1", complete: true } }]) } };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 5_000,
+      observerSessionId: "worker-a" });
+    const source = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    await observer.captureCmdSnapshot(source, "cgnew.fts368.com");
+    loaderId = "loader-new";
+    await observer.captureCmdSnapshot(source, "cgnew.fts368.com");
+    expect(forward).toHaveBeenCalledTimes(2);
+    const documentKeys = forward.mock.calls.map(([message]) =>
+      JSON.parse(String(message.payload.body)).sweepDocumentKey as string);
+    expect(documentKeys[0]).not.toBe(documentKeys[1]);
   });
 
   it("does not emit an old-document sweep marker after the source epoch changes", async () => {
@@ -1200,7 +1271,8 @@ describe("NetworkObserver", () => {
     expect(scans).toBe(2);
     expect(forward).toHaveBeenCalledOnce();
     const chunk = JSON.parse(String(forward.mock.calls[0]![0].payload.body));
-    expect(chunk).toMatchObject({ sweepId: "cmd:new:sweep", sweepComplete: false, sweepFrameKey: "top" });
+    expect(chunk).toMatchObject({ sweepId: "cmd:new:sweep", sweepComplete: false, sweepFrameKey: "top",
+      sweepDocumentKey: expect.any(String) });
     expect(JSON.stringify(chunk.records)).toContain("new-event");
     expect(JSON.stringify(chunk)).not.toContain("old-event");
   });

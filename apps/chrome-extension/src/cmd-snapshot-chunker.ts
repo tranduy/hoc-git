@@ -6,17 +6,23 @@ import { utf8ByteLength } from "./utf8-length.js";
 // serialized, so its body must stay comfortably below the 256 KiB wire limit.
 const DEFAULT_MAX_CHUNK_BODY_BYTES = 110_000;
 
+type CmdSweepBinding = {
+  readonly sweepId: string;
+  readonly sweepComplete: boolean;
+  readonly sweepFrameKey: string;
+  readonly sweepDocumentKey: string;
+};
+
 function envelope(snapshotId: string, chunkIndex: number, chunkCount: number,
-  records: readonly unknown[], sweep?: { readonly sweepId: string; readonly sweepComplete: boolean;
-    readonly sweepFrameKey?: string }): CmdSnapshotChunk {
+  records: readonly unknown[], sweep?: CmdSweepBinding): CmdSnapshotChunk {
   return { schemaVersion: 2, snapshotId, chunkIndex, chunkCount, records: [...records], ...sweep };
 }
 
 export function chunkCmdSnapshot(records: readonly unknown[], snapshotId: string,
   maxBytes = DEFAULT_MAX_CHUNK_BODY_BYTES,
-  sweep?: { readonly sweepId: string; readonly sweepComplete: boolean;
-    readonly sweepFrameKey?: string }): readonly CmdSnapshotChunk[] {
-  if (records.length === 0) return [];
+  sweep?: CmdSweepBinding): readonly CmdSnapshotChunk[] {
+  if (records.length === 0) return sweep?.sweepComplete === true
+    ? [envelope(snapshotId, 0, 1, [], sweep)] : [];
   // Serialize each record exactly once. A chunk body is the fixed envelope
   // wrapper (measured with an empty records array, using the widest index
   // labels) plus the records joined by commas, so the byte size of a group

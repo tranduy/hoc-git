@@ -216,6 +216,49 @@ describe("ImHttpCatalogAdapter", () => {
     ]));
   });
 
+  it("replays a delta received between the first and second initial partitions", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const signedBaseline = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
+      ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 10, undefined,
+      "IM_MARKET_1", "im:8:first", "observer-im:0", 9))).toEqual([]);
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
+      ws: event.mls[0]!.ws.map((selection) => ({ ...selection,
+        o: selection.wsi === 101 ? 0.84 : -0.91 })) }] }] };
+    expect(adapter.decode(envelope(delta, 11, "/api/EventV6/GetSEDelta"))).toEqual([]);
+    const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
+      "IM_MARKET_2", "im:8:first", "observer-im:0", 9)).at(-1)?.value as {
+        quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
+    expect(committed.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })
+    ]));
+  });
+
+  it("bounds initial reconciliation replay to the latest 128 ordered deltas", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const signedBaseline = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
+      ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
+    adapter.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 10, undefined,
+      "IM_MARKET_1", "im:8:first", "observer-im:0", 9));
+    adapter.decode(envelope({ StatusCode: 100, dc: [{ eid: 112516390, a: 1 }] }, 11,
+      "/api/EventV6/GetSEDelta"));
+    for (let offset = 0; offset < 128; offset += 1) {
+      const homePrice = 0.7 + offset / 10_000;
+      const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
+        ws: event.mls[0]!.ws.map((selection) => ({ ...selection,
+          o: selection.wsi === 101 ? homePrice : -0.9 })) }] }] };
+      adapter.decode(envelope(delta, 12 + offset, "/api/EventV6/GetSEDelta"));
+    }
+    const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 140, undefined,
+      "IM_MARKET_2", "im:8:first", "observer-im:0", 9)).at(-1)?.value as {
+        events: Array<{ providerEventId: string }>;
+        quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
+    expect(committed.events).toEqual([expect.objectContaining({ providerEventId: "112516390" })]);
+    expect(committed.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.7127" })
+    ]));
+  });
+
   it("does not replay a pre-cutoff delta or a delta from a retired source epoch", () => {
     const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
       ws: event.mls[0]!.ws.map((selection) => ({ ...selection, o: 0.84 })) }] }] };

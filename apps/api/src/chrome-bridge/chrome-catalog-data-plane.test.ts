@@ -24,11 +24,12 @@ function cmdEnvelope(sequence = 1, records: readonly unknown[] = [record], chunk
 }
 
 function cmdSweepEnvelope(sequence: number, records: readonly unknown[], sweepComplete: boolean,
-  snapshotId: string): ChromeBridgeEnvelope {
+  snapshotId: string, sweepId = "cmd:9:sweep-dom-only"): ChromeBridgeEnvelope {
   const base = cmdEnvelope(sequence, records, 0, 1, snapshotId);
   return { ...base, observedAtMs: 1_000 + sequence, payload: { encoding: "UTF8",
     body: JSON.stringify({ schemaVersion: 2, snapshotId, chunkIndex: 0, chunkCount: 1,
-      sweepId: "cmd:9:sweep-dom-only", sweepComplete, records }) } };
+      sweepId, sweepComplete, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1", records }) } };
 }
 
 function cmdHttpEnvelope(sequence = 1, options: { readonly t?: number; readonly a?: boolean;
@@ -432,6 +433,14 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(malformedSecond.read("catalog-source:IM:FOOTBALL"))
       .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
 
+    const malformedNested = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    expect(malformedNested.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100,
+      sel: [{ ...validEvent, iscyb: true, mls: [{}] }] }))).toBe(false);
+    expect(malformedNested.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100,
+      sel: [validEvent] }))).toBe(false);
+    await expect(malformedNested.read("catalog-source:IM:FOOTBALL"))
+      .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
     const characterizedExclusion = new ChromeCatalogDataPlane({ now: () => 1_500 });
     expect(characterizedExclusion.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100,
       sel: [{ ...validEvent, eid: 112516391, iscyb: true }] }))).toBe(false);
@@ -448,14 +457,17 @@ describe("ChromeCatalogDataPlane", () => {
     const second = { ...record, matchId: "event-2", teamNames: ["Gamma", "Delta"], groups: [{
       ...record.groups[0]!, odds: record.groups[0]!.odds.map((odd) => ({ ...odd, marketOddsId: "market-2" }))
     }] };
-    expect(plane.ingest(cmdEnvelope(1, [record], 0, 1, "cmd:9:dom-only-a-0001"))).toBe(true);
-    expect(plane.ingest(cmdEnvelope(2, [second], 0, 1, "cmd:9:dom-only-b-0002"))).toBe(true);
+    expect(plane.ingest(cmdSweepEnvelope(1, [record], false, "cmd:9:dom-only-a-0001",
+      "cmd:9:dom-only-prior"))).toBe(true);
+    expect(plane.ingest(cmdSweepEnvelope(2, [second], true, "cmd:9:dom-only-b-0002",
+      "cmd:9:dom-only-prior"))).toBe(true);
     expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ events: expect.arrayContaining([
       expect.objectContaining({ providerEventId: "event-1" }),
       expect.objectContaining({ providerEventId: "event-2" })
     ]) }), "STALE");
 
-    expect(plane.ingest(cmdSweepEnvelope(3, [record], true, "cmd:9:dom-only-sweep-0003"))).toBe(true);
+    expect(plane.ingest(cmdSweepEnvelope(3, [record], true, "cmd:9:dom-only-sweep-0003",
+      "cmd:9:dom-only-next"))).toBe(true);
     expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({
       events: [expect.objectContaining({ providerEventId: "event-1" })]
     }), "STALE");

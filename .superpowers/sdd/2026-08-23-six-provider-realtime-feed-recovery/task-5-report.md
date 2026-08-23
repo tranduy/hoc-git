@@ -308,3 +308,118 @@ All six compile/build commands exited 0. `git diff --check` exited 0 with only t
 - `packages/contracts/src/chrome-bridge.test.ts`
 
 Commit subject: `fix(feed): close CMD and IM reconciliation races`.
+
+---
+
+## Fix Round 3
+
+Status: DONE
+
+Review base: `858ed0c`
+
+### Review findings resolved
+
+- IM uses one bounded per-source delta log for every reconciliation phase. Natural deltas are retained before partition 1, between partitions, and while an older catalog remains current. At atomic commit, ordered log entries newer than the announced cutoff are replayed once onto the new baseline. The log deterministically evicts its oldest entry above 128, rejects non-increasing source order, and is discarded on source reset.
+- IM validates each cyborg event's complete characterized market structure before applying the `iscyb: true` exclusion. A cyborg-shaped event with malformed nested `mls` now rejects the partition/generation; a fully structured characterized cyborg exclusion remains safe.
+- CMD semantic dedup now includes per-frame records plus sweep ID, completion state, and document identity. Unchanged records therefore emit the `false -> true` completion transition, while a repeated identical completion inside the dedup interval remains silent.
+- A completed, fully bound CMD sweep may carry zero records. The chunk contract rejects empty partial/unbound snapshots, while the chunker, assembler, adapter, and data plane carry an explicit completed-empty sweep through to same-document tombstones without granting `LIVE` authority.
+- Sweep metadata is all-or-none: sweep ID, completion, frame key, and document key are required together, and orphan identity fields are rejected. The observer derives the document key from observer session, target tab, source generation, full frame ID, and CDP loader identity. The public key is a bounded opaque hash rather than raw runtime identity.
+- The CMD assembler fingerprints all sweep metadata across chunks in addition to records and chunk count. Conflicting frame/document/session/completion metadata closes the snapshot; a normal identically bound multi-chunk snapshot still assembles out of order.
+- CMD adapter sweep ownership is keyed by both frame and document. A replacement document cannot complete or tombstone the prior document's sweep, while a new completed sweep from the owning document can remove all of its omitted rows.
+
+The sanitized authoritative CMD evidence and hashes remain unchanged. Fix Round 3 performed no browser/provider/runtime action and added no response fixture, raw provider body, header, cookie, token, credential, account identifier, or user data.
+
+### Fix Round 3 RED
+
+Tests were written before production changes and run against `858ed0c`:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/contracts -- --run src/chrome-bridge.test.ts
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/im-http-adapter.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/chrome-bridge/cmd-dom-adapter.test.ts src/chrome-bridge/cmd-snapshot-assembler.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/cmd-snapshot-chunker.test.ts src/network-observer.test.ts
+```
+
+```text
+Contracts: 2 failed / 12 passed.
+  Strict document binding and completed-empty sweep acceptance were absent.
+API: 9 failed / 49 passed.
+  IM lost the between-partition delta and the 129-entry bounded replay burst (2).
+  Malformed nested mls under iscyb authorized a generation (1).
+  Conflicting assembler document metadata completed incorrectly (1).
+  CMD strict binding/completed-empty/document ownership and the data-plane sweep path failed (5).
+Extension: 8 failed / 130 passed.
+  Completed-empty chunking failed (1).
+  Required document propagation, false-to-true semantic emission, zero-record completion,
+  and same-frame loader replacement failed in the observer (7).
+```
+
+The bounded replay test uses 129 post-cutoff deltas: an oldest event deletion followed by 128 ordered price updates. Correct deterministic eviction drops the deletion and commits the latest `0.7127` price; an unbounded replay would delete the event, while the prior lost-buffer behavior committed `0.60`.
+
+The strict sweep fixtures establish prior frame ownership with an explicitly bound sweep before testing omission. Legacy unbound viewport rows are not retrospectively assigned to a frame/document, so a completion cannot tombstone evidence whose ownership was never proven.
+
+### Fix Round 3 GREEN
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/cmd-http-adapter.test.ts src/chrome-bridge/cmd-dom-adapter.test.ts src/chrome-bridge/im-http-adapter.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/chrome-bridge/cmd-snapshot-assembler.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/cmd-dom-snapshot.test.ts src/cmd-snapshot-poller.test.ts src/cmd-snapshot-chunker.test.ts src/network-observer.test.ts
+npm.cmd test --workspace @tool-chenh/contracts -- --run src/chrome-bridge.test.ts
+```
+
+```text
+Task 5 API: 5 suites / 64 tests passed.
+Task 5 extension: 4 suites / 159 tests passed.
+Contracts: 1 suite / 14 tests passed.
+```
+
+Task 1-4 regressions:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/automatic-source-recovery.test.ts src/chrome-bridge/provider-source-refresh.test.ts src/chrome-bridge/chrome-bridge-control-plane.test.ts src/chrome-bridge/provider-feed-controller.test.ts src/chrome-bridge/provider-feed-registry.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/catalog/catalog-coverage-guard.test.ts src/server.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/provider-work-scheduler.test.ts src/local-bridge.test.ts src/network-observer.test.ts src/saba-snapshot-storage.test.ts src/cmd-snapshot-poller.test.ts src/bridge-wakeup.test.ts
+```
+
+```text
+API: 8 suites / 94 tests passed.
+Extension: 6 suites / 183 tests passed.
+```
+
+Compile/build and hygiene gates:
+
+```powershell
+npm.cmd run typecheck --workspace @tool-chenh/contracts
+npm.cmd run typecheck --workspace @tool-chenh/api
+npm.cmd run typecheck --workspace @tool-chenh/chrome-extension
+npm.cmd run build --workspace @tool-chenh/contracts
+npm.cmd run build --workspace @tool-chenh/api
+npm.cmd run build --workspace @tool-chenh/chrome-extension
+git diff --check
+git diff -- . ':!*.md' | rg -n -i "authorization|cookie|password|bearer|session[_-]?id|access[_-]?token|refresh[_-]?token|api[_-]?key"
+```
+
+All six compile/build commands exited 0. `git diff --check` exited 0 with only the checkout's LF-to-CRLF notices. The hygiene scan found only the synthetic test value and internal field name `observerSessionId`; document identity is emitted only as a bounded opaque hash.
+
+### Ordering, freshness, and remaining boundaries
+
+- The IM log cap remains 128 and is the only reconciliation replay buffer; no pending-generation array can grow separately. Deltas at or below the cutoff, non-increasing source sequences, and retired source epochs remain rejected.
+- Completed-empty CMD sweeps remain `DOM_FALLBACK` deltas. They can remove records proven to belong to that exact frame/document but cannot establish or renew authoritative network freshness or `LIVE`.
+- CDP loader identity plus observer/source epoch fencing makes document replacement explicit without exposing the raw loader, session, frame, or target tuple across the bridge.
+- Per-frame capture and IM reconciliation remain on their existing keyed provider lanes. No global heavy-work tail or cross-provider blocking was added.
+- Equal CMD cursor idempotence and AbortSignal-aware IM signer plumbing remain deferred exactly as ledgered.
+
+### Files changed in Fix Round 3
+
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `apps/api/src/chrome-bridge/cmd-dom-adapter.ts`
+- `apps/api/src/chrome-bridge/cmd-dom-adapter.test.ts`
+- `apps/api/src/chrome-bridge/cmd-snapshot-assembler.ts`
+- `apps/api/src/chrome-bridge/cmd-snapshot-assembler.test.ts`
+- `apps/api/src/chrome-bridge/im-http-adapter.ts`
+- `apps/api/src/chrome-bridge/im-http-adapter.test.ts`
+- `apps/chrome-extension/src/cmd-snapshot-chunker.ts`
+- `apps/chrome-extension/src/cmd-snapshot-chunker.test.ts`
+- `apps/chrome-extension/src/network-observer.ts`
+- `apps/chrome-extension/src/network-observer.test.ts`
+- `packages/contracts/src/chrome-bridge.ts`
+- `packages/contracts/src/chrome-bridge.test.ts`
+
+Commit subject: `fix(feed): bind reconciliation to current documents`.

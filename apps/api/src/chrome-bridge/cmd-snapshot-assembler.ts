@@ -2,6 +2,7 @@ import type { CmdSnapshotChunk } from "@tool-chenh/contracts";
 
 type PendingSnapshot = {
   readonly chunkCount: number;
+  readonly sweepMetadataFingerprint: string;
   readonly firstSeenMs: number;
   readonly chunks: Map<number, { readonly fingerprint: string; readonly records: readonly unknown[]; readonly bytes: number }>;
   bytes: number;
@@ -45,10 +46,18 @@ export class CmdSnapshotAssembler {
     }
 
     let pending = this.#pending.get(key);
+    const sweepMetadataFingerprint = JSON.stringify([
+      chunk.sweepId ?? null,
+      chunk.sweepComplete ?? null,
+      chunk.sweepFrameKey ?? null,
+      chunk.sweepDocumentKey ?? null
+    ]);
     if (!pending) {
-      pending = { chunkCount: chunk.chunkCount, firstSeenMs: receivedAtMs, chunks: new Map(), bytes: 0 };
+      pending = { chunkCount: chunk.chunkCount, sweepMetadataFingerprint,
+        firstSeenMs: receivedAtMs, chunks: new Map(), bytes: 0 };
       this.#pending.set(key, pending);
-    } else if (pending.chunkCount !== chunk.chunkCount) {
+    } else if (pending.chunkCount !== chunk.chunkCount ||
+      pending.sweepMetadataFingerprint !== sweepMetadataFingerprint) {
       this.#reject(key, receivedAtMs);
       return null;
     }

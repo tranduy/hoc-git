@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 
-const chunk = (snapshotId: string, chunkIndex: number, chunkCount: number, records: unknown[]) => ({
+const chunk = (snapshotId: string, chunkIndex: number, chunkCount: number, records: unknown[], sweep?: {
+  readonly sweepId: string; readonly sweepComplete: boolean; readonly sweepFrameKey: string;
+  readonly sweepDocumentKey: string;
+}) => ({
   schemaVersion: 2 as const,
   snapshotId,
   chunkIndex,
   chunkCount,
-  records
+  records,
+  ...sweep
 });
 
 describe("CmdSnapshotAssembler", () => {
@@ -35,6 +39,27 @@ describe("CmdSnapshotAssembler", () => {
     expect(assembler.ingest("source-a", chunk(id, 1, 2, ["b"]), 3, 10)).toBeNull();
     expect(assembler.ingest("source-b", chunk(id, 0, 2, ["x"]), 4, 10)).toBeNull();
     expect(assembler.ingest("source-b", chunk(id, 1, 2, ["y"]), 5, 10)).toEqual(["x", "y"]);
+  });
+
+  it("rejects conflicting sweep document metadata across chunks", () => {
+    const assembler = new CmdSnapshotAssembler();
+    const id = "cmd:9:sweep-conflict-0001";
+    const base = { sweepId: "cmd:sweep:1", sweepComplete: false, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1" };
+    expect(assembler.ingest("chrome:CMD:9", chunk(id, 0, 2, ["a"], base), 1, 10)).toBeNull();
+    expect(assembler.ingest("chrome:CMD:9", chunk(id, 1, 2, ["b"], {
+      ...base, sweepDocumentKey: "worker-b:9:odds-frame:document-2"
+    }), 2, 10)).toBeNull();
+    expect(assembler.ingest("chrome:CMD:9", chunk(id, 1, 2, ["b"], base), 3, 10)).toBeNull();
+  });
+
+  it("assembles a normal multi-chunk sweep only when every binding matches", () => {
+    const assembler = new CmdSnapshotAssembler();
+    const id = "cmd:9:sweep-complete-0001";
+    const sweep = { sweepId: "cmd:sweep:1", sweepComplete: false, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1" };
+    expect(assembler.ingest("chrome:CMD:9", chunk(id, 1, 2, ["b"], sweep), 1, 10)).toBeNull();
+    expect(assembler.ingest("chrome:CMD:9", chunk(id, 0, 2, ["a"], sweep), 2, 10)).toEqual(["a", "b"]);
   });
 
   it("expires incomplete snapshots and rejects oversized assemblies", () => {

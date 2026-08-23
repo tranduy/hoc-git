@@ -10,6 +10,7 @@ const HOST = "imsports.directsb.net";
 const SNAPSHOT_PATH = "/api/EventV6/GetSE";
 const DELTA_PATH = "/api/EventV6/GetSEDelta";
 const PREMATCH_HORIZON_MS = 48 * 60 * 60 * 1_000;
+const MAX_RECENT_DELTAS = 128;
 type ImPartition = "IM_MARKET_1" | "IM_MARKET_2";
 type ImRecord = ReturnType<typeof extractImFootballCatalog>[number];
 
@@ -32,7 +33,6 @@ interface SnapshotGeneration {
   readonly partitions: Map<ImPartition, ClassifiedPartition>;
   readonly startedSequence: number;
   readonly cutoffSequence: number;
-  readonly bufferedDeltas: ChromeBridgeEnvelope[];
 }
 
 interface SourceState {
@@ -100,8 +100,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       if (state.pending === null || state.pending.id !== generation) {
         if (state.pending !== null) rememberObsolete(state, state.pending.id);
         state.pending = { id: generation, partitions: new Map<ImPartition, ClassifiedPartition>(),
-          startedSequence: envelope.sequence, cutoffSequence,
-          bufferedDeltas: state.recentDeltas.filter((delta) => delta.sequence > cutoffSequence) };
+          startedSequence: envelope.sequence, cutoffSequence };
       }
       if (state.pending.cutoffSequence !== cutoffSequence) return [];
       const classified = classifySnapshot(root, envelope.observedAtMs);
@@ -121,19 +120,18 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       if (state.currentGeneration !== null) rememberObsolete(state, state.currentGeneration);
       state.current = new Map([...pendingPartitions].map(([key, value]) => [key, value.records]));
       state.currentGeneration = state.pending.id;
-      for (const buffered of state.pending.bufferedDeltas) this.#applyDelta(state.current, buffered);
+      for (const delta of state.recentDeltas) {
+        if (delta.sequence > state.pending.cutoffSequence) this.#applyDelta(state.current, delta);
+      }
       state.pending = null;
     } else {
       if (state.latestDeltaSequence !== null && envelope.sequence <= state.latestDeltaSequence) return [];
       state.latestDeltaSequence = envelope.sequence;
       state.recentDeltas.push(envelope);
-      while (state.recentDeltas.length > 128) state.recentDeltas.shift();
+      while (state.recentDeltas.length > MAX_RECENT_DELTAS) state.recentDeltas.shift();
       this.#states.set(envelope.sourceId, state);
       const sourcePartitions = state.current;
       if (sourcePartitions === null) return [];
-      if (state.pending !== null && envelope.sequence > state.pending.cutoffSequence) {
-        state.pending.bufferedDeltas.push(envelope);
-      }
       const changed = this.#applyDelta(sourcePartitions, envelope);
       if (!changed) return [];
     }
@@ -200,9 +198,9 @@ function classifySnapshot(root: Record<string, unknown>, nowMs: number): {
       candidate.htn.trim() === candidate.atn.trim() ||
       typeof candidate.cn !== "string" || candidate.cn.trim() === "" ||
       typeof candidate.isrbt !== "boolean" || !Number.isFinite(eventAtMs) || !Array.isArray(candidate.mls)) return null;
+    if (!(candidate.mls as unknown[]).every(isClassifiedImMarket)) return null;
     if (candidate.iscyb === true) continue;
     if (candidate.iscyb !== false) return null;
-    if (!(candidate.mls as unknown[]).every(isClassifiedImMarket)) return null;
     const extracted = extractImFootballCatalog({ StatusCode: 100, sel: [candidate] }, {
       nowMs, prematchHorizonMs: PREMATCH_HORIZON_MS
     });

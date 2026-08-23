@@ -33,6 +33,21 @@ describe("chunkCmdSnapshot", () => {
       "cmd-1786776000000-abcdef", 220)).toThrow("CMD_SNAPSHOT_TOO_MANY_CHUNKS");
   });
 
+  it("emits one explicit completed chunk for an empty same-document sweep", () => {
+    expect(chunkCmdSnapshot([], "cmd:9:empty-complete-0001", undefined, {
+      sweepId: "cmd:sweep:empty", sweepComplete: true, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1"
+    })).toEqual([{
+      schemaVersion: 2, snapshotId: "cmd:9:empty-complete-0001", chunkIndex: 0, chunkCount: 1,
+      records: [], sweepId: "cmd:sweep:empty", sweepComplete: true, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1"
+    }]);
+    expect(chunkCmdSnapshot([], "cmd:9:empty-partial-0001", undefined, {
+      sweepId: "cmd:sweep:partial", sweepComplete: false, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1"
+    })).toEqual([]);
+  });
+
   it("keeps the complete quote-dense WebSocket envelope below 256 KiB", () => {
     const records = Array.from({ length: 300 }, (_, index) => ({
       sportId: "1", leagueId: `league-${index}`, leagueName: `League ${index}`,

@@ -68,16 +68,21 @@ export const CmdSnapshotChunkSchema = z.strictObject({
   sweepId: PublicGenerationIdSchema.optional(),
   sweepComplete: z.boolean().optional(),
   sweepFrameKey: PublicGenerationIdSchema.optional(),
-  records: z.array(z.unknown()).min(1).max(5_000)
+  sweepDocumentKey: PublicGenerationIdSchema.optional(),
+  records: z.array(z.unknown()).max(5_000)
 }).superRefine((value, context) => {
   if (value.chunkIndex >= value.chunkCount) {
     context.addIssue({ code: "custom", path: ["chunkIndex"], message: "chunkIndex must be below chunkCount" });
   }
-  if ((value.sweepId === undefined) !== (value.sweepComplete === undefined)) {
-    context.addIssue({ code: "custom", path: ["sweepId"], message: "sweep metadata must be paired" });
+  const sweepFields = [value.sweepId, value.sweepComplete, value.sweepFrameKey, value.sweepDocumentKey];
+  const sweepFieldCount = sweepFields.filter((field) => field !== undefined).length;
+  if (sweepFieldCount !== 0 && sweepFieldCount !== sweepFields.length) {
+    context.addIssue({ code: "custom", path: ["sweepId"],
+      message: "sweep identity, completion, frame, and document metadata must be bound" });
   }
-  if (value.sweepFrameKey !== undefined && value.sweepId === undefined) {
-    context.addIssue({ code: "custom", path: ["sweepFrameKey"], message: "sweep frame requires sweep metadata" });
+  if (value.records.length === 0 && !(sweepFieldCount === sweepFields.length && value.sweepComplete === true)) {
+    context.addIssue({ code: "custom", path: ["records"],
+      message: "empty records require an explicitly completed bound sweep" });
   }
 });
 

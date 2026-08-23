@@ -190,7 +190,11 @@ describe("CmdSnapshotChunkSchema", () => {
   it("accepts a strict bounded chunk", () => {
     expect(contracts.CmdSnapshotChunkSchema.safeParse(valid).success).toBe(true);
     expect(contracts.CmdSnapshotChunkSchema.safeParse({ ...valid, sweepId: "cmd:sweep:1",
-      sweepComplete: true, sweepFrameKey: "odds-frame" }).success).toBe(true);
+      sweepComplete: true, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1" }).success).toBe(true);
+    expect(contracts.CmdSnapshotChunkSchema.safeParse({ ...valid, records: [], sweepId: "cmd:sweep:empty",
+      sweepComplete: true, sweepFrameKey: "odds-frame",
+      sweepDocumentKey: "worker-a:9:odds-frame:document-1" }).success).toBe(true);
   });
 
   it("rejects invalid indexes, excessive counts, empty records, and extra fields", () => {
@@ -200,7 +204,13 @@ describe("CmdSnapshotChunkSchema", () => {
       { ...valid, chunkCount: 65 },
       { ...valid, records: [] },
       { ...valid, sweepFrameKey: "odds-frame" },
-      { ...valid, sweepId: "cmd:sweep:1", sweepComplete: true, sweepFrameKey: "unsafe/frame" },
+      { ...valid, sweepDocumentKey: "worker-a:document-1" },
+      { ...valid, records: [], sweepId: "cmd:sweep:partial", sweepComplete: false,
+        sweepFrameKey: "odds-frame", sweepDocumentKey: "worker-a:9:odds-frame:document-1" },
+      { ...valid, sweepId: "cmd:sweep:1", sweepComplete: true },
+      { ...valid, sweepId: "cmd:sweep:1", sweepComplete: true, sweepFrameKey: "odds-frame" },
+      { ...valid, sweepId: "cmd:sweep:1", sweepComplete: true, sweepFrameKey: "unsafe/frame",
+        sweepDocumentKey: "worker-a:9:odds-frame:document-1" },
       { ...valid, credential: "secret" }
     ]) expect(contracts.CmdSnapshotChunkSchema.safeParse(invalid).success).toBe(false);
   });

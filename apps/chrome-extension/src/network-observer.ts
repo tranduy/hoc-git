@@ -2016,30 +2016,35 @@ export class NetworkObserver {
         const frameTree = await this.#withFrameCommandTimeout(
           this.#sendCommand(source.tabId, "Page.getFrameTree")
         ).catch(() => ({}));
-        const frameIds = collectFrameIds(frameTree);
-        const values: Array<{ readonly frameKey: string; readonly value: unknown }> = [];
-        if (frameIds.length === 0) {
-          values.push({ frameKey: "top", value: await this.#withFrameCommandTimeout(
+        const frames = collectFrameDescriptors(frameTree);
+        const values: Array<{ readonly frameKey: string; readonly documentKey: string;
+          readonly value: unknown }> = [];
+        if (frames.length === 0) {
+          values.push({ frameKey: "top",
+            documentKey: sweepDocumentKey(this.#observerSessionId, source.tabId, sourceGeneration,
+              "top", "document-unknown"), value: await this.#withFrameCommandTimeout(
             this.#sendCommand(source.tabId, "Runtime.evaluate", {
               expression, returnByValue: true, awaitPromise: false
             })).catch(() => ({})) });
         } else {
-          const frameValues = await Promise.all(frameIds.map(async (frameId, frameIndex) => {
+          const frameValues = await Promise.all(frames.map(async (frame, frameIndex) => {
             const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
               "Page.createIsolatedWorld", {
-              frameId, worldName: "fieldline-read-only", grantUniveralAccess: false
+              frameId: frame.id, worldName: "fieldline-read-only", grantUniveralAccess: false
             })).catch(() => ({}));
             const contextId = nestedNumber(world, "executionContextId");
             if (contextId === null) return null;
             const value = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
               expression, contextId, returnByValue: true, awaitPromise: false
             })).catch(() => ({}));
-            return { frameKey: safeFrameKey(frameId, frameIndex), value };
+            const frameKey = safeFrameKey(frame.id, frameIndex);
+            return { frameKey, documentKey: sweepDocumentKey(this.#observerSessionId, source.tabId,
+              sourceGeneration, frame.id, frame.loaderId), value };
           }));
           values.push(...frameValues.filter((value) => value !== null));
         }
         if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
-        const frameCaptures = values.map(({ frameKey, value }) => {
+        const frameCaptures = values.map(({ frameKey, documentKey, value }) => {
           const evaluated = readEvaluationRecords(value);
           const sweepMarker = evaluated.find((item) => isRecord(item) && "__fieldlineSweep" in item);
           const sweepValue = isRecord(sweepMarker) && isRecord(sweepMarker.__fieldlineSweep)
@@ -2048,27 +2053,33 @@ export class NetworkObserver {
           const catalogRecords = withoutSweep.filter((item) =>
             !isRecord(item) || !("__fieldlineDiagnostic" in item));
           const hasCatalog = catalogRecords.length > 0;
-          const sweep = hasCatalog && sweepValue !== null && typeof sweepValue.sweepId === "string" &&
+          const sweep = sweepValue !== null && typeof sweepValue.sweepId === "string" &&
             /^[a-z0-9._:-]{1,128}$/iu.test(sweepValue.sweepId) && typeof sweepValue.complete === "boolean"
-            ? { sweepId: sweepValue.sweepId, sweepComplete: sweepValue.complete, sweepFrameKey: frameKey }
+            ? { sweepId: sweepValue.sweepId, sweepComplete: sweepValue.complete,
+              sweepFrameKey: frameKey, sweepDocumentKey: documentKey }
             : undefined;
-          return { frameKey, records: hasCatalog ? catalogRecords : withoutSweep, hasCatalog, sweep };
-        }).filter((capture) => capture.records.length > 0);
+          const records = hasCatalog ? catalogRecords : sweep?.sweepComplete === true ? [] : withoutSweep;
+          return { frameKey, records, hasCatalog, sweep };
+        }).filter((capture) => capture.records.length > 0 || capture.sweep?.sweepComplete === true);
         const hasCatalog = frameCaptures.some((capture) => capture.hasCatalog);
-        const eligibleFrames = hasCatalog ? frameCaptures.filter((capture) => capture.hasCatalog) : frameCaptures;
+        const eligibleFrames = hasCatalog ? frameCaptures.filter((capture) =>
+          capture.hasCatalog || (source.lobby === "CMD" && capture.sweep?.sweepComplete === true)) : frameCaptures;
         if (eligibleFrames.length === 0) return;
         const emissionGroups = source.lobby === "CMD" ? eligibleFrames : [{ frameKey: "aggregate",
           records: eligibleFrames.flatMap((capture) => capture.records), hasCatalog,
           sweep: undefined }];
         const records = emissionGroups.flatMap((capture) => capture.records);
         const catalogBody = JSON.stringify(records);
+        const semanticBody = JSON.stringify(emissionGroups.map((group) => ({
+          frameKey: group.frameKey, records: group.records, sweep: group.sweep
+        })));
         const nowMs = this.#now();
         const receivedMonotonicMs = this.#monotonicNow();
         const previous = this.#cmdLastBodies.get(source.sourceId);
         // Transport heartbeats only prove that the tab is attached. Renew the
         // unchanged catalog before the API freshness TTL expires so a quiet
         // market cannot be misclassified as a dead data source.
-        if (!forceGeneration && previous === catalogBody && nowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0)
+        if (!forceGeneration && previous === semanticBody && nowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0)
           < CATALOG_REFRESH_INTERVAL_MS) return;
         for (const group of emissionGroups) {
           const ordinal = (this.#domSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
@@ -2082,7 +2093,7 @@ export class NetworkObserver {
           }
         }
         if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
-        this.#cmdLastBodies.set(source.sourceId, catalogBody);
+        this.#cmdLastBodies.set(source.sourceId, semanticBody);
         this.#cmdLastSentAtMs.set(source.sourceId, nowMs);
         if (isReplayableCmdCatalog(records)) {
           this.#cmdSnapshots.set(source.sourceId, { body: catalogBody, sentAtMs: nowMs, receivedMonotonicMs });
@@ -2984,6 +2995,21 @@ function collectFrameIds(value: unknown): string[] {
   return output;
 }
 
+function collectFrameDescriptors(value: unknown): Array<{ readonly id: string; readonly loaderId: string }> {
+  if (!isRecord(value) || !isRecord(value.frameTree)) return [];
+  const output: Array<{ readonly id: string; readonly loaderId: string }> = [];
+  const visit = (tree: unknown): void => {
+    if (!isRecord(tree)) return;
+    if (isRecord(tree.frame) && typeof tree.frame.id === "string") {
+      output.push({ id: tree.frame.id,
+        loaderId: typeof tree.frame.loaderId === "string" ? tree.frame.loaderId : "document-unknown" });
+    }
+    if (Array.isArray(tree.childFrames)) tree.childFrames.forEach(visit);
+  };
+  visit(value.frameTree);
+  return output;
+}
+
 function readEvaluationRecords(value: unknown): unknown[] {
   if (!isRecord(value) || !isRecord(value.result) || typeof value.result.value !== "string") return [];
   try {
@@ -2997,4 +3023,17 @@ function readEvaluationRecords(value: unknown): unknown[] {
 function safeFrameKey(frameId: string, frameIndex: number): string {
   const key = frameId.slice(0, 96);
   return /^[a-z0-9._:-]+$/iu.test(key) ? key : `frame-${frameIndex}`;
+}
+
+function sweepDocumentKey(observerSessionId: string, tabId: number, sourceGeneration: number,
+  frameId: string, loaderId: string): string {
+  const value = `${observerSessionId}\u0000${tabId}\u0000${sourceGeneration}\u0000${frameId}\u0000${loaderId}`;
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    left = Math.imul(left ^ code, 0x01000193);
+    right = Math.imul(right ^ code, 0x85ebca6b);
+  }
+  return `cmd-document:${(left >>> 0).toString(36)}:${(right >>> 0).toString(36)}`;
 }
