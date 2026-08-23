@@ -2,6 +2,11 @@ import type { ChromeLobbyId } from "@tool-chenh/contracts";
 
 type FabetProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
 
+const STRUCTURED_RECOVERY_REASONS = new Set([
+  "AUTH_EGRESS_UNAVAILABLE", "LAUNCH_EXPIRED", "LAUNCH_CONSUMED",
+  "PORTAL_VALIDATION_FAILED", "SOURCE_MISSING", "BASELINE_TIMEOUT", "PROVIDER_SCHEMA_CHANGED"
+]);
+
 interface RefreshControlPlane {
   ensureLobby(lobby: ChromeLobbyId, url: string): number;
   restoreLobby(lobby: ChromeLobbyId): number;
@@ -38,10 +43,7 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
     const failure = launches.find((result) => !result.ok);
     if (failure === undefined) break;
     if (attempt === maxLaunchAttempts || options.refreshLaunches === undefined) {
-      const reason = failure.error instanceof Error
-        ? failure.error.message
-        : "FABET_PROVIDER_LAUNCH_UNAVAILABLE";
-      throw new Error(`${reason}:${failure.provider}`);
+      throw launchFailure(failure.error, failure.provider);
     }
     await options.refreshLaunches();
   }
@@ -52,8 +54,7 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
   let firstFailure: Error | null = null;
   for (const result of launches) {
     if (!result.ok) {
-      const reason = result.error instanceof Error ? result.error.message : "FABET_PROVIDER_LAUNCH_UNAVAILABLE";
-      firstFailure ??= new Error(`${reason}:${result.provider}`);
+      firstFailure ??= launchFailure(result.error, result.provider);
       continue;
     }
     const delivered = options.controlPlane.ensureLobby(result.launch.lobby, result.launch.url);
@@ -70,6 +71,14 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
   }
   if (firstFailure !== null) throw firstFailure;
   return requested;
+}
+
+function launchFailure(error: unknown, provider: FabetProvider): Error {
+  const reason = error instanceof Error ? error.message : "FABET_PROVIDER_LAUNCH_UNAVAILABLE";
+  for (const structured of STRUCTURED_RECOVERY_REASONS) {
+    if (reason === structured || reason.startsWith(`${structured}:`)) return new Error(structured);
+  }
+  return new Error(`${reason}:${provider}`);
 }
 
 async function collectLaunches(

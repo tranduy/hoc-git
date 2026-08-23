@@ -2,6 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 import { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
 
 describe("ChromeBridgeControlPlane", () => {
+  it("requests a snapshot only from the targeted provider lobby", () => {
+    const saba = { send: vi.fn(), readyState: 1 };
+    const bti = { send: vi.fn(), readyState: 1 };
+    const plane = new ChromeBridgeControlPlane();
+    plane.attach("chrome:SABA:1", saba);
+    plane.attach("chrome:BTI:2", bti);
+
+    expect(plane.requestLobbySnapshot("SABA")).toBe(1);
+
+    expect(saba.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:1"
+    }));
+    expect(bti.send).not.toHaveBeenCalled();
+  });
   it("requests a fresh snapshot from every attached source exactly once", () => {
     const saba = { send: vi.fn(), readyState: 1 };
     const bti = { send: vi.fn(), readyState: 1 };

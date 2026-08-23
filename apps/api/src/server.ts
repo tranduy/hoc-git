@@ -27,7 +27,10 @@ import { createChromeCatalogOverlay } from "./chrome-bridge/chrome-catalog-overl
 import { isOpenProviderTicketEnabled } from "./chrome-bridge/chrome-bridge-feature-flags.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
 import { refreshBridgeProviderSources } from "./chrome-bridge/provider-source-refresh.js";
-import { AutomaticSourceRecovery } from "./chrome-bridge/automatic-source-recovery.js";
+import { AutomaticSourceRecovery, type RecoveryResult } from "./chrome-bridge/automatic-source-recovery.js";
+import { ProviderFeedRegistry } from "./chrome-bridge/provider-feed-registry.js";
+import type { ProviderRecoveryRequest } from "./chrome-bridge/provider-feed-types.js";
+import type { RefreshableProvider } from "./routes/maintenance.js";
 import { resolveLocalAppData } from "./local-app-data.js";
 import { LatestCatalogPersister } from "./catalog/latest-catalog-persister.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
@@ -39,6 +42,36 @@ export interface ServerConfig {
   readonly viteOrigin: string;
   readonly dataMode: DataMode;
   readonly fixtureReplaySpeed: number;
+}
+
+interface RecoverySweepRegistry {
+  sweep(): readonly ProviderRecoveryRequest[];
+  dispose(): void;
+}
+
+interface RecoverySweepActor {
+  recover(request: ProviderRecoveryRequest): Promise<RecoveryResult>;
+  dispose(): void;
+}
+
+export function startProviderRecoverySweep(
+  providerFeeds: RecoverySweepRegistry,
+  automaticSourceRecovery: RecoverySweepActor
+): { dispose(): void } {
+  let disposed = false;
+  const feedSweep = setInterval(() => {
+    for (const request of providerFeeds.sweep()) void automaticSourceRecovery.recover(request);
+  }, 1_000);
+  feedSweep.unref();
+  return {
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      clearInterval(feedSweep);
+      automaticSourceRecovery.dispose();
+      providerFeeds.dispose();
+    }
+  };
 }
 
 const fixtureSources = [
@@ -243,6 +276,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
   const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane() : null;
+  const providerFeeds = chromeBridgeRegistry ? new ProviderFeedRegistry() : null;
   const cmdHiddenMarketProbe = chromeBridgeRegistry && chromeBridgeControlPlane
     ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
       controlPlane: chromeBridgeControlPlane })
@@ -251,16 +285,11 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     ? new SelectionPriceProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
       controlPlane: chromeBridgeControlPlane })
     : null;
-  // Streaming providers (SABA/SBOBET/APSPORT/BTI) cannot replay a lost
-  // WebSocket baseline through CDP. When one of them stays stale for a full
-  // recovery window, replace only that provider tab with a fresh Fabet launch.
-  // CMD and IM are excluded: they re-request their catalog in page on reconnect.
-  let requestAutomaticSourceRecovery = (_accountId: string): void => undefined;
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs: 20_000 });
       catalogPersister.schedule(`catalog-source|${catalog.provider}|${catalog.category}`, catalog);
-    }, onSourceRecoveryNeeded: (accountId) => requestAutomaticSourceRecovery(accountId) })
+    }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }) })
     : null;
   if (chromeCatalogDataPlane !== null) {
     await Promise.all(["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"].map(async (provider) => {
@@ -291,6 +320,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       reader: sessionServices.catalogReader,
       chrome: chromeCatalogDataPlane
     });
+  const explicitProviderRefreshes = new Set<string>();
   const maintenance = new SessionRefreshControl({ refresh: async () => {
     // Only the explicit Reset button and scheduled 03:00 run enter this path.
     // They are the sole authority to replace a complete catalog with a much
@@ -322,21 +352,35 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   },
     journal: new MaintenanceJournal({ nowMs: Date.now },
       join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
-  if (chromeBridgeControlPlane !== null) {
-    const automaticSourceRecovery = new AutomaticSourceRecovery({
+  const refreshProvider = chromeBridgeControlPlane === null ? undefined
+    : async (provider: RefreshableProvider): Promise<number> => {
+      const accountId = `catalog-source:${provider}:FOOTBALL`;
+      explicitProviderRefreshes.add(accountId);
+      try {
+        return await refreshBridgeProviderSources({
+          controlPlane: chromeBridgeControlPlane,
+          withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
+          minAcquiredAtMs: 0,
+          providers: [provider],
+          restoreCmd: false
+        });
+      } finally {
+        explicitProviderRefreshes.delete(accountId);
+      }
+    };
+  const automaticSourceRecovery = chromeBridgeControlPlane !== null && providerFeeds !== null
+    ? new AutomaticSourceRecovery({
       controlPlane: chromeBridgeControlPlane,
+      feedRegistry: providerFeeds,
       refreshFabetLaunches: () => sessionServices.refreshFabetLaunches(),
       withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
+      isRecoverySuppressed: (accountId) => maintenance.status().running || explicitProviderRefreshes.has(accountId),
       onError: (accountId, error) => {
         const reason = error instanceof Error ? error.message : String(error);
         process.stderr.write(`[source-recovery] ${accountId} failed: ${reason}\n`);
       }
-    });
-    requestAutomaticSourceRecovery = (accountId) => {
-      process.stdout.write(`[source-recovery] ${accountId} stalled; replacing provider tab\n`);
-      void automaticSourceRecovery.recover(accountId);
-    };
-  }
+    })
+    : null;
   const app = buildApp(runtime, {
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
@@ -358,14 +402,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     receiptProtocol: sessionServices.receiptProtocol,
     betHistory,
     maintenance,
-    ...(chromeBridgeControlPlane === null ? {} : { refreshProvider: (provider: "SABA" | "IM" | "SBOBET" |
-      "APSPORT" | "BTI") => refreshBridgeProviderSources({
-        controlPlane: chromeBridgeControlPlane,
-        withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
-        minAcquiredAtMs: 0,
-        providers: [provider],
-        restoreCmd: false
-      }) }),
+    ...(refreshProvider === undefined ? {} : { refreshProvider }),
     ...(cmdHiddenMarketProbe === null ? {} : { cmdHiddenMarketProbe }),
     ...(chromeBridgeRegistry && chromeBridgeKey
       ? { chromeBridge: {
@@ -376,6 +413,12 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       } }
       : {})
   });
+  const providerRecovery = automaticSourceRecovery === null || providerFeeds === null
+    ? null
+    : startProviderRecoverySweep(providerFeeds, automaticSourceRecovery);
+  if (providerRecovery !== null) {
+    app.addHook("onClose", async () => { providerRecovery.dispose(); });
+  }
   await app.listen({ host: config.host, port: config.port });
   const dailyMaintenance = createDailyMaintenanceScheduler(() => maintenance.runScheduled());
   dailyMaintenance.start();

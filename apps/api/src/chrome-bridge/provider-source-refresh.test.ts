@@ -132,4 +132,18 @@ describe("refreshBridgeProviderSources", () => {
     expect(ensureLobby.mock.calls.map((call) => call[0])).toEqual(["BTI"]);
     expect(restoreLobby).not.toHaveBeenCalled();
   });
+
+  it("preserves structured provider launch failures without appending a provider suffix", async () => {
+    const withLatestFabetLaunch = async <T>(): Promise<T> => {
+      throw new Error("LAUNCH_CONSUMED");
+    };
+
+    await expect(refreshBridgeProviderSources({
+      controlPlane: { ensureLobby: () => 1, restoreLobby: () => 1 },
+      withLatestFabetLaunch,
+      minAcquiredAtMs: 123,
+      providers: ["SABA"],
+      restoreCmd: false
+    })).rejects.toThrowError(/^LAUNCH_CONSUMED$/u);
+  });
 });
