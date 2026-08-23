@@ -229,6 +229,22 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const generation = this.#authoritativeGenerations.get(epochKey);
       const authoritative = applied.fullSnapshot && generation !== undefined &&
         envelope.request.replayed !== true && this.#activeStreams.get(epochKey) === streamId;
+      if (authoritative && applied.records.length === 0) {
+        // empty/done is a complete provider replacement, not an empty bridge
+        // shard. Remove every retained epoch partition before publishing it.
+        for (const key of this.#parts.keys()) {
+          if (key.startsWith(`${epochKey}|`)) {
+            this.#parts.delete(key);
+            this.#partObservedAtMs.delete(key);
+          }
+        }
+        for (const key of this.#readyPartitions) {
+          if (key.startsWith(`${decoderKey}|`) && key !== readyKey) this.#readyPartitions.delete(key);
+        }
+        for (const key of this.#lastWsPublishAtMs.keys()) {
+          if (key.startsWith(`${decoderKey}|`) && key !== publishKey) this.#lastWsPublishAtMs.delete(key);
+        }
+      }
       return this.#update(envelope, `WS:${streamId}:${frame.bridgeId}`, normalized,
         authoritative ? { authoritativeBaseline: true, evidenceMode: "BASELINE", generation, provenance: "WS" }
           : generation !== undefined && this.#activeStreams.get(epochKey) === streamId

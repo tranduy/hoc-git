@@ -57,7 +57,7 @@ describe("KsportWsCatalogAdapter", () => {
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(5643423)] }], "live", 10)))
       .toEqual([]);
     const catalog = adapter.decode(receiptEnvelope([{ "1": "Today", "2": [event(5643424)] }],
-      "today", 11))[0]!.value as { events: Array<{ providerEventId: string }> };
+      "today", 11, 10))[0]!.value as { events: Array<{ providerEventId: string }> };
 
     expect(catalog.events.map((item) => item.providerEventId).sort()).toEqual(["5643423", "5643424"]);
   });
@@ -71,7 +71,7 @@ describe("KsportWsCatalogAdapter", () => {
       "live", 10, 10, "ksport-stream-1", "worker-a:0"))).toEqual([]);
     expect(adapter.decode(receiptEnvelope([], "today", 11, 11,
       "ksport-stream-1", "worker-b:0"))).toEqual([]);
-    expect(adapter.decode(receiptEnvelope([], "today", 12, 12,
+    expect(adapter.decode(receiptEnvelope([], "today", 12, 10,
       "ksport-stream-1", "worker-a:0"))).toEqual([expect.objectContaining({
         authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
       })]);
@@ -82,7 +82,7 @@ describe("KsportWsCatalogAdapter", () => {
       "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(5643423)] }], "live", 10));
-    const currentToday = receiptEnvelope([{ "1": "Hot", "2": [event(5643424)] }], "today", 11);
+    const currentToday = receiptEnvelope([{ "1": "Hot", "2": [event(5643424)] }], "today", 11, 10);
     const body = currentToday.payload.body
       .replace("/sports/1_1/today/", "/sports/1_11/today/")
       .replace("subSportBookToday", "subSportHotMatch");
@@ -97,10 +97,10 @@ describe("KsportWsCatalogAdapter", () => {
       "8": 5643423 });
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.80")] }], "live", 10, 100));
-    adapter.decode(receiptEnvelope([], "today", 11, 101));
+    adapter.decode(receiptEnvelope([], "today", 11, 100));
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.95")] }],
       "live", 12, 102))).toEqual([]);
-    const newest = adapter.decode(receiptEnvelope([], "today", 13, 103))[0]!.value as {
+    const newest = adapter.decode(receiptEnvelope([], "today", 13, 102))[0]!.value as {
       quotes: Array<{ selection: string; rawOdds: string }> };
     expect(newest.quotes.find((quote) => quote.selection === "OVER")?.rawOdds).toBe("0.95");
 
@@ -115,13 +115,13 @@ describe("KsportWsCatalogAdapter", () => {
       "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(5643423)] }], "live", 10, 200));
-    adapter.decode(receiptEnvelope([], "today", 11, 201));
+    adapter.decode(receiptEnvelope([], "today", 11, 200));
     const opened: ChromeBridgeEnvelope = { ...receiptEnvelope([], "live", 12, 1, "ksport-stream-2"),
       transport: "WS_STATE", payload: { encoding: "UTF8", body: JSON.stringify({ state: "OPEN" }) } };
     expect(adapter.decode(opened)).toEqual([]);
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(5643424)] }],
       "live", 13, 1, "ksport-stream-2"))).toEqual([]);
-    const catalog = adapter.decode(receiptEnvelope([], "today", 14, 2, "ksport-stream-2"))[0]!.value as {
+    const catalog = adapter.decode(receiptEnvelope([], "today", 14, 1, "ksport-stream-2"))[0]!.value as {
       events: Array<{ providerEventId: string }> };
     expect(catalog.events.map((item) => item.providerEventId)).toEqual(["5643424"]);
   });
@@ -131,7 +131,7 @@ describe("KsportWsCatalogAdapter", () => {
       "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 10, 100));
-    adapter.decode(receiptEnvelope([], "today", 11, 101));
+    adapter.decode(receiptEnvelope([], "today", 11, 100));
     const opened: ChromeBridgeEnvelope = { ...receiptEnvelope([], "live", 12, 1, "ksport-stream-2"),
       transport: "WS_STATE", payload: { encoding: "UTF8", body: JSON.stringify({ state: "OPEN" }) } };
     adapter.decode(opened);
@@ -139,7 +139,7 @@ describe("KsportWsCatalogAdapter", () => {
 
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 14, 102,
       "ksport-stream-1"))).toEqual([]);
-    const catalog = adapter.decode(receiptEnvelope([], "today", 15, 2, "ksport-stream-2"))[0]!.value as {
+    const catalog = adapter.decode(receiptEnvelope([], "today", 15, 1, "ksport-stream-2"))[0]!.value as {
       events: Array<{ providerEventId: string }> };
     expect(catalog.events.map((item) => item.providerEventId)).toEqual(["2"]);
   });
@@ -151,17 +151,32 @@ describe("KsportWsCatalogAdapter", () => {
     adapter.decode(socketState("ksport-stream-1", "OPEN", 1));
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 10, 100)))
       .toEqual([]);
-    expect(adapter.decode(receiptEnvelope([], "today", 11, 101))).toHaveLength(1);
+    expect(adapter.decode(receiptEnvelope([], "today", 11, 100))).toHaveLength(1);
 
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(2)] }], "live", 12, 200)))
       .toEqual([]);
-    expect(adapter.decode(receiptEnvelope([], "today", 13, 101))).toEqual([]);
-    const replacement = adapter.decode(receiptEnvelope([], "today", 14, 201))[0]!;
+    expect(adapter.decode(receiptEnvelope([], "today", 13, 100))).toEqual([]);
+    const replacement = adapter.decode(receiptEnvelope([], "today", 14, 200))[0]!;
 
     expect(replacement).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE",
       provenance: "WS" });
     expect((replacement.value as { events: Array<{ providerEventId: string }> }).events)
       .toEqual([expect.objectContaining({ providerEventId: "2" })]);
+  });
+
+  it("requires live and today full receipts to carry the exact same WS generation", () => {
+    const event = { "0": "2026-08-20T16:00:00Z", "2": "Home", "3": "Away",
+      "7": { "3": ["2.5 0.92*56434230030002005h -0.98*56434230030002005a 5643423181025"] },
+      "8": 5643423 };
+    const adapter = new KsportWsCatalogAdapter();
+
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event] }], "live", 10, 200)))
+      .toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 11, 150))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 12, 200))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true,
+      generation: "legacy:ksport-ws:ksport-stream-1:200"
+    })]);
   });
 
   it("keeps an incomplete canonical HTTP generation separate from the committed baseline", () => {
@@ -180,11 +195,24 @@ describe("KsportWsCatalogAdapter", () => {
       .toEqual([expect.objectContaining({ providerEventId: "2" })]);
   });
 
+  it("rejects a leading-zero HTTP tab ID instead of pairing a different generation string", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    expect(adapter.decode(httpEnvelope([], "live", 1, 10))).toEqual([]);
+    const noncanonical = httpEnvelope([], "today", 1, 11);
+
+    expect(adapter.decode({ ...noncanonical, request: { ...noncanonical.request,
+      streamId: "ksport-http:08:1:today" } })).toEqual([]);
+    expect(adapter.decode(httpEnvelope([], "today", 1, 12))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true,
+      generation: "worker-a:0:ksport-http:8:1"
+    })]);
+  });
+
   it("treats duplicate current OPEN as a no-op after a completed KSPORT baseline", () => {
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(socketState("ksport-stream-1", "OPEN", 1));
     adapter.decode(receiptEnvelope([], "live", 2));
-    adapter.decode(receiptEnvelope([], "today", 3));
+    adapter.decode(receiptEnvelope([], "today", 3, 2));
 
     expect(adapter.decode(socketState("ksport-stream-1", "OPEN", 4))).toEqual([]);
     const heartbeat = { ...receiptEnvelope([], "today", 5),
@@ -199,7 +227,7 @@ describe("KsportWsCatalogAdapter", () => {
 
     expect(adapter.decode(socketState("ksport-stream-1", "OPEN", 3))).toEqual([]);
     expect(adapter.decode(receiptEnvelope([], "live", 4, 4, "ksport-stream-2"))).toEqual([]);
-    expect(adapter.decode(receiptEnvelope([], "today", 5, 5, "ksport-stream-2")))
+    expect(adapter.decode(receiptEnvelope([], "today", 5, 4, "ksport-stream-2")))
       .toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
   });
 
@@ -212,7 +240,7 @@ describe("KsportWsCatalogAdapter", () => {
 
     expect(adapter.fingerprint(input)).toBe(true);
     expect(adapter.decode(input)).toEqual([]);
-    const value = adapter.decode(receiptEnvelope([], "today", 6))[0]!.value as {
+    const value = adapter.decode(receiptEnvelope([], "today", 6, 5))[0]!.value as {
       accountId: string; events: unknown[]; markets: unknown[]; quotes: unknown[] };
     expect(value.accountId).toBe("catalog-source:SBOBET:FOOTBALL");
     expect(value.events).toHaveLength(1);
@@ -228,7 +256,7 @@ describe("KsportWsCatalogAdapter", () => {
   it("reports transport liveness for a heartbeat on the current completed sportsbook socket", () => {
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([], "live", 4));
-    adapter.decode(receiptEnvelope([], "today", 5));
+    adapter.decode(receiptEnvelope([], "today", 5, 4));
     const heartbeat = { ...receiptEnvelope([], "today", 6),
       payload: { encoding: "UTF8" as const, body: `a${JSON.stringify(["\n"])}` } };
 
@@ -240,7 +268,7 @@ describe("KsportWsCatalogAdapter", () => {
   it("ignores heartbeats from a retired sportsbook socket", () => {
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([], "live", 4));
-    adapter.decode(receiptEnvelope([], "today", 5));
+    adapter.decode(receiptEnvelope([], "today", 5, 4));
     const opened: ChromeBridgeEnvelope = { ...receiptEnvelope([], "live", 6, 1, "ksport-stream-2"),
       transport: "WS_STATE", payload: { encoding: "UTF8", body: JSON.stringify({ state: "OPEN" }) } };
     adapter.decode(opened);
@@ -284,12 +312,12 @@ describe("KsportWsCatalogAdapter", () => {
     const first = receiptEnvelope([{ "1": "League", "2": [event(5593392, "Home 1"),
       event(5593393, "Home 2")] }], "live", 5);
     expect(adapter.decode(first)).toEqual([]);
-    expect((adapter.decode(receiptEnvelope([], "today", 6))[0]!.value as { events: unknown[] }).events)
+    expect((adapter.decode(receiptEnvelope([], "today", 6, 5))[0]!.value as { events: unknown[] }).events)
       .toHaveLength(2);
     const replacementLive = receiptEnvelope([{ "1": "League", "2": [event(5593392, "Home 1")] }],
       "live", 7, 7);
     expect(adapter.decode(replacementLive)).toEqual([]);
-    const catalog = adapter.decode(receiptEnvelope([], "today", 8, 8))[0]!.value as {
+    const catalog = adapter.decode(receiptEnvelope([], "today", 8, 7))[0]!.value as {
       events: unknown[]; quotes: Array<{
       providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
     expect(catalog.events).toHaveLength(1);
@@ -305,7 +333,7 @@ describe("KsportWsCatalogAdapter", () => {
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(5643423, "0.80"),
       event(5643424, "0.81")] }], "live", 10, 100));
-    adapter.decode(receiptEnvelope([], "today", 11, 101));
+    adapter.decode(receiptEnvelope([], "today", 11, 100));
 
     const catalog = adapter.decode(receiptEnvelope(event(5643423, "0.95"), "live", 12, 102))[0]!.value as {
       events: Array<{ providerEventId: string }>; quotes: Array<{
@@ -324,7 +352,7 @@ describe("KsportWsCatalogAdapter", () => {
       "7": { "3": ["2.5 0.95*56434230030002005h -0.98*56434230030002005a 5643423181025"] } };
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event] }], "live", 10, 100));
-    adapter.decode(receiptEnvelope([], "today", 11, 101));
+    adapter.decode(receiptEnvelope([], "today", 11, 100));
 
     const catalog = adapter.decode(receiptEnvelope(delta, "live", 12, 102))[0]!.value as {
       markets: Array<{ marketType: string }>; quotes: Array<{ marketType: string; rawOdds: string }> };
@@ -338,10 +366,10 @@ describe("KsportWsCatalogAdapter", () => {
     }, "8": id });
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "League", "2": [event(5593392)] }], "live", 5));
-    adapter.decode(receiptEnvelope([], "today", 6));
+    adapter.decode(receiptEnvelope([], "today", 6, 5));
     expect(adapter.decode(receiptEnvelope([{ "1": "League", "2": [event(5593393)] }],
       "live", 7, 7))).toEqual([]);
-    const catalog = adapter.decode(receiptEnvelope([], "today", 8, 8))[0]!.value as {
+    const catalog = adapter.decode(receiptEnvelope([], "today", 8, 7))[0]!.value as {
         events: Array<{ providerEventId: string }>; quotes: Array<{
           providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
     expect(catalog.events.map((item) => item.providerEventId)).toEqual(["5593393"]);
@@ -351,7 +379,7 @@ describe("KsportWsCatalogAdapter", () => {
   it("invalidates SBOBET immediately when its active socket closes", () => {
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([], "live", 4));
-    adapter.decode(receiptEnvelope([], "today", 5));
+    adapter.decode(receiptEnvelope([], "today", 5, 4));
     const closed: ChromeBridgeEnvelope = { ...receiptEnvelope([], "live", 6), transport: "WS_STATE",
       payload: { encoding: "UTF8", body: JSON.stringify({ state: "CLOSED" }) } };
     expect(adapter.fingerprint(closed)).toBe(true);

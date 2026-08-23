@@ -72,6 +72,23 @@ describe("ChromeBridgeRegistry", () => {
     expect(registry.listSources()).toMatchObject([{ state: "LIVE", lastSequence: 1, reason: null }]);
   });
 
+  it("never lets a superseded bridge connection reclaim its source", () => {
+    const accepted = vi.fn();
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const firstConnection = {};
+    const replacementConnection = {};
+    registry.subscribe(accepted);
+
+    expect(registry.ingest({ ...envelope(40), sourceEpoch: "worker-a:0" }, firstConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "worker-b:0" }, replacementConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.ingest({ ...envelope(41), sourceEpoch: "worker-a:1" }, firstConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(accepted).toHaveBeenCalledTimes(2);
+    expect(registry.listSources()).toMatchObject([{ lastSequence: 0 }]);
+  });
+
   it("evicts retired tab sources instead of retaining their server state forever", () => {
     let now = 1_000;
     const registry = new ChromeBridgeRegistry({

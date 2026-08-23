@@ -372,7 +372,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       ...(allowedCaptureLobbies === undefined ? {} : { allowedLobbies: allowedCaptureLobbies })
     });
     chromeBridgeRegistry.subscribe((envelope) => { void captureStore.record(envelope); });
-    chromeBridgeRegistry.subscribe((envelope) => { chromeCatalogDataPlane?.ingest(envelope); });
+    chromeBridgeRegistry.subscribe((envelope, context) => { chromeCatalogDataPlane?.ingest(envelope, context); });
     if (cmdHiddenMarketProbe !== null) {
       chromeBridgeRegistry.subscribe((envelope) => { cmdHiddenMarketProbe.ingest(envelope); });
     }

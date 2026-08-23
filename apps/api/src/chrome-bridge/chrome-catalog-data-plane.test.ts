@@ -78,12 +78,13 @@ function sabaEnvelope(sequence: number, matchIds: readonly number[]): ChromeBrid
 }
 
 function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds: readonly number[],
-  sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
+  sourceEpoch = "worker-a:0", receiptGeneration = Math.floor((sequence + 1) / 2)): ChromeBridgeEnvelope {
   const events = eventIds.map((eventId) => ({ "2": `Home ${eventId}`, "3": `Away ${eventId}`, "8": eventId,
     "7": { "3": [`2.5 0.92*${eventId}0030002005h -0.98*${eventId}0030002005a ${eventId}181025`] } }));
   const destination = `/topic/sports/1_1/${partition}/ma/event/vi`;
   const subscription = partition === "live" ? "subSportBookLive" : "subSportBookToday";
-  const frame = `MESSAGE\ndestination:${destination}\nsubscription:${subscription}\nmessage-id:socket-${sequence}\n\n` +
+  const frame = `MESSAGE\ndestination:${destination}\nsubscription:${subscription}\n` +
+    `message-id:socket-${receiptGeneration}\n\n` +
     `${JSON.stringify({ statusCode: "OK", statusCodeValue: 200,
       body: JSON.stringify([{ "1": "League", "2": events }]) })}\0`;
   return { version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8,
@@ -233,7 +234,7 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
 
     expect(plane.ingest(ksportEnvelope(4, "live", [101]))).toBe(false);
-    expect(plane.ingest(ksportEnvelope(5, "today", []))).toBe(true);
+    expect(plane.ingest(ksportEnvelope(5, "today", [], "worker-a:0", 2))).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "101" })]
     });
@@ -287,16 +288,18 @@ describe("ChromeCatalogDataPlane", () => {
   it("invalidates the prior epoch before accepting a replacement source baseline", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
-    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0"));
-    plane.ingest(ksportEnvelope(2, "today", [102], "worker-a:0"));
+    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0"), { connectionGeneration: 1 });
+    plane.ingest(ksportEnvelope(2, "today", [102], "worker-a:0"), { connectionGeneration: 1 });
 
     expect(plane.ingest(tabHeartbeat(ksportEnvelope(3, "today", [], "worker-a:0"),
-      1_100, 3, "worker-b:0"))).toBe(true);
+      1_100, 3, "worker-b:0"), { connectionGeneration: 2 })).toBe(true);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
 
-    expect(plane.ingest(ksportEnvelope(4, "live", [103], "worker-b:0"))).toBe(false);
-    expect(plane.ingest(ksportEnvelope(5, "today", [], "worker-b:0"))).toBe(true);
+    expect(plane.ingest(ksportEnvelope(4, "live", [103], "worker-b:0"),
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(ksportEnvelope(5, "today", [], "worker-b:0", 2),
+      { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "103" })]
     });
@@ -308,19 +311,37 @@ describe("ChromeCatalogDataPlane", () => {
     const baselineA = { ...cmdHttpEnvelope(1, { t: 100 }), sourceEpoch: "worker-a:0" };
     const baselineB = { ...cmdHttpEnvelope(2, { t: 200 }), sourceEpoch: "worker-b:0" };
 
-    expect(plane.ingest(baselineA)).toBe(true);
-    expect(plane.ingest(baselineB)).toBe(true);
-    expect(plane.ingest(tabHeartbeat(baselineA, 1_003, 3, "worker-a:0"))).toBe(false);
+    expect(plane.ingest(baselineA, { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(baselineB, { connectionGeneration: 2 })).toBe(true);
+    expect(plane.ingest(tabHeartbeat(baselineA, 1_003, 3, "worker-a:0"),
+      { connectionGeneration: 1 })).toBe(false);
     await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_002 });
 
     const deltaB: ChromeBridgeEnvelope = { ...baselineB, sequence: 4, observedAtMs: 1_004,
       request: { ...baselineB.request, providerFunctionCode: 3 },
       payload: { encoding: "UTF8", body: JSON.stringify({ t: 201, a: true,
         data: [[24881365, 1, 35, 0.80, -0.98, 1, 1, "S"]] }) } };
-    expect(plane.ingest(deltaB)).toBe(true);
+    expect(plane.ingest(deltaB, { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_004 });
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH", "FRESH"]);
   });
+
+  it("rejects the oldest same-lineage epoch after more than 32 replacements without losing the current feed",
+    async () => {
+      const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+      let current = cmdHttpEnvelope(1, { t: 100 });
+      for (let generation = 0; generation <= 33; generation += 1) {
+        current = { ...cmdHttpEnvelope(generation + 1, { t: 100 + generation }),
+          sourceEpoch: `worker-a:${generation}` };
+        expect(plane.ingest(current, { connectionGeneration: 1 })).toBe(true);
+      }
+
+      expect(plane.ingest(tabHeartbeat(current, 1_100, 100, "worker-a:0"),
+        { connectionGeneration: 1 })).toBe(false);
+      await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({
+        observedAtMs: 1_034
+      });
+    });
 
   it("keeps one pinned tab per account and invalidates before handing over", async () => {
     let now = 1_500;

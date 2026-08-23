@@ -30,12 +30,18 @@ export interface ChromeBridgeRegistryOptions {
   readonly retireAfterMs?: number;
 }
 
+export interface ChromeBridgeIngestContext {
+  readonly connectionGeneration: number;
+}
+
 export class ChromeBridgeRegistry {
   readonly #now: () => number;
   readonly #staleAfterMs: number;
   readonly #retireAfterMs: number;
   readonly #sources = new Map<string, SourceRecord>();
-  readonly #listeners = new Set<(envelope: ChromeBridgeEnvelope) => void>();
+  readonly #listeners = new Set<(envelope: ChromeBridgeEnvelope, context: ChromeBridgeIngestContext) => void>();
+  readonly #connectionGenerations = new WeakMap<object, number>();
+  #latestConnectionGeneration = 0;
 
   constructor(options: ChromeBridgeRegistryOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -43,7 +49,7 @@ export class ChromeBridgeRegistry {
     this.#retireAfterMs = options.retireAfterMs ?? 300_000;
   }
 
-  subscribe(listener: (envelope: ChromeBridgeEnvelope) => void): () => void {
+  subscribe(listener: (envelope: ChromeBridgeEnvelope, context: ChromeBridgeIngestContext) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
   }
@@ -55,6 +61,8 @@ export class ChromeBridgeRegistry {
   }
 
   ingest(envelope: ChromeBridgeEnvelope, connection: object | null = null): ChromeBridgeControlMessage {
+    const connectionGeneration = this.#connectionGeneration(connection);
+    if (connectionGeneration < this.#latestConnectionGeneration) return reject(envelope, "OUT_OF_ORDER");
     let existing = this.#sources.get(envelope.sourceId);
     if (existing !== undefined && connection !== null && existing.connection !== connection) {
       this.#sources.delete(envelope.sourceId);
@@ -90,8 +98,21 @@ export class ChromeBridgeRegistry {
     record.reason = null;
     if (connection !== null) record.connection = connection;
     this.#sources.set(envelope.sourceId, record);
-    for (const listener of this.#listeners) listener(envelope);
+    for (const listener of this.#listeners) listener(envelope, { connectionGeneration });
     return { version: 1, kind: "ACK", sourceId: envelope.sourceId, sequence: envelope.sequence };
+  }
+
+  #connectionGeneration(connection: object | null): number {
+    if (connection === null) return 0;
+    const existing = this.#connectionGenerations.get(connection);
+    if (existing !== undefined) return existing;
+    // The authenticated extension bridge is a single logical publisher. A
+    // replacement connection advances this scalar permanently, so an older
+    // socket cannot reclaim any source even after its per-source record moves.
+    const generation = this.#latestConnectionGeneration + 1;
+    this.#connectionGenerations.set(connection, generation);
+    this.#latestConnectionGeneration = generation;
+    return generation;
   }
 
   listSources(): readonly ChromeBridgeSourceSnapshot[] {

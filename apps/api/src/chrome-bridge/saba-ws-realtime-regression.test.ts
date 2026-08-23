@@ -16,14 +16,15 @@ const eventRows = (odds1a: number, odds2a: number): unknown[][] => [
     oddsstatus: "running", enable: 1, odds1a, odds2a, hdp1: 0.25, hdp2: 0 })
 ];
 
-function envelope(rows: unknown[][], revision: string, sequence: number, sourceEpoch = "worker-a:0"):
+function envelope(rows: unknown[][], revision: string, sequence: number, sourceEpoch = "worker-a:0",
+  bridgeId = "b1"):
 ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
     sourceEpoch, sequence, observedAtMs: 1_786_449_540_000 + sequence,
     receivedMonotonicMs: sequence, transport: "WS_FRAME",
     request: { hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket",
       streamId: "stream-1" },
-    payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", "b1", rows, revision])}` } };
+    payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", bridgeId, rows, revision])}` } };
 }
 
 function socketState(state: "OPEN" | "CLOSED", sequence: number,
@@ -98,18 +99,18 @@ describe("SABA websocket realtime regressions", () => {
   it("discards the prior source epoch and requires a new complete baseline even at a lower envelope sequence", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100, publish });
-    expect(plane.ingest(socketState("OPEN", 99, "worker-a:0"))).toBe(false);
+    expect(plane.ingest(socketState("OPEN", 99, "worker-a:0"), { connectionGeneration: 1 })).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
-      [0, "done"]], "r0100", 100, "worker-a:0"))).toBe(true);
+      [0, "done"]], "r0100", 100, "worker-a:0"), { connectionGeneration: 1 })).toBe(true);
 
     expect(plane.ingest(envelope([
       encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.01 })
-    ], "r0001", 1, "worker-b:0"))).toBe(true);
+    ], "r0001", 1, "worker-b:0"), { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).rejects.toThrow();
 
-    expect(plane.ingest(socketState("OPEN", 2, "worker-b:0"))).toBe(false);
+    expect(plane.ingest(socketState("OPEN", 2, "worker-b:0"), { connectionGeneration: 2 })).toBe(false);
     expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.72, -0.82),
-      [0, "done"]], "r0002", 3, "worker-b:0"))).toBe(true);
+      [0, "done"]], "r0002", 3, "worker-b:0"), { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
       quotes: expect.arrayContaining([expect.objectContaining({ providerSelectionId: "30:home", rawOdds: "0.72" })])
     });
@@ -189,6 +190,25 @@ describe("SABA websocket realtime regressions", () => {
     expect(plane.ingest(envelope([[0, "done"]], "r0002", 5))).toBe(true);
     await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
       observedAtMs: 1_786_449_540_005, events: [], markets: [], quotes: []
+    });
+  });
+
+  it("lets a proven complete empty replacement bridge tombstone every retained bridge partition", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100 });
+    expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
+    expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2, "worker-a:0", "b1"))).toBe(true);
+
+    expect(plane.ingest(envelope([["f", 0, fields], [0, "empty"]], "r0001", 3,
+      "worker-a:0", "b2"))).toBe(false);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "20" })]
+    });
+
+    expect(plane.ingest(envelope([[0, "done"]], "r0001", 4,
+      "worker-a:0", "b2"))).toBe(true);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
+      events: [], markets: [], quotes: []
     });
   });
 });

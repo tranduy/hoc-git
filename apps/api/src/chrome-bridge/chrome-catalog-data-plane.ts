@@ -27,6 +27,17 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly onSourceRecoveryNeeded?: (accountId: string) => void;
 }
 
+export interface ChromeCatalogIngestContext {
+  readonly connectionGeneration?: number;
+}
+
+interface SourceEpochLineage {
+  readonly connectionGeneration: number;
+  readonly lineage: string | null;
+  readonly highWatermark: number | null;
+  readonly currentEpoch: string;
+}
+
 const DEFAULT_RECOVERABLE_ACCOUNTS: ReadonlySet<string> = new Set([
   "catalog-source:SABA:FOOTBALL",
   "catalog-source:SBOBET:FOOTBALL",
@@ -49,7 +60,7 @@ export class ChromeCatalogDataPlane {
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
   readonly #catalogBases = new Map<string, FeedProvenance>();
   readonly #sourceEpochs = new Map<string, string>();
-  readonly #retiredSourceEpochs = new Map<string, string[]>();
+  readonly #sourceEpochLineages = new Map<string, SourceEpochLineage>();
   readonly #activeSourceIds = new Map<string, string>();
   readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
   readonly #recoverableAccountIds: ReadonlySet<string>;
@@ -72,7 +83,7 @@ export class ChromeCatalogDataPlane {
     return this.#feeds.list().some((snapshot) => snapshot.accountId === accountId);
   }
 
-  ingest(envelope: ChromeBridgeEnvelope): boolean {
+  ingest(envelope: ChromeBridgeEnvelope, context: ChromeCatalogIngestContext = {}): boolean {
     const ageMs = this.#now() - envelope.observedAtMs;
     const replayed = envelope.request.replayed === true;
     if (!Number.isFinite(ageMs) ||
@@ -80,7 +91,7 @@ export class ChromeCatalogDataPlane {
     const transportAccountId = accountIdForLobby(envelope.lobby);
     if (transportAccountId === null) return false;
     const sourceEpoch = envelope.sourceEpoch ?? legacySourceEpoch(envelope.sourceId);
-    if (this.#retiredSourceEpochs.get(envelope.sourceId)?.includes(sourceEpoch) === true) return false;
+    if (!this.#admitSourceEpoch(envelope.sourceId, sourceEpoch, context.connectionGeneration ?? 0)) return false;
     let published = false;
     if (transportAccountId !== null) {
       const previousSourceId = this.#activeSourceIds.get(transportAccountId);
@@ -99,8 +110,6 @@ export class ChromeCatalogDataPlane {
           return false;
         }
         published = this.#invalidateCurrent(transportAccountId, envelope.observedAtMs, "SOURCE_REPLACED") || published;
-        const previousEpoch = this.#sourceEpochs.get(previousSourceId);
-        if (previousEpoch !== undefined) this.#retireSourceEpoch(previousSourceId, previousEpoch);
         this.#router.resetSource(previousSourceId);
         this.#networkBodies.resetSource(previousSourceId);
         this.#sourceEpochs.delete(previousSourceId);
@@ -112,7 +121,6 @@ export class ChromeCatalogDataPlane {
     const priorEpoch = this.#sourceEpochs.get(envelope.sourceId);
     if (priorEpoch !== undefined && priorEpoch !== sourceEpoch) {
       published = this.#invalidateCurrent(transportAccountId, envelope.observedAtMs, "SOURCE_REPLACED") || published;
-      this.#retireSourceEpoch(envelope.sourceId, priorEpoch);
       this.#router.resetSource(envelope.sourceId);
       this.#networkBodies.resetSource(envelope.sourceId);
     }
@@ -245,17 +253,25 @@ export class ChromeCatalogDataPlane {
       sourceId: snapshot.sourceId, sourceEpoch: snapshot.sourceEpoch, atMs, reason }));
   }
 
-  #retireSourceEpoch(sourceId: string, sourceEpoch: string): void {
-    const retired = this.#retiredSourceEpochs.get(sourceId) ?? [];
-    if (!retired.includes(sourceEpoch)) retired.push(sourceEpoch);
-    while (retired.length > 32) retired.shift();
-    this.#retiredSourceEpochs.delete(sourceId);
-    this.#retiredSourceEpochs.set(sourceId, retired);
-    while (this.#retiredSourceEpochs.size > 128) {
-      const oldestSourceId = this.#retiredSourceEpochs.keys().next().value as string | undefined;
-      if (oldestSourceId === undefined) break;
-      this.#retiredSourceEpochs.delete(oldestSourceId);
+  #admitSourceEpoch(sourceId: string, sourceEpoch: string, connectionGeneration: number): boolean {
+    if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration < 0) return false;
+    const parsed = canonicalSourceEpoch(sourceEpoch);
+    const current = this.#sourceEpochLineages.get(sourceId);
+    if (current === undefined || connectionGeneration > current.connectionGeneration) {
+      this.#sourceEpochLineages.set(sourceId, { connectionGeneration, currentEpoch: sourceEpoch,
+        lineage: parsed?.lineage ?? null, highWatermark: parsed?.generation ?? null });
+      return true;
     }
+    if (connectionGeneration < current.connectionGeneration) return false;
+    if (sourceEpoch === current.currentEpoch) return true;
+    // NetworkObserver emits <observer-session>:<monotonic generation>. One
+    // exact high-watermark replaces an evicting retired-ID list: memory is
+    // constant per source and no lower/equal epoch can ever reopen.
+    if (parsed === null || current.lineage === null || parsed.lineage !== current.lineage ||
+      current.highWatermark === null || parsed.generation <= current.highWatermark) return false;
+    this.#sourceEpochLineages.set(sourceId, { connectionGeneration, currentEpoch: sourceEpoch,
+      lineage: parsed.lineage, highWatermark: parsed.generation });
+    return true;
   }
 
   #applyDecision(decision: FeedDecision): boolean {
@@ -276,6 +292,13 @@ function accountIdForLobby(lobby: ChromeBridgeEnvelope["lobby"]): string | null 
 
 function legacySourceEpoch(sourceId: string): string {
   return `legacy:${sourceId}`;
+}
+
+function canonicalSourceEpoch(sourceEpoch: string): { readonly lineage: string; readonly generation: number } | null {
+  const match = /^(.+):(0|[1-9]\d*)$/u.exec(sourceEpoch);
+  if (match === null) return null;
+  const generation = Number(match[2]);
+  return Number.isSafeInteger(generation) ? { lineage: match[1]!, generation } : null;
 }
 
 function catalogProvenance(transport: ChromeBridgeEnvelope["transport"]): FeedProvenance {

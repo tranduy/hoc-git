@@ -34,7 +34,7 @@ interface SocketEpoch {
   committedPartitions: Map<CatalogPartition, PartitionSnapshot>;
   pendingBaseline: PendingBaseline | null;
   generation: string;
-  generationOrdinal: number;
+  committedGeneration: number;
 }
 
 interface HttpEpoch {
@@ -62,8 +62,11 @@ function receiptPartition(receipt: SbobetStompProviderReceipt): CatalogPartition
 function httpGeneration(envelope: ChromeBridgeEnvelope): {
   readonly generation: string; readonly ordinal: number; readonly partition: CatalogPartition
 } | null {
-  const match = /^ksport-http:(\d+):([1-9]\d*):(live|today)$/u.exec(envelope.request.streamId ?? "");
-  if (match === null || Number(match[1]) !== envelope.tabId) return null;
+  const streamId = envelope.request.streamId ?? "";
+  const match = /^ksport-http:(0|[1-9]\d*):([1-9]\d*):(live|today)$/u.exec(streamId);
+  const tabId = match === null ? Number.NaN : Number(match[1]);
+  if (match === null || !Number.isSafeInteger(tabId) || tabId !== envelope.tabId ||
+    streamId !== `ksport-http:${match[1]}:${match[2]}:${match[3]}`) return null;
   const ordinal = Number(match[2]);
   if (!Number.isSafeInteger(ordinal)) return null;
   return { generation: `${sourceEpoch(envelope)}:ksport-http:${match[1]}:${match[2]}`,
@@ -164,6 +167,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         epoch.pendingBaseline = { generation: requestGeneration.generation, ordinal: requestGeneration.ordinal,
           partitions: new Map<CatalogPartition, PartitionSnapshot>() };
       }
+      if (epoch.pendingBaseline.generation !== requestGeneration.generation) return [];
       const prior = epoch.pendingBaseline.partitions.get(requestGeneration.partition);
       if (prior !== undefined && envelope.sequence <= prior.receiptSequence) return [];
       const records = new Map<string, RetainedRecord>();
@@ -210,7 +214,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         }
         this.#epochs.set(epochKey, { streamId, committedPartitions: new Map(), pendingBaseline: null,
           generation: `${sourceEpoch(envelope)}:ksport-ws:${streamId}:0`,
-          generationOrdinal: 0 });
+          committedGeneration: 0 });
         this.#decoders.set(streamKey, new SbobetStompReceiptDecoder());
         return [];
       }
@@ -242,7 +246,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       epoch = { streamId: envelope.request.streamId ?? "legacy", committedPartitions: new Map(),
         pendingBaseline: null,
         generation: `${sourceEpoch(envelope)}:ksport-ws:${streamId}:0`,
-        generationOrdinal: 0 };
+        committedGeneration: 0 };
       this.#epochs.set(epochKey, epoch);
     }
     if (epoch.streamId !== streamId) return [];
@@ -251,8 +255,11 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     for (const receipt of receipts) {
       const partition = receiptPartition(receipt);
       if (partition === null) continue;
-      const order = receipt.receiptSequence ?? envelope.sequence;
       const fullSnapshot = isFullPartitionSnapshot(receipt.body);
+      const receiptGeneration = receipt.receiptSequence;
+      if (fullSnapshot && (receiptGeneration === null || !Number.isSafeInteger(receiptGeneration) ||
+        receiptGeneration <= 0)) continue;
+      const order = receiptGeneration ?? envelope.sequence;
       const committed = epoch.committedPartitions.get(partition);
       const pending = epoch.pendingBaseline?.partitions.get(partition);
       const latestOrder = Math.max(committed?.receiptSequence ?? Number.NEGATIVE_INFINITY,
@@ -261,13 +268,16 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (!fullSnapshot && (committed === undefined || epoch.pendingBaseline !== null)) continue;
       const bootstrap = bootstrapRecords(receipt.body, partition === "live");
       const changed = extractSbobetDirectCatalogRecords(receipt.body, bootstrap);
-      if (fullSnapshot && epoch.pendingBaseline === null) {
-        epoch.generationOrdinal += 1;
+      if (fullSnapshot && (epoch.pendingBaseline === null || receiptGeneration! > epoch.pendingBaseline.ordinal)) {
         epoch.pendingBaseline = {
-          generation: `${sourceEpoch(envelope)}:ksport-ws:${streamId}:${epoch.generationOrdinal}`,
-          ordinal: epoch.generationOrdinal, partitions: new Map<CatalogPartition, PartitionSnapshot>()
+          generation: `${sourceEpoch(envelope)}:ksport-ws:${streamId}:${receiptGeneration!}`,
+          ordinal: receiptGeneration!, partitions: new Map<CatalogPartition, PartitionSnapshot>()
         };
       }
+      // A provider receipt number is the WS baseline generation. Partition-
+      // local ordering alone must never combine live@N with today@M.
+      if (fullSnapshot && (receiptGeneration! <= epoch.committedGeneration ||
+        receiptGeneration! !== epoch.pendingBaseline!.ordinal)) continue;
       const prior = fullSnapshot ? epoch.pendingBaseline!.partitions.get(partition) : committed;
       const records = fullSnapshot ? new Map<string, RetainedRecord>() : new Map(prior?.records ?? []);
       for (const incoming of changed) {
@@ -286,6 +296,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         if (epoch.pendingBaseline!.partitions.has("live") && epoch.pendingBaseline!.partitions.has("today")) {
           epoch.committedPartitions = epoch.pendingBaseline!.partitions;
           epoch.generation = epoch.pendingBaseline!.generation;
+          epoch.committedGeneration = epoch.pendingBaseline!.ordinal;
           epoch.pendingBaseline = null;
           completedBaseline = true;
         }

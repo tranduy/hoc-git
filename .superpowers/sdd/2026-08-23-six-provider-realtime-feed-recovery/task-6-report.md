@@ -183,3 +183,67 @@ Supplemental whole-package verification passed all contracts tests (95/95) and a
 - `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6-report.md`
 
 Commit subject: `fix(feed): fence SBOBET recovery generations`.
+
+---
+
+## Review Round 2
+
+Status: DONE
+
+Review base: `f14ed85`
+
+### Findings resolved
+
+- Retired source epochs no longer live in an evicting ID list. `ChromeBridgeRegistry` assigns each authenticated bridge connection a monotonically increasing server-side generation and permanently rejects any older connection before publishing to listeners. The data plane receives that context and retains one exact source-lineage record: current connection generation, canonical observer-session prefix, current epoch, and numeric suffix high-watermark. Within a connection, only the exact current epoch or a strictly higher canonical suffix in the same lineage is admitted. A newer connection may establish a new lineage; its predecessor can never reclaim the source.
+- This is an exact bounded fence, not a probabilistic one. State is one scalar plus weak connection identities in the registry and one fixed-size lineage record per source in the data plane; it does not grow with epoch count and never evicts evidence needed to reject an old epoch. A 34-replacement regression proves epoch 0 remains rejected after the former 32-entry boundary while the generation-33 feed remains readable.
+- KSPORT WS uses the decoded positive provider receipt sequence as the baseline generation. Full `live` and `today` partitions commit only when their receipt generation is exactly equal. A higher receipt starts a new pending generation, a lower/mixed receipt is ignored, and deltas remain bound to the committed generation only.
+- KSPORT HTTP requires canonical decimal tab and positive ordinal components, safe integer values, exact tab identity, and exact pending-generation string equality. `ksport-http:8:1:live` cannot pair with `ksport-http:08:1:today`.
+- A current-stream SABA `empty/done` baseline is a complete provider replacement rather than an empty bridge shard. Before publication it removes every retained source-epoch partition and retires prior bridge readiness, so data from another bridge cannot survive the empty catalog. Partial and delta empties remain silent, while nonempty parallel bridge snapshots retain their approved union behavior.
+
+### RED
+
+Tests were added and observed failing before their production changes:
+
+```text
+Exact epoch/connection fence: 2 failed / 32 skipped.
+  Epoch 0 reopened after 34 same-session generations and invalidated the current feed.
+  A superseded authenticated connection reclaimed its source and was ACKed/published.
+KSPORT WS mixed receipt generations: 1 failed / 22 skipped.
+  live@200 plus today@150 emitted an authoritative baseline.
+KSPORT HTTP canonical identity: 1 failed / 23 skipped.
+  ksport-http:08:1:today completed a pending ksport-http:8:1 generation.
+SABA cross-bridge complete empty: 1 failed / 8 skipped.
+  After supplying the replacement bridge's required field table, empty/done published the old bridge's retained event instead of an empty catalog.
+```
+
+The first SABA fixture attempt omitted the new bridge's field table and therefore failed before reaching the reviewed behavior. The attempted production edit was removed, the fixture was corrected, and RED was rerun to observe the retained-old-bridge failure before the final implementation was applied.
+
+### GREEN and regression matrix
+
+```text
+Task 6 focused API: 7 suites / 109 tests passed.
+Task 6 focused extension: 3 suites / 169 tests passed.
+Task 5 CMD/IM/data-plane API: 5 suites / 82 tests passed.
+Task 1-4 recovery/control/registry/data-plane/coverage/server API: 8 suites / 98 tests passed.
+Task 1-5 extension observer/scheduler/bridge/storage/poller/wakeup: 6 suites / 187 tests passed.
+Contracts chrome-bridge: 1 suite / 14 tests passed.
+```
+
+All contracts, API, and extension typechecks exited 0. All three builds exited 0. `git diff --check` exited 0 with only the checkout's LF-to-CRLF notices, and the scoped secret scan returned no matches.
+
+### Files changed in Review Round 2
+
+- `apps/api/src/chrome-bridge/chrome-bridge-registry.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-registry.test.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `apps/api/src/chrome-bridge/ksport-ws-adapter.ts`
+- `apps/api/src/chrome-bridge/ksport-ws-adapter.test.ts`
+- `apps/api/src/chrome-bridge/saba-ws-adapter.ts`
+- `apps/api/src/chrome-bridge/saba-ws-realtime-regression.test.ts`
+- `apps/api/src/server.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6-report.md`
+
+No schema was guessed, no global reload/navigation/restart was introduced, and no browser/provider/runtime or external action was performed. The deliberate cost of exact connection ownership is fail-closed behavior for a noncanonical epoch transition on the same connection; the shipped observer emits the characterized canonical `<observer-session>:<generation>` form.
+
+Commit subject: `fix(feed): enforce exact recovery lineages`.
