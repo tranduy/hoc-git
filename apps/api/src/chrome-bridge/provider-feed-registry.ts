@@ -11,6 +11,8 @@ export interface ProviderFeedRegistryOptions {
 export class ProviderFeedRegistry {
   readonly #controllers = new Map<string, ProviderFeedController>();
   readonly #listeners = new Set<(snapshot: ProviderFeedSnapshot) => void>();
+  readonly #pendingWaitFinalizers = new Set<(error: Error) => void>();
+  #disposed = false;
 
   constructor(options: ProviderFeedRegistryOptions = {}) {
     for (const [accountId, policy] of [...providerFeedPolicies].sort(([left], [right]) => left.localeCompare(right))) {
@@ -42,7 +44,14 @@ export class ProviderFeedRegistry {
   }
 
   read(accountId: string): ObservedProviderCatalog {
-    return this.#controller(accountId).read();
+    const controller = this.#controller(accountId);
+    const before = controller.snapshot();
+    try {
+      return controller.read();
+    } finally {
+      const after = controller.snapshot();
+      if (before.state !== after.state || before.reason !== after.reason) this.#notify(after);
+    }
   }
 
   snapshot(accountId: string): ProviderFeedSnapshot {
@@ -53,10 +62,11 @@ export class ProviderFeedRegistry {
     return [...this.#controllers.values()].map((controller) => controller.snapshot());
   }
 
-  sweep(): readonly ProviderRecoveryRequest[] {
+  sweep(eligibleAccountIds?: ReadonlySet<string>): readonly ProviderRecoveryRequest[] {
     const requests: ProviderRecoveryRequest[] = [];
     for (const controller of this.#controllers.values()) {
       const before = controller.snapshot();
+      if (eligibleAccountIds !== undefined && !eligibleAccountIds.has(before.accountId)) continue;
       const request = controller.sweep();
       const after = controller.snapshot();
       if (request !== null) requests.push(request);
@@ -70,10 +80,19 @@ export class ProviderFeedRegistry {
     return () => this.#listeners.delete(listener);
   }
 
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    const error = new Error("PROVIDER_FEED_REGISTRY_DISPOSED");
+    for (const finalize of [...this.#pendingWaitFinalizers]) finalize(error);
+    this.#listeners.clear();
+  }
+
   waitForFreshBaseline(accountId: string, afterMs: number, timeoutMs: number): Promise<ProviderFeedSnapshot> {
     if (!Number.isFinite(afterMs) || !Number.isFinite(timeoutMs) || timeoutMs < 0) {
       return Promise.reject(new Error("PROVIDER_FEED_WAIT_INVALID"));
     }
+    if (this.#disposed) return Promise.reject(new Error("PROVIDER_FEED_REGISTRY_DISPOSED"));
     let controller: ProviderFeedController;
     try {
       controller = this.#controller(accountId);
@@ -87,9 +106,11 @@ export class ProviderFeedRegistry {
     return new Promise((resolve, reject) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let unsubscribe: () => void = () => {};
       const cleanup = (): void => {
         if (timer !== undefined) clearTimeout(timer);
         unsubscribe();
+        this.#pendingWaitFinalizers.delete(cancel);
       };
       const finish = (snapshot: ProviderFeedSnapshot): void => {
         if (settled) return;
@@ -97,14 +118,28 @@ export class ProviderFeedRegistry {
         cleanup();
         resolve(snapshot);
       };
-      const unsubscribe = this.subscribe((snapshot) => {
-        if (snapshot.accountId === accountId && isFreshBaseline(snapshot, afterMs)) finish(snapshot);
-      });
-      timer = setTimeout(() => {
+      const cancel = (error: Error): void => {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+        reject(error);
+      };
+      this.#pendingWaitFinalizers.add(cancel);
+      unsubscribe = this.subscribe((snapshot) => {
+        if (snapshot.accountId === accountId && isFreshBaseline(snapshot, afterMs)) finish(snapshot);
+      });
+      if (settled) {
+        unsubscribe();
+        return;
+      }
+      try { controller.read(); } catch { /* refresh state before the post-subscribe race check */ }
+      const subscribedSnapshot = controller.snapshot();
+      if (isFreshBaseline(subscribedSnapshot, afterMs)) {
+        finish(subscribedSnapshot);
+        return;
+      }
+      timer = setTimeout(() => {
+        cancel(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
       }, timeoutMs);
     });
   }

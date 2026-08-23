@@ -15,6 +15,7 @@ import type { FeedDecision, FeedProvenance } from "./provider-feed-types.js";
 
 export interface ChromeCatalogDataPlaneOptions {
   readonly now?: () => number;
+  readonly feedRegistry?: ProviderFeedRegistry;
   readonly freshnessMs?: number;
   readonly maxEnvelopeAgeMs?: number;
   readonly publish?: (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void;
@@ -63,7 +64,7 @@ export class ChromeCatalogDataPlane {
     this.#publish = options.publish ?? null;
     this.#recoverableAccountIds = options.recoverableAccountIds ?? DEFAULT_RECOVERABLE_ACCOUNTS;
     this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
-    this.#feeds = new ProviderFeedRegistry({ now: this.#now });
+    this.#feeds = options.feedRegistry ?? new ProviderFeedRegistry({ now: this.#now });
   }
 
   owns(accountId: string): boolean {
@@ -151,11 +152,14 @@ export class ChromeCatalogDataPlane {
       ? `${sourceEpoch}:${update.sequence}` : null);
     if (generation === null) return published;
     const provenance = update.provenance ?? catalogProvenance(envelope.transport);
-    if (!this.#coverage.accept(nextCatalog.accountId, { generation, authoritativeBaseline: mode === "BASELINE",
-      providerEventIds: nextCatalog.events.map((event) => event.providerEventId) })) return published;
-    return this.#applyDecision(this.#feeds.accept({ kind: "CATALOG", accountId: nextCatalog.accountId,
+    const coverage = { generation, authoritativeBaseline: mode === "BASELINE",
+      providerEventIds: nextCatalog.events.map((event) => event.providerEventId) };
+    if (!this.#coverage.allows(nextCatalog.accountId, coverage)) return published;
+    const decision = this.#feeds.accept({ kind: "CATALOG", accountId: nextCatalog.accountId,
       sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, generation, mode, provenance,
-      providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog })) || published;
+      providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog });
+    if (decision.accepted) this.#coverage.commit(nextCatalog.accountId, coverage);
+    return this.#applyDecision(decision) || published;
   }
 
   async read(accountId: string): Promise<ObservedProviderCatalog> {
@@ -203,12 +207,11 @@ export class ChromeCatalogDataPlane {
 
   #requestRecoveries(): void {
     if (this.#onSourceRecoveryNeeded === null) return;
-    for (const request of this.#feeds.sweep()) {
-      if (!this.#recoverableAccountIds.has(request.accountId)) continue;
-      const snapshot = this.#feeds.snapshot(request.accountId);
-      const hasFeedEvidence = this.#catalogs.has(request.accountId) || snapshot.tabReachableAtMs !== null ||
-        snapshot.providerTransportAtMs !== null;
-      if (!hasFeedEvidence) continue;
+    const eligible = new Set(this.#feeds.list().filter((snapshot) =>
+      this.#recoverableAccountIds.has(snapshot.accountId) && (this.#catalogs.has(snapshot.accountId) ||
+        snapshot.tabReachableAtMs !== null || snapshot.providerTransportAtMs !== null))
+      .map((snapshot) => snapshot.accountId));
+    for (const request of this.#feeds.sweep(eligible)) {
       try { this.#onSourceRecoveryNeeded(request.accountId); } catch { /* recovery is best-effort */ }
     }
   }

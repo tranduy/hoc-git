@@ -22,6 +22,31 @@ function wsBaseline(accountId: string, atMs: number, generation: string) {
     catalog: catalogFor(accountId, atMs) };
 }
 
+function wsDelta(accountId: string, atMs: number, generation: string) {
+  return { ...wsBaseline(accountId, atMs, generation), mode: "DELTA" as const };
+}
+
+class TrackingRegistry extends ProviderFeedRegistry {
+  activeSubscriptions = 0;
+
+  override subscribe(listener: Parameters<ProviderFeedRegistry["subscribe"]>[0]): () => void {
+    const unsubscribe = super.subscribe(listener);
+    this.activeSubscriptions += 1;
+    return () => {
+      this.activeSubscriptions -= 1;
+      unsubscribe();
+    };
+  }
+}
+
+class SynchronouslyDeliveringRegistry extends TrackingRegistry {
+  override subscribe(listener: Parameters<ProviderFeedRegistry["subscribe"]>[0]): () => void {
+    this.accept(wsBaseline(SABA, 1_001, "reset-synchronous"));
+    listener(this.snapshot(SABA));
+    return super.subscribe(listener);
+  }
+}
+
 afterEach(() => vi.useRealTimers());
 
 describe("ProviderFeedRegistry", () => {
@@ -77,5 +102,84 @@ describe("ProviderFeedRegistry", () => {
 
     await rejected;
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("disposes pending baseline waits and removes their listeners and timers", async () => {
+    vi.useFakeTimers();
+    const registry = new TrackingRegistry({ now: () => 1_000 });
+    const waiting = registry.waitForFreshBaseline(SABA, 1_000, 5_000);
+    const rejected = expect(waiting).rejects.toThrow("PROVIDER_FEED_REGISTRY_DISPOSED");
+
+    expect(registry.activeSubscriptions).toBe(1);
+    registry.dispose();
+
+    await rejected;
+    expect(registry.activeSubscriptions).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("handles a fresh baseline delivered synchronously while subscribing", async () => {
+    vi.useFakeTimers();
+    const registry = new SynchronouslyDeliveringRegistry({ now: () => 1_001 });
+
+    await expect(registry.waitForFreshBaseline(SABA, 1_000, 5_000)).resolves.toMatchObject({
+      state: "LIVE", lastCompleteBaselineAtMs: 1_001
+    });
+    expect(registry.activeSubscriptions).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not resolve for a baseline exactly at the requested boundary", async () => {
+    vi.useFakeTimers();
+    const registry = new ProviderFeedRegistry({ now: () => 1_000 });
+    const waiting = registry.waitForFreshBaseline(SABA, 1_000, 5_000);
+    const rejected = expect(waiting).rejects.toThrow("PROVIDER_FEED_BASELINE_TIMEOUT");
+
+    registry.accept(wsBaseline(SABA, 1_000, "reset-boundary"));
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await rejected;
+  });
+
+  it("does not resolve a baseline wait from a newer DELTA notification", async () => {
+    vi.useFakeTimers();
+    let nowMs = 1_000;
+    const registry = new ProviderFeedRegistry({ now: () => nowMs });
+    registry.accept(wsBaseline(SABA, 1_000, "reset-1"));
+    const waiting = registry.waitForFreshBaseline(SABA, 1_000, 5_000);
+    const rejected = expect(waiting).rejects.toThrow("PROVIDER_FEED_BASELINE_TIMEOUT");
+
+    nowMs = 1_001;
+    registry.accept(wsDelta(SABA, 1_001, "reset-1"));
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await rejected;
+  });
+
+  it("removes a baseline wait listener after a normal resolve", async () => {
+    vi.useFakeTimers();
+    const registry = new TrackingRegistry({ now: () => 1_001 });
+    const waiting = registry.waitForFreshBaseline(SABA, 1_000, 5_000);
+
+    registry.accept(wsBaseline(SABA, 1_001, "reset-2"));
+
+    await expect(waiting).resolves.toBeDefined();
+    expect(registry.activeSubscriptions).toBe(0);
+  });
+
+  it("notifies subscribers when read expires a LIVE snapshot", () => {
+    let nowMs = 1_000;
+    const registry = new ProviderFeedRegistry({ now: () => nowMs });
+    registry.accept(wsBaseline(SABA, 1_000, "reset-1"));
+    const listener = vi.fn();
+    registry.subscribe(listener);
+
+    nowMs = 11_001;
+    expect(() => registry.read(SABA)).toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({
+      accountId: SABA, state: "STALLED", reason: "EVIDENCE_CADENCE_EXCEEDED"
+    }));
   });
 });

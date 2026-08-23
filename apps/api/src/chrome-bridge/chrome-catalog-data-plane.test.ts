@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CatalogSourceStatus, ChromeBridgeEnvelope } from "@tool-chenh/contracts";
+import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { ChromeCatalogDataPlane } from "./chrome-catalog-data-plane.js";
+import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
+import { ProviderFeedRegistry } from "./provider-feed-registry.js";
 
 const SBOBET = "catalog-source:SBOBET:FOOTBALL";
 const SABA = "catalog-source:SABA:FOOTBALL";
@@ -67,7 +70,73 @@ const activeSbobet: CatalogSourceStatus = { id: SBOBET, alias: "K-Sports · SBOB
 const activeSaba: CatalogSourceStatus = { id: SABA, alias: "SABA", provider: "SABA", category: "FOOTBALL",
   sessionState: "ACTIVE", acquiredAtMs: 100, reason: null };
 
+async function catalogWith(eventIds: readonly number[]): Promise<ObservedProviderCatalog> {
+  const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+  plane.ingest(ksportEnvelope(1, "live", eventIds));
+  plane.ingest(ksportEnvelope(2, "today", []));
+  return plane.read(SBOBET);
+}
+
+function decodedBaseline(sourceId: string, catalog: ObservedProviderCatalog, sequence: number) {
+  return [{ sourceId, sequence, observedAtMs: 1_000 + sequence, value: catalog, authoritativeBaseline: true,
+    evidenceMode: "BASELINE" as const, generation: "shared-generation", provenance: "WS" as const,
+    providerTimestampMs: null }];
+}
+
+afterEach(() => vi.restoreAllMocks());
+
 describe("ChromeCatalogDataPlane", () => {
+  it("resolves a recovery-owner wait through the injected shared registry", async () => {
+    const registry = new ProviderFeedRegistry({ now: () => 1_500 });
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, feedRegistry: registry });
+    const waiting = registry.waitForFreshBaseline(SBOBET, 1_000, 100);
+
+    plane.ingest(ksportEnvelope(1, "live", [101]));
+    plane.ingest(ksportEnvelope(2, "today", [102]));
+
+    await expect(waiting).resolves.toMatchObject({ accountId: SBOBET, state: "LIVE",
+      lastCompleteBaselineAtMs: 1_002 });
+  });
+
+  it("does not let a retired-epoch baseline poison coverage before a legitimate baseline", async () => {
+    const poison = await catalogWith([999]);
+    const legitimate = await catalogWith([101, 102]);
+    const registry = new ProviderFeedRegistry({ now: () => 1_500 });
+    registry.accept({ kind: "TAB_REACHABLE", accountId: SBOBET, sourceId: "chrome:KSPORT:8",
+      sourceEpoch: "worker-a:0", atMs: 900 });
+    registry.accept({ kind: "INVALIDATE", accountId: SBOBET, sourceId: "chrome:KSPORT:8",
+      sourceEpoch: "worker-a:0", atMs: 950, reason: "SOURCE_REPLACED" });
+    vi.spyOn(KsportWsCatalogAdapter.prototype, "decode")
+      .mockReturnValueOnce(decodedBaseline("chrome:KSPORT:8", poison, 1))
+      .mockReturnValueOnce(decodedBaseline("chrome:KSPORT:9", legitimate, 2));
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, feedRegistry: registry });
+
+    expect(plane.ingest(ksportEnvelope(1, "live", [999], "worker-a:0"))).toBe(false);
+    expect(plane.ingest({ ...ksportEnvelope(2, "live", [101, 102], "worker-b:0"),
+      sourceId: "chrome:KSPORT:9", tabId: 9 })).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" }),
+        expect.objectContaining({ providerEventId: "102" })]
+    });
+  });
+
+  it("does not let a competing-source baseline poison current-source coverage", async () => {
+    const poison = await catalogWith([999]);
+    const legitimate = await catalogWith([101, 102]);
+    const registry = new ProviderFeedRegistry({ now: () => 1_500 });
+    vi.spyOn(KsportWsCatalogAdapter.prototype, "decode")
+      .mockReturnValueOnce(decodedBaseline("chrome:KSPORT:99", poison, 1))
+      .mockReturnValueOnce(decodedBaseline("chrome:KSPORT:8", legitimate, 2));
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, feedRegistry: registry });
+
+    expect(plane.ingest(ksportEnvelope(1, "live", [999]))).toBe(false);
+    expect(plane.ingest(ksportEnvelope(2, "live", [101, 102]))).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" }),
+        expect.objectContaining({ providerEventId: "102" })]
+    });
+  });
+
   it("owns exactly the six configured Football feeds", () => {
     const plane = new ChromeCatalogDataPlane();
     expect(["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"]
@@ -215,6 +284,23 @@ describe("ChromeCatalogDataPlane", () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 900_000, onSourceRecoveryNeeded });
     await plane.overlayStatuses([activeSaba, activeSbobet]);
     expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+  });
+
+  it("delivers SOFT first when a tab attaches after a long no-source period", async () => {
+    let now = 0;
+    const onSourceRecoveryNeeded = vi.fn();
+    const registry = new ProviderFeedRegistry({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: registry, onSourceRecoveryNeeded });
+
+    now = 100_000;
+    await plane.overlayStatuses([activeSaba]);
+    expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+
+    now = 100_001;
+    plane.ingest(tabHeartbeat(sabaEnvelope(1, []), now, 2));
+
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledExactlyOnceWith(SABA);
+    expect(registry.snapshot(SABA)).toMatchObject({ recoveryStage: "SOFT", recoveryAttempt: 1 });
   });
 
   it("drops expired and incomplete CMD observations without making them live", async () => {

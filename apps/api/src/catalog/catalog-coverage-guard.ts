@@ -1,6 +1,6 @@
 interface CoverageState {
-  acceptedCount: number;
-  authoritativeGeneration: string | null;
+  acceptedEventIds: ReadonlySet<string>;
+  consumedAuthoritativeGenerations: ReadonlySet<string>;
 }
 
 export interface CatalogCoverageCandidate {
@@ -13,26 +13,32 @@ export class CatalogCoverageGuard {
   readonly #states = new Map<string, CoverageState>();
 
   accept(sourceKey: string, candidate: CatalogCoverageCandidate): boolean {
+    if (!this.allows(sourceKey, candidate)) return false;
+    this.commit(sourceKey, candidate);
+    return true;
+  }
+
+  allows(sourceKey: string, candidate: CatalogCoverageCandidate): boolean {
     const current = this.#states.get(sourceKey);
-    if (current === undefined) {
-      this.#states.set(sourceKey, { acceptedCount: candidate.providerEventIds.length,
-        authoritativeGeneration: candidate.authoritativeBaseline ? candidate.generation : null });
+    if (current === undefined) return true;
+    if (candidate.authoritativeBaseline && !current.consumedAuthoritativeGenerations.has(candidate.generation)) {
       return true;
     }
-    if (candidate.authoritativeBaseline && current.authoritativeGeneration !== candidate.generation) {
-      this.#states.set(sourceKey, { acceptedCount: candidate.providerEventIds.length,
-        authoritativeGeneration: candidate.generation });
-      return true;
-    }
-    if (candidate.providerEventIds.length >= Math.ceil(current.acceptedCount * 0.7)) {
-      this.#states.set(sourceKey, { acceptedCount: candidate.providerEventIds.length,
-        authoritativeGeneration: current.authoritativeGeneration });
-      return true;
-    }
-    return false;
+    const proposed = new Set(candidate.providerEventIds);
+    return [...current.acceptedEventIds].every((eventId) => proposed.has(eventId));
+  }
+
+  commit(sourceKey: string, candidate: CatalogCoverageCandidate): void {
+    this.#states.set(sourceKey, stateAfter(this.#states.get(sourceKey) ?? null, candidate));
   }
 
   reset(sourceKey: string): void {
     this.#states.delete(sourceKey);
   }
+}
+
+function stateAfter(current: CoverageState | null, candidate: CatalogCoverageCandidate): CoverageState {
+  const consumed = new Set(current?.consumedAuthoritativeGenerations ?? []);
+  if (candidate.authoritativeBaseline) consumed.add(candidate.generation);
+  return { acceptedEventIds: new Set(candidate.providerEventIds), consumedAuthoritativeGenerations: consumed };
 }
