@@ -4,6 +4,7 @@ import {
   type ChromeBridgeEnvelope,
   type ChromeBridgeControlMessage
 } from "@tool-chenh/contracts";
+import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
 
 const LOOPBACK_URL = "ws://127.0.0.1:4310/api/chrome-bridge";
 
@@ -36,6 +37,7 @@ export interface LocalBridgeOptions {
   readonly clearTimer?: (handle: unknown) => void;
   readonly onOpen?: () => void | Promise<void>;
   readonly onSnapshotRequest?: (sourceId: string) => void | Promise<void>;
+  readonly onSourceResync?: (sourceId: string) => void | Promise<void>;
   readonly onSourceReload?: (sourceId: string) => void | Promise<void>;
   readonly onSourceNavigate?: (sourceId: string, url: string) => void | Promise<void>;
   readonly onSourceEnsure?: (lobby: ChromeBridgeEnvelope["lobby"], url: string) => void | Promise<void>;
@@ -59,6 +61,7 @@ export class LocalBridge {
   readonly #clearTimer: (handle: unknown) => void;
   readonly #onOpen: () => void | Promise<void>;
   readonly #onSnapshotRequest: (sourceId: string) => void | Promise<void>;
+  readonly #onSourceResync: (sourceId: string) => void | Promise<void>;
   readonly #onSourceReload: (sourceId: string) => void | Promise<void>;
   readonly #onSourceNavigate: NonNullable<LocalBridgeOptions["onSourceNavigate"]>;
   readonly #onSourceEnsure: NonNullable<LocalBridgeOptions["onSourceEnsure"]>;
@@ -67,6 +70,8 @@ export class LocalBridge {
   readonly #onSelectionPriceProbe: NonNullable<LocalBridgeOptions["onSelectionPriceProbe"]>;
   readonly #onCmdHiddenMarketProbe: NonNullable<LocalBridgeOptions["onCmdHiddenMarketProbe"]>;
   readonly #queue: QueueEntry[] = [];
+  readonly #recoveryScheduler = new ProviderWorkScheduler();
+  readonly #resyncingSources = new Map<string, string | null>();
   #socket: BridgeSocket | null = null;
   #timer: unknown = null;
   #generation = 0;
@@ -75,7 +80,6 @@ export class LocalBridge {
   #probeInFlight = false;
   #connectToken = 0;
   #sourceRecoveryTail: Promise<void> | null = null;
-  #snapshotRecoveryTail: Promise<void> | null = null;
   #lastServerContactAtMs = 0;
 
   constructor(options: LocalBridgeOptions) {
@@ -93,6 +97,7 @@ export class LocalBridge {
     this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     this.#onOpen = options.onOpen ?? (() => undefined);
     this.#onSnapshotRequest = options.onSnapshotRequest ?? (() => undefined);
+    this.#onSourceResync = options.onSourceResync ?? this.#onSnapshotRequest;
     this.#onSourceReload = options.onSourceReload ?? (() => undefined);
     this.#onSourceNavigate = options.onSourceNavigate ?? (() => undefined);
     this.#onSourceEnsure = options.onSourceEnsure ?? (() => undefined);
@@ -118,6 +123,14 @@ export class LocalBridge {
   }
 
   async enqueue(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): Promise<void> {
+    const resyncEpoch = this.#resyncingSources.get(envelope.sourceId);
+    if (resyncEpoch !== undefined) {
+      if (envelope.sourceEpoch === undefined || envelope.sourceEpoch === resyncEpoch) return;
+      // The collector has begun the replacement snapshot under the epoch
+      // created by onSourceResync. The API still requires that generation's
+      // complete baseline before it can become LIVE.
+      this.#resyncingSources.delete(envelope.sourceId);
+    }
     const serialized = JSON.stringify(envelope);
     const entry: QueueEntry = {
       envelope,
@@ -135,12 +148,11 @@ export class LocalBridge {
         continue;
       }
       if (priority === "DIAGNOSTIC") return;
-      const sameSourceIndex = this.#queue.findIndex((queued) => queued.priority === "QUOTE" &&
-        queued.envelope.sourceId === envelope.sourceId);
-      const quoteIndex = sameSourceIndex >= 0 ? sameSourceIndex :
-        this.#queue.findIndex((queued) => queued.priority === "QUOTE");
-      if (quoteIndex < 0) return;
-      this.#removeAt(quoteIndex);
+      // Removing one quote would make later quotes look contiguous while a
+      // provider generation has a hole. Retire only the affected source and
+      // require a replacement epoch; never evict another provider's queue.
+      this.#requestSourceResync(envelope.sourceId, envelope.sourceEpoch ?? null);
+      return;
     }
     this.#queue.push(entry);
     this.#queueBytes += entry.bytes;
@@ -316,11 +328,8 @@ export class LocalBridge {
           // backlog would make the server close every new socket forever.
           // Drop only the rejected source and republish its authoritative
           // snapshot; healthy sources remain queued and connected.
-          for (let index = this.#queue.length - 1; index >= 0; index--) {
-            if (this.#queue[index]?.envelope.sourceId === rejection.sourceId) this.#removeAt(index);
-          }
-          try { void Promise.resolve(this.#onSnapshotRequest(rejection.sourceId)).catch(() => undefined); }
-          catch { /* source recovery must not disrupt the bridge */ }
+          const rejected = this.#queue.find((entry) => entry.envelope.sourceId === rejection.sourceId);
+          this.#requestSourceResync(rejection.sourceId, rejected?.envelope.sourceEpoch ?? null);
           return;
         }
         if (rejection.sequence !== null) {
@@ -355,17 +364,34 @@ export class LocalBridge {
   }
 
   #enqueueSnapshotRecovery(sourceId: string): void {
-    const invoke = async (): Promise<void> => {
+    void this.#recoveryScheduler.run(sourceId, async () => {
       try { await this.#onSnapshotRequest(sourceId); }
       catch { /* one snapshot failure must not block the next provider */ }
-    };
-    const operation = this.#snapshotRecoveryTail === null
-      ? invoke()
-      : this.#snapshotRecoveryTail.then(invoke, invoke);
-    const settled = operation.finally(() => {
-      if (this.#snapshotRecoveryTail === settled) this.#snapshotRecoveryTail = null;
-    });
-    this.#snapshotRecoveryTail = settled;
+    }).catch(() => undefined);
+  }
+
+  #requestSourceResync(sourceId: string, sourceEpoch: string | null): void {
+    if (this.#resyncingSources.has(sourceId)) return;
+    const queuedEpoch = this.#queue.find((entry) => entry.envelope.sourceId === sourceId)?.envelope.sourceEpoch;
+    this.#resyncingSources.set(sourceId, queuedEpoch ?? sourceEpoch);
+    for (let index = this.#queue.length - 1; index >= 0; index--) {
+      if (this.#queue[index]?.envelope.sourceId === sourceId) this.#removeAt(index);
+    }
+    // Explicit resync supersedes an unsent ordinary snapshot request for this
+    // source. An already-running provider operation remains ordered ahead of
+    // the resync, while unrelated providers retain independent lanes.
+    this.#recoveryScheduler.clear(sourceId);
+    void this.#recoveryScheduler.run(sourceId, async () => {
+      try { await this.#onSourceResync(sourceId); }
+      finally { this.#reconnectAfterResync(); }
+    }).catch(() => undefined);
+  }
+
+  #reconnectAfterResync(): void {
+    const socket = this.#socket;
+    this.#socket = null;
+    socket?.close();
+    this.connect();
   }
 
 }

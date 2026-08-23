@@ -1051,7 +1051,7 @@ describe("NetworkObserver", () => {
     expect(maximumInFlight).toBe(3);
   });
 
-  it("runs periodic provider DOM work in one cross-tab lane to avoid synchronized CPU spikes", async () => {
+  it("does not let a blocked TSPORT lane delay BTI", async () => {
     let releaseFirstScan: (() => void) | undefined;
     const firstScanBlocked = new Promise<void>((resolve) => { releaseFirstScan = resolve; });
     const startedTabs: number[] = [];
@@ -1067,23 +1067,89 @@ describe("NetworkObserver", () => {
     });
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
 
-    const cmdCapture = observer.captureCmdSnapshot(
-      { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 }, "cgnew.fts368.com"
+    const tsportMaintenance = observer.maintain(
+      { lobby: "TSPORT", sourceId: "chrome:TSPORT:9", tabId: 9 }
     );
     await vi.waitFor(() => expect(startedTabs).toEqual([9]));
-    const tsportMaintenance = observer.maintain(
-      { lobby: "TSPORT", sourceId: "chrome:TSPORT:11", tabId: 11 }
-    );
     const btiRefresh = observer.refreshCatalog(
       { lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 }
     );
-    await Promise.resolve();
-
-    expect(sendCommand.mock.calls.filter(([tabId]) => tabId !== 9)).toHaveLength(0);
+    await vi.waitFor(() => expect(startedTabs).toEqual([9, 6]));
 
     releaseFirstScan?.();
-    await Promise.all([cmdCapture, tsportMaintenance, btiRefresh]);
-    expect(startedTabs).toEqual([9, 11, 6]);
+    await Promise.all([tsportMaintenance, btiRefresh]);
+  });
+
+  it("begins a new public epoch and discards pending old-epoch bodies", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
+      ? { body: '{"StatusCode":100,"sel":[]}', base64Encoded: false } : {});
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+
+    await observer.heartbeat(im, "imsports.directsb.net");
+    await observer.handleEvent(im, "Network.responseReceived", {
+      requestId: "old-body", type: "XHR", response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" }
+    });
+    expect(observer.beginSourceEpoch(im.sourceId)).toBe("worker-a:1");
+    await observer.handleEvent(im, "Network.loadingFinished", { requestId: "old-body" });
+    await observer.heartbeat(im, "imsports.directsb.net");
+
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Network.getResponseBody")).toBe(false);
+    expect(forward.mock.calls.map(([message]) => [message.sourceEpoch, message.sequence])).toEqual([
+      ["worker-a:0", 0], ["worker-a:1", 0]
+    ]);
+  });
+
+  it("does not stamp a scan started in a retired epoch as replacement-epoch data", async () => {
+    let releaseOldScan: (() => void) | undefined;
+    const oldScanBlocked = new Promise<void>((resolve) => { releaseOldScan = resolve; });
+    let scans = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") {
+        scans += 1;
+        if (scans === 1) await oldScanBlocked;
+        return { frameTree: { frame: { id: "top" } } };
+      }
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") return { result: { value: JSON.stringify([
+        { eventId: scans === 1 ? "old-event" : "new-event" }
+      ]) } };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
+    const tsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:11", tabId: 11 } as const;
+
+    const oldScan = observer.captureCmdSnapshot(tsport, "pacific.agenate.com");
+    await vi.waitFor(() => expect(scans).toBe(1));
+    expect(observer.beginSourceEpoch(tsport.sourceId)).toBe("worker-a:1");
+    const replacementScan = observer.captureCmdSnapshot(tsport, "pacific.agenate.com");
+    releaseOldScan?.();
+    await Promise.all([oldScan, replacementScan]);
+
+    expect(forward).toHaveBeenCalledOnce();
+    expect(forward.mock.calls[0]![0]).toMatchObject({ sourceEpoch: "worker-a:1", sequence: 0 });
+    expect(forward.mock.calls[0]![0].payload.body).toContain("new-event");
+    expect(forward.mock.calls[0]![0].payload.body).not.toContain("old-event");
+  });
+
+  it("does not restore a durable socket baseline into a replacement source epoch", async () => {
+    const loadSabaWsSnapshots = vi.fn(async () => ({ version: 1 }));
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) =>
+        method === "Runtime.evaluate" && params?.expression === "String(performance.timeOrigin)"
+          ? { result: { value: "1787432000000" } } : {}),
+      forward: vi.fn(async () => undefined),
+      observerSessionId: "worker-a",
+      loadSabaWsSnapshots
+    });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
+
+    observer.beginSourceEpoch(saba.sourceId);
+    await observer.refreshCatalog(saba);
+
+    expect(loadSabaWsSnapshots).not.toHaveBeenCalled();
   });
 
   it.each(["Emulation.setFocusEmulationEnabled", "Page.setWebLifecycleState",

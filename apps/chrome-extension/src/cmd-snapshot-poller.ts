@@ -26,6 +26,7 @@ export class CmdSnapshotPoller {
   readonly #lastCatalogRefreshAtMs = new Map<number, number>();
   readonly #maintenanceInFlight = new Set<number>();
   readonly #catalogRefreshInFlight = new Set<number>();
+  readonly #lastPolledSourceIds = new Set<string>();
   #lastScheduledPollAtMs: number | null = null;
 
   constructor(dependencies: CmdSnapshotPollerDependencies) {
@@ -50,14 +51,18 @@ export class CmdSnapshotPoller {
 
   pollNow(): void {
     const now = (this.#dependencies.now ?? Date.now)();
+    const tabs = this.#dependencies.list();
+    const hasNewSource = tabs.some((tab) =>
+      !this.#lastPolledSourceIds.has(`chrome:${tab.lobby}:${tab.tabId}`));
     if (this.#lastScheduledPollAtMs !== null &&
-      now - this.#lastScheduledPollAtMs < (this.#dependencies.intervalMs ?? 2_000)) return;
-    this.#tick();
+      now - this.#lastScheduledPollAtMs < (this.#dependencies.intervalMs ?? 2_000) && !hasNewSource) return;
+    this.#tick(tabs);
   }
 
-  #tick(): void {
+  #tick(tabs = this.#dependencies.list()): void {
     const now = (this.#dependencies.now ?? Date.now)();
-    const tabs = this.#dependencies.list();
+    this.#lastPolledSourceIds.clear();
+    for (const tab of tabs) this.#lastPolledSourceIds.add(`chrome:${tab.lobby}:${tab.tabId}`);
     if (this.#dependencies.maintain !== undefined &&
       (this.#lastMaintenanceAtMs === null || now - this.#lastMaintenanceAtMs >= 60_000)) {
       this.#lastMaintenanceAtMs = now;

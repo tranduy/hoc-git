@@ -15,6 +15,30 @@ describe("CmdSnapshotPoller", () => {
     expect(refreshCatalog).toHaveBeenCalledTimes(1);
   });
 
+  it("polls a newly reattached BTI source even after a just-completed empty scheduled tick", async () => {
+    let callback: (() => void) | undefined;
+    let tabs: Array<{ readonly lobby: "BTI"; readonly tabId: number; readonly hostname: string;
+      readonly state: "ATTACHED" }> = [];
+    let now = 1_000;
+    const refreshCatalog = vi.fn(async () => undefined);
+    const poller = new CmdSnapshotPoller({
+      list: () => tabs,
+      capture: vi.fn(async () => undefined), refreshCatalog, now: () => now,
+      setInterval: (next) => { callback = next; return 1; }
+    });
+
+    poller.start();
+    callback?.();
+    tabs = [{ lobby: "BTI", tabId: 6, hostname: "prod.example.com", state: "ATTACHED" }];
+    now = 1_001;
+    poller.pollNow();
+    await Promise.resolve();
+
+    expect(refreshCatalog).toHaveBeenCalledExactlyOnceWith({
+      lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6
+    });
+  });
+
   it("keeps both BTI and the current HTTP-based SBOBET catalog fresh", async () => {
     const refreshCatalog = vi.fn(async (_source: { readonly lobby: string; readonly sourceId: string;
       readonly tabId: number }) => undefined);

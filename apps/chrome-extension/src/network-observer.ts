@@ -14,6 +14,7 @@ import { buildBtiSelectionPriceExpression, buildCmdSelectionPriceExpression, bui
   type SelectionPriceProbeIdentity } from "./selection-price.js";
 import { buildCmdHiddenMarketProbeExpression, summarizeCmdHiddenProtocolFrame,
   type CmdHiddenDomProbeResult, type CmdHiddenProtocolEvidence } from "./cmd-hidden-market-probe.js";
+import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
 
 const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
@@ -46,6 +47,7 @@ export interface NetworkObserverDependencies {
   readonly loadSabaWsSnapshots?: (sourceId: string) => Promise<unknown>;
   readonly saveSabaWsSnapshots?: (snapshots: PersistedSabaWsSnapshots) => Promise<void>;
   readonly clearSabaWsSnapshots?: (sourceId: string) => Promise<void>;
+  readonly workScheduler?: ProviderWorkScheduler;
 }
 
 type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
@@ -541,8 +543,10 @@ export class NetworkObserver {
   readonly #loadSabaWsSnapshots: NonNullable<NetworkObserverDependencies["loadSabaWsSnapshots"]>;
   readonly #saveSabaWsSnapshots: NetworkObserverDependencies["saveSabaWsSnapshots"];
   readonly #clearSabaWsSnapshots: NonNullable<NetworkObserverDependencies["clearSabaWsSnapshots"]>;
+  readonly #workScheduler: ProviderWorkScheduler;
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
+  readonly #activeWorkGenerations = new Map<string, number>();
   readonly #streamOrdinals = new Map<string, number>();
   readonly #emissionTails = new Map<string, Promise<void>>();
   readonly #webSockets = new Map<string, {
@@ -592,7 +596,6 @@ export class NetworkObserver {
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
     readonly headers: Readonly<Record<string, string>> }>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
-  #periodicDomWorkTail: Promise<void> = Promise.resolve();
 
   constructor(dependencies: NetworkObserverDependencies) {
     this.#sendCommand = dependencies.sendCommand;
@@ -608,6 +611,7 @@ export class NetworkObserver {
     this.#loadSabaWsSnapshots = dependencies.loadSabaWsSnapshots ?? (async () => null);
     this.#saveSabaWsSnapshots = dependencies.saveSabaWsSnapshots;
     this.#clearSabaWsSnapshots = dependencies.clearSabaWsSnapshots ?? (async () => undefined);
+    this.#workScheduler = dependencies.workScheduler ?? new ProviderWorkScheduler();
     if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
       throw new Error("OBSERVER_SESSION_ID_INVALID");
     }
@@ -702,6 +706,74 @@ export class NetworkObserver {
     this.releaseTab(source.tabId);
   }
 
+  beginSourceEpoch(sourceId: string): string {
+    const generation = (this.#sourceGenerations.get(sourceId) ?? 0) + 1;
+    this.#sourceGenerations.set(sourceId, generation);
+    this.#workScheduler.clear(sourceId);
+    this.#sequences.delete(sourceId);
+    this.#emissionTails.delete(sourceId);
+    this.#streamOrdinals.delete(sourceId);
+    this.#cmdSnapshots.delete(sourceId);
+    this.#cmdLastBodies.delete(sourceId);
+    this.#cmdLastSentAtMs.delete(sourceId);
+    this.#cmdSnapshotHosts.delete(sourceId);
+    this.#domSnapshotOrdinals.delete(sourceId);
+    this.#httpSnapshots.delete(sourceId);
+    this.#imSnapshotOrdinals.delete(sourceId);
+    this.#tsportSnapshots.delete(sourceId);
+    this.#tsportRequestUrls.delete(sourceId);
+    this.#catalogWsSnapshots.delete(sourceId);
+    this.#activeKsportStreams.delete(sourceId);
+    this.#socketBaselineRecoveryAtMs.delete(sourceId);
+    this.#sabaDomBootstrapAtMs.delete(sourceId);
+    for (const key of this.#sabaReadySnapshotPartitions) {
+      if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
+    }
+    this.#sabaSnapshotLoads.delete(sourceId);
+    this.#sabaSnapshotSaveRequested.delete(sourceId);
+    this.#sabaSnapshotSaveOperations.delete(sourceId);
+    const sabaSaveTimer = this.#sabaSnapshotSaveTimers.get(sourceId);
+    if (sabaSaveTimer !== undefined) clearTimeout(sabaSaveTimer);
+    this.#sabaSnapshotSaveTimers.delete(sourceId);
+    this.#sabaSnapshotLastSavedAtMs.delete(sourceId);
+    this.#sabaDocumentMarkers.delete(sourceId);
+    this.#sbobetEventRequests.delete(sourceId);
+    this.#ksportAttachedTargetSessions.delete(sourceId);
+    this.#ksportDiagnosticAtMs.delete(sourceId);
+    this.#ksportRefreshesInFlight.delete(sourceId);
+    this.#ksportTodayRequested.delete(sourceId);
+    this.#ksportLiveRestored.delete(sourceId);
+    this.#ksportCatalogFrameAtMs.delete(sourceId);
+    this.#ksportMaintenanceRecoveryAtMs.delete(sourceId);
+    this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
+    this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
+    this.#cmdCapturesInFlight.delete(sourceId);
+    this.#imLastRecoveryAtMs.delete(sourceId);
+    this.#imCatalogRefreshes.delete(sourceId);
+    this.#activeCmdHiddenProbes.delete(sourceId);
+    for (const [key, socket] of this.#webSockets) {
+      if (socket.source.sourceId === sourceId) this.#webSockets.delete(key);
+    }
+    let tabId: number | null = null;
+    for (const [key, pending] of this.#pending) {
+      if (pending.source.sourceId !== sourceId) continue;
+      tabId = pending.source.tabId;
+      this.#pending.delete(key);
+    }
+    const sourceTabId = Number(sourceId.slice(sourceId.lastIndexOf(":") + 1));
+    if (Number.isSafeInteger(sourceTabId)) tabId = sourceTabId;
+    if (tabId !== null) {
+      for (const key of this.#requestPartitions.keys()) {
+        if (key.startsWith(`${tabId}:`)) this.#requestPartitions.delete(key);
+      }
+      for (const key of this.#requestStreamIds.keys()) {
+        if (key.startsWith(`${tabId}:`)) this.#requestStreamIds.delete(key);
+      }
+    }
+    void this.#clearSabaWsSnapshots(sourceId).catch(() => undefined);
+    return `${this.#observerSessionId}:${generation}`;
+  }
+
   releaseTab(tabId: number): void {
     this.#startedTabs.delete(tabId);
     this.#mainWorldContexts.delete(tabId);
@@ -718,9 +790,7 @@ export class NetworkObserver {
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
     for (const sourceId of sourceIds) {
-      this.#sourceGenerations.set(sourceId, (this.#sourceGenerations.get(sourceId) ?? 0) + 1);
-      this.#sequences.delete(sourceId);
-      this.#emissionTails.delete(sourceId);
+      this.beginSourceEpoch(sourceId);
       this.#cmdSnapshots.delete(sourceId);
       this.#cmdLastBodies.delete(sourceId);
       this.#cmdLastSentAtMs.delete(sourceId);
@@ -773,7 +843,7 @@ export class NetworkObserver {
   }
 
   async maintain(source: ObservedSource): Promise<void> {
-    await this.#runPeriodicDomWork(async () => {
+    await this.#runPeriodicDomWork(source.sourceId, async () => {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Emulation.setFocusEmulationEnabled", { enabled: true })).catch(() => ({}));
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
@@ -871,7 +941,7 @@ export class NetworkObserver {
     if (source.lobby === "IM") {
       const existing = this.#imCatalogRefreshes.get(source.sourceId);
       if (existing !== undefined) return existing;
-      const operation = this.#runPeriodicDomWork(async () => {
+      const operation = this.#runPeriodicDomWork(source.sourceId, async () => {
         const results = await this.#evaluateImCatalogMainWorlds(source, true);
         await this.#emit(source, "https://imsports.directsb.net/__fieldline_im_catalog_refresh__",
           "Diagnostic", "TAB_STATE", {
@@ -947,7 +1017,7 @@ export class NetworkObserver {
       return;
     }
     if (source.lobby !== "BTI") return;
-    await this.#runPeriodicDomWork(async () => {
+    await this.#runPeriodicDomWork(source.sourceId, async () => {
       const frameTree = await this.#withFrameCommandTimeout(
         this.#sendCommand(source.tabId, "Page.getFrameTree")
       ).catch(() => ({}));
@@ -1372,7 +1442,7 @@ export class NetworkObserver {
     if (method === "Runtime.executionContextsCleared") {
       this.#mainWorldContexts.delete(source.tabId);
       this.#mainWorldContextSessions.delete(source.tabId);
-      this.#sourceGenerations.set(source.sourceId, (this.#sourceGenerations.get(source.sourceId) ?? 0) + 1);
+      this.beginSourceEpoch(source.sourceId);
       if (source.lobby === "SABA") {
         // Runtime.enable can emit executionContextsCleared while an unchanged
         // document is merely being reattached after an MV3 worker restart.
@@ -1746,7 +1816,7 @@ export class NetworkObserver {
     if (this.#cmdCapturesInFlight.has(source.sourceId) || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
     this.#cmdCapturesInFlight.add(source.sourceId);
     try {
-      await this.#runPeriodicDomWork(async () => {
+      await this.#runPeriodicDomWork(source.sourceId, async () => {
         for (let generation = 0; generation < (forceGeneration ? 2 : 1); generation += 1) {
         const frameTree = await this.#withFrameCommandTimeout(
           this.#sendCommand(source.tabId, "Page.getFrameTree")
@@ -1806,10 +1876,21 @@ export class NetworkObserver {
     }
   }
 
-  async #runPeriodicDomWork<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.#periodicDomWorkTail.catch(() => undefined).then(operation);
-    this.#periodicDomWorkTail = result.then(() => undefined, () => undefined);
-    return result;
+  async #runPeriodicDomWork<T>(sourceId: string, operation: () => Promise<T>): Promise<T> {
+    const scheduledGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
+    return this.#workScheduler.run(sourceId, async () => {
+      if ((this.#sourceGenerations.get(sourceId) ?? 0) !== scheduledGeneration) {
+        throw new Error("PROVIDER_WORK_EPOCH_RETIRED");
+      }
+      this.#activeWorkGenerations.set(sourceId, scheduledGeneration);
+      try {
+        return await operation();
+      } finally {
+        if (this.#activeWorkGenerations.get(sourceId) === scheduledGeneration) {
+          this.#activeWorkGenerations.delete(sourceId);
+        }
+      }
+    });
   }
 
   async #withFrameCommandTimeout<T>(operation: Promise<T>, timeoutMs = this.#frameCommandTimeoutMs): Promise<T> {
@@ -2231,6 +2312,10 @@ export class NetworkObserver {
   async #restoreSabaWsSnapshots(source: ObservedSource): Promise<void> {
     if (this.#sabaSnapshotLoads.has(source.sourceId)) return;
     this.#sabaSnapshotLoads.add(source.sourceId);
+    // Durable frames are worker-bootstrap evidence only. Once this worker has
+    // explicitly replaced the source epoch, accepting them would relabel an
+    // old complete baseline as current and create false continuity.
+    if ((this.#sourceGenerations.get(source.sourceId) ?? 0) > 0) return;
     const documentMarker = await this.#sabaDocumentMarker(source);
     if (documentMarker === null) return;
     const raw = await this.#loadSabaWsSnapshots(source.sourceId).catch(() => null);
@@ -2401,15 +2486,18 @@ export class NetworkObserver {
       readonly receivedMonotonicMs?: number;
     } = {}
   ): Promise<void> {
+    const sourceGeneration = this.#activeWorkGenerations.get(source.sourceId) ??
+      this.#sourceGenerations.get(source.sourceId) ?? 0;
     const previous = this.#emissionTails.get(source.sourceId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(async () => {
+      if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration) return;
       const sequence = this.#sequences.get(source.sourceId) ?? 0;
       try {
         const redacted = redactNetworkEnvelope({
           version: 1,
           kind: "NETWORK",
           ...source,
-          sourceEpoch: `${this.#observerSessionId}:${this.#sourceGenerations.get(source.sourceId) ?? 0}`,
+          sourceEpoch: `${this.#observerSessionId}:${sourceGeneration}`,
           sequence,
           observedAtMs: metadata.observedAtMs ?? this.#now(),
           receivedMonotonicMs: metadata.receivedMonotonicMs ?? this.#monotonicNow(),
@@ -2418,7 +2506,9 @@ export class NetworkObserver {
           payload
         }) as ChromeBridgeEnvelope;
         await this.#forward(redacted);
-        this.#sequences.set(source.sourceId, sequence + 1);
+        if ((this.#sourceGenerations.get(source.sourceId) ?? 0) === sourceGeneration) {
+          this.#sequences.set(source.sourceId, sequence + 1);
+        }
       } catch (error) {
         if (!(error instanceof Error) || !/^BRIDGE_PAYLOAD_/u.test(error.message)) throw error;
       }

@@ -116,6 +116,27 @@ const snapshotPoller = new CmdSnapshotPoller({
 });
 snapshotPoller.start();
 
+async function recoverSourceSnapshot(sourceId: string, beginEpoch: boolean): Promise<void> {
+  const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
+  if (!attached) return;
+  if (beginEpoch) observer.beginSourceEpoch(sourceId);
+  // Never replay cached response bytes with a new timestamp. A recovery must
+  // prove freshness from the current page without consuming a launch URL.
+  await recoverAttachedSource(attached, {
+    capture: async (source) => observer.captureCmdSnapshot({
+      lobby: source.lobby,
+      sourceId,
+      tabId: source.tabId
+    }, source.hostname),
+    refresh: async (source) => observer.refreshCatalog({
+      lobby: source.lobby,
+      sourceId,
+      tabId: source.tabId
+    }),
+    reload: async (tabId) => chrome.tabs.reload(tabId)
+  });
+}
+
 const tabBootstrapper = new TabBootstrapper({
   has: async (key) => (await chrome.storage.session.get(key))[key] === true,
   mark: async (key) => { await chrome.storage.session.set({ [key]: true }); },
@@ -307,26 +328,8 @@ async function configureBridgeOnce(): Promise<boolean> {
       // provider payload floods a fresh API process with stale multi-megabyte
       // baselines and can exhaust its heap before live frames are accepted.
       onOpen: () => undefined,
-      onSnapshotRequest: async (sourceId) => {
-        const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
-        if (!attached) return;
-        // Never replay cached response bytes with a new timestamp. A recovery
-        // must prove freshness from the current page without consuming BTI's
-        // one-time Fabet launch URL again.
-        await recoverAttachedSource(attached, {
-          capture: async (source) => observer.captureCmdSnapshot({
-            lobby: source.lobby,
-            sourceId,
-            tabId: source.tabId
-          }, source.hostname),
-          refresh: async (source) => observer.refreshCatalog({
-            lobby: source.lobby,
-            sourceId,
-            tabId: source.tabId
-          }),
-          reload: async (tabId) => chrome.tabs.reload(tabId)
-        });
-      },
+      onSnapshotRequest: async (sourceId) => recoverSourceSnapshot(sourceId, false),
+      onSourceResync: async (sourceId) => recoverSourceSnapshot(sourceId, true),
       onSourceReload: async (sourceId) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
         if (attached) await chrome.tabs.reload(attached.tabId);
@@ -389,10 +392,18 @@ async function restorePreferredTabs(): Promise<void> {
 }
 
 async function restorePreferredTabsOnce(): Promise<void> {
+  await reconcilePreferredTabs();
+  await reattachPreferredTabs();
+}
+
+async function reconcilePreferredTabs(): Promise<void> {
   const tabs = await chrome.tabs.query({});
   await Promise.all(tabs.map(async (tab) => rememberRecognizedUrl(tab)));
-  const restored = await registry.restore(tabs);
-  for (const attached of restored) {
+  await registry.restore(tabs);
+}
+
+async function reattachPreferredTabs(): Promise<void> {
+  for (const attached of registry.list()) {
     const source: ObservedSource = {
       lobby: attached.lobby,
       tabId: attached.tabId,
@@ -404,12 +415,15 @@ async function restorePreferredTabsOnce(): Promise<void> {
   }
 }
 
-new BridgeWakeup({
+const bridgeWakeup = new BridgeWakeup({
   createAlarm: (name, info) => { void chrome.alarms.create(name, info); },
   addAlarmListener: (listener) => chrome.alarms.onAlarm.addListener(listener),
+  reconcileTabs: reconcilePreferredTabs,
   ensureConnected: ensureBridgeConnected,
-  ensureAttached: restorePreferredTabs
-}).start();
+  ensureAttached: reattachPreferredTabs,
+  pollNow: () => snapshotPoller.pollNow()
+});
+bridgeWakeup.start();
 
 function sourceForTab(tabId: number): ObservedSource | null {
   const attached = registry.list().find((entry) => entry.tabId === tabId);
@@ -420,18 +434,13 @@ function sourceForTab(tabId: number): ObservedSource | null {
 
 chrome.runtime.onInstalled.addListener((details) => {
   void (async () => {
-    await configureBridge();
-    await restorePreferredTabs();
+    await bridgeWakeup.wakeNow();
     for (const tabId of tabsNeedingContentScriptRefresh(details.reason, registry.list())) {
       await chrome.tabs.reload(tabId);
     }
   })().catch(() => undefined);
 });
-chrome.runtime.onStartup.addListener(() => { void configureBridge(); });
-void (async () => {
-  await configureBridge();
-  await restorePreferredTabs();
-})();
+chrome.runtime.onStartup.addListener(() => { void bridgeWakeup.wakeNow(); });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   bootstrappingSourceTabs.delete(tabId);

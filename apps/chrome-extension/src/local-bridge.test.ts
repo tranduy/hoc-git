@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { LocalBridge, type BridgeSocket } from "./local-bridge.js";
 
-function envelope(sequence: number, body = "{}", sourceId = "chrome:SABA:7"): ChromeBridgeEnvelope {
+function envelope(sequence: number, body = "{}", sourceId = "chrome:SABA:7",
+  sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
   return {
     version: 1, kind: "NETWORK", lobby: "SABA", sourceId, tabId: 7, sequence,
+    sourceEpoch,
     observedAtMs: 1_000, receivedMonotonicMs: 50, transport: "WS_FRAME",
     request: { hostname: "sports.example", pathnameClass: "/feed", resourceType: "WebSocket" },
     payload: { encoding: "UTF8", body }
@@ -102,24 +104,50 @@ describe("LocalBridge", () => {
     expect(sockets[1]!.sent.map((value) => JSON.parse(value).sequence)).toEqual([0]);
   });
 
-  it("drops a source's gapped backlog and requests a fresh snapshot instead of reconnecting forever", () => {
-    const socket = new FakeSocket();
-    const onSnapshotRequest = vi.fn();
+  it("drops a source's gapped backlog atomically and requests a new source epoch", async () => {
+    const sockets = [new FakeSocket(), new FakeSocket()];
+    let socketIndex = 0;
+    const onSourceResync = vi.fn();
     const bridge = new LocalBridge({
-      socketFactory: () => socket, installationKey: "local-key", onSnapshotRequest
+      socketFactory: () => sockets[socketIndex++]!, installationKey: "local-key", onSourceResync
     });
     bridge.enqueue(envelope(12, "old", "chrome:SABA:7"));
     bridge.enqueue(envelope(4, "healthy", "chrome:IM:8"));
     bridge.connect();
-    socket.open();
+    sockets[0]!.open();
 
-    socket.onmessage?.({ data: JSON.stringify({
+    sockets[0]!.onmessage?.({ data: JSON.stringify({
       version: 1, kind: "REJECT", sourceId: "chrome:SABA:7", sequence: 12, reason: "SEQUENCE_GAP"
     }) });
 
     expect(bridge.pendingSequences()).toEqual([4]);
-    expect(onSnapshotRequest).toHaveBeenCalledOnce();
-    expect(onSnapshotRequest).toHaveBeenCalledWith("chrome:SABA:7");
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+    await vi.waitFor(() => expect(socketIndex).toBe(2));
+  });
+
+  it("drops one overflowing source atomically without removing another provider", async () => {
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => new FakeSocket(), installationKey: "local-key",
+      maxQueueBytes: 700, onSourceResync });
+
+    await bridge.enqueue(envelope(0, "x".repeat(200), "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(1, "y".repeat(200), "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(9, "z".repeat(200), "chrome:BTI:8", "worker-a:0"));
+
+    expect(bridge.pendingSequences()).toEqual([9]);
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+  });
+
+  it("refuses the old source epoch until a replacement snapshot begins", async () => {
+    const bridge = new LocalBridge({ socketFactory: () => new FakeSocket(), installationKey: "local-key",
+      maxQueueBytes: 1_300, onSourceResync: vi.fn() });
+
+    await bridge.enqueue(envelope(0, "x".repeat(500), "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(1, "y".repeat(500), "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(2, "old", "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(0, "baseline", "chrome:SABA:7", "worker-a:1"));
+
+    expect(bridge.pendingSequences()).toEqual([0]);
   });
 
   it("notifies the collector after every successful socket generation so snapshots can be replayed", () => {
@@ -155,7 +183,7 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([0]);
   });
 
-  it("serializes provider snapshot recovery so large catalogs cannot flood the API together", async () => {
+  it("does not let one blocked snapshot recovery delay another provider", async () => {
     const socket = new FakeSocket();
     let releaseFirst: (() => void) | undefined;
     const started: string[] = [];
@@ -174,10 +202,9 @@ describe("LocalBridge", () => {
       sourceId: "chrome:SABA:7" }) });
     socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
       sourceId: "chrome:IM:8" }) });
-    await vi.waitFor(() => expect(started).toEqual(["chrome:SABA:7"]));
+    await vi.waitFor(() => expect(started).toEqual(["chrome:SABA:7", "chrome:IM:8"]));
 
     releaseFirst?.();
-    await vi.waitFor(() => expect(started).toEqual(["chrome:SABA:7", "chrome:IM:8"]));
   });
 
   it("forwards an explicit source reload command to the attached-tab controller", () => {
@@ -350,10 +377,11 @@ describe("LocalBridge", () => {
     expect(bridge.queueBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
   });
 
-  it("coalesces old quote frames without blocking producers when loopback is unavailable", async () => {
+  it("retires an overflowing quote generation without blocking producers", async () => {
     const socket = new FakeSocket();
+    const onSourceResync = vi.fn();
     const bridge = new LocalBridge({
-      socketFactory: () => socket, installationKey: "local-key", maxQueueBytes: 700
+      socketFactory: () => socket, installationKey: "local-key", maxQueueBytes: 700, onSourceResync
     });
     bridge.connect();
     socket.open();
@@ -361,7 +389,8 @@ describe("LocalBridge", () => {
     await bridge.enqueue(envelope(0, "x".repeat(200)));
     await expect(bridge.enqueue(envelope(1, "y".repeat(200)))).resolves.toBeUndefined();
 
-    expect(bridge.pendingSequences()).toEqual([1]);
+    expect(bridge.pendingSequences()).toEqual([]);
     expect(bridge.queueBytes).toBeLessThanOrEqual(700);
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
   });
 });

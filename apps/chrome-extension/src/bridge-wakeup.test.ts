@@ -2,23 +2,30 @@ import { describe, expect, it, vi } from "vitest";
 import { BridgeWakeup } from "./bridge-wakeup.js";
 
 describe("BridgeWakeup", () => {
-  it("uses a Chrome alarm to reconnect after the MV3 worker sleeps", async () => {
+  it("reconciles, reconnects, reattaches, and polls immediately on worker start and alarm", async () => {
     let listener: ((alarm: { readonly name: string }) => void) | undefined;
-    const ensureConnected = vi.fn(async () => true);
-    const ensureAttached = vi.fn(async () => undefined);
+    const calls: string[] = [];
+    const reconcileTabs = vi.fn(async () => { calls.push("reconcile"); });
+    const ensureConnected = vi.fn(async () => { calls.push("connect"); return true; });
+    const ensureAttached = vi.fn(async () => { calls.push("attach"); });
+    const pollNow = vi.fn(() => { calls.push("poll"); });
     const createAlarm = vi.fn();
     new BridgeWakeup({
       createAlarm,
       addAlarmListener: (next) => { listener = next; },
+      reconcileTabs,
       ensureConnected,
-      ensureAttached
+      ensureAttached,
+      pollNow
     }).start();
 
     expect(createAlarm).toHaveBeenCalledWith("fieldline-bridge-wakeup", { periodInMinutes: 0.5 });
+    await vi.waitFor(() => expect(calls).toEqual(["reconcile", "connect", "attach", "poll"]));
     listener?.({ name: "unrelated" });
     listener?.({ name: "fieldline-bridge-wakeup" });
-    await Promise.resolve();
-    expect(ensureConnected).toHaveBeenCalledTimes(1);
-    expect(ensureAttached).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(calls).toEqual([
+      "reconcile", "connect", "attach", "poll", "reconcile", "connect", "attach", "poll"
+    ]));
+    expect(pollNow).toHaveBeenCalledTimes(2);
   });
 });
