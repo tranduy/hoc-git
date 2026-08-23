@@ -1,23 +1,34 @@
 interface CoverageState {
   acceptedCount: number;
+  authoritativeGeneration: string | null;
+}
+
+export interface CatalogCoverageCandidate {
+  readonly generation: string;
+  readonly authoritativeBaseline: boolean;
+  readonly providerEventIds: readonly string[];
 }
 
 export class CatalogCoverageGuard {
   readonly #states = new Map<string, CoverageState>();
 
-  accept(sourceKey: string, eventIds: readonly string[]): boolean {
+  accept(sourceKey: string, candidate: CatalogCoverageCandidate): boolean {
     const current = this.#states.get(sourceKey);
     if (current === undefined) {
-      this.#states.set(sourceKey, { acceptedCount: eventIds.length });
+      this.#states.set(sourceKey, { acceptedCount: candidate.providerEventIds.length,
+        authoritativeGeneration: candidate.authoritativeBaseline ? candidate.generation : null });
       return true;
     }
-    if (eventIds.length >= Math.ceil(current.acceptedCount * 0.7)) {
-      this.#states.set(sourceKey, { acceptedCount: eventIds.length });
+    if (candidate.authoritativeBaseline && current.authoritativeGeneration !== candidate.generation) {
+      this.#states.set(sourceKey, { acceptedCount: candidate.providerEventIds.length,
+        authoritativeGeneration: candidate.generation });
       return true;
     }
-    // A repeated partial viewport is still partial. Only an explicit Reset or
-    // the scheduled 03:00 maintenance may authorize a catastrophically smaller
-    // baseline; transport repetition must never overwrite a complete catalog.
+    if (candidate.providerEventIds.length >= Math.ceil(current.acceptedCount * 0.7)) {
+      this.#states.set(sourceKey, { acceptedCount: candidate.providerEventIds.length,
+        authoritativeGeneration: current.authoritativeGeneration });
+      return true;
+    }
     return false;
   }
 

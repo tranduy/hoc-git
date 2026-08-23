@@ -10,20 +10,17 @@ import { SbobetSocketIoCatalogAdapter } from "./sbobet-socketio-adapter.js";
 import { BtiHttpCatalogAdapter } from "./bti-http-adapter.js";
 import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
 import { NetworkBodyAssembler } from "./network-body-assembler.js";
+import { ProviderFeedRegistry } from "./provider-feed-registry.js";
+import type { FeedDecision, FeedProvenance } from "./provider-feed-types.js";
 
 export interface ChromeCatalogDataPlaneOptions {
   readonly now?: () => number;
   readonly freshnessMs?: number;
   readonly maxEnvelopeAgeMs?: number;
   readonly publish?: (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void;
-  /**
-   * Automatic stall recovery. CMD and IM re-request their catalog in page on
-   * every bridge reconnect, so they are excluded by default. The streaming
-   * providers (SABA, SBOBET, APSPORT, BTI) cannot replay a WebSocket baseline
-   * through CDP once it is lost, so a stalled catalog stays stale until the
-   * provider tab is replaced with a fresh launch.
-   */
+  /** @deprecated Provider feed policies now own recovery timing. */
   readonly recoveryAfterMs?: number;
+  /** @deprecated Provider feed policies now own recovery cooldowns. */
   readonly recoveryCooldownMs?: number;
   readonly recoverableAccountIds?: ReadonlySet<string>;
   readonly onSourceRecoveryNeeded?: (accountId: string) => void;
@@ -48,20 +45,13 @@ export class ChromeCatalogDataPlane {
     { confirmationsRequired: 1 });
   readonly #networkBodies = new NetworkBodyAssembler();
   readonly #coverage = new CatalogCoverageGuard();
+  readonly #feeds: ProviderFeedRegistry;
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
-  readonly #lastTransportAtMs = new Map<string, number>();
-  readonly #transportStartedAtMs = new Map<string, number>();
   readonly #sourceEpochs = new Map<string, string>();
   readonly #activeSourceIds = new Map<string, string>();
   readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
-  readonly #invalidatedAccounts = new Set<string>();
-  readonly #recoveryAfterMs: number;
-  readonly #recoveryCooldownMs: number;
   readonly #recoverableAccountIds: ReadonlySet<string>;
   readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
-  readonly #lastRecoveryAtMs = new Map<string, number>();
-  readonly #lastDecodedAtMs = new Map<string, number>();
-  readonly #startedAtMs: number;
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -71,18 +61,13 @@ export class ChromeCatalogDataPlane {
     this.#freshnessMs = options.freshnessMs ?? 20_000;
     this.#maxEnvelopeAgeMs = options.maxEnvelopeAgeMs ?? 30_000;
     this.#publish = options.publish ?? null;
-    this.#recoveryAfterMs = options.recoveryAfterMs ?? 60_000;
-    this.#recoveryCooldownMs = options.recoveryCooldownMs ?? 300_000;
     this.#recoverableAccountIds = options.recoverableAccountIds ?? DEFAULT_RECOVERABLE_ACCOUNTS;
     this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
-    this.#startedAtMs = this.#now();
+    this.#feeds = new ProviderFeedRegistry({ now: this.#now });
   }
 
   owns(accountId: string): boolean {
-    // When the local Chrome bridge is enabled, every configured Football
-    // source is bridge-owned. Missing decoders must fail closed instead of
-    // silently launching a second Playwright browser per provider.
-    return /^(?:catalog-source:)(?:CMD|IM|SABA|SBOBET|APSPORT|BTI):FOOTBALL$/u.test(accountId);
+    return this.#feeds.list().some((snapshot) => snapshot.accountId === accountId);
   }
 
   ingest(envelope: ChromeBridgeEnvelope): boolean {
@@ -91,7 +76,9 @@ export class ChromeCatalogDataPlane {
     if (!Number.isFinite(ageMs) ||
       (ageMs > this.#maxEnvelopeAgeMs && (!replayed || ageMs > 86_400_000))) return false;
     const transportAccountId = accountIdForLobby(envelope.lobby);
-    let stateChanged = false;
+    if (transportAccountId === null) return false;
+    const sourceEpoch = envelope.sourceEpoch ?? legacySourceEpoch(envelope.sourceId);
+    let published = false;
     if (transportAccountId !== null) {
       const previousSourceId = this.#activeSourceIds.get(transportAccountId);
       if (previousSourceId !== undefined && previousSourceId !== envelope.sourceId) {
@@ -108,6 +95,7 @@ export class ChromeCatalogDataPlane {
         if (!sameLobby && previousSeenAtMs !== undefined && this.#now() - previousSeenAtMs <= this.#freshnessMs) {
           return false;
         }
+        published = this.#invalidateCurrent(transportAccountId, envelope.observedAtMs, "SOURCE_REPLACED") || published;
         this.#router.resetSource(previousSourceId);
         this.#networkBodies.resetSource(previousSourceId);
         this.#sourceEpochs.delete(previousSourceId);
@@ -116,94 +104,70 @@ export class ChromeCatalogDataPlane {
       this.#activeSourceIds.set(transportAccountId, envelope.sourceId);
       this.#lastEnvelopeAtMsBySource.set(envelope.sourceId, this.#now());
     }
-    if (envelope.sourceEpoch !== undefined) {
-      const priorEpoch = this.#sourceEpochs.get(envelope.sourceId);
-      if (priorEpoch !== undefined && priorEpoch !== envelope.sourceEpoch) {
-        this.#router.resetSource(envelope.sourceId);
-        this.#networkBodies.resetSource(envelope.sourceId);
-        if (transportAccountId !== null) {
-          stateChanged = this.#invalidate(transportAccountId) || stateChanged;
-        }
-      }
-      this.#sourceEpochs.set(envelope.sourceId, envelope.sourceEpoch);
+    const priorEpoch = this.#sourceEpochs.get(envelope.sourceId);
+    if (priorEpoch !== undefined && priorEpoch !== sourceEpoch) {
+      published = this.#invalidateCurrent(transportAccountId, envelope.observedAtMs, "SOURCE_REPLACED") || published;
+      this.#router.resetSource(envelope.sourceId);
+      this.#networkBodies.resetSource(envelope.sourceId);
     }
-    // KSPORT heartbeats and analytics only prove that the tab exists. Its
-    // catalog transport is the sportsbook STOMP socket, so only a routed
-    // WebSocket frame may refresh transport liveness for this provider.
-    if (transportAccountId !== null && envelope.lobby !== "KSPORT" && envelope.lobby !== "BTI") {
-      if (!this.#lastTransportAtMs.has(transportAccountId)) {
-        this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
-      }
-      this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
-    }
-    if (transportAccountId !== null && envelope.request.pathnameClass === "/__fieldline_heartbeat__") {
-      // A tab that keeps heartbeating while its catalog stays stale is exactly
-      // the lost-WebSocket-baseline case: the renderer is alive, the feed is not.
-      this.#requestRecoveryIfStalled(transportAccountId);
+    this.#sourceEpochs.set(envelope.sourceId, sourceEpoch);
+    this.#feeds.accept({ kind: "TAB_REACHABLE", accountId: transportAccountId, sourceId: envelope.sourceId,
+      sourceEpoch, atMs: envelope.observedAtMs });
+    if (envelope.transport === "TAB_STATE") {
+      this.#requestRecoveries();
+      return published;
     }
     const assembled = this.#networkBodies.ingest(envelope);
-    if (assembled === null) return stateChanged;
+    if (assembled === null) return published;
     const route = this.#router.route(assembled);
-    if (route.status !== "TRUSTED" || route.adapter === null) return stateChanged;
+    if (route.status !== "TRUSTED" || route.adapter === null) return published;
     const update = route.adapter.decode(assembled).at(-1);
-    if (update === undefined) return stateChanged;
-    // Any frame the provider adapter understood (including a liveness-only
-    // STOMP/socket heartbeat) proves the sportsbook feed itself is alive.
-    if (transportAccountId !== null) this.#lastDecodedAtMs.set(transportAccountId, envelope.observedAtMs);
-    if (transportAccountId !== null && (envelope.lobby === "KSPORT" || envelope.lobby === "BTI")) {
-      if (!this.#lastTransportAtMs.has(transportAccountId)) {
-        this.#transportStartedAtMs.set(transportAccountId, envelope.observedAtMs);
-      }
-      this.#lastTransportAtMs.set(transportAccountId, envelope.observedAtMs);
+    if (update === undefined) return published;
+    if (update.transportAlive === true) {
+      const provenance = transportProvenance(envelope.transport);
+      if (provenance !== null) this.#feeds.accept({ kind: "TRANSPORT", accountId: transportAccountId,
+        sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, provenance,
+        providerSequence: update.sequence });
+      return published;
     }
-    if (update.transportAlive === true) return stateChanged;
     if (update.invalidateAccountId !== undefined) {
-      return this.#invalidate(update.invalidateAccountId) || stateChanged;
+      return this.#applyDecision(this.#feeds.accept({ kind: "INVALIDATE", accountId: update.invalidateAccountId,
+        sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, reason: update.reason })) || published;
     }
-    if (!isObservedCatalog(update.value)) return stateChanged;
+    if (!isObservedCatalog(update.value)) return published;
     let nextCatalog = update.value;
     if (envelope.lobby === "SABA" && envelope.transport === "DOM_SNAPSHOT") {
       const retained = this.#catalogs.get(nextCatalog.accountId);
       if (retained !== undefined) nextCatalog = overlaySabaDomCatalog(retained, nextCatalog);
     }
-    if (nextCatalog.category !== "FOOTBALL") return stateChanged;
+    if (nextCatalog.category !== "FOOTBALL" || nextCatalog.accountId !== transportAccountId) return published;
     // A provider page can briefly render the event shell before its market
     // rows. Such a snapshot is transport-valid but unusable for comparison;
     // publishing it would erase the last complete catalog on every refresh.
     if (nextCatalog.events.length > 0 &&
-      (nextCatalog.markets.length === 0 || nextCatalog.quotes.length === 0)) return stateChanged;
-    // A reconnecting delta-only feed can briefly publish a small viewport or
-    // one channel before its full reset/done snapshot. Retain the last
-    // complete catalog until the smaller event set is stable across three
-    // identical reads; this prevents a transient partial update erasing most
-    // of a provider's prices.
-    if (update.authoritativeBaseline === true) this.#coverage.reset(nextCatalog.accountId);
-    if (!this.#coverage.accept(nextCatalog.accountId,
-      nextCatalog.events.map((event) => event.providerEventId))) return stateChanged;
-    this.#catalogs.set(nextCatalog.accountId, nextCatalog);
-    const snapshotState = this.#now() - nextCatalog.observedAtMs <= this.#freshnessMs ? "FRESH" : "STALE";
-    if (snapshotState === "FRESH") this.#invalidatedAccounts.delete(nextCatalog.accountId);
-    else this.#invalidatedAccounts.add(nextCatalog.accountId);
-    this.#publish?.(nextCatalog, snapshotState);
-    return true;
+      (nextCatalog.markets.length === 0 || nextCatalog.quotes.length === 0)) return published;
+    const mode = update.evidenceMode ?? (update.authoritativeBaseline === true ? "BASELINE" : "DELTA");
+    const generation = update.generation ?? (mode === "BASELINE" && update.authoritativeBaseline === true
+      ? `${sourceEpoch}:${update.sequence}` : null);
+    if (generation === null) return published;
+    const provenance = update.provenance ?? catalogProvenance(envelope.transport);
+    if (!this.#coverage.accept(nextCatalog.accountId, { generation, authoritativeBaseline: mode === "BASELINE",
+      providerEventIds: nextCatalog.events.map((event) => event.providerEventId) })) return published;
+    return this.#applyDecision(this.#feeds.accept({ kind: "CATALOG", accountId: nextCatalog.accountId,
+      sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, generation, mode, provenance,
+      providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog })) || published;
   }
 
   async read(accountId: string): Promise<ObservedProviderCatalog> {
-    const catalog = this.#catalogs.get(accountId);
-    if (catalog === undefined) throw new Error("CHROME_CATALOG_NOT_FOUND");
-    if (this.#invalidatedAccounts.has(accountId) || this.#now() - catalog.observedAtMs > this.#freshnessMs) {
-      throw new Error("CHROME_CATALOG_STALE");
-    }
-    return catalog;
+    return this.#feeds.read(accountId);
   }
 
   restore(catalog: ObservedProviderCatalog): void {
     if (!this.owns(catalog.accountId) || catalog.category !== "FOOTBALL" ||
       catalog.events.length === 0 || catalog.markets.length === 0 || catalog.quotes.length === 0) return;
-    this.#catalogs.set(catalog.accountId, catalog);
-    this.#coverage.accept(catalog.accountId, catalog.events.map((event) => event.providerEventId));
-    this.#invalidatedAccounts.add(catalog.accountId);
-    this.#publish?.(catalog, "STALE");
+    this.#coverage.accept(catalog.accountId, { generation: `restored:${catalog.observedAtMs}`,
+      authoritativeBaseline: false, providerEventIds: catalog.events.map((event) => event.providerEventId) });
+    this.#applyDecision(this.#feeds.restore(catalog));
   }
 
   resetCoverage(accountId?: string): void {
@@ -215,20 +179,19 @@ export class ChromeCatalogDataPlane {
   }
 
   async overlayStatuses(statuses: readonly CatalogSourceStatus[]): Promise<readonly CatalogSourceStatus[]> {
+    this.#requestRecoveries();
     return statuses.map((status) => {
       const catalog = this.#catalogs.get(status.id);
-      const invalidated = this.#invalidatedAccounts.has(status.id);
-      const fresh = !invalidated && catalog !== undefined && this.#now() - catalog.observedAtMs <= this.#freshnessMs;
-      const transportAtMs = this.#lastTransportAtMs.get(status.id);
-      const transportFresh = transportAtMs !== undefined && this.#now() - transportAtMs <= this.#freshnessMs;
-      if (!fresh && status.sessionState === "ACTIVE") this.#requestRecoveryIfStalled(status.id);
-      if (fresh || (!invalidated && catalog !== undefined && transportFresh)) {
+      if (!this.owns(status.id)) return status;
+      let live = false;
+      try {
+        this.#feeds.read(status.id);
+        live = true;
+      } catch { /* a non-live provider must fail closed */ }
+      if (live && catalog !== undefined) {
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTIVE",
           acquiredAtMs: catalog.observedAtMs, reason: null });
       }
-      // Authentication/bridge heartbeats only prove that a tab is reachable.
-      // They must never promote a source to ACTIVE until a provider-specific
-      // adapter has decoded a fresh, usable catalog from that tab.
       if (status.sessionState === "ACTIVE") {
         return CatalogSourceStatusSchema.parse({ ...status, sessionState: "ACTION_REQUIRED",
           acquiredAtMs: catalog?.observedAtMs ?? status.acquiredAtMs,
@@ -238,38 +201,29 @@ export class ChromeCatalogDataPlane {
     });
   }
 
-  /**
-   * Requests a targeted tab replacement when a recoverable provider that once
-   * delivered a catalog (or at least opened its transport) has been silent for
-   * longer than `recoveryAfterMs`. A source that never produced anything is
-   * left alone: after an API restart the tab may simply not have emitted its
-   * first baseline yet, and replacing it would consume a one-time launch.
-   */
-  #requestRecoveryIfStalled(accountId: string): void {
-    if (this.#onSourceRecoveryNeeded === null || !this.#recoverableAccountIds.has(accountId)) return;
-    const candidates = [this.#catalogs.get(accountId)?.observedAtMs, this.#lastDecodedAtMs.get(accountId),
-      this.#transportStartedAtMs.get(accountId)].filter((value): value is number => value !== undefined);
-    if (candidates.length === 0) return;
-    const lastSeenMs = Math.max(...candidates);
-    // A catalog restored from disk at startup is old by definition; give the
-    // attached tabs one full window to deliver their first live baseline.
-    const stalledSinceMs = Math.max(lastSeenMs, this.#startedAtMs);
-    // Tab heartbeats also count as transport for SABA/APSPORT, so transport
-    // liveness must not gate recovery: the decisive signal is that no decoded
-    // catalog has arrived for the whole recovery window.
-    const now = this.#now();
-    if (now - stalledSinceMs < this.#recoveryAfterMs) return;
-    const lastRecoveryAtMs = this.#lastRecoveryAtMs.get(accountId) ?? Number.NEGATIVE_INFINITY;
-    if (now - lastRecoveryAtMs < this.#recoveryCooldownMs) return;
-    this.#lastRecoveryAtMs.set(accountId, now);
-    try { this.#onSourceRecoveryNeeded(accountId); } catch { /* recovery is best-effort */ }
+  #requestRecoveries(): void {
+    if (this.#onSourceRecoveryNeeded === null) return;
+    for (const request of this.#feeds.sweep()) {
+      if (!this.#recoverableAccountIds.has(request.accountId)) continue;
+      const snapshot = this.#feeds.snapshot(request.accountId);
+      const hasFeedEvidence = this.#catalogs.has(request.accountId) || snapshot.tabReachableAtMs !== null ||
+        snapshot.providerTransportAtMs !== null;
+      if (!hasFeedEvidence) continue;
+      try { this.#onSourceRecoveryNeeded(request.accountId); } catch { /* recovery is best-effort */ }
+    }
   }
 
-  #invalidate(accountId: string): boolean {
-    const catalog = this.#catalogs.get(accountId);
-    if (catalog === undefined || this.#invalidatedAccounts.has(accountId)) return false;
-    this.#invalidatedAccounts.add(accountId);
-    this.#publish?.(catalog, "STALE");
+  #invalidateCurrent(accountId: string, atMs: number, reason: "SOURCE_REPLACED"): boolean {
+    const snapshot = this.#feeds.snapshot(accountId);
+    if (snapshot.sourceId === null || snapshot.sourceEpoch === null) return false;
+    return this.#applyDecision(this.#feeds.accept({ kind: "INVALIDATE", accountId,
+      sourceId: snapshot.sourceId, sourceEpoch: snapshot.sourceEpoch, atMs, reason }));
+  }
+
+  #applyDecision(decision: FeedDecision): boolean {
+    if (decision.publish === null) return false;
+    this.#catalogs.set(decision.publish.catalog.accountId, decision.publish.catalog);
+    this.#publish?.(decision.publish.catalog, decision.publish.snapshotState);
     return true;
   }
 }
@@ -280,6 +234,20 @@ function accountIdForLobby(lobby: ChromeBridgeEnvelope["lobby"]): string | null 
     : lobby === "CMD" || lobby === "IM" || lobby === "SABA" || lobby === "BTI" ? lobby
     : null;
   return provider === null ? null : `catalog-source:${provider}:FOOTBALL`;
+}
+
+function legacySourceEpoch(sourceId: string): string {
+  return `legacy:${sourceId}`;
+}
+
+function catalogProvenance(transport: ChromeBridgeEnvelope["transport"]): FeedProvenance {
+  return transport === "WS_FRAME" ? "WS"
+    : transport === "HTTP_RESPONSE" ? "AUTHENTICATED_HTTP"
+    : "DOM_FALLBACK";
+}
+
+function transportProvenance(transport: ChromeBridgeEnvelope["transport"]): "WS" | "AUTHENTICATED_HTTP" | null {
+  return transport === "WS_FRAME" ? "WS" : transport === "HTTP_RESPONSE" ? "AUTHENTICATED_HTTP" : null;
 }
 
 function isObservedCatalog(value: unknown): value is ObservedProviderCatalog {

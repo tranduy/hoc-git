@@ -119,7 +119,8 @@ export function registerCatalogRoutes(
     if (existing !== undefined) return existing;
     const operation = (store?.load(sourceKey) ?? Promise.resolve(null)).then((catalog) => {
       if (catalog !== null && !recentReads.has(sourceKey)) {
-        coverageGuard.accept(sourceKey, catalog.events.map((event) => event.providerEventId));
+        coverageGuard.accept(sourceKey, { generation: sourceKey, authoritativeBaseline: false,
+          providerEventIds: catalog.events.map((event) => event.providerEventId) });
         recentReads.set(sourceKey, { catalog, completedAtMs: performance.now(), restored: true });
       }
     }).catch(() => undefined).finally(() => {
@@ -155,7 +156,8 @@ export function registerCatalogRoutes(
     const started = telemetry.now();
     const underlying = Promise.resolve().then(() => reader.read(accountId));
     const operation = within(underlying, collectionTimeoutMs).then(async (catalog) => {
-      if (!coverageGuard.accept(sourceKey, catalog.events.map((event) => event.providerEventId))) {
+      if (!coverageGuard.accept(sourceKey, { generation: sourceKey, authoritativeBaseline: false,
+        providerEventIds: catalog.events.map((event) => event.providerEventId) })) {
         throw new Error("CATALOG_COVERAGE_REGRESSION");
       }
       await telemetry.recordSuccess(accountId, catalog, telemetry.complete(started));
