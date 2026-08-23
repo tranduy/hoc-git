@@ -9,7 +9,7 @@ const event = { eid: 112516390, htn: "Monterrey Rayados", atn: "Nashville SC", c
   ] }] };
 
 function envelope(body: unknown, sequence = 1, path = "/api/EventV6/GetSE",
-  providerPartition?: "IM_MARKET_1" | "IM_MARKET_2", generation = "im:8:generation-1",
+  providerPartition?: "IM_MARKET_1" | "IM_MARKET_2", generation = "im:8:1",
   sourceEpoch = "observer-im:0", reconcileCutoffSequence = 0): ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence,
     sourceEpoch,
@@ -91,9 +91,9 @@ describe("ImHttpCatalogAdapter", () => {
 
     const replacement = makeEvent(303, 33, "Replacement");
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 3, undefined,
-      "IM_MARKET_1", "im:8:generation-2"))).toEqual([]);
+      "IM_MARKET_1", "im:8:2"))).toEqual([]);
     const catalog = adapter.decode(envelope({ StatusCode: 100, sel: [marketTwo] }, 4, undefined,
-      "IM_MARKET_2", "im:8:generation-2"))[0]!.value as { events: Array<{ providerEventId: string }>;
+      "IM_MARKET_2", "im:8:2"))[0]!.value as { events: Array<{ providerEventId: string }>;
         quotes: Array<{ providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
     expect(catalog.events.map((item) => item.providerEventId).sort()).toEqual(["202", "303"]);
     expect(catalog.quotes.filter((quote) => quote.providerEventId === "202"))
@@ -108,15 +108,15 @@ describe("ImHttpCatalogAdapter", () => {
         ws: market.ws.map((selection, index) => ({ ...selection, wsi: marketId * 10 + index })) })) });
     const adapter = new ImHttpCatalogAdapter();
     adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(101, 11, "Old One")] }, 1,
-      undefined, "IM_MARKET_1", "im:8:old"));
+      undefined, "IM_MARKET_1", "im:8:1"));
     const oldCatalog = adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(202, 22, "Old Two")] }, 2,
-      undefined, "IM_MARKET_2", "im:8:old"));
+      undefined, "IM_MARKET_2", "im:8:1"));
     expect(oldCatalog).toHaveLength(1);
 
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(303, 33, "New One")] }, 3,
-      undefined, "IM_MARKET_1", "im:8:new"))).toEqual([]);
+      undefined, "IM_MARKET_1", "im:8:2"))).toEqual([]);
     const current = adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(404, 44, "New Two")] }, 4,
-      undefined, "IM_MARKET_2", "im:8:new"))[0]!.value as {
+      undefined, "IM_MARKET_2", "im:8:2"))[0]!.value as {
         events: Array<{ providerEventId: string }> };
     expect(current.events.map((item) => item.providerEventId).sort()).toEqual(["303", "404"]);
   });
@@ -124,9 +124,9 @@ describe("ImHttpCatalogAdapter", () => {
   it("publishes one atomic generation when Market 2 arrives before Market 1", () => {
     const adapter = new ImHttpCatalogAdapter();
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 1, undefined,
-      "IM_MARKET_2", "im:8:reverse"))).toEqual([]);
+      "IM_MARKET_2", "im:8:1"))).toEqual([]);
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 2, undefined,
-      "IM_MARKET_1", "im:8:reverse"))[0]?.value).toMatchObject({
+      "IM_MARKET_1", "im:8:1"))[0]?.value).toMatchObject({
       events: [{ providerEventId: "112516390" }]
     });
   });
@@ -136,18 +136,18 @@ describe("ImHttpCatalogAdapter", () => {
       atn: `Away ${eventId}` });
     const adapter = new ImHttpCatalogAdapter();
     adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(101)] }, 1, undefined,
-      "IM_MARKET_1", "im:8:old"));
+      "IM_MARKET_1", "im:8:1"));
     adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(102)] }, 2, undefined,
-      "IM_MARKET_2", "im:8:old"));
+      "IM_MARKET_2", "im:8:1"));
     adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(201)] }, 3, undefined,
-      "IM_MARKET_1", "im:8:new"));
+      "IM_MARKET_1", "im:8:2"));
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(202)] }, 4, undefined,
-      "IM_MARKET_2", "im:8:new"))).toHaveLength(1);
+      "IM_MARKET_2", "im:8:2"))).toHaveLength(1);
 
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(101)] }, 5, undefined,
-      "IM_MARKET_1", "im:8:old"))).toEqual([]);
+      "IM_MARKET_1", "im:8:1"))).toEqual([]);
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(102)] }, 6, undefined,
-      "IM_MARKET_2", "im:8:old"))).toEqual([]);
+      "IM_MARKET_2", "im:8:1"))).toEqual([]);
   });
 
   it("rejects an unseen lower signed reconciliation ordinal after a newer generation commits", () => {
@@ -159,6 +159,85 @@ describe("ImHttpCatalogAdapter", () => {
       "IM_MARKET_1", "im:8:1"))).toEqual([]);
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 4, undefined,
       "IM_MARKET_2", "im:8:1"))).toEqual([]);
+  });
+
+  it.each([
+    ["malformed JSON", "{not-json"],
+    ["a missing selection array", JSON.stringify({ StatusCode: 100 })],
+    ["a failed provider status", JSON.stringify({ StatusCode: 500, sel: [event] })]
+  ])("poisons a routed generation after %s", (_label, body) => {
+    const adapter = new ImHttpCatalogAdapter();
+    const failed = envelope({ StatusCode: 100, sel: [event] }, 1, undefined, "IM_MARKET_1", "im:8:1");
+    const routedFailure = { ...failed, payload: { encoding: "UTF8" as const, body } };
+
+    expect(adapter.fingerprint(routedFailure)).toBe(true);
+    expect(adapter.decode(routedFailure)).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 2, undefined,
+      "IM_MARKET_1", "im:8:1"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 3, undefined,
+      "IM_MARKET_2", "im:8:1"))).toEqual([]);
+  });
+
+  it("poisons a declared generation when its partition metadata is missing", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const candidate = envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
+      "IM_MARKET_1", "im:8:1");
+    const { providerPartition: _providerPartition, ...request } = candidate.request;
+    const missingPartition = { ...candidate, request };
+
+    expect(adapter.fingerprint(missingPartition)).toBe(true);
+    expect(adapter.decode(missingPartition)).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 2, undefined,
+      "IM_MARKET_1", "im:8:1"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 3, undefined,
+      "IM_MARKET_2", "im:8:1"))).toEqual([]);
+  });
+
+  it("poisons a declared generation when its cutoff is missing", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const candidate = envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
+      "IM_MARKET_1", "im:8:1");
+    const { reconcileCutoffSequence: _reconcileCutoffSequence, ...request } = candidate.request;
+    const missingCutoff = { ...candidate, request };
+
+    expect(adapter.fingerprint(missingCutoff)).toBe(true);
+    expect(adapter.decode(missingCutoff)).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 2, undefined,
+      "IM_MARKET_1", "im:8:1"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 3, undefined,
+      "IM_MARKET_2", "im:8:1"))).toEqual([]);
+  });
+
+  it("poisons both partitions after their reconciliation cutoffs disagree", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 11, undefined,
+      "IM_MARKET_1", "im:8:1", "observer-im:0", 10))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
+      "IM_MARKET_2", "im:8:1", "observer-im:0", 11))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 13, undefined,
+      "IM_MARKET_2", "im:8:1", "observer-im:0", 10))).toEqual([]);
+  });
+
+  it.each(["im:8:generation", "im:8:01", "im:08:1", "im:8:0", "other:8:1"])(
+    "rejects noncanonical reconciliation generation %s", (generation) => {
+      const adapter = new ImHttpCatalogAdapter();
+      expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
+        "IM_MARKET_1", generation))).toEqual([]);
+      expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
+        "IM_MARKET_2", generation))).toEqual([]);
+    });
+
+  it("rejects a different generation ID that reuses the committed ordinal", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
+      "IM_MARKET_1", "im:8:3"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
+      "IM_MARKET_2", "im:8:3"))).toHaveLength(1);
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 3, undefined,
+      "IM_MARKET_1", "im:999:3"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 4, undefined,
+      "IM_MARKET_2", "im:999:3"))).toEqual([]);
   });
 
   it("permanently rejects a generation when its second partition is malformed", () => {
@@ -191,9 +270,9 @@ describe("ImHttpCatalogAdapter", () => {
 
     adapter.resetSource("chrome:IM:8");
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
-      "IM_MARKET_1", "im:8:2", "observer-im:1"))).toEqual([]);
+      "IM_MARKET_1", "im:8:1", "observer-im:1"))).toEqual([]);
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
-      "IM_MARKET_2", "im:8:2", "observer-im:1"))).toHaveLength(1);
+      "IM_MARKET_2", "im:8:1", "observer-im:1"))).toHaveLength(1);
   });
 
   it("reapplies a newer delta after a two-part baseline commits", () => {
@@ -202,12 +281,12 @@ describe("ImHttpCatalogAdapter", () => {
     const replacement = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
       ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 10, undefined,
-      "IM_MARKET_1", "im:8:generation-2"))).toEqual([]);
+      "IM_MARKET_1", "im:8:2"))).toEqual([]);
     const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
       ws: event.mls[0]!.ws.map((selection) => ({ ...selection, o: selection.wsi === 101 ? 0.84 : -0.91 })) }] }] };
     adapter.decode(envelope(delta, 11, "/api/EventV6/GetSEDelta"));
     const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
-      "IM_MARKET_2", "im:8:generation-2")).at(-1)?.value as {
+      "IM_MARKET_2", "im:8:2")).at(-1)?.value as {
         quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
     expect(committed.quotes).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })
@@ -224,9 +303,9 @@ describe("ImHttpCatalogAdapter", () => {
     const replacement = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
       ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 11, undefined,
-      "IM_MARKET_1", "im:8:generation-2", "observer-im:0", 9))).toEqual([]);
+      "IM_MARKET_1", "im:8:2", "observer-im:0", 9))).toEqual([]);
     const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
-      "IM_MARKET_2", "im:8:generation-2", "observer-im:0", 9)).at(-1)?.value as {
+      "IM_MARKET_2", "im:8:2", "observer-im:0", 9)).at(-1)?.value as {
         quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
     expect(committed.quotes).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })
@@ -242,9 +321,9 @@ describe("ImHttpCatalogAdapter", () => {
     const signedBaseline = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
       ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 11, undefined,
-      "IM_MARKET_1", "im:8:first", "observer-im:0", 9))).toEqual([]);
+      "IM_MARKET_1", "im:8:1", "observer-im:0", 9))).toEqual([]);
     const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
-      "IM_MARKET_2", "im:8:first", "observer-im:0", 9)).at(-1)?.value as {
+      "IM_MARKET_2", "im:8:1", "observer-im:0", 9)).at(-1)?.value as {
         quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
     expect(committed.quotes).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })
@@ -256,13 +335,13 @@ describe("ImHttpCatalogAdapter", () => {
     const signedBaseline = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
       ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 10, undefined,
-      "IM_MARKET_1", "im:8:first", "observer-im:0", 9))).toEqual([]);
+      "IM_MARKET_1", "im:8:1", "observer-im:0", 9))).toEqual([]);
     const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
       ws: event.mls[0]!.ws.map((selection) => ({ ...selection,
         o: selection.wsi === 101 ? 0.84 : -0.91 })) }] }] };
     expect(adapter.decode(envelope(delta, 11, "/api/EventV6/GetSEDelta"))).toEqual([]);
     const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
-      "IM_MARKET_2", "im:8:first", "observer-im:0", 9)).at(-1)?.value as {
+      "IM_MARKET_2", "im:8:1", "observer-im:0", 9)).at(-1)?.value as {
         quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
     expect(committed.quotes).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerSelectionId: "101", rawOdds: "0.84" })
@@ -274,7 +353,7 @@ describe("ImHttpCatalogAdapter", () => {
     const signedBaseline = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
       ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
     adapter.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 10, undefined,
-      "IM_MARKET_1", "im:8:first", "observer-im:0", 9));
+      "IM_MARKET_1", "im:8:1", "observer-im:0", 9));
     adapter.decode(envelope({ StatusCode: 100, dc: [{ eid: 112516390, a: 1 }] }, 11,
       "/api/EventV6/GetSEDelta"));
     for (let offset = 0; offset < 128; offset += 1) {
@@ -285,7 +364,7 @@ describe("ImHttpCatalogAdapter", () => {
       adapter.decode(envelope(delta, 12 + offset, "/api/EventV6/GetSEDelta"));
     }
     const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 140, undefined,
-      "IM_MARKET_2", "im:8:first", "observer-im:0", 9)).at(-1)?.value as {
+      "IM_MARKET_2", "im:8:1", "observer-im:0", 9)).at(-1)?.value as {
         events: Array<{ providerEventId: string }>;
         quotes: Array<{ providerSelectionId: string; rawOdds: string }> };
     expect(committed.events).toEqual([expect.objectContaining({ providerEventId: "112516390" })]);
@@ -302,20 +381,20 @@ describe("ImHttpCatalogAdapter", () => {
     const adapter = new ImHttpCatalogAdapter();
     adapter.decode(envelope(delta, 8, "/api/EventV6/GetSEDelta"));
     adapter.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 11, undefined,
-      "IM_MARKET_1", "im:8:first", "observer-im:0", 9));
+      "IM_MARKET_1", "im:8:1", "observer-im:0", 9));
     const preCutoff = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
-      "IM_MARKET_2", "im:8:first", "observer-im:0", 9)).at(-1)?.value as {
+      "IM_MARKET_2", "im:8:1", "observer-im:0", 9)).at(-1)?.value as {
         quotes: Array<{ rawOdds: string }> };
     expect(preCutoff.quotes.map((quote) => quote.rawOdds)).toEqual(["0.6", "0.6"]);
 
     const replacement = new ImHttpCatalogAdapter();
     replacement.decode(envelope(delta, 10, "/api/EventV6/GetSEDelta", undefined,
-      "im:8:first", "observer-im:0"));
+      "im:8:1", "observer-im:0"));
     replacement.resetSource("chrome:IM:8");
     replacement.decode(envelope({ StatusCode: 100, sel: [signedBaseline] }, 11, undefined,
-      "IM_MARKET_1", "im:8:first", "observer-im:1", 9));
+      "IM_MARKET_1", "im:8:1", "observer-im:1", 9));
     const nextEpoch = replacement.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
-      "IM_MARKET_2", "im:8:first", "observer-im:1", 9)).at(-1)?.value as {
+      "IM_MARKET_2", "im:8:1", "observer-im:1", 9)).at(-1)?.value as {
         quotes: Array<{ rawOdds: string }> };
     expect(nextEpoch.quotes.map((quote) => quote.rawOdds)).toEqual(["0.6", "0.6"]);
   });
@@ -323,10 +402,10 @@ describe("ImHttpCatalogAdapter", () => {
   it("annotates atomic baselines and natural deltas with the current evidence generation", () => {
     const adapter = new ImHttpCatalogAdapter();
     adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined,
-      "IM_MARKET_1", "im:8:generation-1"));
+      "IM_MARKET_1", "im:8:1"));
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
-      "IM_MARKET_2", "im:8:generation-1")).at(-1)).toMatchObject({
-      authoritativeBaseline: true, evidenceMode: "BASELINE", generation: "im:8:generation-1",
+      "IM_MARKET_2", "im:8:1")).at(-1)).toMatchObject({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", generation: "im:8:1",
       provenance: "AUTHENTICATED_HTTP"
     });
   });
@@ -334,29 +413,30 @@ describe("ImHttpCatalogAdapter", () => {
   it("accepts a lower sequence only after the source epoch resets adapter state", () => {
     const adapter = new ImHttpCatalogAdapter();
     adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 900, undefined,
-      "IM_MARKET_1", "im:8:before", "observer-im:0"));
+      "IM_MARKET_1", "im:8:1", "observer-im:0"));
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 901, undefined,
-      "IM_MARKET_2", "im:8:before", "observer-im:0"))).toHaveLength(1);
+      "IM_MARKET_2", "im:8:1", "observer-im:0"))).toHaveLength(1);
 
     adapter.resetSource("chrome:IM:8");
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 1, undefined,
-      "IM_MARKET_2", "im:8:after", "observer-im:1"))).toEqual([]);
+      "IM_MARKET_2", "im:8:1", "observer-im:1"))).toEqual([]);
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 2, undefined,
-      "IM_MARKET_1", "im:8:after", "observer-im:1"))).toHaveLength(1);
+      "IM_MARKET_1", "im:8:1", "observer-im:1"))).toHaveLength(1);
   });
 
   it("rejects an unpartitioned GetSE snapshot instead of ambiguously merging it", () => {
     const adapter = new ImHttpCatalogAdapter();
     const unpartitioned = envelope({ StatusCode: 100, sel: [event] });
-    expect(adapter.fingerprint(unpartitioned)).toBe(false);
+    expect(adapter.fingerprint(unpartitioned)).toBe(true);
     expect(adapter.decode(unpartitioned)).toEqual([]);
   });
 
-  it("rejects lookalike hosts, paths, and failed provider envelopes", () => {
+  it("routes exact IM candidates independently from response validation and rejects lookalike routes", () => {
     const adapter = new ImHttpCatalogAdapter();
     expect(adapter.fingerprint({ ...envelope({ StatusCode: 100, sel: [event] }),
       request: { hostname: "evil.example", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR" } })).toBe(false);
-    expect(adapter.fingerprint(envelope({ StatusCode: 500, sel: [event] }))).toBe(false);
+    expect(adapter.fingerprint(envelope({ StatusCode: 500, sel: [event] }))).toBe(true);
+    expect(adapter.decode(envelope({ StatusCode: 500, sel: [event] }))).toEqual([]);
     expect(adapter.fingerprint(envelope({ StatusCode: 100, sel: [event] }, 1, "/api/EventV6/GetESI"))).toBe(false);
   });
 });

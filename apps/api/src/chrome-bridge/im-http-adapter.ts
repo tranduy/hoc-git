@@ -41,22 +41,20 @@ interface SourceState {
   pending: SnapshotGeneration | null;
   readonly obsoleteGenerations: Set<string>;
   readonly rejectedGenerations: Set<string>;
-  newestRejectedGenerationOrdinal: number | null;
-  newestGenerationOrdinal: number | null;
+  highestGenerationOrdinal: number | null;
   readonly recentDeltas: ChromeBridgeEnvelope[];
   latestDeltaSequence: number | null;
 }
 
-function rememberRejected(state: SourceState, generation: string): void {
+function rememberRejected(state: SourceState, generation: string, ordinal: number | null = null): void {
   state.rejectedGenerations.add(generation);
   while (state.rejectedGenerations.size > 64) {
     const oldest = state.rejectedGenerations.values().next().value as string | undefined;
     if (oldest === undefined) break;
     state.rejectedGenerations.delete(oldest);
   }
-  const ordinal = generationOrdinal(generation);
-  if (ordinal !== null && (state.newestRejectedGenerationOrdinal === null ||
-    ordinal > state.newestRejectedGenerationOrdinal)) state.newestRejectedGenerationOrdinal = ordinal;
+  if (ordinal !== null && (state.highestGenerationOrdinal === null ||
+    ordinal > state.highestGenerationOrdinal)) state.highestGenerationOrdinal = ordinal;
   if (state.pending?.id === generation) state.pending = null;
 }
 
@@ -74,56 +72,72 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
   readonly lobby = "IM" as const;
   readonly providerFamily = "IM";
   readonly #states = new Map<string, SourceState>();
-  readonly #parsedBodies = new WeakMap<ChromeBridgeEnvelope, Record<string, unknown> | null>();
 
   resetSource(sourceId: string): void {
     this.#states.delete(sourceId);
   }
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
-    if (envelope.lobby !== "IM" || envelope.transport !== "HTTP_RESPONSE" ||
-      envelope.request.hostname !== HOST || envelope.payload.encoding !== "UTF8" ||
-      (envelope.request.pathnameClass !== SNAPSHOT_PATH && envelope.request.pathnameClass !== DELTA_PATH)) return false;
-    if (envelope.request.pathnameClass === SNAPSHOT_PATH &&
-      (envelope.request.providerPartition === undefined || envelope.request.streamId === undefined ||
-        envelope.request.reconcileCutoffSequence === undefined)) return false;
-    const root = parseRecord(envelope.payload.body);
-    this.#parsedBodies.set(envelope, root);
-    return root?.StatusCode === 100 && (envelope.request.pathnameClass === SNAPSHOT_PATH
-      ? Array.isArray(root.sel) : Array.isArray(root.dc));
+    return envelope.lobby === "IM" && envelope.transport === "HTTP_RESPONSE" &&
+      envelope.request.hostname === HOST && /^(?:XHR|Fetch)$/u.test(envelope.request.resourceType) &&
+      envelope.payload.encoding === "UTF8" &&
+      (envelope.request.pathnameClass === SNAPSHOT_PATH || envelope.request.pathnameClass === DELTA_PATH);
   }
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
-    const root = this.#parsedBodies.get(envelope) ?? parseRecord(envelope.payload.body);
-    if (root === null) return [];
     const state = this.#states.get(envelope.sourceId) ?? { current: null, currentGeneration: null,
       pending: null, obsoleteGenerations: new Set<string>(), rejectedGenerations: new Set<string>(),
-      newestRejectedGenerationOrdinal: null, newestGenerationOrdinal: null,
+      highestGenerationOrdinal: null,
       recentDeltas: [], latestDeltaSequence: null };
     if (envelope.request.pathnameClass === SNAPSHOT_PATH) {
       const partition = envelope.request.providerPartition;
       const generation = envelope.request.streamId;
       const cutoffSequence = envelope.request.reconcileCutoffSequence;
-      const ordinal = generation === undefined ? null : generationOrdinal(generation);
-      if (partition === undefined || generation === undefined || cutoffSequence === undefined ||
-        state.obsoleteGenerations.has(generation) || state.rejectedGenerations.has(generation) ||
-        (ordinal !== null && state.newestRejectedGenerationOrdinal !== null &&
-          ordinal <= state.newestRejectedGenerationOrdinal) ||
-        (ordinal !== null && state.newestGenerationOrdinal !== null && ordinal < state.newestGenerationOrdinal) ||
-        state.currentGeneration === generation) return [];
-      if (ordinal !== null && (state.newestGenerationOrdinal === null || ordinal > state.newestGenerationOrdinal)) {
-        state.newestGenerationOrdinal = ordinal;
+      if (typeof generation !== "string") return [];
+      const ordinal = canonicalGenerationOrdinal(generation, envelope.tabId);
+      if (ordinal === null) {
+        rememberRejected(state, generation);
+        this.#states.set(envelope.sourceId, state);
+        return [];
       }
-      if (state.pending === null || state.pending.id !== generation) {
+      if (state.obsoleteGenerations.has(generation) || state.rejectedGenerations.has(generation) ||
+        state.currentGeneration === generation) return [];
+      const matchesPending = state.pending?.id === generation;
+      if (!matchesPending && state.highestGenerationOrdinal !== null &&
+        ordinal <= state.highestGenerationOrdinal) {
+        rememberRejected(state, generation, ordinal);
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
+      if (!matchesPending) {
         if (state.pending !== null) rememberObsolete(state, state.pending.id);
+        state.pending = null;
+        state.highestGenerationOrdinal = ordinal;
+      }
+      if (!isImPartition(partition) || !isValidCutoff(cutoffSequence)) {
+        rememberRejected(state, generation, ordinal);
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
+      const root = parseRecord(envelope.payload.body);
+      if (root === null || root.StatusCode !== 100 || !Array.isArray(root.sel)) {
+        rememberRejected(state, generation, ordinal);
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
+      if (state.pending === null) {
         state.pending = { id: generation, partitions: new Map<ImPartition, ClassifiedPartition>(),
           startedSequence: envelope.sequence, cutoffSequence };
       }
-      if (state.pending.cutoffSequence !== cutoffSequence) return [];
+      if (state.pending.cutoffSequence !== cutoffSequence || state.pending.partitions.has(partition)) {
+        rememberRejected(state, generation, ordinal);
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
       const classified = classifySnapshot(root, envelope.observedAtMs);
       if (classified === null) {
-        rememberRejected(state, generation);
+        rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
         return [];
       }
@@ -139,7 +153,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       const acceptedCount = [...pendingPartitions.values()].reduce((sum, value) => sum + value.records.size, 0);
       const inputCount = [...pendingPartitions.values()].reduce((sum, value) => sum + value.inputCount, 0);
       if (acceptedCount === 0 && inputCount > 0) {
-        rememberRejected(state, generation);
+        rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
         return [];
       }
@@ -151,6 +165,8 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       }
       state.pending = null;
     } else {
+      const root = parseRecord(envelope.payload.body);
+      if (root === null || root.StatusCode !== 100 || !Array.isArray(root.dc)) return [];
       if (state.latestDeltaSequence !== null && envelope.sequence <= state.latestDeltaSequence) return [];
       state.latestDeltaSequence = envelope.sequence;
       state.recentDeltas.push(envelope);
@@ -263,11 +279,21 @@ function providerIdentifier(value: unknown): string | null {
     : typeof value === "string" && /^\d+$/u.test(value) && value !== "0" ? value : null;
 }
 
-function generationOrdinal(generation: string): number | null {
-  const match = /:(\d+)$/u.exec(generation);
+function canonicalGenerationOrdinal(generation: string, tabId: number): number | null {
+  const match = /^im:(0|[1-9]\d*):([1-9]\d*)$/u.exec(generation);
   if (match === null) return null;
-  const ordinal = Number(match[1]);
-  return Number.isSafeInteger(ordinal) ? ordinal : null;
+  const generationTabId = Number(match[1]);
+  const ordinal = Number(match[2]);
+  return Number.isSafeInteger(generationTabId) && generationTabId === tabId &&
+    Number.isSafeInteger(ordinal) ? ordinal : null;
+}
+
+function isImPartition(value: unknown): value is ImPartition {
+  return value === "IM_MARKET_1" || value === "IM_MARKET_2";
+}
+
+function isValidCutoff(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function parseRecord(body: string): Record<string, unknown> | null {

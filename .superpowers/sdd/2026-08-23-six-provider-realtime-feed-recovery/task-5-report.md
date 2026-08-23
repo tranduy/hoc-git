@@ -521,3 +521,107 @@ All six compile/build commands exited 0. `git diff --check` exited 0 with only t
 - `apps/chrome-extension/src/network-observer.test.ts`
 
 Commit subject: `fix(feed): reject poisoned snapshots and stale documents`.
+
+---
+
+## Fix Round 5
+
+Status: DONE
+
+Review base: `247c9da`
+
+### Review finding resolved
+
+- IM routing now fingerprints only the exact lobby, HTTP transport, host, GetSE/GetSEDelta path,
+  XHR/Fetch resource type, and UTF-8 encoding. Response JSON, provider status, schema, partition,
+  generation, and cutoff validation happen only after the candidate reaches the adapter.
+- A routed GetSE candidate that declares a canonical generation advances the source-epoch ordinal
+  watermark before response validation. Malformed JSON, failed status, missing/invalid `sel`, missing
+  or invalid partition/cutoff metadata, duplicate partitions, and cross-partition cutoff mismatches all
+  reject the generation through one bounded poison path and discard its pending state.
+- Generation IDs use the exact observer format `im:<tabId>:<positive ordinal>`, with canonical decimal
+  encoding, a safe-integer ordinal, and the generation tab matching the envelope tab. Nonnumeric,
+  zero, leading-zero, wrong-prefix, and wrong-tab IDs cannot establish authority.
+- Ordinals are strictly increasing. An ordinal at or below the source watermark is rejected unless the
+  envelope is the missing partition of the exact pending generation. A poisoned generation retains the
+  scalar watermark after its exact ID ages out of the bounded 64-entry rejection set, and a different
+  ID cannot reuse a committed ordinal. `resetSource` deletes poison, watermark, pending partitions, and
+  the bounded delta log together, matching NetworkObserver's source reset back to ordinal 1.
+
+The existing CMD fixes, the 128-entry IM delta replay bound, source-lane isolation, secret hygiene, and
+previously deferred equal-CMD-cursor and AbortSignal-aware IM signer minors are unchanged. This round
+performed no browser/provider/runtime action and added no provider body, header, cookie, token,
+credential, account identifier, or user data.
+
+### Fix Round 5 RED
+
+The adapter tests were first converted from invented descriptive generation suffixes to the exact
+canonical IDs already emitted by NetworkObserver. New behavior tests were then run against `247c9da`
+with test-only changes:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/im-http-adapter.test.ts
+```
+
+```text
+IM: 13 failed / 19 passed.
+  Malformed JSON, missing sel, failed status, missing partition, and missing cutoff were rejected by
+  fingerprinting before the generation could be poisoned (5).
+  A cutoff mismatch returned without poison, so the original cutoff could later complete (1).
+  Nonnumeric, zero, leading-zero, wrong-prefix, and otherwise noncanonical generations published (5).
+  im:8:3 followed by im:999:3 reused the equal ordinal and published (1).
+  The routing/response-validation separation assertion failed (1).
+```
+
+Existing canonical cases in the same RED run continued to prove that reverse partition arrival, exact
+pending two-part completion, a strictly newer ordinal, and a source reset to a fresh ordinal work.
+
+### Fix Round 5 GREEN
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/cmd-http-adapter.test.ts src/chrome-bridge/cmd-dom-adapter.test.ts src/chrome-bridge/im-http-adapter.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/chrome-bridge/cmd-snapshot-assembler.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/cmd-dom-snapshot.test.ts src/cmd-snapshot-poller.test.ts src/cmd-snapshot-chunker.test.ts src/network-observer.test.ts
+npm.cmd test --workspace @tool-chenh/contracts -- --run src/chrome-bridge.test.ts
+```
+
+```text
+Task 5 API: 5 suites / 78 tests passed.
+Task 5 extension: 4 suites / 163 tests passed.
+Contracts: 1 suite / 14 tests passed.
+```
+
+Task 1-4 regressions:
+
+```powershell
+npm.cmd test --workspace @tool-chenh/api -- --run src/chrome-bridge/automatic-source-recovery.test.ts src/chrome-bridge/provider-source-refresh.test.ts src/chrome-bridge/chrome-bridge-control-plane.test.ts src/chrome-bridge/provider-feed-controller.test.ts src/chrome-bridge/provider-feed-registry.test.ts src/chrome-bridge/chrome-catalog-data-plane.test.ts src/catalog/catalog-coverage-guard.test.ts src/server.test.ts
+npm.cmd test --workspace @tool-chenh/chrome-extension -- --run src/provider-work-scheduler.test.ts src/local-bridge.test.ts src/network-observer.test.ts src/saba-snapshot-storage.test.ts src/cmd-snapshot-poller.test.ts src/bridge-wakeup.test.ts
+```
+
+```text
+API: 8 suites / 94 tests passed.
+Extension: 6 suites / 187 tests passed.
+```
+
+Compile/build and hygiene gates:
+
+```powershell
+npm.cmd run typecheck --workspace @tool-chenh/contracts
+npm.cmd run typecheck --workspace @tool-chenh/api
+npm.cmd run typecheck --workspace @tool-chenh/chrome-extension
+npm.cmd run build --workspace @tool-chenh/contracts
+npm.cmd run build --workspace @tool-chenh/api
+npm.cmd run build --workspace @tool-chenh/chrome-extension
+git diff --check
+git diff -- . ':!*.md' | rg -n -i "authorization|cookie|password|bearer|session[_-]?id|access[_-]?token|refresh[_-]?token|api[_-]?key"
+```
+
+All six compile/build commands exited 0. `git diff --check` exited 0 with only the checkout's existing
+LF-to-CRLF notices. The hygiene scan returned no matches.
+
+### Files changed in Fix Round 5
+
+- `apps/api/src/chrome-bridge/im-http-adapter.ts`
+- `apps/api/src/chrome-bridge/im-http-adapter.test.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-5-report.md`
+
+Commit subject: `fix(feed): enforce IM reconciliation generations`.
