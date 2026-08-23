@@ -118,6 +118,26 @@ describe("ProviderFeedRegistry", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("aborts one baseline wait without disturbing the registry or leaking its listener and timer", async () => {
+    vi.useFakeTimers();
+    const registry = new TrackingRegistry({ now: () => 1_000 });
+    const controller = new AbortController();
+    const waitForFreshBaseline = registry.waitForFreshBaseline.bind(registry) as unknown as (
+      accountId: string, afterMs: number, timeoutMs: number, signal: AbortSignal
+    ) => ReturnType<ProviderFeedRegistry["waitForFreshBaseline"]>;
+    const waiting = waitForFreshBaseline(SABA, 1_000, 5_000, controller.signal);
+    const rejected = expect(waiting).rejects.toThrow("PROVIDER_FEED_WAIT_ABORTED");
+
+    expect(registry.activeSubscriptions).toBe(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await rejected;
+    expect(registry.activeSubscriptions).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(registry.snapshot(SABA).state).toBe("STARTING");
+  });
+
   it("handles a fresh baseline delivered synchronously while subscribing", async () => {
     vi.useFakeTimers();
     const registry = new SynchronouslyDeliveringRegistry({ now: () => 1_001 });

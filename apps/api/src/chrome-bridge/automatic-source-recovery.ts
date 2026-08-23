@@ -17,9 +17,9 @@ interface RecoveryControlPlane {
 interface AutomaticSourceRecoveryOptions {
   readonly controlPlane: RecoveryControlPlane;
   readonly feedRegistry: RecoveryFeedRegistry;
-  readonly refreshFabetLaunches: () => Promise<void>;
+  readonly refreshFabetLaunches: (signal: AbortSignal) => Promise<void>;
   readonly withLatestFabetLaunch: <T>(provider: FabetProvider, category: "FOOTBALL",
-    consume: (url: string) => Promise<T>, minAcquiredAtMs: number) => Promise<T>;
+    consume: (url: string) => Promise<T>, minAcquiredAtMs: number, signal?: AbortSignal) => Promise<T>;
   readonly baselineTimeoutMs?: number;
   readonly now?: () => number;
   readonly isRecoverySuppressed?: (accountId: string) => boolean;
@@ -60,8 +60,10 @@ export class AutomaticSourceRecovery {
   readonly #now: () => number;
   readonly #inflight = new Map<string, Promise<RecoveryResult>>();
   readonly #disposeSignal: Promise<typeof DISPOSED>;
+  readonly #abortController = new AbortController();
   #signalDispose!: () => void;
   #disposed = false;
+  #disposal: Promise<void> | null = null;
 
   constructor(options: AutomaticSourceRecoveryOptions) {
     const baselineTimeoutMs = options.baselineTimeoutMs ?? 10_000;
@@ -86,10 +88,13 @@ export class AutomaticSourceRecovery {
     return operation;
   }
 
-  dispose(): void {
-    if (this.#disposed) return;
+  dispose(): Promise<void> {
+    if (this.#disposal !== null) return this.#disposal;
     this.#disposed = true;
+    this.#abortController.abort(new Error("RECOVERY_DISPOSED"));
     this.#signalDispose();
+    this.#disposal = Promise.allSettled([...this.#inflight.values()]).then(() => undefined);
+    return this.#disposal;
   }
 
   async #recover(request: ProviderRecoveryRequest): Promise<RecoveryResult> {
@@ -127,13 +132,14 @@ export class AutomaticSourceRecovery {
         delivered = this.#options.controlPlane.restoreLobby("CMD");
       } else {
         const recoveryStartedAtMs = this.#now();
-        const refresh = await this.#whileActive(this.#options.refreshFabetLaunches());
+        const refresh = await this.#whileActive(this.#options.refreshFabetLaunches(this.#abortController.signal));
         if (refresh === DISPOSED) return stopped(request.accountId, "HARD");
         if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
         const targetedDelivery = await this.#whileActive(refreshBridgeProviderSources({
           controlPlane: this.#options.controlPlane,
           withLatestFabetLaunch: this.#options.withLatestFabetLaunch,
           minAcquiredAtMs: recoveryStartedAtMs,
+          signal: this.#abortController.signal,
           providers: [source.provider],
           restoreCmd: false,
           beforeDelivery: () => {
@@ -155,7 +161,7 @@ export class AutomaticSourceRecovery {
   async #confirm(request: ProviderRecoveryRequest, stage: RecoveryStage): Promise<RecoveryResult> {
     try {
       const baseline = await this.#whileActive(this.#options.feedRegistry.waitForFreshBaseline(
-        request.accountId, request.requestedAtMs, this.#baselineTimeoutMs
+        request.accountId, request.requestedAtMs, this.#baselineTimeoutMs, this.#abortController.signal
       ));
       if (baseline === DISPOSED) return stopped(request.accountId, stage);
       if (!isStrictlyNewerBaseline(baseline, request)) {

@@ -15,11 +15,12 @@ interface RefreshControlPlane {
 interface RefreshOptions {
   readonly controlPlane: RefreshControlPlane;
   readonly withLatestFabetLaunch: <T>(provider: FabetProvider, category: "FOOTBALL",
-    consume: (url: string) => Promise<T>, minAcquiredAtMs: number) => Promise<T>;
+    consume: (url: string) => Promise<T>, minAcquiredAtMs: number, signal?: AbortSignal) => Promise<T>;
   readonly minAcquiredAtMs: number;
+  readonly signal?: AbortSignal;
   readonly providers?: readonly FabetProvider[];
   readonly restoreCmd?: boolean;
-  readonly refreshLaunches?: () => Promise<void>;
+  readonly refreshLaunches?: (signal?: AbortSignal) => Promise<void>;
   readonly maxLaunchAttempts?: number;
   readonly beforeDelivery?: () => void | Promise<void>;
 }
@@ -33,6 +34,7 @@ const PROVIDER_LOBBIES = [
 ] as const satisfies readonly (readonly [FabetProvider, ChromeLobbyId])[];
 
 export async function refreshBridgeProviderSources(options: RefreshOptions): Promise<number> {
+  throwIfAborted(options.signal);
   const selected = options.providers === undefined
     ? PROVIDER_LOBBIES
     : PROVIDER_LOBBIES.filter(([provider]) => options.providers?.includes(provider));
@@ -45,14 +47,18 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
     if (attempt === maxLaunchAttempts || options.refreshLaunches === undefined) {
       throw launchFailure(failure.error, failure.provider);
     }
-    await options.refreshLaunches();
+    await options.refreshLaunches(options.signal);
+    throwIfAborted(options.signal);
   }
 
+  throwIfAborted(options.signal);
   await options.beforeDelivery?.();
+  throwIfAborted(options.signal);
 
   let requested = 0;
   let firstFailure: Error | null = null;
   for (const result of launches) {
+    throwIfAborted(options.signal);
     if (!result.ok) {
       firstFailure ??= launchFailure(result.error, result.provider);
       continue;
@@ -65,6 +71,7 @@ export async function refreshBridgeProviderSources(options: RefreshOptions): Pro
     requested += delivered;
   }
   if (options.restoreCmd ?? true) {
+    throwIfAborted(options.signal);
     const restored = options.controlPlane.restoreLobby("CMD");
     if (restored === 0) firstFailure ??= new Error("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
     else requested += restored;
@@ -92,10 +99,18 @@ async function collectLaunches(
       // a fresh one-time popup URL when the reset is delivered.
       const minAcquiredAtMs = provider === "SBOBET" ? 0 : options.minAcquiredAtMs;
       const launch = await options.withLatestFabetLaunch(provider, "FOOTBALL",
-        async (url) => ({ lobby, url }), minAcquiredAtMs);
+        async (url) => {
+          throwIfAborted(options.signal);
+          return { lobby, url };
+        }, minAcquiredAtMs, options.signal);
+      throwIfAborted(options.signal);
       return { ok: true, provider, launch } as const;
     } catch (error) {
       return { ok: false, provider, error } as const;
     }
   }));
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw new Error("RECOVERY_DISPOSED");
 }

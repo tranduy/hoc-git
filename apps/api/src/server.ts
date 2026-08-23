@@ -29,7 +29,7 @@ import { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-
 import { refreshBridgeProviderSources } from "./chrome-bridge/provider-source-refresh.js";
 import { AutomaticSourceRecovery, type RecoveryResult } from "./chrome-bridge/automatic-source-recovery.js";
 import { ProviderFeedRegistry } from "./chrome-bridge/provider-feed-registry.js";
-import type { ProviderRecoveryRequest } from "./chrome-bridge/provider-feed-types.js";
+import type { ProviderFeedSnapshot, ProviderRecoveryRequest } from "./chrome-bridge/provider-feed-types.js";
 import type { RefreshableProvider } from "./routes/maintenance.js";
 import { resolveLocalAppData } from "./local-app-data.js";
 import { LatestCatalogPersister } from "./catalog/latest-catalog-persister.js";
@@ -45,31 +45,98 @@ export interface ServerConfig {
 }
 
 interface RecoverySweepRegistry {
-  sweep(): readonly ProviderRecoveryRequest[];
+  list(): readonly ProviderFeedSnapshot[];
+  sweep(eligibleAccountIds?: ReadonlySet<string>): readonly ProviderRecoveryRequest[];
   dispose(): void;
 }
 
 interface RecoverySweepActor {
   recover(request: ProviderRecoveryRequest): Promise<RecoveryResult>;
-  dispose(): void;
+  dispose(): void | Promise<void>;
+}
+
+interface RecoverySweepOptions {
+  readonly isRecoverySuppressed?: (accountId: string) => boolean;
+  readonly onError?: (accountId: string | null, error: unknown) => void;
 }
 
 export function startProviderRecoverySweep(
   providerFeeds: RecoverySweepRegistry,
-  automaticSourceRecovery: RecoverySweepActor
-): { dispose(): void } {
-  let disposed = false;
+  automaticSourceRecovery: RecoverySweepActor,
+  options: RecoverySweepOptions = {}
+): { dispose(): Promise<void> } {
+  let disposal: Promise<void> | null = null;
+  const report = (accountId: string | null, error: unknown): void => {
+    try { options.onError?.(accountId, error); } catch { /* reporting must not stop the sweep */ }
+  };
   const feedSweep = setInterval(() => {
-    for (const request of providerFeeds.sweep()) void automaticSourceRecovery.recover(request);
+    try {
+      const eligible = new Set(providerFeeds.list()
+        .filter(({ accountId }) => options.isRecoverySuppressed?.(accountId) !== true)
+        .map(({ accountId }) => accountId));
+      for (const request of providerFeeds.sweep(eligible)) {
+        try {
+          void automaticSourceRecovery.recover(request).catch((error) => { report(request.accountId, error); });
+        } catch (error) {
+          report(request.accountId, error);
+        }
+      }
+    } catch (error) {
+      report(null, error);
+    }
   }, 1_000);
   feedSweep.unref();
   return {
-    dispose(): void {
-      if (disposed) return;
-      disposed = true;
+    dispose(): Promise<void> {
+      if (disposal !== null) return disposal;
       clearInterval(feedSweep);
-      automaticSourceRecovery.dispose();
+      const actorDisposal = automaticSourceRecovery.dispose();
       providerFeeds.dispose();
+      disposal = Promise.resolve(actorDisposal);
+      return disposal;
+    }
+  };
+}
+
+interface TargetedProviderRefreshOptions {
+  readonly now?: () => number;
+  readonly baselineTimeoutMs?: number;
+  readonly deliver: (provider: RefreshableProvider) => Promise<number>;
+  readonly waitForFreshBaseline: (accountId: string, afterMs: number,
+    timeoutMs: number) => Promise<ProviderFeedSnapshot>;
+}
+
+export function createTargetedProviderRefresh(options: TargetedProviderRefreshOptions): {
+  refresh(provider: RefreshableProvider): Promise<number>;
+  isRecoverySuppressed(accountId: string): boolean;
+} {
+  const baselineTimeoutMs = options.baselineTimeoutMs ?? 10_000;
+  if (!Number.isFinite(baselineTimeoutMs) || baselineTimeoutMs <= 0) {
+    throw new Error("TARGETED_PROVIDER_REFRESH_OPTIONS_INVALID");
+  }
+  const now = options.now ?? Date.now;
+  const owners = new Map<string, number>();
+  const acquire = (accountId: string): void => { owners.set(accountId, (owners.get(accountId) ?? 0) + 1); };
+  const release = (accountId: string): void => {
+    const remaining = (owners.get(accountId) ?? 1) - 1;
+    if (remaining <= 0) owners.delete(accountId);
+    else owners.set(accountId, remaining);
+  };
+  return {
+    async refresh(provider): Promise<number> {
+      const accountId = `catalog-source:${provider}:FOOTBALL`;
+      const requestedAtMs = now();
+      acquire(accountId);
+      try {
+        const delivered = await options.deliver(provider);
+        await options.waitForFreshBaseline(accountId, requestedAtMs, baselineTimeoutMs);
+        return delivered;
+      } finally {
+        release(accountId);
+      }
+    },
+    isRecoverySuppressed(accountId): boolean {
+      return (owners.get(accountId) ?? 0) > 0;
     }
   };
 }
@@ -320,7 +387,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       reader: sessionServices.catalogReader,
       chrome: chromeCatalogDataPlane
     });
-  const explicitProviderRefreshes = new Set<string>();
   const maintenance = new SessionRefreshControl({ refresh: async () => {
     // Only the explicit Reset button and scheduled 03:00 run enter this path.
     // They are the sole authority to replace a complete catalog with a much
@@ -352,29 +418,38 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   },
     journal: new MaintenanceJournal({ nowMs: Date.now },
       join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
-  const refreshProvider = chromeBridgeControlPlane === null ? undefined
-    : async (provider: RefreshableProvider): Promise<number> => {
-      const accountId = `catalog-source:${provider}:FOOTBALL`;
-      explicitProviderRefreshes.add(accountId);
-      try {
-        return await refreshBridgeProviderSources({
+  const targetedProviderRefresh = chromeBridgeControlPlane === null || providerFeeds === null ? null
+    : createTargetedProviderRefresh({
+      deliver: async (provider) => refreshBridgeProviderSources({
           controlPlane: chromeBridgeControlPlane,
           withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
           minAcquiredAtMs: 0,
           providers: [provider],
           restoreCmd: false
-        });
-      } finally {
-        explicitProviderRefreshes.delete(accountId);
-      }
-    };
+        }),
+      waitForFreshBaseline: providerFeeds.waitForFreshBaseline.bind(providerFeeds)
+    });
+  const refreshProvider = targetedProviderRefresh === null ? undefined
+    : targetedProviderRefresh.refresh;
+  const isRecoverySuppressed = (accountId: string): boolean => maintenance.status().running ||
+    targetedProviderRefresh?.isRecoverySuppressed(accountId) === true;
   const automaticSourceRecovery = chromeBridgeControlPlane !== null && providerFeeds !== null
     ? new AutomaticSourceRecovery({
       controlPlane: chromeBridgeControlPlane,
       feedRegistry: providerFeeds,
-      refreshFabetLaunches: () => sessionServices.refreshFabetLaunches(),
-      withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
-      isRecoverySuppressed: (accountId) => maintenance.status().running || explicitProviderRefreshes.has(accountId),
+      refreshFabetLaunches: async (signal) => {
+        assertRecoveryActive(signal);
+        await sessionServices.refreshFabetLaunches();
+        assertRecoveryActive(signal);
+      },
+      withLatestFabetLaunch: async (provider, category, consume, minAcquiredAtMs, signal) =>
+        sessionServices.withLatestFabetLaunch(provider, category, async (url) => {
+          assertRecoveryActive(signal);
+          const result = await consume(url);
+          assertRecoveryActive(signal);
+          return result;
+        }, minAcquiredAtMs),
+      isRecoverySuppressed,
       onError: (accountId, error) => {
         const reason = error instanceof Error ? error.message : String(error);
         process.stderr.write(`[source-recovery] ${accountId} failed: ${reason}\n`);
@@ -415,9 +490,15 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   });
   const providerRecovery = automaticSourceRecovery === null || providerFeeds === null
     ? null
-    : startProviderRecoverySweep(providerFeeds, automaticSourceRecovery);
+    : startProviderRecoverySweep(providerFeeds, automaticSourceRecovery, {
+      isRecoverySuppressed,
+      onError: (accountId, error) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`[source-recovery] ${accountId ?? "sweep"} failed: ${reason}\n`);
+      }
+    });
   if (providerRecovery !== null) {
-    app.addHook("onClose", async () => { providerRecovery.dispose(); });
+    app.addHook("onClose", async () => { await providerRecovery.dispose(); });
   }
   await app.listen({ host: config.host, port: config.port });
   const dailyMaintenance = createDailyMaintenanceScheduler(() => maintenance.runScheduled());
@@ -447,6 +528,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
 
 export function localWarpAuthEnabled(value: string | undefined): boolean {
   return value === "1";
+}
+
+function assertRecoveryActive(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw new Error("RECOVERY_DISPOSED");
 }
 
 const entryPath = process.argv[1];

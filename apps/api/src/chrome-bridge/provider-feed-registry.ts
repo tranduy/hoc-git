@@ -88,11 +88,13 @@ export class ProviderFeedRegistry {
     this.#listeners.clear();
   }
 
-  waitForFreshBaseline(accountId: string, afterMs: number, timeoutMs: number): Promise<ProviderFeedSnapshot> {
+  waitForFreshBaseline(accountId: string, afterMs: number, timeoutMs: number,
+    signal?: AbortSignal): Promise<ProviderFeedSnapshot> {
     if (!Number.isFinite(afterMs) || !Number.isFinite(timeoutMs) || timeoutMs < 0) {
       return Promise.reject(new Error("PROVIDER_FEED_WAIT_INVALID"));
     }
     if (this.#disposed) return Promise.reject(new Error("PROVIDER_FEED_REGISTRY_DISPOSED"));
+    if (signal?.aborted === true) return Promise.reject(new Error("PROVIDER_FEED_WAIT_ABORTED"));
     let controller: ProviderFeedController;
     try {
       controller = this.#controller(accountId);
@@ -107,9 +109,11 @@ export class ProviderFeedRegistry {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let unsubscribe: () => void = () => {};
+      const onAbort = (): void => cancel(new Error("PROVIDER_FEED_WAIT_ABORTED"));
       const cleanup = (): void => {
         if (timer !== undefined) clearTimeout(timer);
         unsubscribe();
+        signal?.removeEventListener("abort", onAbort);
         this.#pendingWaitFinalizers.delete(cancel);
       };
       const finish = (snapshot: ProviderFeedSnapshot): void => {
@@ -130,6 +134,11 @@ export class ProviderFeedRegistry {
       });
       if (settled) {
         unsubscribe();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted === true) {
+        onAbort();
         return;
       }
       try { controller.read(); } catch { /* refresh state before the post-subscribe race check */ }
