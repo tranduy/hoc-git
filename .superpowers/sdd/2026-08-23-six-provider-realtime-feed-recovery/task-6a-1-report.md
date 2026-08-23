@@ -79,3 +79,84 @@ Existing non-recovery requests remain valid. Producers that emit any KSPORT reco
 No cookie, signed URL, authorization material, credential, raw provider response body, or secret-bearing request metadata was added. No coordinator, provider adapter behavior, observer behavior, browser/runtime process, navigation, reload, or external system was changed.
 
 Commit subject: `fix(bridge): bind provider recovery evidence`.
+
+---
+
+## Fix Round 1 (review of `50b6b5af`)
+
+This section supersedes the original report's statements that quarantine/fault
+state expires after 30 seconds or is compacted at provider-account scope.
+
+### Corrected invariants
+
+- The 30-second TTL releases incomplete fragments and their byte/body budget,
+  but latches one exact source/epoch assembly fault. The same epoch remains
+  inadmissible after any number of TTL intervals. Only `resetSource`, lane
+  disposal, or a strictly newer canonical epoch in the same lineage clears it.
+- Mismatch, expiry, and overflow affect only the exact source/epoch. They do
+  not block or delete another source, including another source mapped to the
+  same SBOBET account.
+- Multipart ownership is keyed by the full `(sourceId, sourceEpoch,
+  snapshotId)` tuple. Identical snapshot IDs from BTI, IM, or any other
+  independent sources coexist without collision, while every envelope
+  authority, security, request, clock, transport, and document field remains
+  symmetrically bound across chunks.
+- Every active and candidate data-plane lane shares one
+  `NetworkBodyAssemblyBudget`. The application-wide cap is therefore exactly
+  48 bodies / 144 MiB, while each assembler retains the 8 bodies / 24 MiB per
+  source limits. Completion, fault, reset, candidate replacement, promotion,
+  and idempotent disposal release accounting exactly once.
+- A complete KSPORT recovery metadata triple is accepted only with lobby
+  `KSPORT`; IM, BTI, TSPORT, SABA, CMD, and SBO reject it. Absence of all three
+  fields remains backward compatible.
+
+### Strict RED record
+
+```text
+Contract lobby binding: 1 failed / 14 passed.
+  Non-KSPORT lobbies accepted the complete KSPORT recovery triple.
+
+Assembler ownership/fault probes: 4 failed / 24 passed.
+  Same snapshot IDs collided across independent sources.
+  An SBOBET sibling source was evicted/blocked by another source's overflow.
+  Custom-TTL and default-30s probes re-admitted a faulted old epoch.
+
+Shared-budget export probe: 1 failed / 26 passed.
+  NetworkBodyAssemblyBudget did not exist.
+
+Data-plane injection probe: 1 failed / 38 passed.
+  Active and candidate lanes did not charge the injected shared budget.
+```
+
+The TTL regression uses chunk 0 at `t=0`, chunk 1 at `t=101`, and repeats the
+old epoch at `t=202`; it never completes. A strictly newer epoch and explicit
+source reset both recover. Aggregate probes span multiple assemblers and prove
+the exact 48-body / 144-MiB ceiling plus independent and idempotent cleanup.
+
+### Fix Round 1 verification
+
+```text
+Focused contract suite: 15 passed.
+Focused assembler/data-plane suites: 2 suites / 66 tests passed.
+Whole contracts package: 2 suites / 96 tests passed.
+Task 5/6 assembler, route, data-plane, CMD, IM, SABA, and KSPORT regressions:
+  9 suites / 189 tests passed.
+Contracts typecheck and build: passed.
+API typecheck and build: passed.
+Chrome extension compatibility typecheck and build: passed.
+git diff --check: passed.
+Scoped secret/raw-provider-body hygiene scan: no matches.
+```
+
+### Fix Round 1 files
+
+- `packages/contracts/src/chrome-bridge.ts`
+- `packages/contracts/src/chrome-bridge.test.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.test.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6a-1-report.md`
+
+No coordinator, provider adapter, observer, browser/runtime process, navigation,
+reload, or external system behavior was changed in this fix round.

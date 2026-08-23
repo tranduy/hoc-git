@@ -41,15 +41,19 @@ export const KsportRecoveryRequestMetadataSchema = z.strictObject({
   requestStartSequence: SafeIntegerSchema
 });
 
+const SanitizedNonRecoveryRequestSchema = z.strictObject({
+  ...SanitizedRequestBaseShape,
+  providerPartition: z.enum(["IM_MARKET_1", "IM_MARKET_2"]).optional()
+});
+
+const SanitizedKsportRecoveryRequestSchema = z.strictObject({
+  ...SanitizedRequestBaseShape,
+  ...KsportRecoveryRequestMetadataSchema.shape
+});
+
 const SanitizedRequestSchema = z.union([
-  z.strictObject({
-    ...SanitizedRequestBaseShape,
-    providerPartition: z.enum(["IM_MARKET_1", "IM_MARKET_2"]).optional()
-  }),
-  z.strictObject({
-    ...SanitizedRequestBaseShape,
-    ...KsportRecoveryRequestMetadataSchema.shape
-  })
+  SanitizedNonRecoveryRequestSchema,
+  SanitizedKsportRecoveryRequestSchema
 ]);
 
 const BridgePayloadSchema = z.strictObject({
@@ -74,6 +78,11 @@ export const ChromeBridgeEnvelopeSchema = z.strictObject({
   transport: ChromeBridgeTransportSchema,
   request: SanitizedRequestSchema,
   payload: BridgePayloadSchema
+}).superRefine((value, context) => {
+  if ("providerContentIntent" in value.request && value.lobby !== "KSPORT") {
+    context.addIssue({ code: "custom", path: ["lobby"],
+      message: "KSPORT recovery metadata requires the KSPORT lobby" });
+  }
 });
 
 export const CmdSnapshotChunkSchema = z.strictObject({

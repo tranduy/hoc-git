@@ -115,6 +115,12 @@ describe("ChromeBridgeEnvelopeSchema", () => {
     } });
     expect(parsed.request).toMatchObject(recoveryMetadata);
 
+    for (const lobby of ["IM", "BTI", "TSPORT", "SABA", "CMD", "SBO"] as const) {
+      expect(schema.safeParse({ ...validEnvelope, lobby, request: {
+        ...validEnvelope.request, ...recoveryMetadata
+      } }).success).toBe(false);
+    }
+
     for (const request of [
       { ...validEnvelope.request, providerPartition: "KSPORT_LIVE" },
       { ...validEnvelope.request, providerContentIntent: "FOOTBALL_FULL_CATALOG" },

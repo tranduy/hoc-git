@@ -9,7 +9,7 @@ import { SabaWsCatalogAdapter } from "./saba-ws-adapter.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
 import { BtiHttpCatalogAdapter } from "./bti-http-adapter.js";
 import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
-import { NetworkBodyAssembler } from "./network-body-assembler.js";
+import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
 import type { FeedDecision, FeedProvenance } from "./provider-feed-types.js";
 
@@ -25,6 +25,7 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly recoveryCooldownMs?: number;
   readonly recoverableAccountIds?: ReadonlySet<string>;
   readonly onSourceRecoveryNeeded?: (accountId: string) => void;
+  readonly networkBodyBudget?: NetworkBodyAssemblyBudget;
 }
 
 export interface ChromeCatalogIngestContext {
@@ -89,6 +90,7 @@ export class ChromeCatalogDataPlane {
   readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
   readonly #recoverableAccountIds: ReadonlySet<string>;
   readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
+  readonly #networkBodyBudget: NetworkBodyAssemblyBudget;
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -101,6 +103,7 @@ export class ChromeCatalogDataPlane {
     this.#recoverableAccountIds = options.recoverableAccountIds ?? DEFAULT_RECOVERABLE_ACCOUNTS;
     this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
     this.#feeds = options.feedRegistry ?? new ProviderFeedRegistry({ now: this.#now });
+    this.#networkBodyBudget = options.networkBodyBudget ?? new NetworkBodyAssemblyBudget();
   }
 
   owns(accountId: string): boolean {
@@ -268,7 +271,7 @@ export class ChromeCatalogDataPlane {
     if (current === undefined) {
       const owner = proposed(false);
       this.#accountOwners.set(accountId, owner);
-      this.#activePipelines.set(accountId, createDecodePipeline(this.#now));
+      this.#activePipelines.set(accountId, createDecodePipeline(this.#now, this.#networkBodyBudget));
       return { kind: "CURRENT", owner };
     }
     if (connectionGeneration < current.connectionGeneration) return null;
@@ -283,6 +286,7 @@ export class ChromeCatalogDataPlane {
       this.#accountOwners.set(accountId, reconnected);
       const candidate = this.#candidatePipelines.get(accountId);
       if (candidate !== undefined && candidate.owner.connectionGeneration < connectionGeneration) {
+        candidate.pipeline.networkBodies.dispose();
         this.#candidatePipelines.delete(accountId);
       }
       return { kind: "CURRENT", owner: reconnected };
@@ -315,7 +319,7 @@ export class ChromeCatalogDataPlane {
   #activePipeline(accountId: string): DecodePipeline {
     const existing = this.#activePipelines.get(accountId);
     if (existing !== undefined) return existing;
-    const pipeline = createDecodePipeline(this.#now);
+    const pipeline = createDecodePipeline(this.#now, this.#networkBodyBudget);
     this.#activePipelines.set(accountId, pipeline);
     return pipeline;
   }
@@ -324,7 +328,8 @@ export class ChromeCatalogDataPlane {
     const current = this.#candidatePipelines.get(accountId);
     if (current !== undefined && sameOwner(current.owner, owner)) return current.pipeline;
     if (current !== undefined && !candidateSupersedes(current.owner, owner)) return null;
-    const pipeline = createDecodePipeline(this.#now);
+    if (current !== undefined) current.pipeline.networkBodies.dispose();
+    const pipeline = createDecodePipeline(this.#now, this.#networkBodyBudget);
     this.#candidatePipelines.set(accountId, { owner, pipeline });
     return pipeline;
   }
@@ -340,6 +345,10 @@ export class ChromeCatalogDataPlane {
     }
     const previous = this.#accountOwners.get(accountId);
     if (previous !== undefined) this.#lastEnvelopeAtMsBySource.delete(previous.sourceId);
+    const previousActive = this.#activePipelines.get(accountId);
+    if (previousActive !== undefined && previousActive !== candidate.pipeline) {
+      previousActive.networkBodies.dispose();
+    }
     this.#accountOwners.set(accountId, owner);
     this.#activePipelines.set(accountId, candidate.pipeline);
     this.#candidatePipelines.delete(accountId);
@@ -404,11 +413,11 @@ function candidateSupersedes(current: AccountSourceOwner, proposed: AccountSourc
     proposed.identity.generation > current.identity.generation;
 }
 
-function createDecodePipeline(now: () => number): DecodePipeline {
+function createDecodePipeline(now: () => number, budget: NetworkBodyAssemblyBudget): DecodePipeline {
   return { router: new AdapterRouter([new CmdHttpCatalogAdapter(), new CmdDomCatalogAdapter(),
     new ImHttpCatalogAdapter(), new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(),
     new TsportWsCatalogAdapter(), new BtiHttpCatalogAdapter()], { confirmationsRequired: 1 }),
-  networkBodies: new NetworkBodyAssembler({ now }) };
+  networkBodies: new NetworkBodyAssembler({ now, budget }) };
 }
 
 function catalogProvenance(transport: ChromeBridgeEnvelope["transport"]): FeedProvenance {

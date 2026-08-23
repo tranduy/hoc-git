@@ -1,5 +1,4 @@
 import { ChromeNetworkBodyChunkSchema, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
-import { chromeBridgeAccountKeyForLobby, type ChromeBridgeAccountKey } from "./chrome-bridge-account.js";
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_MAX_BODY_BYTES = 24 * 1024 * 1024;
@@ -9,13 +8,58 @@ const DEFAULT_MAX_PENDING_BYTES_PER_SOURCE = DEFAULT_MAX_BODY_BYTES;
 const DEFAULT_MAX_PENDING_BYTES = DEFAULT_MAX_PENDING_BYTES_PER_SOURCE * 6;
 const textEncoder = new TextEncoder();
 
+export interface NetworkBodyAssemblyBudgetOptions {
+  readonly maxPendingBodies?: number;
+  readonly maxPendingBytes?: number;
+}
+
+export interface NetworkBodyAssemblyBudgetStats {
+  readonly pendingBodies: number;
+  readonly pendingBytes: number;
+}
+
+export class NetworkBodyAssemblyBudget {
+  readonly #maxPendingBodies: number;
+  readonly #maxPendingBytes: number;
+  #pendingBodies = 0;
+  #pendingBytes = 0;
+
+  constructor(options: NetworkBodyAssemblyBudgetOptions = {}) {
+    this.#maxPendingBodies = positiveInteger(options.maxPendingBodies,
+      DEFAULT_MAX_PENDING_BODIES, "maxPendingBodies");
+    this.#maxPendingBytes = positiveInteger(options.maxPendingBytes,
+      DEFAULT_MAX_PENDING_BYTES, "maxPendingBytes");
+  }
+
+  tryReserve(bodyCount: number, byteCount: number): boolean {
+    nonnegativeInteger(bodyCount, "bodyCount");
+    nonnegativeInteger(byteCount, "byteCount");
+    if (this.#pendingBodies + bodyCount > this.#maxPendingBodies ||
+      this.#pendingBytes + byteCount > this.#maxPendingBytes) return false;
+    this.#pendingBodies += bodyCount;
+    this.#pendingBytes += byteCount;
+    return true;
+  }
+
+  release(bodyCount: number, byteCount: number): void {
+    nonnegativeInteger(bodyCount, "bodyCount");
+    nonnegativeInteger(byteCount, "byteCount");
+    if (bodyCount > this.#pendingBodies || byteCount > this.#pendingBytes) {
+      throw new Error("NETWORK_BODY_BUDGET_RELEASE_UNDERFLOW");
+    }
+    this.#pendingBodies -= bodyCount;
+    this.#pendingBytes -= byteCount;
+  }
+
+  stats(): NetworkBodyAssemblyBudgetStats {
+    return { pendingBodies: this.#pendingBodies, pendingBytes: this.#pendingBytes };
+  }
+}
+
 interface PendingBody {
   readonly key: string;
-  readonly snapshotId: string;
   readonly sourceId: string;
   readonly sourceEpoch: string;
-  readonly epochKey: string;
-  readonly accountKey: ChromeBridgeAccountKey;
   readonly identity: string;
   readonly envelope: ChromeBridgeEnvelope;
   readonly chunkCount: number;
@@ -24,18 +68,9 @@ interface PendingBody {
   byteCount: number;
 }
 
-interface QuarantinedBody {
+interface FaultedSourceEpoch {
   readonly sourceId: string;
   readonly sourceEpoch: string;
-  readonly epochKey: string;
-  readonly accountKey: ChromeBridgeAccountKey;
-  readonly createdAtMs: number;
-}
-
-interface BlockedSourceEpoch {
-  readonly sourceId: string;
-  readonly sourceEpoch: string;
-  readonly createdAtMs: number;
 }
 
 export interface NetworkBodyAssemblerOptions {
@@ -46,6 +81,7 @@ export interface NetworkBodyAssemblerOptions {
   readonly maxPendingBodies?: number;
   readonly maxPendingBytesPerSource?: number;
   readonly maxPendingBytes?: number;
+  readonly budget?: NetworkBodyAssemblyBudget;
   readonly maxQuarantinedBodiesPerSource?: number;
   readonly maxQuarantinedBodies?: number;
 }
@@ -62,19 +98,14 @@ export class NetworkBodyAssembler {
   readonly #ttlMs: number;
   readonly #maxBodyBytes: number;
   readonly #maxPendingBodiesPerSource: number;
-  readonly #maxPendingBodies: number;
   readonly #maxPendingBytesPerSource: number;
-  readonly #maxPendingBytes: number;
-  readonly #maxQuarantinedBodiesPerSource: number;
-  readonly #maxQuarantinedBodies: number;
+  readonly #budget: NetworkBodyAssemblyBudget;
   readonly #pending = new Map<string, PendingBody>();
-  readonly #snapshotOwners = new Map<string, string>();
-  readonly #quarantined = new Map<string, QuarantinedBody>();
-  // One escalated fence per provider account bounds rejection state even if a
-  // peer rotates infinitely many snapshot IDs. It is released only by explicit
-  // reset/recovery or a strictly newer canonical source epoch.
-  readonly #blockedByAccount = new Map<ChromeBridgeAccountKey, BlockedSourceEpoch>();
+  // One exact fault bit and epoch watermark per source in this decode lane.
+  // Fragment expiry releases memory but never re-admits the faulted epoch.
+  readonly #faultedBySource = new Map<string, FaultedSourceEpoch>();
   #pendingBytes = 0;
+  #disposed = false;
 
   constructor(options: NetworkBodyAssemblerOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -82,19 +113,16 @@ export class NetworkBodyAssembler {
     this.#maxBodyBytes = positiveInteger(options.maxBodyBytes, DEFAULT_MAX_BODY_BYTES, "maxBodyBytes");
     this.#maxPendingBodiesPerSource = positiveInteger(options.maxPendingBodiesPerSource,
       DEFAULT_MAX_PENDING_BODIES_PER_SOURCE, "maxPendingBodiesPerSource");
-    this.#maxPendingBodies = positiveInteger(options.maxPendingBodies,
-      DEFAULT_MAX_PENDING_BODIES, "maxPendingBodies");
     this.#maxPendingBytesPerSource = positiveInteger(options.maxPendingBytesPerSource,
       DEFAULT_MAX_PENDING_BYTES_PER_SOURCE, "maxPendingBytesPerSource");
-    this.#maxPendingBytes = positiveInteger(options.maxPendingBytes,
-      DEFAULT_MAX_PENDING_BYTES, "maxPendingBytes");
-    this.#maxQuarantinedBodiesPerSource = positiveInteger(options.maxQuarantinedBodiesPerSource,
-      this.#maxPendingBodiesPerSource, "maxQuarantinedBodiesPerSource");
-    this.#maxQuarantinedBodies = positiveInteger(options.maxQuarantinedBodies,
-      this.#maxPendingBodies, "maxQuarantinedBodies");
+    this.#budget = options.budget ?? new NetworkBodyAssemblyBudget({
+      ...(options.maxPendingBodies === undefined ? {} : { maxPendingBodies: options.maxPendingBodies }),
+      ...(options.maxPendingBytes === undefined ? {} : { maxPendingBytes: options.maxPendingBytes })
+    });
   }
 
   ingest(envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope | null {
+    if (this.#disposed) return null;
     if (envelope.transport !== "HTTP_RESPONSE" || envelope.payload.encoding !== "UTF8") return envelope;
     let raw: unknown;
     try { raw = JSON.parse(envelope.payload.body); } catch { return envelope; }
@@ -108,56 +136,49 @@ export class NetworkBodyAssembler {
     this.#sweep(now);
     const chunk = parsed.data;
     const sourceEpoch = envelope.sourceEpoch ?? "legacy";
-    const epochKey = sourceEpochKey(envelope.sourceId, sourceEpoch);
-    const accountKey = chromeBridgeAccountKeyForLobby(envelope.lobby);
     const key = bodyKey(envelope.sourceId, sourceEpoch, chunk.snapshotId);
-    this.#releaseRetiredFences(accountKey, sourceEpoch);
-    if (this.#blockedByAccount.has(accountKey) || this.#quarantined.has(key)) return null;
-
-    // snapshotId is producer request/document identity. If it appears under a
-    // different authority scope while still pending, quarantine both exact
-    // scopes rather than allowing either half to complete.
-    const snapshotOwnerKey = this.#snapshotOwners.get(chunk.snapshotId);
-    if (snapshotOwnerKey !== undefined && snapshotOwnerKey !== key) {
-      const snapshotOwner = this.#pending.get(snapshotOwnerKey);
-      if (snapshotOwner !== undefined) this.#quarantinePending(snapshotOwner, now);
-      this.#quarantine(key, envelope.sourceId, sourceEpoch, epochKey, accountKey, now);
-      return null;
-    }
+    this.#releaseRetiredFault(envelope.sourceId, sourceEpoch);
+    if (this.#faultedBySource.has(envelope.sourceId)) return null;
 
     const identity = assemblyIdentity(envelope);
     let state = this.#pending.get(key);
+    let fragmentReserved = false;
     if (state !== undefined && (state.identity !== identity || state.chunkCount !== chunk.chunkCount)) {
-      this.#quarantinePending(state, now);
+      this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
       return null;
     }
 
     const fragmentBytes = textEncoder.encode(chunk.bodyFragment).byteLength;
     if (state === undefined) {
       if (fragmentBytes > this.#maxBodyBytes ||
-        this.#pending.size >= this.#maxPendingBodies ||
         this.#pendingCount(envelope.sourceId) >= this.#maxPendingBodiesPerSource ||
-        this.#pendingBytes + fragmentBytes > this.#maxPendingBytes ||
         this.#pendingByteCount(envelope.sourceId) + fragmentBytes > this.#maxPendingBytesPerSource) {
-        this.#quarantine(key, envelope.sourceId, sourceEpoch, epochKey, accountKey, now);
+        this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
         return null;
       }
-      state = { key, snapshotId: chunk.snapshotId, sourceId: envelope.sourceId, sourceEpoch, epochKey,
-        accountKey, identity, envelope, chunkCount: chunk.chunkCount, fragments: new Map<number, string>(),
+      if (!this.#budget.tryReserve(1, fragmentBytes)) {
+        this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
+        return null;
+      }
+      fragmentReserved = true;
+      state = { key, sourceId: envelope.sourceId, sourceEpoch,
+        identity, envelope, chunkCount: chunk.chunkCount, fragments: new Map<number, string>(),
         createdAtMs: now, byteCount: 0 };
       this.#pending.set(key, state);
-      this.#snapshotOwners.set(chunk.snapshotId, key);
     }
 
     const prior = state.fragments.get(chunk.chunkIndex);
     if (prior !== undefined) {
-      if (prior !== chunk.bodyFragment) this.#quarantinePending(state, now);
+      if (prior !== chunk.bodyFragment) this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
       return null;
     }
     if (state.byteCount + fragmentBytes > this.#maxBodyBytes ||
-      this.#pendingBytes + fragmentBytes > this.#maxPendingBytes ||
       this.#pendingByteCount(envelope.sourceId) + fragmentBytes > this.#maxPendingBytesPerSource) {
-      this.#quarantinePending(state, now);
+      this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
+      return null;
+    }
+    if (!fragmentReserved && !this.#budget.tryReserve(0, fragmentBytes)) {
+      this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
       return null;
     }
     state.fragments.set(chunk.chunkIndex, chunk.bodyFragment);
@@ -174,19 +195,21 @@ export class NetworkBodyAssembler {
   stats(): NetworkBodyAssemblerStats {
     this.#sweep(this.#now());
     return { pendingBodies: this.#pending.size, pendingBytes: this.#pendingBytes,
-      quarantinedBodies: this.#quarantined.size, blockedSourceEpochs: this.#blockedByAccount.size };
+      quarantinedBodies: 0, blockedSourceEpochs: this.#faultedBySource.size };
   }
 
   resetSource(sourceId: string): void {
     for (const pending of [...this.#pending.values()]) {
       if (pending.sourceId === sourceId) this.#removePending(pending);
     }
-    for (const [key, quarantined] of this.#quarantined) {
-      if (quarantined.sourceId === sourceId) this.#quarantined.delete(key);
-    }
-    for (const [accountKey, blocked] of this.#blockedByAccount) {
-      if (blocked.sourceId === sourceId) this.#blockedByAccount.delete(accountKey);
-    }
+    this.#faultedBySource.delete(sourceId);
+  }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    for (const pending of [...this.#pending.values()]) this.#removePending(pending);
+    this.#faultedBySource.clear();
   }
 
   #pendingCount(sourceId: string): number {
@@ -201,72 +224,34 @@ export class NetworkBodyAssembler {
     return bytes;
   }
 
-  #quarantinedCount(sourceId: string): number {
-    let count = 0;
-    for (const body of this.#quarantined.values()) if (body.sourceId === sourceId) count += 1;
-    return count;
-  }
-
   #removePending(pending: PendingBody): void {
     if (this.#pending.get(pending.key) !== pending) return;
     this.#pending.delete(pending.key);
     this.#pendingBytes -= pending.byteCount;
-    if (this.#snapshotOwners.get(pending.snapshotId) === pending.key) {
-      this.#snapshotOwners.delete(pending.snapshotId);
-    }
+    this.#budget.release(1, pending.byteCount);
   }
 
-  #quarantinePending(pending: PendingBody, now: number): void {
-    this.#removePending(pending);
-    this.#quarantine(pending.key, pending.sourceId, pending.sourceEpoch, pending.epochKey,
-      pending.accountKey, now);
-  }
-
-  #quarantine(key: string, sourceId: string, sourceEpoch: string, epochKey: string,
-    accountKey: ChromeBridgeAccountKey, now: number): void {
-    if (this.#quarantined.has(key) || this.#blockedByAccount.has(accountKey)) return;
-    if (this.#quarantined.size >= this.#maxQuarantinedBodies ||
-      this.#quarantinedCount(sourceId) >= this.#maxQuarantinedBodiesPerSource) {
-      this.#blockSourceEpoch(accountKey, sourceId, sourceEpoch, now);
-      return;
+  #faultSourceEpoch(sourceId: string, sourceEpoch: string): void {
+    if (!this.#faultedBySource.has(sourceId)) {
+      this.#faultedBySource.set(sourceId, { sourceId, sourceEpoch });
     }
-    this.#quarantined.set(key, { sourceId, sourceEpoch, epochKey, accountKey, createdAtMs: now });
-  }
-
-  #blockSourceEpoch(accountKey: ChromeBridgeAccountKey, sourceId: string,
-    sourceEpoch: string, now: number): void {
-    if (!this.#blockedByAccount.has(accountKey)) {
-      this.#blockedByAccount.set(accountKey, { sourceId, sourceEpoch, createdAtMs: now });
-    }
-    // Escalation replaces many exact tombstones with one bounded epoch fence.
     for (const pending of [...this.#pending.values()]) {
-      if (pending.accountKey === accountKey) this.#removePending(pending);
-    }
-    for (const [key, quarantined] of this.#quarantined) {
-      if (quarantined.accountKey === accountKey) this.#quarantined.delete(key);
+      if (pending.sourceId === sourceId && pending.sourceEpoch === sourceEpoch) this.#removePending(pending);
     }
   }
 
-  #releaseRetiredFences(accountKey: ChromeBridgeAccountKey, sourceEpoch: string): void {
-    const blocked = this.#blockedByAccount.get(accountKey);
-    if (blocked !== undefined && isStrictlyNewerEpoch(blocked.sourceEpoch, sourceEpoch)) {
-      this.#blockedByAccount.delete(accountKey);
-    }
-    for (const [key, quarantined] of this.#quarantined) {
-      if (quarantined.accountKey === accountKey &&
-        isStrictlyNewerEpoch(quarantined.sourceEpoch, sourceEpoch)) this.#quarantined.delete(key);
+  #releaseRetiredFault(sourceId: string, sourceEpoch: string): void {
+    const faulted = this.#faultedBySource.get(sourceId);
+    if (faulted !== undefined && isStrictlyNewerEpoch(faulted.sourceEpoch, sourceEpoch)) {
+      this.#faultedBySource.delete(sourceId);
     }
   }
 
   #sweep(now: number): void {
-    for (const [key, quarantined] of this.#quarantined) {
-      if (now - quarantined.createdAtMs >= this.#ttlMs) this.#quarantined.delete(key);
-    }
-    for (const [accountKey, blocked] of this.#blockedByAccount) {
-      if (now - blocked.createdAtMs >= this.#ttlMs) this.#blockedByAccount.delete(accountKey);
-    }
     for (const pending of [...this.#pending.values()]) {
-      if (now - pending.createdAtMs >= this.#ttlMs) this.#quarantinePending(pending, now);
+      if (now - pending.createdAtMs >= this.#ttlMs) {
+        this.#faultSourceEpoch(pending.sourceId, pending.sourceEpoch);
+      }
     }
   }
 }
@@ -277,8 +262,8 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
   return resolved;
 }
 
-function sourceEpochKey(sourceId: string, sourceEpoch: string): string {
-  return JSON.stringify([sourceId, sourceEpoch]);
+function nonnegativeInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`NETWORK_BODY_${name}_INVALID`);
 }
 
 function bodyKey(sourceId: string, sourceEpoch: string, snapshotId: string): string {

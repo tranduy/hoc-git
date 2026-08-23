@@ -3,6 +3,7 @@ import type { CatalogSourceStatus, ChromeBridgeEnvelope } from "@tool-chenh/cont
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { ChromeCatalogDataPlane } from "./chrome-catalog-data-plane.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
+import { NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
 
 const SBOBET = "catalog-source:SBOBET:FOOTBALL";
@@ -294,6 +295,25 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "103" })]
     });
+  });
+
+  it("injects one application-global multipart budget into active and candidate lanes", async () => {
+    const budget = new NetworkBodyAssemblyBudget({ maxPendingBodies: 1, maxPendingBytes: 1_000_000 });
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500,
+      networkBodyBudget: budget } as ConstructorParameters<typeof ChromeCatalogDataPlane>[0]);
+    const current = cmdHttpEnvelope(1, { t: 100 });
+    const candidate = { ...cmdHttpEnvelope(2, { t: 200 }), sourceId: "chrome:CMD:10", tabId: 10,
+      sourceEpoch: "worker-a:1" };
+
+    expect(plane.ingest(chunkedNetworkBody(current, 1, 0, "network-shared-lane-current"),
+      { connectionGeneration: 1 })).toBe(false);
+    expect(budget.stats().pendingBodies).toBe(1);
+    expect(plane.ingest(chunkedNetworkBody(candidate, 2, 0, "network-shared-lane-candidate"),
+      { connectionGeneration: 1 })).toBe(false);
+    expect(budget.stats().pendingBodies).toBe(1);
+    expect(plane.ingest(chunkedNetworkBody(current, 3, 1, "network-shared-lane-current"),
+      { connectionGeneration: 1 })).toBe(true);
+    expect(budget.stats()).toMatchObject({ pendingBodies: 0, pendingBytes: 0 });
   });
 
   it("never assembles KSPORT HTTP authority from mixed current/candidate chunks in either direction", async () => {
