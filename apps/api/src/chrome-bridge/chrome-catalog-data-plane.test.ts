@@ -93,6 +93,19 @@ function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds:
     payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
 }
 
+function legacySbobetSocketIoEnvelope(sequence: number): ChromeBridgeEnvelope {
+  const fields = ["matchid", "sporttype", "hteamnameen", "ateamnameen", "kickofftime", "leagueid",
+    "leaguenameen", "liveperiod", "oddsid", "bettype", "hdp1", "hdp2", "odds1a", "odds2a", "oddsstatus"];
+  const rows = [["c", "c2"], ["f", 1, fields],
+    [0, "m", 1, 9001, 2, 1, 3, "Alpha", 4, "Beta", 5, 1_787_328_000, 6, 77, 7, "League", 8, 0],
+    [0, "o", 9, 7001, 1, 9001, 10, 1, 11, 0.25, 12, 0, 13, "0.91", 14, "-0.97", 15, "running"]];
+  return { version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
+    transport: "WS_FRAME", request: { hostname: "sports.example", pathnameClass: "/socket.io/",
+      resourceType: "WebSocket", streamId: "legacy-sbobet-socket" },
+    payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", "b52", rows, sequence])}` } };
+}
+
 function tabHeartbeat(base: ChromeBridgeEnvelope, observedAtMs: number, sequence: number,
   sourceEpoch = base.sourceEpoch): ChromeBridgeEnvelope {
   return { ...base, sequence, observedAtMs, ...(sourceEpoch === undefined ? {} : { sourceEpoch }),
@@ -193,6 +206,40 @@ describe("ChromeCatalogDataPlane", () => {
     }]);
   });
 
+  it("keeps the committed SBOBET catalog until a complete empty replacement baseline commits", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    expect(plane.ingest(ksportEnvelope(1, "live", [101]))).toBe(false);
+    expect(plane.ingest(ksportEnvelope(2, "today", []))).toBe(true);
+
+    expect(plane.ingest(ksportEnvelope(3, "live", []))).toBe(false);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" })]
+    });
+
+    expect(plane.ingest(ksportEnvelope(4, "today", []))).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      observedAtMs: 1_004, events: [], markets: [], quotes: []
+    });
+  });
+
+  it("does not let the legacy SBOBET Socket.IO route bypass KSPORT baseline proof", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+
+    expect(plane.ingest(legacySbobetSocketIoEnvelope(1))).toBe(false);
+    expect(plane.ingest({ ...legacySbobetSocketIoEnvelope(2), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: JSON.stringify({ state: "CLOSED" }) } })).toBe(false);
+    expect(plane.ingest(legacySbobetSocketIoEnvelope(3))).toBe(false);
+    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    expect(plane.ingest(ksportEnvelope(4, "live", [101]))).toBe(false);
+    expect(plane.ingest(ksportEnvelope(5, "today", []))).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" })]
+    });
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+
   it("never reports ACTIVE when the same provider feed is too stale to read", async () => {
     let now = 1_500;
     const plane = new ChromeCatalogDataPlane({ now: () => now });
@@ -255,6 +302,26 @@ describe("ChromeCatalogDataPlane", () => {
     });
   });
 
+  it("rejects a retired source epoch before it can invalidate the current epoch", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    const baselineA = { ...cmdHttpEnvelope(1, { t: 100 }), sourceEpoch: "worker-a:0" };
+    const baselineB = { ...cmdHttpEnvelope(2, { t: 200 }), sourceEpoch: "worker-b:0" };
+
+    expect(plane.ingest(baselineA)).toBe(true);
+    expect(plane.ingest(baselineB)).toBe(true);
+    expect(plane.ingest(tabHeartbeat(baselineA, 1_003, 3, "worker-a:0"))).toBe(false);
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_002 });
+
+    const deltaB: ChromeBridgeEnvelope = { ...baselineB, sequence: 4, observedAtMs: 1_004,
+      request: { ...baselineB.request, providerFunctionCode: 3 },
+      payload: { encoding: "UTF8", body: JSON.stringify({ t: 201, a: true,
+        data: [[24881365, 1, 35, 0.80, -0.98, 1, 1, "S"]] }) } };
+    expect(plane.ingest(deltaB)).toBe(true);
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_004 });
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH", "FRESH"]);
+  });
+
   it("keeps one pinned tab per account and invalidates before handing over", async () => {
     let now = 1_500;
     const publish = vi.fn();
@@ -277,7 +344,8 @@ describe("ChromeCatalogDataPlane", () => {
     plane.ingest(ksportEnvelope(1, "live", ten));
     expect(plane.ingest(ksportEnvelope(2, "today", []))).toBe(true);
 
-    expect(plane.ingest(ksportEnvelope(3, "live", [5_600_000]))).toBe(true);
+    expect(plane.ingest(ksportEnvelope(3, "live", [5_600_000]))).toBe(false);
+    expect(plane.ingest(ksportEnvelope(4, "today", []))).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [{ providerEventId: "5600000" }]
     });

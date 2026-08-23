@@ -2901,7 +2901,7 @@ describe("NetworkObserver", () => {
     const catalogResponses = forward.mock.calls.map(([message]) => message)
       .filter((message) => message.transport === "HTTP_RESPONSE");
     expect(catalogResponses.map((message) => message.request.streamId))
-      .toEqual(["ksport-http:live", "ksport-http:today"]);
+      .toEqual(["ksport-http:14:1:live", "ksport-http:14:1:today"]);
     expect(catalogResponses.map((message) => message.payload.body)).toEqual([liveBody, todayBody]);
     expect(forward.mock.calls.some(([message]) => message.request.replayed === true)).toBe(false);
     expect(sendCommand).not.toHaveBeenCalledWith(14, "Page.reload", expect.anything());

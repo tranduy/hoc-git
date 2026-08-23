@@ -27,9 +27,22 @@ ChromeBridgeEnvelope {
 }
 
 function socketState(state: "OPEN" | "CLOSED", sequence: number,
-  sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
+  sourceEpoch = "worker-a:0", streamId = "stream-1"): ChromeBridgeEnvelope {
   return { ...envelope([], "state", sequence, sourceEpoch), transport: "WS_STATE",
+    request: { ...envelope([], "state", sequence, sourceEpoch).request, streamId },
     payload: { encoding: "UTF8", body: JSON.stringify({ state }) } };
+}
+
+function domEnvelope(sequence: number): ChromeBridgeEnvelope {
+  return { ...envelope([], "dom", sequence), transport: "DOM_SNAPSHOT",
+    request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+      snapshotId: `saba:7:empty-dom-${String(sequence).padStart(4, "0")}`, chunkIndex: 0, chunkCount: 1,
+      records: [{ sportId: "1", leagueId: "10", leagueName: "League", matchId: "20", timeText: "LIVE",
+        teamNames: ["Home", "Away"], groups: [{ betTypeIds: ["1"], labels: ["0.25"], odds: [
+          { marketOddsId: "30", priceText: "0.91", lineText: "0.25" },
+          { marketOddsId: "30", priceText: "-0.99" }
+        ] }] }] }) } };
 }
 
 describe("SABA websocket realtime regressions", () => {
@@ -131,5 +144,51 @@ describe("SABA websocket realtime regressions", () => {
     expect(adapter.decode(envelope([
       encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.72, odds2a: -0.82 })
     ], "r0002", 60_002))).toEqual([]);
+  });
+
+  it("treats duplicate current OPEN as a no-op after a complete SABA baseline", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    adapter.decode(socketState("OPEN", 1));
+    expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2))).toHaveLength(1);
+
+    expect(adapter.decode(socketState("OPEN", 3))).toEqual([]);
+    const delta = adapter.decode(envelope([
+      encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.72, odds2a: -0.82 })
+    ], "r0002", 4));
+    expect(delta).toEqual([expect.objectContaining({ evidenceMode: "DELTA", provenance: "WS" })]);
+  });
+
+  it("ignores delayed OPEN from a retired SABA stream", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    adapter.decode(socketState("OPEN", 1, "worker-a:0", "stream-1"));
+    adapter.decode(socketState("OPEN", 2, "worker-a:0", "stream-2"));
+
+    expect(adapter.decode(socketState("OPEN", 3, "worker-a:0", "stream-1"))).toEqual([]);
+    const replacement = envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.72, -0.82),
+      [0, "done"]], "r0001", 4);
+    const update = adapter.decode({ ...replacement,
+      request: { ...replacement.request, streamId: "stream-2" } });
+    expect(update).toEqual([expect.objectContaining({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+    })]);
+  });
+
+  it("commits a proven complete empty SABA baseline but not a partial empty reset", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100 });
+    expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
+    expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2))).toBe(true);
+    expect(plane.ingest(domEnvelope(3))).toBe(false);
+
+    expect(plane.ingest(envelope([[0, "empty"]], "r0002", 4))).toBe(false);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "20" })]
+    });
+
+    expect(plane.ingest(envelope([[0, "done"]], "r0002", 5))).toBe(true);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
+      observedAtMs: 1_786_449_540_005, events: [], markets: [], quotes: []
+    });
   });
 });

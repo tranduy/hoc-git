@@ -7,7 +7,6 @@ import { CmdHttpCatalogAdapter } from "./cmd-http-adapter.js";
 import { ImHttpCatalogAdapter } from "./im-http-adapter.js";
 import { SabaWsCatalogAdapter } from "./saba-ws-adapter.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
-import { SbobetSocketIoCatalogAdapter } from "./sbobet-socketio-adapter.js";
 import { BtiHttpCatalogAdapter } from "./bti-http-adapter.js";
 import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
 import { NetworkBodyAssembler } from "./network-body-assembler.js";
@@ -41,8 +40,7 @@ export class ChromeCatalogDataPlane {
   readonly #maxEnvelopeAgeMs: number;
   readonly #publish: ((catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void) | null;
   readonly #router = new AdapterRouter([new CmdHttpCatalogAdapter(), new CmdDomCatalogAdapter(), new ImHttpCatalogAdapter(),
-    new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(),
-    new SbobetSocketIoCatalogAdapter("KSPORT"), new SbobetSocketIoCatalogAdapter("SBO"), new TsportWsCatalogAdapter(),
+    new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(), new TsportWsCatalogAdapter(),
     new BtiHttpCatalogAdapter()],
     { confirmationsRequired: 1 });
   readonly #networkBodies = new NetworkBodyAssembler();
@@ -51,6 +49,7 @@ export class ChromeCatalogDataPlane {
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
   readonly #catalogBases = new Map<string, FeedProvenance>();
   readonly #sourceEpochs = new Map<string, string>();
+  readonly #retiredSourceEpochs = new Map<string, string[]>();
   readonly #activeSourceIds = new Map<string, string>();
   readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
   readonly #recoverableAccountIds: ReadonlySet<string>;
@@ -81,6 +80,7 @@ export class ChromeCatalogDataPlane {
     const transportAccountId = accountIdForLobby(envelope.lobby);
     if (transportAccountId === null) return false;
     const sourceEpoch = envelope.sourceEpoch ?? legacySourceEpoch(envelope.sourceId);
+    if (this.#retiredSourceEpochs.get(envelope.sourceId)?.includes(sourceEpoch) === true) return false;
     let published = false;
     if (transportAccountId !== null) {
       const previousSourceId = this.#activeSourceIds.get(transportAccountId);
@@ -99,6 +99,8 @@ export class ChromeCatalogDataPlane {
           return false;
         }
         published = this.#invalidateCurrent(transportAccountId, envelope.observedAtMs, "SOURCE_REPLACED") || published;
+        const previousEpoch = this.#sourceEpochs.get(previousSourceId);
+        if (previousEpoch !== undefined) this.#retireSourceEpoch(previousSourceId, previousEpoch);
         this.#router.resetSource(previousSourceId);
         this.#networkBodies.resetSource(previousSourceId);
         this.#sourceEpochs.delete(previousSourceId);
@@ -110,6 +112,7 @@ export class ChromeCatalogDataPlane {
     const priorEpoch = this.#sourceEpochs.get(envelope.sourceId);
     if (priorEpoch !== undefined && priorEpoch !== sourceEpoch) {
       published = this.#invalidateCurrent(transportAccountId, envelope.observedAtMs, "SOURCE_REPLACED") || published;
+      this.#retireSourceEpoch(envelope.sourceId, priorEpoch);
       this.#router.resetSource(envelope.sourceId);
       this.#networkBodies.resetSource(envelope.sourceId);
     }
@@ -240,6 +243,19 @@ export class ChromeCatalogDataPlane {
     if (snapshot.sourceId === null || snapshot.sourceEpoch === null) return false;
     return this.#applyDecision(this.#feeds.accept({ kind: "INVALIDATE", accountId,
       sourceId: snapshot.sourceId, sourceEpoch: snapshot.sourceEpoch, atMs, reason }));
+  }
+
+  #retireSourceEpoch(sourceId: string, sourceEpoch: string): void {
+    const retired = this.#retiredSourceEpochs.get(sourceId) ?? [];
+    if (!retired.includes(sourceEpoch)) retired.push(sourceEpoch);
+    while (retired.length > 32) retired.shift();
+    this.#retiredSourceEpochs.delete(sourceId);
+    this.#retiredSourceEpochs.set(sourceId, retired);
+    while (this.#retiredSourceEpochs.size > 128) {
+      const oldestSourceId = this.#retiredSourceEpochs.keys().next().value as string | undefined;
+      if (oldestSourceId === undefined) break;
+      this.#retiredSourceEpochs.delete(oldestSourceId);
+    }
   }
 
   #applyDecision(decision: FeedDecision): boolean {

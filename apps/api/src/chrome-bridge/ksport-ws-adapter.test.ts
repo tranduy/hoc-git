@@ -27,6 +27,19 @@ function receiptEnvelope(payload: unknown, partition: "live" | "today", sequence
     payload: { encoding: "UTF8", body: `a${JSON.stringify([message])}` } };
 }
 
+function socketState(streamId: string, state: "OPEN" | "CLOSED", sequence: number): ChromeBridgeEnvelope {
+  return { ...receiptEnvelope([], "live", sequence, sequence, streamId), transport: "WS_STATE",
+    payload: { encoding: "UTF8", body: JSON.stringify({ state }) } };
+}
+
+function httpEnvelope(payload: unknown, partition: "live" | "today", generation: number,
+  sequence: number): ChromeBridgeEnvelope {
+  return { ...envelope([]), sourceEpoch: "worker-a:0", transport: "HTTP_RESPONSE", sequence,
+    request: { hostname: "zenandfe.com", pathnameClass: "/api/v2/getEvent", resourceType: "Fetch",
+      streamId: `ksport-http:8:${generation}:${partition}` },
+    payload: { encoding: "UTF8", body: JSON.stringify(payload) } };
+}
+
 describe("KsportWsCatalogAdapter", () => {
   it("rejects the auxiliary Volta root socket even when it shares an sb21 host", () => {
     const adapter = new KsportWsCatalogAdapter();
@@ -85,14 +98,16 @@ describe("KsportWsCatalogAdapter", () => {
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.80")] }], "live", 10, 100));
     adapter.decode(receiptEnvelope([], "today", 11, 101));
-    const newest = adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.95")] }],
-      "live", 12, 102))[0]!.value as { quotes: Array<{ selection: string; rawOdds: string }> };
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.95")] }],
+      "live", 12, 102))).toEqual([]);
+    const newest = adapter.decode(receiptEnvelope([], "today", 13, 103))[0]!.value as {
+      quotes: Array<{ selection: string; rawOdds: string }> };
     expect(newest.quotes.find((quote) => quote.selection === "OVER")?.rawOdds).toBe("0.95");
 
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.70")] }],
-      "live", 13, 101))).toEqual([]);
+      "live", 14, 101))).toEqual([]);
     expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.60")] }],
-      "live", 14, 102))).toEqual([]);
+      "live", 15, 102))).toEqual([]);
   });
 
   it("drops the previous socket epoch and waits for a complete reconnect baseline", () => {
@@ -127,6 +142,65 @@ describe("KsportWsCatalogAdapter", () => {
     const catalog = adapter.decode(receiptEnvelope([], "today", 15, 2, "ksport-stream-2"))[0]!.value as {
       events: Array<{ providerEventId: string }> };
     expect(catalog.events.map((item) => item.providerEventId)).toEqual(["2"]);
+  });
+
+  it("keeps an incomplete replacement baseline pending until both WS partitions match", () => {
+    const event = (id: number) => ({ "0": "2026-08-20T16:00:00Z", "2": `Home ${id}`, "3": `Away ${id}`,
+      "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(socketState("ksport-stream-1", "OPEN", 1));
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 10, 100)))
+      .toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 11, 101))).toHaveLength(1);
+
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event(2)] }], "live", 12, 200)))
+      .toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 13, 101))).toEqual([]);
+    const replacement = adapter.decode(receiptEnvelope([], "today", 14, 201))[0]!;
+
+    expect(replacement).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE",
+      provenance: "WS" });
+    expect((replacement.value as { events: Array<{ providerEventId: string }> }).events)
+      .toEqual([expect.objectContaining({ providerEventId: "2" })]);
+  });
+
+  it("keeps an incomplete canonical HTTP generation separate from the committed baseline", () => {
+    const event = (id: number) => ({ "0": "2026-08-20T16:00:00Z", "2": `Home ${id}`, "3": `Away ${id}`,
+      "7": { "3": [`2.5 0.92*${id}0030002005h -0.98*${id}0030002005a ${id}181025`] }, "8": id });
+    const adapter = new KsportWsCatalogAdapter();
+    expect(adapter.decode(httpEnvelope([{ "1": "Live", "2": [event(1)] }], "live", 1, 10))).toEqual([]);
+    expect(adapter.decode(httpEnvelope([], "today", 1, 11))).toHaveLength(1);
+
+    expect(adapter.decode(httpEnvelope([{ "1": "Live", "2": [event(2)] }], "live", 2, 12))).toEqual([]);
+    expect(adapter.decode(httpEnvelope([], "today", 1, 13))).toEqual([]);
+    const replacement = adapter.decode(httpEnvelope([], "today", 2, 14))[0]!;
+
+    expect(replacement.generation).toBe("worker-a:0:ksport-http:8:2");
+    expect((replacement.value as { events: Array<{ providerEventId: string }> }).events)
+      .toEqual([expect.objectContaining({ providerEventId: "2" })]);
+  });
+
+  it("treats duplicate current OPEN as a no-op after a completed KSPORT baseline", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(socketState("ksport-stream-1", "OPEN", 1));
+    adapter.decode(receiptEnvelope([], "live", 2));
+    adapter.decode(receiptEnvelope([], "today", 3));
+
+    expect(adapter.decode(socketState("ksport-stream-1", "OPEN", 4))).toEqual([]);
+    const heartbeat = { ...receiptEnvelope([], "today", 5),
+      payload: { encoding: "UTF8" as const, body: `a${JSON.stringify(["\n"])}` } };
+    expect(adapter.decode(heartbeat)).toEqual([expect.objectContaining({ transportAlive: true })]);
+  });
+
+  it("ignores a delayed OPEN from a retired KSPORT stream", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(socketState("ksport-stream-1", "OPEN", 1));
+    adapter.decode(socketState("ksport-stream-2", "OPEN", 2));
+
+    expect(adapter.decode(socketState("ksport-stream-1", "OPEN", 3))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "live", 4, 4, "ksport-stream-2"))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 5, 5, "ksport-stream-2")))
+      .toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
   });
 
   it("decodes the K-Sports STOMP catalog without needing DOM fallback", () => {
@@ -191,17 +265,10 @@ describe("KsportWsCatalogAdapter", () => {
     const event = { "0": "2026-08-21T16:00:00Z", "2": "Kashiwa", "3": "V Varen Nagasaki", "8": 5643423,
       "7": { "5": ["0.5 0.92*56434230050000005h -0.98*56434230050000005a h 735502668161000 0 0 1 1 0"] } };
     const adapter = new KsportWsCatalogAdapter();
-    const input: ChromeBridgeEnvelope = {
-      ...envelope([]), transport: "HTTP_RESPONSE", sequence: 20,
-      request: { hostname: "zenandfe.com", pathnameClass: "/api/v2/getEvent", resourceType: "Fetch",
-        streamId: "ksport-http:today" },
-      payload: { encoding: "UTF8", body: JSON.stringify([]) }
-    };
+    const input = httpEnvelope([], "today", 1, 20);
     expect(adapter.fingerprint(input)).toBe(true);
     expect(adapter.decode(input)).toEqual([]);
-    const update = adapter.decode({ ...input, sequence: 21,
-      request: { ...input.request, streamId: "ksport-http:live" },
-      payload: { encoding: "UTF8", body: JSON.stringify([{ "1": "J League", "2": [event] }]) } })[0]!;
+    const update = adapter.decode(httpEnvelope([{ "1": "J League", "2": [event] }], "live", 1, 21))[0]!;
     const catalog = update.value as { events: unknown[]; quotes: unknown[] };
     expect(catalog.events).toHaveLength(1);
     expect(catalog.quotes).toHaveLength(2);
@@ -219,8 +286,11 @@ describe("KsportWsCatalogAdapter", () => {
     expect(adapter.decode(first)).toEqual([]);
     expect((adapter.decode(receiptEnvelope([], "today", 6))[0]!.value as { events: unknown[] }).events)
       .toHaveLength(2);
-    const delta = receiptEnvelope([{ "1": "League", "2": [event(5593392, "Home 1")] }], "live", 7, 7);
-    const catalog = adapter.decode(delta)[0]!.value as { events: unknown[]; quotes: Array<{
+    const replacementLive = receiptEnvelope([{ "1": "League", "2": [event(5593392, "Home 1")] }],
+      "live", 7, 7);
+    expect(adapter.decode(replacementLive)).toEqual([]);
+    const catalog = adapter.decode(receiptEnvelope([], "today", 8, 8))[0]!.value as {
+      events: unknown[]; quotes: Array<{
       providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
     expect(catalog.events).toHaveLength(1);
     expect(catalog.quotes.filter((quote) => quote.providerEventId === "5593393")).toEqual([]);
@@ -269,8 +339,9 @@ describe("KsportWsCatalogAdapter", () => {
     const adapter = new KsportWsCatalogAdapter();
     adapter.decode(receiptEnvelope([{ "1": "League", "2": [event(5593392)] }], "live", 5));
     adapter.decode(receiptEnvelope([], "today", 6));
-    const catalog = adapter.decode(receiptEnvelope([{ "1": "League", "2": [event(5593393)] }],
-      "live", 7, 7))[0]!.value as {
+    expect(adapter.decode(receiptEnvelope([{ "1": "League", "2": [event(5593393)] }],
+      "live", 7, 7))).toEqual([]);
+    const catalog = adapter.decode(receiptEnvelope([], "today", 8, 8))[0]!.value as {
         events: Array<{ providerEventId: string }>; quotes: Array<{
           providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
     expect(catalog.events.map((item) => item.providerEventId)).toEqual(["5593393"]);

@@ -143,9 +143,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     if (envelope.transport === "WS_STATE") {
       const state = websocketLifecycleState(envelope);
       if (state === null) return [];
-      this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
       if (state === "OPEN") {
         const previous = this.#activeStreams.get(epochKey);
+        if (this.#retiredStreams.get(epochKey)?.has(streamId) === true || previous === streamId) return [];
+        this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
         if (previous !== undefined && previous !== streamId) {
           this.#dropStream(envelope.sourceId, sourceEpoch(envelope), previous);
           const retired = this.#retiredStreams.get(epochKey) ?? new Set<string>();
@@ -157,6 +158,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         this.#authoritativeBaselineAtMs.delete(epochKey);
         return [];
       }
+      this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
       if (this.#activeStreams.get(epochKey) !== streamId) return [];
       this.#activeStreams.delete(epochKey);
       const retired = this.#retiredStreams.get(epochKey) ?? new Set<string>();
@@ -199,7 +201,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         }
       }
       const applied = decoder.apply(frame);
-      if (applied.duplicate || applied.records.length === 0) return [];
+      if (applied.duplicate || (applied.records.length === 0 && !applied.fullSnapshot)) return [];
       const readyKey = `${decoderKey}|${frame.bridgeId}`;
       if (applied.fullSnapshot) this.#readyPartitions.add(readyKey);
       if (!this.#readyPartitions.has(readyKey)) return [];
@@ -230,7 +232,8 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       return this.#update(envelope, `WS:${streamId}:${frame.bridgeId}`, normalized,
         authoritative ? { authoritativeBaseline: true, evidenceMode: "BASELINE", generation, provenance: "WS" }
           : generation !== undefined && this.#activeStreams.get(epochKey) === streamId
-            ? { evidenceMode: "DELTA", generation, provenance: "WS" } : {});
+            ? { evidenceMode: "DELTA", generation, provenance: "WS" } : {},
+        authoritative && applied.records.length === 0);
     } catch (error) {
       if (error instanceof Error && error.message.includes("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP")) {
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
@@ -246,8 +249,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   #update(envelope: ChromeBridgeEnvelope, partition: string,
     normalized: NormalizedCatalogPart,
     evidence: Pick<Extract<DecodedCatalogUpdate, { readonly value: unknown }>, "authoritativeBaseline" |
-      "evidenceMode" | "generation" | "provenance"> = {}): readonly DecodedCatalogUpdate[] {
-    if (normalized.events.length === 0 || normalized.markets.length === 0 || normalized.quotes.length === 0) return [];
+      "evidenceMode" | "generation" | "provenance"> = {},
+    allowCompleteEmpty = false): readonly DecodedCatalogUpdate[] {
+    const empty = normalized.events.length === 0 && normalized.markets.length === 0 && normalized.quotes.length === 0;
+    if ((!empty && (normalized.events.length === 0 || normalized.markets.length === 0 || normalized.quotes.length === 0)) ||
+      (empty && !allowCompleteEmpty)) return [];
     const epochKey = sourceEpochKey(envelope);
     const partitionKey = `${epochKey}|${partition}`;
     this.#parts.delete(partitionKey);

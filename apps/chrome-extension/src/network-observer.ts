@@ -631,6 +631,7 @@ export class NetworkObserver {
   readonly #ksportBaselineChecks = new Map<string, Promise<boolean>>();
   readonly #snapshotReplays = new Map<string, Promise<boolean>>();
   readonly #imSnapshotOrdinals = new Map<string, number>();
+  readonly #ksportSnapshotOrdinals = new Map<string, number>();
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, number>>();
   readonly #mainWorldContextSessions = new Map<number, Map<number, string | undefined>>();
@@ -785,6 +786,7 @@ export class NetworkObserver {
     this.#domSnapshotOrdinals.delete(sourceId);
     this.#httpSnapshots.delete(sourceId);
     this.#imSnapshotOrdinals.delete(sourceId);
+    this.#ksportSnapshotOrdinals.delete(sourceId);
     this.#tsportSnapshots.delete(sourceId);
     this.#tsportRequestUrls.delete(sourceId);
     this.#catalogWsSnapshots.delete(sourceId);
@@ -869,6 +871,7 @@ export class NetworkObserver {
       this.#domSnapshotOrdinals.delete(sourceId);
       this.#httpSnapshots.delete(sourceId);
       this.#imSnapshotOrdinals.delete(sourceId);
+      this.#ksportSnapshotOrdinals.delete(sourceId);
       this.#tsportSnapshots.delete(sourceId);
       this.#tsportRequestUrls.delete(sourceId);
       this.#catalogWsSnapshots.delete(sourceId);
@@ -1445,10 +1448,13 @@ export class NetworkObserver {
         accepted.set(candidate.timeRange, { url: candidate.url, body: candidate.body });
       }
       if (accepted.size !== 2) continue;
+      const ordinal = (this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
+      this.#ksportSnapshotOrdinals.set(source.sourceId, ordinal);
+      const generation = `ksport-http:${source.tabId}:${ordinal}`;
       for (const partition of ["live", "today"] as const) {
         const response = accepted.get(partition)!;
         await this.ingestHttpResponse(source, response.url, "Fetch", response.body,
-          undefined, `ksport-http:${partition}`);
+          undefined, `${generation}:${partition}`);
       }
       return true;
     }
