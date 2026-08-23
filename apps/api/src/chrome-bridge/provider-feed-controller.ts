@@ -44,7 +44,7 @@ export class ProviderFeedController {
     const stateBefore = this.#state;
     const reasonBefore = this.#reason;
     const result = this.#acceptEvidence(evidence);
-    if (!result.accepted) return result;
+    if (!result.accepted) return { ...result, stateChanged: stateBefore !== this.#state || reasonBefore !== this.#reason };
     return { ...result, stateChanged: result.stateChanged ||
       stateBefore !== this.#state || reasonBefore !== this.#reason };
   }
@@ -68,6 +68,9 @@ export class ProviderFeedController {
 
   sweep(nowMs = this.#now()): ProviderRecoveryRequest | null {
     if (!Number.isFinite(nowMs)) return null;
+    if (this.#state === "LIVE" && !this.#livePrerequisitesSatisfied(nowMs)) {
+      this.#transition("STALLED", this.#liveFailureReason(nowMs));
+    }
     const stale = this.#authorityAgeMs(nowMs) > this.#policy.softRecoveryAfterMs || this.#baselineExpired(nowMs);
     if (["STARTING", "SYNCING", "STALLED", "LIVE"].includes(this.#state)) {
       if (!stale || !this.#canRequestRecovery(nowMs)) return null;
@@ -83,6 +86,10 @@ export class ProviderFeedController {
   }
 
   read(): ObservedProviderCatalog {
+    const nowMs = this.#now();
+    if (this.#state === "LIVE" && !this.#livePrerequisitesSatisfied(nowMs)) {
+      this.#transition("STALLED", this.#liveFailureReason(nowMs));
+    }
     if (this.#state !== "LIVE" || this.#authoritativeCatalog === null) throw new Error("PROVIDER_FEED_NOT_LIVE");
     return this.#authoritativeCatalog;
   }
@@ -146,6 +153,10 @@ export class ProviderFeedController {
     if (this.#authoritativeCatalog === null || !this.#matchesCurrentSource(evidence.sourceId, evidence.sourceEpoch) ||
       evidence.generation !== this.#activeGeneration ||
       (this.#lastAuthoritativeEvidenceAtMs !== null && evidence.atMs < this.#lastAuthoritativeEvidenceAtMs)) return rejected();
+    if (this.#baselineExpired(evidence.atMs)) {
+      if (this.#state === "LIVE") this.#transition("STALLED", "BASELINE_EXPIRED");
+      return rejected();
+    }
     this.#latestCatalog = evidence.catalog;
     this.#authoritativeCatalog = evidence.catalog;
     this.#lastAuthoritativeEvidenceAtMs = evidence.atMs;
@@ -205,6 +216,15 @@ export class ProviderFeedController {
 
   #baselineExpired(nowMs: number): boolean {
     return this.#lastCompleteBaselineAtMs === null || nowMs - this.#lastCompleteBaselineAtMs > this.#policy.maxBaselineAgeMs;
+  }
+
+  #livePrerequisitesSatisfied(nowMs: number): boolean {
+    return this.#authoritativeCatalog !== null && !this.#baselineExpired(nowMs) &&
+      this.#authorityAgeMs(nowMs) <= this.#policy.expectedEvidenceCadenceMs;
+  }
+
+  #liveFailureReason(nowMs: number): "BASELINE_EXPIRED" | "EVIDENCE_CADENCE_EXCEEDED" {
+    return this.#baselineExpired(nowMs) ? "BASELINE_EXPIRED" : "EVIDENCE_CADENCE_EXCEEDED";
   }
 
   #canRequestRecovery(nowMs: number): boolean {

@@ -80,6 +80,24 @@ describe("ProviderFeedController", () => {
     expect(controller.snapshot().state).toBe("SOFT_RECOVERY");
   });
 
+  it("revokes LIVE and blocks reads when authoritative evidence misses its cadence", () => {
+    const controller = controllerFor(SABA, 1_000);
+    controller.accept(wsBaseline(1_000, "worker-a:0", "reset-1"));
+    clock.set(11_001);
+    expect(() => controller.read()).toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(controller.snapshot()).toMatchObject({ state: "STALLED", reason: "EVIDENCE_CADENCE_EXCEEDED" });
+  });
+
+  it("rejects a delta after its complete baseline has expired", () => {
+    const controller = controllerFor(SABA, 1_000);
+    controller.accept(wsBaseline(1_000, "worker-a:0", "reset-1"));
+    clock.set(61_001);
+    expect(controller.accept(wsDelta(61_001, "worker-a:0"))).toMatchObject({
+      accepted: false, publish: null, stateChanged: true
+    });
+    expect(controller.snapshot()).toMatchObject({ state: "STALLED", reason: "BASELINE_EXPIRED" });
+  });
+
   it("rejects late evidence from a retired source epoch", () => {
     const controller = controllerFor(SABA, 1_000);
     controller.accept(wsBaseline(1_000, "worker-a:0", "reset-1"));
