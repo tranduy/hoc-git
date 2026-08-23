@@ -115,6 +115,10 @@ function tabHeartbeat(base: ChromeBridgeEnvelope, observedAtMs: number, sequence
     payload: { encoding: "UTF8", body: "{}" } };
 }
 
+function replayedEnvelope(envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope {
+  return { ...envelope, request: { ...envelope.request, replayed: true } };
+}
+
 const activeSbobet: CatalogSourceStatus = { id: SBOBET, alias: "K-Sports · SBOBET", provider: "SBOBET",
   category: "FOOTBALL", sessionState: "ACTIVE", acquiredAtMs: 900, reason: null };
 const activeSaba: CatalogSourceStatus = { id: SABA, alias: "SABA", provider: "SABA", category: "FOOTBALL",
@@ -205,6 +209,46 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.overlayStatuses([activeSbobet])).resolves.toMatchObject([{
       sessionState: "ACTIVE", acquiredAtMs: 1_002, reason: null
     }]);
+  });
+
+  it("keeps replayed KSPORT partitions fail-closed until a fresh baseline completes", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+
+    expect(plane.ingest(replayedEnvelope(ksportEnvelope(1, "live", [101], "worker-a:0", 100))))
+      .toBe(false);
+    expect(plane.ingest(replayedEnvelope(ksportEnvelope(2, "today", [], "worker-a:0", 100))))
+      .toBe(false);
+    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    expect(plane.ingest(ksportEnvelope(3, "live", [102], "worker-a:0", 100))).toBe(false);
+    expect(plane.ingest(ksportEnvelope(4, "today", [], "worker-a:0", 100))).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "102" })]
+    });
+  });
+
+  it("does not promote a replacement candidate from replayed KSPORT partitions", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100), { connectionGeneration: 1 });
+    plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100), { connectionGeneration: 1 });
+    const candidate = (envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope => ({ ...envelope,
+      sourceId: "chrome:KSPORT:9", tabId: 9, sourceEpoch: "worker-b:0" });
+
+    expect(plane.ingest(replayedEnvelope(candidate(ksportEnvelope(3, "live", [999], "worker-b:0", 1))),
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(replayedEnvelope(candidate(ksportEnvelope(4, "today", [], "worker-b:0", 1))),
+      { connectionGeneration: 2 })).toBe(false);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" })]
+    });
+
+    expect(plane.ingest(candidate(ksportEnvelope(5, "live", [103], "worker-b:0", 2)),
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(candidate(ksportEnvelope(6, "today", [], "worker-b:0", 2)),
+      { connectionGeneration: 2 })).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "103" })]
+    });
   });
 
   it("keeps the committed SBOBET catalog until a complete empty replacement baseline commits", async () => {
@@ -322,6 +366,23 @@ describe("ChromeCatalogDataPlane", () => {
       expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
       await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_001 });
     });
+
+  it("keeps the same source epoch authoritative across a newer bridge connection", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    const first = { ...cmdHttpEnvelope(1, { t: 100 }), sourceEpoch: "worker-a:0" };
+    const replacement = { ...cmdHttpEnvelope(2, { t: 200 }), sourceEpoch: "worker-a:0" };
+
+    expect(plane.ingest(first, { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(replacement, { connectionGeneration: 2 })).toBe(true);
+    expect(plane.ingest({ ...cmdHttpEnvelope(3, { t: 150 }), sourceEpoch: "worker-a:0" },
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest({ ...cmdHttpEnvelope(4, { t: 300 }), sourceEpoch: "worker-a:0" },
+      { connectionGeneration: 1 })).toBe(false);
+
+    await expect(plane.read("catalog-source:CMD:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_002 });
+    expect(publish.mock.calls.map((call) => call[0].observedAtMs)).toEqual([1_001, 1_002]);
+  });
 
   it("rejects an explicitly malformed epoch before state mutation but keeps the absent legacy path compatible",
     async () => {

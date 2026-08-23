@@ -318,3 +318,72 @@ All contracts, API, and extension typechecks exited 0. All three builds exited 0
 No schema was guessed, no provider mapping changed, and no global reload, navigation, browser restart, extension restart, API restart, provider runtime action, or external side effect was introduced. Legacy SBOBET Socket.IO remains non-authoritative; SBOBET authority remains limited to the fenced KSPORT WS/HTTP path. The Task 5 equal-CMD-cursor and AbortSignal-aware IM signer minors remain deferred.
 
 Commit subject: `fix(feed): bound provider recovery ownership`.
+
+---
+
+## Fix Round 4
+
+Status: DONE
+
+Review base: `aa9e02cef01746ba28d3a06878313b72c39e1ac0`
+
+### Admission and recovery rulings
+
+- An exact `sourceId` plus `sourceEpoch` observed on a newer authenticated bridge connection is a transport reconnect, not a provider-epoch replacement. The data plane advances the server connection generation in place and retains the active decoder/controller pipeline. The registry's connection generation permanently fences the superseded socket, the canonical source-epoch high-watermark fences catalog rollback, and each provider adapter's receipt cursor fences older provider data. No candidate promotion or `SOURCE_REPLACED` invalidation occurs for this exact-epoch reconnect.
+- A retained KSPORT envelope is never freshness evidence. The KSPORT adapter rejects `replayed:true` before advancing stream ownership or baseline cursors, and the data plane independently prevents any replay-decoded update from renewing transport, invalidating an account, publishing, or promoting a candidate. Consequently, a non-replayed copy of the same provider generation can still complete the authoritative `live` plus `today` baseline.
+- A KSPORT delta is ordered only by its positive decoded provider receipt sequence. While a newer full generation is pending, deltas strictly newer than that generation are coalesced by partition and provider event, then applied after both matching baseline partitions arrive. Recovery state is capped at 256 delta records and 2,048 markets. Overflow clears the recovery buffer and fences that pending generation; only a strictly higher complete full generation can recover authority.
+- KSPORT stream retirement is represented by one numeric high-watermark per source epoch, one active stream identity, and one decoder. The shipped extension emits canonical positive-decimal stream IDs; the exact characterized `ksport-stream-N` fixture spelling maps to the same scalar. Arbitrary opaque IDs reject because they cannot support an exact bounded retirement fence. Close drops active decode/catalog state but retains the scalar, so a delayed old `OPEN` or frame cannot reopen the stream.
+- `ChromeBridgeRegistry` retains one current diagnostic source and one compact owner record for each of the six provider accounts (`CMD`, `IM`, `SABA`, `SBOBET`, `APSPORT`, `BTI`). KSPORT/SBO and TSPORT aliases map to their provider account. A same-connection handover must be a strictly higher canonical ordinal in the same lineage; malformed, unrelated, lower/equal, inactive, and older-connection owners reject deterministically. Replacement deletes the prior account source, expiry marks the compact owner inactive, and recovery then requires a newer authenticated connection. Thus source diagnostics and denial evidence are fixed-cardinality rather than wall-clock-bounded history.
+
+### RED evidence
+
+All five blocking findings were reproduced before their production fix:
+
+```text
+Exact same-epoch reconnect: 1 failed / 31 skipped.
+  The newer connection was admitted as a candidate, then promotion invalidated its exact epoch and returned false.
+Replay freshness/promotion: 2 failed / 32 skipped.
+  Replayed KSPORT live+today made the active feed LIVE and promoted a replacement candidate.
+Replay same-generation refinement: 1 failed / 33 skipped.
+  Although publication was fenced, replay had consumed the adapter cursor, so fresh current evidence at the same provider generation could not establish authority.
+Pending KSPORT delta and overflow: 2 failed / 25 skipped.
+  today@200 committed baseline price 0.85 after delta@201 price 0.95, and 257 pending event deltas did not fence generation 200.
+KSPORT stream churn: 1 failed / 27 skipped.
+  An unorderable replacement OPEN displaced stream 1000, demonstrating that the retired-stream identity set could not be compacted safely.
+Registry cardinality/ownership: 2 failed / 8 skipped.
+  A flood of 1,000 unproven SABA source IDs was ACKed and retained until wall-clock cleanup.
+```
+
+The additional missing-receipt-order characterization initially used an ineffective escaped-string mutation; that run was discarded as invalid evidence. The corrected characterization is GREEN and proves envelope sequence is not substituted for provider receipt order. The two pending-generation failures above are the counted TDD RED for that finding.
+
+### GREEN and verification matrix
+
+```text
+Task 6 focused API: 7 suites / 122 tests passed.
+Task 6 focused extension: 3 suites / 170 tests passed.
+Task 5 CMD/IM/data-plane API: 5 suites / 90 tests passed.
+Task 5 extension observer/CMD lanes: 4 suites / 164 tests passed.
+Task 1-4 recovery/control/registry/data-plane/coverage/server API: 8 suites / 106 tests passed.
+Task 1-5 extension observer/scheduler/bridge/storage/poller/wakeup: 6 suites / 188 tests passed.
+Contracts chrome-bridge: 1 suite / 14 tests passed.
+Whole contracts package: 2 suites / 95 tests passed.
+Whole extension package: 32 suites / 358 tests passed.
+```
+
+All contracts, API, and extension typechecks exited 0. All three builds exited 0. The supplemental whole API run passed 1,023 of 1,025 tests; its only failures are the same pre-existing Windows-host assumptions recorded in Review Round 1: `local-app-data.test.ts` expects POSIX separators for a macOS fixture path, and `local-key-protector.test.ts` expects POSIX `0600` mode from Windows `stat`. All changed and required API suites passed, including `chrome-bridge-route.test.ts` in the whole-package run.
+
+`git diff --check` exited 0 with only the checkout's existing LF-to-CRLF notices. The scoped secret scan found no credential, cookie, authorization value, token, provider response body, or account secret.
+
+### Files changed in Fix Round 4
+
+- `apps/api/src/chrome-bridge/chrome-bridge-registry.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-registry.test.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `apps/api/src/chrome-bridge/ksport-ws-adapter.ts`
+- `apps/api/src/chrome-bridge/ksport-ws-adapter.test.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6-report.md`
+
+No provider mapping or contract was changed, and no navigation, reload, browser/extension/API restart, provider runtime action, or external side effect was performed.
+
+Commit subject: `fix(feed): bound reconnect and replay state`.

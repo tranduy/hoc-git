@@ -89,6 +89,44 @@ describe("ChromeBridgeRegistry", () => {
     expect(registry.listSources()).toMatchObject([{ lastSequence: 0 }]);
   });
 
+  it("keeps the six provider owners bounded when unproven source IDs flood one account", () => {
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const connection = {};
+    const providers = ["CMD", "IM", "SABA", "KSPORT", "TSPORT", "BTI"] as const;
+    for (const [index, lobby] of providers.entries()) {
+      const sourceId = `chrome:${lobby}:${index + 1}`;
+      expect(registry.ingest({ ...envelope(0, sourceId), lobby, tabId: index + 1,
+        sourceEpoch: `observer-a:${index}` }, connection)).toMatchObject({ kind: "ACK" });
+    }
+
+    for (let index = 0; index < 1_000; index += 1) {
+      expect(registry.ingest({ ...envelope(0, `chrome:SABA:noise-${index}`), sourceEpoch: "observer-a:2" },
+        connection)).toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    }
+    expect(registry.listSources()).toHaveLength(6);
+    expect(registry.listSources()).toContainEqual(expect.objectContaining({
+      lobby: "SABA", sourceId: "chrome:SABA:3"
+    }));
+  });
+
+  it("compacts ordered source churn to one account owner and rejects the oldest source", () => {
+    const accepted = vi.fn();
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const connection = {};
+    registry.subscribe(accepted);
+    for (let ordinal = 0; ordinal < 1_000; ordinal += 1) {
+      expect(registry.ingest({ ...envelope(0, `chrome:SABA:${ordinal + 7}`), tabId: ordinal + 7,
+        sourceEpoch: `observer-a:${ordinal}` }, connection)).toMatchObject({ kind: "ACK" });
+    }
+
+    expect(registry.listSources()).toEqual([expect.objectContaining({
+      sourceId: "chrome:SABA:1006", lastSequence: 0
+    })]);
+    expect(registry.ingest({ ...envelope(1, "chrome:SABA:7"), sourceEpoch: "observer-a:0" }, connection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(accepted).toHaveBeenCalledTimes(1_000);
+  });
+
   it("evicts retired tab sources instead of retaining their server state forever", () => {
     let now = 1_000;
     const registry = new ChromeBridgeRegistry({

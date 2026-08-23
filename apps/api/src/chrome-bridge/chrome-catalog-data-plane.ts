@@ -139,6 +139,10 @@ export class ChromeCatalogDataPlane {
     if (route.status !== "TRUSTED" || route.adapter === null) return false;
     const update = route.adapter.decode(assembled).at(-1);
     if (update === undefined) return false;
+    // Retained bridge replay is decoder bootstrap only. Let adapters rebuild
+    // bounded recovery state, but never let replay renew transport, invalidate
+    // the live owner, publish authoritative data, or promote a candidate.
+    if (replayed) return false;
     if (update.transportAlive === true) {
       if (admission.kind === "CANDIDATE") return false;
       const provenance = transportProvenance(envelope.transport);
@@ -270,9 +274,19 @@ export class ChromeCatalogDataPlane {
     }
     if (connectionGeneration < current.connectionGeneration) return null;
     if (sameOwnerEpoch(current, envelope.sourceId, epoch.sourceEpoch)) {
-      return connectionGeneration === current.connectionGeneration
-        ? { kind: "CURRENT", owner: current }
-        : { kind: "CANDIDATE", owner: proposed(current.legacyHandoverUsed) };
+      if (connectionGeneration === current.connectionGeneration) return { kind: "CURRENT", owner: current };
+      // A new authenticated bridge connection does not create a new provider
+      // epoch when the source identity is unchanged. Advance transport
+      // ownership in place so the current decoder/controller authority remains
+      // intact; provider-specific cursors still reject a stale catalog and the
+      // registry connection fence rejects the superseded socket.
+      const reconnected = proposed(current.legacyHandoverUsed);
+      this.#accountOwners.set(accountId, reconnected);
+      const candidate = this.#candidatePipelines.get(accountId);
+      if (candidate !== undefined && candidate.owner.connectionGeneration < connectionGeneration) {
+        this.#candidatePipelines.delete(accountId);
+      }
+      return { kind: "CURRENT", owner: reconnected };
     }
 
     if (current.identity.kind === "CANONICAL" && epoch.identity.kind === "CANONICAL" &&

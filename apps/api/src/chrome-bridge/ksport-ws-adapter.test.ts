@@ -164,6 +164,60 @@ describe("KsportWsCatalogAdapter", () => {
       .toEqual([expect.objectContaining({ providerEventId: "2" })]);
   });
 
+  it("reapplies a newer delta that arrives while its replacement baseline is pending", () => {
+    const event = (price: string) => ({ "0": "2026-08-20T16:00:00Z", "2": "Alpha", "3": "Beta",
+      "7": { "3": [`2.5 ${price}*56434230030002005h -0.98*56434230030002005a 730780068181025`] },
+      "8": 5643423 });
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.80")] }], "live", 10, 100));
+    adapter.decode(receiptEnvelope([], "today", 11, 100));
+
+    expect(adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.85")] }],
+      "live", 12, 200))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope(event("0.95"), "live", 13, 201))).toEqual([]);
+    const committed = adapter.decode(receiptEnvelope([], "today", 14, 200))[0]!;
+
+    expect(committed).toMatchObject({ authoritativeBaseline: true,
+      generation: "legacy:ksport-ws:ksport-stream-1:200" });
+    const catalog = committed.value as { quotes: Array<{ selection: string; rawOdds: string }> };
+    expect(catalog.quotes.find((quote) => quote.selection === "OVER")?.rawOdds).toBe("0.95");
+  });
+
+  it("rejects a KSPORT delta without a comparable provider receipt order", () => {
+    const event = (price: string) => ({ "0": "2026-08-20T16:00:00Z", "2": "Alpha", "3": "Beta",
+      "7": { "3": [`2.5 ${price}*56434230030002005h -0.98*56434230030002005a 730780068181025`] },
+      "8": 5643423 });
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(receiptEnvelope([{ "1": "Live", "2": [event("0.80")] }], "live", 10, 100));
+    adapter.decode(receiptEnvelope([], "today", 11, 100));
+    const unordered = receiptEnvelope(event("0.95"), "live", 200, 201);
+
+    expect(adapter.decode({ ...unordered, payload: { encoding: "UTF8",
+      body: unordered.payload.body.replace("message-id:socket-201\\n", "") } })).toEqual([]);
+  });
+
+  it("fences a pending generation when its bounded delta recovery state overflows", () => {
+    const event = (id: number) => ({ "0": "2026-08-20T16:00:00Z", "2": `Home ${id}`,
+      "3": `Away ${id}`, "7": {
+        "3": [`2.5 0.95*${id}0030002005h -0.98*${id}0030002005a ${id}181025`]
+      }, "8": id });
+    const adapter = new KsportWsCatalogAdapter();
+    adapter.decode(receiptEnvelope([], "live", 10, 100));
+    adapter.decode(receiptEnvelope([], "today", 11, 100));
+    adapter.decode(receiptEnvelope([], "live", 12, 200));
+
+    for (let index = 0; index <= 256; index += 1) {
+      expect(adapter.decode(receiptEnvelope(event(5_700_000 + index), "live", 20 + index, 201 + index)))
+        .toEqual([]);
+    }
+    expect(adapter.decode(receiptEnvelope([], "today", 500, 200))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "live", 501, 500))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 502, 500))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true,
+      generation: "legacy:ksport-ws:ksport-stream-1:500"
+    })]);
+  });
+
   it("requires live and today full receipts to carry the exact same WS generation", () => {
     const event = { "0": "2026-08-20T16:00:00Z", "2": "Home", "3": "Away",
       "7": { "3": ["2.5 0.92*56434230030002005h -0.98*56434230030002005a 5643423181025"] },
@@ -229,6 +283,20 @@ describe("KsportWsCatalogAdapter", () => {
     expect(adapter.decode(receiptEnvelope([], "live", 4, 4, "ksport-stream-2"))).toEqual([]);
     expect(adapter.decode(receiptEnvelope([], "today", 5, 4, "ksport-stream-2")))
       .toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
+  });
+
+  it("keeps one exact monotonic stream fence across large socket churn", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    for (let ordinal = 1; ordinal <= 1_000; ordinal += 1) {
+      expect(adapter.decode(socketState(String(ordinal), "OPEN", ordinal))).toEqual([]);
+    }
+
+    expect(adapter.decode(socketState("not-a-stream-generation", "OPEN", 1_001))).toEqual([]);
+    expect(adapter.decode(socketState("1", "OPEN", 1_002))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "live", 1_003, 200, "1000"))).toEqual([]);
+    expect(adapter.decode(receiptEnvelope([], "today", 1_004, 200, "1000")))
+      .toEqual([expect.objectContaining({ authoritativeBaseline: true,
+        generation: "legacy:ksport-ws:1000:200" })]);
   });
 
   it("decodes the K-Sports STOMP catalog without needing DOM fallback", () => {
