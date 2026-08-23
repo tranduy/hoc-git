@@ -577,6 +577,12 @@ git commit -m "fix(feed): recover SABA and SBOBET authoritative streams"
 
 ---
 
+### Mandatory prerequisite before Task 7: Task 6A Provider Authority Transactions
+
+Task 6 exhausted five scoped fix rounds and the independent breaker still reproduced false authority across SABA content classification, DOM/WS provenance, KSPORT HTTP/WS ordering, replacement OPEN lifecycle, and registry/control ownership. Execute every task in `docs/superpowers/plans/2026-08-24-provider-authority-transactions.md` and obtain a zero-Critical/zero-Important breaker verdict before starting Task 7. Tasks 7–11 consume the frozen coordinator, commit-proof, cursor, and ordering interfaces from that prerequisite.
+
+---
+
 ### Task 7: APSPORT Authority and BTI Detail Stability
 
 **Files:**
