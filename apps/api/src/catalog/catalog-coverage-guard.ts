@@ -9,6 +9,11 @@ export interface CatalogCoverageCandidate {
   readonly providerEventIds: readonly string[];
 }
 
+export interface CatalogCoverageCheckpoint {
+  readonly owner: CatalogCoverageGuard;
+  readonly states: ReadonlyMap<string, CoverageState>;
+}
+
 export class CatalogCoverageGuard {
   readonly #states = new Map<string, CoverageState>();
 
@@ -34,6 +39,22 @@ export class CatalogCoverageGuard {
 
   reset(sourceKey: string): void {
     this.#states.delete(sourceKey);
+  }
+
+  checkpoint(): CatalogCoverageCheckpoint {
+    return { owner: this, states: new Map([...this.#states].map(([key, state]) => [key, {
+      acceptedEventIds: new Set(state.acceptedEventIds),
+      consumedAuthoritativeGenerations: new Set(state.consumedAuthoritativeGenerations)
+    }])) };
+  }
+
+  restoreCheckpoint(checkpoint: CatalogCoverageCheckpoint): void {
+    if (checkpoint.owner !== this) throw new Error("CATALOG_COVERAGE_CHECKPOINT_OWNER_MISMATCH");
+    this.#states.clear();
+    for (const [key, state] of checkpoint.states) {
+      this.#states.set(key, { acceptedEventIds: new Set(state.acceptedEventIds),
+        consumedAuthoritativeGenerations: new Set(state.consumedAuthoritativeGenerations) });
+    }
   }
 }
 

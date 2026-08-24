@@ -206,11 +206,19 @@ export class NetworkBodyAssembler {
     const sourceEpoch = envelope.sourceEpoch ?? "legacy";
     const admission = this.#sourceEpochAdmission(envelope.sourceId, envelope.sourceEpoch);
     if (admission === "REJECTED") return null;
+    const requestFrameKey = "requestFrameKey" in envelope.request &&
+      typeof envelope.request.requestFrameKey === "string" ? envelope.request.requestFrameKey : null;
+    const requestDocumentKey = "requestDocumentKey" in envelope.request &&
+      typeof envelope.request.requestDocumentKey === "string" ? envelope.request.requestDocumentKey : null;
+    if (requestFrameKey === null || requestDocumentKey === null) {
+      this.#faultAdmittedSourceEpoch(envelope.sourceId, envelope.sourceEpoch, admission);
+      return null;
+    }
     const observerRequestId = "observerRequestId" in envelope.request &&
       typeof envelope.request.observerRequestId === "string"
       ? envelope.request.observerRequestId : "legacy-request";
-    const key = bodyKey(envelope.sourceId, sourceEpoch,
-      observerRequestId, chunk.snapshotId);
+    const key = bodyKey(envelope.sourceId, sourceEpoch, observerRequestId,
+      requestFrameKey, requestDocumentKey, chunk.snapshotId);
 
     const identity = assemblyIdentity(envelope);
     let state = this.#pending.get(key);
@@ -404,8 +412,9 @@ function deadline(nowMs: number, ttlMs: number): number {
   return expiresAtMs;
 }
 
-function bodyKey(sourceId: string, sourceEpoch: string, observerRequestId: string, snapshotId: string): string {
-  return JSON.stringify([sourceId, sourceEpoch, observerRequestId, snapshotId]);
+function bodyKey(sourceId: string, sourceEpoch: string, observerRequestId: string,
+  requestFrameKey: string, requestDocumentKey: string, snapshotId: string): string {
+  return JSON.stringify([sourceId, sourceEpoch, observerRequestId, requestFrameKey, requestDocumentKey, snapshotId]);
 }
 
 function canonicalEpoch(sourceEpoch: string): {

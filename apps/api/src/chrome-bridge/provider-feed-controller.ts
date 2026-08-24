@@ -8,6 +8,27 @@ export interface ProviderFeedControllerOptions {
   readonly now?: () => number;
 }
 
+export interface ProviderFeedControllerCheckpoint {
+  readonly owner: ProviderFeedController;
+  readonly retiredEpoch: string | null;
+  readonly state: ProviderFeedState;
+  readonly reason: string | null;
+  readonly latestCatalog: ObservedProviderCatalog | null;
+  readonly authoritativeCatalog: ObservedProviderCatalog | null;
+  readonly sourceId: string | null;
+  readonly sourceEpoch: string | null;
+  readonly tabReachableAtMs: number | null;
+  readonly providerTransportAtMs: number | null;
+  readonly lastAuthoritativeEvidenceAtMs: number | null;
+  readonly lastCompleteBaselineAtMs: number | null;
+  readonly lastDeltaAtMs: number | null;
+  readonly lastSemanticChangeAtMs: number | null;
+  readonly activeGeneration: string | null;
+  readonly recoveryStage: "NONE" | "SOFT" | "HARD";
+  readonly recoveryAttempt: number;
+  readonly lastRecoveryRequestedAtMs: number | null;
+}
+
 export class ProviderFeedController {
   readonly #accountId: string;
   readonly #policy: ProviderFeedPolicy;
@@ -102,6 +123,39 @@ export class ProviderFeedController {
       lastCompleteBaselineAtMs: this.#lastCompleteBaselineAtMs, lastDeltaAtMs: this.#lastDeltaAtMs,
       lastSemanticChangeAtMs: this.#lastSemanticChangeAtMs, activeGeneration: this.#activeGeneration,
       recoveryStage: this.#recoveryStage, recoveryAttempt: this.#recoveryAttempt };
+  }
+
+  checkpoint(): ProviderFeedControllerCheckpoint {
+    return Object.freeze({ owner: this, retiredEpoch: this.#retiredEpoch, state: this.#state,
+      reason: this.#reason, latestCatalog: this.#latestCatalog, authoritativeCatalog: this.#authoritativeCatalog,
+      sourceId: this.#sourceId, sourceEpoch: this.#sourceEpoch, tabReachableAtMs: this.#tabReachableAtMs,
+      providerTransportAtMs: this.#providerTransportAtMs,
+      lastAuthoritativeEvidenceAtMs: this.#lastAuthoritativeEvidenceAtMs,
+      lastCompleteBaselineAtMs: this.#lastCompleteBaselineAtMs, lastDeltaAtMs: this.#lastDeltaAtMs,
+      lastSemanticChangeAtMs: this.#lastSemanticChangeAtMs, activeGeneration: this.#activeGeneration,
+      recoveryStage: this.#recoveryStage, recoveryAttempt: this.#recoveryAttempt,
+      lastRecoveryRequestedAtMs: this.#lastRecoveryRequestedAtMs });
+  }
+
+  restoreCheckpoint(checkpoint: ProviderFeedControllerCheckpoint): void {
+    if (checkpoint.owner !== this) throw new Error("PROVIDER_FEED_CHECKPOINT_OWNER_MISMATCH");
+    this.#retiredEpoch = checkpoint.retiredEpoch;
+    this.#state = checkpoint.state;
+    this.#reason = checkpoint.reason;
+    this.#latestCatalog = checkpoint.latestCatalog;
+    this.#authoritativeCatalog = checkpoint.authoritativeCatalog;
+    this.#sourceId = checkpoint.sourceId;
+    this.#sourceEpoch = checkpoint.sourceEpoch;
+    this.#tabReachableAtMs = checkpoint.tabReachableAtMs;
+    this.#providerTransportAtMs = checkpoint.providerTransportAtMs;
+    this.#lastAuthoritativeEvidenceAtMs = checkpoint.lastAuthoritativeEvidenceAtMs;
+    this.#lastCompleteBaselineAtMs = checkpoint.lastCompleteBaselineAtMs;
+    this.#lastDeltaAtMs = checkpoint.lastDeltaAtMs;
+    this.#lastSemanticChangeAtMs = checkpoint.lastSemanticChangeAtMs;
+    this.#activeGeneration = checkpoint.activeGeneration;
+    this.#recoveryStage = checkpoint.recoveryStage;
+    this.#recoveryAttempt = checkpoint.recoveryAttempt;
+    this.#lastRecoveryRequestedAtMs = checkpoint.lastRecoveryRequestedAtMs;
   }
 
   #acceptEvidence(evidence: ProviderFeedEvidence): FeedDecision {

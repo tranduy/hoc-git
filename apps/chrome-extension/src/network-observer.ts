@@ -55,12 +55,17 @@ type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
 interface PendingRequest {
   readonly source: ObservedSource;
   readonly sourceGeneration: number;
+  readonly tabGeneration: number;
   readonly sessionId?: string;
   readonly url: string;
   readonly resourceType: string;
   readonly method: ChromeBridgeHttpMethod;
   readonly observerRequestId: string;
   readonly observerRequestOrdinal: number;
+  readonly frameId?: string;
+  readonly loaderId?: string;
+  readonly requestFrameKey?: string;
+  readonly requestDocumentKey?: string;
   readonly providerPartition?: ImProviderPartition;
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
@@ -75,6 +80,8 @@ interface ReplayableHttpSnapshot {
   readonly method: ChromeBridgeHttpMethod;
   readonly observerRequestId: string;
   readonly observerRequestOrdinal: number;
+  readonly requestFrameKey?: string;
+  readonly requestDocumentKey?: string;
   readonly providerPartition?: ImProviderPartition;
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
@@ -106,6 +113,11 @@ export interface DirectHttpRequestMetadata {
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
   readonly reconcileCutoffSequence?: number;
+  readonly verifiedDocument?: {
+    readonly frameId: string;
+    readonly loaderId: string;
+    readonly sessionId?: string;
+  };
 }
 
 interface ActiveCmdHiddenProbe {
@@ -605,6 +617,7 @@ export class NetworkObserver {
   readonly #workScheduler: ProviderWorkScheduler;
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
+  readonly #tabGenerations = new Map<number, number>();
   readonly #publicSourceEpochs = new Map<string, { readonly sourceGeneration: number; readonly ordinal: number }>();
   #nextPublicEpochOrdinal = 0;
   readonly #activeWorkGenerations = new Map<string, number>();
@@ -622,7 +635,9 @@ export class NetworkObserver {
   readonly #requestFunctionCodes = new Map<string, number>();
   readonly #requestGenerations = new Map<string, number>();
   readonly #requestIdentities = new Map<string, { readonly method: ChromeBridgeHttpMethod;
-    readonly observerRequestId: string; readonly observerRequestOrdinal: number }>();
+    readonly observerRequestId: string; readonly observerRequestOrdinal: number;
+    readonly tabGeneration: number; readonly frameId?: string; readonly loaderId?: string;
+    readonly requestFrameKey?: string; readonly requestDocumentKey?: string }>();
   #nextObserverRequestOrdinal = 0;
   readonly #pending = new Map<string, PendingRequest>();
   readonly #cmdSnapshots = new Map<string, { readonly body: string; readonly sentAtMs: number;
@@ -875,6 +890,7 @@ export class NetworkObserver {
   }
 
   releaseTab(tabId: number): void {
+    this.#tabGenerations.set(tabId, this.#captureTabGeneration(tabId) + 1);
     this.#startedTabs.delete(tabId);
     this.#mainWorldContexts.delete(tabId);
     this.#mainWorldContextSessions.delete(tabId);
@@ -890,6 +906,10 @@ export class NetworkObserver {
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
     for (const sourceId of this.#publicSourceEpochs.keys()) remember(sourceId);
+    for (const sourceId of this.#sourceGenerations.keys()) remember(sourceId);
+    for (const sourceId of this.#activeWorkGenerations.keys()) remember(sourceId);
+    for (const pending of this.#pending.values()) if (pending.source.tabId === tabId) remember(pending.source.sourceId);
+    for (const socket of this.#webSockets.values()) if (socket.source.tabId === tabId) remember(socket.source.sourceId);
     for (const sourceId of sourceIds) {
       this.beginSourceEpoch(sourceId);
       this.#publicSourceEpochs.delete(sourceId);
@@ -952,6 +972,9 @@ export class NetworkObserver {
     }
     for (const key of this.#requestGenerations.keys()) {
       if (key.startsWith(`${tabId}:`)) this.#requestGenerations.delete(key);
+    }
+    for (const key of this.#requestIdentities.keys()) {
+      if (key.startsWith(`${tabId}:`)) this.#requestIdentities.delete(key);
     }
   }
 
@@ -1164,13 +1187,15 @@ export class NetworkObserver {
         this.#sendCommand(source.tabId, "Page.getFrameTree")
       ).catch(() => ({}));
       const frameIds = collectFrameIds(frameTree);
+      const frameDescriptors = collectFrameDescriptors(frameTree);
       // Always address the current top-level main world directly. Cached CDP
       // execution-context ids are invalidated on provider-side redirects and a
       // stale id otherwise makes every later refresh a silent no-op.
       const topEvaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
         expression: BTI_CATALOG_REFRESH_EXPRESSION, returnByValue: true, awaitPromise: true
       }), this.#btiCatalogRefreshTimeoutMs).catch(() => ({}));
-      await this.#ingestBtiRefreshEvaluation(source, topEvaluation);
+      await this.#ingestBtiRefreshEvaluation(source, topEvaluation,
+        verifiedDocumentForDescriptor(frameDescriptors[0]));
       if (frameIds.length <= 1) return;
       await Promise.all(frameIds.slice(1).map(async (frameId) => {
         const mainContextId = this.#mainWorldContexts.get(source.tabId)?.get(frameId);
@@ -1179,7 +1204,8 @@ export class NetworkObserver {
             expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId: mainContextId,
             returnByValue: true, awaitPromise: true
           }), this.#btiCatalogRefreshTimeoutMs).catch(() => ({}));
-          await this.#ingestBtiRefreshEvaluation(source, evaluation);
+          await this.#ingestBtiRefreshEvaluation(source, evaluation,
+            verifiedDocumentForDescriptor(frameDescriptors.find((frame) => frame.id === frameId)));
           return;
         }
         const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
@@ -1191,7 +1217,8 @@ export class NetworkObserver {
         const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression: BTI_CATALOG_REFRESH_EXPRESSION, contextId, returnByValue: true, awaitPromise: true
         }), this.#btiCatalogRefreshTimeoutMs).catch(() => ({}));
-        await this.#ingestBtiRefreshEvaluation(source, evaluation);
+        await this.#ingestBtiRefreshEvaluation(source, evaluation,
+          verifiedDocumentForDescriptor(frameDescriptors.find((frame) => frame.id === frameId)));
       }));
   }
 
@@ -1343,12 +1370,13 @@ export class NetworkObserver {
       if (socket.source.sourceId !== source.sourceId) return false;
       try { return isKsportCatalogSocket(new URL(socket.url)); } catch { return false; }
     });
-    const knownContexts = [...new Set(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])];
+    const knownContexts = [...(this.#mainWorldContexts.get(source.tabId)?.entries() ?? [])];
     const sessionByContext = this.#mainWorldContextSessions.get(source.tabId);
-    const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> = knownContexts.map(
-      (contextId) => {
+    const targets: Array<{ readonly contextId?: number; readonly sessionId?: string;
+      readonly frameId?: string }> = knownContexts.map(
+      ([frameId, contextId]) => {
         const contextSessionId = sessionByContext?.get(contextId);
-        return { contextId, ...(contextSessionId === undefined ? {} : { sessionId: contextSessionId }) };
+        return { contextId, frameId, ...(contextSessionId === undefined ? {} : { sessionId: contextSessionId }) };
       });
     if (targets.length === 0 && active !== undefined) targets.push({
       ...(active.sessionId === undefined ? {} : { sessionId: active.sessionId })
@@ -1363,7 +1391,7 @@ export class NetworkObserver {
             frameId, worldName: "fieldline-ksport-catalog-refresh", grantUniveralAccess: false
           })).catch(() => ({}));
         const contextId = nestedNumber(world, "executionContextId");
-        if (contextId !== null) targets.push({ contextId });
+        if (contextId !== null) targets.push({ contextId, frameId });
       }
     }
     let attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId);
@@ -1444,6 +1472,13 @@ export class NetworkObserver {
     const attempts: Array<{ readonly target: "CONTEXT" | "SESSION" | "ROOT";
       readonly status: string; readonly page?: string; readonly controls?: unknown }> = [];
     for (const target of targets) {
+      const frameTree = await this.#withFrameCommandTimeout(target.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Page.getFrameTree")
+        : this.#sendCommand(source.tabId, "Page.getFrameTree", {}, target.sessionId)).catch(() => ({}));
+      const descriptors = collectFrameDescriptors(frameTree);
+      const verifiedDocument = verifiedDocumentForDescriptor(target.frameId === undefined
+        ? descriptors[0]
+        : descriptors.find((frame) => frame.id === target.frameId), target.sessionId);
       const params = { expression, ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
         returnByValue: true, awaitPromise: true };
       const evaluation = await this.#withFrameCommandTimeout(target.sessionId === undefined
@@ -1483,7 +1518,8 @@ export class NetworkObserver {
       for (const partition of ["live", "today"] as const) {
         const response = accepted.get(partition)!;
         await this.ingestHttpResponse(source, response.url, "Fetch", response.body,
-          { method: "GET", streamId: `${generation}:${partition}` });
+          { method: "GET", streamId: `${generation}:${partition}`,
+            ...(verifiedDocument === undefined ? {} : { verifiedDocument }) });
       }
       return true;
     }
@@ -1497,7 +1533,8 @@ export class NetworkObserver {
     return false;
   }
 
-  async #ingestBtiRefreshEvaluation(source: ObservedSource, evaluation: unknown): Promise<void> {
+  async #ingestBtiRefreshEvaluation(source: ObservedSource, evaluation: unknown,
+    verifiedDocument?: NonNullable<DirectHttpRequestMetadata["verifiedDocument"]>): Promise<void> {
     const value = nestedValue(evaluation, "result", "value");
     if (!isRecord(value) || value.status !== "catalog-requested" ||
       typeof value.generation !== "string" || !/^bti:\d{10,16}:\d{1,9}$/u.test(value.generation) ||
@@ -1519,7 +1556,8 @@ export class NetworkObserver {
     if (unique.size !== allowedPaths.size) return;
     for (const path of allowedPaths) {
       await this.ingestHttpResponse(source, new URL(path, origin).href, "Fetch", unique.get(path)!,
-        { method: "GET", streamId: value.generation });
+        { method: "GET", streamId: value.generation,
+          ...(verifiedDocument === undefined ? {} : { verifiedDocument }) });
     }
   }
 
@@ -1539,8 +1577,11 @@ export class NetworkObserver {
       this.#sendCommand(source.tabId, "Page.getFrameTree")
     ).catch(() => ({}));
     const frameIds = collectFrameIds(frameTree);
+    const frameDescriptors = collectFrameDescriptors(frameTree);
     const contexts = this.#mainWorldContexts.get(source.tabId);
-    const evaluate = async (label: string, contextId?: number): Promise<string> => {
+    const evaluate = async (label: string, descriptor?: { readonly id: string;
+      readonly loaderId: string | null }, contextId?: number): Promise<string> => {
+      const verifiedDocument = verifiedDocumentForDescriptor(descriptor);
       const response = await this.#withFrameCommandTimeout(
         this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression: IM_CATALOG_DISCOVERY_EXPRESSION, ...(contextId === undefined ? {} : { contextId }),
@@ -1554,6 +1595,7 @@ export class NetworkObserver {
           await this.ingestHttpResponse(source, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
             item.body, { method: "POST", providerPartition: item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2",
               ...(generation === undefined ? {} : { streamId: generation }),
+              ...(verifiedDocument === undefined ? {} : { verifiedDocument }),
               reconcileCutoffSequence: reconcileCutoffSequence! });
         }
       }
@@ -1562,11 +1604,12 @@ export class NetworkObserver {
         .test(status) ? status : "unavailable";
       return `${label}:${safeValue}`;
     };
-    const evaluations: Array<Promise<string>> = [evaluate("top")];
+    const evaluations: Array<Promise<string>> = [evaluate("top", frameDescriptors[0])];
     for (const frameId of frameIds.slice(1)) {
       const contextId = contexts?.get(frameId);
       if (contextId === undefined) continue;
-      evaluations.push(evaluate(frameId.slice(0, 64), contextId));
+      evaluations.push(evaluate(frameId.slice(0, 64),
+        frameDescriptors.find((frame) => frame.id === frameId), contextId));
     }
     return Promise.all(evaluations);
   }
@@ -1655,8 +1698,13 @@ export class NetworkObserver {
       const request = isRecord(params.request) ? params.request : null;
       const requestMethod = sanitizeHttpMethod(request?.method);
       const requestIdentity = this.#allocateObserverRequestIdentity();
+      const requestDocument = requestDocumentBinding(this.#observerSessionId, source.tabId,
+        this.#sourceGenerations.get(source.sourceId) ?? 0, sessionId,
+        params.frameId, params.loaderId);
       if (requestMethod === null) this.#requestIdentities.delete(key);
-      else this.#requestIdentities.set(key, { method: requestMethod, ...requestIdentity });
+      else this.#requestIdentities.set(key, { method: requestMethod, ...requestIdentity,
+        tabGeneration: this.#captureTabGeneration(source.tabId),
+        ...(requestDocument === null ? {} : requestDocument) });
       if (source.lobby === "CMD" && request !== null && typeof request.url === "string") {
         try {
           const url = new URL(request.url);
@@ -1874,7 +1922,7 @@ export class NetworkObserver {
       this.#requestGenerations.delete(key);
       this.#requestIdentities.delete(key);
       if (!pending || requestId === null) return;
-      if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
+      if (!this.#isPendingCurrent(pending)) return;
       let responseBodyRead = false;
       try {
         if (pending.providerPartition === undefined && isImGetSeUrl(pending.source, pending.url)) {
@@ -1882,7 +1930,7 @@ export class NetworkObserver {
             ? this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId })
             : this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId }, pending.sessionId))
             .catch(() => ({}));
-          if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
+          if (!this.#isPendingCurrent(pending)) return;
           const postData = isRecord(requestPostData) && typeof requestPostData.postData === "string"
             ? requestPostData.postData : null;
           const providerPartition = postData === null ? null : imPartitionFromRequest(pending.source, {
@@ -1892,19 +1940,23 @@ export class NetworkObserver {
         }
         const response = await this.#readResponseBody(source.tabId, requestId,
           isImGetSeUrl(pending.source, pending.url), pending.sessionId);
-        if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
+        if (!this.#isPendingCurrent(pending)) return;
         if (!isRecord(response) || typeof response.body !== "string") return;
+        if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
+        if (!this.#isPendingCurrent(pending)) return;
         responseBodyRead = true;
         if (response.base64Encoded === true) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "BASE64", body: response.body
           }, { request: pendingRequestMetadata(pending),
-            sourceGeneration: pending.sourceGeneration });
+            sourceGeneration: pending.sourceGeneration, tabGeneration: pending.tabGeneration });
           return;
         }
         const safeBody = redactNetworkBody(response.body);
         await this.#recoverMissingImBaseline(pending);
-        if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
+        if (!this.#isPendingCurrent(pending)) return;
+        if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
+        if (!this.#isPendingCurrent(pending)) return;
         const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
         this.#rememberHttpSnapshot(pending, safeBody, clocks);
         const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
@@ -1912,9 +1964,10 @@ export class NetworkObserver {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
             encoding: "UTF8", body: safeBody
           }, { request: pendingRequestMetadata(pending), ...clocks,
-            sourceGeneration: pending.sourceGeneration });
+            sourceGeneration: pending.sourceGeneration, tabGeneration: pending.tabGeneration });
           return;
         }
+        if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return;
         const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
         const emissionPending = pending;
         const emissions = fragments.map((bodyFragment, chunkIndex) =>
@@ -1922,11 +1975,12 @@ export class NetworkObserver {
             encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
               chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
           }, { request: pendingRequestMetadata(emissionPending), ...clocks,
-            sourceGeneration: emissionPending.sourceGeneration }));
+            sourceGeneration: emissionPending.sourceGeneration, tabGeneration: emissionPending.tabGeneration,
+            beforeForward: () => this.#requestDocumentIsCurrent(emissionPending) }));
         await Promise.all(emissions);
       } catch {
         if (!responseBodyRead && isImGetSeUrl(pending.source, pending.url) &&
-          this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) {
+          this.#isPendingCurrent(pending)) {
           const encodedDataLength = typeof params.encodedDataLength === "number" &&
             Number.isSafeInteger(params.encodedDataLength) && params.encodedDataLength >= 0
             ? params.encodedDataLength : 0;
@@ -1936,7 +1990,8 @@ export class NetworkObserver {
               body: JSON.stringify({ path: "/api/EventV6/GetSE",
                 ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
                 encodedDataLength })
-            }, { sourceGeneration: pending.sourceGeneration }).catch(() => undefined);
+            }, { sourceGeneration: pending.sourceGeneration,
+              tabGeneration: pending.tabGeneration }).catch(() => undefined);
         }
         // A response body can be evicted by Chrome; isolate it from the stream.
       }
@@ -1984,8 +2039,15 @@ export class NetworkObserver {
     const method = sanitizeHttpMethod(requestMetadata.method);
     if (method === null) return;
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
-    const pending: PendingRequest = { source, sourceGeneration, url, resourceType, method,
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const verifiedDocument = requestMetadata.verifiedDocument;
+    const requestDocument = verifiedDocument === undefined ? null : requestDocumentBinding(
+      this.#observerSessionId, source.tabId, sourceGeneration, verifiedDocument.sessionId,
+      verifiedDocument.frameId, verifiedDocument.loaderId);
+    const pending: PendingRequest = { source, sourceGeneration, tabGeneration, url, resourceType, method,
       ...requestIdentity,
+      ...(verifiedDocument?.sessionId === undefined ? {} : { sessionId: verifiedDocument.sessionId }),
+      ...(requestDocument === null ? {} : requestDocument),
       ...(requestMetadata.providerPartition === undefined ? {} : { providerPartition: requestMetadata.providerPartition }),
       ...(requestMetadata.streamId === undefined ? {} : { streamId: requestMetadata.streamId }),
       ...(requestMetadata.providerFunctionCode === undefined ? {} :
@@ -1994,7 +2056,9 @@ export class NetworkObserver {
         { reconcileCutoffSequence: requestMetadata.reconcileCutoffSequence }) };
     const safeBody = redactNetworkBody(body);
     await this.#recoverMissingImBaseline(pending);
-    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+    if (!this.#isPendingCurrent(pending)) return;
+    if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
+    if (!this.#isPendingCurrent(pending)) return;
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
     const fragments = splitUtf8Text(safeBody, NETWORK_CHUNK_BODY_BYTES);
@@ -2002,17 +2066,18 @@ export class NetworkObserver {
     const request = Object.keys(sanitizedRequestMetadata).length === 0 ? {} : { request: sanitizedRequestMetadata };
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
-        { ...request, ...clocks, sourceGeneration });
+        { ...request, ...clocks, sourceGeneration, tabGeneration });
       return;
     }
+    if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return;
     const snapshotId = networkSnapshotId(source.tabId, pending.observerRequestOrdinal);
-    for (const [chunkIndex, bodyFragment] of fragments.entries()) {
-      await this.#emit(source, url, resourceType, "HTTP_RESPONSE", {
+    const emissions = fragments.map((bodyFragment, chunkIndex) => this.#emit(source, url, resourceType, "HTTP_RESPONSE", {
         encoding: "UTF8",
         body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex, chunkCount: fragments.length,
           bodyEncoding: "UTF8", bodyFragment })
-      }, { ...request, ...clocks, sourceGeneration });
-    }
+      }, { ...request, ...clocks, sourceGeneration, tabGeneration,
+        beforeForward: () => this.#requestDocumentIsCurrent(pending) }));
+    await Promise.all(emissions);
   }
 
   async ingestDomSnapshot(source: ObservedSource, hostname: string, body: string): Promise<void> {
@@ -2798,7 +2863,8 @@ export class NetworkObserver {
     clocks: { readonly observedAtMs: number; readonly receivedMonotonicMs: number }): void {
     let url: URL;
     try { url = new URL(pending.url); } catch { return; }
-    if (pending.source.lobby !== "IM" || url.hostname !== "imsports.directsb.net" ||
+    if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined ||
+      pending.source.lobby !== "IM" || url.hostname !== "imsports.directsb.net" ||
       url.pathname !== "/api/EventV6/GetSE") return;
     let parsed: unknown;
     try { parsed = JSON.parse(body); } catch { return; }
@@ -2813,6 +2879,7 @@ export class NetworkObserver {
     deduplicated.push({ source: pending.source, url: pending.url, resourceType: pending.resourceType, body,
       method: pending.method, observerRequestId: pending.observerRequestId,
       observerRequestOrdinal: pending.observerRequestOrdinal,
+      requestFrameKey: pending.requestFrameKey, requestDocumentKey: pending.requestDocumentKey,
       ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
       ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }),
       ...(pending.providerFunctionCode === undefined ? {} : { providerFunctionCode: pending.providerFunctionCode }),
@@ -2851,16 +2918,24 @@ export class NetworkObserver {
     payload: ChromeBridgeEnvelope["payload"],
     metadata: {
       readonly request?: Pick<ChromeBridgeEnvelope["request"], "streamId" | "providerPartition" | "replayed" |
-        "providerFunctionCode" | "reconcileCutoffSequence" | "method" | "observerRequestId">;
+        "providerFunctionCode" | "reconcileCutoffSequence" | "method" | "observerRequestId" |
+        "requestFrameKey" | "requestDocumentKey">;
       readonly observedAtMs?: number;
       readonly receivedMonotonicMs?: number;
       readonly sourceGeneration?: number;
+      readonly tabGeneration?: number;
+      readonly beforeForward?: () => Promise<boolean>;
     } = {}
   ): Promise<void> {
     const sourceGeneration = metadata.sourceGeneration ?? this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = metadata.tabGeneration ?? this.#captureTabGeneration(source.tabId);
     const previous = this.#emissionTails.get(source.sourceId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(async () => {
-      if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration) return;
+      if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
+      if (metadata.beforeForward !== undefined && !await metadata.beforeForward()) return;
+      if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
       const sequence = this.#sequences.get(source.sourceId) ?? 0;
       try {
         const redacted = redactNetworkEnvelope({
@@ -2876,7 +2951,8 @@ export class NetworkObserver {
           payload
         }) as ChromeBridgeEnvelope;
         await this.#forward(redacted);
-        if ((this.#sourceGenerations.get(source.sourceId) ?? 0) === sourceGeneration) {
+        if ((this.#sourceGenerations.get(source.sourceId) ?? 0) === sourceGeneration &&
+          this.#captureTabGeneration(source.tabId) === tabGeneration) {
           this.#sequences.set(source.sourceId, sequence + 1);
         }
       } catch (error) {
@@ -2918,6 +2994,26 @@ export class NetworkObserver {
   #isSourceGenerationCurrent(sourceId: string, generation: number): boolean {
     return (this.#sourceGenerations.get(sourceId) ?? 0) === generation;
   }
+
+  #captureTabGeneration(tabId: number): number {
+    return this.#tabGenerations.get(tabId) ?? 0;
+  }
+
+  #isPendingCurrent(pending: PendingRequest): boolean {
+    return this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration) &&
+      this.#captureTabGeneration(pending.source.tabId) === pending.tabGeneration;
+  }
+
+  async #requestDocumentIsCurrent(pending: PendingRequest): Promise<boolean> {
+    if (pending.frameId === undefined || pending.loaderId === undefined ||
+      pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return false;
+    const frameTree = await (pending.sessionId === undefined
+      ? this.#sendCommand(pending.source.tabId, "Page.getFrameTree")
+      : this.#sendCommand(pending.source.tabId, "Page.getFrameTree", {}, pending.sessionId))
+      .catch(() => null);
+    return this.#isPendingCurrent(pending) && frameTree !== null &&
+      currentFrameLoader(frameTree, pending.frameId) === pending.loaderId;
+  }
 }
 
 function sanitizeHttpMethod(value: unknown): ChromeBridgeHttpMethod | null {
@@ -2944,10 +3040,12 @@ function imPartitionFromRequest(source: ObservedSource,
 
 function pendingRequestMetadata(pending: PendingRequest): Pick<ChromeBridgeEnvelope["request"],
   "streamId" | "providerPartition" | "providerFunctionCode" | "reconcileCutoffSequence" |
-  "method" | "observerRequestId"> {
+  "method" | "observerRequestId" | "requestFrameKey" | "requestDocumentKey"> {
   return {
     method: pending.method,
     observerRequestId: pending.observerRequestId,
+    ...(pending.requestFrameKey === undefined ? {} : { requestFrameKey: pending.requestFrameKey }),
+    ...(pending.requestDocumentKey === undefined ? {} : { requestDocumentKey: pending.requestDocumentKey }),
     ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
     ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }),
     ...(pending.providerFunctionCode === undefined ? {} : { providerFunctionCode: pending.providerFunctionCode }),
@@ -2958,8 +3056,8 @@ function pendingRequestMetadata(pending: PendingRequest): Pick<ChromeBridgeEnvel
 
 function replayRequestMetadata(snapshot: ReplayableHttpSnapshot): Pick<ChromeBridgeEnvelope["request"],
   "streamId" | "providerPartition" | "providerFunctionCode" | "reconcileCutoffSequence" | "replayed" |
-  "method" | "observerRequestId"> {
-  return { ...pendingRequestMetadata({ ...snapshot, sourceGeneration: 0 }), replayed: true };
+  "method" | "observerRequestId" | "requestFrameKey" | "requestDocumentKey"> {
+  return { ...pendingRequestMetadata({ ...snapshot, sourceGeneration: 0, tabGeneration: 0 }), replayed: true };
 }
 
 function isImGetSeUrl(source: ObservedSource, value: string): boolean {
@@ -3110,6 +3208,14 @@ function currentFrameLoader(value: unknown, frameId: string): string | null {
   return collectFrameDescriptors(value).find((frame) => frame.id === frameId)?.loaderId ?? null;
 }
 
+function verifiedDocumentForDescriptor(descriptor: { readonly id: string;
+  readonly loaderId: string | null } | undefined, sessionId?: string):
+  NonNullable<DirectHttpRequestMetadata["verifiedDocument"]> | undefined {
+  if (descriptor?.loaderId === null || descriptor === undefined) return undefined;
+  return { frameId: descriptor.id, loaderId: descriptor.loaderId,
+    ...(sessionId === undefined ? {} : { sessionId }) };
+}
+
 function readEvaluationRecords(value: unknown): unknown[] {
   if (!isRecord(value) || !isRecord(value.result) || typeof value.result.value !== "string") return [];
   try {
@@ -3136,4 +3242,37 @@ function sweepDocumentKey(observerSessionId: string, tabId: number, sourceGenera
     right = Math.imul(right ^ code, 0x85ebca6b);
   }
   return `cmd-document:${(left >>> 0).toString(36)}:${(right >>> 0).toString(36)}`;
+}
+
+function requestDocumentBinding(observerSessionId: string, tabId: number, sourceGeneration: number,
+  sessionId: string | undefined, rawFrameId: unknown, rawLoaderId: unknown): {
+    readonly frameId: string;
+    readonly loaderId: string;
+    readonly requestFrameKey: string;
+    readonly requestDocumentKey: string;
+  } | null {
+  if (typeof rawFrameId !== "string" || rawFrameId.length === 0 || rawFrameId.length > 256 ||
+    typeof rawLoaderId !== "string" || rawLoaderId.length === 0 || rawLoaderId.length > 256 ||
+    (sessionId !== undefined && (sessionId.length === 0 || sessionId.length > 256))) return null;
+  const session = sessionId ?? "root";
+  return {
+    frameId: rawFrameId,
+    loaderId: rawLoaderId,
+    requestFrameKey: opaqueRequestKey("http-frame", [observerSessionId, tabId, session, rawFrameId]),
+    requestDocumentKey: opaqueRequestKey("http-document",
+      [observerSessionId, tabId, sourceGeneration, session, rawFrameId, rawLoaderId])
+  };
+}
+
+function opaqueRequestKey(prefix: "http-frame" | "http-document",
+  parts: readonly (string | number)[]): string {
+  const value = parts.join("\u0000");
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    left = Math.imul(left ^ code, 0x01000193);
+    right = Math.imul(right ^ code, 0x85ebca6b);
+  }
+  return `${prefix}:${(left >>> 0).toString(36)}${(right >>> 0).toString(36)}`;
 }

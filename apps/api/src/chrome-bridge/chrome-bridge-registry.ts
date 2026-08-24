@@ -83,6 +83,7 @@ export class ChromeBridgeRegistry {
       candidate: null,
       retiredActiveTransportIdentity: null
     }]));
+    this.#authorityCoordinator.subscribe((transition) => this.#reconcile(transition.accountId));
   }
 
   get authorityCoordinator(): ProviderAuthorityCoordinator {
@@ -119,7 +120,8 @@ export class ChromeBridgeRegistry {
     return this.ingestDetailed(envelope, connection).control;
   }
 
-  ingestDetailed(envelope: ChromeBridgeEnvelope, connection: object | null = null): ChromeBridgeIngestResult {
+  ingestDetailed(envelope: ChromeBridgeEnvelope, connection: object | null = null,
+    beforeDelivery?: (context: ChromeBridgeIngestContext) => void): ChromeBridgeIngestResult {
     const acceptedAtMs = this.#now();
     this.#retireSources(acceptedAtMs);
     const actualConnection = connection ?? this.#implicitConnection;
@@ -197,6 +199,9 @@ export class ChromeBridgeRegistry {
       authorityIdentity: identity,
       authorityObservation: observation
     };
+    // Control ownership must be attached before a one-envelope HTTP baseline
+    // can promote from inside a data-plane listener and publish externally.
+    beforeDelivery?.(context);
     for (const listener of this.#listeners) listener(envelope, context);
     this.#reconcile(accountId);
     return { control: ack(envelope), context };

@@ -148,7 +148,7 @@ describe("refreshCatalogSources", () => {
 
   it("does not report success until every source is owned by a replacement tab", async () => {
     const oldSources = ["CMD", "IM", "SABA", "KSPORT", "TSPORT", "BTI"].map((lobby, index) => ({
-      lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99
+      lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99, authorityDisposition: "ACTIVE" as const
     }));
     const bridgeSources = vi.fn()
       .mockReturnValueOnce(oldSources)
@@ -168,10 +168,10 @@ describe("refreshCatalogSources", () => {
     const lobbies = ["CMD", "IM", "SABA", "KSPORT", "TSPORT", "BTI"];
     const bridgeSources = vi.fn()
       .mockReturnValueOnce(lobbies.map((lobby, index) => ({
-        lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99
+        lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99, authorityDisposition: "ACTIVE" as const
       })))
       .mockReturnValue(lobbies.map((lobby, index) => ({
-        lobby, tabId: index + 101, state: "LIVE", lastAcceptedAtMs: 101
+        lobby, tabId: index + 101, state: "LIVE", lastAcceptedAtMs: 101, authorityDisposition: "ACTIVE" as const
       })));
 
     await expect(refreshCatalogSources({
@@ -192,10 +192,11 @@ describe("refreshCatalogSources", () => {
     const bridgeSources = vi.fn(() => {
       bridgeRead += 1;
       if (bridgeRead === 1) return lobbies.map((lobby, index) => ({
-        lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99
+        lobby, tabId: index + 1, state: "LIVE", lastAcceptedAtMs: 99, authorityDisposition: "ACTIVE" as const
       }));
       return lobbies.map((lobby, index) => ({
         lobby, tabId: index + 101, state: "LIVE",
+        authorityDisposition: "ACTIVE" as const,
         lastAcceptedAtMs: lobby === "KSPORT" ? 101 : Math.max(101, nowMs)
       }));
     });
@@ -211,5 +212,24 @@ describe("refreshCatalogSources", () => {
       stabilityMs: 2,
       sleep: async (delayMs) => { nowMs += delayMs; }
     })).rejects.toThrow("CHROME_BRIDGE_STABILITY_INCOMPLETE:KSPORT");
+  });
+
+  it("does not count six fresh candidate tabs as active replacements", async () => {
+    const lobbies = ["CMD", "IM", "SABA", "KSPORT", "TSPORT", "BTI"];
+    const oldActive = lobbies.map((lobby, index) => ({ lobby, tabId: index + 1, state: "LIVE",
+      lastAcceptedAtMs: 99, authorityDisposition: "ACTIVE" as const }));
+    const candidates = lobbies.map((lobby, index) => ({ lobby, tabId: index + 101, state: "LIVE",
+      lastAcceptedAtMs: 101, authorityDisposition: "CANDIDATE" as const }));
+    const bridgeSources = vi.fn().mockReturnValueOnce(oldActive).mockReturnValue([...oldActive, ...candidates]);
+
+    await expect(refreshCatalogSources({
+      legacyRefresh: async () => undefined,
+      requestBridgeSnapshots: () => 6,
+      statuses: async () => activeBridgeStatuses(),
+      bridgeSources,
+      now: () => 100,
+      timeoutMs: 0,
+      stabilityMs: 0
+    })).rejects.toThrow("CHROME_BRIDGE_TAB_REPLACEMENT_INCOMPLETE");
   });
 });

@@ -50,6 +50,40 @@ class SynchronouslyDeliveringRegistry extends TrackingRegistry {
 afterEach(() => vi.useRealTimers());
 
 describe("ProviderFeedRegistry", () => {
+  it("flushes one final subscriber snapshot after a successful account transaction", () => {
+    const registry = new ProviderFeedRegistry({ now: () => 1_001 });
+    const listener = vi.fn();
+    registry.subscribe(listener);
+
+    registry.transaction(SABA, () => {
+      expect(registry.accept(wsBaseline(SABA, 1_001, "reset-transaction"))).toMatchObject({ accepted: true });
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({
+      accountId: SABA, state: "LIVE", sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0"
+    }));
+  });
+
+  it("restores readable controller state and stays silent when a transaction fails", () => {
+    const registry = new ProviderFeedRegistry({ now: () => 1_001 });
+    registry.accept(wsBaseline(SABA, 1_000, "reset-a"));
+    const before = registry.snapshot(SABA);
+    const listener = vi.fn();
+    registry.subscribe(listener);
+
+    expect(() => registry.transaction(SABA, () => {
+      registry.accept({ kind: "INVALIDATE", accountId: SABA, sourceId: "chrome:SABA:7",
+        sourceEpoch: "worker-a:0", atMs: 1_001, reason: "SOURCE_REPLACED" });
+      throw new Error("fault-injected");
+    })).toThrow("fault-injected");
+
+    expect(registry.snapshot(SABA)).toEqual(before);
+    expect(registry.read(SABA)).toEqual(catalogFor(SABA, 1_000));
+    expect(listener).not.toHaveBeenCalled();
+  });
+
   it("creates all six controllers and keeps restored data stale", () => {
     const registry = new ProviderFeedRegistry({ now: () => 1_000 });
 

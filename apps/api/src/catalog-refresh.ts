@@ -9,6 +9,7 @@ interface BridgeSourceStatus {
   readonly tabId: number;
   readonly state: string;
   readonly lastAcceptedAtMs: number;
+  readonly authorityDisposition?: "ACTIVE" | "CANDIDATE";
 }
 
 const BRIDGE_SOURCE = /^catalog-source:(CMD|IM|SABA|SBOBET|APSPORT|BTI):FOOTBALL$/u;
@@ -35,7 +36,8 @@ export async function refreshCatalogSources(options: {
   const freshAfterMs = now();
   const previousTabIds = new Map<string, Set<number>>();
   if (options.bridgeSources !== undefined) {
-    for (const source of await options.bridgeSources()) {
+    for (const source of (await options.bridgeSources())
+      .filter((candidate) => candidate.authorityDisposition === "ACTIVE")) {
       const ids = previousTabIds.get(source.lobby) ?? new Set<number>();
       ids.add(source.tabId);
       previousTabIds.set(source.lobby, ids);
@@ -90,7 +92,8 @@ export async function refreshCatalogSources(options: {
     });
     let replacements = new Map<string, BridgeSourceStatus>();
     if (options.bridgeSources !== undefined) {
-      const bridgeSources = await options.bridgeSources();
+      const bridgeSources = (await options.bridgeSources())
+        .filter((source) => source.authorityDisposition === "ACTIVE");
       for (const lobby of REQUIRED_BRIDGE_LOBBIES) {
         const replacement = bridgeSources.filter((source) => source.lobby === lobby && source.state === "LIVE" &&
           source.lastAcceptedAtMs >= freshAfterMs && !previousTabIds.get(lobby)?.has(source.tabId))

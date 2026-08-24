@@ -1,6 +1,6 @@
 import { CatalogSourceStatusSchema, type CatalogSourceStatus, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
-import { CatalogCoverageGuard } from "../catalog/catalog-coverage-guard.js";
+import { CatalogCoverageGuard, type CatalogCoverageCandidate } from "../catalog/catalog-coverage-guard.js";
 import { AdapterRouter } from "./adapter-router.js";
 import { CmdDomCatalogAdapter } from "./cmd-dom-adapter.js";
 import { CmdHttpCatalogAdapter } from "./cmd-http-adapter.js";
@@ -11,7 +11,7 @@ import { BtiHttpCatalogAdapter } from "./bti-http-adapter.js";
 import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
 import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
-import type { FeedDecision, FeedProvenance } from "./provider-feed-types.js";
+import type { FeedDecision, FeedProvenance, ProviderFeedEvidence } from "./provider-feed-types.js";
 import { chromeBridgeProviderAccountIdForLobby,
   type ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
 import { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
@@ -177,6 +177,7 @@ export class ChromeCatalogDataPlane {
     if (pipeline === null) return false;
     const assembled = pipeline.networkBodies.ingest(envelope);
     if (assembled === null) return false;
+    if (assembled.transport === "HTTP_RESPONSE" && !hasBoundHttpDocument(assembled)) return false;
     const route = pipeline.router.route(assembled);
     if (route.status !== "TRUSTED" || route.adapter === null) return false;
     const update = route.adapter.decode(assembled).at(-1);
@@ -199,6 +200,7 @@ export class ChromeCatalogDataPlane {
     if (!isObservedCatalog(update.value)) return false;
     let nextCatalog = update.value;
     const provenance = update.provenance ?? catalogProvenance(envelope.transport);
+    if (admission.disposition === "CANDIDATE" && provenance === "DOM_FALLBACK") return false;
     let catalogBasis = provenance;
     if (envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT") {
       const retained = this.#catalogs.get(nextCatalog.accountId);
@@ -226,32 +228,24 @@ export class ChromeCatalogDataPlane {
     const generation = update.generation ?? (mode === "BASELINE" && update.authoritativeBaseline === true
       ? `${sourceEpoch}:${update.sequence}` : null);
     if (generation === null) return false;
-    const diagnosticOnlyDomCandidate = admission.disposition === "CANDIDATE" &&
-      provenance === "DOM_FALLBACK" && this.#authorityCoordinator.snapshot(transportAccountId).active === null;
-    if (admission.disposition === "CANDIDATE" && !diagnosticOnlyDomCandidate &&
+    if (admission.disposition === "CANDIDATE" &&
       (mode !== "BASELINE" || update.authoritativeBaseline !== true || provenance === "DOM_FALLBACK")) return false;
     const coverage = { generation, authoritativeBaseline: mode === "BASELINE",
       providerEventIds: nextCatalog.events.map((event) => event.providerEventId) };
     const explicitDomSweep = envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
       update.completeSweepEvidence === true;
     if (!explicitDomSweep && !pipeline.coverage.allows(nextCatalog.accountId, coverage)) return false;
-    if (admission.disposition === "CANDIDATE" && !diagnosticOnlyDomCandidate) {
+    if (admission.disposition === "CANDIDATE") {
       const proof = compatibilityCatalogProof(nextCatalog, provenance, update.sequence, generation);
       if (proof === null) return false;
-      let stagedDecision: FeedDecision = { accepted: false, publish: null, stateChanged: false };
-      const promoted = this.#promoteCandidate(identity, admission.token, pipeline, proof,
-        envelope.observedAtMs, () => {
-          stagedDecision = this.#feeds.accept({ kind: "CATALOG", accountId: nextCatalog.accountId,
-            sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, generation, mode, provenance,
-            providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog });
-          if (stagedDecision.accepted) pipeline.coverage.commit(nextCatalog.accountId, coverage);
-          if (stagedDecision.accepted) this.#catalogBases.set(nextCatalog.accountId, catalogBasis);
-          if (stagedDecision.publish !== null) {
-            this.#catalogs.set(stagedDecision.publish.catalog.accountId, stagedDecision.publish.catalog);
-          }
-          return stagedDecision.accepted;
-        });
-      if (!promoted || stagedDecision.publish === null) return false;
+      const catalogEvidence: Extract<ProviderFeedEvidence, { readonly kind: "CATALOG" }> = {
+        kind: "CATALOG", accountId: nextCatalog.accountId, sourceId: update.sourceId, sourceEpoch,
+        atMs: update.observedAtMs, generation, mode, provenance,
+        providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog
+      };
+      const stagedDecision = this.#promoteCandidate(identity, admission.token, pipeline, proof,
+        envelope.observedAtMs, catalogEvidence, coverage, catalogBasis);
+      if (stagedDecision === null || stagedDecision.publish === null) return false;
       this.#publish?.(stagedDecision.publish.catalog, stagedDecision.publish.snapshotState);
       return true;
     }
@@ -346,47 +340,103 @@ export class ChromeCatalogDataPlane {
   }
 
   #promoteCandidate(identity: AuthorityIdentity, token: AuthorityCandidateToken,
-    pipeline: DecodePipeline, proof: CatalogCommitProof, atMs: number, commit: () => boolean): boolean {
+    pipeline: DecodePipeline, proof: CatalogCommitProof, atMs: number,
+    catalogEvidence: Extract<ProviderFeedEvidence, { readonly kind: "CATALOG" }>,
+    coverage: CatalogCoverageCandidate, catalogBasis: FeedProvenance): FeedDecision | null {
     const candidate = this.#candidatePipelines.get(identity.accountId);
     if (candidate === undefined || candidate.token !== token || candidate.pipeline !== pipeline ||
-      !sameAuthorityIdentity(candidate.identity, identity)) return false;
-    let committed = false;
-    const promotion = this.#authorityCoordinator.promote(token, proof, (transaction) => {
-      if (transaction.previousActive !== null &&
-        (transaction.previousActive.sourceId !== identity.sourceId ||
-          transaction.previousActive.sourceEpoch !== identity.sourceEpoch)) {
-        this.#lastEnvelopeAtMsBySource.delete(transaction.previousActive.sourceId);
-        this.#feeds.accept({
+      !sameAuthorityIdentity(candidate.identity, identity)) return null;
+    const authorityBefore = this.#authorityCoordinator.snapshot(identity.accountId);
+    if (authorityBefore.candidateToken !== token || authorityBefore.candidate === null ||
+      !sameAuthorityIdentity(authorityBefore.candidate, identity)) return null;
+    const previousActive = authorityBefore.active;
+    const invalidation: Extract<ProviderFeedEvidence, { readonly kind: "INVALIDATE" }> | null =
+      previousActive !== null && (previousActive.sourceId !== identity.sourceId ||
+        previousActive.sourceEpoch !== identity.sourceEpoch) ? {
           kind: "INVALIDATE",
           accountId: identity.accountId,
-          sourceId: transaction.previousActive.sourceId,
-          sourceEpoch: transaction.previousActive.sourceEpoch,
+          sourceId: previousActive.sourceId,
+          sourceEpoch: previousActive.sourceEpoch,
           atMs,
           reason: "SOURCE_REPLACED"
+        } : null;
+    const prepared = invalidation === null ? [catalogEvidence] : [invalidation, catalogEvidence];
+    let promotedAtMs: number;
+    try {
+      const decisions = this.#feeds.preflight(prepared);
+      if (decisions.some((decision) => !decision.accepted) || decisions.at(-1)?.publish === null) return null;
+      promotedAtMs = this.#now();
+    } catch {
+      return null;
+    }
+
+    const coverageCheckpoint = pipeline.coverage.checkpoint();
+    const catalogCheckpoint = checkpointMapEntry(this.#catalogs, identity.accountId);
+    const basisCheckpoint = checkpointMapEntry(this.#catalogBases, identity.accountId);
+    const activePipelineCheckpoint = checkpointMapEntry(this.#activePipelines, identity.accountId);
+    const candidatePipelineCheckpoint = checkpointMapEntry(this.#candidatePipelines, identity.accountId);
+    const lastEnvelopeCheckpoints = new Map<string, MapEntryCheckpoint<number>>();
+    for (const sourceId of new Set([identity.sourceId, previousActive?.sourceId].filter(isString))) {
+      lastEnvelopeCheckpoints.set(sourceId, checkpointMapEntry(this.#lastEnvelopeAtMsBySource, sourceId));
+    }
+    let stagedDecision: FeedDecision | null = null;
+    let committed = false;
+    try {
+      this.#feeds.transaction(identity.accountId, () => {
+        const promotion = this.#authorityCoordinator.promote(token, proof, (transaction) => {
+          // Construct all potentially fallible state before changing any visible
+          // catalog, pipeline, coverage, or ownership pointer.
+          const activePipeline: DecodePipeline = {
+            router: pipeline.router,
+            coverage: pipeline.coverage,
+            laneToken: transaction.activeLaneToken,
+            networkBodies: new NetworkBodyAssembler({
+              budget: this.#networkBodyBudget,
+              laneToken: transaction.activeLaneToken
+            })
+          };
+          if (invalidation !== null) {
+            const invalidated = this.#feeds.accept(invalidation);
+            if (!invalidated.accepted) throw new Error("AUTHORITY_FEED_INVALIDATION_REJECTED");
+          }
+          stagedDecision = this.#feeds.accept(catalogEvidence);
+          if (!stagedDecision.accepted || stagedDecision.publish === null) {
+            throw new Error("AUTHORITY_FEED_COMMIT_REJECTED");
+          }
+
+          // No fallible work follows this point. The coordinator remains inside
+          // its CAS callback until every data-plane pointer agrees on B.
+          pipeline.coverage.commit(identity.accountId, coverage);
+          this.#catalogBases.set(identity.accountId, catalogBasis);
+          this.#catalogs.set(stagedDecision.publish.catalog.accountId, stagedDecision.publish.catalog);
+          const oldActive = this.#activePipelines.get(identity.accountId);
+          this.#activePipelines.set(identity.accountId, { identity: transaction.active, pipeline: activePipeline });
+          this.#candidatePipelines.delete(identity.accountId);
+          if (transaction.previousActive !== null) {
+            this.#lastEnvelopeAtMsBySource.delete(transaction.previousActive.sourceId);
+          }
+          this.#lastEnvelopeAtMsBySource.set(identity.sourceId, promotedAtMs);
+
+          // The proof-triggering candidate body has completed. Disposing both
+          // retired lanes removes every other pending multipart reservation.
+          pipeline.networkBodies.dispose();
+          oldActive?.pipeline.networkBodies.dispose();
+          committed = true;
         });
+        if (!promotion.promoted || !committed) throw new Error("AUTHORITY_PROMOTION_REJECTED");
+      });
+    } catch {
+      pipeline.coverage.restoreCheckpoint(coverageCheckpoint);
+      restoreMapEntry(this.#catalogs, identity.accountId, catalogCheckpoint);
+      restoreMapEntry(this.#catalogBases, identity.accountId, basisCheckpoint);
+      restoreMapEntry(this.#activePipelines, identity.accountId, activePipelineCheckpoint);
+      restoreMapEntry(this.#candidatePipelines, identity.accountId, candidatePipelineCheckpoint);
+      for (const [sourceId, checkpoint] of lastEnvelopeCheckpoints) {
+        restoreMapEntry(this.#lastEnvelopeAtMsBySource, sourceId, checkpoint);
       }
-      if (!commit()) throw new Error("AUTHORITY_FEED_COMMIT_REJECTED");
-      // The proof-triggering body has already completed. Rotate the assembler
-      // inside the coordinator transaction so no observer can see an ACTIVE
-      // token paired with candidate-phase multipart state.
-      pipeline.networkBodies.dispose();
-      const activePipeline: DecodePipeline = {
-        router: pipeline.router,
-        coverage: pipeline.coverage,
-        laneToken: transaction.activeLaneToken,
-        networkBodies: new NetworkBodyAssembler({
-          budget: this.#networkBodyBudget,
-          laneToken: transaction.activeLaneToken
-        })
-      };
-      const previous = this.#activePipelines.get(identity.accountId);
-      previous?.pipeline.networkBodies.dispose();
-      this.#activePipelines.set(identity.accountId, { identity: transaction.active, pipeline: activePipeline });
-      this.#candidatePipelines.delete(identity.accountId);
-      this.#lastEnvelopeAtMsBySource.set(identity.sourceId, this.#now());
-      committed = true;
-    });
-    return promotion.promoted && committed;
+      return null;
+    }
+    return committed ? stagedDecision : null;
   }
 
   #applyDecision(decision: FeedDecision): boolean {
@@ -399,6 +449,28 @@ export class ChromeCatalogDataPlane {
 
 function accountIdForLobby(lobby: ChromeBridgeEnvelope["lobby"]): ChromeBridgeProviderAccountId {
   return chromeBridgeProviderAccountIdForLobby(lobby);
+}
+
+interface MapEntryCheckpoint<T> {
+  readonly present: boolean;
+  readonly value: T | undefined;
+}
+
+function checkpointMapEntry<K, V>(map: ReadonlyMap<K, V>, key: K): MapEntryCheckpoint<V> {
+  return { present: map.has(key), value: map.get(key) };
+}
+
+function restoreMapEntry<K, V>(map: Map<K, V>, key: K, checkpoint: MapEntryCheckpoint<V>): void {
+  if (checkpoint.present) map.set(key, checkpoint.value as V);
+  else map.delete(key);
+}
+
+function isString(value: string | undefined): value is string {
+  return typeof value === "string";
+}
+
+function hasBoundHttpDocument(envelope: ChromeBridgeEnvelope): boolean {
+  return envelope.request.requestFrameKey !== undefined && envelope.request.requestDocumentKey !== undefined;
 }
 
 function legacySourceEpoch(sourceId: string): string {

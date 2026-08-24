@@ -419,7 +419,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
           });
         } }),
       statuses: () => catalogAccess.sources.listStatuses(),
-      ...(chromeBridgeRegistry === null ? {} : { bridgeSources: () => chromeBridgeRegistry.listSources() })
+      ...(chromeBridgeRegistry === null ? {} : { bridgeSources: () => chromeBridgeRegistry.listActiveSources() })
     });
   },
     journal: new MaintenanceJournal({ nowMs: Date.now },

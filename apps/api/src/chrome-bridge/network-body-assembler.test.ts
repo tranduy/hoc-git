@@ -9,7 +9,9 @@ function envelope(index: number, count = 2, fragment = index === 0 ? "{\"StatusC
   return {
     version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8, sequence: index,
     observedAtMs: 1_000, receivedMonotonicMs: 50, transport: "HTTP_RESPONSE",
-    request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR" },
+    request: { hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "XHR",
+      method: "POST", observerRequestId: "observer-a:request:1",
+      requestFrameKey: "http-frame:frame-a", requestDocumentKey: "http-document:document-a" },
     payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1,
       snapshotId, chunkIndex: index, chunkCount: count,
       bodyEncoding: "UTF8", bodyFragment: fragment }) }
@@ -190,6 +192,23 @@ describe("NetworkBodyAssembler", () => {
     expect(assembler.ingest(chunk("observer-a:request:2", "POST", 1, "body")))
       .toMatchObject({ request: { observerRequestId: "observer-a:request:2", method: "POST" },
         payload: { body: "B-body" } });
+  });
+
+  it("assembles the same request and snapshot independently across verified documents", () => {
+    const assembler = new NetworkBodyAssembler();
+    const chunk = (document: "a" | "b", index: number, fragment: string): ChromeBridgeEnvelope => ({
+      ...envelope(index, 2, fragment, "network-same-request-and-snapshot"),
+      request: {
+        ...envelope(index).request,
+        requestFrameKey: `http-frame:${document}`,
+        requestDocumentKey: `http-document:${document}`
+      }
+    });
+
+    expect(assembler.ingest(chunk("a", 0, "A-"))).toBeNull();
+    expect(assembler.ingest(chunk("b", 0, "B-"))).toBeNull();
+    expect(assembler.ingest(chunk("a", 1, "body"))).toMatchObject({ payload: { body: "A-body" } });
+    expect(assembler.ingest(chunk("b", 1, "body"))).toMatchObject({ payload: { body: "B-body" } });
   });
 
   it("faults declared malformed wrappers instead of forwarding them as provider JSON", () => {

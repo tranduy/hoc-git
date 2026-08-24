@@ -3,7 +3,7 @@ import type { CatalogSourceStatus, ChromeBridgeEnvelope } from "@tool-chenh/cont
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { ChromeCatalogDataPlane } from "./chrome-catalog-data-plane.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
-import { NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
+import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
 import { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
 import { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
@@ -11,6 +11,7 @@ import { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
 
 const SBOBET = "catalog-source:SBOBET:FOOTBALL";
 const SABA = "catalog-source:SABA:FOOTBALL";
+const CMD = "catalog-source:CMD:FOOTBALL";
 
 const record = { sportId: "1", leagueId: "league-1", leagueName: "League", matchId: "event-1",
   timeText: "08/17 02:30AM", teamNames: ["Alpha", "Beta"], groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
@@ -49,6 +50,8 @@ function cmdHttpEnvelope(sequence = 1, options: { readonly t?: number; readonly 
     sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
     transport: "HTTP_RESPONSE", request: { hostname: "cgnew.fts368.com",
       pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx", resourceType: "XHR",
+      method: "GET", observerRequestId: `observer-a:request:${sequence}`,
+      requestFrameKey: "http-frame:cmd-main", requestDocumentKey: "http-document:cmd-document",
       providerFunctionCode: options.providerFunctionCode ?? 1 },
     payload: { encoding: "UTF8", body: JSON.stringify(body) } } as ChromeBridgeEnvelope;
 }
@@ -59,6 +62,8 @@ function imEnvelope(sequence: number, partition: "IM_MARKET_1" | "IM_MARKET_2",
     sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
     transport: "HTTP_RESPONSE", request: { hostname: "imsports.directsb.net",
       pathnameClass: "/api/EventV6/GetSE", resourceType: "Fetch", providerPartition: partition,
+      method: "POST", observerRequestId: `observer-a:request:${sequence}`,
+      requestFrameKey: "http-frame:im-main", requestDocumentKey: "http-document:im-document",
       streamId: "im:8:1", reconcileCutoffSequence: 0 },
     payload: { encoding: "UTF8", body: JSON.stringify(body) } } as ChromeBridgeEnvelope;
 }
@@ -119,7 +124,9 @@ function ksportHttpEnvelope(sequence: number, partition: "live" | "today", gener
   return { version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId, tabId, sourceEpoch,
     sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
     transport: "HTTP_RESPONSE", request: { hostname: "zenandfe.com", pathnameClass: "/api/v2/getEvent",
-      resourceType: "Fetch", streamId: `ksport-http:${tabId}:${generation}:${partition}` },
+      resourceType: "Fetch", method: "GET", observerRequestId: `observer-a:request:${sequence}`,
+      requestFrameKey: `http-frame:ksport-${tabId}`, requestDocumentKey: `http-document:ksport-${tabId}`,
+      streamId: `ksport-http:${tabId}:${generation}:${partition}` },
     payload: { encoding: "UTF8", body: JSON.stringify(partition === "live"
       ? [{ "1": "League", "2": events }] : []) } };
 }
@@ -176,9 +183,69 @@ function decodedBaseline(sourceId: string, catalog: ObservedProviderCatalog, seq
     providerTimestampMs: null }];
 }
 
+class RejectingPromotionFeedRegistry extends ProviderFeedRegistry {
+  rejectSourceId: string | null = null;
+
+  override accept(evidence: Parameters<ProviderFeedRegistry["accept"]>[0]) {
+    if (evidence.kind === "CATALOG" && evidence.sourceId === this.rejectSourceId) {
+      return { accepted: false, publish: null, stateChanged: false } as const;
+    }
+    return super.accept(evidence);
+  }
+}
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("ChromeCatalogDataPlane", () => {
+  it("keeps unbound HTTP candidate evidence out of authority and decoder state", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const feeds = new ProviderFeedRegistry({ now: () => 1_500 });
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
+      feedRegistry: feeds, publish });
+    const http = cmdHttpEnvelope(1);
+    const { requestFrameKey: _frame, requestDocumentKey: _document, ...unboundRequest } = http.request;
+
+    expect(plane.ingest({ ...http, request: unboundRequest } as ChromeBridgeEnvelope,
+      { connectionGeneration: 1 })).toBe(false);
+    expect(feeds.snapshot(CMD)).toMatchObject({ state: "STARTING", sourceId: null, sourceEpoch: null });
+    expect(coordinator.snapshot(CMD)).toMatchObject({ active: null,
+      candidate: expect.objectContaining({ sourceId: "chrome:CMD:9" }) });
+    expect(publish).not.toHaveBeenCalled();
+
+    expect(plane.ingest(cmdHttpEnvelope(2), { connectionGeneration: 1 })).toBe(true);
+    await expect(plane.read(CMD)).resolves.toMatchObject({ provider: "CMD" });
+  });
+
+  it("keeps a DOM-only CMD candidate lane-local until a newer HTTP candidate proves authority", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const feeds = new ProviderFeedRegistry({ now: () => 1_500 });
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
+      feedRegistry: feeds, publish });
+
+    expect(plane.ingest(cmdEnvelope(1), { connectionGeneration: 1 })).toBe(false);
+    expect(coordinator.snapshot(CMD)).toMatchObject({
+      active: null,
+      candidate: expect.objectContaining({ sourceId: "chrome:CMD:9" })
+    });
+    expect(feeds.snapshot(CMD)).toMatchObject({ state: "STARTING", sourceId: null, sourceEpoch: null });
+    expect(() => feeds.read(CMD)).toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(publish).not.toHaveBeenCalled();
+
+    const network = { ...cmdHttpEnvelope(10), sourceId: "chrome:CMD:10", tabId: 10,
+      sourceEpoch: "worker-b:0", request: { ...cmdHttpEnvelope(10).request,
+        observerRequestId: "observer-a:request:10", requestFrameKey: "http-frame:cmd-replacement",
+        requestDocumentKey: "http-document:cmd-replacement" } };
+    expect(plane.ingest(network, { connectionGeneration: 2 })).toBe(true);
+    expect(coordinator.snapshot(CMD)).toMatchObject({
+      active: expect.objectContaining({ sourceId: "chrome:CMD:10", connectionGeneration: 2 }),
+      candidate: null
+    });
+    await expect(plane.read(CMD)).resolves.toMatchObject({ provider: "CMD" });
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+
   it("atomically aligns registry, data, feed, and control ownership before active routing", async () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const budget = new NetworkBodyAssemblyBudget();
@@ -224,6 +291,32 @@ describe("ChromeCatalogDataPlane", () => {
     expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
   });
 
+  it("attaches a one-envelope HTTP candidate control target before publishing its promotion", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const feeds = new ProviderFeedRegistry({ now: () => 1_500 });
+    const registry = new ChromeBridgeRegistry({ now: () => 1_500, authorityCoordinator: coordinator });
+    const control = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const socket = { send: vi.fn(), readyState: 1 };
+    const observations: Array<{ readonly activeSourceId: string | null; readonly controlRequests: number;
+      readonly controlTarget: string | null }> = [];
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
+      feedRegistry: feeds, publish: () => {
+        const controlRequests = control.requestAllSnapshots();
+        const sent = socket.send.mock.calls.at(-1)?.[0];
+        observations.push({ activeSourceId: coordinator.snapshot(CMD).active?.sourceId ?? null,
+          controlRequests, controlTarget: typeof sent === "string" ? JSON.parse(sent).sourceId as string : null });
+      } });
+    registry.subscribe((envelope, context) => { plane.ingest(envelope, context); });
+    const connection = {};
+
+    expect(registry.ingestDetailed(cmdHttpEnvelope(1), connection, (context) => {
+      control.attachAuthority(context.authorityIdentity, context.authorityObservation, "CMD", socket);
+    }).control).toMatchObject({ kind: "ACK" });
+
+    expect(observations).toEqual([{ activeSourceId: "chrome:CMD:9", controlRequests: 1,
+      controlTarget: "chrome:CMD:9" }]);
+  });
+
   it("keeps bootstrap evidence candidate-only and promotes only its complete catalog proof", async () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator });
@@ -245,6 +338,134 @@ describe("ChromeCatalogDataPlane", () => {
       activeLaneToken: expect.objectContaining({ phase: "ACTIVE" })
     });
     await expect(plane.read(SBOBET)).resolves.toMatchObject({ accountId: SBOBET });
+  });
+
+  it("flushes replacement promotion only after coordinator and LIVE feed both point at the winner", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const feeds = new ProviderFeedRegistry({ now: () => 1_500 });
+    const published: Array<{ readonly sourceId: string | null; readonly activeSourceId: string | null }> = [];
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
+      feedRegistry: feeds, publish: () => published.push({ sourceId: feeds.snapshot(SBOBET).sourceId,
+        activeSourceId: coordinator.snapshot(SBOBET).active?.sourceId ?? null }) });
+    plane.ingest(ksportEnvelope(1, "live", [101]), { connectionGeneration: 1 });
+    expect(plane.ingest(ksportEnvelope(2, "today", []), { connectionGeneration: 1 })).toBe(true);
+    published.length = 0;
+    const observed: Array<{ readonly state: string; readonly sourceId: string | null;
+      readonly activeSourceId: string | null; readonly readableEventId: string | null }> = [];
+    feeds.subscribe((snapshot) => {
+      let readableEventId: string | null = null;
+      try { readableEventId = feeds.read(SBOBET).events[0]?.providerEventId ?? null; } catch { /* fail closed */ }
+      observed.push({ state: snapshot.state, sourceId: snapshot.sourceId,
+        activeSourceId: coordinator.snapshot(SBOBET).active?.sourceId ?? null, readableEventId });
+    });
+
+    const replacement = (envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope => ({ ...envelope,
+      sourceId: "chrome:KSPORT:9", tabId: 9, sourceEpoch: "worker-b:0" });
+    expect(plane.ingest(replacement(ksportEnvelope(3, "live", [202], "worker-b:0", 2)),
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(replacement(ksportEnvelope(4, "today", [], "worker-b:0", 2)),
+      { connectionGeneration: 2 })).toBe(true);
+
+    expect(observed).toEqual([{ state: "LIVE", sourceId: "chrome:KSPORT:9",
+      activeSourceId: "chrome:KSPORT:9", readableEventId: "202" }]);
+    expect(published).toEqual([{ sourceId: "chrome:KSPORT:9", activeSourceId: "chrome:KSPORT:9" }]);
+  });
+
+  it("rolls back feed and authority state when the prepared candidate baseline cannot commit", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const feeds = new RejectingPromotionFeedRegistry({ now: () => 1_500 });
+    const registry = new ChromeBridgeRegistry({ now: () => 1_500, authorityCoordinator: coordinator });
+    const control = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const activeSocket = { send: vi.fn(), readyState: 1 };
+    const candidateSocket = { send: vi.fn(), readyState: 1 };
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
+      feedRegistry: feeds, publish });
+    registry.subscribe((envelope, context) => { plane.ingest(envelope, context); });
+    const activeConnection = {};
+    const candidateConnection = {};
+    const ingest = (envelope: ChromeBridgeEnvelope, connection: object,
+      socket: typeof activeSocket) => registry.ingestDetailed(envelope, connection, (context) => {
+        control.attachAuthority(context.authorityIdentity, context.authorityObservation, envelope.lobby, socket);
+      });
+    ingest(ksportEnvelope(1, "live", [101]), activeConnection, activeSocket);
+    expect(ingest(ksportEnvelope(2, "today", []), activeConnection, activeSocket).control)
+      .toMatchObject({ kind: "ACK" });
+    publish.mockClear();
+    feeds.rejectSourceId = "chrome:KSPORT:9";
+
+    const replacement = (envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope => ({ ...envelope,
+      sourceId: "chrome:KSPORT:9", tabId: 9, sourceEpoch: "worker-b:0" });
+    ingest(replacement(ksportEnvelope(3, "live", [202], "worker-b:0", 2)),
+      candidateConnection, candidateSocket);
+    expect(ingest(replacement(ksportEnvelope(4, "today", [], "worker-b:0", 2)),
+      candidateConnection, candidateSocket).control).toMatchObject({ kind: "ACK" });
+
+    expect(coordinator.snapshot(SBOBET)).toMatchObject({
+      active: expect.objectContaining({ sourceId: "chrome:KSPORT:8" }),
+      candidate: expect.objectContaining({ sourceId: "chrome:KSPORT:9" })
+    });
+    expect(registry.listActiveSources()).toEqual([expect.objectContaining({ sourceId: "chrome:KSPORT:8" })]);
+    expect(registry.listSources()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: "chrome:KSPORT:8", authorityDisposition: "ACTIVE" }),
+      expect.objectContaining({ sourceId: "chrome:KSPORT:9", authorityDisposition: "CANDIDATE" })
+    ]));
+    activeSocket.send.mockClear();
+    candidateSocket.send.mockClear();
+    expect(control.requestAllSnapshots()).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledWith(JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:KSPORT:8" }));
+    expect(candidateSocket.send).not.toHaveBeenCalled();
+    expect(feeds.snapshot(SBOBET)).toMatchObject({ state: "LIVE", sourceId: "chrome:KSPORT:8" });
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" })]
+    });
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("restores catalog, coverage, and pipeline pointers after a defensive post-swap rollback", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const feeds = new ProviderFeedRegistry({ now: () => 1_500 });
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
+      feedRegistry: feeds, publish });
+    plane.ingest(ksportEnvelope(1, "live", [101]), { connectionGeneration: 1 });
+    expect(plane.ingest(ksportEnvelope(2, "today", []), { connectionGeneration: 1 })).toBe(true);
+    publish.mockClear();
+
+    const originalDispose = NetworkBodyAssembler.prototype.dispose;
+    let injectFailure = true;
+    vi.spyOn(NetworkBodyAssembler.prototype, "dispose").mockImplementation(function (this: NetworkBodyAssembler) {
+      if (injectFailure && this.authorityLaneToken?.phase === "CANDIDATE") {
+        injectFailure = false;
+        throw new Error("post-swap-fault");
+      }
+      return originalDispose.call(this);
+    });
+    const replacement = (envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope => ({ ...envelope,
+      sourceId: "chrome:KSPORT:9", tabId: 9, sourceEpoch: "worker-b:0" });
+    plane.ingest(replacement(ksportEnvelope(3, "live", [202], "worker-b:0", 2)),
+      { connectionGeneration: 2 });
+    expect(plane.ingest(replacement(ksportEnvelope(4, "today", [], "worker-b:0", 2)),
+      { connectionGeneration: 2 })).toBe(false);
+
+    expect(coordinator.snapshot(SBOBET)).toMatchObject({
+      active: expect.objectContaining({ sourceId: "chrome:KSPORT:8" }),
+      candidate: expect.objectContaining({ sourceId: "chrome:KSPORT:9" })
+    });
+    expect(feeds.snapshot(SBOBET)).toMatchObject({ state: "LIVE", sourceId: "chrome:KSPORT:8" });
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" })]
+    });
+    expect(publish).not.toHaveBeenCalled();
+
+    expect(plane.ingest(replacement(ksportEnvelope(5, "live", [303], "worker-b:0", 3)),
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(replacement(ksportEnvelope(6, "today", [], "worker-b:0", 3)),
+      { connectionGeneration: 2 })).toBe(true);
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "303" })]
+    });
   });
 
   it("disposes every pending candidate body when the completed promotion body wins CAS", () => {
@@ -945,26 +1166,19 @@ describe("ChromeCatalogDataPlane", () => {
     });
   });
 
-  it("keeps CMD DOM-only additions and complete-sweep tombstones without becoming LIVE", async () => {
+  it("keeps CMD DOM-only additions and complete-sweep tombstones lane-local without publishing", async () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
     const second = { ...record, matchId: "event-2", teamNames: ["Gamma", "Delta"], groups: [{
       ...record.groups[0]!, odds: record.groups[0]!.odds.map((odd) => ({ ...odd, marketOddsId: "market-2" }))
     }] };
     expect(plane.ingest(cmdSweepEnvelope(1, [record], false, "cmd:9:dom-only-a-0001",
-      "cmd:9:dom-only-prior"))).toBe(true);
+      "cmd:9:dom-only-prior"))).toBe(false);
     expect(plane.ingest(cmdSweepEnvelope(2, [second], true, "cmd:9:dom-only-b-0002",
-      "cmd:9:dom-only-prior"))).toBe(true);
-    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({ events: expect.arrayContaining([
-      expect.objectContaining({ providerEventId: "event-1" }),
-      expect.objectContaining({ providerEventId: "event-2" })
-    ]) }), "STALE");
-
+      "cmd:9:dom-only-prior"))).toBe(false);
     expect(plane.ingest(cmdSweepEnvelope(3, [record], true, "cmd:9:dom-only-sweep-0003",
-      "cmd:9:dom-only-next"))).toBe(true);
-    expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({
-      events: [expect.objectContaining({ providerEventId: "event-1" })]
-    }), "STALE");
-    await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+      "cmd:9:dom-only-next"))).toBe(false);
+    expect(publish).not.toHaveBeenCalled();
+    await expect(plane.read(CMD)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
 });

@@ -41,6 +41,9 @@ export class ChromeBridgeControlPlane {
   constructor(options: ChromeBridgeControlPlaneOptions = {}) {
     this.#activeSourceIds = options.activeSourceIds ?? null;
     this.#authorityCoordinator = options.authorityCoordinator ?? null;
+    this.#authorityCoordinator?.subscribe((transition) => {
+      this.#reconcileAuthoritySlot(transition.accountId);
+    });
   }
 
   attachInstallation(socket: BridgeControlSocket): void {

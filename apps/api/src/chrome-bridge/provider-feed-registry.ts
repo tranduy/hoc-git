@@ -1,5 +1,5 @@
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
-import { ProviderFeedController } from "./provider-feed-controller.js";
+import { ProviderFeedController, type ProviderFeedControllerCheckpoint } from "./provider-feed-controller.js";
 import { providerFeedPolicies } from "./provider-feed-policies.js";
 import type { FeedDecision, ProviderFeedEvidence, ProviderFeedSnapshot,
   ProviderRecoveryRequest } from "./provider-feed-types.js";
@@ -13,6 +13,8 @@ export class ProviderFeedRegistry {
   readonly #listeners = new Set<(snapshot: ProviderFeedSnapshot) => void>();
   readonly #pendingWaitFinalizers = new Set<(error: Error) => void>();
   #disposed = false;
+  #transaction: { readonly accountId: string; readonly controller: ProviderFeedController;
+    readonly checkpoint: ProviderFeedControllerCheckpoint; changed: boolean } | null = null;
 
   constructor(options: ProviderFeedRegistryOptions = {}) {
     for (const [accountId, policy] of [...providerFeedPolicies].sort(([left], [right]) => left.localeCompare(right))) {
@@ -24,6 +26,47 @@ export class ProviderFeedRegistry {
   accept(evidence: ProviderFeedEvidence): FeedDecision {
     const controller = this.#controllers.get(evidence.accountId);
     if (controller === undefined) return rejected();
+    const decision = this.#acceptController(controller, evidence);
+    if (decision.accepted || decision.stateChanged) this.#queueNotification(controller.snapshot());
+    return decision;
+  }
+
+  preflight(evidence: readonly ProviderFeedEvidence[]): readonly FeedDecision[] {
+    if (this.#transaction !== null) throw new Error("PROVIDER_FEED_PREFLIGHT_DURING_TRANSACTION");
+    if (evidence.length === 0) return [];
+    const accountId = evidence[0]!.accountId;
+    if (evidence.some((item) => item.accountId !== accountId)) {
+      throw new Error("PROVIDER_FEED_PREFLIGHT_ACCOUNT_MISMATCH");
+    }
+    const controller = this.#controller(accountId);
+    const checkpoint = controller.checkpoint();
+    try {
+      return evidence.map((item) => this.#acceptController(controller, item));
+    } finally {
+      controller.restoreCheckpoint(checkpoint);
+    }
+  }
+
+  transaction<T>(accountId: string, operation: () => T): T {
+    if (this.#disposed) throw new Error("PROVIDER_FEED_REGISTRY_DISPOSED");
+    if (this.#transaction !== null) throw new Error("PROVIDER_FEED_TRANSACTION_NESTED");
+    const controller = this.#controller(accountId);
+    const transaction = { accountId, controller, checkpoint: controller.checkpoint(), changed: false };
+    this.#transaction = transaction;
+    try {
+      const result = operation();
+      if (isPromiseLike(result)) throw new Error("PROVIDER_FEED_TRANSACTION_ASYNC");
+      this.#transaction = null;
+      if (transaction.changed) this.#notify(controller.snapshot());
+      return result;
+    } catch (error) {
+      controller.restoreCheckpoint(transaction.checkpoint);
+      this.#transaction = null;
+      throw error;
+    }
+  }
+
+  #acceptController(controller: ProviderFeedController, evidence: ProviderFeedEvidence): FeedDecision {
     let decision = controller.accept(evidence);
     if (decision.publish?.snapshotState === "FRESH") {
       try { controller.read(); }
@@ -31,7 +74,6 @@ export class ProviderFeedRegistry {
         decision = { ...decision, publish: { ...decision.publish, snapshotState: "STALE" }, stateChanged: true };
       }
     }
-    if (decision.accepted || decision.stateChanged) this.#notify(controller.snapshot());
     return decision;
   }
 
@@ -39,7 +81,7 @@ export class ProviderFeedRegistry {
     const controller = this.#controllers.get(catalog.accountId);
     if (controller === undefined) return rejected();
     const decision = controller.restore(catalog);
-    if (decision.accepted || decision.stateChanged) this.#notify(controller.snapshot());
+    if (decision.accepted || decision.stateChanged) this.#queueNotification(controller.snapshot());
     return decision;
   }
 
@@ -50,7 +92,7 @@ export class ProviderFeedRegistry {
       return controller.read();
     } finally {
       const after = controller.snapshot();
-      if (before.state !== after.state || before.reason !== after.reason) this.#notify(after);
+      if (before.state !== after.state || before.reason !== after.reason) this.#queueNotification(after);
     }
   }
 
@@ -70,7 +112,9 @@ export class ProviderFeedRegistry {
       const request = controller.sweep();
       const after = controller.snapshot();
       if (request !== null) requests.push(request);
-      if (request !== null || before.state !== after.state || before.reason !== after.reason) this.#notify(after);
+      if (request !== null || before.state !== after.state || before.reason !== after.reason) {
+        this.#queueNotification(after);
+      }
     }
     return requests;
   }
@@ -164,6 +208,23 @@ export class ProviderFeedRegistry {
       try { listener(snapshot); } catch { /* feed observers must not interrupt ingestion */ }
     }
   }
+
+  #queueNotification(snapshot: ProviderFeedSnapshot): void {
+    if (this.#transaction === null) {
+      this.#notify(snapshot);
+      return;
+    }
+    if (snapshot.accountId !== this.#transaction.accountId ||
+      this.#transaction.controller !== this.#controllers.get(snapshot.accountId)) {
+      throw new Error("PROVIDER_FEED_TRANSACTION_SCOPE_VIOLATION");
+    }
+    this.#transaction.changed = true;
+  }
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === "object" && value !== null && "then" in value &&
+    typeof (value as { readonly then?: unknown }).then === "function";
 }
 
 function isFreshBaseline(snapshot: ProviderFeedSnapshot, afterMs: number): boolean {

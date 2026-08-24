@@ -96,12 +96,11 @@ export function registerChromeBridgeRoute(
         socket.send(JSON.stringify(reject("MALFORMED")));
         return;
       }
-      const result = registry.ingestDetailed(parsed.data, connection);
+      const result = registry.ingestDetailed(parsed.data, connection, (context) => {
+        options.controlPlane?.attachAuthority(context.authorityIdentity,
+          context.authorityObservation, parsed.data.lobby, writableSocket);
+      });
       const control = result.control;
-      if (control.kind === "ACK" && result.context !== null) {
-        options.controlPlane?.attachAuthority(result.context.authorityIdentity,
-          result.context.authorityObservation, parsed.data.lobby, writableSocket);
-      }
       socket.send(JSON.stringify(control), () => {
         if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") { socket.close(); return; }
         const observation = result.context?.authorityObservation;

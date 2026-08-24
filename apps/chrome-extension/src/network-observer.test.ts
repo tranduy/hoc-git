@@ -2072,6 +2072,47 @@ describe("NetworkObserver", () => {
     expect(forward).toHaveBeenCalledTimes(1);
   });
 
+  it("emits opaque bound frame and document provenance and rotates it with either CDP identity", async () => {
+    let currentFrame = { id: "raw-frame-secret-a", loaderId: "raw-loader-secret-a" };
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: currentFrame } };
+      if (method === "Network.getResponseBody") return { body: "{\"odds\":1.95}", base64Encoded: false };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, forward: async (envelope) => { forwarded.push(envelope); },
+      now: () => 1_000, monotonicNow: () => 50, observerSessionId: "observer-provenance" });
+
+    const capture = async (requestId: string): Promise<void> => {
+      await observer.handleEvent(source, "Network.requestWillBeSent", { requestId,
+        frameId: currentFrame.id, loaderId: currentFrame.loaderId,
+        request: { method: "GET", url: "https://sports.example/api/odds?token=secret" } });
+      await observer.handleEvent(source, "Network.responseReceived", { requestId, type: "XHR",
+        response: { url: "https://sports.example/api/odds?token=secret" } });
+      await observer.handleEvent(source, "Network.loadingFinished", { requestId });
+    };
+
+    await capture("document-a");
+    currentFrame = { id: "raw-frame-secret-a", loaderId: "raw-loader-secret-b" };
+    await capture("document-b");
+    currentFrame = { id: "raw-frame-secret-b", loaderId: "raw-loader-secret-c" };
+    await capture("frame-b");
+
+    const identities = forwarded.map((envelope) => ({
+      frame: (envelope.request as Record<string, unknown>).requestFrameKey,
+      document: (envelope.request as Record<string, unknown>).requestDocumentKey
+    }));
+    expect(identities).toHaveLength(3);
+    expect(identities.every(({ frame, document }) =>
+      typeof frame === "string" && /^http-frame:[a-z0-9]+$/u.test(frame) &&
+      typeof document === "string" && /^http-document:[a-z0-9]+$/u.test(document))).toBe(true);
+    expect(identities[0]!.frame).toBe(identities[1]!.frame);
+    expect(identities[0]!.document).not.toBe(identities[1]!.document);
+    expect(identities[1]!.frame).not.toBe(identities[2]!.frame);
+    expect(JSON.stringify(forwarded)).not.toContain("raw-frame-secret");
+    expect(JSON.stringify(forwarded)).not.toContain("raw-loader-secret");
+  });
+
   it("propagates only CMD's numeric DataOdds fc request metadata", async () => {
     const full = JSON.stringify({ t: 10, a: true, data: [], today: [], f: [] });
     const sendCommand = vi.fn(async (_tabId: number, method: string) =>
@@ -2233,12 +2274,15 @@ describe("NetworkObserver", () => {
       sel: Array.from({ length: 5_000 }, (_, index) => ({ eid: index + 1, name: `event-${index}`, pad: "x".repeat(80) })) });
     const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
       ? { body: largeBody, base64Encoded: false }
-      : {});
+      : method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "im-frame", loaderId: "im-document" } } }
+        : {});
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000, monotonicNow: () => 50 });
 
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "xhr-large",
+      frameId: "im-frame", loaderId: "im-document",
       request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.responseReceived", {
       requestId: "xhr-large", type: "XHR",
@@ -2260,7 +2304,9 @@ describe("NetworkObserver", () => {
   it("allocates direct HTTP request identities before awaits so concurrent large bodies cannot collide", async () => {
     const forwarded: ChromeBridgeEnvelope[] = [];
     const observer = new NetworkObserver({
-      sendCommand: vi.fn(async () => ({})),
+      sendCommand: vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "im-frame", loaderId: "im-document" } } }
+        : {}),
       forward: async (message) => { forwarded.push(message); },
       now: () => 1_000,
       monotonicNow: () => 50,
@@ -2270,12 +2316,17 @@ describe("NetworkObserver", () => {
     const large = (label: string) => JSON.stringify({ StatusCode: 100,
       sel: [{ label, pad: "x".repeat(230_000) }] });
     type DirectHttpIngest = (source: typeof im, url: string, resourceType: "Fetch", body: string,
-      request: { readonly method: "GET" | "POST" }) => Promise<void>;
+      request: { readonly method: "GET" | "POST"; readonly verifiedDocument: {
+        readonly frameId: string; readonly loaderId: string } }) => Promise<void>;
     const ingest = observer.ingestHttpResponse.bind(observer) as unknown as DirectHttpIngest;
 
     await Promise.all([
-      ingest(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch", large("A"), { method: "GET" }),
-      ingest(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch", large("B"), { method: "POST" })
+      ingest(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch", large("A"), {
+        method: "GET", verifiedDocument: { frameId: "im-frame", loaderId: "im-document" }
+      }),
+      ingest(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch", large("B"), {
+        method: "POST", verifiedDocument: { frameId: "im-frame", loaderId: "im-document" }
+      })
     ]);
 
     const chunks = forwarded.map((message) => ({ message, wrapper: JSON.parse(message.payload.body) as {
@@ -2302,6 +2353,25 @@ describe("NetworkObserver", () => {
     })).toBe(true);
   });
 
+  it("keeps unverified direct HTTP diagnostic-only and never emits authority-bearing chunks", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: async (message) => { forwarded.push(message); }, now: () => 1_000, monotonicNow: () => 50 });
+    const bti = { lobby: "BTI", sourceId: "chrome:BTI:8", tabId: 8 } as const;
+
+    await observer.ingestHttpResponse(bti, "https://sports.example/api/catalog", "Fetch",
+      JSON.stringify({ rows: [{ pad: "x".repeat(230_000) }] }), { method: "GET" });
+    expect(forwarded).toEqual([]);
+
+    await observer.ingestHttpResponse(bti, "https://sports.example/api/catalog", "Fetch",
+      JSON.stringify({ rows: [] }), { method: "GET" });
+    expect(forwarded).toHaveLength(1);
+    expect(forwarded[0]!.request).toMatchObject({ method: "GET",
+      observerRequestId: expect.stringMatching(/:request:\d+$/u) });
+    expect(forwarded[0]!.request).not.toHaveProperty("requestFrameKey");
+    expect(forwarded[0]!.request).not.toHaveProperty("requestDocumentKey");
+  });
+
   it("queues every snapshot chunk before later delta traffic can interleave", async () => {
     const snapshot = JSON.stringify({ StatusCode: 100,
       sel: Array.from({ length: 5_000 }, (_, index) => ({ eid: index, pad: "x".repeat(80) })) });
@@ -2309,6 +2379,9 @@ describe("NetworkObserver", () => {
     const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const forwarded: ChromeBridgeEnvelope[] = [];
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "im-frame", loaderId: "im-document" } } };
+      }
       if (method !== "Network.getResponseBody") return {};
       return { body: params?.requestId === "snapshot" ? snapshot : '{"StatusCode":100,"dc":[]}',
         base64Encoded: false };
@@ -2319,12 +2392,14 @@ describe("NetworkObserver", () => {
     }, now: () => 1_000, monotonicNow: () => 50 });
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "snapshot",
+      frameId: "im-frame", loaderId: "im-document",
       request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.responseReceived", { requestId: "snapshot", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     const snapshotRead = observer.handleEvent(im, "Network.loadingFinished", { requestId: "snapshot" });
-    await Promise.resolve();
+    await vi.waitFor(() => expect(forwarded).toHaveLength(1));
     await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "delta",
+      frameId: "im-frame", loaderId: "im-document",
       request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSEDelta" } });
     await observer.handleEvent(im, "Network.responseReceived", { requestId: "delta", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSEDelta" } });
@@ -2425,6 +2500,58 @@ describe("NetworkObserver", () => {
     expect(await observer.replaySnapshots(im.sourceId)).toBe(false);
     expect(forward).not.toHaveBeenCalled();
     expect(sendCommand).toHaveBeenCalledWith(8, "Network.disable", {});
+  });
+
+  it("fences a request identity when releaseTab happens before response and completion events", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
+      ? { body: "{\"StatusCode\":100,\"sel\":[]}", base64Encoded: false }
+      : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "released-request",
+      frameId: "frame-a", loaderId: "loader-a",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    observer.releaseTab(im.tabId);
+    await observer.handleEvent(im, "Network.responseReceived", { requestId: "released-request", type: "XHR",
+      response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.loadingFinished", { requestId: "released-request" });
+
+    expect(sendCommand).not.toHaveBeenCalledWith(8, "Network.getResponseBody", expect.anything());
+    expect(forward).not.toHaveBeenCalled();
+  });
+
+  it("fences an already-awaiting response body when releaseTab retires its tab lifetime", async () => {
+    let releaseBody!: () => void;
+    const bodyBlocked = new Promise<void>((resolve) => { releaseBody = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "frame-a", loaderId: "loader-a" } } };
+      }
+      if (method === "Network.getResponseBody") {
+        await bodyBlocked;
+        return { body: "{\"StatusCode\":100,\"sel\":[]}", base64Encoded: false };
+      }
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "awaiting-request",
+      frameId: "frame-a", loaderId: "loader-a",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.responseReceived", { requestId: "awaiting-request", type: "XHR",
+      response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+
+    const loading = observer.handleEvent(im, "Network.loadingFinished", { requestId: "awaiting-request" });
+    await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledWith(8, "Network.getResponseBody",
+      { requestId: "awaiting-request" }));
+    observer.releaseTab(im.tabId);
+    releaseBody();
+    await loading;
+
+    expect(forward).not.toHaveBeenCalled();
   });
 
   it("forgets failed response requests instead of retaining them indefinitely", async () => {
@@ -2565,12 +2692,15 @@ describe("NetworkObserver", () => {
     const snapshot = JSON.stringify({ StatusCode: 100, sel: [{ eid: 1, htn: "Alpha", atn: "Beta" }] });
     const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
       ? { body: snapshot, base64Encoded: false }
-      : {});
+      : method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "im-frame", loaderId: "im-document" } } }
+        : {});
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     let now = 1_000;
     const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => 60 });
     const source = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "snapshot",
+      frameId: "im-frame", loaderId: "im-document",
       request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE",
         postData: JSON.stringify({ SportId: 1, Market: 2 }) } });
     await observer.handleEvent(source, "Network.responseReceived", { requestId: "snapshot", type: "XHR",
@@ -2593,13 +2723,16 @@ describe("NetworkObserver", () => {
     const snapshot = JSON.stringify({ StatusCode: 100, sel: [] });
     const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
       ? { body: snapshot, base64Encoded: false }
-      : {});
+      : method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "im-frame", loaderId: "im-document" } } }
+        : {});
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000, monotonicNow: () => 60 });
     const source = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     for (const market of [1, 2] as const) {
       const requestId = `snapshot-${market}`;
       await observer.handleEvent(source, "Network.requestWillBeSent", { requestId,
+        frameId: "im-frame", loaderId: "im-document",
         request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE",
           postData: JSON.stringify({ SportId: 1, Market: market }) } });
       await observer.handleEvent(source, "Network.responseReceived", { requestId, type: "XHR",
@@ -3300,11 +3433,14 @@ describe("NetworkObserver", () => {
       sel: Array.from({ length: 5_000 }, (_, index) => ({ eid: index, pad: "x".repeat(80) })) });
     const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
       ? { body: snapshot, base64Encoded: false }
-      : {});
+      : method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "im-frame", loaderId: "im-document" } } }
+        : {});
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward, now: () => 2_000, monotonicNow: () => 60 });
     const source = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "snapshot",
+      frameId: "im-frame", loaderId: "im-document",
       request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(source, "Network.responseReceived", { requestId: "snapshot", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });

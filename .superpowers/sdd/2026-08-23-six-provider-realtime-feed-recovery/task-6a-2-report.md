@@ -126,3 +126,126 @@ pass.
 No provider schema was guessed, no credential or raw provider payload was
 persisted or logged, and no browser/runtime process, navigation, reload,
 provider action, or external side effect was introduced.
+
+---
+
+## Fix Round 1
+
+Status: DONE
+
+Review base: `3393ecd12c5049e6c9005742394a5f4874475e46`
+
+### Boundary corrections
+
+- A non-authoritative candidate, including CMD DOM snapshots and completed DOM
+  sweeps, now stops after its candidate-local assembler/router/adapter work. It
+  cannot call the shared feed registry, commit shared coverage/catalog state,
+  publish, or establish source ownership. The exact CMD source 9 DOM -> source
+  10 HTTP replacement path proves that a later bound network candidate can
+  still promote normally.
+- `releaseTab` advances a monotonic tab lifetime before cleanup, retires every
+  source generation associated with the tab, and clears pending requests,
+  request identity/function/partition/stream maps, sockets, execution-context
+  ownership, and durable replay state. Pending and queued async work checks both
+  source and tab lifetime before and after awaits and immediately before
+  forwarding. Both response events arriving after release and an already
+  awaiting `Network.getResponseBody` completion emit nothing.
+- HTTP requests carry the all-or-none public pair `requestFrameKey` and
+  `requestDocumentKey`. CDP frame/loader/session values are bounded internally,
+  converted to opaque keys, and never forwarded. The loader is re-read from
+  `Page.getFrameTree` before authority emission and before each multipart
+  forward. Generated BTI, IM, and KSPORT requests bind the evaluated frame and
+  verified current document. Unverified direct/generated large bodies are not
+  chunked; unverified small bodies remain diagnostic-only and the API rejects
+  them before routing. Multipart identity and keys include both public
+  provenance fields, so different frames/documents cannot combine.
+- Provider-feed promotion is now a synchronous account transaction. Feed
+  controller preflight restores a complete checkpoint, subscriber delivery is
+  suppressed during invalidation and baseline commit, and one final snapshot is
+  flushed only after coordinator CAS, catalog, basis, coverage, lane pipeline,
+  registry role, and control target all point to the winner. The route attaches
+  candidate control ownership before data-plane delivery, which also closes the
+  one-envelope HTTP promotion case. Publishing remains outside the transaction
+  and occurs only after successful flush.
+- All fallible promotion checks and time capture occur before the no-throw
+  pointer swap. Defensive rollback checkpoints cover feed controller state,
+  coverage, catalog/basis maps, active/candidate pipeline maps, last-envelope
+  ownership, coordinator identity, registry role, and control target. Fault
+  injection after the pointer swap restores active A and leaves candidate B
+  isolated and reusable; a later strictly newer B baseline promotes.
+- Maintenance replacement accounting accepts only `authorityDisposition ===
+  "ACTIVE"`. Server composition supplies `listActiveSources()`, while the
+  refresh function independently filters both its initial and current source
+  sets. Six fresh candidate-only tabs cannot satisfy replacement or stability;
+  six promoted active replacements do.
+
+No Task 6A.3 content-proof, SABA characterization, or KSPORT ordering behavior
+was implemented.
+
+### RED evidence
+
+The first focused RED run recorded 11 failures with 270 passing tests:
+
+```text
+Contracts: 1 failure in 17 tests.
+API data-plane/registry/assembler/catalog refresh: 7 failures in 120 tests.
+Extension observer: 3 failures in 143 tests.
+```
+
+The one-envelope control-target refinement then failed its isolated probe once
+(`controlRequests: 0`, expected `1`) before the registry pre-delivery handoff.
+All probes were retained as regressions.
+
+### GREEN and verification matrix
+
+```text
+Focused coordinator/registry/feed/control/route/data-plane/assembler/coverage/refresh/server:
+  11 suites / 205 tests passed.
+Task 5/6 API regressions:
+  9 suites / 177 tests passed.
+Task 5/6 extension regressions:
+  6 suites / 200 tests passed.
+Contracts chrome-bridge:
+  1 suite / 17 tests passed.
+Whole contracts package:
+  2 suites / 98 tests passed.
+Whole Chrome extension package:
+  32 suites / 363 tests passed (network observer: 144 tests passed).
+Whole API package:
+  144 suites passed; 1,111 of 1,113 tests passed.
+Contracts, API, and extension typechecks: passed.
+Contracts, API, and extension builds: passed.
+```
+
+The whole API package has only the two previously documented Windows-host
+assertions in untouched files: `local-app-data.test.ts` expects POSIX separators
+for a Darwin fixture path, and `local-key-protector.test.ts` expects POSIX
+`0600` mode from Windows `stat`. Every changed and required API suite passes.
+
+### Files changed in Fix Round 1
+
+- `packages/contracts/src/chrome-bridge.ts`
+- `packages/contracts/src/chrome-bridge.test.ts`
+- `apps/chrome-extension/src/network-observer.ts`
+- `apps/chrome-extension/src/network-observer.test.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.test.ts`
+- `apps/api/src/chrome-bridge/provider-feed-controller.ts`
+- `apps/api/src/chrome-bridge/provider-feed-registry.ts`
+- `apps/api/src/chrome-bridge/provider-feed-registry.test.ts`
+- `apps/api/src/catalog/catalog-coverage-guard.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-registry.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-control-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-bridge-route.ts`
+- `apps/api/src/catalog-refresh.ts`
+- `apps/api/src/catalog-refresh.test.ts`
+- `apps/api/src/server.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6a-2-report.md`
+
+No provider schema was guessed, no raw provider response or credential was
+added, and no navigation, reload, browser/runtime action, or external side
+effect was performed.
+
+Commit subject: `fix(feed): close authority promotion races`.

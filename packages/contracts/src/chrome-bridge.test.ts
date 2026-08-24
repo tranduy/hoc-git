@@ -161,6 +161,35 @@ describe("ChromeBridgeEnvelopeSchema", () => {
       expect(schema.safeParse({ ...http, request }).success).toBe(false);
     }
   });
+
+  it("accepts only all-or-none opaque frame and document provenance", () => {
+    const schema = contracts.ChromeBridgeEnvelopeSchema;
+    const http = {
+      ...validEnvelope,
+      transport: "HTTP_RESPONSE",
+      request: {
+        ...validEnvelope.request,
+        method: "POST",
+        observerRequestId: "observer-a:request:17",
+        requestFrameKey: "http-frame:8f3a1b2c",
+        requestDocumentKey: "http-document:4d5e6f70"
+      }
+    } as const;
+
+    expect(schema.safeParse(http).success).toBe(true);
+    expect(schema.safeParse({ ...http, request: {
+      ...http.request, requestFrameKey: undefined
+    } }).success).toBe(false);
+    expect(schema.safeParse({ ...http, request: {
+      ...http.request, requestDocumentKey: undefined
+    } }).success).toBe(false);
+    expect(schema.safeParse({ ...http, request: {
+      ...http.request, requestFrameKey: "frame?token=secret"
+    } }).success).toBe(false);
+    expect(schema.safeParse({ ...http, request: {
+      ...http.request, frameId: "raw-frame", loaderId: "raw-loader"
+    } }).success).toBe(false);
+  });
 });
 
 describe("ChromeBridgeControlMessageSchema", () => {

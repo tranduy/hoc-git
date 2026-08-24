@@ -34,6 +34,8 @@ const SanitizedRequestBaseShape = {
   resourceType: z.string().trim().min(1).max(64),
   method: ChromeBridgeHttpMethodSchema.optional(),
   observerRequestId: PublicGenerationIdSchema.optional(),
+  requestFrameKey: PublicGenerationIdSchema.optional(),
+  requestDocumentKey: PublicGenerationIdSchema.optional(),
   streamId: PublicGenerationIdSchema.optional(),
   providerFunctionCode: z.number().int().min(1).max(7).optional(),
   reconcileCutoffSequence: SafeIntegerSchema.optional(),
@@ -84,6 +86,12 @@ export const ChromeBridgeEnvelopeSchema = z.strictObject({
   request: SanitizedRequestSchema,
   payload: BridgePayloadSchema
 }).superRefine((value, context) => {
+  const requestProvenanceCount = [value.request.requestFrameKey, value.request.requestDocumentKey]
+    .filter((field) => field !== undefined).length;
+  if (requestProvenanceCount === 1) {
+    context.addIssue({ code: "custom", path: ["request", "requestFrameKey"],
+      message: "request frame and document provenance must be bound together" });
+  }
   if ("providerContentIntent" in value.request && value.lobby !== "KSPORT") {
     context.addIssue({ code: "custom", path: ["lobby"],
       message: "KSPORT recovery metadata requires the KSPORT lobby" });
