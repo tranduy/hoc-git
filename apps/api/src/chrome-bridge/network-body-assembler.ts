@@ -43,13 +43,18 @@ export class NetworkBodyAssemblyBudget {
     this.#now = options.now ?? Date.now;
   }
 
-  reserve(byteCount: number, expiresAtMs: number, nowMs: number): NetworkBodyAssemblyReservation | null {
+  now(): number {
+    return this.#observeNow(this.#now());
+  }
+
+  reserve(byteCount: number, ttlMs: number): NetworkBodyAssemblyReservation | null {
     nonnegativeInteger(byteCount, "byteCount");
-    finiteNonnegative(expiresAtMs, "expiresAtMs");
-    const now = this.#observeNow(nowMs);
+    positiveIntegerValue(ttlMs, "ttlMs");
+    const now = this.now();
     this.#sweep(now);
-    if (expiresAtMs <= now || this.#reservations.size >= this.#maxPendingBodies ||
+    if (this.#reservations.size >= this.#maxPendingBodies ||
       this.#pendingBytes() + byteCount > this.#maxPendingBytes) return null;
+    const expiresAtMs = deadline(now, ttlMs);
     const reservation = Object.freeze({
       kind: "NETWORK_BODY_ASSEMBLY_RESERVATION" as const
     });
@@ -58,22 +63,21 @@ export class NetworkBodyAssemblyBudget {
   }
 
   update(reservation: NetworkBodyAssemblyReservation, additionalBytes: number,
-    expiresAtMs: number, nowMs: number): NetworkBodyAssemblyReservationUpdate {
+    ttlMs: number): NetworkBodyAssemblyReservationUpdate {
     nonnegativeInteger(additionalBytes, "additionalBytes");
-    finiteNonnegative(expiresAtMs, "expiresAtMs");
-    const now = this.#observeNow(nowMs);
+    positiveIntegerValue(ttlMs, "ttlMs");
+    const now = this.now();
     this.#sweep(now);
     const retained = this.#reservations.get(reservation);
-    if (retained === undefined || expiresAtMs <= now) return "MISSING";
+    if (retained === undefined) return "MISSING";
     if (this.#pendingBytes() + additionalBytes > this.#maxPendingBytes) return "PRESSURE";
     retained.bytes += additionalBytes;
-    // A fragment cannot extend the body's original absolute TTL.
-    retained.expiresAtMs = Math.min(retained.expiresAtMs, expiresAtMs);
+    retained.expiresAtMs = deadline(now, ttlMs);
     return "ACCEPTED";
   }
 
-  isLive(reservation: NetworkBodyAssemblyReservation, nowMs: number): boolean {
-    const now = this.#observeNow(nowMs);
+  isLive(reservation: NetworkBodyAssemblyReservation): boolean {
+    const now = this.now();
     this.#sweep(now);
     return this.#reservations.has(reservation);
   }
@@ -83,7 +87,7 @@ export class NetworkBodyAssemblyBudget {
   }
 
   stats(): NetworkBodyAssemblyBudgetStats {
-    const now = this.#observeNow(this.#now());
+    const now = this.now();
     this.#sweep(now);
     return { pendingBodies: this.#reservations.size, pendingBytes: this.#pendingBytes() };
   }
@@ -115,7 +119,6 @@ interface PendingBody {
   readonly envelope: ChromeBridgeEnvelope;
   readonly chunkCount: number;
   readonly fragments: Map<number, string>;
-  readonly expiresAtMs: number;
   readonly reservation: NetworkBodyAssemblyReservation;
   byteCount: number;
 }
@@ -145,7 +148,6 @@ export interface NetworkBodyAssemblerStats {
 }
 
 export class NetworkBodyAssembler {
-  readonly #now: () => number;
   readonly #ttlMs: number;
   readonly #maxBodyBytes: number;
   readonly #maxPendingBodiesPerSource: number;
@@ -159,7 +161,6 @@ export class NetworkBodyAssembler {
   #disposed = false;
 
   constructor(options: NetworkBodyAssemblerOptions = {}) {
-    this.#now = options.now ?? Date.now;
     this.#ttlMs = positiveInteger(options.ttlMs, DEFAULT_TTL_MS, "ttlMs");
     this.#maxBodyBytes = positiveInteger(options.maxBodyBytes, DEFAULT_MAX_BODY_BYTES, "maxBodyBytes");
     this.#maxPendingBodiesPerSource = positiveInteger(options.maxPendingBodiesPerSource,
@@ -169,7 +170,7 @@ export class NetworkBodyAssembler {
     this.#budget = options.budget ?? new NetworkBodyAssemblyBudget({
       ...(options.maxPendingBodies === undefined ? {} : { maxPendingBodies: options.maxPendingBodies }),
       ...(options.maxPendingBytes === undefined ? {} : { maxPendingBytes: options.maxPendingBytes }),
-      now: this.#now
+      now: options.now ?? Date.now
     });
   }
 
@@ -184,8 +185,7 @@ export class NetworkBodyAssembler {
     // normal single-envelope HTTP response.
     if (!parsed.success) return isPotentialNetworkChunk(raw) ? null : envelope;
 
-    const now = this.#now();
-    this.#sweep(now);
+    this.#sweep();
     const chunk = parsed.data;
     const sourceEpoch = envelope.sourceEpoch ?? "legacy";
     if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch)) return null;
@@ -207,13 +207,12 @@ export class NetworkBodyAssembler {
         this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
         return null;
       }
-      const expiresAtMs = now + this.#ttlMs;
-      const reservation = this.#budget.reserve(fragmentBytes, expiresAtMs, now);
+      const reservation = this.#budget.reserve(fragmentBytes, this.#ttlMs);
       if (reservation === null) return null;
       fragmentReserved = true;
       state = { key, sourceId: envelope.sourceId, sourceEpoch,
         identity, envelope, chunkCount: chunk.chunkCount, fragments: new Map<number, string>(),
-        expiresAtMs, reservation, byteCount: 0 };
+        reservation, byteCount: 0 };
       this.#pending.set(key, state);
     }
 
@@ -228,8 +227,7 @@ export class NetworkBodyAssembler {
       return null;
     }
     if (!fragmentReserved) {
-      const reservationUpdate = this.#budget.update(state.reservation, fragmentBytes,
-        state.expiresAtMs, now);
+      const reservationUpdate = this.#budget.update(state.reservation, fragmentBytes, this.#ttlMs);
       if (reservationUpdate === "MISSING") {
         this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
         return null;
@@ -248,7 +246,7 @@ export class NetworkBodyAssembler {
   }
 
   stats(): NetworkBodyAssemblerStats {
-    this.#sweep(this.#now());
+    this.#sweep();
     return { pendingBodies: this.#pending.size, pendingBytes: this.#pendingBytes,
       quarantinedBodies: 0, blockedSourceEpochs: [...this.#epochFenceBySource.values()]
         .filter((fence) => fence.faulted).length };
@@ -320,9 +318,9 @@ export class NetworkBodyAssembler {
     return true;
   }
 
-  #sweep(now: number): void {
+  #sweep(): void {
     for (const pending of [...this.#pending.values()]) {
-      if (now >= pending.expiresAtMs || !this.#budget.isLive(pending.reservation, now)) {
+      if (!this.#budget.isLive(pending.reservation)) {
         this.#faultSourceEpoch(pending.sourceId, pending.sourceEpoch);
       }
     }
@@ -339,8 +337,18 @@ function nonnegativeInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`NETWORK_BODY_${name}_INVALID`);
 }
 
+function positiveIntegerValue(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`NETWORK_BODY_${name}_INVALID`);
+}
+
 function finiteNonnegative(value: number, name: string): void {
   if (!Number.isFinite(value) || value < 0) throw new Error(`NETWORK_BODY_${name}_INVALID`);
+}
+
+function deadline(nowMs: number, ttlMs: number): number {
+  const expiresAtMs = nowMs + ttlMs;
+  finiteNonnegative(expiresAtMs, "expiresAtMs");
+  return expiresAtMs;
 }
 
 function bodyKey(sourceId: string, sourceEpoch: string, snapshotId: string): string {

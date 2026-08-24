@@ -310,3 +310,82 @@ No contract, coordinator, adapter, observer, browser/runtime process,
 navigation, reload, or external system behavior was changed in this fix round.
 The data-plane-only edit supplies its existing clock to the shared default
 budget; it does not change authority or routing semantics.
+
+---
+
+## Fix Round 4 (review of `0b6b561`)
+
+This section supersedes Fix Round 3's statement that a multipart body's TTL is
+an immutable deadline from its first fragment.
+
+### Sliding activity and single-clock invariants
+
+- A new reservation expires one TTL interval after its first accepted chunk.
+  Every later accepted, previously unseen chunk slides the token deadline to
+  `budget.now() + ttlMs`. Three chunks at `t=0`, `t=50`, and `t=101` therefore
+  complete with `ttlMs=100`; inactivity expires exactly at the last accepted
+  chunk time plus 100.
+- Duplicate chunk indices, conflicting fragments, identity mismatch, shared
+  pressure rejection, malformed traffic, and other rejected input do not touch
+  the deadline. Conflict and local-limit behavior remains fail closed.
+- `NetworkBodyAssemblyBudget` is the sole clock authority for every token it
+  owns. Its `reserve`, `update`, liveness sweep, and `stats` methods read the
+  injected clock internally; callers cannot supply arbitrary operation times
+  or absolute deadlines.
+- A standalone assembler constructs its private budget with the assembler's
+  configured/default clock. An assembler using an injected shared budget uses
+  that budget's clock even if its own options contain a conflicting legacy
+  `now` callback. Every active/candidate data-plane lane therefore observes the
+  same clock owned by the shared budget.
+- Default `Date.now` and injected deterministic clocks both reserve, slide,
+  sweep, and report consistently without immediate expiry or a permanently
+  future watermark.
+
+Exact token release, idle-owner expiry recovery, compact source/session epoch
+fences, pressure retry behavior, 48-body/144-MiB global and 8-body/24-MiB
+per-source limits, KSPORT metadata binding, and provider isolation remain
+unchanged.
+
+### Strict RED record
+
+```text
+network-body-assembler.test.ts: 4 failed / 37 passed (41 total).
+
+Sliding TTL probes:
+  chunks accepted at t=0 and t=50 still expired at the original t=100;
+  the body was already faulted at t=149 instead of expiring at t=150.
+
+Single-clock probes:
+  a conflicting assembler clock made a default-budget token expire immediately;
+  two assemblers sharing one deterministic budget observed different effective
+  times and could not retain both reservations.
+
+Duplicate/mismatched non-extension was GREEN as a preservation probe.
+```
+
+### Fix Round 4 verification
+
+```text
+Focused assembler GREEN: 41 passed.
+Focused contracts/assembler/data-plane: 3 suites / 95 tests passed.
+Whole contracts package: 2 suites / 96 tests passed.
+Task 5/6 assembler, route, data-plane, CMD, IM, SABA, and KSPORT regressions:
+  9 suites / 203 tests passed.
+Contracts typecheck and build: passed.
+API typecheck and build: passed.
+Chrome extension compatibility typecheck and build: passed.
+git diff/show --check: passed.
+Scoped added-production-line credential/raw-body hygiene scan: no matches.
+```
+
+### Fix Round 4 files
+
+- `apps/api/src/chrome-bridge/network-body-assembler.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.test.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6a-1-report.md`
+
+No contract, coordinator, adapter, observer, browser/runtime process,
+navigation, reload, or external system behavior was changed. The data-plane
+edit only removes a redundant per-assembler clock argument so its existing
+shared budget is the one assembly clock authority.

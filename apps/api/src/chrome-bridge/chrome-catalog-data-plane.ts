@@ -271,7 +271,7 @@ export class ChromeCatalogDataPlane {
     if (current === undefined) {
       const owner = proposed(false);
       this.#accountOwners.set(accountId, owner);
-      this.#activePipelines.set(accountId, createDecodePipeline(this.#now, this.#networkBodyBudget));
+      this.#activePipelines.set(accountId, createDecodePipeline(this.#networkBodyBudget));
       return { kind: "CURRENT", owner };
     }
     if (connectionGeneration < current.connectionGeneration) return null;
@@ -319,7 +319,7 @@ export class ChromeCatalogDataPlane {
   #activePipeline(accountId: string): DecodePipeline {
     const existing = this.#activePipelines.get(accountId);
     if (existing !== undefined) return existing;
-    const pipeline = createDecodePipeline(this.#now, this.#networkBodyBudget);
+    const pipeline = createDecodePipeline(this.#networkBodyBudget);
     this.#activePipelines.set(accountId, pipeline);
     return pipeline;
   }
@@ -329,7 +329,7 @@ export class ChromeCatalogDataPlane {
     if (current !== undefined && sameOwner(current.owner, owner)) return current.pipeline;
     if (current !== undefined && !candidateSupersedes(current.owner, owner)) return null;
     if (current !== undefined) current.pipeline.networkBodies.dispose();
-    const pipeline = createDecodePipeline(this.#now, this.#networkBodyBudget);
+    const pipeline = createDecodePipeline(this.#networkBodyBudget);
     this.#candidatePipelines.set(accountId, { owner, pipeline });
     return pipeline;
   }
@@ -413,11 +413,11 @@ function candidateSupersedes(current: AccountSourceOwner, proposed: AccountSourc
     proposed.identity.generation > current.identity.generation;
 }
 
-function createDecodePipeline(now: () => number, budget: NetworkBodyAssemblyBudget): DecodePipeline {
+function createDecodePipeline(budget: NetworkBodyAssemblyBudget): DecodePipeline {
   return { router: new AdapterRouter([new CmdHttpCatalogAdapter(), new CmdDomCatalogAdapter(),
     new ImHttpCatalogAdapter(), new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(),
     new TsportWsCatalogAdapter(), new BtiHttpCatalogAdapter()], { confirmationsRequired: 1 }),
-  networkBodies: new NetworkBodyAssembler({ now, budget }) };
+  networkBodies: new NetworkBodyAssembler({ budget }) };
 }
 
 function catalogProvenance(transport: ChromeBridgeEnvelope["transport"]): FeedProvenance {

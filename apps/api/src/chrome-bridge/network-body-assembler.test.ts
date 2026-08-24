@@ -316,6 +316,59 @@ describe("NetworkBodyAssembler", () => {
       sourceEpoch: "worker-a:1" })).toMatchObject({ payload: { body: "fresh-body" } });
   });
 
+  it("extends sliding TTL after each accepted new chunk", () => {
+    let now = 0;
+    const assembler = new NetworkBodyAssembler({ now: () => now, ttlMs: 100 });
+    const chunk = (index: number) => ({ ...envelope(index, 3, String.fromCharCode(65 + index),
+      "network-sliding-ttl"), sourceEpoch: "worker-a:0" });
+
+    expect(assembler.ingest(chunk(0))).toBeNull();
+    now = 50;
+    expect(assembler.ingest(chunk(1))).toBeNull();
+    now = 101;
+    expect(assembler.ingest(chunk(2))).toMatchObject({ payload: { body: "ABC" } });
+  });
+
+  it("expires only after one TTL interval without accepted chunk activity", () => {
+    let now = 0;
+    const assembler = new NetworkBodyAssembler({ now: () => now, ttlMs: 100 });
+    const chunk = (index: number) => ({ ...envelope(index, 3, String.fromCharCode(65 + index),
+      "network-sliding-inactive"), sourceEpoch: "worker-a:0" });
+
+    expect(assembler.ingest(chunk(0))).toBeNull();
+    now = 50;
+    expect(assembler.ingest(chunk(1))).toBeNull();
+    now = 149;
+    expect(assembler.stats()).toMatchObject({ pendingBodies: 1, blockedSourceEpochs: 0 });
+    now = 150;
+    expect(assembler.stats()).toMatchObject({ pendingBodies: 0, blockedSourceEpochs: 1 });
+    expect(assembler.ingest(chunk(2))).toBeNull();
+  });
+
+  it("does not extend TTL for duplicate or mismatched traffic", () => {
+    let now = 0;
+    const duplicate = new NetworkBodyAssembler({ now: () => now, ttlMs: 100 });
+    const first = { ...envelope(0, 2, "A", "network-duplicate-no-touch"),
+      sourceEpoch: "worker-a:0" };
+    expect(duplicate.ingest(first)).toBeNull();
+    now = 90;
+    expect(duplicate.ingest(first)).toBeNull();
+    now = 101;
+    expect(duplicate.ingest({ ...envelope(1, 2, "B", "network-duplicate-no-touch"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    expect(duplicate.stats()).toMatchObject({ pendingBodies: 0, blockedSourceEpochs: 1 });
+
+    now = 0;
+    const mismatch = new NetworkBodyAssembler({ now: () => now, ttlMs: 100 });
+    expect(mismatch.ingest(first)).toBeNull();
+    now = 90;
+    expect(mismatch.ingest({ ...first, payload: { encoding: "UTF8", body: JSON.stringify({
+      schemaVersion: 1, snapshotId: "network-duplicate-no-touch", chunkIndex: 0,
+      chunkCount: 2, bodyEncoding: "UTF8", bodyFragment: "X"
+    }) } })).toBeNull();
+    expect(mismatch.stats()).toMatchObject({ pendingBodies: 0, blockedSourceEpochs: 1 });
+  });
+
   it("keeps exactly 8 pending bodies per source and 48 globally by default", () => {
     const perSource = new NetworkBodyAssembler();
     for (let index = 0; index < 8; index += 1) {
@@ -579,6 +632,47 @@ describe("NetworkBodyAssembler", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("uses the default budget clock even when an assembler supplies a conflicting clock", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const budget = new NetworkBodyAssemblyBudget({ maxPendingBodies: 1, maxPendingBytes: 10 });
+      const assembler = new NetworkBodyAssembler({ now: () => 0, ttlMs: 100, budget });
+      expect(assembler.ingest({ ...envelope(0, 2, "A", "network-default-clock-owner"),
+        sourceEpoch: "worker-a:0" })).toBeNull();
+      expect(budget.stats()).toEqual({ pendingBodies: 1, pendingBytes: 1 });
+      vi.setSystemTime(1_101);
+      expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+      expect(() => assembler.dispose()).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives every assembler the shared budget's deterministic clock", () => {
+    let now = 0;
+    const budget = new NetworkBodyAssemblyBudget({
+      maxPendingBodies: 2, maxPendingBytes: 10, now: () => now
+    });
+    const first = new NetworkBodyAssembler({ now: Date.now, ttlMs: 100, budget });
+    const second = new NetworkBodyAssembler({ now: () => 999_999, ttlMs: 100, budget });
+    expect(first.ingest({ ...envelope(0, 3, "A", "network-shared-clock-first"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    expect(second.ingest({ ...envelope(0, 2, "B", "network-shared-clock-second"),
+      sourceId: "chrome:IM:9", tabId: 9, sourceEpoch: "worker-b:0" })).toBeNull();
+    expect(budget.stats()).toEqual({ pendingBodies: 2, pendingBytes: 2 });
+
+    now = 50;
+    expect(first.ingest({ ...envelope(1, 3, "C", "network-shared-clock-first"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    now = 101;
+    expect(budget.stats()).toEqual({ pendingBodies: 1, pendingBytes: 2 });
+    now = 150;
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+    first.dispose();
+    second.dispose();
   });
 
   it("rejects bodies that exceed per-body or byte-pool limits and never completes them later", () => {
