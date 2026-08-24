@@ -389,3 +389,71 @@ No contract, coordinator, adapter, observer, browser/runtime process,
 navigation, reload, or external system behavior was changed. The data-plane
 edit only removes a redundant per-assembler clock argument so its existing
 shared budget is the one assembly clock authority.
+
+---
+
+## Fix Round 5 (review of `556137f`)
+
+### Fixed-cardinality source lineage ownership
+
+Each `NetworkBodyAssembler` now retains at most eight source lineage fences.
+This is a defensive ceiling around the production ownership invariant that one
+assembler belongs to one active or candidate authority lane.
+
+- An exact known source remains admitted through its existing compact lineage
+  high-watermark. A strictly newer canonical generation can therefore recover
+  after a fault even when the lineage table is full.
+- Once the eight-lineage ceiling is reached, every previously unseen
+  `sourceId` rejects before insertion, fragment allocation, or shared-budget
+  reservation. Rejected IDs are not recorded in a second collection.
+- Stored fences are never evicted to make room. The earliest retired source
+  therefore remains rejected after arbitrary unseen-source churn, and another
+  stored source cannot be reopened by cross-source eviction.
+- `resetSource` continues to retain and fault the existing fence. `dispose`
+  continues to release the assembler instance and clear its bounded table; a
+  fresh lane can admit a legitimate source independently.
+
+No contract, metadata-binding, request identity, reservation, TTL, local/global
+limit, pressure, provider, or data-plane authority behavior changed.
+
+### Strict RED record
+
+```text
+Adversarial focused probe: 1 failed / 41 skipped (42 total).
+After 50,000 unique source fault attempts:
+  expected blockedSourceEpochs: 8
+  received blockedSourceEpochs: 50,000
+Pending bodies/bytes and the shared budget were already zero, isolating the
+failure to retained source-lineage metadata.
+```
+
+The retained regression also proves that source zero stays retired, unseen
+source 50,001 stays rejected without allocation, a known source's generation
+one completes, older generations for two stored sources remain fenced, and a
+separate fresh assembler accepts the legitimate new source.
+
+### Fix Round 5 verification
+
+```text
+Focused adversarial GREEN: 1 passed / 41 skipped (42 total).
+Focused contracts/assembler/data-plane: 3 suites / 96 tests passed.
+Whole assembler suite: 42 tests passed.
+Whole contracts package: 2 suites / 96 tests passed.
+Task 5/6 assembler, route, data-plane, CMD, IM, SABA, and KSPORT regressions:
+  9 suites / 204 tests passed.
+Contracts typecheck and build: passed.
+API typecheck and build: passed.
+Chrome extension compatibility typecheck and build: passed.
+git diff --check: passed.
+Scoped added-production-line credential/raw-provider-body scan: no matches.
+```
+
+### Fix Round 5 files
+
+- `apps/api/src/chrome-bridge/network-body-assembler.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.test.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6a-1-report.md`
+
+No contract, data-plane, coordinator, adapter, observer, browser/runtime
+process, navigation, reload, or external system behavior was changed in this
+fix round.

@@ -6,6 +6,7 @@ const DEFAULT_MAX_PENDING_BODIES_PER_SOURCE = 8;
 const DEFAULT_MAX_PENDING_BODIES = DEFAULT_MAX_PENDING_BODIES_PER_SOURCE * 6;
 const DEFAULT_MAX_PENDING_BYTES_PER_SOURCE = DEFAULT_MAX_BODY_BYTES;
 const DEFAULT_MAX_PENDING_BYTES = DEFAULT_MAX_PENDING_BYTES_PER_SOURCE * 6;
+const MAX_SOURCE_LINEAGES = 8;
 const textEncoder = new TextEncoder();
 
 export interface NetworkBodyAssemblyBudgetOptions {
@@ -301,6 +302,7 @@ export class NetworkBodyAssembler {
     if (proposed === null) return false;
     const current = this.#epochFenceBySource.get(sourceId);
     if (current === undefined) {
+      if (this.#epochFenceBySource.size >= MAX_SOURCE_LINEAGES) return false;
       this.#epochFenceBySource.set(sourceId, proposed.kind === "LEGACY"
         ? { kind: "LEGACY", faulted: false }
         : { ...proposed, faulted: false });

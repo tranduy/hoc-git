@@ -291,6 +291,58 @@ describe("NetworkBodyAssembler", () => {
       .toMatchObject({ payload: { body: "observer-b-body" } });
   });
 
+  it("bounds source lineages without evicting retirement evidence", () => {
+    const budget = new NetworkBodyAssemblyBudget();
+    const assembler = new NetworkBodyAssembler({ budget });
+    const chunk = (sourceNumber: number, generation: number, index: number,
+      snapshotId: string, mismatched = false): ChromeBridgeEnvelope => ({
+      ...envelope(index, 2, index === 0 ? "A" : "B", snapshotId),
+      sourceId: `chrome:IM:${sourceNumber + 20}`,
+      tabId: sourceNumber + 20 + (mismatched ? 1 : 0),
+      sourceEpoch: `observer-${sourceNumber}:${generation}`
+    });
+
+    for (let sourceNumber = 0; sourceNumber < 50_000; sourceNumber += 1) {
+      const snapshotId = `network-lineage-fault-${sourceNumber}`;
+      expect(assembler.ingest(chunk(sourceNumber, 0, 0, snapshotId))).toBeNull();
+      expect(assembler.ingest(chunk(sourceNumber, 0, 1, snapshotId, true))).toBeNull();
+    }
+
+    expect(assembler.stats()).toMatchObject({
+      pendingBodies: 0,
+      pendingBytes: 0,
+      blockedSourceEpochs: 8
+    });
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+
+    const retiredFirst = "network-lineage-retired-first";
+    expect(assembler.ingest(chunk(0, 0, 0, retiredFirst))).toBeNull();
+    expect(assembler.ingest(chunk(0, 0, 1, retiredFirst))).toBeNull();
+
+    const unknown = "network-lineage-unknown-50001";
+    expect(assembler.ingest(chunk(50_000, 0, 0, unknown))).toBeNull();
+    expect(assembler.ingest(chunk(50_000, 0, 1, unknown))).toBeNull();
+
+    const newerKnown = "network-lineage-known-newer";
+    expect(assembler.ingest(chunk(0, 1, 0, newerKnown))).toBeNull();
+    expect(assembler.ingest(chunk(0, 1, 1, newerKnown)))
+      .toMatchObject({ payload: { body: "AB" } });
+
+    const retiredAfterAdvance = "network-lineage-retired-after-advance";
+    expect(assembler.ingest(chunk(0, 0, 0, retiredAfterAdvance))).toBeNull();
+    expect(assembler.ingest(chunk(0, 0, 1, retiredAfterAdvance))).toBeNull();
+    const otherStoredFence = "network-lineage-other-stored-fence";
+    expect(assembler.ingest(chunk(1, 0, 0, otherStoredFence))).toBeNull();
+    expect(assembler.ingest(chunk(1, 0, 1, otherStoredFence))).toBeNull();
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+
+    const freshLane = new NetworkBodyAssembler();
+    const freshSnapshot = "network-lineage-fresh-lane";
+    expect(freshLane.ingest(chunk(50_000, 0, 0, freshSnapshot))).toBeNull();
+    expect(freshLane.ingest(chunk(50_000, 0, 1, freshSnapshot)))
+      .toMatchObject({ payload: { body: "AB" } });
+  }, 30_000);
+
   it("uses the default 30-second TTL to release fragments without reopening the faulted epoch", () => {
     let now = 0;
     const assembler = new NetworkBodyAssembler({ now: () => now });
