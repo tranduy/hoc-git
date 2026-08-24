@@ -66,4 +66,23 @@ The report must specify the observer wiring for:
 - correlation to one complete current-document `fc=1` request/body;
 - bounded retry/abort diagnostics with no raw URL, frame, loader, body, or credential values.
 
-Do not edit the observer yourself. Do not use the live CMD page or DevTools.
+Do not edit the observer yourself. End Phase A by writing the report with status `READY_FOR_INTEGRATION`, then remain available.
+
+## Phase B Realtime Gate
+
+After the integrator supplies the CMD runtime lease and confirms observer wiring/build/reload:
+
+Run the provider sampler without building:
+
+```powershell
+node scripts/verify-cmd-runtime.mjs 45000 .run/five-provider/cmd-runtime-evidence.json
+```
+
+1. Require one complete current-document authenticated `fc=1` baseline; `busy` or `baseline-requested` acknowledgement is not success.
+2. Require CMD to become `ACTIVE` and `LIVE/FRESH` without tab navigation or replacement.
+3. Sample for at least 45 seconds and record at least three authenticated CMD provider responses/cursor advances, including the scheduled full reconciliation cadence.
+4. Record an ordered semantic delta when emitted and prove a pre-cutoff/pre-baseline delta cannot roll back the committed baseline.
+5. Ask the integrator to issue one exact addressed CMD snapshot, then prove it is single-flight, bounded, tied to the same leased tab/document, and leaves every other provider source unchanged. Do not use global maintenance.
+6. Update the report to `DONE` only when all gates pass; otherwise mark `BLOCKED` with the exact redacted reason.
+
+Do not attach DevTools/CDP, use active-tab actions, build/restart/reload, or touch another provider.

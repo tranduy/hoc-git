@@ -49,4 +49,23 @@ If the optional generation files are unnecessary, do not create them and omit th
 
 ## Required Shared Integration Request
 
-If the existing envelope does not carry an explicit recovery generation, the report must define the exact observer/contract metadata needed to create and propagate it. Do not edit observer, contracts, route, data plane, or runtime files yourself. Do not query the live SBOBET page.
+If the existing envelope does not carry an explicit recovery generation, the Phase A report must define the exact observer/contract metadata needed to create and propagate it. Do not edit shared files. Set status `READY_FOR_INTEGRATION` and remain available.
+
+## Phase B Realtime Gate
+
+After the integrator supplies the SBOBET/KSPORT runtime lease and confirms explicit generation wiring:
+
+Run the provider sampler without building:
+
+```powershell
+node scripts/verify-sbobet-runtime.mjs 45000 .run/five-provider/sbobet-runtime-evidence.json
+```
+
+1. Require current live and today full partitions under one explicit recovery generation to commit atomically even when receipt sequences differ.
+2. Require SBOBET to become `ACTIVE` and `LIVE/FRESH`; mixed generations and partial pairs must remain non-authoritative.
+3. Sample for at least 45 seconds and record at least three current KSPORT evidence/receipt advances and a semantic delta when emitted.
+4. Prove pending-delta overflow/gap/close suppresses liveness until a strictly newer full pair commits.
+5. Trigger one SBOBET-targeted recovery, require a current baseline within 90 seconds, and prove all other provider sources remain unchanged.
+6. Update the report to `DONE` only if every gate passes; otherwise mark `BLOCKED` with exact redacted reason.
+
+Do not attach DevTools/CDP, use active-tab actions, build/restart/reload, inspect launch/auth data, or touch another provider.

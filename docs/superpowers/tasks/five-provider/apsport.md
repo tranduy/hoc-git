@@ -59,4 +59,23 @@ The report must describe exact extension/data-plane wiring that:
 - passes expected identities and stream metadata to the adapter without granting DOM authority;
 - proves candidate DOM remains unpromoted and complete fresh WS coverage performs one atomic promotion.
 
-Do not edit shared extension/data-plane files or use the live APSPORT page.
+Do not edit shared extension/data-plane files. End Phase A by writing status `READY_FOR_INTEGRATION`, then remain available.
+
+## Phase B Realtime Gate
+
+After the integrator supplies the APSPORT/TSPORT runtime lease and confirms shared socket wiring:
+
+Run the provider sampler without building:
+
+```powershell
+node scripts/verify-apsport-runtime.mjs 30000 .run/five-provider/apsport-runtime-evidence.json
+```
+
+1. Require candidate DOM capture alone to remain non-authoritative.
+2. Require a fresh current TSPORT event stream to cover the current expected event IDs and emit one WS-only authoritative baseline.
+3. Require APSPORT to become `ACTIVE` and `LIVE/FRESH`; inspect the resulting catalog to ensure authoritative quote values came from WS rather than DOM.
+4. Sample for at least 30 seconds and record at least three current WS evidence advances plus a semantic delta when emitted.
+5. Trigger one APSPORT-targeted recovery, require only the exact football event socket to reconnect in the same tab, and prove all other provider sources remain unchanged.
+6. Update the report to `DONE` only if every gate passes; otherwise mark `BLOCKED` with exact redacted coverage/state/reason.
+
+Do not attach DevTools/CDP, use active-tab actions, build/restart/reload, or touch another provider.

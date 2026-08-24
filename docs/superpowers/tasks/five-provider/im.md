@@ -49,6 +49,25 @@ npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/im-http-adapter.te
 git diff --check -- apps/api/src/chrome-bridge/im-http-adapter.ts apps/api/src/chrome-bridge/im-http-adapter.test.ts apps/api/src/providers/im/im-football-catalog-source.ts apps/api/src/providers/im/im-football-catalog-source.test.ts
 ```
 
-## Completion
+## Phase A Handoff
 
-Write the report. If observer metadata or shared integration changes are needed, specify the exact contract in the report and leave shared files untouched. Do not query the live IM page or provider endpoint.
+Write the report with status `READY_FOR_INTEGRATION`. If observer metadata or shared integration changes are needed, specify the exact contract and leave shared files untouched. Do not describe the task as done and remain available.
+
+## Phase B Realtime Gate
+
+After the integrator supplies the IM runtime lease:
+
+Run the provider sampler without building:
+
+```powershell
+node scripts/verify-im-runtime.mjs 45000 .run/five-provider/im-runtime-evidence.json
+```
+
+1. Require two complete authenticated GetSE partitions with the same cutoff/generation to emit one baseline.
+2. Require IM to become `ACTIVE` and `LIVE/FRESH`, with representative positive Hong Kong odds normalized to valid Malay odds and no authoritative empty-catalog laundering.
+3. Sample for at least 45 seconds and record at least three authenticated provider response/cursor advances.
+4. Record an ordered semantic delta when emitted; prove pre-cutoff deltas cannot roll back the committed generation and malformed deltas cannot renew liveness.
+5. Trigger one IM-targeted reconciliation and prove the other providers' source identities are unchanged.
+6. Update the report to `DONE` only if every gate passes; otherwise mark `BLOCKED` with exact redacted reason.
+
+Do not attach DevTools/CDP, use active-tab actions, build/restart/reload, inspect raw provider bodies, or touch another provider.

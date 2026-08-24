@@ -53,6 +53,25 @@ git diff --check -- apps/api/src/chrome-bridge/saba-ws-adapter.ts apps/api/src/c
 
 If the typecheck command writes or triggers a build in the current package configuration, omit it and record that the integrator must run it. Do not build.
 
-## Completion
+## Phase A Handoff
 
-Write the required report. If shared observer/data-plane wiring is still needed, describe it in the shared integration request format. Do not run the live SABA page, debugger, extension reload, recovery endpoint, Git mutation, or build.
+Write the required report with status `READY_FOR_INTEGRATION`. If shared observer/data-plane wiring is still needed, describe it in the shared integration request format. Do not describe the task as done and remain available for Phase B.
+
+## Phase B Realtime Gate
+
+After the integrator supplies the SABA runtime lease:
+
+Run the provider sampler without building:
+
+```powershell
+node scripts/verify-saba-runtime.mjs 30000 .run/five-provider/saba-runtime-evidence.json
+```
+
+1. Verify the leased tab is the current authenticated SABA page and not an auth/error page, without reading its launch token.
+2. Require the leased source to move to `ACTIVE` and catalog/feed to `LIVE/FRESH` only after a current socket OPEN/reset/data/done baseline.
+3. Sample for at least 30 seconds and record at least three current provider socket/evidence advances; a bridge/tab heartbeat does not count.
+4. Record a semantic price/status revision if SABA emits one during the window.
+5. Trigger one SABA-targeted recovery. Require a strictly newer current-stream baseline within 60 seconds and prove CMD/APSPORT/IM/SBOBET/BTI source identities were not reset.
+6. Update the report to `DONE` only if every item passes. Otherwise mark `BLOCKED` with exact redacted state/reason.
+
+Do not build, restart, reload the extension, attach a debugger, use active-tab actions, or touch another provider during Phase B.

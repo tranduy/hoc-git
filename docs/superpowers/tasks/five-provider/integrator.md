@@ -1,6 +1,6 @@
 # Integrator Task
 
-This file governs the only session allowed to mutate Git history, shared files, build artifacts, runtime processes, the loaded extension, or Chrome provider tabs.
+This file governs the only session allowed to mutate Git history, shared files, build artifacts, runtime processes, the loaded extension, or debugger ownership. Provider workers receive bounded runtime leases only after the integration barrier.
 
 ## Exclusive Resources
 
@@ -13,22 +13,23 @@ The integrator exclusively owns:
 - launcher, API, web, and browser processes;
 - Chrome extension reload and loaded-directory synchronization;
 - all DevTools/CDP/`chrome.debugger` ownership;
-- exact provider tab IDs and live acceptance;
+- exact provider tab IDs, runtime lease issuance, and combined live acceptance;
 - ignored `.auth` launch data.
 
 Workers never receive raw launch URLs or tokens. The integrator resolves them locally by provider key.
 
 ## Collection Protocol
 
-For each worker report:
+For each Phase A worker report:
 
 1. Confirm its declared starting coordination-base commit.
 2. Compare `git diff --name-only` with the exact provider whitelist.
 3. Reject any out-of-scope edit and ask the worker to move it into a shared integration request; do not silently absorb it.
 4. Read every changed production/test line.
 5. Re-run the report's focused RED/GREEN outcome from the current combined worktree.
-6. Apply shared wiring with a new integration-level failing test before production edits.
-7. Stage only exact reviewed paths and commit only after the relevant gate passes.
+6. Require the report status to be `READY_FOR_INTEGRATION`, not done.
+7. Apply shared wiring with a new integration-level failing test before production edits.
+8. Stage only exact reviewed paths and commit only after the relevant gate passes.
 
 Do not stage a common progress file. Each worker has a separate report to avoid write conflicts.
 
@@ -91,9 +92,22 @@ npm.cmd test --workspace @tool-chenh/chrome-extension
 
 Then run package typechecks/builds and `git diff --check`. Scan tracked diffs for token/session/cookie/authorization fields and raw provider payloads before every commit.
 
+## Build Barrier and Runtime Leases
+
+After every provider-local/shared gate passes:
+
+1. Commit all reviewed integration changes.
+2. Run the full static matrix, then build contracts/API/extension/web serially.
+3. Start/restart the main application from that exact commit.
+4. Sync and reload the extension once; verify loaded artifact hash.
+5. Create the ignored evidence directory with `New-Item -ItemType Directory -Force .run/five-provider`.
+6. Resolve the five exact provider tab IDs and current bridge source IDs without exposing URLs/tokens.
+7. Send each worker a lease containing only its account, tab ID, source ID, commit, API process identity, extension artifact identity, allowed local endpoints, sampler command, evidence path, and acceptance window.
+8. Keep DevTools/CDP/`chrome.debugger`, global restart, extension reload, and build rights exclusively in the integrator.
+
 ## Runtime Gate
 
-Keep the five provider pages in different Chrome tabs. Build/reload once, then select targets by exact tab ID and source identity rather than activating tabs.
+Keep the five provider pages in different Chrome tabs. Build/reload once. Provider workers then select only their leased exact tab/source rather than activating tabs; the integrator watches for cross-provider interference.
 
 For each provider record redacted evidence:
 
@@ -106,6 +120,6 @@ For each provider record redacted evidence:
 - targeted recovery duration and result;
 - whether any unrelated provider source/sequence changed unexpectedly.
 
-Do not mark a provider accepted from bridge sequence alone. Do not turn an unavailable external login/provider into an empty successful catalog.
+Do not accept a worker report that contains only unit tests or bridge sequence. Do not turn an unavailable external login/provider into an empty successful catalog.
 
-Final order is SABA, CMD, APSPORT, IM, SBOBET, BTI regression, then a ten-minute simultaneous soak.
+Integration order is SABA, CMD, APSPORT, IM, SBOBET. Runtime provider checks may run concurrently after leases are issued; the final order is five worker verdicts, BTI regression, restart/reload reproof, then a ten-minute simultaneous soak.

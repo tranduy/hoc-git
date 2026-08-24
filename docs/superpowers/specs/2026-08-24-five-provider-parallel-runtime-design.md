@@ -12,7 +12,7 @@ Scope: SABA, CMD, APSPORT/TSPORT, IM, and SBOBET/KSPORT. BTI is the live regress
 
 Finish the five non-BTI realtime feeds quickly without allowing parallel agents to corrupt a shared Git index, overwrite shared integration files, race extension builds, or compete for Chrome debugger ownership.
 
-The final result is still one application and one branch. Parallelism is used only for provider-local adapter logic and focused tests. Shared bridge wiring, builds, runtime processes, extension reload, browser control, integration, and commits remain serialized through one integrator.
+The final result is still one application and one branch. Work runs in two phases. In Phase A, workers implement provider-local logic and focused tests while shared wiring/build/runtime stay serialized through the integrator. In Phase B, after one integration build/reload barrier, all five workers resume and perform provider-scoped live acceptance concurrently. A worker task is not complete at the Phase A boundary.
 
 ## Execution Model
 
@@ -25,7 +25,7 @@ feat/six-provider-realtime-feed
 
 Roles are fixed for the whole run:
 
-- Integrator: owns Git, all shared files, build artifacts, API/web processes, extension reload, Chrome tabs, debugger attachment, and live acceptance.
+- Integrator: owns Git, all shared files, build artifacts, API/web processes, extension reload, debugger attachment, runtime leases, and the final six-provider gate.
 - SABA worker: owns only the SABA API adapter files and its report.
 - CMD worker: owns only the CMD HTTP adapter, CMD poller/recovery unit, their tests, and its report.
 - APSPORT worker: owns only the TSPORT API adapter/authority assembler, their tests, and its report.
@@ -34,11 +34,13 @@ Roles are fixed for the whole run:
 
 An exact worker whitelist is authoritative. Everything not listed in that whitelist belongs to the integrator. Workers do not make opportunistic edits outside their list.
 
-## Why Browser Ownership Is Serialized
+## Browser and Runtime Ownership
 
 The five provider pages should stay open in five distinct Chrome tabs. That isolates page state and lets the integrator address each provider by exact `tabId` rather than relying on whichever tab is active.
 
-The five worker sessions must not open DevTools, call `chrome.debugger`, navigate, reload, close, focus, or otherwise automate those tabs. Chrome permits only one debugger owner for a target; a second DevTools/debugger attachment can detach the extension observer and invalidate the realtime evidence being tested.
+During Phase A, worker sessions do not touch Chrome or runtime. Chrome permits only one debugger owner for a target; a second DevTools/debugger attachment can detach the extension observer and invalidate realtime evidence. DevTools/CDP/`chrome.debugger`, builds, process restarts, and extension reload therefore remain integrator-only in both phases.
+
+After the integrator completes the shared build/reload barrier, each worker receives one runtime lease containing an account, exact `tabId`, exact source ID, and build identity. During Phase B that worker may query local runtime endpoints and exercise targeted recovery only for its leased provider. It may inspect/control the exact leased tab only through a mechanism that addresses the explicit tab/window identity; it must never fall back to the active tab. It may not attach a debugger, reveal launch data, or touch another provider.
 
 Only the integrator may:
 
@@ -48,9 +50,9 @@ Only the integrator may:
 - copy a build into the Chrome-loaded extension directory;
 - restart API/web/launcher processes;
 - trigger live source recovery;
-- perform runtime acceptance.
+- issue runtime leases and perform the final cross-provider acceptance.
 
-Workers use deterministic fixtures and focused Vitest suites only.
+Workers use deterministic fixtures and focused Vitest suites in Phase A. In Phase B they must also prove realtime behavior for their own provider from the integrated main application.
 
 ## Shared-State Safety
 
@@ -63,7 +65,7 @@ Workers must not edit:
 - another provider's files;
 - common task documents or another worker's report.
 
-When provider-local work requires shared wiring, the worker records one exact integration request in its report: required input/output, the shared file and symbol, the failing test that the integrator should add, and the invariant that must remain true. The integrator applies the shared edit once after collecting all reports.
+When provider-local work requires shared wiring, the worker records one exact integration request in its Phase A report: required input/output, the shared file and symbol, the failing test that the integrator should add, and the invariant that must remain true. The integrator applies the shared edit once after collecting all reports, builds/reloads once, then returns a runtime lease to the same worker.
 
 ## Provider Mapping
 
@@ -99,11 +101,11 @@ The integrator handles shared requests and live acceptance in this order:
 5. SBOBET
 6. BTI regression and six-provider soak
 
-This preserves the requested priority while allowing all five adapter workers to work concurrently.
+This preserves the requested integration priority while allowing all five adapter workers to work concurrently in both the code phase and the provider-scoped live phase.
 
 ## Acceptance Contract
 
-A provider is accepted only when all of the following are observed from the built main application:
+A provider worker may report `DONE` only when all of the following are observed by that worker from the integrator-issued built main application:
 
 - authority disposition is `ACTIVE`;
 - catalog/feed state is `LIVE` and externally reported snapshot state is `FRESH`;
@@ -115,5 +117,7 @@ A provider is accepted only when all of the following are observed from the buil
 - API restart and one extension reload recover through new authoritative evidence;
 - BTI remains active throughout;
 - the final six-provider soak runs for ten minutes with no false-live source.
+
+Before Phase B, the only permitted completion status is `READY_FOR_INTEGRATION`; wording such as done, complete, successful, fixed, or realtime-ready is forbidden.
 
 External provider/authentication unavailability is not converted into success. In that case the source remains fail-closed with an exact reason and the report records the external evidence.
