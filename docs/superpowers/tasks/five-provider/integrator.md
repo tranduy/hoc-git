@@ -38,9 +38,13 @@ Root completes any one-time legacy-to-managed-v2 handoff before the five worker
 prompts start. Only root may inspect or mutate the minimum `.auth` state required
 for that handoff. Workers never read, delete, repair, or replace `.auth` state.
 
-Root also verifies that the five provider pages remain in five distinct tabs and
-that the loaded unpacked extension belongs to this repository root. Root must not
-open DevTools or take debugger/CDP ownership from the extension observer.
+Root verifies that the five provider pages remain in five distinct tabs. The
+already-running extension may remain loaded during provider-local Phase A so the
+workers can begin immediately; it is observation-only and cannot prove completion
+for the new tree. Root must not open DevTools or take debugger/CDP ownership from
+the extension observer. Loading/reloading the exact repository-root extension is
+mandatory only inside Phase B, after all five workers are `LOCAL_GREEN` and before
+live acceptance begins.
 
 ## Phase A — Parallel Local Green
 

@@ -47,8 +47,11 @@ work concurrently.
 - [ ] Work only in `F:\0. PROJECT\tool-chenh` and confirm all prompt/task/report
   paths resolve from that root.
 - [ ] Complete any root-only legacy-to-managed-v2 handoff before worker prompts.
-- [ ] Keep five provider pages in five distinct tabs and confirm the loaded
-  unpacked extension belongs to the repository-root `dist` path.
+- [ ] Keep five provider pages in five distinct tabs. Do not delay Phase A merely
+  because Chrome still runs the prior extension artifact; that artifact is
+  observation-only and cannot produce acceptance evidence for the new tree.
+- [ ] Load/reload the exact repository-root `dist` only in the combined deployment
+  after all five workers are `LOCAL_GREEN` and before live acceptance begins.
 - [ ] Issue the five one-line prompts from `proccess.md`.
 
 ## Task 2 — Concurrent Provider-Local TDD
