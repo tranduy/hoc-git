@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import * as networkBodyAssembly from "./network-body-assembler.js";
@@ -500,6 +500,85 @@ describe("NetworkBodyAssembler", () => {
     expect(waiting.ingest(waitingChunk(0))).toBeNull();
     expect(waiting.ingest(waitingChunk(1))).toMatchObject({ payload: { body: "B!" } });
     expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("lets another assembler reclaim an idle owner's expired reservation", () => {
+    let now = 0;
+    const budget = new NetworkBodyAssemblyBudget({
+      maxPendingBodies: 1, maxPendingBytes: 10, now: () => now
+    });
+    const idle = new NetworkBodyAssembler({ now: () => now, ttlMs: 100, budget });
+    const active = new NetworkBodyAssembler({ now: () => now, ttlMs: 100, budget });
+
+    expect(idle.ingest({ ...envelope(0, 2, "A", "network-idle-owner"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    expect(budget.stats()).toEqual({ pendingBodies: 1, pendingBytes: 1 });
+    now = 101;
+    expect(active.ingest({ ...envelope(0, 1, "B", "network-active-owner"),
+      sourceId: "chrome:IM:9", tabId: 9, sourceEpoch: "worker-b:0" }))
+      .toMatchObject({ payload: { body: "B" } });
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+
+    expect(idle.ingest({ ...envelope(1, 2, "!", "network-idle-owner"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    expect(idle.stats()).toMatchObject({ pendingBodies: 0, blockedSourceEpochs: 1 });
+    expect(() => idle.dispose()).not.toThrow();
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("reclaims all 48 expired global reservations when a new owner arrives", () => {
+    let now = 0;
+    const budget = new NetworkBodyAssemblyBudget({ now: () => now });
+    const owners = Array.from({ length: 48 }, (_, index) => {
+      const assembler = new NetworkBodyAssembler({ now: () => now, ttlMs: 100, budget });
+      expect(assembler.ingest({ ...envelope(0, 2, "x", `network-expired-owner-${index}`),
+        sourceId: `chrome:IM:${index + 20}`, tabId: index + 20,
+        sourceEpoch: `worker-${index}:0` })).toBeNull();
+      return assembler;
+    });
+    expect(budget.stats()).toEqual({ pendingBodies: 48, pendingBytes: 48 });
+
+    now = 101;
+    const newcomer = new NetworkBodyAssembler({ now: () => now, ttlMs: 100, budget });
+    expect(newcomer.ingest({ ...envelope(0, 1, "N", "network-after-global-expiry"),
+      sourceId: "chrome:BTI:100", tabId: 100, sourceEpoch: "worker-new:0",
+      lobby: "BTI", request: { ...envelope(0).request, hostname: "bti.example" } }))
+      .toMatchObject({ payload: { body: "N" } });
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+    for (const owner of owners) owner.dispose();
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("makes disposal harmless after the budget expires a reservation independently", () => {
+    let now = 0;
+    const budget = new NetworkBodyAssemblyBudget({
+      maxPendingBodies: 2, maxPendingBytes: 10, now: () => now
+    });
+    const expired = new NetworkBodyAssembler({ now: () => now, ttlMs: 100, budget });
+    expect(expired.ingest({ ...envelope(0, 2, "A", "network-expiry-dispose"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    now = 101;
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+    expect(() => expired.dispose()).not.toThrow();
+    expect(() => expired.dispose()).not.toThrow();
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("uses the system clock to expire default-budget reservations during stats", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const budget = new NetworkBodyAssemblyBudget({ maxPendingBodies: 1, maxPendingBytes: 10 });
+      const assembler = new NetworkBodyAssembler({ ttlMs: 100, budget });
+      expect(assembler.ingest({ ...envelope(0, 2, "A", "network-default-budget-clock"),
+        sourceEpoch: "worker-a:0" })).toBeNull();
+      expect(budget.stats()).toEqual({ pendingBodies: 1, pendingBytes: 1 });
+      vi.setSystemTime(101);
+      expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+      expect(() => assembler.dispose()).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects bodies that exceed per-body or byte-pool limits and never completes them later", () => {

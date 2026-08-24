@@ -298,7 +298,9 @@ describe("ChromeCatalogDataPlane", () => {
   });
 
   it("injects one application-global multipart budget into active and candidate lanes", async () => {
-    const budget = new NetworkBodyAssemblyBudget({ maxPendingBodies: 1, maxPendingBytes: 1_000_000 });
+    const budget = new NetworkBodyAssemblyBudget({
+      maxPendingBodies: 1, maxPendingBytes: 1_000_000, now: () => 1_500
+    });
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500,
       networkBodyBudget: budget } as ConstructorParameters<typeof ChromeCatalogDataPlane>[0]);
     const current = cmdHttpEnvelope(1, { t: 100 });

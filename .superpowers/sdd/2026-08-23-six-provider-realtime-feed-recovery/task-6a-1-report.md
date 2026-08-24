@@ -235,3 +235,78 @@ Scoped added-production-line secret/raw-body hygiene scan: no matches.
 No contract, data-plane, coordinator, adapter, observer, browser/runtime
 process, navigation, reload, or external system behavior was changed in this
 fix round.
+
+---
+
+## Fix Round 3 (review of `492e5d8`)
+
+### Corrected global expiry ownership
+
+The application-global `NetworkBodyAssemblyBudget` now owns exact reservation
+tokens rather than irreversible aggregate counters. Each live token records its
+reserved bytes and absolute `expiresAtMs`; the token map itself is the body
+count, and live token bytes derive the aggregate byte count.
+
+- Every reserve, update, liveness check, and clock-aware stats read sweeps
+  expired tokens first. No timer or background process is required.
+- A pending assembler body holds its exact token. Accepted fragments update
+  that token's bytes while preserving the body's original absolute 30-second
+  deadline; fragments do not slide or extend TTL.
+- Shared pressure against a still-live token remains non-mutating and
+  non-faulting, preserving the Round 2 retry behavior.
+- If another assembler advances the shared clock and expires a token, the old
+  owner detects the missing token on its next sweep/chunk, releases its local
+  fragments, and faults the exact old source epoch. It cannot complete.
+- `release(token)` is identity-based and idempotent. Completion, reset,
+  externally-triggered expiry, repeated disposal, and disposal after expiry
+  cannot decrement a different reservation or underflow aggregate accounting.
+
+The 48-body/144-MiB global limits, 8-body/24-MiB per-source limits, compact
+epoch retirement fences, KSPORT request metadata binding, and cross-provider
+isolation are unchanged.
+
+### Strict RED record
+
+```text
+network-body-assembler.test.ts: 3 failed / 32 passed (35 total).
+
+The one-body cross-owner probe could not admit B after idle A's TTL elapsed.
+The 48-owner stress could not recover any global slot after every token expired.
+The clock-aware stats/disposal probe retained A's expired aggregate allocation.
+
+Default-clock follow-up RED: 1 failed / 35 passed (36 total).
+  A default budget's `stats()` reused the last operation timestamp instead of
+  sweeping at the current system time.
+```
+
+These failures reproduced the ownership gap directly: only A's local sweep
+could decrement A's allocation, so an idle A permanently consumed shared
+capacity.
+
+### Fix Round 3 verification
+
+```text
+Focused assembler GREEN: 36 passed.
+Focused contracts/assembler/data-plane: 3 suites / 90 tests passed.
+Whole contracts package: 2 suites / 96 tests passed.
+Task 5/6 assembler, route, data-plane, CMD, IM, SABA, and KSPORT regressions:
+  9 suites / 198 tests passed.
+Contracts typecheck and build: passed.
+API typecheck and build: passed.
+Chrome extension compatibility typecheck and build: passed.
+git diff/show --check: passed.
+Scoped added-production-line credential/raw-body hygiene scan: no matches.
+```
+
+### Fix Round 3 files
+
+- `apps/api/src/chrome-bridge/network-body-assembler.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.test.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+- `apps/api/src/chrome-bridge/chrome-catalog-data-plane.test.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6a-1-report.md`
+
+No contract, coordinator, adapter, observer, browser/runtime process,
+navigation, reload, or external system behavior was changed in this fix round.
+The data-plane-only edit supplies its existing clock to the shared default
+budget; it does not change authority or routing semantics.

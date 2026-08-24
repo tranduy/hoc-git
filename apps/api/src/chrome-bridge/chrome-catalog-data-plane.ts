@@ -103,7 +103,7 @@ export class ChromeCatalogDataPlane {
     this.#recoverableAccountIds = options.recoverableAccountIds ?? DEFAULT_RECOVERABLE_ACCOUNTS;
     this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
     this.#feeds = options.feedRegistry ?? new ProviderFeedRegistry({ now: this.#now });
-    this.#networkBodyBudget = options.networkBodyBudget ?? new NetworkBodyAssemblyBudget();
+    this.#networkBodyBudget = options.networkBodyBudget ?? new NetworkBodyAssemblyBudget({ now: this.#now });
   }
 
   owns(accountId: string): boolean {

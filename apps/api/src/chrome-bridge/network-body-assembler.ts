@@ -11,6 +11,7 @@ const textEncoder = new TextEncoder();
 export interface NetworkBodyAssemblyBudgetOptions {
   readonly maxPendingBodies?: number;
   readonly maxPendingBytes?: number;
+  readonly now?: () => number;
 }
 
 export interface NetworkBodyAssemblyBudgetStats {
@@ -18,41 +19,91 @@ export interface NetworkBodyAssemblyBudgetStats {
   readonly pendingBytes: number;
 }
 
+export interface NetworkBodyAssemblyReservation {
+  readonly kind: "NETWORK_BODY_ASSEMBLY_RESERVATION";
+}
+
+export type NetworkBodyAssemblyReservationUpdate = "ACCEPTED" | "MISSING" | "PRESSURE";
+
 export class NetworkBodyAssemblyBudget {
   readonly #maxPendingBodies: number;
   readonly #maxPendingBytes: number;
-  #pendingBodies = 0;
-  #pendingBytes = 0;
+  readonly #now: () => number;
+  readonly #reservations = new Map<NetworkBodyAssemblyReservation, {
+    bytes: number;
+    expiresAtMs: number;
+  }>();
+  #observedNowMs = 0;
 
   constructor(options: NetworkBodyAssemblyBudgetOptions = {}) {
     this.#maxPendingBodies = positiveInteger(options.maxPendingBodies,
       DEFAULT_MAX_PENDING_BODIES, "maxPendingBodies");
     this.#maxPendingBytes = positiveInteger(options.maxPendingBytes,
       DEFAULT_MAX_PENDING_BYTES, "maxPendingBytes");
+    this.#now = options.now ?? Date.now;
   }
 
-  tryReserve(bodyCount: number, byteCount: number): boolean {
-    nonnegativeInteger(bodyCount, "bodyCount");
+  reserve(byteCount: number, expiresAtMs: number, nowMs: number): NetworkBodyAssemblyReservation | null {
     nonnegativeInteger(byteCount, "byteCount");
-    if (this.#pendingBodies + bodyCount > this.#maxPendingBodies ||
-      this.#pendingBytes + byteCount > this.#maxPendingBytes) return false;
-    this.#pendingBodies += bodyCount;
-    this.#pendingBytes += byteCount;
-    return true;
+    finiteNonnegative(expiresAtMs, "expiresAtMs");
+    const now = this.#observeNow(nowMs);
+    this.#sweep(now);
+    if (expiresAtMs <= now || this.#reservations.size >= this.#maxPendingBodies ||
+      this.#pendingBytes() + byteCount > this.#maxPendingBytes) return null;
+    const reservation = Object.freeze({
+      kind: "NETWORK_BODY_ASSEMBLY_RESERVATION" as const
+    });
+    this.#reservations.set(reservation, { bytes: byteCount, expiresAtMs });
+    return reservation;
   }
 
-  release(bodyCount: number, byteCount: number): void {
-    nonnegativeInteger(bodyCount, "bodyCount");
-    nonnegativeInteger(byteCount, "byteCount");
-    if (bodyCount > this.#pendingBodies || byteCount > this.#pendingBytes) {
-      throw new Error("NETWORK_BODY_BUDGET_RELEASE_UNDERFLOW");
-    }
-    this.#pendingBodies -= bodyCount;
-    this.#pendingBytes -= byteCount;
+  update(reservation: NetworkBodyAssemblyReservation, additionalBytes: number,
+    expiresAtMs: number, nowMs: number): NetworkBodyAssemblyReservationUpdate {
+    nonnegativeInteger(additionalBytes, "additionalBytes");
+    finiteNonnegative(expiresAtMs, "expiresAtMs");
+    const now = this.#observeNow(nowMs);
+    this.#sweep(now);
+    const retained = this.#reservations.get(reservation);
+    if (retained === undefined || expiresAtMs <= now) return "MISSING";
+    if (this.#pendingBytes() + additionalBytes > this.#maxPendingBytes) return "PRESSURE";
+    retained.bytes += additionalBytes;
+    // A fragment cannot extend the body's original absolute TTL.
+    retained.expiresAtMs = Math.min(retained.expiresAtMs, expiresAtMs);
+    return "ACCEPTED";
+  }
+
+  isLive(reservation: NetworkBodyAssemblyReservation, nowMs: number): boolean {
+    const now = this.#observeNow(nowMs);
+    this.#sweep(now);
+    return this.#reservations.has(reservation);
+  }
+
+  release(reservation: NetworkBodyAssemblyReservation): void {
+    this.#reservations.delete(reservation);
   }
 
   stats(): NetworkBodyAssemblyBudgetStats {
-    return { pendingBodies: this.#pendingBodies, pendingBytes: this.#pendingBytes };
+    const now = this.#observeNow(this.#now());
+    this.#sweep(now);
+    return { pendingBodies: this.#reservations.size, pendingBytes: this.#pendingBytes() };
+  }
+
+  #observeNow(nowMs: number): number {
+    finiteNonnegative(nowMs, "nowMs");
+    this.#observedNowMs = Math.max(this.#observedNowMs, nowMs);
+    return this.#observedNowMs;
+  }
+
+  #sweep(nowMs: number): void {
+    for (const [reservation, retained] of this.#reservations) {
+      if (retained.expiresAtMs <= nowMs) this.#reservations.delete(reservation);
+    }
+  }
+
+  #pendingBytes(): number {
+    let bytes = 0;
+    for (const retained of this.#reservations.values()) bytes += retained.bytes;
+    return bytes;
   }
 }
 
@@ -64,7 +115,8 @@ interface PendingBody {
   readonly envelope: ChromeBridgeEnvelope;
   readonly chunkCount: number;
   readonly fragments: Map<number, string>;
-  readonly createdAtMs: number;
+  readonly expiresAtMs: number;
+  readonly reservation: NetworkBodyAssemblyReservation;
   byteCount: number;
 }
 
@@ -116,7 +168,8 @@ export class NetworkBodyAssembler {
       DEFAULT_MAX_PENDING_BYTES_PER_SOURCE, "maxPendingBytesPerSource");
     this.#budget = options.budget ?? new NetworkBodyAssemblyBudget({
       ...(options.maxPendingBodies === undefined ? {} : { maxPendingBodies: options.maxPendingBodies }),
-      ...(options.maxPendingBytes === undefined ? {} : { maxPendingBytes: options.maxPendingBytes })
+      ...(options.maxPendingBytes === undefined ? {} : { maxPendingBytes: options.maxPendingBytes }),
+      now: this.#now
     });
   }
 
@@ -154,13 +207,13 @@ export class NetworkBodyAssembler {
         this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
         return null;
       }
-      if (!this.#budget.tryReserve(1, fragmentBytes)) {
-        return null;
-      }
+      const expiresAtMs = now + this.#ttlMs;
+      const reservation = this.#budget.reserve(fragmentBytes, expiresAtMs, now);
+      if (reservation === null) return null;
       fragmentReserved = true;
       state = { key, sourceId: envelope.sourceId, sourceEpoch,
         identity, envelope, chunkCount: chunk.chunkCount, fragments: new Map<number, string>(),
-        createdAtMs: now, byteCount: 0 };
+        expiresAtMs, reservation, byteCount: 0 };
       this.#pending.set(key, state);
     }
 
@@ -174,8 +227,14 @@ export class NetworkBodyAssembler {
       this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
       return null;
     }
-    if (!fragmentReserved && !this.#budget.tryReserve(0, fragmentBytes)) {
-      return null;
+    if (!fragmentReserved) {
+      const reservationUpdate = this.#budget.update(state.reservation, fragmentBytes,
+        state.expiresAtMs, now);
+      if (reservationUpdate === "MISSING") {
+        this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
+        return null;
+      }
+      if (reservationUpdate === "PRESSURE") return null;
     }
     state.fragments.set(chunk.chunkIndex, chunk.bodyFragment);
     state.byteCount += fragmentBytes;
@@ -226,7 +285,7 @@ export class NetworkBodyAssembler {
     if (this.#pending.get(pending.key) !== pending) return;
     this.#pending.delete(pending.key);
     this.#pendingBytes -= pending.byteCount;
-    this.#budget.release(1, pending.byteCount);
+    this.#budget.release(pending.reservation);
   }
 
   #faultSourceEpoch(sourceId: string, sourceEpoch: string): void {
@@ -263,7 +322,7 @@ export class NetworkBodyAssembler {
 
   #sweep(now: number): void {
     for (const pending of [...this.#pending.values()]) {
-      if (now - pending.createdAtMs >= this.#ttlMs) {
+      if (now >= pending.expiresAtMs || !this.#budget.isLive(pending.reservation, now)) {
         this.#faultSourceEpoch(pending.sourceId, pending.sourceEpoch);
       }
     }
@@ -278,6 +337,10 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
 
 function nonnegativeInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`NETWORK_BODY_${name}_INVALID`);
+}
+
+function finiteNonnegative(value: number, name: string): void {
+  if (!Number.isFinite(value) || value < 0) throw new Error(`NETWORK_BODY_${name}_INVALID`);
 }
 
 function bodyKey(sourceId: string, sourceEpoch: string, snapshotId: string): string {
