@@ -1559,6 +1559,8 @@ describe("NetworkObserver", () => {
     });
     const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "worker-a" });
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "old-body",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.responseReceived", {
       requestId: "old-body", type: "XHR", response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" }
     });
@@ -1692,7 +1694,7 @@ describe("NetworkObserver", () => {
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
 
     const ingest = observer.ingestHttpResponse(im,
-      "https://imsports.directsb.net/api/EventV6/GetSEDelta", "Fetch", '{"delta":true}');
+      "https://imsports.directsb.net/api/EventV6/GetSEDelta", "Fetch", '{"delta":true}', { method: "POST" });
     await vi.waitFor(() => expect(recoverImBaseline).toHaveBeenCalledOnce());
     observer.beginSourceEpoch(im.sourceId);
     releaseRecovery();
@@ -2050,6 +2052,8 @@ describe("NetworkObserver", () => {
     });
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000, monotonicNow: () => 50 });
+    await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "xhr-1",
+      request: { method: "GET", url: "https://sports.example/api/odds?token=secret" } });
     await observer.handleEvent(source, "Network.responseReceived", {
       requestId: "xhr-1", type: "XHR", response: { url: "https://sports.example/api/odds?token=secret", mimeType: "application/json" }
     });
@@ -2059,6 +2063,8 @@ describe("NetworkObserver", () => {
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({ transport: "HTTP_RESPONSE", sequence: 0 }));
 
     sendCommand.mockRejectedValueOnce(new Error("body unavailable"));
+    await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "xhr-2",
+      request: { method: "POST", url: "https://sports.example/api/feed" } });
     await observer.handleEvent(source, "Network.responseReceived", {
       requestId: "xhr-2", type: "Fetch", response: { url: "https://sports.example/api/feed", mimeType: "application/json" }
     });
@@ -2079,10 +2085,11 @@ describe("NetworkObserver", () => {
     await observer.handleEvent(cmd, "Network.responseReceived", { requestId: "cmd-full", type: "XHR",
       response: { url: providerUrl, mimeType: "application/json" } });
     await observer.handleEvent(cmd, "Network.loadingFinished", { requestId: "cmd-full" });
-    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ request: {
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ request: expect.objectContaining({
       hostname: "cgnew.fts368.com", pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx",
-      resourceType: "XHR", providerFunctionCode: 1
-    } }));
+      resourceType: "XHR", providerFunctionCode: 1, method: "GET",
+      observerRequestId: expect.stringMatching(/:request:0$/u)
+    }) }));
     expect(JSON.stringify(forward.mock.calls)).not.toContain("opaque=secret");
   });
 
@@ -2115,7 +2122,7 @@ describe("NetworkObserver", () => {
       monotonicNow: () => 50, observerSessionId: "observer-im" });
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "xhr-im",
-      request: { url: "https://imsports.directsb.net/api/EventV6/GetSE",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE",
         postData: JSON.stringify({ SportId: 1, Market: 2, token: "must-not-leak" }) } });
     await observer.handleEvent(im, "Network.responseReceived", { requestId: "xhr-im", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
@@ -2144,7 +2151,7 @@ describe("NetworkObserver", () => {
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
 
     await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "xhr-im",
-      request: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.responseReceived", { requestId: "xhr-im", type: "Fetch",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.loadingFinished", { requestId: "xhr-im" });
@@ -2169,6 +2176,8 @@ describe("NetworkObserver", () => {
       monotonicNow: () => 50 });
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
 
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "xhr-im",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.responseReceived", { requestId: "xhr-im", type: "Fetch",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.loadingFinished", {
@@ -2204,6 +2213,8 @@ describe("NetworkObserver", () => {
       monotonicNow: () => 50 });
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
 
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "xhr-im",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.responseReceived", { requestId: "xhr-im", type: "Fetch",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.loadingFinished", { requestId: "xhr-im", encodedDataLength: 471_781 });
@@ -2226,12 +2237,14 @@ describe("NetworkObserver", () => {
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000, monotonicNow: () => 50 });
 
-    await observer.handleEvent({ lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 }, "Network.responseReceived", {
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "xhr-large",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.responseReceived", {
       requestId: "xhr-large", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE", mimeType: "application/json" }
     });
-    await observer.handleEvent({ lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 },
-      "Network.loadingFinished", { requestId: "xhr-large" });
+    await observer.handleEvent(im, "Network.loadingFinished", { requestId: "xhr-large" });
 
     expect(forward.mock.calls.length).toBeGreaterThan(1);
     const chunks = forward.mock.calls.map(([envelope]) => JSON.parse(envelope.payload.body));
@@ -2242,6 +2255,51 @@ describe("NetworkObserver", () => {
     const reconstructed = chunks.map((chunk) => chunk.bodyFragment).join("");
     expect(JSON.parse(reconstructed).sel).toHaveLength(5_000);
     expect(reconstructed).not.toContain("super-secret");
+  });
+
+  it("allocates direct HTTP request identities before awaits so concurrent large bodies cannot collide", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async () => ({})),
+      forward: async (message) => { forwarded.push(message); },
+      now: () => 1_000,
+      monotonicNow: () => 50,
+      observerSessionId: "observer-concurrent"
+    });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    const large = (label: string) => JSON.stringify({ StatusCode: 100,
+      sel: [{ label, pad: "x".repeat(230_000) }] });
+    type DirectHttpIngest = (source: typeof im, url: string, resourceType: "Fetch", body: string,
+      request: { readonly method: "GET" | "POST" }) => Promise<void>;
+    const ingest = observer.ingestHttpResponse.bind(observer) as unknown as DirectHttpIngest;
+
+    await Promise.all([
+      ingest(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch", large("A"), { method: "GET" }),
+      ingest(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch", large("B"), { method: "POST" })
+    ]);
+
+    const chunks = forwarded.map((message) => ({ message, wrapper: JSON.parse(message.payload.body) as {
+      snapshotId: string; chunkIndex: number; bodyFragment: string
+    } }));
+    expect(new Set(chunks.map(({ message }) => message.request.observerRequestId)).size).toBe(2);
+    expect(new Set(chunks.map(({ wrapper }) => wrapper.snapshotId)).size).toBe(2);
+    const requests = new Map<string, ChromeBridgeEnvelope[]>();
+    for (const { message } of chunks) {
+      const id = String(message.request.observerRequestId);
+      requests.set(id, [...(requests.get(id) ?? []), message]);
+    }
+    expect([...requests.values()].map((messages) => messages[0]!.request.method).sort())
+      .toEqual(["GET", "POST"]);
+    expect([...requests.values()].every((messages) => {
+      const ordered = [...messages].sort((left, right) => {
+        const leftChunk = JSON.parse(left.payload.body) as { chunkIndex: number };
+        const rightChunk = JSON.parse(right.payload.body) as { chunkIndex: number };
+        return leftChunk.chunkIndex - rightChunk.chunkIndex;
+      });
+      const body = ordered.map((message) => (JSON.parse(message.payload.body) as { bodyFragment: string })
+        .bodyFragment).join("");
+      return JSON.parse(body).sel.length === 1;
+    })).toBe(true);
   });
 
   it("queues every snapshot chunk before later delta traffic can interleave", async () => {
@@ -2260,10 +2318,14 @@ describe("NetworkObserver", () => {
       if (envelope.sequence === 0) await firstBlocked;
     }, now: () => 1_000, monotonicNow: () => 50 });
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "snapshot",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(im, "Network.responseReceived", { requestId: "snapshot", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     const snapshotRead = observer.handleEvent(im, "Network.loadingFinished", { requestId: "snapshot" });
     await Promise.resolve();
+    await observer.handleEvent(im, "Network.requestWillBeSent", { requestId: "delta",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSEDelta" } });
     await observer.handleEvent(im, "Network.responseReceived", { requestId: "delta", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSEDelta" } });
     const deltaRead = observer.handleEvent(im, "Network.loadingFinished", { requestId: "delta" });
@@ -2509,7 +2571,7 @@ describe("NetworkObserver", () => {
     const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => 60 });
     const source = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "snapshot",
-      request: { url: "https://imsports.directsb.net/api/EventV6/GetSE",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE",
         postData: JSON.stringify({ SportId: 1, Market: 2 }) } });
     await observer.handleEvent(source, "Network.responseReceived", { requestId: "snapshot", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
@@ -2538,7 +2600,7 @@ describe("NetworkObserver", () => {
     for (const market of [1, 2] as const) {
       const requestId = `snapshot-${market}`;
       await observer.handleEvent(source, "Network.requestWillBeSent", { requestId,
-        request: { url: "https://imsports.directsb.net/api/EventV6/GetSE",
+        request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE",
           postData: JSON.stringify({ SportId: 1, Market: market }) } });
       await observer.handleEvent(source, "Network.responseReceived", { requestId, type: "XHR",
         response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
@@ -3242,6 +3304,8 @@ describe("NetworkObserver", () => {
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward, now: () => 2_000, monotonicNow: () => 60 });
     const source = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "snapshot",
+      request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(source, "Network.responseReceived", { requestId: "snapshot", type: "XHR",
       response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
     await observer.handleEvent(source, "Network.loadingFinished", { requestId: "snapshot" });
@@ -3267,6 +3331,8 @@ describe("NetworkObserver", () => {
       recoverImBaseline, now: () => now });
     const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
     const delta = async (requestId: string) => {
+      await observer.handleEvent(im, "Network.requestWillBeSent", { requestId,
+        request: { method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSEDelta" } });
       await observer.handleEvent(im, "Network.responseReceived", { requestId, type: "XHR",
         response: { url: "https://imsports.directsb.net/api/EventV6/GetSEDelta" } });
       await observer.handleEvent(im, "Network.loadingFinished", { requestId });
@@ -3329,7 +3395,7 @@ describe("NetworkObserver", () => {
 
     await observer.ingestWebSocketFrame(source, "wss://imsports.directsb.net/feed", '{"odds":1.9}');
     await observer.ingestHttpResponse(source, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
-      '{"StatusCode":100,"sel":[]}');
+      '{"StatusCode":100,"sel":[]}', { method: "POST" });
 
     expect(sendCommand).not.toHaveBeenCalled();
     expect(forward.mock.calls.map(([message]) => message.transport)).toEqual(["WS_FRAME", "HTTP_RESPONSE"]);

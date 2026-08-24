@@ -35,6 +35,7 @@ import { resolveLocalAppData } from "./local-app-data.js";
 import { LatestCatalogPersister } from "./catalog/latest-catalog-persister.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
+import { ProviderAuthorityCoordinator } from "./chrome-bridge/provider-authority-coordinator.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -341,24 +342,27 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const catalogPersister = new LatestCatalogPersister(catalogStore);
   const catalogRevisions = new CatalogRevisionStore();
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
-  const chromeBridgeRegistry = chromeBridgeKey ? new ChromeBridgeRegistry() : null;
+  const providerAuthorityCoordinator = chromeBridgeKey ? new ProviderAuthorityCoordinator() : null;
+  const chromeBridgeRegistry = providerAuthorityCoordinator
+    ? new ChromeBridgeRegistry({ authorityCoordinator: providerAuthorityCoordinator }) : null;
   const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane({
-    activeSourceIds: () => new Set(chromeBridgeRegistry.listSources().map((source) => source.sourceId))
+    authorityCoordinator: chromeBridgeRegistry.authorityCoordinator
   }) : null;
   const providerFeeds = chromeBridgeRegistry ? new ProviderFeedRegistry() : null;
   const cmdHiddenMarketProbe = chromeBridgeRegistry && chromeBridgeControlPlane
-    ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
+    ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listActiveSources(),
       controlPlane: chromeBridgeControlPlane })
     : null;
   const selectionPriceProbe = chromeBridgeRegistry && chromeBridgeControlPlane
-    ? new SelectionPriceProbeCoordinator({ listSources: () => chromeBridgeRegistry.listSources(),
+    ? new SelectionPriceProbeCoordinator({ listSources: () => chromeBridgeRegistry.listActiveSources(),
       controlPlane: chromeBridgeControlPlane })
     : null;
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs: 20_000 });
       catalogPersister.schedule(`catalog-source|${catalog.provider}|${catalog.category}`, catalog);
-    }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }) })
+    }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }),
+    authorityCoordinator: chromeBridgeRegistry.authorityCoordinator })
     : null;
   if (chromeCatalogDataPlane !== null) {
     await Promise.all(["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"].map(async (provider) => {

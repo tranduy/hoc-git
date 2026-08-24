@@ -1,7 +1,56 @@
 import { describe, expect, it, vi } from "vitest";
 import { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
+import { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
+import type { AuthorityIdentity, CatalogCommitProof } from "./provider-authority-types.js";
+
+const SABA_ACCOUNT = "catalog-source:SABA:FOOTBALL" as const;
+
+function proof(cursor: bigint): CatalogCommitProof {
+  return { authorityCursor: cursor, provenance: "WS", contentClass: "FOOTBALL", completeness: "COMPLETE",
+    scope: "ACCOUNT", completedPartitions: ["SABA"], emptyProof: "PROVIDER_CONFIRMED_EMPTY",
+    catalog: { dataMode: "LIVE", accountId: SABA_ACCOUNT, provider: "SABA", category: "FOOTBALL",
+      comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: Number(cursor), rejectedMarketCount: 0,
+      events: [], markets: [], quotes: [] } };
+}
 
 describe("ChromeBridgeControlPlane", () => {
+  it("keeps routine control on active authority and explicitly addresses one candidate bootstrap", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const activeSocket = { send: vi.fn(), readyState: 1 };
+    const candidateSocket = { send: vi.fn(), readyState: 1 };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+
+    expect(plane.requestAllSnapshots()).toBe(0);
+    expect(plane.requestCandidateSnapshot(first.token)).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledWith(JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:SABA:1" }));
+    coordinator.promote(first.token, proof(1n));
+    expect(plane.requestAllSnapshots()).toBe(1);
+
+    const nextIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:2",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const next = coordinator.observe(nextIdentity, "TRANSPORT");
+    if (next.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(nextIdentity, next, "SABA", candidateSocket);
+    activeSocket.send.mockClear();
+    expect(plane.requestAllSnapshots()).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledOnce();
+    expect(candidateSocket.send).not.toHaveBeenCalled();
+
+    coordinator.promote(next.token, proof(2n));
+    plane.detach(activeSocket);
+    activeSocket.send.mockClear();
+    expect(plane.requestAllSnapshots()).toBe(1);
+    expect(candidateSocket.send).toHaveBeenCalledWith(JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:SABA:2" }));
+    expect(activeSocket.send).not.toHaveBeenCalled();
+  });
+
   it("requests a snapshot only from the targeted provider lobby", () => {
     const saba = { send: vi.fn(), readyState: 1 };
     const bti = { send: vi.fn(), readyState: 1 };

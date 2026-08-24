@@ -12,6 +12,16 @@ import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
 import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
 import type { FeedDecision, FeedProvenance } from "./provider-feed-types.js";
+import { chromeBridgeProviderAccountIdForLobby,
+  type ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
+import { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
+import type {
+  AuthorityCandidateToken,
+  AuthorityIdentity,
+  AuthorityLaneToken,
+  AuthorityObservation,
+  CatalogCommitProof
+} from "./provider-authority-types.js";
 
 export interface ChromeCatalogDataPlaneOptions {
   readonly now?: () => number;
@@ -26,10 +36,13 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly recoverableAccountIds?: ReadonlySet<string>;
   readonly onSourceRecoveryNeeded?: (accountId: string) => void;
   readonly networkBodyBudget?: NetworkBodyAssemblyBudget;
+  readonly authorityCoordinator?: ProviderAuthorityCoordinator;
 }
 
 export interface ChromeCatalogIngestContext {
   readonly connectionGeneration?: number;
+  readonly authorityIdentity?: AuthorityIdentity;
+  readonly authorityObservation?: AuthorityObservation;
 }
 
 interface CanonicalEpochIdentity {
@@ -44,29 +57,23 @@ interface LegacyEpochIdentity {
 
 type EpochIdentity = CanonicalEpochIdentity | LegacyEpochIdentity;
 
-interface AccountSourceOwner {
-  readonly connectionGeneration: number;
-  readonly sourceId: string;
-  readonly sourceEpoch: string;
-  readonly lobby: ChromeBridgeEnvelope["lobby"];
-  readonly identity: EpochIdentity;
-  readonly legacyHandoverUsed: boolean;
-}
-
 interface DecodePipeline {
   readonly router: AdapterRouter;
   readonly networkBodies: NetworkBodyAssembler;
+  readonly coverage: CatalogCoverageGuard;
+  readonly laneToken: AuthorityLaneToken;
 }
 
 interface CandidateDecodePipeline {
-  readonly owner: AccountSourceOwner;
+  readonly identity: AuthorityIdentity;
+  readonly token: AuthorityCandidateToken;
   readonly pipeline: DecodePipeline;
 }
 
-type SourceAdmission = {
-  readonly kind: "CURRENT" | "CANDIDATE";
-  readonly owner: AccountSourceOwner;
-};
+interface ActiveDecodePipeline {
+  readonly identity: AuthorityIdentity;
+  readonly pipeline: DecodePipeline;
+}
 
 const DEFAULT_RECOVERABLE_ACCOUNTS: ReadonlySet<string> = new Set([
   "catalog-source:SABA:FOOTBALL",
@@ -80,17 +87,17 @@ export class ChromeCatalogDataPlane {
   readonly #freshnessMs: number;
   readonly #maxEnvelopeAgeMs: number;
   readonly #publish: ((catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void) | null;
-  readonly #coverage = new CatalogCoverageGuard();
+  readonly #restoredCoverage = new CatalogCoverageGuard();
   readonly #feeds: ProviderFeedRegistry;
   readonly #catalogs = new Map<string, ObservedProviderCatalog>();
   readonly #catalogBases = new Map<string, FeedProvenance>();
-  readonly #accountOwners = new Map<string, AccountSourceOwner>();
-  readonly #activePipelines = new Map<string, DecodePipeline>();
+  readonly #activePipelines = new Map<string, ActiveDecodePipeline>();
   readonly #candidatePipelines = new Map<string, CandidateDecodePipeline>();
   readonly #lastEnvelopeAtMsBySource = new Map<string, number>();
   readonly #recoverableAccountIds: ReadonlySet<string>;
   readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
   readonly #networkBodyBudget: NetworkBodyAssemblyBudget;
+  readonly #authorityCoordinator: ProviderAuthorityCoordinator;
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -104,6 +111,21 @@ export class ChromeCatalogDataPlane {
     this.#onSourceRecoveryNeeded = options.onSourceRecoveryNeeded ?? null;
     this.#feeds = options.feedRegistry ?? new ProviderFeedRegistry({ now: this.#now });
     this.#networkBodyBudget = options.networkBodyBudget ?? new NetworkBodyAssemblyBudget({ now: this.#now });
+    this.#authorityCoordinator = options.authorityCoordinator ?? new ProviderAuthorityCoordinator();
+    this.#authorityCoordinator.subscribe((transition) => {
+      if (transition.kind === "ACTIVE_TRANSPORT_RELEASED") {
+        const active = this.#activePipelines.get(transition.accountId);
+        if (active?.pipeline.laneToken === transition.activeLaneToken) {
+          active.pipeline.networkBodies.dispose();
+        }
+        return;
+      }
+      if (transition.kind !== "CANDIDATE_REPLACED" && transition.kind !== "CANDIDATE_RELEASED") return;
+      const candidate = this.#candidatePipelines.get(transition.accountId);
+      if (candidate?.pipeline.laneToken !== transition.retiredLaneToken) return;
+      candidate.pipeline.networkBodies.dispose();
+      this.#candidatePipelines.delete(transition.accountId);
+    });
   }
 
   owns(accountId: string): boolean {
@@ -116,28 +138,42 @@ export class ChromeCatalogDataPlane {
     if (!Number.isFinite(ageMs) ||
       (ageMs > this.#maxEnvelopeAgeMs && (!replayed || ageMs > 86_400_000))) return false;
     const transportAccountId = accountIdForLobby(envelope.lobby);
-    if (transportAccountId === null) return false;
     const epoch = envelopeEpoch(envelope);
     if (epoch === null) return false;
     // Durable replay is display/bootstrap material only. It must not allocate
     // source ownership or touch body, router, or adapter authority state.
     if (replayed) return false;
-    const connectionGeneration = context.connectionGeneration ?? 0;
-    const admission = this.#admitSourceEpoch(transportAccountId, envelope, epoch, connectionGeneration);
-    if (admission === null) return false;
-    const sourceEpoch = admission.owner.sourceEpoch;
-    if (admission.kind === "CURRENT") {
+    // Direct callers have no authenticated socket generation. The tab id is a
+    // stable, bounded compatibility generation; the bridge route always
+    // supplies the registry's real monotonically increasing generation.
+    const connectionGeneration = context.connectionGeneration ?? Math.max(1, envelope.tabId);
+    if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration <= 0) return false;
+    const identity: AuthorityIdentity = context.authorityIdentity ?? {
+      accountId: transportAccountId,
+      sourceId: envelope.sourceId,
+      sourceEpoch: epoch.sourceEpoch,
+      connectionGeneration
+    };
+    if (!identityMatchesEnvelope(identity, transportAccountId, envelope, epoch.sourceEpoch,
+      connectionGeneration)) return false;
+    const admission = this.#authorityCoordinator.observe(identity,
+      envelope.transport === "TAB_STATE" || envelope.transport === "WS_STATE" ? "TRANSPORT" : "CANDIDATE_DATA");
+    if (admission.disposition === "REJECTED") return false;
+    if (context.authorityObservation !== undefined &&
+      !sameAuthorityObservation(admission, context.authorityObservation)) return false;
+    const sourceEpoch = identity.sourceEpoch;
+    if (admission.disposition === "ACTIVE") {
       this.#lastEnvelopeAtMsBySource.set(envelope.sourceId, this.#now());
       this.#feeds.accept({ kind: "TAB_REACHABLE", accountId: transportAccountId, sourceId: envelope.sourceId,
         sourceEpoch, atMs: envelope.observedAtMs });
     }
     if (envelope.transport === "TAB_STATE") {
-      if (admission.kind === "CURRENT") this.#requestRecoveries();
+      if (admission.disposition === "ACTIVE") this.#requestRecoveries();
       return false;
     }
-    const pipeline = admission.kind === "CURRENT"
-      ? this.#activePipeline(transportAccountId)
-      : this.#candidatePipeline(transportAccountId, admission.owner);
+    const pipeline = admission.disposition === "ACTIVE"
+      ? this.#activePipeline(identity, admission.laneToken)
+      : this.#candidatePipeline(identity, admission.token, admission.laneToken);
     if (pipeline === null) return false;
     const assembled = pipeline.networkBodies.ingest(envelope);
     if (assembled === null) return false;
@@ -145,8 +181,9 @@ export class ChromeCatalogDataPlane {
     if (route.status !== "TRUSTED" || route.adapter === null) return false;
     const update = route.adapter.decode(assembled).at(-1);
     if (update === undefined) return false;
+    if (update.sourceId !== identity.sourceId) return false;
     if (update.transportAlive === true) {
-      if (admission.kind === "CANDIDATE") return false;
+      if (admission.disposition === "CANDIDATE") return false;
       const provenance = transportProvenance(envelope.transport);
       if (provenance !== null) this.#feeds.accept({ kind: "TRANSPORT", accountId: transportAccountId,
         sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, provenance,
@@ -154,7 +191,8 @@ export class ChromeCatalogDataPlane {
       return false;
     }
     if (update.invalidateAccountId !== undefined) {
-      if (admission.kind === "CANDIDATE") return false;
+      if (admission.disposition === "CANDIDATE" ||
+        !this.#authorityCoordinator.invalidate(identity, update.reason).accepted) return false;
       return this.#applyDecision(this.#feeds.accept({ kind: "INVALIDATE", accountId: update.invalidateAccountId,
         sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, reason: update.reason }));
     }
@@ -188,19 +226,39 @@ export class ChromeCatalogDataPlane {
     const generation = update.generation ?? (mode === "BASELINE" && update.authoritativeBaseline === true
       ? `${sourceEpoch}:${update.sequence}` : null);
     if (generation === null) return false;
-    if (admission.kind === "CANDIDATE" && (mode !== "BASELINE" || update.authoritativeBaseline !== true ||
-      provenance === "DOM_FALLBACK")) return false;
+    const diagnosticOnlyDomCandidate = admission.disposition === "CANDIDATE" &&
+      provenance === "DOM_FALLBACK" && this.#authorityCoordinator.snapshot(transportAccountId).active === null;
+    if (admission.disposition === "CANDIDATE" && !diagnosticOnlyDomCandidate &&
+      (mode !== "BASELINE" || update.authoritativeBaseline !== true || provenance === "DOM_FALLBACK")) return false;
     const coverage = { generation, authoritativeBaseline: mode === "BASELINE",
       providerEventIds: nextCatalog.events.map((event) => event.providerEventId) };
     const explicitDomSweep = envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
       update.completeSweepEvidence === true;
-    if (!explicitDomSweep && !this.#coverage.allows(nextCatalog.accountId, coverage)) return false;
-    if (admission.kind === "CANDIDATE" &&
-      !this.#promoteCandidate(transportAccountId, admission.owner, envelope.observedAtMs)) return false;
+    if (!explicitDomSweep && !pipeline.coverage.allows(nextCatalog.accountId, coverage)) return false;
+    if (admission.disposition === "CANDIDATE" && !diagnosticOnlyDomCandidate) {
+      const proof = compatibilityCatalogProof(nextCatalog, provenance, update.sequence, generation);
+      if (proof === null) return false;
+      let stagedDecision: FeedDecision = { accepted: false, publish: null, stateChanged: false };
+      const promoted = this.#promoteCandidate(identity, admission.token, pipeline, proof,
+        envelope.observedAtMs, () => {
+          stagedDecision = this.#feeds.accept({ kind: "CATALOG", accountId: nextCatalog.accountId,
+            sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, generation, mode, provenance,
+            providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog });
+          if (stagedDecision.accepted) pipeline.coverage.commit(nextCatalog.accountId, coverage);
+          if (stagedDecision.accepted) this.#catalogBases.set(nextCatalog.accountId, catalogBasis);
+          if (stagedDecision.publish !== null) {
+            this.#catalogs.set(stagedDecision.publish.catalog.accountId, stagedDecision.publish.catalog);
+          }
+          return stagedDecision.accepted;
+        });
+      if (!promoted || stagedDecision.publish === null) return false;
+      this.#publish?.(stagedDecision.publish.catalog, stagedDecision.publish.snapshotState);
+      return true;
+    }
     const decision = this.#feeds.accept({ kind: "CATALOG", accountId: nextCatalog.accountId,
       sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, generation, mode, provenance,
       providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog });
-    if (decision.accepted) this.#coverage.commit(nextCatalog.accountId, coverage);
+    if (decision.accepted) pipeline.coverage.commit(nextCatalog.accountId, coverage);
     if (decision.accepted) this.#catalogBases.set(nextCatalog.accountId, catalogBasis);
     return this.#applyDecision(decision);
   }
@@ -212,7 +270,7 @@ export class ChromeCatalogDataPlane {
   restore(catalog: ObservedProviderCatalog): void {
     if (!this.owns(catalog.accountId) || catalog.category !== "FOOTBALL" ||
       catalog.events.length === 0 || catalog.markets.length === 0 || catalog.quotes.length === 0) return;
-    this.#coverage.accept(catalog.accountId, { generation: `restored:${catalog.observedAtMs}`,
+    this.#restoredCoverage.accept(catalog.accountId, { generation: `restored:${catalog.observedAtMs}`,
       authoritativeBaseline: false, providerEventIds: catalog.events.map((event) => event.providerEventId) });
     this.#catalogBases.set(catalog.accountId, "DOM_FALLBACK");
     this.#applyDecision(this.#feeds.restore(catalog));
@@ -220,10 +278,16 @@ export class ChromeCatalogDataPlane {
 
   resetCoverage(accountId?: string): void {
     if (accountId !== undefined) {
-      this.#coverage.reset(accountId);
+      this.#restoredCoverage.reset(accountId);
+      this.#activePipelines.get(accountId)?.pipeline.coverage.reset(accountId);
+      this.#candidatePipelines.get(accountId)?.pipeline.coverage.reset(accountId);
       return;
     }
-    for (const id of this.#catalogs.keys()) this.#coverage.reset(id);
+    for (const id of this.#catalogs.keys()) {
+      this.#restoredCoverage.reset(id);
+      this.#activePipelines.get(id)?.pipeline.coverage.reset(id);
+      this.#candidatePipelines.get(id)?.pipeline.coverage.reset(id);
+    }
   }
 
   async overlayStatuses(statuses: readonly CatalogSourceStatus[]): Promise<readonly CatalogSourceStatus[]> {
@@ -260,100 +324,69 @@ export class ChromeCatalogDataPlane {
     }
   }
 
-  #admitSourceEpoch(accountId: string, envelope: ChromeBridgeEnvelope,
-    epoch: { readonly sourceEpoch: string; readonly identity: EpochIdentity },
-    connectionGeneration: number): SourceAdmission | null {
-    if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration < 0) return null;
-    const current = this.#accountOwners.get(accountId);
-    const proposed = (legacyHandoverUsed: boolean): AccountSourceOwner => ({ connectionGeneration,
-      sourceId: envelope.sourceId, sourceEpoch: epoch.sourceEpoch, lobby: envelope.lobby,
-      identity: epoch.identity, legacyHandoverUsed });
-    if (current === undefined) {
-      const owner = proposed(false);
-      this.#accountOwners.set(accountId, owner);
-      this.#activePipelines.set(accountId, createDecodePipeline(this.#networkBodyBudget));
-      return { kind: "CURRENT", owner };
-    }
-    if (connectionGeneration < current.connectionGeneration) return null;
-    if (sameOwnerEpoch(current, envelope.sourceId, epoch.sourceEpoch)) {
-      if (connectionGeneration === current.connectionGeneration) return { kind: "CURRENT", owner: current };
-      // A new authenticated bridge connection does not create a new provider
-      // epoch when the source identity is unchanged. Advance transport
-      // ownership in place so the current decoder/controller authority remains
-      // intact; provider-specific cursors still reject a stale catalog and the
-      // registry connection fence rejects the superseded socket.
-      const reconnected = proposed(current.legacyHandoverUsed);
-      this.#accountOwners.set(accountId, reconnected);
-      const candidate = this.#candidatePipelines.get(accountId);
-      if (candidate !== undefined && candidate.owner.connectionGeneration < connectionGeneration) {
-        candidate.pipeline.networkBodies.dispose();
-        this.#candidatePipelines.delete(accountId);
-      }
-      return { kind: "CURRENT", owner: reconnected };
-    }
-
-    if (current.identity.kind === "CANONICAL" && epoch.identity.kind === "CANONICAL" &&
-      current.identity.lineage === epoch.identity.lineage) {
-      if (epoch.identity.generation <= current.identity.generation) return null;
-      return { kind: "CANDIDATE", owner: proposed(current.legacyHandoverUsed) };
-    }
-
-    const feedHasNoOwner = this.#feeds.snapshot(accountId).sourceId === null;
-    if (connectionGeneration > current.connectionGeneration || feedHasNoOwner) {
-      return { kind: "CANDIDATE", owner: proposed(current.legacyHandoverUsed) };
-    }
-
-    // Legacy fixtures have no observer lineage. Preserve one bounded
-    // same-connection handover after the pinned source is silent; modern
-    // sources use canonical epochs and can advance indefinitely by watermark.
-    if (current.identity.kind === "LEGACY" && epoch.identity.kind === "LEGACY" &&
-      !current.legacyHandoverUsed) {
-      const lastSeenAtMs = this.#lastEnvelopeAtMsBySource.get(current.sourceId);
-      if (lastSeenAtMs !== undefined && this.#now() - lastSeenAtMs > this.#freshnessMs) {
-        return { kind: "CANDIDATE", owner: proposed(true) };
-      }
-    }
-    return null;
-  }
-
-  #activePipeline(accountId: string): DecodePipeline {
-    const existing = this.#activePipelines.get(accountId);
-    if (existing !== undefined) return existing;
-    const pipeline = createDecodePipeline(this.#networkBodyBudget);
-    this.#activePipelines.set(accountId, pipeline);
+  #activePipeline(identity: AuthorityIdentity, laneToken: AuthorityLaneToken): DecodePipeline {
+    const existing = this.#activePipelines.get(identity.accountId);
+    if (existing !== undefined && existing.pipeline.laneToken === laneToken &&
+      sameAuthorityIdentity(existing.identity, identity)) return existing.pipeline;
+    existing?.pipeline.networkBodies.dispose();
+    const pipeline = createDecodePipeline(this.#networkBodyBudget, laneToken);
+    this.#activePipelines.set(identity.accountId, { identity, pipeline });
     return pipeline;
   }
 
-  #candidatePipeline(accountId: string, owner: AccountSourceOwner): DecodePipeline | null {
-    const current = this.#candidatePipelines.get(accountId);
-    if (current !== undefined && sameOwner(current.owner, owner)) return current.pipeline;
-    if (current !== undefined && !candidateSupersedes(current.owner, owner)) return null;
-    if (current !== undefined) current.pipeline.networkBodies.dispose();
-    const pipeline = createDecodePipeline(this.#networkBodyBudget);
-    this.#candidatePipelines.set(accountId, { owner, pipeline });
+  #candidatePipeline(identity: AuthorityIdentity, token: AuthorityCandidateToken,
+    laneToken: AuthorityLaneToken): DecodePipeline {
+    const current = this.#candidatePipelines.get(identity.accountId);
+    if (current !== undefined && current.token === token && current.pipeline.laneToken === laneToken &&
+      sameAuthorityIdentity(current.identity, identity)) return current.pipeline;
+    current?.pipeline.networkBodies.dispose();
+    const pipeline = createDecodePipeline(this.#networkBodyBudget, laneToken);
+    this.#candidatePipelines.set(identity.accountId, { identity, token, pipeline });
     return pipeline;
   }
 
-  #promoteCandidate(accountId: string, owner: AccountSourceOwner, atMs: number): boolean {
-    const candidate = this.#candidatePipelines.get(accountId);
-    if (candidate === undefined || !sameOwner(candidate.owner, owner)) return false;
-    const snapshot = this.#feeds.snapshot(accountId);
-    if (snapshot.sourceId !== null && snapshot.sourceEpoch !== null) {
-      const invalidation = this.#feeds.accept({ kind: "INVALIDATE", accountId,
-        sourceId: snapshot.sourceId, sourceEpoch: snapshot.sourceEpoch, atMs, reason: "SOURCE_REPLACED" });
-      if (!invalidation.accepted) return false;
-    }
-    const previous = this.#accountOwners.get(accountId);
-    if (previous !== undefined) this.#lastEnvelopeAtMsBySource.delete(previous.sourceId);
-    const previousActive = this.#activePipelines.get(accountId);
-    if (previousActive !== undefined && previousActive !== candidate.pipeline) {
-      previousActive.networkBodies.dispose();
-    }
-    this.#accountOwners.set(accountId, owner);
-    this.#activePipelines.set(accountId, candidate.pipeline);
-    this.#candidatePipelines.delete(accountId);
-    this.#lastEnvelopeAtMsBySource.set(owner.sourceId, this.#now());
-    return true;
+  #promoteCandidate(identity: AuthorityIdentity, token: AuthorityCandidateToken,
+    pipeline: DecodePipeline, proof: CatalogCommitProof, atMs: number, commit: () => boolean): boolean {
+    const candidate = this.#candidatePipelines.get(identity.accountId);
+    if (candidate === undefined || candidate.token !== token || candidate.pipeline !== pipeline ||
+      !sameAuthorityIdentity(candidate.identity, identity)) return false;
+    let committed = false;
+    const promotion = this.#authorityCoordinator.promote(token, proof, (transaction) => {
+      if (transaction.previousActive !== null &&
+        (transaction.previousActive.sourceId !== identity.sourceId ||
+          transaction.previousActive.sourceEpoch !== identity.sourceEpoch)) {
+        this.#lastEnvelopeAtMsBySource.delete(transaction.previousActive.sourceId);
+        this.#feeds.accept({
+          kind: "INVALIDATE",
+          accountId: identity.accountId,
+          sourceId: transaction.previousActive.sourceId,
+          sourceEpoch: transaction.previousActive.sourceEpoch,
+          atMs,
+          reason: "SOURCE_REPLACED"
+        });
+      }
+      if (!commit()) throw new Error("AUTHORITY_FEED_COMMIT_REJECTED");
+      // The proof-triggering body has already completed. Rotate the assembler
+      // inside the coordinator transaction so no observer can see an ACTIVE
+      // token paired with candidate-phase multipart state.
+      pipeline.networkBodies.dispose();
+      const activePipeline: DecodePipeline = {
+        router: pipeline.router,
+        coverage: pipeline.coverage,
+        laneToken: transaction.activeLaneToken,
+        networkBodies: new NetworkBodyAssembler({
+          budget: this.#networkBodyBudget,
+          laneToken: transaction.activeLaneToken
+        })
+      };
+      const previous = this.#activePipelines.get(identity.accountId);
+      previous?.pipeline.networkBodies.dispose();
+      this.#activePipelines.set(identity.accountId, { identity: transaction.active, pipeline: activePipeline });
+      this.#candidatePipelines.delete(identity.accountId);
+      this.#lastEnvelopeAtMsBySource.set(identity.sourceId, this.#now());
+      committed = true;
+    });
+    return promotion.promoted && committed;
   }
 
   #applyDecision(decision: FeedDecision): boolean {
@@ -364,12 +397,8 @@ export class ChromeCatalogDataPlane {
   }
 }
 
-function accountIdForLobby(lobby: ChromeBridgeEnvelope["lobby"]): string | null {
-  const provider = lobby === "KSPORT" || lobby === "SBO" ? "SBOBET"
-    : lobby === "TSPORT" ? "APSPORT"
-    : lobby === "CMD" || lobby === "IM" || lobby === "SABA" || lobby === "BTI" ? lobby
-    : null;
-  return provider === null ? null : `catalog-source:${provider}:FOOTBALL`;
+function accountIdForLobby(lobby: ChromeBridgeEnvelope["lobby"]): ChromeBridgeProviderAccountId {
+  return chromeBridgeProviderAccountIdForLobby(lobby);
 }
 
 function legacySourceEpoch(sourceId: string): string {
@@ -395,29 +424,47 @@ function canonicalSourceEpoch(sourceEpoch: string): { readonly lineage: string; 
   return Number.isSafeInteger(generation) ? { lineage: match[1]!, generation } : null;
 }
 
-function sameOwnerEpoch(owner: AccountSourceOwner, sourceId: string, sourceEpoch: string): boolean {
-  return owner.sourceId === sourceId && owner.sourceEpoch === sourceEpoch;
-}
-
-function sameOwner(left: AccountSourceOwner, right: AccountSourceOwner): boolean {
-  return left.connectionGeneration === right.connectionGeneration && left.sourceId === right.sourceId &&
-    left.sourceEpoch === right.sourceEpoch;
-}
-
-function candidateSupersedes(current: AccountSourceOwner, proposed: AccountSourceOwner): boolean {
-  if (proposed.connectionGeneration !== current.connectionGeneration) {
-    return proposed.connectionGeneration > current.connectionGeneration;
-  }
-  return current.identity.kind === "CANONICAL" && proposed.identity.kind === "CANONICAL" &&
-    current.identity.lineage === proposed.identity.lineage &&
-    proposed.identity.generation > current.identity.generation;
-}
-
-function createDecodePipeline(budget: NetworkBodyAssemblyBudget): DecodePipeline {
+function createDecodePipeline(budget: NetworkBodyAssemblyBudget, laneToken: AuthorityLaneToken): DecodePipeline {
   return { router: new AdapterRouter([new CmdHttpCatalogAdapter(), new CmdDomCatalogAdapter(),
     new ImHttpCatalogAdapter(), new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(),
     new TsportWsCatalogAdapter(), new BtiHttpCatalogAdapter()], { confirmationsRequired: 1 }),
-  networkBodies: new NetworkBodyAssembler({ budget }) };
+  coverage: new CatalogCoverageGuard(), laneToken,
+  networkBodies: new NetworkBodyAssembler({ budget, laneToken }) };
+}
+
+function sameAuthorityIdentity(left: AuthorityIdentity, right: AuthorityIdentity): boolean {
+  return left.accountId === right.accountId && left.sourceId === right.sourceId &&
+    left.sourceEpoch === right.sourceEpoch && left.connectionGeneration === right.connectionGeneration;
+}
+
+function sameAuthorityObservation(left: AuthorityObservation, right: AuthorityObservation): boolean {
+  if (left.disposition !== right.disposition) return false;
+  if (left.disposition === "REJECTED" || right.disposition === "REJECTED") {
+    return left.disposition === right.disposition && left.reason === right.reason;
+  }
+  return left.laneToken === right.laneToken && left.token === right.token;
+}
+
+function identityMatchesEnvelope(identity: AuthorityIdentity, accountId: ChromeBridgeProviderAccountId,
+  envelope: ChromeBridgeEnvelope, sourceEpoch: string, connectionGeneration: number): boolean {
+  return identity.accountId === accountId && identity.sourceId === envelope.sourceId &&
+    identity.sourceEpoch === sourceEpoch && identity.connectionGeneration === connectionGeneration;
+}
+
+function compatibilityCatalogProof(catalog: ObservedProviderCatalog, provenance: FeedProvenance,
+  sequence: number, generation: string): CatalogCommitProof | null {
+  if (provenance !== "WS" && provenance !== "AUTHENTICATED_HTTP") return null;
+  if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
+  return {
+    authorityCursor: BigInt(sequence),
+    provenance,
+    contentClass: "FOOTBALL",
+    completeness: "COMPLETE",
+    scope: "ACCOUNT",
+    completedPartitions: [generation],
+    emptyProof: catalog.events.length === 0 ? "PROVIDER_CONFIRMED_EMPTY" : "NONEMPTY",
+    catalog
+  };
 }
 
 function catalogProvenance(transport: ChromeBridgeEnvelope["transport"]): FeedProvenance {

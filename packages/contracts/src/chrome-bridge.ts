@@ -7,6 +7,9 @@ const TimestampSchema = z.number().finite().nonnegative();
 const SourceIdSchema = z.string().trim().min(1).max(128);
 const PublicGenerationIdSchema = z.string().trim().min(1).max(128).regex(/^[a-z0-9._:-]+$/iu);
 
+export const ChromeBridgeHttpMethodSchema = z.string().min(1).max(32)
+  .regex(/^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]*$/u);
+
 export const ChromeLobbyIdSchema = z.enum([
   "IM",
   "BTI",
@@ -29,6 +32,8 @@ const SanitizedRequestBaseShape = {
   hostname: z.string().trim().min(1).max(253).regex(/^[a-z0-9.-]+$/iu),
   pathnameClass: z.string().trim().min(1).max(512).startsWith("/"),
   resourceType: z.string().trim().min(1).max(64),
+  method: ChromeBridgeHttpMethodSchema.optional(),
+  observerRequestId: PublicGenerationIdSchema.optional(),
   streamId: PublicGenerationIdSchema.optional(),
   providerFunctionCode: z.number().int().min(1).max(7).optional(),
   reconcileCutoffSequence: SafeIntegerSchema.optional(),
@@ -82,6 +87,16 @@ export const ChromeBridgeEnvelopeSchema = z.strictObject({
   if ("providerContentIntent" in value.request && value.lobby !== "KSPORT") {
     context.addIssue({ code: "custom", path: ["lobby"],
       message: "KSPORT recovery metadata requires the KSPORT lobby" });
+  }
+  if (value.transport === "HTTP_RESPONSE") {
+    if (value.request.method === undefined) {
+      context.addIssue({ code: "custom", path: ["request", "method"],
+        message: "HTTP responses require an exact sanitized request method" });
+    }
+    if (value.request.observerRequestId === undefined) {
+      context.addIssue({ code: "custom", path: ["request", "observerRequestId"],
+        message: "HTTP responses require an observer request identity" });
+    }
   }
 });
 
@@ -266,6 +281,7 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
 
 export type ChromeLobbyId = z.infer<typeof ChromeLobbyIdSchema>;
 export type ChromeBridgeTransport = z.infer<typeof ChromeBridgeTransportSchema>;
+export type ChromeBridgeHttpMethod = z.infer<typeof ChromeBridgeHttpMethodSchema>;
 export type KsportRecoveryRequestMetadata = z.infer<typeof KsportRecoveryRequestMetadataSchema>;
 export type ChromeBridgeRequest = z.infer<typeof SanitizedRequestSchema>;
 export type ChromeBridgeEnvelope = z.infer<typeof ChromeBridgeEnvelopeSchema>;

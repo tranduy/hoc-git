@@ -5,6 +5,9 @@ import { ChromeCatalogDataPlane } from "./chrome-catalog-data-plane.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
 import { NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
+import { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
+import { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
+import { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
 
 const SBOBET = "catalog-source:SBOBET:FOOTBALL";
 const SABA = "catalog-source:SABA:FOOTBALL";
@@ -176,6 +179,98 @@ function decodedBaseline(sourceId: string, catalog: ObservedProviderCatalog, seq
 afterEach(() => vi.restoreAllMocks());
 
 describe("ChromeCatalogDataPlane", () => {
+  it("atomically aligns registry, data, feed, and control ownership before active routing", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const budget = new NetworkBodyAssemblyBudget();
+    const registry = new ChromeBridgeRegistry({ now: () => 1_500, authorityCoordinator: coordinator });
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
+      networkBodyBudget: budget });
+    const control = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const connection = {};
+    const socket = { send: vi.fn(), readyState: 1 };
+    registry.subscribe((envelope, context) => { plane.ingest(envelope, context); });
+    const ingest = (envelope: ChromeBridgeEnvelope) => {
+      const result = registry.ingestDetailed(envelope, connection);
+      if (result.context !== null) {
+        control.attachAuthority(result.context.authorityIdentity, result.context.authorityObservation,
+          envelope.lobby, socket);
+      }
+      return result;
+    };
+
+    expect(ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 1)).control)
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.listActiveSources()).toEqual([]);
+    expect(control.requestAllSnapshots()).toBe(0);
+
+    expect(ingest(ksportEnvelope(2, "today", [], "worker-a:0", 1)).control)
+      .toMatchObject({ kind: "ACK" });
+    expect(coordinator.snapshot(SBOBET).candidate).toBeNull();
+    expect(registry.listActiveSources()).toEqual([expect.objectContaining({
+      sourceId: "chrome:KSPORT:8", authorityDisposition: "ACTIVE"
+    })]);
+    socket.send.mockClear();
+    expect(control.requestAllSnapshots()).toBe(1);
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:KSPORT:8" }));
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "101" })]
+    });
+
+    ingest(chunkedNetworkBody(ksportHttpEnvelope(3, "live", 2, [202]), 3, 0,
+      "active-body-released-with-connection"));
+    expect(budget.stats()).toMatchObject({ pendingBodies: 1 });
+    registry.releaseConnection(connection);
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("keeps bootstrap evidence candidate-only and promotes only its complete catalog proof", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator });
+    const live = ksportEnvelope(1, "live", [101], "worker-a:0", 1);
+
+    expect(plane.ingest(tabHeartbeat(live, 1_001, 0), { connectionGeneration: 1 })).toBe(false);
+    expect(coordinator.snapshot(SBOBET)).toMatchObject({
+      active: null,
+      candidate: expect.objectContaining({ sourceId: "chrome:KSPORT:8", sourceEpoch: "worker-a:0" })
+    });
+    expect(plane.ingest(live, { connectionGeneration: 1 })).toBe(false);
+    expect(coordinator.snapshot(SBOBET).active).toBeNull();
+
+    expect(plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 1),
+      { connectionGeneration: 1 })).toBe(true);
+    expect(coordinator.snapshot(SBOBET)).toMatchObject({
+      active: expect.objectContaining({ sourceId: "chrome:KSPORT:8", connectionGeneration: 1 }),
+      candidate: null,
+      activeLaneToken: expect.objectContaining({ phase: "ACTIVE" })
+    });
+    await expect(plane.read(SBOBET)).resolves.toMatchObject({ accountId: SBOBET });
+  });
+
+  it("disposes every pending candidate body when the completed promotion body wins CAS", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const budget = new NetworkBodyAssemblyBudget();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, authorityCoordinator: coordinator,
+      networkBodyBudget: budget });
+    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 1), { connectionGeneration: 1 });
+    expect(plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 1),
+      { connectionGeneration: 1 })).toBe(true);
+
+    const replacementHttp = ksportHttpEnvelope(3, "live", 2, [202],
+      "chrome:KSPORT:9", 9, "worker-b:0");
+    expect(plane.ingest(chunkedNetworkBody(replacementHttp, 3, 0, "candidate-unrelated-pending"),
+      { connectionGeneration: 2 })).toBe(false);
+    expect(budget.stats()).toMatchObject({ pendingBodies: 1 });
+    expect(coordinator.snapshot(SBOBET).active?.sourceId).toBe("chrome:KSPORT:8");
+
+    expect(plane.ingest({ ...ksportEnvelope(4, "live", [202], "worker-b:0", 2),
+      sourceId: "chrome:KSPORT:9", tabId: 9 }, { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest({ ...ksportEnvelope(5, "today", [], "worker-b:0", 2),
+      sourceId: "chrome:KSPORT:9", tabId: 9 }, { connectionGeneration: 2 })).toBe(true);
+    expect(coordinator.snapshot(SBOBET).active?.sourceId).toBe("chrome:KSPORT:9");
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
   it("resolves a recovery-owner wait through the injected shared registry", async () => {
     const registry = new ProviderFeedRegistry({ now: () => 1_500 });
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, feedRegistry: registry });
@@ -297,7 +392,7 @@ describe("ChromeCatalogDataPlane", () => {
     });
   });
 
-  it("injects one application-global multipart budget into active and candidate lanes", async () => {
+  it("shares one multipart budget while candidate rotation retires the prior pending body", async () => {
     const budget = new NetworkBodyAssemblyBudget({
       maxPendingBodies: 1, maxPendingBytes: 1_000_000, now: () => 1_500
     });
@@ -314,6 +409,9 @@ describe("ChromeCatalogDataPlane", () => {
       { connectionGeneration: 1 })).toBe(false);
     expect(budget.stats().pendingBodies).toBe(1);
     expect(plane.ingest(chunkedNetworkBody(current, 3, 1, "network-shared-lane-current"),
+      { connectionGeneration: 1 })).toBe(false);
+    expect(budget.stats().pendingBodies).toBe(1);
+    expect(plane.ingest(chunkedNetworkBody(candidate, 4, 1, "network-shared-lane-candidate"),
       { connectionGeneration: 1 })).toBe(true);
     expect(budget.stats()).toMatchObject({ pendingBodies: 0, pendingBytes: 0 });
   });
@@ -717,7 +815,7 @@ describe("ChromeCatalogDataPlane", () => {
     expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
   });
 
-  it("delivers SOFT first when a tab attaches after a long no-source period", async () => {
+  it("keeps a candidate tab out of active feed recovery until catalog promotion", async () => {
     let now = 0;
     const onSourceRecoveryNeeded = vi.fn();
     const registry = new ProviderFeedRegistry({ now: () => now });
@@ -730,8 +828,9 @@ describe("ChromeCatalogDataPlane", () => {
     now = 100_001;
     plane.ingest(tabHeartbeat(sabaEnvelope(1, []), now, 2));
 
-    expect(onSourceRecoveryNeeded).toHaveBeenCalledExactlyOnceWith(SABA);
-    expect(registry.snapshot(SABA)).toMatchObject({ recoveryStage: "SOFT", recoveryAttempt: 1 });
+    expect(onSourceRecoveryNeeded).not.toHaveBeenCalled();
+    expect(registry.snapshot(SABA)).toMatchObject({ state: "STARTING", recoveryStage: "NONE",
+      recoveryAttempt: 0, sourceId: null });
   });
 
   it("drops expired and incomplete CMD observations without making them live", async () => {

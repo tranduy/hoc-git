@@ -1,6 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
+import type { CatalogCommitProof } from "./provider-authority-types.js";
+
+function proof(cursor: bigint): CatalogCommitProof {
+  return {
+    authorityCursor: cursor, provenance: "WS", contentClass: "FOOTBALL", completeness: "COMPLETE",
+    scope: "ACCOUNT", completedPartitions: ["SABA"], emptyProof: "PROVIDER_CONFIRMED_EMPTY",
+    catalog: { dataMode: "LIVE", accountId: "catalog-source:SABA:FOOTBALL", provider: "SABA",
+      category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: Number(cursor),
+      rejectedMarketCount: 0, events: [], markets: [], quotes: [] }
+  };
+}
 
 function envelope(sequence: number, sourceId = "chrome:SABA:7"): ChromeBridgeEnvelope {
   return {
@@ -13,6 +24,43 @@ function envelope(sequence: number, sourceId = "chrome:SABA:7"): ChromeBridgeEnv
 }
 
 describe("ChromeBridgeRegistry", () => {
+  it("ACKs transport while keeping active and candidate records proof-fenced", () => {
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const firstConnection = {};
+    const candidateConnection = {};
+    const replayConnection = {};
+    const observed = vi.fn();
+    registry.subscribe(observed);
+
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" }, firstConnection))
+      .toMatchObject({ kind: "ACK" });
+    const firstToken = registry.authorityCoordinator.snapshot("catalog-source:SABA:FOOTBALL").candidateToken!;
+    expect(registry.authorityCoordinator.promote(firstToken, proof(1n))).toMatchObject({ promoted: true });
+    expect(registry.listSources()).toEqual([expect.objectContaining({
+      sourceId: "chrome:SABA:7", authorityDisposition: "ACTIVE"
+    })]);
+
+    const next = { ...envelope(0, "chrome:SABA:8"), tabId: 8, sourceEpoch: "observer-b:0" };
+    expect(registry.ingest(next, candidateConnection)).toMatchObject({ kind: "ACK" });
+    expect(registry.listSources()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceId: "chrome:SABA:7", authorityDisposition: "ACTIVE" }),
+      expect.objectContaining({ sourceId: "chrome:SABA:8", authorityDisposition: "CANDIDATE" })
+    ]));
+
+    expect(registry.ingest({ ...envelope(0, "chrome:SABA:9"), tabId: 9,
+      sourceEpoch: "observer-replay:0", request: { ...envelope(0).request, replayed: true } }, replayConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.listSources()).toHaveLength(2);
+    expect(observed).toHaveBeenCalledTimes(2);
+
+    const nextToken = registry.authorityCoordinator.snapshot("catalog-source:SABA:FOOTBALL").candidateToken!;
+    registry.authorityCoordinator.promote(nextToken, proof(2n));
+    registry.releaseConnection(firstConnection);
+    expect(registry.listSources()).toEqual([expect.objectContaining({
+      sourceId: "chrome:SABA:8", authorityDisposition: "ACTIVE"
+    })]);
+  });
+
   it("accepts ordered envelopes, publishes them, and ACKs exact sequence", () => {
     const accepted = vi.fn();
     const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
@@ -106,7 +154,7 @@ describe("ChromeBridgeRegistry", () => {
     })]);
   });
 
-  it("retires every source from the revoked connection as soon as its replacement authenticates", () => {
+  it("does not revoke a silent incumbent merely because another socket authenticates", () => {
     const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
     const olderConnection = {};
     const replacementConnection = {};
@@ -118,11 +166,13 @@ describe("ChromeBridgeRegistry", () => {
 
     registry.registerConnection(replacementConnection);
 
-    expect(registry.listSources()).toEqual([]);
+    expect(registry.listSources()).toHaveLength(2);
     expect(registry.ingest({ ...envelope(1), sourceEpoch: "observer-a:2" }, olderConnection))
-      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
-    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" }, replacementConnection))
       .toMatchObject({ kind: "ACK" });
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-b:0" }, replacementConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.ingest({ ...envelope(2), sourceEpoch: "observer-a:2" }, olderConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
   });
 
   it("keeps the six provider owners bounded when unproven source IDs flood one account", () => {

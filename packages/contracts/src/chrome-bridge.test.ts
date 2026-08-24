@@ -137,6 +137,30 @@ describe("ChromeBridgeEnvelopeSchema", () => {
       { ...validEnvelope.request, ...recoveryMetadata, requestStartSequence: Number.MAX_SAFE_INTEGER + 1 }
     ]) expect(schema.safeParse({ ...validEnvelope, lobby: "KSPORT", request }).success).toBe(false);
   });
+
+  it("requires an exact sanitized method and observer request identity for every HTTP response", () => {
+    const schema = contracts.ChromeBridgeEnvelopeSchema;
+    const http = {
+      ...validEnvelope,
+      transport: "HTTP_RESPONSE",
+      request: {
+        ...validEnvelope.request,
+        method: "POST",
+        observerRequestId: "observer-a:request:17"
+      }
+    } as const;
+
+    expect(schema.safeParse(http).success).toBe(true);
+    for (const request of [
+      { ...http.request, method: undefined },
+      { ...http.request, observerRequestId: undefined },
+      { ...http.request, method: "post" },
+      { ...http.request, method: "GET /secret" },
+      { ...http.request, observerRequestId: "request?token=secret" }
+    ]) {
+      expect(schema.safeParse({ ...http, request }).success).toBe(false);
+    }
+  });
 });
 
 describe("ChromeBridgeControlMessageSchema", () => {

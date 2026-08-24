@@ -1,4 +1,5 @@
 import { ChromeNetworkBodyChunkSchema, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
+import type { AuthorityLaneToken } from "./provider-authority-types.js";
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_MAX_BODY_BYTES = 24 * 1024 * 1024;
@@ -129,6 +130,7 @@ type SourceEpochFence =
   | { readonly kind: "CANONICAL"; readonly sessionId: string; generation: number; faulted: boolean };
 
 export interface NetworkBodyAssemblerOptions {
+  readonly laneToken?: AuthorityLaneToken;
   readonly now?: () => number;
   readonly ttlMs?: number;
   readonly maxBodyBytes?: number;
@@ -149,6 +151,7 @@ export interface NetworkBodyAssemblerStats {
 }
 
 export class NetworkBodyAssembler {
+  readonly #authorityLaneToken: AuthorityLaneToken | null;
   readonly #ttlMs: number;
   readonly #maxBodyBytes: number;
   readonly #maxPendingBodiesPerSource: number;
@@ -162,6 +165,10 @@ export class NetworkBodyAssembler {
   #disposed = false;
 
   constructor(options: NetworkBodyAssemblerOptions = {}) {
+    if (options.laneToken !== undefined && !Object.isFrozen(options.laneToken)) {
+      throw new Error("NETWORK_BODY_laneToken_MUTABLE");
+    }
+    this.#authorityLaneToken = options.laneToken ?? null;
     this.#ttlMs = positiveInteger(options.ttlMs, DEFAULT_TTL_MS, "ttlMs");
     this.#maxBodyBytes = positiveInteger(options.maxBodyBytes, DEFAULT_MAX_BODY_BYTES, "maxBodyBytes");
     this.#maxPendingBodiesPerSource = positiveInteger(options.maxPendingBodiesPerSource,
@@ -175,6 +182,10 @@ export class NetworkBodyAssembler {
     });
   }
 
+  get authorityLaneToken(): AuthorityLaneToken | null {
+    return this.#authorityLaneToken;
+  }
+
   ingest(envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope | null {
     if (this.#disposed) return null;
     if (envelope.transport !== "HTTP_RESPONSE" || envelope.payload.encoding !== "UTF8") return envelope;
@@ -184,13 +195,22 @@ export class NetworkBodyAssembler {
     // A malformed/oversize value that declares itself as a bridge chunk is
     // never forwarded as provider data. Non-wrapper provider JSON remains a
     // normal single-envelope HTTP response.
-    if (!parsed.success) return isPotentialNetworkChunk(raw) ? null : envelope;
+    if (!parsed.success) {
+      if (!isPotentialNetworkChunk(raw)) return envelope;
+      this.#faultDeclaredSourceEpoch(envelope.sourceId, envelope.sourceEpoch);
+      return null;
+    }
 
     this.#sweep();
     const chunk = parsed.data;
     const sourceEpoch = envelope.sourceEpoch ?? "legacy";
-    if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch)) return null;
-    const key = bodyKey(envelope.sourceId, sourceEpoch, chunk.snapshotId);
+    const admission = this.#sourceEpochAdmission(envelope.sourceId, envelope.sourceEpoch);
+    if (admission === "REJECTED") return null;
+    const observerRequestId = "observerRequestId" in envelope.request &&
+      typeof envelope.request.observerRequestId === "string"
+      ? envelope.request.observerRequestId : "legacy-request";
+    const key = bodyKey(envelope.sourceId, sourceEpoch,
+      observerRequestId, chunk.snapshotId);
 
     const identity = assemblyIdentity(envelope);
     let state = this.#pending.get(key);
@@ -205,11 +225,15 @@ export class NetworkBodyAssembler {
       if (fragmentBytes > this.#maxBodyBytes ||
         this.#pendingCount(envelope.sourceId) >= this.#maxPendingBodiesPerSource ||
         this.#pendingByteCount(envelope.sourceId) + fragmentBytes > this.#maxPendingBytesPerSource) {
-        this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
+        this.#faultAdmittedSourceEpoch(envelope.sourceId, envelope.sourceEpoch, admission);
         return null;
       }
       const reservation = this.#budget.reserve(fragmentBytes, this.#ttlMs);
       if (reservation === null) return null;
+      if (!this.#commitSourceEpoch(envelope.sourceId, envelope.sourceEpoch, admission)) {
+        this.#budget.release(reservation);
+        return null;
+      }
       fragmentReserved = true;
       state = { key, sourceId: envelope.sourceId, sourceEpoch,
         identity, envelope, chunkCount: chunk.chunkCount, fragments: new Map<number, string>(),
@@ -295,23 +319,50 @@ export class NetworkBodyAssembler {
     }
   }
 
-  #admitSourceEpoch(sourceId: string, sourceEpoch: string | undefined): boolean {
+  #faultDeclaredSourceEpoch(sourceId: string, sourceEpoch: string | undefined): void {
+    const admission = this.#sourceEpochAdmission(sourceId, sourceEpoch);
+    if (admission === "REJECTED" || !this.#commitSourceEpoch(sourceId, sourceEpoch, admission)) return;
+    this.#faultSourceEpoch(sourceId, sourceEpoch ?? "legacy");
+  }
+
+  #faultAdmittedSourceEpoch(sourceId: string, sourceEpoch: string | undefined,
+    admission: "CURRENT" | "ADVANCE" | "NEW"): void {
+    if (!this.#commitSourceEpoch(sourceId, sourceEpoch, admission)) return;
+    this.#faultSourceEpoch(sourceId, sourceEpoch ?? "legacy");
+  }
+
+  #sourceEpochAdmission(sourceId: string, sourceEpoch: string | undefined):
+    "CURRENT" | "ADVANCE" | "NEW" | "REJECTED" {
+    const proposed = sourceEpoch === undefined
+      ? { kind: "LEGACY" as const }
+      : canonicalEpoch(sourceEpoch);
+    if (proposed === null) return "REJECTED";
+    const current = this.#epochFenceBySource.get(sourceId);
+    if (current === undefined) return this.#epochFenceBySource.size < MAX_SOURCE_LINEAGES ? "NEW" : "REJECTED";
+    if (current.kind !== proposed.kind) return "REJECTED";
+    if (current.kind === "LEGACY" || proposed.kind === "LEGACY") return current.faulted ? "REJECTED" : "CURRENT";
+    if (current.sessionId !== proposed.sessionId || proposed.generation < current.generation) return "REJECTED";
+    if (proposed.generation === current.generation) return current.faulted ? "REJECTED" : "CURRENT";
+    return "ADVANCE";
+  }
+
+  #commitSourceEpoch(sourceId: string, sourceEpoch: string | undefined,
+    admission: "CURRENT" | "ADVANCE" | "NEW"): boolean {
+    if (admission === "CURRENT") return true;
     const proposed = sourceEpoch === undefined
       ? { kind: "LEGACY" as const }
       : canonicalEpoch(sourceEpoch);
     if (proposed === null) return false;
-    const current = this.#epochFenceBySource.get(sourceId);
-    if (current === undefined) {
-      if (this.#epochFenceBySource.size >= MAX_SOURCE_LINEAGES) return false;
+    if (admission === "NEW") {
+      if (this.#epochFenceBySource.has(sourceId) || this.#epochFenceBySource.size >= MAX_SOURCE_LINEAGES) return false;
       this.#epochFenceBySource.set(sourceId, proposed.kind === "LEGACY"
         ? { kind: "LEGACY", faulted: false }
         : { ...proposed, faulted: false });
       return true;
     }
-    if (current.kind !== proposed.kind) return false;
-    if (current.kind === "LEGACY" || proposed.kind === "LEGACY") return !current.faulted;
-    if (current.sessionId !== proposed.sessionId || proposed.generation < current.generation) return false;
-    if (proposed.generation === current.generation) return !current.faulted;
+    const current = this.#epochFenceBySource.get(sourceId);
+    if (current?.kind !== "CANONICAL" || proposed.kind !== "CANONICAL" ||
+      current.sessionId !== proposed.sessionId || proposed.generation <= current.generation) return false;
     for (const pending of [...this.#pending.values()]) {
       if (pending.sourceId === sourceId) this.#removePending(pending);
     }
@@ -353,8 +404,8 @@ function deadline(nowMs: number, ttlMs: number): number {
   return expiresAtMs;
 }
 
-function bodyKey(sourceId: string, sourceEpoch: string, snapshotId: string): string {
-  return JSON.stringify([sourceId, sourceEpoch, snapshotId]);
+function bodyKey(sourceId: string, sourceEpoch: string, observerRequestId: string, snapshotId: string): string {
+  return JSON.stringify([sourceId, sourceEpoch, observerRequestId, snapshotId]);
 }
 
 function canonicalEpoch(sourceEpoch: string): {
@@ -382,8 +433,8 @@ function fenceMatchesSourceEpoch(fence: SourceEpochFence, sourceEpoch: string): 
 function isPotentialNetworkChunk(value: unknown): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
-  return candidate.schemaVersion === 1 && "snapshotId" in candidate && "chunkIndex" in candidate &&
-    "chunkCount" in candidate && "bodyFragment" in candidate;
+  return candidate.schemaVersion === 1 && ["snapshotId", "chunkIndex", "chunkCount", "bodyEncoding", "bodyFragment"]
+    .some((field) => field in candidate);
 }
 
 function assemblyIdentity(envelope: ChromeBridgeEnvelope): string {

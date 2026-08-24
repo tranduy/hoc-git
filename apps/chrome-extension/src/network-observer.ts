@@ -1,4 +1,4 @@
-import type { ChromeBridgeEnvelope, ChromeLobbyId } from "@tool-chenh/contracts";
+import type { ChromeBridgeEnvelope, ChromeBridgeHttpMethod, ChromeLobbyId } from "@tool-chenh/contracts";
 import { splitUtf8Text } from "./utf8-length.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
@@ -58,6 +58,9 @@ interface PendingRequest {
   readonly sessionId?: string;
   readonly url: string;
   readonly resourceType: string;
+  readonly method: ChromeBridgeHttpMethod;
+  readonly observerRequestId: string;
+  readonly observerRequestOrdinal: number;
   readonly providerPartition?: ImProviderPartition;
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
@@ -69,6 +72,9 @@ interface ReplayableHttpSnapshot {
   readonly url: string;
   readonly resourceType: string;
   readonly body: string;
+  readonly method: ChromeBridgeHttpMethod;
+  readonly observerRequestId: string;
+  readonly observerRequestOrdinal: number;
   readonly providerPartition?: ImProviderPartition;
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
@@ -92,6 +98,14 @@ export interface PersistedSabaWsSnapshots {
   readonly documentMarker: string;
   readonly partitions: ReadonlyArray<{ readonly partition: string;
     readonly frames: ReadonlyArray<Omit<ReplayableWsEvent, "source">> }>;
+}
+
+export interface DirectHttpRequestMetadata {
+  readonly method: ChromeBridgeHttpMethod;
+  readonly providerPartition?: ImProviderPartition;
+  readonly streamId?: string;
+  readonly providerFunctionCode?: number;
+  readonly reconcileCutoffSequence?: number;
 }
 
 interface ActiveCmdHiddenProbe {
@@ -607,6 +621,9 @@ export class NetworkObserver {
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
   readonly #requestGenerations = new Map<string, number>();
+  readonly #requestIdentities = new Map<string, { readonly method: ChromeBridgeHttpMethod;
+    readonly observerRequestId: string; readonly observerRequestOrdinal: number }>();
+  #nextObserverRequestOrdinal = 0;
   readonly #pending = new Map<string, PendingRequest>();
   readonly #cmdSnapshots = new Map<string, { readonly body: string; readonly sentAtMs: number;
     readonly receivedMonotonicMs: number }>();
@@ -845,6 +862,12 @@ export class NetworkObserver {
       }
       for (const key of this.#requestFunctionCodes.keys()) {
         if (key.startsWith(`${tabId}:`)) this.#requestFunctionCodes.delete(key);
+      }
+      for (const key of this.#requestGenerations.keys()) {
+        if (key.startsWith(`${tabId}:`)) this.#requestGenerations.delete(key);
+      }
+      for (const key of this.#requestIdentities.keys()) {
+        if (key.startsWith(`${tabId}:`)) this.#requestIdentities.delete(key);
       }
     }
     void this.#scheduleSabaWsSnapshotClear(sourceId);
@@ -1460,7 +1483,7 @@ export class NetworkObserver {
       for (const partition of ["live", "today"] as const) {
         const response = accepted.get(partition)!;
         await this.ingestHttpResponse(source, response.url, "Fetch", response.body,
-          undefined, `${generation}:${partition}`);
+          { method: "GET", streamId: `${generation}:${partition}` });
       }
       return true;
     }
@@ -1496,7 +1519,7 @@ export class NetworkObserver {
     if (unique.size !== allowedPaths.size) return;
     for (const path of allowedPaths) {
       await this.ingestHttpResponse(source, new URL(path, origin).href, "Fetch", unique.get(path)!,
-        undefined, value.generation);
+        { method: "GET", streamId: value.generation });
     }
   }
 
@@ -1529,8 +1552,9 @@ export class NetworkObserver {
         for (const item of value.responses) {
           if (!isRecord(item) || (item.market !== 1 && item.market !== 2) || typeof item.body !== "string") continue;
           await this.ingestHttpResponse(source, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
-            item.body, item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2", generation,
-            { reconcileCutoffSequence: reconcileCutoffSequence! });
+            item.body, { method: "POST", providerPartition: item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2",
+              ...(generation === undefined ? {} : { streamId: generation }),
+              reconcileCutoffSequence: reconcileCutoffSequence! });
         }
       }
       const status = isRecord(value) ? value.status : null;
@@ -1629,6 +1653,10 @@ export class NetworkObserver {
     if (method === "Network.requestWillBeSent" && key) {
       this.#requestGenerations.set(key, this.#sourceGenerations.get(source.sourceId) ?? 0);
       const request = isRecord(params.request) ? params.request : null;
+      const requestMethod = sanitizeHttpMethod(request?.method);
+      const requestIdentity = this.#allocateObserverRequestIdentity();
+      if (requestMethod === null) this.#requestIdentities.delete(key);
+      else this.#requestIdentities.set(key, { method: requestMethod, ...requestIdentity });
       if (source.lobby === "CMD" && request !== null && typeof request.url === "string") {
         try {
           const url = new URL(request.url);
@@ -1817,9 +1845,11 @@ export class NetworkObserver {
       const providerPartition = this.#requestPartitions.get(key);
       const streamId = this.#requestStreamIds.get(key);
       const providerFunctionCode = this.#requestFunctionCodes.get(key);
+      const requestIdentity = this.#requestIdentities.get(key);
+      if (requestIdentity === undefined) return;
       this.#pending.set(key, { source,
         sourceGeneration: this.#requestGenerations.get(key) ?? this.#sourceGenerations.get(source.sourceId) ?? 0,
-        url: response.url, resourceType,
+        url: response.url, resourceType, ...requestIdentity,
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(providerPartition === undefined ? {} : { providerPartition }),
         ...(streamId === undefined ? {} : { streamId }),
@@ -1832,6 +1862,7 @@ export class NetworkObserver {
       this.#requestStreamIds.delete(key);
       this.#requestFunctionCodes.delete(key);
       this.#requestGenerations.delete(key);
+      this.#requestIdentities.delete(key);
       return;
     }
     if (method === "Network.loadingFinished" && key) {
@@ -1841,6 +1872,7 @@ export class NetworkObserver {
       this.#requestStreamIds.delete(key);
       this.#requestFunctionCodes.delete(key);
       this.#requestGenerations.delete(key);
+      this.#requestIdentities.delete(key);
       if (!pending || requestId === null) return;
       if (!this.#isSourceGenerationCurrent(pending.source.sourceId, pending.sourceGeneration)) return;
       let responseBodyRead = false;
@@ -1883,7 +1915,7 @@ export class NetworkObserver {
             sourceGeneration: pending.sourceGeneration });
           return;
         }
-        const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
+        const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
         const emissionPending = pending;
         const emissions = fragments.map((bodyFragment, chunkIndex) =>
           this.#emit(emissionPending.source, emissionPending.url, emissionPending.resourceType, "HTTP_RESPONSE", {
@@ -1946,14 +1978,16 @@ export class NetworkObserver {
   }
 
   async ingestHttpResponse(source: ObservedSource, url: string, resourceType: "XHR" | "Fetch",
-    body: string, providerPartition?: ImProviderPartition, streamId?: string,
-    requestMetadata: Pick<ChromeBridgeEnvelope["request"], "providerFunctionCode" |
-      "reconcileCutoffSequence"> = {}): Promise<void> {
+    body: string, requestMetadata: DirectHttpRequestMetadata): Promise<void> {
+    const requestIdentity = this.#allocateObserverRequestIdentity();
     if (!/^https?:\/\//iu.test(url)) return;
+    const method = sanitizeHttpMethod(requestMetadata.method);
+    if (method === null) return;
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
-    const pending: PendingRequest = { source, sourceGeneration, url, resourceType,
-      ...(providerPartition === undefined ? {} : { providerPartition }),
-      ...(streamId === undefined ? {} : { streamId }),
+    const pending: PendingRequest = { source, sourceGeneration, url, resourceType, method,
+      ...requestIdentity,
+      ...(requestMetadata.providerPartition === undefined ? {} : { providerPartition: requestMetadata.providerPartition }),
+      ...(requestMetadata.streamId === undefined ? {} : { streamId: requestMetadata.streamId }),
       ...(requestMetadata.providerFunctionCode === undefined ? {} :
         { providerFunctionCode: requestMetadata.providerFunctionCode }),
       ...(requestMetadata.reconcileCutoffSequence === undefined ? {} :
@@ -1971,7 +2005,7 @@ export class NetworkObserver {
         { ...request, ...clocks, sourceGeneration });
       return;
     }
-    const snapshotId = `network:${source.tabId}:${this.#now()}:${this.#sequences.get(source.sourceId) ?? 0}`;
+    const snapshotId = networkSnapshotId(source.tabId, pending.observerRequestOrdinal);
     for (const [chunkIndex, bodyFragment] of fragments.entries()) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", {
         encoding: "UTF8",
@@ -2474,7 +2508,7 @@ export class NetworkObserver {
           }, { request: replayRequestMetadata(snapshot),
             observedAtMs: snapshot.observedAtMs, receivedMonotonicMs: snapshot.receivedMonotonicMs });
         } else {
-          const snapshotId = `network-replay:${snapshot.source.tabId}:${this.#now()}:${this.#sequences.get(sourceId) ?? 0}`;
+          const snapshotId = `network-replay:${snapshot.source.tabId}:${snapshot.observerRequestOrdinal}`;
           for (const [chunkIndex, bodyFragment] of fragments.entries()) {
             await this.#emit(snapshot.source, snapshot.url, snapshot.resourceType, "HTTP_RESPONSE", {
               encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex,
@@ -2777,6 +2811,8 @@ export class NetworkObserver {
       ? entry.body !== body
       : entry.providerPartition !== pending.providerPartition);
     deduplicated.push({ source: pending.source, url: pending.url, resourceType: pending.resourceType, body,
+      method: pending.method, observerRequestId: pending.observerRequestId,
+      observerRequestOrdinal: pending.observerRequestOrdinal,
       ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
       ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }),
       ...(pending.providerFunctionCode === undefined ? {} : { providerFunctionCode: pending.providerFunctionCode }),
@@ -2815,7 +2851,7 @@ export class NetworkObserver {
     payload: ChromeBridgeEnvelope["payload"],
     metadata: {
       readonly request?: Pick<ChromeBridgeEnvelope["request"], "streamId" | "providerPartition" | "replayed" |
-        "providerFunctionCode" | "reconcileCutoffSequence">;
+        "providerFunctionCode" | "reconcileCutoffSequence" | "method" | "observerRequestId">;
       readonly observedAtMs?: number;
       readonly receivedMonotonicMs?: number;
       readonly sourceGeneration?: number;
@@ -2859,6 +2895,17 @@ export class NetworkObserver {
     return this.#activeWorkGenerations.get(sourceId) ?? this.#sourceGenerations.get(sourceId) ?? 0;
   }
 
+  #allocateObserverRequestIdentity(): { readonly observerRequestId: string;
+    readonly observerRequestOrdinal: number } {
+    if (this.#nextObserverRequestOrdinal >= Number.MAX_SAFE_INTEGER) {
+      throw new Error("OBSERVER_REQUEST_ORDINAL_EXHAUSTED");
+    }
+    const observerRequestOrdinal = this.#nextObserverRequestOrdinal;
+    this.#nextObserverRequestOrdinal += 1;
+    return { observerRequestId: `${this.#observerSessionId}:request:${observerRequestOrdinal}`,
+      observerRequestOrdinal };
+  }
+
   #publicSourceEpochOrdinal(sourceId: string, sourceGeneration: number): number {
     const current = this.#publicSourceEpochs.get(sourceId);
     if (current?.sourceGeneration === sourceGeneration) return current.ordinal;
@@ -2871,6 +2918,15 @@ export class NetworkObserver {
   #isSourceGenerationCurrent(sourceId: string, generation: number): boolean {
     return (this.#sourceGenerations.get(sourceId) ?? 0) === generation;
   }
+}
+
+function sanitizeHttpMethod(value: unknown): ChromeBridgeHttpMethod | null {
+  return typeof value === "string" && /^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,31}$/u.test(value)
+    ? value as ChromeBridgeHttpMethod : null;
+}
+
+function networkSnapshotId(tabId: number, observerRequestOrdinal: number): string {
+  return `network:${tabId}:request:${observerRequestOrdinal}`;
 }
 
 function imPartitionFromRequest(source: ObservedSource,
@@ -2887,8 +2943,11 @@ function imPartitionFromRequest(source: ObservedSource,
 }
 
 function pendingRequestMetadata(pending: PendingRequest): Pick<ChromeBridgeEnvelope["request"],
-  "streamId" | "providerPartition" | "providerFunctionCode" | "reconcileCutoffSequence"> {
+  "streamId" | "providerPartition" | "providerFunctionCode" | "reconcileCutoffSequence" |
+  "method" | "observerRequestId"> {
   return {
+    method: pending.method,
+    observerRequestId: pending.observerRequestId,
     ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
     ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }),
     ...(pending.providerFunctionCode === undefined ? {} : { providerFunctionCode: pending.providerFunctionCode }),
@@ -2898,7 +2957,8 @@ function pendingRequestMetadata(pending: PendingRequest): Pick<ChromeBridgeEnvel
 }
 
 function replayRequestMetadata(snapshot: ReplayableHttpSnapshot): Pick<ChromeBridgeEnvelope["request"],
-  "streamId" | "providerPartition" | "providerFunctionCode" | "reconcileCutoffSequence" | "replayed"> {
+  "streamId" | "providerPartition" | "providerFunctionCode" | "reconcileCutoffSequence" | "replayed" |
+  "method" | "observerRequestId"> {
   return { ...pendingRequestMetadata({ ...snapshot, sourceGeneration: 0 }), replayed: true };
 }
 

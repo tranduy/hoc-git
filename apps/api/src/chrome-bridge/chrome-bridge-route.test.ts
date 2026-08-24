@@ -5,6 +5,7 @@ import { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
 import { registerChromeBridgeRoute } from "./chrome-bridge-route.js";
 import type { Socket } from "node:net";
+import type { ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
 
 const loopbackSocket = { remoteAddress: "127.0.0.1" } as Socket;
 
@@ -19,14 +20,23 @@ async function appWithRoute(openProviderTicket = true) {
   const app = Fastify({ logger: false });
   await app.register(websocket, { options: { maxPayload: 262_144 } });
   const registry = new ChromeBridgeRegistry();
-  const controlPlane = new ChromeBridgeControlPlane({
-    activeSourceIds: () => new Set(registry.listSources().map((source) => source.sourceId))
-  });
+  const controlPlane = new ChromeBridgeControlPlane({ authorityCoordinator: registry.authorityCoordinator });
   registerChromeBridgeRoute(app, registry, {
     installationKey: "local-key", openProviderTicket, controlPlane
   });
   await app.ready();
   return { app, registry, controlPlane };
+}
+
+function promoteCandidate(registry: ChromeBridgeRegistry, accountId: ChromeBridgeProviderAccountId): void {
+  const token = registry.authorityCoordinator.snapshot(accountId).candidateToken;
+  if (token === null) throw new Error("candidate missing");
+  const provider = accountId.split(":")[1] as "CMD" | "IM" | "SABA" | "SBOBET" | "APSPORT" | "BTI";
+  registry.authorityCoordinator.promote(token, { authorityCursor: BigInt(token.nonce), provenance: "WS",
+    contentClass: "FOOTBALL", completeness: "COMPLETE", scope: "ACCOUNT", completedPartitions: [provider],
+    emptyProof: "PROVIDER_CONFIRMED_EMPTY", catalog: { dataMode: "LIVE", accountId, provider,
+      category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: token.nonce,
+      rejectedMarketCount: 0, events: [], markets: [], quotes: [] } });
 }
 
 function nextMessage(socket: { once(event: "message", callback: (data: Buffer) => void): void }): Promise<unknown> {
@@ -250,6 +260,7 @@ describe("Chrome bridge route", () => {
     const cmdEnvelope = { ...validEnvelope, lobby: "CMD", sourceId: "chrome:CMD:7" } as const;
     socket.send(JSON.stringify(cmdEnvelope));
     await initialControls;
+    promoteCandidate(registry, "catalog-source:CMD:FOOTBALL");
     const focused = nextMessage(socket);
     const response = await app.inject({
       method: "POST",
@@ -310,6 +321,8 @@ describe("Chrome bridge route", () => {
         sourceEpoch: `observer-a:${ordinal}` }));
     }
     await accepted;
+
+    promoteCandidate(registry, "catalog-source:SABA:FOOTBALL");
 
     expect(registry.listSources()).toEqual([expect.objectContaining({ sourceId: "chrome:SABA:1006" })]);
     expect(controlPlane.sourceCount()).toBe(1);

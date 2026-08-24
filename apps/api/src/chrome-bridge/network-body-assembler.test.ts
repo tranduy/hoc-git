@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import * as networkBodyAssembly from "./network-body-assembler.js";
+import type { AuthorityLaneToken } from "./provider-authority-types.js";
 
 function envelope(index: number, count = 2, fragment = index === 0 ? "{\"StatusCode\":" : "100}",
   snapshotId = "network-8-request-abcdef"): ChromeBridgeEnvelope {
@@ -30,6 +31,27 @@ function ksportEnvelope(index: number, count = 2, fragment = index === 0 ? "live
 }
 
 describe("NetworkBodyAssembler", () => {
+  it("binds pending bodies to one immutable authority lane and releases them on rotation", () => {
+    const budget = new NetworkBodyAssemblyBudget();
+    const candidateLane: AuthorityLaneToken = Object.freeze({
+      accountId: "catalog-source:IM:FOOTBALL", nonce: 1, phase: "CANDIDATE"
+    });
+    const candidate = new NetworkBodyAssembler({ budget, laneToken: candidateLane });
+    expect(candidate.authorityLaneToken).toBe(candidateLane);
+    expect(candidate.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" })).toBeNull();
+    expect(budget.stats()).toMatchObject({ pendingBodies: 1 });
+
+    candidate.dispose();
+    const activeLane: AuthorityLaneToken = Object.freeze({
+      accountId: "catalog-source:IM:FOOTBALL", nonce: 2, phase: "ACTIVE"
+    });
+    const active = new NetworkBodyAssembler({ budget, laneToken: activeLane });
+    expect(active.authorityLaneToken).toBe(activeLane);
+    expect(candidate.ingest({ ...envelope(1), sourceEpoch: "observer-a:0" })).toBeNull();
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+    expect(active.stats()).toMatchObject({ pendingBodies: 0 });
+  });
+
   it("returns an HTTP envelope only after every ordered chunk arrives", () => {
     const assembler = new NetworkBodyAssembler();
     expect(assembler.ingest(envelope(0))).toBeNull();
@@ -145,6 +167,74 @@ describe("NetworkBodyAssembler", () => {
     expect(assembler.ingest(envelope(1, 2, "body", sharedSnapshotId)))
       .toMatchObject({ payload: { body: "A-body" } });
     expect(assembler.ingest(sourceB(1))).toMatchObject({ payload: { body: "B-body" } });
+  });
+
+  it("assembles interleaved same-clock bodies independently by observer request identity", () => {
+    const assembler = new NetworkBodyAssembler();
+    const request = (observerRequestId: string, method: "GET" | "POST") => ({
+      ...envelope(0).request,
+      observerRequestId,
+      method
+    });
+    const chunk = (observerRequestId: string, method: "GET" | "POST", index: number,
+      fragment: string): ChromeBridgeEnvelope => ({
+      ...envelope(index, 2, fragment, "network-same-clock-sequence"),
+      request: request(observerRequestId, method)
+    });
+
+    expect(assembler.ingest(chunk("observer-a:request:1", "GET", 0, "A-"))).toBeNull();
+    expect(assembler.ingest(chunk("observer-a:request:2", "POST", 0, "B-"))).toBeNull();
+    expect(assembler.ingest(chunk("observer-a:request:1", "GET", 1, "body")))
+      .toMatchObject({ request: { observerRequestId: "observer-a:request:1", method: "GET" },
+        payload: { body: "A-body" } });
+    expect(assembler.ingest(chunk("observer-a:request:2", "POST", 1, "body")))
+      .toMatchObject({ request: { observerRequestId: "observer-a:request:2", method: "POST" },
+        payload: { body: "B-body" } });
+  });
+
+  it("faults declared malformed wrappers instead of forwarding them as provider JSON", () => {
+    const malformed = [
+      { schemaVersion: 1, snapshotId: "network-malformed-missing-body", chunkIndex: 0,
+        chunkCount: 2, bodyEncoding: "UTF8" },
+      { schemaVersion: 1, snapshotId: "network-malformed-index", chunkIndex: 2,
+        chunkCount: 2, bodyEncoding: "UTF8", bodyFragment: "x" },
+      { schemaVersion: 1, snapshotId: "network-malformed-oversize", chunkIndex: 0,
+        chunkCount: 2, bodyEncoding: "UTF8", bodyFragment: "x".repeat(128 * 1024 + 1) }
+    ];
+
+    for (const [index, wrapper] of malformed.entries()) {
+      const assembler = new NetworkBodyAssembler();
+      const sourceEpoch = `observer-malformed-${index}:0`;
+      const bad = { ...envelope(0), sourceId: `chrome:IM:${index + 20}`, sourceEpoch,
+        payload: { encoding: "UTF8" as const, body: JSON.stringify(wrapper) } };
+      expect(assembler.ingest(bad)).toBeNull();
+      expect(assembler.stats()).toMatchObject({ pendingBodies: 0, blockedSourceEpochs: 1 });
+      expect(assembler.ingest({ ...envelope(0, 1, "later", `network-later-${index}`),
+        sourceId: bad.sourceId, sourceEpoch })).toBeNull();
+    }
+  });
+
+  it("does not consume unseen lineage slots when shared admission is denied", () => {
+    const budget = new NetworkBodyAssemblyBudget({ maxPendingBodies: 1, maxPendingBytes: 8 });
+    const occupied = new NetworkBodyAssembler({ budget });
+    const waiting = new NetworkBodyAssembler({ budget });
+    expect(occupied.ingest({ ...envelope(0, 2, "A", "network-pressure-owner"),
+      sourceEpoch: "observer-owner:0" })).toBeNull();
+
+    for (let index = 0; index < 8; index += 1) {
+      expect(waiting.ingest({ ...envelope(0, 2, "B", `network-denied-${index}`),
+        sourceId: `chrome:IM:${index + 20}`, tabId: index + 20,
+        sourceEpoch: `observer-denied-${index}:0` })).toBeNull();
+    }
+    expect(waiting.stats()).toMatchObject({ pendingBodies: 0, blockedSourceEpochs: 0 });
+
+    expect(occupied.ingest({ ...envelope(1, 2, "!", "network-pressure-owner"),
+      sourceEpoch: "observer-owner:0" })).toMatchObject({ payload: { body: "A!" } });
+    const legitimate = (index: number) => ({ ...envelope(index, 2, index === 0 ? "C" : "!",
+      "network-legitimate-ninth"), sourceId: "chrome:IM:99", tabId: 99,
+      sourceEpoch: "observer-legitimate:0" });
+    expect(waiting.ingest(legitimate(0))).toBeNull();
+    expect(waiting.ingest(legitimate(1))).toMatchObject({ payload: { body: "C!" } });
   });
 
   it("bounds 5,000 incomplete bodies without starving another source in the same provider account", () => {
