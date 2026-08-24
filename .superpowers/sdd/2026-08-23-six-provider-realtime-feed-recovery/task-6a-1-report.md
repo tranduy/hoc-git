@@ -160,3 +160,78 @@ Scoped secret/raw-provider-body hygiene scan: no matches.
 
 No coordinator, provider adapter, observer, browser/runtime process, navigation,
 reload, or external system behavior was changed in this fix round.
+
+---
+
+## Fix Round 2 (review of `214fb0b`)
+
+This section supersedes Fix Round 1's statement that explicit source reset
+clears an assembly fault. Reset releases fragments and reservations, but does
+not erase the lane's retirement evidence.
+
+### Corrected lineage and pressure invariants
+
+- Each source owned by an assembler retains one compact epoch fence. A
+  canonical epoch is parsed at the last colon into observer session identity
+  and a canonical nonnegative safe generation. The fence stores only that
+  session, its maximum admitted/faulted generation, and the current fault bit.
+- A higher generation in the same observer session retires every lower
+  generation permanently. Expiry, mismatch, local overflow, or `resetSource`
+  retires the current generation. Neither reset nor later advancement can
+  re-admit a retired generation.
+- An absent epoch is one tagged legacy lineage. Once faulted or reset it cannot
+  reopen within that assembler. An arbitrary chunk cannot replace an installed
+  observer session; a genuine session replacement receives a fresh data-plane
+  lane/assembler, and disposal clears the retired instance.
+- Shared body/byte budget denial is non-mutating backpressure. It neither
+  faults the source epoch nor removes an already-reserved body. The exact
+  2-body/3-byte contention probe preserves both pending reservations; after
+  the aggressor completes and releases capacity, the victim retries its denied
+  fragment and completes. A new body denied by global count pressure can start
+  after capacity is released.
+- Local schema, identity, per-body, 8-body/24-MiB per-source failures still
+  fault the exact current source epoch. The shared 48-body/144-MiB application
+  cap, cross-provider isolation, and KSPORT metadata binding remain unchanged.
+
+### Strict RED record
+
+```text
+network-body-assembler.test.ts: 5 failed / 27 passed (32 total).
+
+Three lineage probes demonstrated that:
+  a retired generation reopened after advancing and then resetting;
+  the maximum of two expired generations was forgotten;
+  legacy reset and arbitrary observer-session replacement were re-admitted.
+
+Two shared-pressure probes demonstrated that:
+  byte pressure deleted and faulted an existing victim body;
+  body-count pressure permanently faulted a source before it allocated a body.
+```
+
+Each failure was an assertion on real completion, pending accounting, or fault
+state and failed directly because of the reviewed behavior.
+
+### Fix Round 2 verification
+
+```text
+Focused assembler GREEN: 32 passed.
+Focused contracts/assembler/data-plane: 3 suites / 86 tests passed.
+Whole contracts package: 2 suites / 96 tests passed.
+Task 5/6 assembler, route, data-plane, CMD, IM, SABA, and KSPORT regressions:
+  9 suites / 194 tests passed.
+Contracts typecheck and build: passed.
+API typecheck and build: passed.
+Chrome extension compatibility typecheck and build: passed.
+git diff/show --check: passed.
+Scoped added-production-line secret/raw-body hygiene scan: no matches.
+```
+
+### Fix Round 2 files
+
+- `apps/api/src/chrome-bridge/network-body-assembler.ts`
+- `apps/api/src/chrome-bridge/network-body-assembler.test.ts`
+- `.superpowers/sdd/2026-08-23-six-provider-realtime-feed-recovery/task-6a-1-report.md`
+
+No contract, data-plane, coordinator, adapter, observer, browser/runtime
+process, navigation, reload, or external system behavior was changed in this
+fix round.

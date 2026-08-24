@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
-import { NetworkBodyAssembler } from "./network-body-assembler.js";
+import { NetworkBodyAssembler, NetworkBodyAssemblyBudget } from "./network-body-assembler.js";
 import * as networkBodyAssembly from "./network-body-assembler.js";
 
 function envelope(index: number, count = 2, fragment = index === 0 ? "{\"StatusCode\":" : "100}",
@@ -189,7 +189,7 @@ describe("NetworkBodyAssembler", () => {
       .toMatchObject({ payload: { body: "OK" } });
   });
 
-  it("latches an expired assembly fault until a newer epoch or explicit reset", () => {
+  it("latches an expired assembly fault across reset while allowing a newer epoch", () => {
     let now = 0;
     const assembler = new NetworkBodyAssembler({ now: () => now, ttlMs: 100 });
     const oldEpoch = (index: number) => ({ ...envelope(index, 2, index === 0 ? "old-" : "body",
@@ -210,9 +210,85 @@ describe("NetworkBodyAssembler", () => {
       sourceEpoch: "worker-a:1" })).toMatchObject({ payload: { body: "new-body" } });
 
     assembler.resetSource("chrome:IM:8");
-    expect(assembler.ingest(envelope(0, 2, "reset-", "network-reset-source"))).toBeNull();
-    expect(assembler.ingest(envelope(1, 2, "body", "network-reset-source")))
-      .toMatchObject({ payload: { body: "reset-body" } });
+    expect(assembler.ingest({ ...envelope(0, 2, "reset-", "network-reset-source"),
+      sourceEpoch: "worker-a:1" })).toBeNull();
+    expect(assembler.ingest({ ...envelope(1, 2, "body", "network-reset-source"),
+      sourceEpoch: "worker-a:1" })).toBeNull();
+    expect(assembler.ingest({ ...envelope(0, 2, "next-", "network-reset-newer"),
+      sourceEpoch: "worker-a:2" })).toBeNull();
+    expect(assembler.ingest({ ...envelope(1, 2, "body", "network-reset-newer"),
+      sourceEpoch: "worker-a:2" })).toMatchObject({ payload: { body: "next-body" } });
+  });
+
+  it("never re-admits retired canonical generations after advance or reset", () => {
+    let now = 0;
+    const assembler = new NetworkBodyAssembler({ now: () => now, ttlMs: 100 });
+    const chunk = (generation: number, index: number, snapshotId: string) => ({
+      ...envelope(index, 2, index === 0 ? `${generation}-` : "body", snapshotId),
+      sourceEpoch: `observer:session-a:${generation}`
+    });
+
+    expect(assembler.ingest(chunk(0, 0, "network-retired-zero"))).toBeNull();
+    now = 101;
+    expect(assembler.ingest(chunk(0, 1, "network-retired-zero"))).toBeNull();
+    expect(assembler.ingest(chunk(1, 0, "network-current-one"))).toBeNull();
+    expect(assembler.ingest(chunk(1, 1, "network-current-one")))
+      .toMatchObject({ payload: { body: "1-body" } });
+
+    expect(assembler.ingest(chunk(0, 0, "network-retired-zero-retry"))).toBeNull();
+    expect(assembler.ingest(chunk(0, 1, "network-retired-zero-retry"))).toBeNull();
+    assembler.resetSource("chrome:IM:8");
+    expect(assembler.ingest(chunk(0, 0, "network-retired-zero-reset"))).toBeNull();
+    expect(assembler.ingest(chunk(0, 1, "network-retired-zero-reset"))).toBeNull();
+
+    expect(assembler.ingest(chunk(2, 0, "network-current-two"))).toBeNull();
+    expect(assembler.ingest(chunk(2, 1, "network-current-two")))
+      .toMatchObject({ payload: { body: "2-body" } });
+  });
+
+  it("retains the maximum retired generation when multiple epochs expire together", () => {
+    let now = 0;
+    const assembler = new NetworkBodyAssembler({ now: () => now, ttlMs: 100 });
+    const chunk = (generation: number, index: number, snapshotId: string) => ({
+      ...envelope(index, 2, index === 0 ? `${generation}-` : "body", snapshotId),
+      sourceEpoch: `worker-a:${generation}`
+    });
+
+    expect(assembler.ingest(chunk(0, 0, "network-expire-zero"))).toBeNull();
+    expect(assembler.ingest(chunk(1, 0, "network-expire-one"))).toBeNull();
+    now = 101;
+    expect(assembler.stats()).toMatchObject({ pendingBodies: 0, pendingBytes: 0 });
+    for (const generation of [0, 1]) {
+      expect(assembler.ingest(chunk(generation, 0, `network-expired-${generation}-retry`))).toBeNull();
+      expect(assembler.ingest(chunk(generation, 1, `network-expired-${generation}-retry`))).toBeNull();
+    }
+    expect(assembler.ingest(chunk(2, 0, "network-expire-two"))).toBeNull();
+    expect(assembler.ingest(chunk(2, 1, "network-expire-two")))
+      .toMatchObject({ payload: { body: "2-body" } });
+  });
+
+  it("keeps legacy retirement across reset and rejects arbitrary session replacement", () => {
+    const legacy = new NetworkBodyAssembler();
+    expect(legacy.ingest(envelope(0, 2, "old-", "network-legacy-retired"))).toBeNull();
+    legacy.resetSource("chrome:IM:8");
+    expect(legacy.ingest(envelope(0, 2, "new-", "network-legacy-retry"))).toBeNull();
+    expect(legacy.ingest(envelope(1, 2, "body", "network-legacy-retry"))).toBeNull();
+
+    const canonical = new NetworkBodyAssembler();
+    const session = (sessionId: string, index: number) => ({
+      ...envelope(index, 2, index === 0 ? `${sessionId}-` : "body", `network-session-${sessionId}`),
+      sourceEpoch: `${sessionId}:0`
+    });
+    expect(canonical.ingest(session("observer-a", 0))).toBeNull();
+    expect(canonical.ingest(session("observer-a", 1)))
+      .toMatchObject({ payload: { body: "observer-a-body" } });
+    expect(canonical.ingest(session("observer-b", 0))).toBeNull();
+    expect(canonical.ingest(session("observer-b", 1))).toBeNull();
+
+    const replacementLane = new NetworkBodyAssembler();
+    expect(replacementLane.ingest(session("observer-b", 0))).toBeNull();
+    expect(replacementLane.ingest(session("observer-b", 1)))
+      .toMatchObject({ payload: { body: "observer-b-body" } });
   });
 
   it("uses the default 30-second TTL to release fragments without reopening the faulted epoch", () => {
@@ -233,8 +309,11 @@ describe("NetworkBodyAssembler", () => {
     expect(assembler.ingest(withEpoch(envelope(1, 2, "body", "network-default-ttl-2")))).toBeNull();
     assembler.resetSource("chrome:IM:8");
     expect(assembler.ingest(withEpoch(envelope(0, 2, "fresh-", "network-default-ttl-2")))).toBeNull();
-    expect(assembler.ingest(withEpoch(envelope(1, 2, "body", "network-default-ttl-2"))))
-      .toMatchObject({ payload: { body: "fresh-body" } });
+    expect(assembler.ingest(withEpoch(envelope(1, 2, "body", "network-default-ttl-2")))).toBeNull();
+    expect(assembler.ingest({ ...envelope(0, 2, "fresh-", "network-default-ttl-newer"),
+      sourceEpoch: "worker-a:1" })).toBeNull();
+    expect(assembler.ingest({ ...envelope(1, 2, "body", "network-default-ttl-newer"),
+      sourceEpoch: "worker-a:1" })).toMatchObject({ payload: { body: "fresh-body" } });
   });
 
   it("keeps exactly 8 pending bodies per source and 48 globally by default", () => {
@@ -378,6 +457,50 @@ describe("NetworkBodyAssembler", () => {
     (defaultByteB as NetworkBodyAssembler & { dispose(): void }).dispose();
     expect(defaultByteBudget.stats()).toMatchObject({ pendingBodies: 0, pendingBytes: 0 });
   }, 30_000);
+
+  it("preserves an existing body when shared byte pressure rejects a later fragment", () => {
+    const budget = new NetworkBodyAssemblyBudget({ maxPendingBodies: 2, maxPendingBytes: 3 });
+    const victim = new NetworkBodyAssembler({ budget });
+    const aggressor = new NetworkBodyAssembler({ budget });
+    const aggressorChunk = (index: number) => ({
+      ...envelope(index, 2, "a", "network-pressure-aggressor"),
+      sourceId: "chrome:IM:9", tabId: 9, sourceEpoch: "worker-b:0"
+    });
+
+    expect(victim.ingest({ ...envelope(0, 2, "v", "network-pressure-victim"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    expect(aggressor.ingest(aggressorChunk(0))).toBeNull();
+    expect(budget.stats()).toEqual({ pendingBodies: 2, pendingBytes: 2 });
+
+    expect(victim.ingest({ ...envelope(1, 2, "vv", "network-pressure-victim"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    expect(budget.stats()).toEqual({ pendingBodies: 2, pendingBytes: 2 });
+    expect(aggressor.ingest(aggressorChunk(1)))
+      .toMatchObject({ payload: { body: "aa" } });
+    expect(victim.ingest({ ...envelope(1, 2, "vv", "network-pressure-victim"),
+      sourceEpoch: "worker-a:0" })).toMatchObject({ payload: { body: "vvv" } });
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
+
+  it("does not fault a source when global body pressure rejects a new body", () => {
+    const budget = new NetworkBodyAssemblyBudget({ maxPendingBodies: 1, maxPendingBytes: 10 });
+    const occupied = new NetworkBodyAssembler({ budget });
+    const waiting = new NetworkBodyAssembler({ budget });
+    const waitingChunk = (index: number) => ({
+      ...envelope(index, 2, index === 0 ? "B" : "!", "network-pressure-waiting"),
+      sourceId: "chrome:IM:9", tabId: 9, sourceEpoch: "worker-b:0"
+    });
+
+    expect(occupied.ingest({ ...envelope(0, 2, "A", "network-pressure-occupied"),
+      sourceEpoch: "worker-a:0" })).toBeNull();
+    expect(waiting.ingest(waitingChunk(0))).toBeNull();
+    expect(waiting.stats()).toMatchObject({ pendingBodies: 0, blockedSourceEpochs: 0 });
+    expect(occupied.ingest({ ...envelope(1, 2, "!", "network-pressure-occupied"),
+      sourceEpoch: "worker-a:0" })).toMatchObject({ payload: { body: "A!" } });
+    expect(waiting.ingest(waitingChunk(0))).toBeNull();
+    expect(waiting.ingest(waitingChunk(1))).toMatchObject({ payload: { body: "B!" } });
+    expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
+  });
 
   it("rejects bodies that exceed per-body or byte-pool limits and never completes them later", () => {
     const assembler = new NetworkBodyAssembler({

@@ -68,10 +68,9 @@ interface PendingBody {
   byteCount: number;
 }
 
-interface FaultedSourceEpoch {
-  readonly sourceId: string;
-  readonly sourceEpoch: string;
-}
+type SourceEpochFence =
+  | { readonly kind: "LEGACY"; faulted: boolean }
+  | { readonly kind: "CANONICAL"; readonly sessionId: string; generation: number; faulted: boolean };
 
 export interface NetworkBodyAssemblerOptions {
   readonly now?: () => number;
@@ -101,9 +100,9 @@ export class NetworkBodyAssembler {
   readonly #maxPendingBytesPerSource: number;
   readonly #budget: NetworkBodyAssemblyBudget;
   readonly #pending = new Map<string, PendingBody>();
-  // One exact fault bit and epoch watermark per source in this decode lane.
-  // Fragment expiry releases memory but never re-admits the faulted epoch.
-  readonly #faultedBySource = new Map<string, FaultedSourceEpoch>();
+  // One compact lineage high-watermark per source owned by this decode lane.
+  // Lower generations remain retired after reset, expiry, or later admission.
+  readonly #epochFenceBySource = new Map<string, SourceEpochFence>();
   #pendingBytes = 0;
   #disposed = false;
 
@@ -136,9 +135,8 @@ export class NetworkBodyAssembler {
     this.#sweep(now);
     const chunk = parsed.data;
     const sourceEpoch = envelope.sourceEpoch ?? "legacy";
+    if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch)) return null;
     const key = bodyKey(envelope.sourceId, sourceEpoch, chunk.snapshotId);
-    this.#releaseRetiredFault(envelope.sourceId, sourceEpoch);
-    if (this.#faultedBySource.has(envelope.sourceId)) return null;
 
     const identity = assemblyIdentity(envelope);
     let state = this.#pending.get(key);
@@ -157,7 +155,6 @@ export class NetworkBodyAssembler {
         return null;
       }
       if (!this.#budget.tryReserve(1, fragmentBytes)) {
-        this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
         return null;
       }
       fragmentReserved = true;
@@ -178,7 +175,6 @@ export class NetworkBodyAssembler {
       return null;
     }
     if (!fragmentReserved && !this.#budget.tryReserve(0, fragmentBytes)) {
-      this.#faultSourceEpoch(envelope.sourceId, sourceEpoch);
       return null;
     }
     state.fragments.set(chunk.chunkIndex, chunk.bodyFragment);
@@ -195,21 +191,23 @@ export class NetworkBodyAssembler {
   stats(): NetworkBodyAssemblerStats {
     this.#sweep(this.#now());
     return { pendingBodies: this.#pending.size, pendingBytes: this.#pendingBytes,
-      quarantinedBodies: 0, blockedSourceEpochs: this.#faultedBySource.size };
+      quarantinedBodies: 0, blockedSourceEpochs: [...this.#epochFenceBySource.values()]
+        .filter((fence) => fence.faulted).length };
   }
 
   resetSource(sourceId: string): void {
     for (const pending of [...this.#pending.values()]) {
       if (pending.sourceId === sourceId) this.#removePending(pending);
     }
-    this.#faultedBySource.delete(sourceId);
+    const fence = this.#epochFenceBySource.get(sourceId);
+    if (fence !== undefined) fence.faulted = true;
   }
 
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
     for (const pending of [...this.#pending.values()]) this.#removePending(pending);
-    this.#faultedBySource.clear();
+    this.#epochFenceBySource.clear();
   }
 
   #pendingCount(sourceId: string): number {
@@ -232,19 +230,35 @@ export class NetworkBodyAssembler {
   }
 
   #faultSourceEpoch(sourceId: string, sourceEpoch: string): void {
-    if (!this.#faultedBySource.has(sourceId)) {
-      this.#faultedBySource.set(sourceId, { sourceId, sourceEpoch });
-    }
+    const fence = this.#epochFenceBySource.get(sourceId);
+    if (fence !== undefined && fenceMatchesSourceEpoch(fence, sourceEpoch)) fence.faulted = true;
     for (const pending of [...this.#pending.values()]) {
       if (pending.sourceId === sourceId && pending.sourceEpoch === sourceEpoch) this.#removePending(pending);
     }
   }
 
-  #releaseRetiredFault(sourceId: string, sourceEpoch: string): void {
-    const faulted = this.#faultedBySource.get(sourceId);
-    if (faulted !== undefined && isStrictlyNewerEpoch(faulted.sourceEpoch, sourceEpoch)) {
-      this.#faultedBySource.delete(sourceId);
+  #admitSourceEpoch(sourceId: string, sourceEpoch: string | undefined): boolean {
+    const proposed = sourceEpoch === undefined
+      ? { kind: "LEGACY" as const }
+      : canonicalEpoch(sourceEpoch);
+    if (proposed === null) return false;
+    const current = this.#epochFenceBySource.get(sourceId);
+    if (current === undefined) {
+      this.#epochFenceBySource.set(sourceId, proposed.kind === "LEGACY"
+        ? { kind: "LEGACY", faulted: false }
+        : { ...proposed, faulted: false });
+      return true;
     }
+    if (current.kind !== proposed.kind) return false;
+    if (current.kind === "LEGACY" || proposed.kind === "LEGACY") return !current.faulted;
+    if (current.sessionId !== proposed.sessionId || proposed.generation < current.generation) return false;
+    if (proposed.generation === current.generation) return !current.faulted;
+    for (const pending of [...this.#pending.values()]) {
+      if (pending.sourceId === sourceId) this.#removePending(pending);
+    }
+    current.generation = proposed.generation;
+    current.faulted = false;
+    return true;
   }
 
   #sweep(now: number): void {
@@ -270,18 +284,26 @@ function bodyKey(sourceId: string, sourceEpoch: string, snapshotId: string): str
   return JSON.stringify([sourceId, sourceEpoch, snapshotId]);
 }
 
-function canonicalEpoch(sourceEpoch: string): { readonly lineage: string; readonly generation: number } | null {
-  const match = /^(.+):(0|[1-9]\d*)$/u.exec(sourceEpoch);
-  if (match === null) return null;
-  const generation = Number(match[2]);
-  return Number.isSafeInteger(generation) ? { lineage: match[1]!, generation } : null;
+function canonicalEpoch(sourceEpoch: string): {
+  readonly kind: "CANONICAL";
+  readonly sessionId: string;
+  readonly generation: number;
+} | null {
+  const separator = sourceEpoch.lastIndexOf(":");
+  if (separator <= 0 || separator === sourceEpoch.length - 1) return null;
+  const generationText = sourceEpoch.slice(separator + 1);
+  if (!/^(0|[1-9]\d*)$/u.test(generationText)) return null;
+  const generation = Number(generationText);
+  return Number.isSafeInteger(generation)
+    ? { kind: "CANONICAL", sessionId: sourceEpoch.slice(0, separator), generation }
+    : null;
 }
 
-function isStrictlyNewerEpoch(previous: string, candidate: string): boolean {
-  const left = canonicalEpoch(previous);
-  const right = canonicalEpoch(candidate);
-  return left !== null && right !== null && left.lineage === right.lineage &&
-    right.generation > left.generation;
+function fenceMatchesSourceEpoch(fence: SourceEpochFence, sourceEpoch: string): boolean {
+  if (fence.kind === "LEGACY") return sourceEpoch === "legacy";
+  const candidate = canonicalEpoch(sourceEpoch);
+  return candidate !== null && candidate.sessionId === fence.sessionId &&
+    candidate.generation === fence.generation;
 }
 
 function isPotentialNetworkChunk(value: unknown): boolean {
