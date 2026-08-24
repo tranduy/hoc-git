@@ -109,6 +109,51 @@ Commit: `fix(bridge): bind provider recovery evidence`
 
 ---
 
+### Task 6A.1B: Exact Request Identity and Lane-Bound Multipart State
+
+**Reason for insertion:** The Task 6A.1 breaker proved that chunk storage also needs producer request identity and the authority-lane token defined by Task 6A.2. This is an architectural boundary closure after the five-round Task 6A.1 breaker, not a sixth local fix round.
+
+**Files:**
+
+- Modify: `packages/contracts/src/chrome-bridge.ts`
+- Modify: `packages/contracts/src/chrome-bridge.test.ts`
+- Modify: `apps/chrome-extension/src/network-observer.ts`
+- Modify: `apps/chrome-extension/src/network-observer.test.ts`
+- Modify: `apps/api/src/chrome-bridge/network-body-assembler.ts`
+- Modify: `apps/api/src/chrome-bridge/network-body-assembler.test.ts`
+- Modify: `apps/api/src/chrome-bridge/chrome-catalog-data-plane.ts`
+
+**Interfaces:**
+
+- Every HTTP envelope carries sanitized `method` and `observerRequestId`; the observer assigns the request ID synchronously at `Network.requestWillBeSent` or at entry to a generated/direct request, before any await.
+- `NetworkBodyAssembler` is constructed with an immutable internal authority-lane token. All pending bodies are discarded when connection ownership changes or a candidate promotes; a body begun in one lane phase cannot complete in another.
+
+- [ ] **Step 1: Write RED tests for concurrent request identity collisions**
+
+Dispatch two large same-millisecond responses concurrently before bridge sequence advancement and assert distinct observer request IDs/snapshot IDs. Interleave their chunks and assert both bodies assemble independently. Assert exact HTTP method is preserved and bound.
+
+- [ ] **Step 2: Write RED tests for malformed/oversize wrapper quarantine and non-mutating pressure**
+
+Missing `bodyFragment`, invalid chunk index/count, and a 128-KiB-plus-one fragment that otherwise declare the chunk schema must fault the exact source epoch and may not be forwarded to an adapter. Fill shared pressure with eight unseen sources and assert failed reservations do not consume lineage slots; after release, a legitimate ninth source starts.
+
+- [ ] **Step 3: Implement producer request ordinals and strict contract fields**
+
+Use an observer-session monotonic safe integer allocated synchronously. Do not derive uniqueness from wall-clock time or bridge sequence. Sanitize method to the exact uppercase HTTP-method enum/regex and carry it through stored/replayed metadata.
+
+- [ ] **Step 4: Implement fail-closed wrapper detection and staged lineage admission**
+
+Recognize a declared wrapper from its schema marker plus chunk identity fields even when one required field is absent. Fault only after extracting a valid envelope source/epoch; never forward it as provider JSON. Reserve shared capacity before committing a new source lineage; global pressure leaves lineage/fault state unchanged.
+
+- [ ] **Step 5: Bind multipart state to the Task 6A.2 lane token**
+
+Task 6A.2 supplies the immutable token and invokes explicit reconnect/promotion rotation. Rotation disposes all pending reservations while retaining upstream epoch/connection rejection. The baseline body used to prepare promotion must complete before compare-and-swap; no other candidate body survives the swap.
+
+- [ ] **Step 6: Run contract/observer/assembler/data-plane tests and commit**
+
+Commit: `fix(bridge): bind multipart requests to authority lanes`
+
+---
+
 ### Task 6A.2: Atomic Account Authority Coordinator
 
 **Files:**
