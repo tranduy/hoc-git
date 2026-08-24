@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { confirmLobbyFingerprint, recognizeLobbyTab,
+import { confirmLobbyFingerprint, recognizeExpectedLobbyTab, recognizeLobbyTab,
   shouldPreserveKsportObserver } from "./lobby-signatures.js";
 
 const configuredHosts = [
@@ -36,6 +36,15 @@ describe("lobby tab recognition", () => {
       .toBe("KSPORT");
   });
 
+  it("does not recognize a SABA authentication error as a sportsbook source", () => {
+    expect(recognizeLobbyTab({ id: 13,
+      url: "https://c0z0ob.bp7xvs95.com/sports?token=expired",
+      title: "SPA-1008 - Authentication failed" })).toBeNull();
+    expect(recognizeLobbyTab({ id: 14,
+      url: "https://c0z0ob.bp7xvs95.com/sports?token=fresh",
+      title: "SABA Sports" })?.lobby).toBe("SABA");
+  });
+
   it("preserves only an already-baselined KSPORT observer across an outer-shell transition", () => {
     expect(shouldPreserveKsportObserver("KSPORT", true)).toBe(true);
     expect(shouldPreserveKsportObserver("KSPORT", false)).toBe(false);
@@ -57,6 +66,16 @@ describe("lobby tab recognition", () => {
       url: "https://c0z0oc.bpf7t7s9.com/session/NewIndex?token=opaque", title: "Sports" })?.lobby)
       .toBe("SBO");
     expect(recognizeLobbyTab({ id: 12, url: "https://c0z0ob.bpb7jrm5.com.evil.test/" })).toBeNull();
+  });
+
+  it("allows only an explicitly expected SABA launch to disambiguate a legacy SBO host", () => {
+    const launch = { id: 15, url: "https://c0z0ob.bpb7jrm5.com/session/NewIndex?token=opaque",
+      title: "SABA Sports" };
+    expect(recognizeLobbyTab(launch)?.lobby).toBe("SBO");
+    expect(recognizeExpectedLobbyTab(launch, "SABA")?.lobby).toBe("SABA");
+    expect(recognizeExpectedLobbyTab(launch, "CMD")).toBeNull();
+    expect(recognizeExpectedLobbyTab({ ...launch,
+      title: "SPA-1008 - Authentication failed" }, "SABA")).toBeNull();
   });
 
   it("recognizes the current APSPORT launch host", () => {

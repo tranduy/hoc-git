@@ -1,5 +1,5 @@
 import { ChromeLobbyIdSchema, type ChromeLobbyId } from "@tool-chenh/contracts";
-import { recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
+import { recognizeExpectedLobbyTab, recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
 
 export interface DebuggerAttachmentPort {
   attach(tabId: number): Promise<void>;
@@ -47,7 +47,7 @@ export class TabRegistry {
   }
 
   async attachBootstrap(tab: TabDescriptor, lobby: ChromeLobbyId): Promise<AttachedLobbyTab> {
-    const candidate = recognizeLobbyTab(tab);
+    const candidate = recognizeExpectedLobbyTab(tab, lobby);
     if (candidate?.lobby !== lobby) throw new Error("TAB_NOT_RECOGNIZED");
     return this.#attachCandidate(candidate);
   }

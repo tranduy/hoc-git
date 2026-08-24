@@ -23,6 +23,16 @@ describe("TabRegistry", () => {
     expect(attach).not.toHaveBeenCalled();
   });
 
+  it("attaches an ambiguous host as SABA only through expected bootstrap", async () => {
+    const { registry, attach } = createRegistry();
+    const tab = { id: 19,
+      url: "https://c0z0ob.bpb7jrm5.com/session/NewIndex?token=opaque", title: "SABA Sports" };
+
+    expect(await registry.attachBootstrap(tab, "SABA"))
+      .toMatchObject({ lobby: "SABA", tabId: 19, state: "ATTACHED" });
+    expect(attach).toHaveBeenCalledWith(19);
+  });
+
   it("detaches a removed tab and reattaches a recognized tab after navigation", async () => {
     const { registry, attach, detach } = createRegistry();
     await registry.attachSelected({ id: 7, url: "https://imsports.directsb.net/live" });

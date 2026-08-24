@@ -443,6 +443,21 @@ describe("SourceTabRecovery", () => {
       .rejects.toThrow("UNTRUSTED_LAUNCH_URL");
   });
 
+  it("consumes an API-expected SABA launch on an otherwise ambiguous SBO host", async () => {
+    const attachBootstrap = vi.fn(async () => undefined);
+    const launch = "https://c0z0ob.bpb7jrm5.com/session/NewIndex?token=opaque";
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [], query: async () => [],
+      create: async () => ({ id: 18, url: "about:blank" }),
+      update: async () => ({ id: 18, url: launch, title: "SABA Sports" }),
+      attach: vi.fn(), attachBootstrap,
+      validateReady: async () => true
+    });
+
+    await expect(recovery.ensure("SABA", launch)).resolves.toBeUndefined();
+    expect(attachBootstrap).toHaveBeenCalledWith({ id: 18, url: launch }, "SABA");
+  });
+
   it("restores and attaches a recently closed source tab", async () => {
     const attach = vi.fn(async () => undefined);
     const restore = vi.fn(async () => ({ id: 10, url: "https://cgnew.fts368.com/live" }));

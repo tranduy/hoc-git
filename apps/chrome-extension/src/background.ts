@@ -209,8 +209,9 @@ const sourceTabRecovery = new SourceTabRecovery({
   },
   onBootstrapFailure: (tabId) => { bootstrappingSourceTabs.delete(tabId); },
   validateReady: async (tab, lobby) => {
-    if (lobby !== "KSPORT") return true;
     if (tab.id === undefined) return false;
+    if (lobby === "SABA") return observer.hasCompleteSabaBaseline(`chrome:SABA:${tab.id}`);
+    if (lobby !== "KSPORT") return true;
     return observer.ensureCompleteKsportBaseline({ lobby: "KSPORT", tabId: tab.id,
       sourceId: `chrome:KSPORT:${tab.id}` });
   },

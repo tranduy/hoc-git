@@ -711,6 +711,21 @@ export class NetworkObserver {
     return frames !== undefined && ksportFramesContainCompleteBaseline(frames);
   }
 
+  hasCompleteSabaBaseline(sourceId: string): boolean {
+    for (const socket of this.#webSockets.values()) {
+      if (socket.source.sourceId !== sourceId || socket.source.lobby !== "SABA" ||
+        !this.#isSourceGenerationCurrent(sourceId, socket.sourceGeneration)) continue;
+      try {
+        if (!/\/socket\.io\/?$/u.test(new URL(socket.url).pathname)) continue;
+      } catch { continue; }
+      const partitionPrefix = `${sourceId}|${socket.streamId}:`;
+      for (const readyKey of this.#sabaReadySnapshotPartitions) {
+        if (readyKey.startsWith(partitionPrefix)) return true;
+      }
+    }
+    return false;
+  }
+
   async ensureCompleteKsportBaseline(source: ObservedSource): Promise<boolean> {
     const existing = this.#ksportBaselineChecks.get(source.sourceId);
     if (existing !== undefined) return existing;
@@ -1137,6 +1152,7 @@ export class NetworkObserver {
       // establish or renew network authority. A fresh Socket.IO OPEN plus
       // reset/done remains the only SABA LIVE proof.
       await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true, true);
+      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
       return;
     }
     if (source.lobby === "KSPORT") {

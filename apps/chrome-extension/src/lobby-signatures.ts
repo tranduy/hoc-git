@@ -50,12 +50,28 @@ export function recognizeLobbyTab(tab: TabDescriptor): LobbyTabCandidate | null 
       /^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/iu.test(hostname) ? "SABA" :
         /^pacific\.(?:agenate|racern)\.com$/iu.test(hostname) ? "TSPORT" : undefined);
     if (!lobby) return null;
+    const title = tab.title?.trim() ?? "";
+    if (lobby === "SABA" && isSabaErrorTitle(title)) {
+      return null;
+    }
     if (lobby === "KSPORT" && (/\bvolta\b/iu.test(parsed.pathname) ||
-      /volta|something went wrong/iu.test(tab.title?.trim() ?? ""))) return null;
+      /volta|something went wrong/iu.test(title))) return null;
     return { lobby, tabId: tab.id!, hostname, confidence: "CANDIDATE" };
   } catch {
     return null;
   }
+}
+
+export function recognizeExpectedLobbyTab(
+  tab: TabDescriptor,
+  expectedLobby: ChromeLobbyId
+): LobbyTabCandidate | null {
+  const candidate = recognizeLobbyTab(tab);
+  if (candidate?.lobby === expectedLobby) return candidate;
+  if (expectedLobby !== "SABA" || candidate?.lobby !== "SBO" ||
+    !/^c0z0o[a-z0-9]+\.(?:bpb7jrm5|bpf7t7s9)\.com$/iu.test(candidate.hostname) ||
+    isSabaErrorTitle(tab.title?.trim() ?? "")) return null;
+  return { ...candidate, lobby: "SABA" };
 }
 
 export function confirmLobbyFingerprint(
@@ -66,4 +82,8 @@ export function confirmLobbyFingerprint(
   const schemaMatches = /(?:sport|odds|market|event).*(?:feed|price|line|update)|(?:feed|price|line|update).*(?:sport|odds|market|event)/iu
     .test(traffic.marker);
   return transportMatches && schemaMatches ? { ...candidate, confidence: "TRUSTED" } : null;
+}
+
+function isSabaErrorTitle(title: string): boolean {
+  return /(?:SPA-\d+|authentication failed|session expired|login required|please log in|access denied|something went wrong|^error\b)/iu.test(title);
 }

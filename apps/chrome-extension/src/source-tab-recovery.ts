@@ -1,5 +1,5 @@
 import type { ChromeLobbyId } from "@tool-chenh/contracts";
-import { recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
+import { recognizeExpectedLobbyTab, recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
 
 interface AttachedSource {
   readonly lobby: ChromeLobbyId;
@@ -38,7 +38,7 @@ export class SourceTabRecovery {
   }
 
   async ensure(lobby: ChromeLobbyId, url: string): Promise<void> {
-    const recognized = recognizeLobbyTab({ id: 0, url });
+    const recognized = recognizeExpectedLobbyTab({ id: 0, url }, lobby);
     if (recognized?.lobby !== lobby) throw new Error("UNTRUSTED_LAUNCH_URL");
     if (lobby === "KSPORT" && !hasKsportToken(url)) {
       throw new Error("FABET_KSPORT_TOKEN_UNAVAILABLE");
@@ -168,7 +168,7 @@ export class SourceTabRecovery {
 }
 
 function isReadyLobbyTab(tab: TabDescriptor, lobby: ChromeLobbyId): boolean {
-  if (recognizeLobbyTab(tab)?.lobby !== lobby) return false;
+  if (recognizeExpectedLobbyTab(tab, lobby)?.lobby !== lobby) return false;
   if (lobby !== "KSPORT") return true;
   const title = tab.title?.trim() ?? "";
   return /sportsbook/iu.test(title) && !/volta|something went wrong/iu.test(title);
