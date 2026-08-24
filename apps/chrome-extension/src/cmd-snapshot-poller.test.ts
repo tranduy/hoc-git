@@ -103,6 +103,38 @@ describe("CmdSnapshotPoller", () => {
     expect(refreshCatalog).toHaveBeenCalledTimes(2);
   });
 
+  it("starts bounded CMD recovery immediately without overlapping its normal refresh cadence", async () => {
+    let now = 1_000;
+    let releaseRecovery!: () => void;
+    const pendingRecovery = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    const recoverCmdCatalog = vi.fn(async () => pendingRecovery);
+    const refreshCatalog = vi.fn(async () => undefined);
+    const poller = new CmdSnapshotPoller({
+      list: () => [{ lobby: "CMD", tabId: 9, hostname: "cgnew.fts368.com", state: "ATTACHED" }],
+      capture: vi.fn(async () => undefined), recoverCmdCatalog, refreshCatalog, now: () => now
+    });
+
+    poller.pollNow();
+    await Promise.resolve();
+    expect(recoverCmdCatalog).toHaveBeenCalledExactlyOnceWith({
+      lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9
+    });
+    expect(refreshCatalog).not.toHaveBeenCalled();
+
+    now = 16_000;
+    poller.pollNow();
+    await Promise.resolve();
+    expect(recoverCmdCatalog).toHaveBeenCalledTimes(1);
+    expect(refreshCatalog).not.toHaveBeenCalled();
+
+    releaseRecovery();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    poller.pollNow();
+    await Promise.resolve();
+    expect(recoverCmdCatalog).toHaveBeenCalledTimes(2);
+    expect(refreshCatalog).not.toHaveBeenCalled();
+  });
+
   it("forces an explicitly reattached same-ID source despite recent cadence and in-flight attribution", async () => {
     let now = 1_000;
     let release!: () => void;

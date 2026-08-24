@@ -20,12 +20,14 @@ import type { CatalogStoreLike } from "./catalog/durable-catalog-store.js";
 import { registerChromeBridgeRoute } from "./chrome-bridge/chrome-bridge-route.js";
 import type { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
 import type { ChromeBridgeControlPlane } from "./chrome-bridge/chrome-bridge-control-plane.js";
+import type { ProviderFeedSnapshot } from "./chrome-bridge/provider-feed-types.js";
 import { registerMaintenanceRoutes, type RefreshableProvider } from "./routes/maintenance.js";
 import type { SessionRefreshControl } from "./session-maintenance.js";
 import type { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 import { registerCmdHiddenMarketProbeRoute, type CmdHiddenMarketProbeLike } from "./routes/cmd-hidden-market-probe.js";
 
 export interface AppOptions {
+  readonly buildIdentity?: string;
   readonly viteOrigin?: string;
   readonly heartbeatIntervalMs?: number;
   readonly maxBufferedBytes?: number;
@@ -47,6 +49,8 @@ export interface AppOptions {
     readonly installationKey: string;
     readonly openProviderTicket?: boolean;
     readonly controlPlane?: ChromeBridgeControlPlane;
+    readonly currentFeed?: (sourceId: string) => ProviderFeedSnapshot | null;
+    readonly waitForFreshBaseline?: (sourceId: string, afterMs: number) => Promise<ProviderFeedSnapshot>;
   };
   readonly maintenance?: SessionRefreshControl;
   readonly refreshProvider?: (provider: RefreshableProvider) => Promise<number>;
@@ -161,7 +165,7 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
     methods: ["GET", "POST"]
   });
 
-  registerHealthRoute(app, runtime);
+  registerHealthRoute(app, runtime, options.buildIdentity);
   registerSnapshotRoute(app, runtime);
   if (options.sessionServices !== undefined) registerSessionRoutes(app, options.sessionServices);
   if (options.accountRegistry !== undefined) registerAccountRoutes(app, options.accountRegistry);
@@ -184,7 +188,12 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.chromeBridge !== undefined) void app.register(async (instance) => {
     registerChromeBridgeRoute(instance, options.chromeBridge!.registry, {
       installationKey: options.chromeBridge!.installationKey,
+      dashboardOrigins,
       ...(options.chromeBridge!.controlPlane === undefined ? {} : { controlPlane: options.chromeBridge!.controlPlane }),
+      ...(options.chromeBridge!.currentFeed === undefined ? {} : { currentFeed: options.chromeBridge!.currentFeed }),
+      ...(options.chromeBridge!.waitForFreshBaseline === undefined
+        ? {}
+        : { waitForFreshBaseline: options.chromeBridge!.waitForFreshBaseline }),
       ...(options.chromeBridge!.openProviderTicket === undefined
         ? {}
         : { openProviderTicket: options.chromeBridge!.openProviderTicket })

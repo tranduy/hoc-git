@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { posix } from "node:path";
 
 /**
  * Resolves the per-user data root. Windows keeps the strict LOCALAPPDATA
@@ -15,7 +15,7 @@ export function resolveLocalAppData(
   const explicit = env.LOCALAPPDATA?.trim();
   if (explicit) return explicit;
   if (platform === "win32") return null;
-  if (platform === "darwin") return join(home, "Library", "Application Support");
+  if (platform === "darwin") return posix.join(home, "Library", "Application Support");
   const xdg = env.XDG_DATA_HOME?.trim();
-  return xdg ? xdg : join(home, ".local", "share");
+  return xdg ? xdg : posix.join(home, ".local", "share");
 }

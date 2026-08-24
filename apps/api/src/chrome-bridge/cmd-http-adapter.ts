@@ -8,6 +8,8 @@ const HOST = "cgnew.fts368.com";
 const PATH = "/Member/BetsView/BetLight/DataOdds.ashx";
 const FULL_ROW_LENGTH = 91;
 const KNOWN_METADATA_ROW_LENGTH = 3_046;
+const MAX_PRE_BASELINE_RESPONSES = 32;
+const MAX_PRE_BASELINE_OPERATIONS = 256;
 
 interface CmdRoot {
   readonly t: number;
@@ -24,11 +26,36 @@ interface RetainedRow {
   readonly sequence: number;
 }
 
+interface DeltaObservation {
+  readonly observedAtMs: number;
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number;
+}
+
+interface PendingDelta {
+  readonly providerVersion: number;
+  readonly data: readonly unknown[][];
+  readonly observedAtMs: number;
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number;
+}
+
+interface BaselineObservation {
+  readonly providerVersion: number;
+  readonly requestDocumentKey: string;
+  readonly observerSessionId: string;
+  readonly observerRequestOrdinal: number;
+}
+
 interface SourceState {
   rows: Map<string, RetainedRow> | null;
   generation: string | null;
   providerVersion: number | null;
   gap: boolean;
+  pendingDeltas: PendingDelta[];
+  pendingOperationCount: number;
+  preBaselineIncomplete: boolean;
+  baselineObservation: BaselineObservation | null;
 }
 
 const marketPositions = {
@@ -70,27 +97,42 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     const root = this.#parsedBodies.get(envelope) ?? parseRoot(envelope.payload.body);
     if (root === null) return [];
     const state = this.#states.get(envelope.sourceId) ?? { rows: null, generation: null,
-      providerVersion: null, gap: false };
-    if (state.providerVersion !== null && root.t < state.providerVersion) return [];
-    if (!root.a) {
-      state.rows = null;
-      state.generation = null;
-      state.providerVersion = root.t;
-      state.gap = true;
-      this.#states.set(envelope.sourceId, state);
-      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-        observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
-        reason: "PROVIDER_STREAM_GAP" }];
-    }
-
+      providerVersion: null, gap: false, pendingDeltas: [], pendingOperationCount: 0,
+      preBaselineIncomplete: false, baselineObservation: null };
     const providerFunctionCode = envelope.request.providerFunctionCode;
     const isFullFamily = providerFunctionCode === 1 || providerFunctionCode === 2 ||
       providerFunctionCode === 4 || providerFunctionCode === 6;
     const isDeltaFamily = providerFunctionCode === 3 || providerFunctionCode === 5 ||
       providerFunctionCode === 7;
     const isAtomicFull = providerFunctionCode === 1 && root.today !== undefined && root.f !== undefined;
+    const observation = isAtomicFull ? boundBaselineObservation(envelope) : null;
+    const sameProviderVersion = state.providerVersion !== null && root.t === state.providerVersion;
+    const renewsSameProviderVersion = root.a && sameProviderVersion && !state.gap && state.rows !== null &&
+      state.generation !== null && observation !== null &&
+      state.baselineObservation?.providerVersion === root.t &&
+      state.baselineObservation.requestDocumentKey === observation.requestDocumentKey &&
+      state.baselineObservation.observerSessionId === observation.observerSessionId &&
+      observation.observerRequestOrdinal > state.baselineObservation.observerRequestOrdinal;
+    if (state.providerVersion !== null && (root.t < state.providerVersion ||
+      (sameProviderVersion && !renewsSameProviderVersion))) return [];
+    if (!root.a) {
+      state.rows = null;
+      state.generation = null;
+      state.providerVersion = root.t;
+      state.gap = true;
+      state.pendingDeltas = [];
+      state.pendingOperationCount = 0;
+      state.preBaselineIncomplete = false;
+      state.baselineObservation = null;
+      this.#states.set(envelope.sourceId, state);
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+        observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
+        reason: "PROVIDER_STREAM_GAP" }];
+    }
+
     let evidenceMode: "BASELINE" | "DELTA";
     if (isAtomicFull) {
+      if (observation === null) return [];
       const candidates = [...root.data, ...root.today!];
       if (candidates.some((candidate) => !isKnownMetadataRow(candidate) &&
         (!isFullRow(candidate) || decodeRecord(candidate) === null))) return [];
@@ -104,23 +146,75 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
           receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       }
       if (rows.size === 0) return [];
+      const pendingDeltas = state.pendingDeltas.filter((pending) => pending.providerVersion > root.t)
+        .sort((first, second) => first.providerVersion - second.providerVersion || first.sequence - second.sequence);
+      for (const pending of pendingDeltas) {
+        if (pending.data.some((delta) => applyDelta(rows, delta, pending) !== "APPLIED")) {
+          state.pendingDeltas = [];
+          state.pendingOperationCount = 0;
+          state.preBaselineIncomplete = true;
+          this.#states.set(envelope.sourceId, state);
+          return [reconciliationRequired(envelope)];
+        }
+      }
       state.rows = rows;
-      state.generation = `cmd:${root.t}`;
-      state.providerVersion = root.t;
+      if (renewsSameProviderVersion) {
+        state.baselineObservation = { providerVersion: root.t,
+          requestDocumentKey: observation.requestDocumentKey,
+          observerSessionId: observation.observerSessionId,
+          observerRequestOrdinal: observation.observerRequestOrdinal };
+        state.generation = `cmd:${root.t}:observation:${observation.observerRequestOrdinal}`;
+      } else {
+        state.baselineObservation = { providerVersion: root.t,
+          requestDocumentKey: observation.requestDocumentKey,
+          observerSessionId: observation.observerSessionId,
+          observerRequestOrdinal: observation.observerRequestOrdinal };
+        state.generation = `cmd:${root.t}`;
+      }
+      state.providerVersion = pendingDeltas.at(-1)?.providerVersion ?? root.t;
       state.gap = false;
+      state.pendingDeltas = [];
+      state.pendingOperationCount = 0;
+      state.preBaselineIncomplete = false;
       evidenceMode = "BASELINE";
     } else {
       // Only fc=1 has an observed atomic running+today completion rule. Other
       // full-family partitions remain fail-closed until their provider contract
       // is characterized; a full-shaped body on a delta fc is never promoted.
-      if (isFullFamily || !isDeltaFamily || root.today !== undefined || root.f !== undefined ||
-        state.gap || state.rows === null || state.generation === null) {
-        state.providerVersion = root.t;
+      if (isDeltaFamily && root.today === undefined && root.f === undefined && !state.gap &&
+        state.rows === null && state.generation === null) {
+        const data = retainPendingDeltaData(root.data);
+        const duplicateCursor = state.pendingDeltas.some((pending) => pending.providerVersion === root.t);
+        if (state.preBaselineIncomplete || data === null || duplicateCursor ||
+          state.pendingDeltas.length >= MAX_PRE_BASELINE_RESPONSES ||
+          state.pendingOperationCount + data.length > MAX_PRE_BASELINE_OPERATIONS) {
+          const newlyIncomplete = !state.preBaselineIncomplete;
+          state.pendingDeltas = [];
+          state.pendingOperationCount = 0;
+          state.preBaselineIncomplete = true;
+          this.#states.set(envelope.sourceId, state);
+          return newlyIncomplete ? [reconciliationRequired(envelope)] : [];
+        }
+        state.pendingDeltas.push({ providerVersion: root.t, data,
+          observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
+          sequence: envelope.sequence });
+        state.pendingOperationCount += data.length;
         this.#states.set(envelope.sourceId, state);
         return [];
       }
+      if (isFullFamily || !isDeltaFamily || root.today !== undefined || root.f !== undefined || state.gap) {
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
+      if (state.rows === null || state.generation === null) return [];
+      const nextRows = new Map(state.rows);
       let changed = false;
-      for (const delta of root.data) changed = applyDelta(state.rows, delta, envelope) || changed;
+      for (const delta of root.data) {
+        const outcome = applyDelta(nextRows, delta, envelope);
+        if (outcome === "INVALID") return [];
+        changed = outcome === "APPLIED" || changed;
+      }
+      state.rows = nextRows;
       state.providerVersion = root.t;
       this.#states.set(envelope.sourceId, state);
       // Unknown provider commands are deliberately not decoded, but their
@@ -136,6 +230,24 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
       // `t` is CMD's ordering cursor/version, not a Unix timestamp.
       providerTimestampMs: null }];
   }
+}
+
+function boundBaselineObservation(envelope: ChromeBridgeEnvelope): {
+  readonly requestDocumentKey: string;
+  readonly observerSessionId: string;
+  readonly observerRequestOrdinal: number;
+} | null {
+  const { observerRequestId, requestDocumentKey } = envelope.request;
+  if (observerRequestId === undefined || requestDocumentKey === undefined) return null;
+  const identity = /^([a-z0-9._:-]+):request:(0|[1-9]\d*)$/iu.exec(observerRequestId);
+  if (identity === null) return null;
+  const observerSessionId = identity[1];
+  const ordinalText = identity[2];
+  if (observerSessionId === undefined || ordinalText === undefined) return null;
+  const observerRequestOrdinal = Number(ordinalText);
+  return Number.isSafeInteger(observerRequestOrdinal)
+    ? { requestDocumentKey, observerSessionId, observerRequestOrdinal }
+    : null;
 }
 
 function parseRoot(body: string): CmdRoot | null {
@@ -161,6 +273,30 @@ function isFullRow(value: readonly unknown[]): value is unknown[] { return value
 
 function isKnownMetadataRow(value: readonly unknown[]): boolean {
   return value.length === KNOWN_METADATA_ROW_LENGTH;
+}
+
+function retainPendingDeltaData(data: readonly unknown[][]): readonly unknown[][] | null {
+  if (data.length > MAX_PRE_BASELINE_OPERATIONS) return null;
+  const retained: unknown[][] = [];
+  for (const delta of data) {
+    if (delta.length < 4 || delta[1] !== 1 || typeof delta[2] !== "number") return null;
+    const eventId = providerId(delta[0]);
+    const command = deltaCommands.get(delta[2]);
+    if (eventId === null || command === undefined) return null;
+    if (command.kind === "LINE") {
+      if (finiteLine(delta[3]) === null) return null;
+      retained.push([eventId, 1, delta[2], delta[3]]);
+    } else {
+      if (delta.length < 5 || finiteOdd(delta[3]) === null || finiteOdd(delta[4]) === null) return null;
+      retained.push([eventId, 1, delta[2], delta[3], delta[4]]);
+    }
+  }
+  return retained;
+}
+
+function reconciliationRequired(envelope: ChromeBridgeEnvelope): DecodedCatalogUpdate {
+  return { sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+    invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_GAP" };
 }
 
 function providerId(value: unknown): string | null {
@@ -219,26 +355,29 @@ function decodeRecord(row: readonly unknown[]): CmdCatalogInputRecord | null {
 }
 
 function applyDelta(rows: Map<string, RetainedRow>, delta: readonly unknown[],
-  envelope: ChromeBridgeEnvelope): boolean {
-  if (delta.length < 4 || delta[1] !== 1 || typeof delta[2] !== "number") return false;
+  envelope: DeltaObservation): "APPLIED" | "IGNORED" | "INVALID" {
+  if (delta.length < 4 || delta[1] !== 1 || typeof delta[2] !== "number") return "INVALID";
   const eventId = providerId(delta[0]);
   const command = deltaCommands.get(delta[2]);
-  if (eventId === null || command === undefined) return false;
+  if (eventId === null) return "INVALID";
+  // Unknown commands are ordered authenticated evidence, but they are not a
+  // schema error and must not prevent characterized siblings from applying.
+  if (command === undefined) return "IGNORED";
   const retained = rows.get(eventId);
-  if (retained === undefined) return false;
+  if (retained === undefined) return "INVALID";
   const next = [...retained.row];
   const positions = marketPositions[command.betType];
   if (command.kind === "LINE") {
-    if (finiteLine(delta[3]) === null) return false;
+    if (finiteLine(delta[3]) === null) return "INVALID";
     next[positions.line] = delta[3];
   } else {
-    if (delta.length < 5 || finiteOdd(delta[3]) === null || finiteOdd(delta[4]) === null) return false;
+    if (delta.length < 5 || finiteOdd(delta[3]) === null || finiteOdd(delta[4]) === null) return "INVALID";
     next[positions.home] = delta[3];
     next[positions.away] = delta[4];
   }
   rows.set(eventId, { row: next, observedAtMs: envelope.observedAtMs,
     receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
-  return true;
+  return "APPLIED";
 }
 
 function materialize(rows: Map<string, RetainedRow>, observedAtMs: number) {

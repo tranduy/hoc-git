@@ -29,7 +29,9 @@ function envelope(body: unknown, sequence: number, providerFunctionCode = 1): Ch
     sourceEpoch: "observer-cmd:0", sequence, observedAtMs: 1_787_494_070_000 + sequence,
     receivedMonotonicMs: 100 + sequence, transport: "HTTP_RESPONSE",
     request: { hostname: "cgnew.fts368.com", pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx",
-      resourceType: "XHR", providerFunctionCode }, payload: { encoding: "UTF8", body: JSON.stringify(body) } };
+      resourceType: "XHR", method: "GET", observerRequestId: `observer-a:request:${sequence}`,
+      requestFrameKey: "http-frame:cmd-main", requestDocumentKey: "http-document:cmd-document",
+      providerFunctionCode }, payload: { encoding: "UTF8", body: JSON.stringify(body) } };
   return value as ChromeBridgeEnvelope;
 }
 
@@ -49,6 +51,66 @@ describe("CmdHttpCatalogAdapter", () => {
     expect(adapter.decode(envelope(oddsChange, 2, 3))).toEqual([]);
   });
 
+  it("renews a quiet same-cursor fc1 only for an independently observed bound request", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    const body = { ...fullResponse, t: 100 };
+    const firstEnvelope = envelope(body, 1, 1);
+    const first = adapter.decode(firstEnvelope).at(-1);
+
+    expect(first).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE",
+      generation: "cmd:100" });
+    expect(adapter.decode(firstEnvelope)).toEqual([]);
+
+    const redeliveredRequest = envelope(body, 2, 1);
+    expect(adapter.decode({ ...redeliveredRequest, request: { ...redeliveredRequest.request,
+      observerRequestId: firstEnvelope.request.observerRequestId } })).toEqual([]);
+    const otherDocument = envelope(body, 3, 1);
+    expect(adapter.decode({ ...otherDocument, request: { ...otherDocument.request,
+      requestDocumentKey: "http-document:cmd-other" } })).toEqual([]);
+
+    const renewed = adapter.decode(envelope(body, 4, 1)).at(-1);
+    expect(renewed).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE" });
+    expect(renewed?.generation).not.toBe(first?.generation);
+
+    const lateRedelivery = envelope(body, 5, 1);
+    expect(adapter.decode({ ...lateRedelivery, request: { ...lateRedelivery.request,
+      observerRequestId: firstEnvelope.request.observerRequestId } })).toEqual([]);
+    const delta = adapter.decode(envelope({ ...oddsChange, t: 101 }, 6, 3)).at(-1);
+    expect(delta).toMatchObject({ evidenceMode: "DELTA", generation: renewed?.generation });
+    expect(adapter.decode(envelope({ ...fullResponse, t: 99 }, 7, 1))).toEqual([]);
+  });
+
+  it("renews beyond a fixed history window but rejects an unseen older request ordinal", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    const body = { ...fullResponse, t: 100 };
+    adapter.decode(envelope(body, 1, 1));
+
+    for (let ordinal = 2; ordinal <= 66; ordinal += 2) {
+      const update = adapter.decode(envelope(body, ordinal, 1)).at(-1);
+      expect(update).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE" });
+    }
+
+    const olderUnseenRequest = envelope(body, 67, 1);
+    expect(adapter.decode({ ...olderUnseenRequest, request: { ...olderUnseenRequest.request,
+      observerRequestId: "observer-a:request:65" } })).toEqual([]);
+  });
+
+  it("requires observer-session continuity until the source is reset", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    const body = { ...fullResponse, t: 100 };
+    const first = envelope(body, 1, 1);
+    adapter.decode(first);
+    const nextSession = envelope(body, 2, 1);
+    const nextSessionRequest = { ...nextSession, request: { ...nextSession.request,
+      observerRequestId: "observer-b:request:2" } };
+
+    expect(adapter.decode(nextSessionRequest)).toEqual([]);
+    adapter.resetSource(first.sourceId);
+    expect(adapter.decode(nextSessionRequest)).toEqual([
+      expect.objectContaining({ authoritativeBaseline: true, evidenceMode: "BASELINE", generation: "cmd:100" })
+    ]);
+  });
+
   it("maps the characterized line and odds commands to stable provider selections", () => {
     const adapter = new CmdHttpCatalogAdapter();
     const earlier = { ...fullResponse, t: 8_277_000 };
@@ -61,6 +123,39 @@ describe("CmdHttpCatalogAdapter", () => {
         expect.objectContaining({ providerSelectionId: "25299763:3:over", rawOdds: "0.8" }),
         expect.objectContaining({ providerSelectionId: "25299763:3:under", rawOdds: "-0.98" })
       ]));
+  });
+
+  it("commits a complete baseline below a buffered pre-baseline delta and reapplies that delta", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    const baseline = { ...fullResponse, t: 100 };
+    const newerDelta = { ...oddsChange, t: 101 };
+
+    expect(adapter.decode(envelope(newerDelta, 1, 3))).toEqual([]);
+    const updates = adapter.decode(envelope(baseline, 2, 1));
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE",
+      generation: "cmd:100" });
+    expect((updates[0]?.value as { quotes: Array<{ providerSelectionId: string; rawOdds: string }> }).quotes)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ providerSelectionId: "25299763:3:over", rawOdds: "0.8" }),
+        expect.objectContaining({ providerSelectionId: "25299763:3:under", rawOdds: "-0.98" })
+      ]));
+  });
+
+  it("bounds pre-baseline deltas without blocking the next complete baseline below the overflow watermark", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    let overflowUpdate = adapter.decode(envelope({ ...oddsChange, t: 101 }, 1, 3));
+    for (let index = 1; index < 33; index += 1) {
+      overflowUpdate = adapter.decode(envelope({ ...oddsChange, t: 101 + index }, index + 1, 3));
+    }
+
+    expect(overflowUpdate).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:CMD:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
+    expect(adapter.decode(envelope({ ...fullResponse, t: 100 }, 40, 1))).toEqual([
+      expect.objectContaining({ authoritativeBaseline: true, evidenceMode: "BASELINE", generation: "cmd:100" })
+    ]);
   });
 
   it("fails closed on lookalike hosts, incomplete full shapes, and provider reset signals", () => {
@@ -91,5 +186,36 @@ describe("CmdHttpCatalogAdapter", () => {
       today: [...fullResponse.today, [25299764, "unknown-row"]] }, 3, 1))).toEqual([]);
     expect(adapter.decode(envelope({ t: 8_281_247, a: true,
       data: fullResponse.data, f: [] }, 4, 1))).toEqual([]);
+  });
+
+  it("does not let rejected pre-baseline function families poison a later complete baseline", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    expect(adapter.decode(envelope({ ...fullResponse, t: 101 }, 1, 3))).toEqual([]);
+    expect(adapter.decode(envelope({ ...fullResponse, t: 102 }, 2, 2))).toEqual([]);
+    expect(adapter.decode(envelope({ ...fullResponse, t: 100 }, 3, 1))).toEqual([
+      expect.objectContaining({ authoritativeBaseline: true, evidenceMode: "BASELINE", generation: "cmd:100" })
+    ]);
+  });
+
+  it("does not let a rejected post-baseline function family poison a later valid delta", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    adapter.decode(envelope({ ...fullResponse, t: 100 }, 1, 1));
+
+    expect(adapter.decode(envelope({ ...fullResponse, t: 200 }, 2, 2))).toEqual([]);
+    expect(adapter.decode(envelope({ ...oddsChange, t: 150 }, 3, 3))).toEqual([
+      expect.objectContaining({ evidenceMode: "DELTA", generation: "cmd:100" })
+    ]);
+  });
+
+  it("rejects a mixed malformed post-baseline delta atomically without advancing its cursor", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    adapter.decode(envelope({ ...fullResponse, t: 100 }, 1, 1));
+    const malformed = { ...oddsChange, t: 101,
+      data: [...oddsChange.data, [25299763, 1, 35, 0.8, "not-an-odd"]] };
+
+    expect(adapter.decode(envelope(malformed, 2, 3))).toEqual([]);
+    expect(adapter.decode(envelope({ ...oddsChange, t: 101 }, 3, 3))).toEqual([
+      expect.objectContaining({ evidenceMode: "DELTA", generation: "cmd:100" })
+    ]);
   });
 });

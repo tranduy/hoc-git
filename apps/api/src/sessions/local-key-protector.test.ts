@@ -26,7 +26,9 @@ describe("LocalKeyProtector", () => {
 
     expect(Buffer.from(ciphertext).toString("latin1")).not.toContain("local-roundtrip-canary");
     expect(Array.from(await protector.unprotect(ciphertext))).toEqual(Array.from(cleartext));
-    expect((await stat(keyPath)).mode & 0o777).toBe(0o600);
+    // POSIX mode bits are meaningful only on the platforms where this
+    // fallback protector is selected. Windows uses DPAPI and NTFS ACLs.
+    if (process.platform !== "win32") expect((await stat(keyPath)).mode & 0o777).toBe(0o600);
     expect(Buffer.from((await readFile(keyPath, "utf8")).trim(), "base64")).toHaveLength(32);
   });
 

@@ -3,10 +3,10 @@ import type { ChromeLobbyId } from "@tool-chenh/contracts";
 export type SnapshotRecoveryMode = "DOM_CAPTURE" | "CATALOG_REFRESH" | "TAB_RELOAD";
 
 export function snapshotRecoveryMode(lobby: ChromeLobbyId): SnapshotRecoveryMode {
-  // CMD's table is authoritative in the rendered DOM. Every other attached
-  // provider must recover inside the current authenticated page. A loopback
-  // API reconnect is never permission to navigate or hard-reload a source.
-  if (lobby === "CMD") return "DOM_CAPTURE";
+  // Every attached provider recovers inside the current authenticated page. A
+  // loopback API reconnect is never permission to navigate or hard-reload a
+  // source. CMD's refresh path requests its authenticated fc=1 baseline.
+  void lobby;
   return "CATALOG_REFRESH";
 }
 

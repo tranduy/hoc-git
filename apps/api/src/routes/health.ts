@@ -8,7 +8,12 @@ const expectedProviderStatuses = new Set([
   "IM\u0000LOL"
 ]);
 
-export function registerHealthRoute(app: FastifyInstance, runtime: Runtime): void {
+const buildIdentityPattern = /^sha256:[a-f0-9]{64}$/u;
+
+export function registerHealthRoute(app: FastifyInstance, runtime: Runtime,
+  buildIdentityValue?: string): void {
+  const buildIdentity = typeof buildIdentityValue === "string" && buildIdentityPattern.test(buildIdentityValue)
+    ? buildIdentityValue : null;
   app.get("/api/health", async (_request, reply) => {
     const snapshot = runtime.getSnapshot();
     const statusIdentities = new Set(snapshot.providerStatuses.map((provider) =>
@@ -22,6 +27,7 @@ export function registerHealthRoute(app: FastifyInstance, runtime: Runtime): voi
       status: allExpectedProvidersLive ? "ok" : "degraded",
       mode: "OBSERVE",
       executionReady: false,
+      buildIdentity,
       revision: snapshot.revision,
       providerStatuses: snapshot.providerStatuses
     });

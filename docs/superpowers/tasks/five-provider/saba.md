@@ -51,27 +51,24 @@ npm.cmd run typecheck --workspace @tool-chenh/api -- --pretty false
 git diff --check -- apps/api/src/chrome-bridge/saba-ws-adapter.ts apps/api/src/chrome-bridge/saba-ws-adapter.test.ts apps/api/src/chrome-bridge/saba-ws-realtime-regression.test.ts
 ```
 
-If the typecheck command writes or triggers a build in the current package configuration, omit it and record that the integrator must run it. Do not build.
+## End-to-End Realtime Gate
 
-## Phase A Handoff
-
-Write the required report with status `READY_FOR_INTEGRATION`. If shared observer/data-plane wiring is still needed, describe it in the shared integration request format. Do not describe the task as done and remain available for Phase B.
-
-## Phase B Realtime Gate
-
-After the integrator supplies the SABA runtime lease:
+After focused GREEN, perform the exact common deployment transaction verbatim, then begin the SABA acceptance lease with `begin-acceptance SABA <worker> chrome:SABA:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
 
 Run the provider sampler without building:
 
 ```powershell
-node scripts/verify-saba-runtime.mjs 30000 .run/five-provider/saba-runtime-evidence.json
+node scripts/verify-saba-runtime.mjs 120000 .run/five-provider/saba-runtime-evidence.json
 ```
 
 1. Verify the leased tab is the current authenticated SABA page and not an auth/error page, without reading its launch token.
 2. Require the leased source to move to `ACTIVE` and catalog/feed to `LIVE/FRESH` only after a current socket OPEN/reset/data/done baseline.
-3. Sample for at least 30 seconds and record at least three current provider socket/evidence advances; a bridge/tab heartbeat does not count.
+3. Sample for at least 120 seconds and record at least three current provider socket/evidence advances; a bridge/tab heartbeat does not count.
 4. Record a semantic price/status revision if SABA emits one during the window.
 5. Trigger one SABA-targeted recovery. Require a strictly newer current-stream baseline within 60 seconds and prove CMD/APSPORT/IM/SBOBET/BTI source identities were not reset.
-6. Update the report to `DONE` only if every item passes. Otherwise mark `BLOCKED` with exact redacted state/reason.
+6. Update the report to `DONE` only if every item passes. On a failed gate keep
+   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
+   the worker loop. `BLOCKED` is legal only after proving a genuine external
+   provider/auth failure that in-scope code and same-tab recovery cannot fix.
 
-Do not build, restart, reload the extension, attach a debugger, use active-tab actions, or touch another provider during Phase B.
+Do not attach a debugger, use active-tab fallback, or touch another provider. Unit tests without this live gate are not completion.

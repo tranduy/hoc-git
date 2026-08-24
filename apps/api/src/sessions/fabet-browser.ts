@@ -1146,8 +1146,30 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
           const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
           if (await refreshed.isVisible().catch(() => false)) control = refreshed;
         }
+        const play = control.locator(".game-item__play-btn button").first();
+        if (!clicked && await play.count() > 0) {
+          await control.hover({ timeout: 2_000 }).catch(() => undefined);
+          if (input.provider === "SABA" && controlPriority >= 1 && input.category === "FOOTBALL") {
+            const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
+            if (await refreshed.isVisible().catch(() => false)) control = refreshed;
+          }
+          const activePlay = control.locator(".game-item__play-btn button").first();
+          try {
+            await activePlay.click({ timeout: 2_000 });
+            clicked = await providerNavigationStarted();
+            for (let wait = 0; wait < 10 && !clicked; wait += 1) {
+              await lobbyPage.waitForTimeout(100).catch(() => undefined);
+              clicked = await providerNavigationStarted();
+            }
+          }
+          catch (error) {
+            clickFailure = error;
+            await lobbyPage.waitForTimeout(150).catch(() => undefined);
+            clicked = await providerNavigationStarted();
+          }
+        }
         const thumbnail = control.locator("img.game-item__thumb").first();
-        if (await thumbnail.isVisible().catch(() => false)) {
+        if (!clicked && await thumbnail.isVisible().catch(() => false)) {
           try {
             await thumbnail.click({ timeout: 2_000 });
             for (let wait = 0; wait < 10 && !clicked; wait += 1) {
@@ -1159,21 +1181,6 @@ export class PlaywrightFabetAutomation implements FabetBrowserAutomation {
         if (!clicked && input.provider === "SABA" && controlPriority >= 1 && input.category === "FOOTBALL") {
           const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
           if (await refreshed.isVisible().catch(() => false)) control = refreshed;
-        }
-        const play = control.locator(".game-item__play-btn button").first();
-        if (!clicked && await play.count() > 0) {
-          await control.hover({ timeout: 2_000 }).catch(() => undefined);
-          if (input.provider === "SABA" && controlPriority >= 1 && input.category === "FOOTBALL") {
-            const refreshed = lobbyPage.locator(".game-item.lobby", { hasText: /C-SPORTS/iu }).first();
-            if (await refreshed.isVisible().catch(() => false)) control = refreshed;
-          }
-          const activePlay = control.locator(".game-item__play-btn button").first();
-          try { await activePlay.click({ timeout: 2_000 }); clicked = true; }
-          catch (error) {
-            clickFailure = error;
-            await lobbyPage.waitForTimeout(150).catch(() => undefined);
-            clicked = await providerNavigationStarted();
-          }
         }
         if (!clicked) {
           try { await control.click({ timeout: 3_000 }); clicked = true; }

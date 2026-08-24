@@ -703,14 +703,22 @@ describe("PlaywrightFabetAutomation", () => {
   it("selects a provider card from a large lobby without per-card browser round trips", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/warm-provider") {
+        response.end("<!doctype html><main>IM football warm</main>");
+        return;
+      }
       if (request.url === "/im-provider") {
         response.end("<!doctype html><main>IM esports ready</main>");
         return;
       }
-      const filler = Array.from({ length: 199 }, (_value, index) =>
+      const filler = Array.from({ length: 198 }, (_value, index) =>
         `<div class="game-item lobby"><img class="game-item__thumb" src="/game/other-${index}.webp">` +
         `<p class="game-item__name">OTHER ${index}</p></div>`).join("");
       response.end(`<!doctype html>${filler}<div class="game-item lobby">` +
+        `<img class="game-item__thumb" src="/game/isports.webp">` +
+        `<p class="game-item__name">I-SPORTS</p><div class="game-item__play-btn">` +
+        `<button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/warm-provider')">` +
+        `Play</button></div></div><div class="game-item lobby">` +
         `<img class="game-item__thumb" src="/game/betradar_esportss_landscape.avif">` +
         `<p class="game-item__name">I-SPORTS</p><div class="game-item__play-btn">` +
         `<button onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/im-provider')">` +
@@ -723,6 +731,9 @@ describe("PlaywrightFabetAutomation", () => {
       profilePath: join(await setup().then((value) => value.directory), "large-lobby-profile"), headless: true
     });
     try {
+      await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
+        provider: "IM", category: "FOOTBALL" }, async (page) => page.locator("main").innerText()))
+        .resolves.toBe("IM football warm");
       const startedAt = performance.now();
       await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
         provider: "IM", category: "LOL" }, async (page) => page.locator("main").innerText()))
@@ -733,6 +744,36 @@ describe("PlaywrightFabetAutomation", () => {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
   }, 10_000);
+
+  it("falls back to the provider thumbnail when the Play control does not launch", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html; charset=utf-8");
+      if (request.url === "/im-provider") {
+        response.end("<!doctype html><main>IM provider ready</main>");
+        return;
+      }
+      response.end(`<!doctype html><div class="game-item lobby">
+        <img class="game-item__thumb" src="/game/isports.webp"
+          onclick="window.open('http://localhost:${(server.address() as { port: number }).port}/im-provider')">
+        <p class="game-item__name">I-SPORTS</p>
+        <div class="game-item__play-btn"><button type="button">Play</button></div>
+      </div>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("test server did not bind");
+    const automation = new PlaywrightFabetAutomation({
+      profilePath: join(await setup().then((value) => value.directory), "inert-play-thumbnail-profile"), headless: true
+    });
+    try {
+      await expect(automation.withProviderPage({ lobbyUrl: `http://127.0.0.1:${address.port}/lobby`,
+        provider: "IM", category: "FOOTBALL" }, async (page) => page.locator("main").innerText()))
+        .resolves.toBe("IM provider ready");
+    } finally {
+      await automation.close();
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+  }, 20_000);
 
   it("clicks the exact I-SPORTS Football card without falling back to C-SPORTS", async () => {
     const server = createServer((request, response) => {

@@ -165,6 +165,8 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
           return [];
         }
         if (current !== undefined && streamOrdinal <= current.highWatermark) return [];
+        const retiresAuthoritativeStream = current?.activeStreamId !== null && current?.activeStreamId !== undefined &&
+          this.#authoritativeGenerations.has(epochKey);
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
         if (current?.activeStreamId !== null && current?.activeStreamId !== undefined) {
           this.#dropStream(envelope.sourceId, sourceEpoch(envelope), current.activeStreamId);
@@ -173,7 +175,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
           activeStreamOrdinal: streamOrdinal, highWatermark: streamOrdinal, authorizing: true });
         this.#authoritativeGenerations.delete(epochKey);
         this.#authoritativeBaselineAtMs.delete(epochKey);
-        return [];
+        return retiresAuthoritativeStream
+          ? [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+              invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_GAP" }]
+          : [];
       }
       const current = this.#streamStates.get(epochKey);
       if (current?.activeStreamId !== streamId || current.activeStreamOrdinal !== streamOrdinal) return [];
@@ -197,11 +202,15 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       this.#streamStates.set(epochKey, stream);
     }
     if (stream.activeStreamId !== streamId || stream.activeStreamOrdinal !== streamOrdinal) return [];
+    let startsBaseline = false;
     try {
       const frame = parseSabaSocketFrame(envelope.payload.body);
       if (frame === null) return [];
       if (JSON.stringify(frame.rows).includes('"A003"')) {
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
+        stream.activeStreamId = null;
+        stream.activeStreamOrdinal = null;
+        stream.authorizing = false;
         this.#authoritativeGenerations.delete(epochKey);
         this.#authoritativeBaselineAtMs.delete(epochKey);
         return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
@@ -212,12 +221,40 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         decoder = new SabaPushDecoder();
         this.#decoders.set(decoderKey, decoder);
       }
-      const startsBaseline = (frame.rows as readonly unknown[]).some((row) => Array.isArray(row) &&
+      startsBaseline = (frame.rows as readonly unknown[]).some((row) => Array.isArray(row) &&
         (row[1] === "reset" || row[1] === "empty"));
+      const priorGeneration = startsBaseline ? this.#authoritativeGenerations.get(epochKey) : undefined;
+      const priorBaselineAtMs = startsBaseline ? this.#authoritativeBaselineAtMs.get(epochKey) : undefined;
+      const restorePriorAuthority = (): void => {
+        if (priorGeneration !== undefined) this.#authoritativeGenerations.set(epochKey, priorGeneration);
+        if (priorBaselineAtMs !== undefined) this.#authoritativeBaselineAtMs.set(epochKey, priorBaselineAtMs);
+      };
       if (startsBaseline) {
         this.#authoritativeGenerations.delete(epochKey);
         this.#authoritativeBaselineAtMs.delete(epochKey);
-      } else {
+      }
+      const applied = decoder.apply(frame);
+      if (applied.duplicate) {
+        restorePriorAuthority();
+        return [];
+      }
+      if (startsBaseline && !applied.fullSnapshot) {
+        restorePriorAuthority();
+        return [];
+      }
+      if (applied.records.length === 0 && !applied.fullSnapshot) return [];
+      const normalized = normalizeSabaFootballRecords(applied.records, {
+        observedAtMs: envelope.observedAtMs,
+        receivedMonotonicMs: envelope.receivedMonotonicMs,
+        sequence: envelope.sequence
+      });
+      const partition = `WS:${streamId}:${frame.bridgeId}`;
+      const previousPart = this.#parts.get(`${epochKey}|${partition}`);
+      if (previousPart !== undefined && sameSabaCatalogPart(previousPart, normalized)) {
+        restorePriorAuthority();
+        return [];
+      }
+      if (!startsBaseline) {
         const baselineAtMs = this.#authoritativeBaselineAtMs.get(epochKey);
         if (baselineAtMs !== undefined && envelope.observedAtMs - baselineAtMs > MAX_RETAINED_PART_AGE_MS) {
           this.#authoritativeGenerations.delete(epochKey);
@@ -227,8 +264,6 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
           }
         }
       }
-      const applied = decoder.apply(frame);
-      if (applied.duplicate || (applied.records.length === 0 && !applied.fullSnapshot)) return [];
       const readyKey = `${decoderKey}|${frame.bridgeId}`;
       if (applied.fullSnapshot) this.#readyPartitions.add(readyKey);
       if (!this.#readyPartitions.has(readyKey)) return [];
@@ -242,11 +277,6 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         change.record?.type === "do" || change.record?.type === "-o");
       if (!applied.fullSnapshot && !changesPrice && envelope.observedAtMs - lastPublishedAtMs < 500) return [];
       this.#lastWsPublishAtMs.set(publishKey, envelope.observedAtMs);
-      const normalized = normalizeSabaFootballRecords(applied.records, {
-        observedAtMs: envelope.observedAtMs,
-        receivedMonotonicMs: envelope.receivedMonotonicMs,
-        sequence: envelope.sequence
-      });
       if (applied.fullSnapshot && this.#streamStates.get(epochKey)?.activeStreamId === streamId &&
         this.#streamStates.get(epochKey)?.authorizing === true) {
         this.#authoritativeGenerations.set(epochKey,
@@ -273,15 +303,19 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
           if (key.startsWith(`${decoderKey}|`) && key !== publishKey) this.#lastWsPublishAtMs.delete(key);
         }
       }
-      return this.#update(envelope, `WS:${streamId}:${frame.bridgeId}`, normalized,
+      return this.#update(envelope, partition, normalized,
         authoritative ? { authoritativeBaseline: true, evidenceMode: "BASELINE", generation, provenance: "WS" }
           : generation !== undefined && this.#streamStates.get(epochKey)?.activeStreamId === streamId &&
               this.#streamStates.get(epochKey)?.authorizing === true
             ? { evidenceMode: "DELTA", generation, provenance: "WS" } : {},
         authoritative && applied.records.length === 0);
     } catch (error) {
-      if (error instanceof Error && error.message.includes("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP")) {
+      if ((error instanceof Error && error.message.includes("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP")) ||
+        startsBaseline) {
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
+        stream.activeStreamId = null;
+        stream.activeStreamOrdinal = null;
+        stream.authorizing = false;
         this.#authoritativeGenerations.delete(epochKey);
         this.#authoritativeBaselineAtMs.delete(epochKey);
         return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
@@ -345,4 +379,10 @@ function sabaStreamOrdinal(streamId: string): number | null {
   if (!/^[1-9]\d*$/u.test(streamId)) return null;
   const ordinal = Number(streamId);
   return Number.isSafeInteger(ordinal) ? ordinal : null;
+}
+
+function sameSabaCatalogPart(left: NormalizedCatalogPart, right: NormalizedCatalogPart): boolean {
+  const semanticFingerprint = (part: NormalizedCatalogPart): string => JSON.stringify(part, (key, value) =>
+    key === "receivedMonotonicMs" || key === "sequence" ? undefined : value);
+  return semanticFingerprint(left) === semanticFingerprint(right);
 }

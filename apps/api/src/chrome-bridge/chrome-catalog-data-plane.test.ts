@@ -99,7 +99,7 @@ function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds:
   return { version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8,
     sourceEpoch, sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
     transport: "WS_FRAME", request: { hostname: "sports.example", pathnameClass: "/sport/session/websocket",
-      resourceType: "WebSocket", streamId: "ksport-stream-1" },
+      resourceType: "WebSocket", streamId: "ksport-stream-1", recoveryGeneration: receiptGeneration },
     payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
 }
 
@@ -111,7 +111,8 @@ function ksportDeltaEnvelope(sequence: number, receiptGeneration: number,
     `subscription:subSportBookLive\nmessage-id:socket-${receiptGeneration}\n\n` +
     `${JSON.stringify({ statusCode: "OK", statusCodeValue: 200, body: JSON.stringify(event) })}\0`;
   const base = ksportEnvelope(sequence, "live", [], "worker-a:0", receiptGeneration);
-  return { ...base, payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
+  return { ...base, request: { ...base.request, recoveryGeneration: 200 },
+    payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
 }
 
 function ksportHttpEnvelope(sequence: number, partition: "live" | "today", generation: number,

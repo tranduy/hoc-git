@@ -4,10 +4,21 @@ import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { BTI_CATALOG_REFRESH_EXPRESSION, CMD_CATALOG_DISCOVERY_EXPRESSION,
   CMD_FULL_BASELINE_EXPRESSION, IM_CATALOG_DISCOVERY_EXPRESSION, KEEP_ACTIVE_EXPRESSION,
-  NetworkObserver } from "./network-observer.js";
+  NetworkObserver, type NetworkObserverDependencies, type PersistedSabaWsSnapshots } from "./network-observer.js";
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
 
 const source = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
+
+function ksportFullReceipt(partition: "live" | "today", order: number): string {
+  const subscription = partition === "live" ? "subSportBookLive" : "subSportBookToday";
+  const path = partition === "live" ? "1_1/live" : "1_11/today";
+  const body = [{ "1": `${partition} league`,
+    "2": [{ "8": `${order}`, "2": "Home", "3": "Away", "7": {} }] }];
+  const wrapper = JSON.stringify({ statusCode: "OK", statusCodeValue: 200,
+    body: JSON.stringify(body) });
+  return `MESSAGE\ndestination:/topic/sports/${path}/ma/event/vi\n` +
+    `subscription:${subscription}\nmessage-id:socket-${order}\n\n${wrapper}\u0000`;
+}
 
 describe("NetworkObserver", () => {
   it("keeps provider pages active and scrolls their real nested frames without clicking odds", async () => {
@@ -153,21 +164,206 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
   });
 
-  it("requests CMD's exact provider-defined running-plus-today full baseline without reloading", async () => {
-    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+  it("evaluates CMD recovery on the owning child session and completes only a matching current-loader fc=1", async () => {
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const row = Array<unknown>(91).fill(null);
+    Object.assign(row, { 0: 25299763, 3: 108007, 10: 0.25, 12: 2.5, 25: 1,
+      37: "League", 38: "Home", 39: "Away", 40: 0.8, 41: -0.9, 42: 0.8, 43: -0.9,
+      53: "1H 4", 56: "08/24", 79: 0 });
+    const bodies = new Map<string, string>();
+    let evaluations = 0;
+    const frameTree = { frameTree: { frame: { id: "top", loaderId: "loader-top",
+      url: "https://cgnew.fts368.com/root" }, childFrames: [{ frame: {
+      id: "odds-frame", loaderId: "loader-current",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx"
+    } }] } };
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>,
+      _sessionId?: string) => {
+      if (method === "Page.getFrameTree") return frameTree;
       if (method === "Runtime.evaluate" && params?.expression === CMD_FULL_BASELINE_EXPRESSION) {
-        return { result: { value: "baseline-requested" } };
+        evaluations += 1;
+        return { result: { value: evaluations === 1 ? "busy" : "baseline-requested" } };
+      }
+      if (method === "Network.getResponseBody") {
+        return { body: bodies.get(String(params?.requestId)) ?? "{}", base64Encoded: false };
       }
       return {};
     });
-    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
-    await observer.refreshCatalog({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 });
-    expect(sendCommand).toHaveBeenCalledWith(9, "Runtime.evaluate", expect.objectContaining({
-      expression: CMD_FULL_BASELINE_EXPRESSION, awaitPromise: false
-    }));
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "observer-cmd",
+      cmdRecoveryMaxAttempts: 20, cmdRecoveryDeadlineMs: 2_000, cmdRecoveryRetryMs: 50 });
+    await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "odds-frame", isDefault: true } }
+    }, "child-session");
+
+    let settled = 0;
+    const recovery = observer.refreshCatalog(cmd).finally(() => { settled += 1; });
+    await vi.waitFor(() => expect(evaluations).toBeGreaterThanOrEqual(2));
+    expect(settled).toBe(0);
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")
+      .every((call) => call[3] === "child-session")).toBe(true);
+
+    const completeRequest = async (requestId: string, functionCode: number, body: string,
+      loaderId = "loader-current"): Promise<void> => {
+      bodies.set(requestId, body);
+      const providerUrl = `https://cgnew.fts368.com/Member/BetsView/BetLight/DataOdds.ashx?fc=${functionCode}`;
+      await observer.handleEvent(cmd, "Network.requestWillBeSent", { requestId, type: "XHR",
+        frameId: "odds-frame", loaderId,
+        request: { url: providerUrl, method: "GET", headers: {} } }, "child-session");
+      await observer.handleEvent(cmd, "Network.responseReceived", { requestId, type: "XHR",
+        response: { url: providerUrl, mimeType: "application/json" } }, "child-session");
+      await observer.handleEvent(cmd, "Network.loadingFinished", { requestId }, "child-session");
+    };
+
+    await completeRequest("wrong-function", 3, JSON.stringify({ t: 101, a: true, data: [] }));
+    await completeRequest("wrong-loader", 1,
+      JSON.stringify({ t: 102, a: true, data: [], today: [row], f: [] }), "loader-old");
+    await completeRequest("partial-full", 1, JSON.stringify({ t: 103, a: true, data: [] }));
+    expect(settled).toBe(0);
+
+    await completeRequest("matching-full", 1,
+      JSON.stringify({ t: 104, a: true, data: [], today: [row], f: [] }));
+    await recovery;
+    await observer.handleEvent(cmd, "Network.loadingFinished", { requestId: "matching-full" }, "child-session");
+
+    expect(settled).toBe(1);
     expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
     expect(CMD_FULL_BASELINE_EXPRESSION).toContain("LoadFullRunningTodayData()");
+  });
+
+  it("bounds CMD recovery by its absolute deadline while Runtime.evaluate is still pending", async () => {
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const frameTree = { frameTree: { frame: { id: "top", loaderId: "loader-top",
+      url: "https://cgnew.fts368.com/root" }, childFrames: [{ frame: {
+      id: "odds-frame", loaderId: "loader-current",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx"
+    } }] } };
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return frameTree;
+      if (method === "Runtime.evaluate") return new Promise<unknown>(() => undefined);
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      frameCommandTimeoutMs: 80, cmdRecoveryMaxAttempts: 2,
+      cmdRecoveryDeadlineMs: 20, cmdRecoveryRetryMs: 1 });
+    await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "odds-frame", isDefault: true } }
+    }, "child-session");
+
+    const outcome = await Promise.race([
+      observer.refreshCatalog(cmd).then(() => "resolved"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 60))
+    ]);
+
+    expect(outcome).toBe("resolved");
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
+  });
+
+  it("retires an in-flight CMD recovery before starting the replacement source epoch", async () => {
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const frameTree = { frameTree: { frame: { id: "top", loaderId: "loader-top",
+      url: "https://cgnew.fts368.com/root" }, childFrames: [{ frame: {
+      id: "odds-frame", loaderId: "loader-current",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx"
+    } }] } };
+    let evaluations = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return frameTree;
+      if (method === "Runtime.evaluate") {
+        evaluations += 1;
+        if (evaluations === 1) return new Promise<unknown>(() => undefined);
+        return { result: { value: "function-unavailable" } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      observerSessionId: "observer-cmd", frameCommandTimeoutMs: 200,
+      cmdRecoveryDeadlineMs: 200, cmdRecoveryMaxAttempts: 2, cmdRecoveryRetryMs: 1 });
+    await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "odds-frame", isDefault: true } }
+    }, "child-session");
+
+    const retired = observer.recoverCmdCatalog(cmd);
+    await vi.waitFor(() => expect(evaluations).toBe(1));
+    observer.beginSourceEpoch(cmd.sourceId);
+    const replacement = observer.recoverCmdCatalog(cmd);
+
+    expect(replacement).not.toBe(retired);
+    await retired;
+    await replacement;
+    expect(evaluations).toBe(2);
+  });
+
+  it("releases an in-flight CMD recovery synchronously when its tab detaches", async () => {
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const frameTree = { frameTree: { frame: { id: "top", loaderId: "loader-top",
+      url: "https://cgnew.fts368.com/root" }, childFrames: [{ frame: {
+      id: "odds-frame", loaderId: "loader-current",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx"
+    } }] } };
+    let evaluations = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return frameTree;
+      if (method === "Runtime.evaluate") {
+        evaluations += 1;
+        return new Promise<unknown>(() => undefined);
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      observerSessionId: "observer-cmd", frameCommandTimeoutMs: 200,
+      cmdRecoveryDeadlineMs: 200, cmdRecoveryMaxAttempts: 2, cmdRecoveryRetryMs: 1 });
+    await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "odds-frame", isDefault: true } }
+    }, "child-session");
+
+    const retired = observer.recoverCmdCatalog(cmd);
+    await vi.waitFor(() => expect(evaluations).toBe(1));
+    observer.releaseTab(cmd.tabId);
+
+    await expect(Promise.race([retired.then(() => "released"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 40))])).resolves.toBe("released");
+  });
+
+  it("releases an in-flight CMD recovery when its exact child session or context detaches", async () => {
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const frameTree = { frameTree: { frame: { id: "top", loaderId: "loader-top",
+      url: "https://cgnew.fts368.com/root" }, childFrames: [{ frame: {
+      id: "odds-frame", loaderId: "loader-current",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx"
+    } }] } };
+    let evaluations = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return frameTree;
+      if (method === "Runtime.evaluate") {
+        evaluations += 1;
+        return new Promise<unknown>(() => undefined);
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      observerSessionId: "observer-cmd", frameCommandTimeoutMs: 200,
+      cmdRecoveryDeadlineMs: 200, cmdRecoveryMaxAttempts: 2, cmdRecoveryRetryMs: 1 });
+    await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "odds-frame", isDefault: true } }
+    }, "child-session");
+
+    const retired = observer.recoverCmdCatalog(cmd);
+    await vi.waitFor(() => expect(evaluations).toBe(1));
+    await observer.handleEvent(cmd, "Target.detachedFromTarget", { sessionId: "child-session" });
+
+    await expect(Promise.race([retired.then(() => "released"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 40))])).resolves.toBe("released");
+
+    await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
+      context: { id: 92, auxData: { frameId: "odds-frame", isDefault: true } }
+    }, "replacement-child-session");
+    const contextRetired = observer.recoverCmdCatalog(cmd);
+    await vi.waitFor(() => expect(evaluations).toBe(2));
+    await observer.handleEvent(cmd, "Runtime.executionContextDestroyed", { executionContextId: 92 },
+      "replacement-child-session");
+    await expect(Promise.race([contextRetired.then(() => "released"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 40))])).resolves.toBe("released");
   });
 
   it("announces an IM generation cutoff before the signed page fetch begins", async () => {
@@ -199,8 +395,8 @@ describe("NetworkObserver", () => {
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand, forward });
     const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
-    const live = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\n{\"event\":1}\u0000";
-    const today = "MESSAGE\ndestination:/topic/sports/1_1/today/ma/event/vi\n\n{\"event\":2}\u0000";
+    const live = ksportFullReceipt("live", 100);
+    const today = ksportFullReceipt("today", 104);
     await observer.ingestWebSocketFrame(source, "wss://sports.example/sport/socket", live);
     await observer.ingestWebSocketFrame(source, "wss://sports.example/sport/socket", today);
     forward.mockClear();
@@ -217,15 +413,35 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls.slice(1).every(([envelope]) => envelope.request.replayed === true)).toBe(true);
   });
 
-  it("recovers TSPORT decoder state from a fresh DOM read without toggling provider network or reloading", async () => {
-      const sendCommand = vi.fn(async (_tabId: number, _method: string,
-        _params?: Record<string, unknown>) => ({}));
-      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+  it("captures TSPORT coverage before requesting a same-tab event-socket baseline without reloading", async () => {
+      const events: string[] = [];
+      const snapshot = JSON.stringify([{ eventId: "event-1" },
+        { __fieldlineSweep: { sweepId: "tsport-refresh-sweep", complete: true } }]);
+      const sendCommand = vi.fn(async (_tabId: number, method: string,
+        params?: Record<string, unknown>) => {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: "top", loaderId: "loader-top" } } };
+        }
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 11 };
+        if (method === "Runtime.evaluate" && params?.expression === TSPORT_PUBLIC_CATALOG_EXPRESSION) {
+          return { result: { type: "string", value: snapshot } };
+        }
+        if (method === "Runtime.evaluate") return { result: { objectId: "prototype" } };
+        if (method === "Runtime.queryObjects") return { objects: { objectId: "instances" } };
+        if (method === "Runtime.callFunctionOn") {
+          events.push("reconnect");
+          return { result: { value: 1 } };
+        }
+        return {};
+      });
+      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async (envelope) => {
+        if (envelope.transport === "DOM_SNAPSHOT") events.push("sweep");
+      }) });
       const provider = { lobby: "TSPORT", sourceId: "chrome:TSPORT:8", tabId: 8 } as const;
 
       await observer.refreshCatalog(provider);
 
-      expect(sendCommand.mock.calls.map(([, method]) => method)).toEqual(["Page.getFrameTree", "Runtime.evaluate"]);
+      expect(events).toEqual(["sweep", "reconnect"]);
       expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
   });
 
@@ -685,59 +901,73 @@ describe("NetworkObserver", () => {
     });
   });
 
-  it("restores SBOBET's request template after the extension worker restarts", async () => {
+  it("keeps a KSPORT request template in the current worker without a durable save", async () => {
+    const saveLegacyTemplate = vi.fn(async (_request: {
+      readonly url: string; readonly headers: Readonly<Record<string, string>>;
+    }) => undefined);
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    let refreshExpression = "";
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
-      if (method !== "Runtime.evaluate") return {};
-      return String(params?.expression).includes('const probeMode = "FETCH_ONLY"')
-        ? { result: { value: { ok: true, rawOdds: "0.17", observedAtMs: 1_100,
-          method: "IN_PAGE_FETCH" } } }
-        : { result: { value: { ok: false, reason: "SBOBET_SELECTION_NOT_FOUND" } } };
-    });
-    const loadSbobetEventRequest = vi.fn(async () => ({
-      url: "https://api.sbobet.example/api/v2/getEvent?live=1",
-      headers: { "x-session-proof": "restored-session" }
-    }));
-    const observer = new NetworkObserver({ sendCommand, loadSbobetEventRequest, now: () => 1_100,
-      forward: vi.fn(async () => undefined) });
-
-    await observer.probeSelectionPrice({ lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 },
-      { requestId: "price-restored", providerEventId: "event-1", providerMarketId: "market-1",
-        providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
-        participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
-        scope: "FULL_TIME", selection: "OVER", line: "2.5" });
-
-    expect(loadSbobetEventRequest).toHaveBeenCalledTimes(1);
-    const evaluation = sendCommand.mock.calls.find(([, method, params]) => method === "Runtime.evaluate" &&
-      String(params?.expression).includes('const probeMode = "FETCH_ONLY"'))?.[2];
-    expect(String(evaluation?.expression)).toContain("api.sbobet.example/api/v2/getEvent?live=1");
-    expect(String(evaluation?.expression)).toContain("restored-session");
-  });
-
-  it("does not persist a failed request issued by KSPORT catalog recovery as the provider template", async () => {
-    let finishRefresh!: (value: unknown) => void;
-    const refreshEvaluation = new Promise<unknown>((resolve) => { finishRefresh = resolve; });
-    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
-      if (method === "Runtime.evaluate" && String(params?.expression)
-        .includes("fieldline-ksport-catalog-refresh")) return refreshEvaluation;
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "document" } } };
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh")) {
+        refreshExpression = String(params?.expression);
+        return { result: { value: { status: "catalog-requested", origin: "https://api.ksport.example", responses: [
+          { timeRange: "live", url: "https://api.ksport.example/api/v2/getEvent?timeRange=live",
+            body: '[{"event":"live"}]' },
+          { timeRange: "today", url: "https://api.ksport.example/api/v2/getEvent?timeRange=today",
+            body: '[{"event":"today"}]' }
+        ] } } };
+      }
       return {};
     });
-    const saveSbobetEventRequest = vi.fn(async () => undefined);
-    const observer = new NetworkObserver({ sendCommand, saveSbobetEventRequest,
-      loadSbobetEventRequest: async () => null, forward: vi.fn(async () => undefined), now: () => 1_000 });
-    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 } as const;
-    await observer.handleEvent(source, "Runtime.executionContextCreated", { context: { id: 71,
+    const dependencies: NetworkObserverDependencies & { readonly saveSbobetEventRequest: typeof saveLegacyTemplate } = {
+      sendCommand, forward, saveSbobetEventRequest: saveLegacyTemplate
+    };
+    const observer = new NetworkObserver(dependencies);
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 } as const;
+    const rawUrl = "https://api.ksport.example/api/v2/getEvent?timeRange=live&ticket=raw-ticket";
+    const authorization = "Bearer raw-authorization";
+    await observer.handleEvent(ksport, "Runtime.executionContextCreated", { context: { id: 71,
+      auxData: { frameId: "root", isDefault: true } } });
+    await observer.handleEvent(ksport, "Network.requestWillBeSent", { requestId: "catalog", type: "Fetch",
+      request: { method: "GET", url: rawUrl, headers: { Authorization: authorization } } });
+
+    await observer.refreshCatalog(ksport);
+
+    expect(saveLegacyTemplate).not.toHaveBeenCalled();
+    expect(refreshExpression).toContain(rawUrl);
+    expect(refreshExpression).toContain(authorization);
+    expect(forward.mock.calls.filter(([message]) => message.transport === "HTTP_RESPONSE")).toHaveLength(2);
+  });
+
+  it("does not restore a KSPORT request template after a worker restart", async () => {
+    const loadLegacyTemplate = vi.fn(async () => ({
+      url: "https://api.ksport.example/api/v2/getEvent?timeRange=live&ticket=raw-ticket",
+      headers: { Authorization: "Bearer raw-authorization" }
+    }));
+    let refreshExpression = "";
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "document" } } };
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh")) {
+        refreshExpression = String(params?.expression);
+        return { result: { value: { status: "fieldline-ksport-catalog-refresh-template-missing" } } };
+      }
+      return {};
+    });
+    const dependencies: NetworkObserverDependencies & { readonly loadSbobetEventRequest: typeof loadLegacyTemplate } = {
+      sendCommand, forward: vi.fn(async () => undefined), loadSbobetEventRequest: loadLegacyTemplate
+    };
+    const observer = new NetworkObserver(dependencies);
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(ksport, "Runtime.executionContextCreated", { context: { id: 71,
       auxData: { frameId: "root", isDefault: true } } });
 
-    const refresh = observer.refreshCatalog(source);
-    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([, method, params]) =>
-      method === "Runtime.evaluate" && String(params?.expression)
-        .includes("fieldline-ksport-catalog-refresh"))).toBe(true));
-    await observer.handleEvent(source, "Network.requestWillBeSent", { requestId: "self-refresh", type: "Fetch",
-      request: { method: "GET", url: "https://zenandfe.com/api/v2/getEvent?timeRange=live", headers: {} } });
-    finishRefresh({ result: { value: { status: "fieldline-ksport-catalog-refresh-failed" } } });
-    await refresh;
+    await observer.refreshCatalog(ksport);
 
-    expect(saveSbobetEventRequest).not.toHaveBeenCalled();
+    expect(loadLegacyTemplate).not.toHaveBeenCalled();
+    expect(refreshExpression).toContain("const capturedUrl = null");
+    expect(refreshExpression).not.toContain("raw-ticket");
+    expect(refreshExpression).not.toContain("raw-authorization");
   });
 
   it("requests a fresh BTI football catalog in the attached authenticated tab", async () => {
@@ -1541,11 +1771,12 @@ describe("NetworkObserver", () => {
       if (method === "Page.getFrameTree") {
         scans += 1;
         if (scans === 1) await oldScanBlocked;
-        return { frameTree: { frame: { id: "top" } } };
+        return { frameTree: { frame: { id: "top", loaderId: "loader-top" } } };
       }
       if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
       if (method === "Runtime.evaluate") return { result: { value: JSON.stringify([
-        { eventId: scans === 1 ? "old-event" : "new-event" }
+        { eventId: scans === 1 ? "old-event" : "new-event" },
+        { __fieldlineSweep: { sweepId: "tsport-epoch-sweep", complete: true } }
       ]) } };
       return {};
     });
@@ -1722,6 +1953,77 @@ describe("NetworkObserver", () => {
     await vi.waitFor(() => expect(events).toEqual(["save:start", "save:end", "clear"]));
   });
 
+  it("persists a complete SABA baseline for worker recovery", async () => {
+    const saveSabaWsSnapshots = vi.fn(async (_snapshots: PersistedSabaWsSnapshots) => undefined);
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) =>
+        method === "Runtime.evaluate" && params?.expression === "String(performance.timeOrigin)"
+          ? { result: { value: "1787432000000" } } : {}),
+      forward: vi.fn(async () => undefined), saveSabaWsSnapshots
+    });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
+    const url = "wss://sports.example/socket.io/";
+    const body = '42["m","b1",[[0,"reset"],[0,"e"],[0,"done"]],"r1"]';
+
+    await observer.handleEvent(saba, "Network.webSocketCreated", { requestId: "ws", url });
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "ws", response: { opcode: 1, payloadData: body }
+    });
+
+    await vi.waitFor(() => expect(saveSabaWsSnapshots).toHaveBeenCalledOnce());
+    expect(saveSabaWsSnapshots.mock.calls[0]?.[0]).toMatchObject({ sourceId: saba.sourceId,
+      partitions: [{ frames: [{ url, body }] }] });
+  });
+
+  it("keeps a complete KSPORT baseline in memory without saving its raw frames", async () => {
+    const saveSabaWsSnapshots = vi.fn(async (_snapshots: PersistedSabaWsSnapshots) => undefined);
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) =>
+        method === "Runtime.evaluate" && params?.expression === "String(performance.timeOrigin)"
+          ? { result: { value: "1787432000000" } } : {}),
+      forward, saveSabaWsSnapshots
+    });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    const url = "wss://sports.example/sport/socket";
+    const live = ksportFullReceipt("live", 100);
+    const today = ksportFullReceipt("today", 104);
+
+    await observer.handleEvent(ksport, "Network.webSocketCreated", { requestId: "ws", url });
+    await observer.handleEvent(ksport, "Network.webSocketFrameReceived", {
+      requestId: "ws", response: { opcode: 1, payloadData: live }
+    });
+    await observer.handleEvent(ksport, "Network.webSocketFrameReceived", {
+      requestId: "ws", response: { opcode: 1, payloadData: today }
+    });
+    await Promise.resolve();
+
+    expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(true);
+    expect(saveSabaWsSnapshots).not.toHaveBeenCalled();
+    expect(saveSabaWsSnapshots.mock.calls.some(([snapshot]) =>
+      JSON.stringify(snapshot).includes(url) || JSON.stringify(snapshot).includes(live) ||
+      JSON.stringify(snapshot).includes(today))).toBe(false);
+    forward.mockClear();
+
+    await expect(observer.replaySnapshots(ksport.sourceId)).resolves.toBe(true);
+    expect(forward.mock.calls.map(([message]) => message.payload.body)).toEqual([live, today]);
+  });
+
+  it("does not load durable snapshots for KSPORT recovery", async () => {
+    const loadSabaWsSnapshots = vi.fn(async () => null);
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) =>
+        method === "Runtime.evaluate" && params?.expression === "String(performance.timeOrigin)"
+          ? { result: { value: "1787432000000" } } : {}),
+      forward: vi.fn(async () => undefined), loadSabaWsSnapshots
+    });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+
+    await observer.refreshCatalog(ksport);
+
+    expect(loadSabaWsSnapshots).not.toHaveBeenCalled();
+  });
+
   it("fences direct HTTP ingest while async IM baseline recovery crosses an epoch", async () => {
     let releaseRecovery!: () => void;
     const recoveryBlocked = new Promise<void>((resolve) => { releaseRecovery = resolve; });
@@ -1817,9 +2119,12 @@ describe("NetworkObserver", () => {
   });
 
   it("starts a fresh TSPORT DOM baseline for a replacement epoch", async () => {
-    const records = JSON.stringify([{ eventId: "replacement-event", markets: [] }]);
+    const records = JSON.stringify([{ eventId: "replacement-event", markets: [] },
+      { __fieldlineSweep: { sweepId: "tsport-replacement-sweep", complete: true } }]);
     const sendCommand = vi.fn(async (_tabId: number, method: string) => {
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "top", loaderId: "loader-top" } } };
+      }
       if (method === "Page.createIsolatedWorld") return { executionContextId: 11 };
       if (method === "Runtime.evaluate") return { result: { type: "string", value: records } };
       return {};
@@ -1875,12 +2180,14 @@ describe("NetworkObserver", () => {
           marketType: "FT_TOTAL", lineText: "2.5", selections: [
             { selectionId: "over", selection: "OVER", priceText: "0.82", locked: false },
             { selectionId: "under", selection: "UNDER", priceText: "-0.9", locked: false }
-          ] }] }]);
+          ] }] }, { __fieldlineSweep: { sweepId: "tsport-timeout-sweep", complete: true } }]);
       const sendCommand = vi.fn(async (tabId: number, method: string) => {
         if (tabId === 9 && method === blockedMethod) {
           return await new Promise<never>(() => undefined);
         }
-        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: `top-${tabId}` } } };
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: `top-${tabId}`, loaderId: `loader-${tabId}` } } };
+        }
         if (method === "Page.createIsolatedWorld") return { executionContextId: tabId };
         if (method === "Runtime.evaluate") return { result: { type: "string", value: records } };
         return {};
@@ -1914,9 +2221,11 @@ describe("NetworkObserver", () => {
         marketType: "FT_AH", lineText: "-0.5", selections: [
           { selectionId: "home", selection: "HOME", priceText: "0.82", locked: false, lineText: "-0.5" },
           { selectionId: "away", selection: "AWAY", priceText: "-0.9", locked: false, lineText: "+0.5" }
-        ] }] }]);
+        ] }] }, { __fieldlineSweep: { sweepId: "tsport-catalog-sweep", complete: true } }]);
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "top", loaderId: "loader-top" } } };
+      }
       if (method === "Page.createIsolatedWorld") return { executionContextId: 71 };
       if (method === "Runtime.evaluate") {
         expect(String(params?.expression)).toContain(".match__team-name");
@@ -2818,8 +3127,8 @@ describe("NetworkObserver", () => {
       ] },
     { lobby: "KSPORT" as const, sourceId: "chrome:KSPORT:14", url: "wss://sports.example/sport/socket",
       bodies: [
-        "MESSAGE\ndestination:/topic/sports/live/1\n\n{\"event\":1}\u0000",
-        "MESSAGE\ndestination:/topic/sports/live/2\n\n{\"event\":2}\u0000"
+        ksportFullReceipt("live", 100),
+        ksportFullReceipt("today", 104)
       ] }
     ,{ lobby: "SBO" as const, sourceId: "chrome:SBO:15", url: "wss://sports.example/socket.io/",
       bodies: [
@@ -3100,7 +3409,7 @@ describe("NetworkObserver", () => {
       return {};
     });
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
-      now: () => 1_000, monotonicNow: () => 60, loadSbobetEventRequest: async () => null });
+      now: () => 1_000, monotonicNow: () => 60 });
     const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
     await observer.handleEvent(ksport, "Runtime.executionContextCreated", { context: { id: 7,
       auxData: { frameId: "root", isDefault: true } } });
@@ -3137,8 +3446,7 @@ describe("NetworkObserver", () => {
       return {};
     });
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
-    const observer = new NetworkObserver({ sendCommand, forward, now: () => 2_000,
-      loadSbobetEventRequest: async () => null });
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 2_000 });
     const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
     await observer.ingestWebSocketFrame(ksport, "wss://sports.example/sport/socket",
       "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\n{\"event\":\"stale-live\"}\u0000");
@@ -3181,8 +3489,7 @@ describe("NetworkObserver", () => {
       }
       return {};
     });
-    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
-      now: () => 2_000, loadSbobetEventRequest: async () => null });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined), now: () => 2_000 });
     const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
 
     await observer.refreshCatalog(ksport);
@@ -3207,10 +3514,9 @@ describe("NetworkObserver", () => {
     await observer.handleEvent(source, "Network.webSocketFrameReceived", { requestId: "old",
       response: { opcode: 1, payloadData: "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\nold" } });
     await observer.handleEvent(source, "Network.webSocketCreated", { requestId: "current", url });
-    const fragments = [
-      "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\npartial-",
-      "continuation-without-destination\u0000"
-    ];
+    const live = ksportFullReceipt("live", 100);
+    const halfway = Math.floor(live.length / 2);
+    const fragments = [live.slice(0, halfway), live.slice(halfway), ksportFullReceipt("today", 104)];
     for (const payloadData of fragments) await observer.handleEvent(source, "Network.webSocketFrameReceived", {
       requestId: "current", response: { opcode: 1, payloadData }
     });
@@ -3224,8 +3530,8 @@ describe("NetworkObserver", () => {
 
   describe("KSPORT periodic maintenance", () => {
     const url = "wss://d42.sb21.net/sport/538/session/websocket";
-    const liveFrame = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\nsubscription:subSportBookLive\n\n{}\u0000";
-    const todayFrame = "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\nsubscription:subSportBookToday\n\n{}\u0000";
+    const liveFrame = ksportFullReceipt("live", 100);
+    const todayFrame = ksportFullReceipt("today", 104);
     const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
 
     function setup(now: { value: number }) {
@@ -3364,13 +3670,25 @@ describe("NetworkObserver", () => {
     const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
     const url = "wss://d42.sb21.net/sport/538/session/websocket";
 
-    await observer.ingestWebSocketFrame(source, url,
-      "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\nsubscription:subSportBookLive\n\n{}\u0000");
+    await observer.ingestWebSocketFrame(source, url, ksportFullReceipt("live", 100));
     expect(observer.hasCompleteKsportBaseline(source.sourceId)).toBe(false);
 
+    await observer.ingestWebSocketFrame(source, url, ksportFullReceipt("today", 104));
+    expect(observer.hasCompleteKsportBaseline(source.sourceId)).toBe(true);
+  });
+
+  it("does not report a manual KSPORT stream ready from destination labels without full snapshots", async () => {
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => undefined), now: () => 1_000, monotonicNow: () => 60 });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
+    const url = "wss://d42.sb21.net/sport/538/session/websocket";
+
+    await observer.ingestWebSocketFrame(source, url,
+      "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\nsubscription:subSportBookLive\n\n{}\u0000");
     await observer.ingestWebSocketFrame(source, url,
       "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\nsubscription:subSportBookToday\n\n{}\u0000");
-    expect(observer.hasCompleteKsportBaseline(source.sourceId)).toBe(true);
+
+    expect(observer.hasCompleteKsportBaseline(source.sourceId)).toBe(false);
   });
 
   it("selects KSPORT today once live is present, then restores the live tab after baseline completion", async () => {
@@ -3380,14 +3698,12 @@ describe("NetworkObserver", () => {
       now: () => 1_000, monotonicNow: () => 60 });
     const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
     const url = "wss://d42.sb21.net/sport/538/session/websocket";
-    await observer.ingestWebSocketFrame(source, url,
-      "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\nsubscription:subSportBookLive\n\n{}\u0000");
+    await observer.ingestWebSocketFrame(source, url, ksportFullReceipt("live", 100));
 
     await expect(observer.ensureCompleteKsportBaseline(source)).resolves.toBe(false);
     expect(String(sendCommand.mock.calls.at(-1)?.[2]?.expression)).toContain("hom nay");
 
-    await observer.ingestWebSocketFrame(source, url,
-      "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\nsubscription:subSportBookToday\n\n{}\u0000");
+    await observer.ingestWebSocketFrame(source, url, ksportFullReceipt("today", 104));
     await expect(observer.ensureCompleteKsportBaseline(source)).resolves.toBe(true);
     expect(String(sendCommand.mock.calls.at(-1)?.[2]?.expression)).toContain("truc tiep");
   });
@@ -3597,8 +3913,8 @@ describe("NetworkObserver", () => {
       now: () => 1_000, monotonicNow: () => 60 });
     const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14 } as const;
     const url = "wss://d42.sb21.net/sport/538/session/websocket";
-    const live = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\n{}\u0000";
-    const today = "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\n\n{}\u0000";
+    const live = ksportFullReceipt("live", 100);
+    const today = ksportFullReceipt("today", 104);
 
     await observer.handleEvent(ksport, "Network.webSocketCreated", { requestId: "sports", url });
     const retiredClose = observer.handleEvent(ksport, "Network.webSocketClosed", { requestId: "sports" });

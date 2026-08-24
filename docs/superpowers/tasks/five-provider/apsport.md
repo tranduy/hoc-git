@@ -1,6 +1,6 @@
 # APSPORT/TSPORT Worker Task
 
-Priority: 3
+Priority: 1
 
 Report: `docs/superpowers/reports/five-provider/apsport.md`
 
@@ -59,23 +59,26 @@ The report must describe exact extension/data-plane wiring that:
 - passes expected identities and stream metadata to the adapter without granting DOM authority;
 - proves candidate DOM remains unpromoted and complete fresh WS coverage performs one atomic promotion.
 
-Do not edit shared extension/data-plane files. End Phase A by writing status `READY_FOR_INTEGRATION`, then remain available.
+Shared socket wiring belongs to the common base. If runtime proves it defective, send the exact failing test/symbol to the root while continuing provider-local work.
 
-## Phase B Realtime Gate
+## End-to-End Realtime Gate
 
-After the integrator supplies the APSPORT/TSPORT runtime lease and confirms shared socket wiring:
+After focused GREEN, perform the exact common deployment transaction verbatim, then begin the APSPORT acceptance lease with `begin-acceptance APSPORT <worker> chrome:TSPORT:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
 
 Run the provider sampler without building:
 
 ```powershell
-node scripts/verify-apsport-runtime.mjs 30000 .run/five-provider/apsport-runtime-evidence.json
+node scripts/verify-apsport-runtime.mjs 120000 .run/five-provider/apsport-runtime-evidence.json
 ```
 
 1. Require candidate DOM capture alone to remain non-authoritative.
 2. Require a fresh current TSPORT event stream to cover the current expected event IDs and emit one WS-only authoritative baseline.
 3. Require APSPORT to become `ACTIVE` and `LIVE/FRESH`; inspect the resulting catalog to ensure authoritative quote values came from WS rather than DOM.
-4. Sample for at least 30 seconds and record at least three current WS evidence advances plus a semantic delta when emitted.
+4. Sample for at least 120 seconds and record at least three current WS evidence advances plus a semantic delta when emitted.
 5. Trigger one APSPORT-targeted recovery, require only the exact football event socket to reconnect in the same tab, and prove all other provider sources remain unchanged.
-6. Update the report to `DONE` only if every gate passes; otherwise mark `BLOCKED` with exact redacted coverage/state/reason.
+6. Update the report to `DONE` only if every gate passes. On a failed gate keep
+   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
+   the worker loop. `BLOCKED` is legal only after proving a genuine external
+   provider/auth failure that in-scope code and same-tab recovery cannot fix.
 
-Do not attach DevTools/CDP, use active-tab actions, build/restart/reload, or touch another provider.
+Do not attach DevTools/CDP, use active-tab fallback, or touch another provider. Unit tests without this live gate are not completion.

@@ -12,7 +12,7 @@ Scope: SABA, CMD, APSPORT/TSPORT, IM, and SBOBET/KSPORT. BTI is the live regress
 
 Finish the five non-BTI realtime feeds quickly without allowing parallel agents to corrupt a shared Git index, overwrite shared integration files, race extension builds, or compete for Chrome debugger ownership.
 
-The final result is still one application and one branch. Work runs in two phases. In Phase A, workers implement provider-local logic and focused tests while shared wiring/build/runtime stay serialized through the integrator. In Phase B, after one integration build/reload barrier, all five workers resume and perform provider-scoped live acceptance concurrently. A worker task is not complete at the Phase A boundary.
+The final result is one application and one branch. Each worker owns one provider end-to-end: diagnosis, RED/GREEN, deployment, exact-tab runtime recovery, and live acceptance. Provider work runs concurrently; only the short shared build/restart/extension-reload transaction is serialized by the repository coordinator. There is no patch-only completion phase.
 
 ## Execution Model
 
@@ -25,7 +25,7 @@ feat/six-provider-realtime-feed
 
 Roles are fixed for the whole run:
 
-- Integrator: owns Git, all shared files, build artifacts, API/web processes, extension reload, debugger attachment, runtime leases, and the final six-provider gate.
+- Integrator: owns Git, shared source files, common-base defects, and the final six-provider gate.
 - SABA worker: owns only the SABA API adapter files and its report.
 - CMD worker: owns only the CMD HTTP adapter, CMD poller/recovery unit, their tests, and its report.
 - APSPORT worker: owns only the TSPORT API adapter/authority assembler, their tests, and its report.
@@ -38,25 +38,21 @@ An exact worker whitelist is authoritative. Everything not listed in that whitel
 
 The five provider pages should stay open in five distinct Chrome tabs. That isolates page state and lets the integrator address each provider by exact `tabId` rather than relying on whichever tab is active.
 
-During Phase A, worker sessions do not touch Chrome or runtime. Chrome permits only one debugger owner for a target; a second DevTools/debugger attachment can detach the extension observer and invalidate realtime evidence. DevTools/CDP/`chrome.debugger`, builds, process restarts, and extension reload therefore remain integrator-only in both phases.
+Each worker may inspect/control only its already-open exact provider tab and must never fall back to the active tab. DevTools/CDP remain forbidden because a second debugger owner can detach the extension observer. Provider-scoped status, recovery, and acceptance run concurrently.
 
-After the integrator completes the shared build/reload barrier, each worker receives one runtime lease containing an account, exact `tabId`, exact source ID, and build identity. During Phase B that worker may query local runtime endpoints and exercise targeted recovery only for its leased provider. It may inspect/control the exact leased tab only through a mechanism that addresses the explicit tab/window identity; it must never fall back to the active tab. It may not attach a debugger, reveal launch data, or touch another provider.
+Each provider-local mutation and its focused verification are enclosed by its short provider edit lease. Five disjoint edit leases may coexist. A still-live lease may be extended only by a token-CAS renewal; an expired or replaced holder cannot renew and must stop immediately. Build, managed-stack restart, and unpacked-extension reload are permitted to a worker only while it holds the exclusive deployment lease from `scripts/five-provider-coordinator.mjs`; deployment is denied until all edit leases are released, and no new edit may start during deployment. Acceptance leases may coexist for all five providers and prevent deployment from interrupting another worker's evidence window. The worker that changes a provider remains responsible until the integrated main application proves that provider realtime.
 
-Only the integrator may:
-
-- inspect or drive the provider pages;
-- attach/detach CDP or DevTools;
-- reload the unpacked extension;
-- copy a build into the Chrome-loaded extension directory;
-- restart API/web/launcher processes;
-- trigger live source recovery;
-- issue runtime leases and perform the final cross-provider acceptance.
-
-Workers use deterministic fixtures and focused Vitest suites in Phase A. In Phase B they must also prove realtime behavior for their own provider from the integrated main application.
+The deployment transaction is fixed: build with `npm.cmd run build`, place the
+exact live deployment token in `TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN`, invoke the
+zero-argument `node scripts/restart-live-stack.mjs`, reload exactly
+`apps/chrome-extension/dist`, prove the aggregate artifact identity, and only
+then release the lease. Root establishes managed state v2 once before workers
+start. Legacy-state handoff is root-only; a worker never reads or manually
+mutates `.auth` or runtime state.
 
 ## Shared-State Safety
 
-Workers must not run Git mutations (`add`, `commit`, `reset`, `restore`, `checkout`, `stash`, `merge`, `rebase`, `clean`) or package builds. They may run `git status --short` and `git diff -- <their paths>` read-only.
+Workers must not run Git mutations (`add`, `commit`, `reset`, `restore`, `checkout`, `stash`, `merge`, `rebase`, `clean`). They may run `git status --short` and `git diff -- <their paths>` read-only. Provider writes require the provider edit lease; package builds and shared runtime mutations require the exclusive deployment lease.
 
 Workers must not edit:
 
@@ -65,7 +61,7 @@ Workers must not edit:
 - another provider's files;
 - common task documents or another worker's report.
 
-When provider-local work requires shared wiring, the worker records one exact integration request in its Phase A report: required input/output, the shared file and symbol, the failing test that the integrator should add, and the invariant that must remain true. The integrator applies the shared edit once after collecting all reports, builds/reloads once, then returns a runtime lease to the same worker.
+When provider runtime proves a shared-base defect, the worker reports the exact shared file/symbol and failing test immediately. The root fixes shared code under the deployment lease while the worker continues independent provider-local diagnosis. The worker does not stop or claim completion at that handoff.
 
 ## Provider Mapping
 
@@ -105,7 +101,7 @@ This preserves the requested integration priority while allowing all five adapte
 
 ## Acceptance Contract
 
-A provider worker may report `DONE` only when all of the following are observed by that worker from the integrator-issued built main application:
+A provider worker may report `DONE` only when all of the following are observed by that worker from the lease-protected built main application whose artifact identity is pinned in its acceptance lease:
 
 - authority disposition is `ACTIVE`;
 - catalog/feed state is `LIVE` and externally reported snapshot state is `FRESH`;
@@ -114,10 +110,13 @@ A provider worker may report `DONE` only when all of the following are observed 
 - a real provider price/status delta changes the semantic catalog when the provider sends one;
 - generic tab heartbeat, replay, unchanged DOM, and control acknowledgement do not renew authority;
 - targeted recovery does not reset another provider;
-- API restart and one extension reload recover through new authoritative evidence;
 - BTI remains active throughout;
-- the final six-provider soak runs for ten minutes with no false-live source.
 
-Before Phase B, the only permitted completion status is `READY_FOR_INTEGRATION`; wording such as done, complete, successful, fixed, or realtime-ready is forbidden.
+After all five provider-local `DONE` verdicts, root separately restarts/reloads
+the final combined artifact and runs the ten-minute six-provider soak. That soak
+is a final integration gate, not a prerequisite that an individual worker must
+somehow complete before the other workers finish.
+
+`READY_FOR_INTEGRATION` is not a completion status. The only successful terminal state is `DONE` after the built main application passes the provider's runtime gates.
 
 External provider/authentication unavailability is not converted into success. In that case the source remains fail-closed with an exact reason and the report records the external evidence.

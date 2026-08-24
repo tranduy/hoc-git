@@ -16,14 +16,21 @@ import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
 import { retryImBootstrapRefresh } from "./im-bootstrap-refresh.js";
 import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
 import { SabaSnapshotStorage } from "./saba-snapshot-storage.js";
+import { SourceLaunchMemory } from "./source-launch-memory.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 
 let bridge: LocalBridge | null = null;
 let configureInFlight: Promise<boolean> | null = null;
 let restoreInFlight: Promise<void> | null = null;
-const sourceLaunchUrlsKey = "sourceLaunchUrls";
+const legacySourceLaunchUrlsKey = "sourceLaunchUrls";
+const sourceLaunchMemory = new SourceLaunchMemory();
 const bootstrappingSourceTabs = new Set<number>();
+
+// Earlier versions persisted signed provider launches. Purge that opaque
+// legacy value without reading it; this worker rebuilds memory only from open
+// recognized tabs, then otherwise relies on browser-session recovery or fails closed.
+const legacySourceLaunchUrlsPurge = chrome.storage.session.remove(legacySourceLaunchUrlsKey).catch(() => undefined);
 
 const sourceTabKeepAlive = new SourceTabKeepAlive({
   attach: async (tabId) => chrome.debugger.attach({ tabId }, "1.3"),
@@ -50,7 +57,6 @@ const registry = new TabRegistry({
   closeTab: async (tabId) => chrome.tabs.remove(tabId)
 });
 
-const sbobetEventRequestStorageKey = "sbobetEventRequestTemplate";
 const sabaWsSnapshotsStorageKey = "sabaWsSnapshotsV1";
 const sabaSnapshotStorage = new SabaSnapshotStorage({
   get: async (key) => chrome.storage.local.get(key),
@@ -60,19 +66,6 @@ const sabaSnapshotStorage = new SabaSnapshotStorage({
 const observer = new NetworkObserver({
   sendCommand: async (tabId, method, params, sessionId) => chrome.debugger.sendCommand(
     sessionId === undefined ? { tabId } : { tabId, sessionId }, method, params),
-  loadSbobetEventRequest: async () => {
-    const value = (await chrome.storage.session.get(sbobetEventRequestStorageKey))[sbobetEventRequestStorageKey];
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    const candidate = value as { readonly url?: unknown; readonly headers?: unknown };
-    if (typeof candidate.url !== "string" || !candidate.headers || typeof candidate.headers !== "object" ||
-      Array.isArray(candidate.headers) || Object.values(candidate.headers).some((item) => typeof item !== "string")) {
-      return null;
-    }
-    return { url: candidate.url, headers: candidate.headers as Readonly<Record<string, string>> };
-  },
-  saveSbobetEventRequest: async (request) => {
-    await chrome.storage.session.set({ [sbobetEventRequestStorageKey]: request });
-  },
   loadSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.load(sourceId),
   saveSabaWsSnapshots: (snapshots) => sabaSnapshotStorage.save(snapshots),
   clearSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.clear(sourceId),
@@ -96,7 +89,8 @@ const snapshotPoller = new CmdSnapshotPoller({
   // explicit snapshot requests and recovery use the full refreshCatalog.
   refreshCatalog: async (source) => source.lobby === "KSPORT"
     ? observer.maintainKsportFeed(source)
-    : observer.refreshCatalog(source)
+    : observer.refreshCatalog(source),
+  recoverCmdCatalog: async (source) => observer.recoverCmdCatalog(source)
 });
 snapshotPoller.start();
 
@@ -112,9 +106,9 @@ async function recoverSourceSnapshot(sourceId: string, beginEpoch: boolean): Pro
       sourceId,
       tabId: source.tabId
     }, source.hostname),
-    refresh: async (source) => source.lobby === "TSPORT"
-      ? observer.captureCmdSnapshot({ lobby: source.lobby, sourceId, tabId: source.tabId }, source.hostname)
-      : observer.refreshCatalog({ lobby: source.lobby, sourceId, tabId: source.tabId }),
+    refresh: async (source) => observer.refreshCatalog({
+      lobby: source.lobby, sourceId, tabId: source.tabId
+    }),
     reload: async (tabId) => chrome.tabs.reload(tabId)
   });
 }
@@ -158,14 +152,8 @@ async function startAttachedSource(attached: { readonly lobby: ChromeLobbyId; re
   await sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
 }
 
-async function rememberRecognizedUrl(tab: TabDescriptor): Promise<void> {
-  const recognized = recognizeLobbyTab(tab);
-  if (!recognized || !tab.url) return;
-  const stored = await chrome.storage.session.get(sourceLaunchUrlsKey);
-  const current = stored[sourceLaunchUrlsKey] && typeof stored[sourceLaunchUrlsKey] === "object"
-    ? stored[sourceLaunchUrlsKey] as Record<string, unknown>
-    : {};
-  await chrome.storage.session.set({ [sourceLaunchUrlsKey]: { ...current, [recognized.lobby]: tab.url } });
+function rememberRecognizedUrl(tab: TabDescriptor): void {
+  sourceLaunchMemory.rememberRecognized(tab);
 }
 
 const fabetPortalLauncher = new FabetPortalLauncher({
@@ -200,6 +188,7 @@ const sourceTabRecovery = new SourceTabRecovery({
   get: async (tabId) => chrome.tabs.get(tabId),
   attach: attachRecoveredTab,
   attachBootstrap: async (tab, lobby) => {
+    rememberRecognizedUrl(tab);
     const attached = await registry.attachBootstrap(tab, lobby);
     await startAttachedSource(attached);
   },
@@ -238,13 +227,7 @@ const sourceTabRecovery = new SourceTabRecovery({
     if (!tab) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
     return tab;
   },
-  loadRemembered: async (lobby) => {
-    const stored = await chrome.storage.session.get(sourceLaunchUrlsKey);
-    const launches = stored[sourceLaunchUrlsKey];
-    if (!launches || typeof launches !== "object") return null;
-    const url = (launches as Record<string, unknown>)[lobby];
-    return typeof url === "string" ? url : null;
-  },
+  loadRemembered: async (lobby) => sourceLaunchMemory.load(lobby),
   // CMD's authenticated sports page uses the existing Chrome cookie session.
   // This canonical entry lets the very first reset recover even when the tab
   // was closed before this extension version had a chance to remember its URL.
@@ -380,6 +363,7 @@ async function restorePreferredTabsOnce(): Promise<void> {
 }
 
 async function reconcilePreferredTabs(): Promise<void> {
+  await legacySourceLaunchUrlsPurge;
   const tabs = await chrome.tabs.query({});
   await Promise.all(tabs.map(async (tab) => rememberRecognizedUrl(tab)));
   await registry.restore(tabs);
@@ -488,6 +472,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     }
     if (request.kind === "ATTACH_TAB" && Number.isSafeInteger(request.tabId)) {
       const tab = await chrome.tabs.get(request.tabId as number);
+      rememberRecognizedUrl(tab);
       const attached = await registry.attachSelected(tab);
       const source: ObservedSource = {
         lobby: attached.lobby as ChromeLobbyId,
@@ -499,11 +484,8 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       return sendResponse({ ok: true, attached });
     }
     if (request.kind === "ENSURE_KSPORT") {
-      const stored = await chrome.storage.session.get(sourceLaunchUrlsKey);
-      const launches = stored[sourceLaunchUrlsKey];
-      const url = launches && typeof launches === "object"
-        ? (launches as Record<string, unknown>).KSPORT : null;
-      if (typeof url !== "string") return sendResponse({ ok: false, reason: "KSPORT_LAUNCH_UNAVAILABLE" });
+      const url = sourceLaunchMemory.load("KSPORT");
+      if (url === null) return sendResponse({ ok: false, reason: "KSPORT_LAUNCH_UNAVAILABLE" });
       await sourceTabRecovery.ensure("KSPORT", url);
       return sendResponse({ ok: true });
     }
@@ -513,6 +495,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       for (const tab of tabs) {
         if (recognizeLobbyTab(tab) === null) continue;
         try {
+          rememberRecognizedUrl(tab);
           const entry = await registry.attachSelected(tab);
           await observer.start({
             lobby: entry.lobby as ChromeLobbyId,

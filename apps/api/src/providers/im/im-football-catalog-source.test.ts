@@ -55,6 +55,44 @@ describe("extractImFootballCatalog", () => {
     }]);
   });
 
+  it("preserves Malay odds and normalizes positive Hong Kong odds without rounding", () => {
+    const decoded = [0.67, -0.79, 1.25, 3].map((odds) => {
+      const candidate = { ...event, mls: [{ ...event.mls[0], ws: event.mls[0]!.ws
+        .map((item, index) => index === 0 ? { ...item, o: odds } : item) }] };
+      return extractImFootballCatalog({ StatusCode: 100, sel: [candidate] })[0]
+        ?.markets[0]?.selections[0]?.priceText;
+    });
+
+    expect(decoded).toEqual(["0.67", "-0.79", "-0.8", "-0.3333333333333333"]);
+  });
+
+  it.each([
+    ["zero", 0],
+    ["NaN", Number.NaN],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["a malformed string", "1.25"],
+    ["unsupported nested odds", { value: 1.25 }],
+    ["an out-of-contract negative value", -1.01],
+    ["a Hong Kong value whose exact Malay form is scientific notation", 1e7]
+  ])("rejects %s at the IM catalog boundary", (_label, odds) => {
+    const candidate = { ...event, mls: [{ ...event.mls[0], ws: event.mls[0]!.ws
+      .map((item, index) => index === 0 ? { ...item, o: odds } : item) }] };
+
+    expect(extractImFootballCatalog({ StatusCode: 100, sel: [candidate] })).toEqual([]);
+  });
+
+  it("does not turn a malformed price delta into a provider removal", () => {
+    const initial = extractImFootballCatalog({ StatusCode: 100, sel: [event] });
+    const malformed = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{
+      ...event.mls[0], ws: event.mls[0]!.ws.map((item, index) => index === 0
+        ? { ...item, o: 0 } : item)
+    }] }] };
+
+    expect(mergeImFootballDelta(initial, malformed)).toBe(initial);
+    expect(initial[0]?.markets[0]?.selections.map((item) => item.priceText)).toEqual(["0.67", "-0.79"]);
+  });
+
   it("keeps first-half handicap and total identities separate from full-time", () => {
     const firstHalf = { ...event, mls: [
       { mi: 20, bti: 1, gp: 2, il: false, ws: [

@@ -1,6 +1,6 @@
 # IM Worker Task
 
-Priority: 4
+Priority: 2
 
 Report: `docs/superpowers/reports/five-provider/im.md`
 
@@ -49,25 +49,24 @@ npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/im-http-adapter.te
 git diff --check -- apps/api/src/chrome-bridge/im-http-adapter.ts apps/api/src/chrome-bridge/im-http-adapter.test.ts apps/api/src/providers/im/im-football-catalog-source.ts apps/api/src/providers/im/im-football-catalog-source.test.ts
 ```
 
-## Phase A Handoff
+## End-to-End Realtime Gate
 
-Write the report with status `READY_FOR_INTEGRATION`. If observer metadata or shared integration changes are needed, specify the exact contract and leave shared files untouched. Do not describe the task as done and remain available.
-
-## Phase B Realtime Gate
-
-After the integrator supplies the IM runtime lease:
+After focused GREEN, perform the exact common deployment transaction verbatim, then begin the IM acceptance lease with `begin-acceptance IM <worker> chrome:IM:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
 
 Run the provider sampler without building:
 
 ```powershell
-node scripts/verify-im-runtime.mjs 45000 .run/five-provider/im-runtime-evidence.json
+node scripts/verify-im-runtime.mjs 120000 .run/five-provider/im-runtime-evidence.json
 ```
 
 1. Require two complete authenticated GetSE partitions with the same cutoff/generation to emit one baseline.
 2. Require IM to become `ACTIVE` and `LIVE/FRESH`, with representative positive Hong Kong odds normalized to valid Malay odds and no authoritative empty-catalog laundering.
-3. Sample for at least 45 seconds and record at least three authenticated provider response/cursor advances.
+3. Sample for at least 120 seconds and record at least three authenticated provider response/cursor advances.
 4. Record an ordered semantic delta when emitted; prove pre-cutoff deltas cannot roll back the committed generation and malformed deltas cannot renew liveness.
 5. Trigger one IM-targeted reconciliation and prove the other providers' source identities are unchanged.
-6. Update the report to `DONE` only if every gate passes; otherwise mark `BLOCKED` with exact redacted reason.
+6. Update the report to `DONE` only if every gate passes. On a failed gate keep
+   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
+   the worker loop. `BLOCKED` is legal only after proving a genuine external
+   provider/auth failure that in-scope code and same-tab recovery cannot fix.
 
-Do not attach DevTools/CDP, use active-tab actions, build/restart/reload, inspect raw provider bodies, or touch another provider.
+Do not attach DevTools/CDP, use active-tab fallback, inspect raw provider bodies, or touch another provider. Unit tests without this live gate are not completion.

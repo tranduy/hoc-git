@@ -1,6 +1,6 @@
 # SBOBET/KSPORT Worker Task
 
-Priority: 5
+Priority: 2
 
 Report: `docs/superpowers/reports/five-provider/sbobet.md`
 
@@ -49,23 +49,26 @@ If the optional generation files are unnecessary, do not create them and omit th
 
 ## Required Shared Integration Request
 
-If the existing envelope does not carry an explicit recovery generation, the Phase A report must define the exact observer/contract metadata needed to create and propagate it. Do not edit shared files. Set status `READY_FOR_INTEGRATION` and remain available.
+The common base must carry the explicit recovery generation. If runtime proves that shared wiring defective, send the exact failing test/symbol to the root while continuing provider-local work.
 
-## Phase B Realtime Gate
+## End-to-End Realtime Gate
 
-After the integrator supplies the SBOBET/KSPORT runtime lease and confirms explicit generation wiring:
+After focused GREEN, perform the exact common deployment transaction verbatim, then begin the SBOBET acceptance lease with `begin-acceptance SBOBET <worker> chrome:KSPORT:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
 
 Run the provider sampler without building:
 
 ```powershell
-node scripts/verify-sbobet-runtime.mjs 45000 .run/five-provider/sbobet-runtime-evidence.json
+node scripts/verify-sbobet-runtime.mjs 120000 .run/five-provider/sbobet-runtime-evidence.json
 ```
 
 1. Require current live and today full partitions under one explicit recovery generation to commit atomically even when receipt sequences differ.
 2. Require SBOBET to become `ACTIVE` and `LIVE/FRESH`; mixed generations and partial pairs must remain non-authoritative.
-3. Sample for at least 45 seconds and record at least three current KSPORT evidence/receipt advances and a semantic delta when emitted.
+3. Sample for at least 120 seconds and record at least three current KSPORT evidence/receipt advances and a semantic delta when emitted.
 4. Prove pending-delta overflow/gap/close suppresses liveness until a strictly newer full pair commits.
 5. Trigger one SBOBET-targeted recovery, require a current baseline within 90 seconds, and prove all other provider sources remain unchanged.
-6. Update the report to `DONE` only if every gate passes; otherwise mark `BLOCKED` with exact redacted reason.
+6. Update the report to `DONE` only if every gate passes. On a failed gate keep
+   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
+   the worker loop. `BLOCKED` is legal only after proving a genuine external
+   provider/auth failure that in-scope code and same-tab recovery cannot fix.
 
-Do not attach DevTools/CDP, use active-tab actions, build/restart/reload, inspect launch/auth data, or touch another provider.
+Do not attach DevTools/CDP, use active-tab fallback, inspect launch/auth data, or touch another provider. Unit tests without this live gate are not completion.

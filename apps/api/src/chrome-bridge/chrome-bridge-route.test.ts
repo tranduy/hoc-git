@@ -1,6 +1,6 @@
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
 import { registerChromeBridgeRoute } from "./chrome-bridge-route.js";
@@ -8,6 +8,8 @@ import type { Socket } from "node:net";
 import type { ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
 
 const loopbackSocket = { remoteAddress: "127.0.0.1" } as Socket;
+const localDashboardOrigin = "http://127.0.0.1:4311";
+const configuredDashboardOrigin = "https://live.babiesbo.uk";
 
 const validEnvelope = {
   version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7, sequence: 0,
@@ -16,14 +18,16 @@ const validEnvelope = {
   payload: { encoding: "UTF8", body: "{}" }
 } as const;
 
-async function appWithRoute(openProviderTicket = true) {
+async function appWithRoute(openProviderTicket = true, recoveryOptions: Record<string, unknown> = {}) {
   const app = Fastify({ logger: false });
   await app.register(websocket, { options: { maxPayload: 262_144 } });
   const registry = new ChromeBridgeRegistry();
   const controlPlane = new ChromeBridgeControlPlane({ authorityCoordinator: registry.authorityCoordinator });
-  registerChromeBridgeRoute(app, registry, {
-    installationKey: "local-key", openProviderTicket, controlPlane
-  });
+  const routeOptions = {
+    installationKey: "local-key", openProviderTicket, controlPlane,
+    dashboardOrigins: new Set([localDashboardOrigin]), ...recoveryOptions
+  };
+  registerChromeBridgeRoute(app, registry, routeOptions);
   await app.ready();
   return { app, registry, controlPlane };
 }
@@ -247,7 +251,113 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
-  it("dispatches a strict read-only focus command only to an attached source", async () => {
+  it("blocks a remote caller before focus-selection reaches an attached bridge", async () => {
+    const { app, registry } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const initialControls = new Promise<void>((resolve) => {
+      let count = 0;
+      socket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "CMD", sourceId: "chrome:CMD:7" }));
+    await initialControls;
+    promoteCandidate(registry, "catalog-source:CMD:FOOTBALL");
+    const controls: unknown[] = [];
+    socket.on("message", (data) => controls.push(JSON.parse(data.toString("utf8"))));
+
+    const response = await app.inject({
+      method: "POST", url: "/api/chrome-bridge/focus-selection", remoteAddress: "203.0.113.8",
+      payload: { sourceId: "chrome:CMD:7", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1" }
+    });
+
+    expect(response.statusCode).toBe(403);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(controls).not.toContainEqual(expect.objectContaining({ kind: "FOCUS_SELECTION" }));
+    socket.terminate();
+    await app.close();
+  });
+
+  it("blocks a Chrome extension origin before focus-selection reaches an attached bridge", async () => {
+    const { app, registry } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const initialControls = new Promise<void>((resolve) => {
+      let count = 0;
+      socket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "CMD", sourceId: "chrome:CMD:7" }));
+    await initialControls;
+    promoteCandidate(registry, "catalog-source:CMD:FOOTBALL");
+    const controls: unknown[] = [];
+    socket.on("message", (data) => controls.push(JSON.parse(data.toString("utf8"))));
+
+    const response = await app.inject({
+      method: "POST", url: "/api/chrome-bridge/focus-selection",
+      headers: { origin: "chrome-extension://foreign-extension" },
+      payload: { sourceId: "chrome:CMD:7", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1" }
+    });
+
+    expect(response.statusCode).toBe(403);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(controls).not.toContainEqual(expect.objectContaining({ kind: "FOCUS_SELECTION" }));
+    socket.terminate();
+    await app.close();
+  });
+
+  it.each([
+    ["an arbitrary HTTPS Origin", "https://attacker.example"],
+    ["the literal null Origin", "null"],
+    ["a case-variant Chrome extension Origin", "Chrome-Extension://foreign-extension"]
+  ])("rejects %s at the focus-selection boundary before source validation", async (_label, origin) => {
+    const { app } = await appWithRoute();
+
+    const response = await app.inject({
+      method: "POST", url: "/api/chrome-bridge/focus-selection", headers: { origin },
+      payload: { sourceId: "chrome:CMD:7", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1" }
+    });
+
+    expect(response.statusCode).toBe(403);
+    await app.close();
+  });
+
+  it("allows an exact configured dashboard Origin to dispatch a focus command", async () => {
+    const { app, registry } = await appWithRoute(true, {
+      dashboardOrigins: new Set([configuredDashboardOrigin])
+    });
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const initialControls = new Promise<void>((resolve) => {
+      let count = 0;
+      socket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "CMD", sourceId: "chrome:CMD:7" }));
+    await initialControls;
+    promoteCandidate(registry, "catalog-source:CMD:FOOTBALL");
+    const focused = nextMessage(socket);
+
+    const response = await app.inject({
+      method: "POST", url: "/api/chrome-bridge/focus-selection",
+      headers: { origin: configuredDashboardOrigin },
+      payload: { sourceId: "chrome:CMD:7", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1" }
+    });
+
+    expect(response.statusCode).toBe(202);
+    await expect(focused).resolves.toMatchObject({ kind: "FOCUS_SELECTION", providerSelectionId: "selection-1" });
+    socket.terminate();
+    await app.close();
+  });
+
+  it("allows an Origin-less local dashboard caller to dispatch a focus command", async () => {
     const { app, registry } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
       headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
@@ -299,6 +409,102 @@ describe("Chrome bridge route", () => {
       payload: { sourceId: "chrome:CMD:7", providerEventId: "e", providerMarketId: "m", providerSelectionId: "s" }
     });
     expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("requests recovery only from the exact attached source ID", async () => {
+    const { app, registry } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const initialControls = new Promise<void>((resolve) => {
+      let count = 0;
+      socket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "CMD", sourceId: "chrome:CMD:7" }));
+    await initialControls;
+    promoteCandidate(registry, "catalog-source:CMD:FOOTBALL");
+
+    const recovery = nextMessage(socket);
+    const response = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:CMD:7" } });
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ sourceId: "chrome:CMD:7", requested: 1 });
+    await expect(recovery).resolves.toEqual({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:CMD:7" });
+
+    const missing = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:CMD:999" } });
+    expect(missing.statusCode).toBe(409);
+    const malformed = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "not-a-source" } });
+    expect(malformed.statusCode).toBe(400);
+    socket.terminate();
+    await app.close();
+  });
+
+  it("confirms an exact recovery only after a strictly newer provider baseline", async () => {
+    const baseline = { accountId: "catalog-source:CMD:FOOTBALL", state: "LIVE", reason: null,
+      sourceId: "chrome:CMD:7", sourceEpoch: "observer:2", tabReachableAtMs: 2_001,
+      providerTransportAtMs: 2_002, lastAuthoritativeEvidenceAtMs: 2_003,
+      lastCompleteBaselineAtMs: 2_004, lastDeltaAtMs: null, lastSemanticChangeAtMs: 2_004,
+      activeGeneration: "cmd:200", recoveryStage: "NONE", recoveryAttempt: 0 } as const;
+    const waitForFreshBaseline = vi.fn(async () => baseline);
+    const { app, registry } = await appWithRoute(true, { now: () => 2_000,
+      currentFeed: () => ({ ...baseline, lastCompleteBaselineAtMs: 1_000, activeGeneration: "cmd:100" }),
+      waitForFreshBaseline });
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const initialControls = new Promise<void>((resolve) => {
+      let count = 0;
+      socket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "CMD", sourceId: "chrome:CMD:7" }));
+    await initialControls;
+    promoteCandidate(registry, "catalog-source:CMD:FOOTBALL");
+    const recovery = nextMessage(socket);
+
+    const response = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:CMD:7" } });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ sourceId: "chrome:CMD:7", requested: 1, baseline: {
+      sourceEpoch: "observer:2", activeGeneration: "cmd:200", lastCompleteBaselineAtMs: 2_004
+    } });
+    expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith("chrome:CMD:7", 2_000);
+    await expect(recovery).resolves.toMatchObject({ kind: "REQUEST_SNAPSHOT", sourceId: "chrome:CMD:7" });
+    socket.terminate();
+    await app.close();
+  });
+
+  it("does not confirm a recovery that merely republishes the prior authority generation", async () => {
+    const prior = { accountId: "catalog-source:CMD:FOOTBALL", state: "LIVE", reason: null,
+      sourceId: "chrome:CMD:7", sourceEpoch: "observer:1", tabReachableAtMs: 1_000,
+      providerTransportAtMs: 1_000, lastAuthoritativeEvidenceAtMs: 1_000,
+      lastCompleteBaselineAtMs: 1_000, lastDeltaAtMs: null, lastSemanticChangeAtMs: 1_000,
+      activeGeneration: "cmd:100", recoveryStage: "NONE", recoveryAttempt: 0 } as const;
+    const { app, registry } = await appWithRoute(true, { now: () => 2_000,
+      currentFeed: () => prior,
+      waitForFreshBaseline: async () => ({ ...prior, lastCompleteBaselineAtMs: 2_001 }) });
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const initialControls = new Promise<void>((resolve) => {
+      let count = 0;
+      socket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "CMD", sourceId: "chrome:CMD:7" }));
+    await initialControls;
+    promoteCandidate(registry, "catalog-source:CMD:FOOTBALL");
+
+    const response = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:CMD:7" } });
+    expect(response.statusCode).toBe(504);
+    expect(response.json()).toEqual({ error: "PROVIDER_FEED_BASELINE_TIMEOUT" });
+    socket.terminate();
     await app.close();
   });
 

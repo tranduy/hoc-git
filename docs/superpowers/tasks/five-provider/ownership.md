@@ -48,7 +48,7 @@ This file is read-only for workers. The whitelist is exact: a worker may modify 
 - `docs/superpowers/reports/five-provider/sbobet.md`
 - ignored runtime output `.run/five-provider/sbobet-runtime-evidence.json`
 
-## Integrator Ownership
+## Shared-Base Ownership
 
 The integrator owns every repository file not explicitly whitelisted above. In particular, workers must not modify:
 
@@ -63,14 +63,16 @@ The integrator owns every repository file not explicitly whitelisted above. In p
 - `apps/chrome-extension/src/lobby-signatures.test.ts`
 - `packages/contracts/**`
 - provider authority/coordinator, registry, data-plane, route/control, recovery actor, and server files;
-- all `dist/**`, `.auth/**`, scripts, runtime state, logs, and process files except the five exact leased `.run/five-provider/*-runtime-evidence.json` outputs listed above;
+- `.auth/**`, raw provider captures, secrets, launch material, and another provider's evidence/report;
 - all planning/task/common documents;
 - Git index and history;
-- DevTools/debugger, extension reload, global process lifecycle, builds, and cross-provider runtime state.
+- DevTools/debugger ownership and cross-provider mutations.
 
-## Phase B Runtime Leases
+The root integrator owns edits to shared source files. A provider worker encloses each provider-local patch in its provider edit lease and may build, restart the managed stack, and reload the extension only while holding the exclusive deployment lease from `scripts/five-provider-coordinator.mjs`. These actions are runtime operations, not permission to edit shared source or Git history.
 
-After the integration barrier, runtime ownership is also non-overlapping:
+## Provider Runtime Ownership
+
+Throughout each end-to-end worker loop, runtime ownership is non-overlapping:
 
 | Worker | Leased account | Leased bridge source |
 | --- | --- | --- |
@@ -80,7 +82,7 @@ After the integration barrier, runtime ownership is also non-overlapping:
 | IM | IM | IM |
 | SBOBET | SBOBET | KSPORT |
 
-The integrator supplies the exact current `tabId`, source ID, commit, API process identity, and extension artifact identity in a follow-up message. A lease permits read-only status/catalog sampling and provider-targeted recovery for that account. It does not permit build/restart/reload, DevTools/CDP, active-tab actions, another account, or raw launch/auth access.
+Each worker resolves and records the exact current `tabId`, source ID, commit, API process identity, and extension artifact identity for its own account. An acceptance lease permits provider-scoped status/catalog sampling, exact-tab browser inspection, and targeted recovery for that account. It never permits DevTools/CDP, active-tab fallback, another account, or raw launch/auth access.
 
 ## Collision Rule
 

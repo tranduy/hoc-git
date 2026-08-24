@@ -20,6 +20,12 @@ function supportedLine(value: unknown): value is number {
     isSupportedFootballTwoWayLine(String(Math.abs(value)));
 }
 
+export function normalizeImOdds(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value === 0 || value < -1) return null;
+  const normalized = value > 1 ? -1 / value : value;
+  return /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(String(normalized)) ? normalized : null;
+}
+
 type ImFootballMarketType = "FT_AH" | "FT_TOTAL" | "FH_AH" | "FH_TOTAL" | "SH_AH" | "SH_TOTAL";
 
 function isHandicapMarket(marketType: ImFootballMarketType): boolean {
@@ -30,8 +36,9 @@ function selection(value: unknown, marketType: ImFootballMarketType): SbobetCata
   const item = record(value);
   const isHandicap = isHandicapMarket(marketType);
   const expected = isHandicap ? [1, 2] : [3, 4];
-  if (item === null || !expected.includes(Number(item.si)) || !supportedLine(item.hdp) ||
-    typeof item.o !== "number" || !Number.isFinite(item.o) || item.o === 0 || Math.abs(item.o) > 1) return null;
+  if (item === null || !expected.includes(Number(item.si)) || !supportedLine(item.hdp)) return null;
+  const normalizedOdds = normalizeImOdds(item.o);
+  if (normalizedOdds === null) return null;
   const selectionId = identifier(item.wsi);
   const lineText = text(item.dih);
   if (selectionId === null || lineText === null) return null;
@@ -39,7 +46,7 @@ function selection(value: unknown, marketType: ImFootballMarketType): SbobetCata
     selectionId,
     selection: isHandicap ? (item.si === 1 ? "HOME" : "AWAY")
       : (item.si === 3 ? "OVER" : "UNDER"),
-    priceText: String(item.o),
+    priceText: String(normalizedOdds),
     locked: false,
     lineText
   };
@@ -65,6 +72,38 @@ function market(value: unknown): SbobetCatalogMarket | null {
 
 function markets(value: unknown): readonly SbobetCatalogMarket[] {
   return Array.isArray(value) ? value.map(market).filter((item): item is SbobetCatalogMarket => item !== null) : [];
+}
+
+function validDeltaMarket(value: unknown): boolean {
+  const item = record(value);
+  if (item === null || identifier(item.mi) === null || typeof item.bti !== "number" ||
+    !Number.isSafeInteger(item.bti) || typeof item.gp !== "number" || !Number.isSafeInteger(item.gp) ||
+    !Array.isArray(item.ws)) return false;
+  const supportedDomain = [1, 2].includes(item.bti) && [1, 2, 3].includes(item.gp);
+  if (!supportedDomain) return true;
+  if (item.ws.length !== 2) return false;
+  const expectedSelections = item.bti === 1 ? new Set([1, 2]) : new Set([3, 4]);
+  const actualSelections = new Set<number>();
+  for (const candidate of item.ws) {
+    const selection = record(candidate);
+    if (selection === null || identifier(selection.wsi) === null || typeof selection.si !== "number" ||
+      !expectedSelections.has(selection.si) || actualSelections.has(selection.si) ||
+      typeof selection.hdp !== "number" || !Number.isFinite(selection.hdp) || Math.abs(selection.hdp) > 100 ||
+      text(selection.dih) === null || normalizeImOdds(selection.o) === null) return false;
+    actualSelections.add(selection.si);
+  }
+  return actualSelections.size === 2;
+}
+
+export function isValidImFootballDelta(value: unknown): boolean {
+  const root = record(value);
+  if (root === null || root.StatusCode !== 100 || !Array.isArray(root.dc)) return false;
+  return root.dc.every((candidate) => {
+    const change = record(candidate);
+    if (change === null || identifier(change.eid) === null) return false;
+    if (change.a === 1 || change.a === 2) return true;
+    return change.a === 3 && Array.isArray(change.v) && change.v.every(validDeltaMarket);
+  });
 }
 
 function liveTime(value: unknown): string {
@@ -116,8 +155,9 @@ export function extractImFootballCatalog(
 export function mergeImFootballDelta(
   previous: readonly SbobetCatalogInputRecord[], value: unknown
 ): readonly SbobetCatalogInputRecord[] {
+  if (!isValidImFootballDelta(value)) return previous;
   const root = record(value);
-  if (root === null || root.StatusCode !== 100 || !Array.isArray(root.dc)) return previous;
+  if (root === null || !Array.isArray(root.dc)) return previous;
   const next = new Map(previous.map((item) => [item.eventId, item]));
   for (const candidate of root.dc) {
     const change = record(candidate);

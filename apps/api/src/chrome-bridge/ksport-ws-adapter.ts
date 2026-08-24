@@ -29,8 +29,9 @@ interface PartitionSnapshot {
 interface PendingBaseline {
   readonly generation: string;
   readonly ordinal: number;
+  readonly receiptFloors: ReadonlyMap<CatalogPartition, number>;
   readonly partitions: Map<CatalogPartition, PartitionSnapshot>;
-  readonly deltas: Map<CatalogPartition, Map<string, RetainedRecord>>;
+  readonly deltas: Map<CatalogPartition, Map<string, Map<string, RetainedRecord>>>;
   deltaRecordCount: number;
   deltaMarketCount: number;
   fenced: boolean;
@@ -45,7 +46,7 @@ interface SocketEpoch {
   pendingBaseline: PendingBaseline | null;
   generation: string;
   committedGeneration: number;
-  receiptHighWatermark: number;
+  receiptHighWatermarks: Map<CatalogPartition, number>;
   authorityLost: boolean;
 }
 
@@ -62,6 +63,14 @@ function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
 
 function sourceEpochKey(envelope: ChromeBridgeEnvelope): string {
   return `${envelope.sourceId}|${sourceEpoch(envelope)}`;
+}
+
+function wsRecoveryGeneration(envelope: ChromeBridgeEnvelope): number | null {
+  const generation = (envelope.request as ChromeBridgeEnvelope["request"] & {
+    readonly recoveryGeneration?: unknown
+  }).recoveryGeneration;
+  return typeof generation === "number" && Number.isSafeInteger(generation) && generation > 0
+    ? generation : null;
 }
 
 function receiptPartition(receipt: SbobetStompProviderReceipt): CatalogPartition | null {
@@ -88,7 +97,19 @@ function httpGeneration(envelope: ChromeBridgeEnvelope): {
 function isFullPartitionSnapshot(body: unknown): boolean {
   return Array.isArray(body) && body.every((value) => {
     const league = record(value);
-    return league !== null && typeof league["1"] === "string" && Array.isArray(league["2"]);
+    if (league === null || typeof league["1"] !== "string" || league["1"].trim() === "" ||
+      !Array.isArray(league["2"])) return false;
+    return league["2"].every((candidate) => {
+      const event = record(candidate);
+      const eventId = event === null ? null : event["8"];
+      const home = event === null ? null : event["2"];
+      const away = event === null ? null : event["3"];
+      const markets = event === null ? null : event["7"];
+      return event !== null && (typeof eventId === "string" || typeof eventId === "number") &&
+        /^\d+$/u.test(String(eventId)) && typeof home === "string" && home.trim() !== "" &&
+        typeof away === "string" && away.trim() !== "" && home.trim() !== away.trim() &&
+        markets !== null && typeof markets === "object" && !Array.isArray(markets);
+    });
   });
 }
 
@@ -171,6 +192,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (!isFullPartitionSnapshot(body)) return [];
       const bootstrap = bootstrapRecords(body, requestGeneration.partition === "live");
       const changed = extractSbobetDirectCatalogRecords(body, bootstrap);
+      if (bootstrap.length > 0 && changed.length === 0) return [];
       const epoch = this.#httpPartitions.get(epochKey) ?? {
         committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(), pendingBaseline: null,
         committedOrdinal: 0, generation: `${sourceEpoch(envelope)}:ksport-http:${envelope.tabId}:0`
@@ -223,9 +245,10 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         const current = this.#epochs.get(epochKey);
         if (current?.activeStreamId === streamId) return [];
         if (current !== undefined && streamOrdinal <= current.streamHighWatermark) return [];
+        const retiresAuthority = current !== undefined && hasCommittedSocketAuthority(current);
         this.#epochs.set(epochKey, socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal,
-          current?.receiptHighWatermark ?? 0));
-        return [];
+          current?.receiptHighWatermarks));
+        return retiresAuthority ? [streamGap(envelope)] : [];
       }
       const current = this.#epochs.get(epochKey);
       if (current?.activeStreamId !== streamId || current.activeStreamOrdinal !== streamOrdinal) return [];
@@ -241,21 +264,28 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }
     let epoch = this.#epochs.get(epochKey);
+    let retiresAuthority = false;
     if (epoch === undefined || streamOrdinal > epoch.streamHighWatermark) {
+      retiresAuthority = epoch !== undefined && hasCommittedSocketAuthority(epoch);
       epoch = socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal,
-        epoch?.receiptHighWatermark ?? 0);
+        epoch?.receiptHighWatermarks);
       this.#epochs.set(epochKey, epoch);
     }
     if (epoch.activeStreamId !== streamId || epoch.activeStreamOrdinal !== streamOrdinal ||
       epoch.decoder === null) return [];
+    const recoveryGeneration = wsRecoveryGeneration(envelope);
+    if (recoveryGeneration === null) return retiresAuthority ? [streamGap(envelope)] : [];
     if (isSportsbookHeartbeat(envelope.payload.body)) {
-      if (epoch.authorityLost || !epoch.committedPartitions.has("live") ||
-        !epoch.committedPartitions.has("today")) return [];
+      if (epoch.authorityLost || epoch.pendingBaseline !== null ||
+        recoveryGeneration !== epoch.committedGeneration ||
+        !epoch.committedPartitions.has("live") || !epoch.committedPartitions.has("today")) {
+        return retiresAuthority ? [streamGap(envelope)] : [];
+      }
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
         observedAtMs: envelope.observedAtMs, transportAlive: true }];
     }
     const receipts = epoch.decoder.push(envelope.payload.body);
-    if (receipts.length === 0) return [];
+    if (receipts.length === 0) return retiresAuthority ? [streamGap(envelope)] : [];
     let acceptedDelta = false;
     let completedBaseline = false;
     let invalidated = false;
@@ -263,31 +293,33 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       const partition = receiptPartition(receipt);
       if (partition === null) continue;
       const fullSnapshot = isFullPartitionSnapshot(receipt.body);
-      const receiptGeneration = receipt.receiptSequence;
-      if (receiptGeneration === null || !Number.isSafeInteger(receiptGeneration) ||
-        receiptGeneration <= 0) continue;
-      const order = receiptGeneration;
+      const order = receipt.receiptSequence;
+      if (order === null || !Number.isSafeInteger(order) || order <= 0) continue;
       const bootstrap = bootstrapRecords(receipt.body, partition === "live");
       const changed = extractSbobetDirectCatalogRecords(receipt.body, bootstrap);
+      if (fullSnapshot && bootstrap.length > 0 && changed.length === 0) continue;
+      if (!fullSnapshot && changed.length === 0) continue;
       if (fullSnapshot) {
-        if (epoch.pendingBaseline === null || receiptGeneration! > epoch.pendingBaseline.ordinal) {
-          // A full replacement must be newer than every valid provider
-          // receipt already observed in this source epoch, including applied
-          // deltas and evidence retained across a socket handoff.
-          if (receiptGeneration! <= epoch.receiptHighWatermark) continue;
+        if (recoveryGeneration <= epoch.committedGeneration) continue;
+        if (epoch.pendingBaseline === null || recoveryGeneration > epoch.pendingBaseline.ordinal) {
+          // A full replacement part must be newer than valid evidence for
+          // that partition, including applied deltas retained across a socket
+          // handoff. The other partition has its own independent order.
+          if (order <= (epoch.receiptHighWatermarks.get(partition) ?? 0)) continue;
           epoch.pendingBaseline = pendingBaseline(
-            `${sourceEpoch(envelope)}:ksport-ws:${streamId}:${receiptGeneration!}`, receiptGeneration!);
-          epoch.receiptHighWatermark = receiptGeneration!;
+            `${sourceEpoch(envelope)}:ksport-ws:${streamId}:${recoveryGeneration}`, recoveryGeneration,
+            epoch.receiptHighWatermarks);
         }
-        // A provider receipt number is the WS baseline generation. Partition-
-        // local ordering alone must never combine live@N with today@M.
-        if (receiptGeneration! <= epoch.committedGeneration ||
-          receiptGeneration! !== epoch.pendingBaseline.ordinal) continue;
+        if (recoveryGeneration !== epoch.pendingBaseline.ordinal) continue;
+        if (epoch.pendingBaseline.fenced) continue;
         const prior = epoch.pendingBaseline.partitions.get(partition);
-        if (prior !== undefined && order <= prior.receiptSequence) continue;
+        if (order <= (epoch.pendingBaseline.receiptFloors.get(partition) ?? 0) ||
+          (prior !== undefined && order <= prior.receiptSequence)) continue;
         const records = new Map<string, RetainedRecord>();
         for (const incoming of changed) records.set(incoming.eventId, retainedRecord(incoming, envelope, order));
         epoch.pendingBaseline.partitions.set(partition, { records, receiptSequence: order });
+        epoch.receiptHighWatermarks.set(partition,
+          Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
         if (epoch.pendingBaseline.partitions.has("live") && epoch.pendingBaseline.partitions.has("today") &&
           !epoch.pendingBaseline.fenced) {
           applyPendingDeltas(epoch.pendingBaseline);
@@ -300,10 +332,21 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         }
         continue;
       }
+      if (recoveryGeneration > epoch.committedGeneration &&
+        (epoch.pendingBaseline === null || recoveryGeneration > epoch.pendingBaseline.ordinal)) {
+        if (order <= (epoch.receiptHighWatermarks.get(partition) ?? 0)) continue;
+        epoch.pendingBaseline = pendingBaseline(
+          `${sourceEpoch(envelope)}:ksport-ws:${streamId}:${recoveryGeneration}`, recoveryGeneration,
+          epoch.receiptHighWatermarks);
+      }
       if (epoch.pendingBaseline !== null) {
-        if (order <= epoch.pendingBaseline.ordinal) continue;
-        epoch.receiptHighWatermark = Math.max(epoch.receiptHighWatermark, order);
+        const pendingPartition = epoch.pendingBaseline.partitions.get(partition);
+        const partitionEvidence = pendingPartition?.receiptSequence ??
+          epoch.pendingBaseline.receiptFloors.get(partition) ?? 0;
+        if (recoveryGeneration !== epoch.pendingBaseline.ordinal || order <= partitionEvidence) continue;
         if (epoch.pendingBaseline.fenced) continue;
+        epoch.receiptHighWatermarks.set(partition,
+          Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
         if (bufferPendingDeltas(epoch.pendingBaseline, partition, changed, envelope, order) === "OVERFLOW") {
           if (!epoch.authorityLost) invalidated = true;
           epoch.authorityLost = true;
@@ -314,9 +357,11 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         }
         continue;
       }
+      if (recoveryGeneration !== epoch.committedGeneration) continue;
       const committed = epoch.committedPartitions.get(partition);
       if (committed === undefined || order <= committed.receiptSequence) continue;
-      epoch.receiptHighWatermark = Math.max(epoch.receiptHighWatermark, order);
+      epoch.receiptHighWatermarks.set(partition,
+        Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
       const records = new Map(committed.records);
       for (const incoming of changed) {
         const existing = records.get(incoming.eventId)?.record;
@@ -325,12 +370,9 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       epoch.committedPartitions.set(partition, { records, receiptSequence: order });
       acceptedDelta = changed.length > 0 || acceptedDelta;
     }
-    const invalidate = (): DecodedCatalogUpdate => ({ sourceId: envelope.sourceId,
-      sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
-      invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_GAP" });
-    if (invalidated) return [invalidate()];
+    if (invalidated) return [streamGap(envelope)];
     if ((!acceptedDelta && !completedBaseline) || !epoch.committedPartitions.has("live") ||
-      !epoch.committedPartitions.has("today")) return [];
+      !epoch.committedPartitions.has("today")) return retiresAuthority ? [streamGap(envelope)] : [];
     const retained = new Map<string, RetainedRecord>();
     for (const partition of ["today", "live"] as const) {
       for (const [eventId, entry] of epoch.committedPartitions.get(partition)!.records) {
@@ -358,6 +400,17 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   }
 }
 
+function hasCommittedSocketAuthority(epoch: SocketEpoch): boolean {
+  return !epoch.authorityLost && epoch.committedGeneration > 0 &&
+    epoch.committedPartitions.has("live") && epoch.committedPartitions.has("today");
+}
+
+function streamGap(envelope: ChromeBridgeEnvelope): DecodedCatalogUpdate {
+  return { sourceId: envelope.sourceId, sequence: envelope.sequence,
+    observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
+    reason: "PROVIDER_STREAM_GAP" };
+}
+
 function wsStreamOrdinal(streamId: string): number | null {
   // Current extension envelopes use canonical positive decimals. Keep the
   // characterized pre-canonical fixture form as an exact alias while refusing
@@ -369,17 +422,20 @@ function wsStreamOrdinal(streamId: string): number | null {
 }
 
 function socketEpoch(epoch: string, streamId: string, streamOrdinal: number,
-  receiptHighWatermark = 0): SocketEpoch {
+  receiptHighWatermarks: ReadonlyMap<CatalogPartition, number> = new Map()): SocketEpoch {
   return { activeStreamId: streamId, activeStreamOrdinal: streamOrdinal,
     streamHighWatermark: streamOrdinal, decoder: new SbobetStompReceiptDecoder(),
     committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(), pendingBaseline: null,
-    generation: `${epoch}:ksport-ws:${streamId}:0`, committedGeneration: 0, receiptHighWatermark,
+    generation: `${epoch}:ksport-ws:${streamId}:0`, committedGeneration: 0,
+    receiptHighWatermarks: new Map(receiptHighWatermarks),
     authorityLost: false };
 }
 
-function pendingBaseline(generation: string, ordinal: number): PendingBaseline {
-  return { generation, ordinal, partitions: new Map<CatalogPartition, PartitionSnapshot>(),
-    deltas: new Map<CatalogPartition, Map<string, RetainedRecord>>(),
+function pendingBaseline(generation: string, ordinal: number,
+  receiptFloors: ReadonlyMap<CatalogPartition, number> = new Map()): PendingBaseline {
+  return { generation, ordinal, receiptFloors: new Map(receiptFloors),
+    partitions: new Map<CatalogPartition, PartitionSnapshot>(),
+    deltas: new Map<CatalogPartition, Map<string, Map<string, RetainedRecord>>>(),
     deltaRecordCount: 0, deltaMarketCount: 0, fenced: false };
 }
 
@@ -400,15 +456,18 @@ function mergeDeltaRecord(existing: SbobetCatalogInputRecord | undefined,
 function bufferPendingDeltas(pending: PendingBaseline, partition: CatalogPartition,
   changed: readonly SbobetCatalogInputRecord[], envelope: ChromeBridgeEnvelope,
   order: number): "BUFFERED" | "OVERFLOW" {
-  const records = pending.deltas.get(partition) ?? new Map<string, RetainedRecord>();
+  const records = pending.deltas.get(partition) ?? new Map<string, Map<string, RetainedRecord>>();
   pending.deltas.set(partition, records);
   for (const incoming of changed) {
     const previous = records.get(incoming.eventId);
-    if (previous !== undefined && order <= previous.receiptSequence) continue;
-    const merged = mergeDeltaRecord(previous?.record, incoming);
+    const acceptedMarkets = incoming.markets.filter((market) => {
+      const prior = previous?.get(market.marketId);
+      return prior === undefined || order > prior.receiptSequence;
+    });
+    if (acceptedMarkets.length === 0) continue;
     const nextRecordCount = pending.deltaRecordCount + (previous === undefined ? 1 : 0);
-    const nextMarketCount = pending.deltaMarketCount - (previous?.record.markets.length ?? 0) +
-      merged.markets.length;
+    const nextMarketCount = pending.deltaMarketCount +
+      acceptedMarkets.filter((market) => !previous?.has(market.marketId)).length;
     if (nextRecordCount > MAX_PENDING_DELTA_RECORDS || nextMarketCount > MAX_PENDING_DELTA_MARKETS) {
       pending.deltas.clear();
       pending.deltaRecordCount = 0;
@@ -416,7 +475,11 @@ function bufferPendingDeltas(pending: PendingBaseline, partition: CatalogPartiti
       pending.fenced = true;
       return "OVERFLOW";
     }
-    records.set(incoming.eventId, retainedRecord(merged, envelope, order));
+    const markets = previous ?? new Map<string, RetainedRecord>();
+    for (const market of acceptedMarkets) {
+      markets.set(market.marketId, retainedRecord({ ...incoming, markets: [market] }, envelope, order));
+    }
+    records.set(incoming.eventId, markets);
     pending.deltaRecordCount = nextRecordCount;
     pending.deltaMarketCount = nextMarketCount;
   }
@@ -429,10 +492,16 @@ function applyPendingDeltas(pending: PendingBaseline): void {
     if (baseline === undefined) continue;
     const records = new Map(baseline.records);
     let receiptSequence = baseline.receiptSequence;
-    for (const [eventId, delta] of deltas) {
-      const existing = records.get(eventId)?.record;
-      records.set(eventId, { ...delta, record: mergeDeltaRecord(existing, delta.record) });
-      receiptSequence = Math.max(receiptSequence, delta.receiptSequence);
+    for (const [eventId, markets] of deltas) {
+      const accepted = [...markets.values()]
+        .filter((delta) => delta.receiptSequence > baseline.receiptSequence)
+        .sort((left, right) => left.receiptSequence - right.receiptSequence || left.sequence - right.sequence);
+      if (accepted.length === 0) continue;
+      let record = records.get(eventId)?.record;
+      for (const delta of accepted) record = mergeDeltaRecord(record, delta.record);
+      const latest = accepted.at(-1)!;
+      records.set(eventId, { ...latest, record: record! });
+      receiptSequence = Math.max(receiptSequence, latest.receiptSequence);
     }
     pending.partitions.set(partition, { records, receiptSequence });
   }

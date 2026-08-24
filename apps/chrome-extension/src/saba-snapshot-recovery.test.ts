@@ -112,47 +112,44 @@ describe("SABA light snapshot recovery", () => {
 
 describe("KSPORT light snapshot recovery", () => {
   const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:9", tabId: 9 } as const;
-  const live = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\n[]\u0000";
-  const today = "MESSAGE\ndestination:/topic/sports/1_1/today/ma/event/vi\n\n[]\u0000";
+  const wrapper = JSON.stringify({ statusCode: "OK", statusCodeValue: 200, body: "[]" });
+  const live = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n" +
+    `subscription:subSportBookLive\nmessage-id:socket-100\n\n${wrapper}\u0000`;
+  const today = "MESSAGE\ndestination:/topic/sports/1_11/today/ma/event/vi\n" +
+    `subscription:subSportBookToday\nmessage-id:socket-104\n\n${wrapper}\u0000`;
 
-  it("persists both STOMP baseline partitions and replays them after worker restart", async () => {
-    let stored: unknown = null;
+  it("replays a KSPORT baseline only within its current worker", async () => {
+    const saveSabaWsSnapshots = vi.fn(async () => undefined);
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const marker = vi.fn(async (_tabId: number, method: string) => method === "Runtime.evaluate"
       ? { result: { value: "1787251000000.5" } } : {});
-    const first = new NetworkObserver({ sendCommand: marker, forward: vi.fn(async () => undefined),
-      saveSabaWsSnapshots: async (value) => { stored = value; } });
-    await first.handleEvent(ksport, "Network.webSocketCreated", {
+    const current = new NetworkObserver({ sendCommand: marker, forward, saveSabaWsSnapshots });
+    await current.handleEvent(ksport, "Network.webSocketCreated", {
       requestId: "ksocket-1", url: "wss://sports.example/sport/socket"
     });
-    await first.handleEvent(ksport, "Network.webSocketFrameReceived", {
-      requestId: "ksocket-1", response: { opcode: 1, payloadData: live }
-    });
-    await first.handleEvent(ksport, "Network.webSocketFrameReceived", {
-      requestId: "ksocket-1", response: { opcode: 1, payloadData: today }
-    });
-    await vi.waitFor(() => expect(stored).not.toBeNull());
+    for (const payloadData of [live, today]) {
+      await current.handleEvent(ksport, "Network.webSocketFrameReceived", {
+        requestId: "ksocket-1", response: { opcode: 1, payloadData }
+      });
+    }
 
-    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
-    const restarted = new NetworkObserver({ sendCommand: marker, forward,
-      loadSabaWsSnapshots: async () => stored });
+    expect(saveSabaWsSnapshots).not.toHaveBeenCalled();
+    forward.mockClear();
+    await expect(current.replaySnapshots(ksport.sourceId)).resolves.toBe(true);
+    expect(forward.mock.calls.map(([envelope]) => envelope.payload.body)).toEqual([live, today]);
+
+    const loadSabaWsSnapshots = vi.fn(async () => ({ version: 1, sourceId: ksport.sourceId,
+      documentMarker: "1787251000000.5", partitions: [{ partition: "1", frames: [
+        { url: "wss://sports.example/sport/socket", body: live, streamId: "1", recoveryGeneration: 1,
+          observedAtMs: 1_000, receivedMonotonicMs: 10 },
+        { url: "wss://sports.example/sport/socket", body: today, streamId: "1", recoveryGeneration: 1,
+          observedAtMs: 1_001, receivedMonotonicMs: 11 }
+      ] }] }));
+    const restartedForward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const restarted = new NetworkObserver({ sendCommand: marker, forward: restartedForward, loadSabaWsSnapshots });
     await restarted.refreshCatalog(ksport);
 
-    const replayedFrames = forward.mock.calls.map(([envelope]) => envelope)
-      .filter((envelope) => envelope.transport === "WS_FRAME");
-    expect(replayedFrames.map((envelope) => envelope.payload.body)).toEqual([live, today]);
-    expect(replayedFrames.every((envelope) => envelope.request.replayed === true)).toBe(true);
-  });
-
-  it("clears a persisted KSPORT baseline when its authoritative socket closes", async () => {
-    const clear = vi.fn(async (_sourceId: string) => undefined);
-    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({
-      result: { value: "1787251000000.5" }
-    })), forward: vi.fn(async () => undefined), clearSabaWsSnapshots: clear });
-    await observer.handleEvent(ksport, "Network.webSocketCreated", {
-      requestId: "ksocket-2", url: "wss://sports.example/sport/socket"
-    });
-    await observer.handleEvent(ksport, "Network.webSocketClosed", { requestId: "ksocket-2" });
-
-    expect(clear).toHaveBeenCalledWith(ksport.sourceId);
+    expect(loadSabaWsSnapshots).not.toHaveBeenCalled();
+    expect(restartedForward.mock.calls.some(([envelope]) => envelope.transport === "WS_FRAME")).toBe(false);
   });
 });

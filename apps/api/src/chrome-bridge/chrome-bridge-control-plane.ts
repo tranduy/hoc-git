@@ -133,6 +133,14 @@ export class ChromeBridgeControlPlane {
     return requested;
   }
 
+  requestSourceSnapshot(sourceId: string): number {
+    const socket = this.#exactSocket(sourceId);
+    if (socket === undefined || socket.readyState !== 1) return 0;
+    const control: ChromeBridgeControlMessage = { version: 1, kind: "REQUEST_SNAPSHOT", sourceId };
+    socket.send(JSON.stringify(control));
+    return 1;
+  }
+
   reloadAllSources(): number {
     return this.#broadcast("RELOAD_SOURCE");
   }

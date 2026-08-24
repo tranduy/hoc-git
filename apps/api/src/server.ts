@@ -36,6 +36,7 @@ import { LatestCatalogPersister } from "./catalog/latest-catalog-persister.js";
 import { refreshCatalogSources } from "./catalog-refresh.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 import { ProviderAuthorityCoordinator } from "./chrome-bridge/provider-authority-coordinator.js";
+import { chromeBridgeSourceIdentity } from "./chrome-bridge/chrome-bridge-account.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -463,6 +464,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     })
     : null;
   const app = buildApp(runtime, {
+    ...(env.TOOL_CHENH_BUILD_IDENTITY === undefined
+      ? {}
+      : { buildIdentity: env.TOOL_CHENH_BUILD_IDENTITY }),
     viteOrigin: config.viteOrigin,
     heartbeatIntervalMs: fixtureReevaluationIntervalMs,
     sessionServices,
@@ -489,6 +493,15 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       ? { chromeBridge: {
         registry: chromeBridgeRegistry,
         ...(chromeBridgeControlPlane === null ? {} : { controlPlane: chromeBridgeControlPlane }),
+        ...(providerFeeds === null ? {} : { currentFeed: (sourceId: string) => {
+          const identity = chromeBridgeSourceIdentity(sourceId);
+          return identity === null ? null : providerFeeds.snapshot(identity.accountId);
+        } }),
+        ...(providerFeeds === null ? {} : { waitForFreshBaseline: async (sourceId: string, afterMs: number) => {
+          const identity = chromeBridgeSourceIdentity(sourceId);
+          if (identity === null) throw new Error("SOURCE_NOT_ATTACHED");
+          return providerFeeds.waitForFreshBaseline(identity.accountId, afterMs, 90_000);
+        } }),
         installationKey: chromeBridgeKey,
         openProviderTicket: isOpenProviderTicketEnabled(env.ENABLE_OPEN_PROVIDER_TICKET)
       } }

@@ -1,0 +1,371 @@
+type CatalogPartition = "live" | "today";
+
+export interface KsportRecoveryGenerationOptions {
+  readonly maxPendingChars?: number;
+  readonly maxPendingFrames?: number;
+}
+
+export interface AttributedKsportFrame {
+  readonly payload: string;
+  readonly recoveryGeneration: number;
+}
+
+interface ProviderReceipt {
+  readonly partition: CatalogPartition;
+  readonly order: number | null;
+  readonly full: boolean;
+}
+
+interface RecoveryState {
+  generation: number;
+  complete: boolean;
+  readonly fullPartitions: Set<CatalogPartition>;
+  readonly highWatermarks: Map<CatalogPartition, number>;
+  previousGeneration: number | null;
+  readonly attemptFloors: Map<CatalogPartition, number>;
+  readonly attemptPartitions: Set<CatalogPartition>;
+}
+
+/**
+ * Attributes KSPORT STOMP receipts to explicit baseline attempts on one socket.
+ * Fragmented receipts are held until their attempt is known. Ambiguous mixed
+ * batches and overflow fail closed rather than relabelling retired evidence.
+ */
+export class KsportRecoveryGenerationTracker {
+  readonly #maxPendingChars: number;
+  readonly #maxPendingFrames: number;
+  #state: RecoveryState = initialState();
+  #pendingStomp = "";
+  #pendingPayloads: string[] = [];
+  #pendingReceipts: ProviderReceipt[] = [];
+  #pendingChars = 0;
+  #pendingSentStomp = "";
+  #pendingSentFrames = 0;
+  #failed = false;
+
+  constructor(options: KsportRecoveryGenerationOptions = {}) {
+    this.#maxPendingChars = positiveBound(options.maxPendingChars ?? 4_000_000);
+    this.#maxPendingFrames = positiveBound(options.maxPendingFrames ?? 64);
+  }
+
+  get currentGeneration(): number { return this.#state.generation; }
+
+  get failed(): boolean { return this.#failed; }
+
+  get currentBaselineState(): { readonly live: boolean; readonly today: boolean;
+    readonly complete: boolean } {
+    if (this.#failed) return { live: false, today: false, complete: false };
+    const live = this.#state.fullPartitions.has("live");
+    const today = this.#state.fullPartitions.has("today");
+    return { live, today, complete: this.#state.complete && live && today };
+  }
+
+  /**
+   * Starts a new attempt only from the provider's own outbound catalog
+   * SUBSCRIBE boundary. Receipt order is deliberately not an attempt clock;
+   * it is used only to fence delayed evidence from the prior explicit attempt.
+   */
+  observeSent(payload: string): number | null {
+    if (this.#failed || typeof payload !== "string") return null;
+    if (payload.length > this.#maxPendingChars) {
+      this.#fail();
+      return null;
+    }
+    const encoded = parseSockJsEnvelope(payload);
+    if (encoded.kind === "INVALID") {
+      this.#fail();
+      return null;
+    }
+    const fragments = encoded.kind === "VALID" ? encoded.strings
+      : (this.#pendingSentStomp !== "" || isRawStompStart(payload, "SENT") ? [payload] : null);
+    if (fragments === null) return null;
+    this.#pendingSentFrames += 1;
+    if (this.#pendingSentFrames > this.#maxPendingFrames) {
+      this.#fail();
+      return null;
+    }
+    let observedGeneration: number | null = null;
+    for (const fragment of fragments) {
+      const appended = appendStompFragment(this.#pendingSentStomp, fragment);
+      this.#pendingSentStomp = appended.pending;
+      if (this.#pendingSentStomp.length > this.#maxPendingChars) {
+        this.#fail();
+        return null;
+      }
+      for (const frame of appended.frames) {
+        const partition = catalogSubscription(frame);
+        if (partition !== null) {
+          if (this.#pendingStomp !== "" || this.#pendingPayloads.length > 0 ||
+            this.#pendingReceipts.length > 0) {
+            // An inbound receipt straddling an outbound recovery boundary has no
+            // observable immutable origin. Retire this tracker instead of guessing.
+            this.#fail();
+            return null;
+          }
+          observedGeneration = this.#beginExplicitAttempt(partition);
+          if (observedGeneration === null) {
+            this.#fail();
+            return null;
+          }
+        }
+      }
+    }
+    if (this.#pendingSentStomp === "") this.#pendingSentFrames = 0;
+    return observedGeneration;
+  }
+
+  push(payload: string): readonly AttributedKsportFrame[] {
+    if (this.#failed || typeof payload !== "string") return [];
+    if (payload.length > this.#maxPendingChars) {
+      this.#fail();
+      return [];
+    }
+    const encoded = parseSockJsEnvelope(payload);
+    if (encoded.kind === "INVALID") {
+      this.#fail();
+      return [];
+    }
+    const fragments = encoded.kind === "VALID" ? encoded.strings
+      : (this.#pendingStomp !== "" || isRawStompStart(payload, "RECEIVED") ? [payload] : null);
+    if (fragments === null) {
+      return this.#pendingStomp === "" ? [{ payload,
+        recoveryGeneration: this.#state.generation }] : [];
+    }
+    this.#pendingPayloads.push(payload);
+    this.#pendingChars += payload.length;
+    if (this.#pendingPayloads.length > this.#maxPendingFrames || this.#pendingChars > this.#maxPendingChars) {
+      this.#fail();
+      return [];
+    }
+    for (const fragment of fragments) {
+      const appended = appendStompFragment(this.#pendingStomp, fragment);
+      this.#pendingStomp = appended.pending;
+      if (this.#pendingStomp.length > this.#maxPendingChars) {
+        this.#fail();
+        return [];
+      }
+      for (const frame of appended.frames) {
+        const receipt = providerReceipt(frame);
+        if (receipt !== null) this.#pendingReceipts.push(receipt);
+      }
+    }
+    if (this.#pendingStomp !== "") return [];
+
+    const receipts = this.#pendingReceipts;
+    const candidate = cloneState(this.#state);
+    const generations = new Set<number>();
+    for (const receipt of receipts) {
+      const generation = attributeReceipt(candidate, receipt);
+      if (generation === null) {
+        this.#dropPending();
+        return [];
+      }
+      generations.add(generation);
+    }
+    if (receipts.length === 0 && candidate.previousGeneration !== null && !candidate.complete) {
+      // A heartbeat/config frame has no attempt identity while replacement is
+      // pending. Forwarding it as either generation could renew stale authority.
+      this.#dropPending();
+      return [];
+    }
+    if (generations.size > 1) {
+      this.#dropPending();
+      return [];
+    }
+    const generation = generations.values().next().value as number | undefined ?? candidate.generation;
+    this.#state = candidate;
+    const output = this.#pendingPayloads.map((pending) => ({ payload: pending,
+      recoveryGeneration: generation }));
+    this.#dropPending();
+    return output;
+  }
+
+  #beginExplicitAttempt(partition: CatalogPartition): number | null {
+    if (this.#state.complete) {
+      if (this.#state.generation >= Number.MAX_SAFE_INTEGER ||
+        this.#state.highWatermarks.size < 2) return null;
+      const candidate = cloneState(this.#state);
+      candidate.previousGeneration = candidate.generation;
+      candidate.attemptFloors.clear();
+      for (const [name, order] of candidate.highWatermarks) candidate.attemptFloors.set(name, order);
+      candidate.generation += 1;
+      candidate.complete = false;
+      candidate.fullPartitions.clear();
+      candidate.attemptPartitions.clear();
+      candidate.attemptPartitions.add(partition);
+      this.#state = candidate;
+      return candidate.generation;
+    }
+    // Multiple partition subscriptions are one attempt. During initial socket
+    // bootstrap they all remain generation 1; during replacement they extend
+    // the already-open explicit attempt without allocating another ordinal.
+    // Repeating the same partition before completion is a distinct overlapping
+    // retry whose old/current frames cannot be separated on this socket.
+    if (this.#state.attemptPartitions.has(partition)) return null;
+    this.#state.attemptPartitions.add(partition);
+    return this.#state.generation;
+  }
+
+  #dropPending(): void {
+    this.#pendingPayloads = [];
+    this.#pendingReceipts = [];
+    this.#pendingChars = 0;
+  }
+
+  #fail(): void {
+    this.#failed = true;
+    this.#pendingStomp = "";
+    this.#pendingSentStomp = "";
+    this.#pendingSentFrames = 0;
+    this.#dropPending();
+  }
+}
+
+function initialState(): RecoveryState {
+  return { generation: 1, complete: false, fullPartitions: new Set(),
+    highWatermarks: new Map(), previousGeneration: null, attemptFloors: new Map(),
+    attemptPartitions: new Set() };
+}
+
+function cloneState(state: RecoveryState): RecoveryState {
+  return { generation: state.generation, complete: state.complete,
+    fullPartitions: new Set(state.fullPartitions), highWatermarks: new Map(state.highWatermarks),
+    previousGeneration: state.previousGeneration, attemptFloors: new Map(state.attemptFloors),
+    attemptPartitions: new Set(state.attemptPartitions) };
+}
+
+function attributeReceipt(state: RecoveryState, receipt: ProviderReceipt): number | null {
+  if (state.previousGeneration !== null) {
+    if (receipt.order === null) return null;
+    const floor = state.attemptFloors.get(receipt.partition);
+    if (floor === undefined) return null;
+    if (receipt.order <= floor || !state.attemptPartitions.has(receipt.partition)) {
+      return state.previousGeneration;
+    }
+  }
+  rememberReceipt(state, receipt);
+  if (receipt.full) state.fullPartitions.add(receipt.partition);
+  if (state.fullPartitions.has("live") && state.fullPartitions.has("today")) state.complete = true;
+  return state.generation;
+}
+
+function rememberReceipt(state: RecoveryState, receipt: ProviderReceipt): void {
+  if (receipt.order === null) return;
+  state.highWatermarks.set(receipt.partition,
+    Math.max(state.highWatermarks.get(receipt.partition) ?? 0, receipt.order));
+}
+
+function appendStompFragment(pending: string, fragment: string): {
+  readonly pending: string; readonly frames: readonly string[]
+} {
+  let combined = pending === "" ? stripLeadingStompHeartbeats(fragment) : pending + fragment;
+  const frames: string[] = [];
+  let terminator = combined.indexOf("\0");
+  while (terminator >= 0) {
+    frames.push(combined.slice(0, terminator));
+    combined = stripLeadingStompHeartbeats(combined.slice(terminator + 1));
+    terminator = combined.indexOf("\0");
+  }
+  return { pending: combined, frames };
+}
+
+function stripLeadingStompHeartbeats(value: string): string {
+  if (/^\s*$/u.test(value)) return "";
+  return value.replace(/^(?:\r?\n)+/u, "");
+}
+
+type ParsedSockJsEnvelope = { readonly kind: "NOT_SOCKJS" } |
+  { readonly kind: "VALID"; readonly strings: readonly string[] } |
+  { readonly kind: "INVALID" };
+
+function parseSockJsEnvelope(payload: string): ParsedSockJsEnvelope {
+  const candidate = payload.startsWith("a[") ? payload.slice(1) : payload.startsWith("[") ? payload : null;
+  if (candidate === null) return { kind: "NOT_SOCKJS" };
+  try {
+    const value: unknown = JSON.parse(candidate);
+    return Array.isArray(value) && value.every((item) => typeof item === "string")
+      ? { kind: "VALID", strings: value as string[] } : { kind: "INVALID" };
+  } catch { return { kind: "INVALID" }; }
+}
+
+function isRawStompStart(payload: string, direction: "SENT" | "RECEIVED"): boolean {
+  return direction === "SENT"
+    ? /^(?:CONNECT|STOMP|SEND|SUBSCRIBE|UNSUBSCRIBE|ACK|NACK|BEGIN|COMMIT|ABORT|DISCONNECT)\r?\n/u
+      .test(payload)
+    : /^(?:CONNECTED|MESSAGE|RECEIPT|ERROR)\r?\n/u.test(payload);
+}
+
+function providerReceipt(frame: string): ProviderReceipt | null {
+  const separator = frame.indexOf("\n\n");
+  if (separator < 0 || frame.slice(0, separator).split("\n")[0]?.trim() !== "MESSAGE") return null;
+  const header = headers(frame.slice(0, separator));
+  const partition = receiptPartition(header.destination, header.subscription);
+  if (partition === null) return null;
+  let wrapper: unknown;
+  try { wrapper = JSON.parse(frame.slice(separator + 2).trim()) as unknown; } catch { return null; }
+  const record = asRecord(wrapper);
+  if (record === null || (record.statusCode !== undefined && record.statusCode !== "OK") ||
+    (record.statusCodeValue !== undefined && record.statusCodeValue !== 200) ||
+    typeof record.body !== "string") return null;
+  let body: unknown;
+  try { body = JSON.parse(record.body) as unknown; } catch { return null; }
+  return { partition, order: receiptSequence(header["message-id"]),
+    full: isFullPartitionSnapshot(body) };
+}
+
+function catalogSubscription(frame: string): CatalogPartition | null {
+  const lines = frame.split("\n");
+  if (lines[0]?.trim() !== "SUBSCRIBE") return null;
+  const header = headers(frame);
+  return receiptPartition(header.destination, header.id ?? header.subscription);
+}
+
+function headers(value: string): Readonly<Record<string, string>> {
+  const result: Record<string, string> = {};
+  for (const line of value.split("\n").slice(1)) {
+    const separator = line.indexOf(":");
+    if (separator > 0) result[line.slice(0, separator).trim().toLowerCase()] =
+      line.slice(separator + 1).trim();
+  }
+  return result;
+}
+
+function receiptPartition(destination?: string, subscription?: string): CatalogPartition | null {
+  if (subscription === "subSportBookLive" || /\/1_1\/live\//u.test(destination ?? "")) return "live";
+  if (subscription === "subSportBookToday" || subscription === "subSportHotMatch" ||
+    /\/sports\/1_\d+\/today\//u.test(destination ?? "")) return "today";
+  return null;
+}
+
+function receiptSequence(messageId?: string): number | null {
+  const match = messageId === undefined ? null : /(?:^|[-:])(\d+)$/u.exec(messageId);
+  if (match === null) return null;
+  const value = Number(match[1]);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function isFullPartitionSnapshot(body: unknown): boolean {
+  return Array.isArray(body) && body.every((value) => {
+    const league = asRecord(value);
+    if (league === null || typeof league["1"] !== "string" || league["1"].trim() === "" ||
+      !Array.isArray(league["2"])) return false;
+    return league["2"].every((candidate) => {
+      const event = asRecord(candidate);
+      const eventId = event?.["8"];
+      return event !== null && (typeof eventId === "string" || typeof eventId === "number") &&
+        /^\d+$/u.test(String(eventId)) && typeof event["2"] === "string" && event["2"].trim() !== "" &&
+        typeof event["3"] === "string" && event["3"].trim() !== "" && event["2"].trim() !== event["3"].trim() &&
+        event["7"] !== null && typeof event["7"] === "object" && !Array.isArray(event["7"]);
+    });
+  });
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : null;
+}
+
+function positiveBound(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError("KSPORT_RECOVERY_BOUND_INVALID");
+  return value;
+}

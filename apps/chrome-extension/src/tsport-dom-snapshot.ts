@@ -11,8 +11,21 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
     const match = clean(value, 32).match(/[+-]?(?:0|[1-9]\\d*)(?:\\.(?:25|5|75))?(?:\\s*[\\/-]\\s*(?:0|[1-9]\\d*)(?:\\.(?:25|5|75))?)?/u);
     return match?.[0]?.replace(/\\s+/gu, "") ?? null;
   };
+  const footballRoots = [...document.querySelectorAll(
+    '[data-football-event-list="true"][data-loaded="true"], ' +
+    '[data-role="football-event-list"][data-loaded="true"], ' +
+    '.football-match-list[data-loaded="true"], ' +
+    '.match-list[data-sport-id="1"][data-loaded="true"], ' +
+    '.match-list[data-sportid="1"][data-loaded="true"]'
+  )];
+  if (footballRoots.length !== 1) return JSON.stringify([]);
+  const footballRoot = footballRoots[0];
+  if (footballRoot.getAttribute('data-loaded') !== 'true' ||
+    footballRoot.getAttribute('aria-busy') !== 'false') return JSON.stringify([]);
+  const candidates = [...footballRoot.querySelectorAll(".match")];
   const records = [];
-  for (const node of document.querySelectorAll(".match")) {
+  let invalidCandidates = 0;
+  for (const node of candidates) {
     const favoriteId = clean(node.querySelector(".match-favorite")?.id, 128);
     const favoriteEventId = favoriteId.match(/eventId-[^-]+-\\d+-([0-9]+)$/u)?.[1] ?? "";
     const dataEventId = clean(node.getAttribute("data-event-id") || node.getAttribute("data-eventid"), 128);
@@ -28,7 +41,10 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
       ? scores.join(" - ") : null;
     const timeText = /(?:live|trực\\s*tiếp|hiệp|\\d+h)/iu.test(rawStatus) || scoreText !== null
       ? (rawStatus || "LIVE") : rawStatus;
-    if (!eventId || !leagueName || teamNames.length !== 2 || !timeText) continue;
+    if (!eventId || !leagueName || teamNames.length !== 2 || !timeText) {
+      invalidCandidates += 1;
+      continue;
+    }
     const markets = [...node.querySelectorAll(".match-odd-pair-list")].flatMap((group, groupIndex) => {
       const label = text(group, ".match__odd-pair-list__type", 80);
       const normalizedLabel = label.normalize("NFD").replace(/[\\u0300-\\u036f]/gu, "").toLowerCase();
@@ -67,6 +83,28 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
         marketType, lineText, selections }];
     });
     records.push({ eventId, leagueName, timeText, scoreText, teamNames, markets });
+  }
+  // A shell, login frame, busy list, or partially rendered list is not a
+  // complete football catalog. Empty authority requires an event-list-specific
+  // sentinel on the exact ready root; generic descendant empty states (for
+  // example an empty bet slip) cannot complete the sweep.
+  const exactEmpty = candidates.length === 0 && (
+    footballRoot.matches('[data-empty="true"], [data-state="empty"]') ||
+    footballRoot.querySelector(
+      '[data-football-events-empty="true"], [data-event-list-empty="true"], ' +
+      '.football-match-list__empty, .match-list__empty'
+    ) !== null
+  );
+  const complete = candidates.length > 0
+    ? invalidCandidates === 0 && records.length === candidates.length
+    : exactEmpty;
+  if (complete) {
+    // The observer adds the current frame/loader binding before forwarding it,
+    // so a different document cannot reuse these expected event ids.
+    records.push({ __fieldlineSweep: {
+      sweepId: "tsport-sweep-" + Date.now(),
+      complete: true
+    } });
   }
   return JSON.stringify(records);
 })()`;

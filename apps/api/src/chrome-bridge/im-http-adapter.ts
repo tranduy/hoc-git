@@ -1,6 +1,6 @@
 import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
-import { extractImFootballCatalog, mergeImFootballDelta } from
+import { extractImFootballCatalog, isValidImFootballDelta, mergeImFootballDelta, normalizeImOdds } from
   "../providers/im/im-football-catalog-source.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
@@ -38,12 +38,14 @@ interface SnapshotGeneration {
 interface SourceState {
   current: Map<ImPartition, PartitionRecords> | null;
   currentGeneration: string | null;
+  currentCutoffSequence: number | null;
   pending: SnapshotGeneration | null;
   readonly obsoleteGenerations: Set<string>;
   readonly rejectedGenerations: Set<string>;
   highestGenerationOrdinal: number | null;
   readonly recentDeltas: ChromeBridgeEnvelope[];
   latestDeltaSequence: number | null;
+  discardedDeltaSequence: number | null;
 }
 
 function rememberRejected(state: SourceState, generation: string, ordinal: number | null = null): void {
@@ -87,9 +89,10 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
     const state = this.#states.get(envelope.sourceId) ?? { current: null, currentGeneration: null,
+      currentCutoffSequence: null,
       pending: null, obsoleteGenerations: new Set<string>(), rejectedGenerations: new Set<string>(),
       highestGenerationOrdinal: null,
-      recentDeltas: [], latestDeltaSequence: null };
+      recentDeltas: [], latestDeltaSequence: null, discardedDeltaSequence: null };
     if (envelope.request.pathnameClass === SNAPSHOT_PATH) {
       const partition = envelope.request.providerPartition;
       const generation = envelope.request.streamId;
@@ -116,6 +119,11 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
         state.highestGenerationOrdinal = ordinal;
       }
       if (!isImPartition(partition) || !isValidCutoff(cutoffSequence)) {
+        rememberRejected(state, generation, ordinal);
+        this.#states.set(envelope.sourceId, state);
+        return [];
+      }
+      if (state.discardedDeltaSequence !== null && state.discardedDeltaSequence > cutoffSequence) {
         rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
         return [];
@@ -160,17 +168,26 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       if (state.currentGeneration !== null) rememberObsolete(state, state.currentGeneration);
       state.current = new Map([...pendingPartitions].map(([key, value]) => [key, value.records]));
       state.currentGeneration = state.pending.id;
+      state.currentCutoffSequence = state.pending.cutoffSequence;
       for (const delta of state.recentDeltas) {
         if (delta.sequence > state.pending.cutoffSequence) this.#applyDelta(state.current, delta);
       }
       state.pending = null;
     } else {
       const root = parseRecord(envelope.payload.body);
-      if (root === null || root.StatusCode !== 100 || !Array.isArray(root.dc)) return [];
+      if (root === null || !isValidImFootballDelta(root)) return [];
+      if (state.currentCutoffSequence !== null && envelope.sequence <= state.currentCutoffSequence) return [];
       if (state.latestDeltaSequence !== null && envelope.sequence <= state.latestDeltaSequence) return [];
       state.latestDeltaSequence = envelope.sequence;
       state.recentDeltas.push(envelope);
-      while (state.recentDeltas.length > MAX_RECENT_DELTAS) state.recentDeltas.shift();
+      while (state.recentDeltas.length > MAX_RECENT_DELTAS) {
+        const discarded = state.recentDeltas.shift();
+        if (discarded === undefined) break;
+        state.discardedDeltaSequence = Math.max(state.discardedDeltaSequence ?? 0, discarded.sequence);
+        if (state.pending !== null && discarded.sequence > state.pending.cutoffSequence) {
+          rememberRejected(state, state.pending.id);
+        }
+      }
       this.#states.set(envelope.sourceId, state);
       const sourcePartitions = state.current;
       if (sourcePartitions === null) return [];
@@ -268,8 +285,7 @@ function isClassifiedImMarket(value: unknown): boolean {
       !expectedSelections.has(Number(selection.si)) || actualSelections.has(Number(selection.si)) ||
       typeof selection.hdp !== "number" || !Number.isFinite(selection.hdp) || Math.abs(selection.hdp) > 100 ||
       typeof selection.dih !== "string" || selection.dih.trim() === "" ||
-      typeof selection.o !== "number" || !Number.isFinite(selection.o) || selection.o === 0 ||
-      Math.abs(selection.o) > 1) return false;
+      normalizeImOdds(selection.o) === null) return false;
     actualSelections.add(Number(selection.si));
   }
   return actualSelections.size === 2;

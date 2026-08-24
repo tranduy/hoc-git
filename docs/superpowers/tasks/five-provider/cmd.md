@@ -1,6 +1,6 @@
 # CMD Worker Task
 
-Priority: 2
+Priority: 1
 
 Report: `docs/superpowers/reports/five-provider/cmd.md`
 
@@ -66,23 +66,26 @@ The report must specify the observer wiring for:
 - correlation to one complete current-document `fc=1` request/body;
 - bounded retry/abort diagnostics with no raw URL, frame, loader, body, or credential values.
 
-Do not edit the observer yourself. End Phase A by writing the report with status `READY_FOR_INTEGRATION`, then remain available.
+The common base owns observer wiring; if that shared invariant fails, send the exact failing test/symbol to the root while continuing provider-local work.
 
-## Phase B Realtime Gate
+## End-to-End Realtime Gate
 
-After the integrator supplies the CMD runtime lease and confirms observer wiring/build/reload:
+After focused GREEN, perform the exact common deployment transaction verbatim, then begin the CMD acceptance lease with `begin-acceptance CMD <worker> chrome:CMD:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
 
 Run the provider sampler without building:
 
 ```powershell
-node scripts/verify-cmd-runtime.mjs 45000 .run/five-provider/cmd-runtime-evidence.json
+node scripts/verify-cmd-runtime.mjs 120000 .run/five-provider/cmd-runtime-evidence.json
 ```
 
 1. Require one complete current-document authenticated `fc=1` baseline; `busy` or `baseline-requested` acknowledgement is not success.
 2. Require CMD to become `ACTIVE` and `LIVE/FRESH` without tab navigation or replacement.
-3. Sample for at least 45 seconds and record at least three authenticated CMD provider responses/cursor advances, including the scheduled full reconciliation cadence.
+3. Sample for at least 120 seconds and record at least three authenticated CMD provider responses/cursor advances, including the scheduled full reconciliation cadence.
 4. Record an ordered semantic delta when emitted and prove a pre-cutoff/pre-baseline delta cannot roll back the committed baseline.
-5. Ask the integrator to issue one exact addressed CMD snapshot, then prove it is single-flight, bounded, tied to the same leased tab/document, and leaves every other provider source unchanged. Do not use global maintenance.
-6. Update the report to `DONE` only when all gates pass; otherwise mark `BLOCKED` with the exact redacted reason.
+5. Issue one exact addressed CMD snapshot, then prove it is single-flight, bounded, tied to the same leased tab/document, and leaves every other provider source unchanged. Do not use global maintenance.
+6. Update the report to `DONE` only when all gates pass. On a failed gate keep
+   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
+   the worker loop. `BLOCKED` is legal only after proving a genuine external
+   provider/auth failure that in-scope code and same-tab recovery cannot fix.
 
-Do not attach DevTools/CDP, use active-tab actions, build/restart/reload, or touch another provider.
+Do not attach DevTools/CDP, use active-tab fallback, or touch another provider. Unit tests without this live gate are not completion.

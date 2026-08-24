@@ -138,6 +138,19 @@ describe("ChromeBridgeEnvelopeSchema", () => {
     ]) expect(schema.safeParse({ ...validEnvelope, lobby: "KSPORT", request }).success).toBe(false);
   });
 
+  it("preserves only a positive safe KSPORT websocket recovery generation", () => {
+    const schema = contracts.ChromeBridgeEnvelopeSchema;
+    const ksport = { ...validEnvelope, lobby: "KSPORT", sourceId: "chrome:KSPORT:42", request: {
+      ...validEnvelope.request, streamId: "7", recoveryGeneration: 3
+    } } as const;
+
+    expect(schema.parse(ksport).request).toMatchObject({ streamId: "7", recoveryGeneration: 3 });
+    for (const recoveryGeneration of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "3"] as const) {
+      expect(schema.safeParse({ ...ksport, request: { ...ksport.request, recoveryGeneration } }).success).toBe(false);
+    }
+    expect(schema.safeParse({ ...ksport, lobby: "SABA", sourceId: "chrome:SABA:42" }).success).toBe(false);
+  });
+
   it("requires an exact sanitized method and observer request identity for every HTTP response", () => {
     const schema = contracts.ChromeBridgeEnvelopeSchema;
     const http = {

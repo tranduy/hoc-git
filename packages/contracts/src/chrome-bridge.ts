@@ -3,6 +3,7 @@ import { z } from "zod";
 export const CHROME_BRIDGE_MAX_PAYLOAD_BYTES = 256 * 1024;
 
 const SafeIntegerSchema = z.number().int().safe().nonnegative();
+const PositiveSafeIntegerSchema = z.number().int().safe().positive();
 const TimestampSchema = z.number().finite().nonnegative();
 const SourceIdSchema = z.string().trim().min(1).max(128);
 const PublicGenerationIdSchema = z.string().trim().min(1).max(128).regex(/^[a-z0-9._:-]+$/iu);
@@ -37,6 +38,7 @@ const SanitizedRequestBaseShape = {
   requestFrameKey: PublicGenerationIdSchema.optional(),
   requestDocumentKey: PublicGenerationIdSchema.optional(),
   streamId: PublicGenerationIdSchema.optional(),
+  recoveryGeneration: PositiveSafeIntegerSchema.optional(),
   providerFunctionCode: z.number().int().min(1).max(7).optional(),
   reconcileCutoffSequence: SafeIntegerSchema.optional(),
   replayed: z.boolean().optional()
@@ -95,6 +97,10 @@ export const ChromeBridgeEnvelopeSchema = z.strictObject({
   if ("providerContentIntent" in value.request && value.lobby !== "KSPORT") {
     context.addIssue({ code: "custom", path: ["lobby"],
       message: "KSPORT recovery metadata requires the KSPORT lobby" });
+  }
+  if (value.request.recoveryGeneration !== undefined && value.lobby !== "KSPORT") {
+    context.addIssue({ code: "custom", path: ["lobby"],
+      message: "KSPORT websocket recovery generation requires the KSPORT lobby" });
   }
   if (value.transport === "HTTP_RESPONSE") {
     if (value.request.method === undefined) {

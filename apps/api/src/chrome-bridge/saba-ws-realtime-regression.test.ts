@@ -34,6 +34,10 @@ function socketState(state: "OPEN" | "CLOSED", sequence: number,
     payload: { encoding: "UTF8", body: JSON.stringify({ state }) } };
 }
 
+function onStream(input: ChromeBridgeEnvelope, streamId: string): ChromeBridgeEnvelope {
+  return { ...input, request: { ...input.request, streamId } };
+}
+
 function domEnvelope(sequence: number): ChromeBridgeEnvelope {
   return { ...envelope([], "dom", sequence), transport: "DOM_SNAPSHOT",
     request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
@@ -176,6 +180,177 @@ describe("SABA websocket realtime regressions", () => {
     expect(update).toEqual([expect.objectContaining({
       authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
     })]);
+  });
+
+  it("lets only the newer current stream done complete its pending baseline", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(socketState("OPEN", 1, "worker-a:0", "1"))).toEqual([]);
+    const first = adapter.decode(envelope([["f", 0, fields], [0, "reset"],
+      ...eventRows(0.91, -0.99), [0, "done"]], "r0001", 2));
+    expect(first).toEqual([expect.objectContaining({
+      evidenceMode: "BASELINE", generation: "worker-a:0:saba:1:2", provenance: "WS"
+    })]);
+
+    expect(adapter.decode(socketState("OPEN", 3, "worker-a:0", "2"))).toEqual([
+      expect.objectContaining({
+        invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+      })
+    ]);
+    expect(adapter.decode(onStream(envelope([["f", 0, fields], [0, "reset"],
+      ...eventRows(0.72, -0.82)], "r0001", 4), "2"))).toEqual([]);
+    expect(adapter.decode(onStream(envelope([[0, "done"]], "r0002", 5), "1"))).toEqual([]);
+
+    const replacement = adapter.decode(onStream(envelope([[0, "done"]], "r0001", 6), "2"));
+    expect(replacement).toEqual([expect.objectContaining({
+      evidenceMode: "BASELINE", generation: "worker-a:0:saba:2:6", provenance: "WS"
+    })]);
+  });
+
+  it("requires a strictly newer stream to rebaseline after a current-stream revision gap", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(socketState("OPEN", 1))).toEqual([]);
+    expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2))).toHaveLength(1);
+    expect(adapter.decode(envelope([
+      encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.01, odds2a: -0.01 })
+    ], "r0003", 3))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
+
+    expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.01, -0.01),
+      [0, "done"]], "r0004", 4))).toEqual([]);
+    expect(adapter.decode(socketState("OPEN", 5, "worker-a:0", "2"))).toEqual([]);
+    const replacement = adapter.decode(onStream(envelope([["f", 0, fields], [0, "reset"],
+      ...eventRows(0.72, -0.82), [0, "done"]], "r0001", 6), "2"));
+    expect(replacement).toEqual([expect.objectContaining({
+      evidenceMode: "BASELINE", generation: "worker-a:0:saba:2:6", provenance: "WS"
+    })]);
+  });
+
+  it("requires a strictly newer stream to rebaseline after an A003 gap", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(socketState("OPEN", 1))).toEqual([]);
+    expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2))).toHaveLength(1);
+    expect(adapter.decode(envelope([["A003"]], "r0002", 3))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
+
+    expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.01, -0.01),
+      [0, "done"]], "r0003", 4))).toEqual([]);
+    expect(adapter.decode(socketState("OPEN", 5, "worker-a:0", "2"))).toEqual([]);
+    const replacement = adapter.decode(onStream(envelope([["f", 0, fields], [0, "reset"],
+      ...eventRows(0.72, -0.82), [0, "done"]], "r0001", 6), "2"));
+    expect(replacement).toEqual([expect.objectContaining({
+      evidenceMode: "BASELINE", generation: "worker-a:0:saba:2:6", provenance: "WS"
+    })]);
+  });
+
+  it("keeps post-baseline deltas on the committed generation and suppresses identical evidence", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(socketState("OPEN", 1))).toEqual([]);
+    const baselineFrame = envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2);
+    const baseline = adapter.decode(baselineFrame);
+    expect(baseline).toEqual([expect.objectContaining({
+      evidenceMode: "BASELINE", generation: "worker-a:0:saba:1:2", provenance: "WS"
+    })]);
+    expect(adapter.decode(baselineFrame)).toEqual([]);
+
+    const deltaFrame = envelope([
+      encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.72, odds2a: -0.82 })
+    ], "r0002", 3);
+    expect(adapter.decode(deltaFrame)).toEqual([expect.objectContaining({
+      evidenceMode: "DELTA", generation: "worker-a:0:saba:1:2", provenance: "WS"
+    })]);
+    expect(adapter.decode(deltaFrame)).toEqual([]);
+  });
+
+  it("invalidates the old generation when a newer same-epoch stream opens before close", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100, publish });
+    expect(plane.ingest(socketState("OPEN", 1, "worker-a:0", "1"))).toBe(false);
+    expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2))).toBe(true);
+
+    expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"],
+      ...eventRows(0.61, -0.71)], "r0002", 3))).toBe(false);
+    expect(plane.ingest(socketState("OPEN", 4, "worker-a:0", "2"))).toBe(true);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL"))
+      .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(plane.ingest(socketState("CLOSED", 5, "worker-a:0", "1"))).toBe(false);
+    expect(plane.ingest(onStream(envelope([
+      encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.01, odds2a: -0.01 })
+    ], "r0003", 6), "1"))).toBe(false);
+
+    expect(plane.ingest(onStream(envelope([["f", 0, fields], [0, "reset"],
+      ...eventRows(0.72, -0.82), [0, "done"]], "r0001", 7), "2"))).toBe(true);
+    expect(plane.ingest(socketState("CLOSED", 8, "worker-a:0", "1"))).toBe(false);
+    expect(plane.ingest(onStream(envelope([
+      encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.02, odds2a: -0.02 })
+    ], "r0004", 9), "1"))).toBe(false);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL")).resolves.toMatchObject({
+      quotes: expect.arrayContaining([
+        expect.objectContaining({ providerSelectionId: "30:home", rawOdds: "0.72" })
+      ])
+    });
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH"]);
+  });
+
+  it("does not publish or renew freshness for identical data at a later legal revision", async () => {
+    let nowMs = 1_786_449_540_002;
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => nowMs, publish });
+    expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
+    expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2))).toBe(true);
+
+    nowMs = 1_786_449_549_002;
+    expect(plane.ingest(envelope([
+      encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.91, odds2a: -0.99 })
+    ], "r0002", 9_002))).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
+
+    nowMs = 1_786_449_550_003;
+    await expect(plane.read("catalog-source:SABA:FOOTBALL"))
+      .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+  });
+
+  it("does not publish or renew freshness for a repeated revisionless complete baseline", async () => {
+    let nowMs = 1_786_449_540_002;
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => nowMs, publish });
+    const rows = [["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99), [0, "done"]];
+    const template = envelope(rows, "unused", 2);
+    const revisionless: ChromeBridgeEnvelope = { ...template,
+      payload: { encoding: "UTF8", body: `42${JSON.stringify(["m", "b1", rows])}` } };
+    expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
+    expect(plane.ingest(revisionless)).toBe(true);
+
+    nowMs = 1_786_449_549_002;
+    expect(plane.ingest({ ...revisionless, sequence: 9_002,
+      observedAtMs: nowMs, receivedMonotonicMs: 9_002 })).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
+
+    nowMs = 1_786_449_550_003;
+    await expect(plane.read("catalog-source:SABA:FOOTBALL"))
+      .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+  });
+
+  it("retires current authority before malformed reset decoding can renew it", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_786_449_540_100, publish });
+    expect(plane.ingest(socketState("OPEN", 1))).toBe(false);
+    expect(plane.ingest(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 2))).toBe(true);
+
+    expect(plane.ingest(envelope([[0, "reset"], [999, "m"]], "r0002", 3))).toBe(true);
+    await expect(plane.read("catalog-source:SABA:FOOTBALL"))
+      .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(plane.ingest(envelope([
+      encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.72, odds2a: -0.82 })
+    ], "r0002", 4))).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
   });
 
   it("commits a proven complete empty SABA baseline but not a partial empty reset", async () => {

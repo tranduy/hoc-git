@@ -1,125 +1,64 @@
-# Integrator Task
+# Root Coordinator Task
 
-This file governs the only session allowed to mutate Git history, shared files, build artifacts, runtime processes, the loaded extension, or debugger ownership. Provider workers receive bounded runtime leases only after the integration barrier.
+## Outcome
 
-## Exclusive Resources
+The root coordinator prepares one buildable shared base, keeps shared files and Git history coherent, and prevents one worker from invalidating another worker's runtime evidence. It does not turn provider workers into patch-only assistants.
 
-The integrator exclusively owns:
+Five provider workers own five end-to-end outcomes concurrently:
 
-- Git index, commits, branch state, and final history;
-- every file not explicitly assigned to one worker;
-- all shared extension and API integration files;
-- contracts and generated/build output;
-- launcher, API, web, and browser processes;
-- Chrome extension reload and loaded-directory synchronization;
-- all DevTools/CDP/`chrome.debugger` ownership;
-- exact provider tab IDs, runtime lease issuance, and combined live acceptance;
-- ignored `.auth` launch data.
+- SABA -> realtime `ACTIVE`
+- CMD -> realtime `ACTIVE`
+- APSPORT/TSPORT -> realtime `ACTIVE`
+- IM -> realtime `ACTIVE`
+- SBOBET/KSPORT -> realtime `ACTIVE`
 
-Workers never receive raw launch URLs or tokens. The integrator resolves them locally by provider key.
+BTI remains the `ACTIVE` regression control. Total elapsed time should approach the slowest provider, not the sum of five provider tasks.
 
-## Collection Protocol
+## Root-Only Ownership
 
-For each Phase A worker report:
+The root alone mutates Git history and shared source listed in `ownership.md`. It reviews cross-provider changes, resolves collisions, and commits coherent checkpoints. Provider workers own diagnosis, provider-local implementation, focused tests, deployment under a lease, exact-tab recovery, and live acceptance for their assigned provider.
 
-1. Confirm its declared starting coordination-base commit.
-2. Compare `git diff --name-only` with the exact provider whitelist.
-3. Reject any out-of-scope edit and ask the worker to move it into a shared integration request; do not silently absorb it.
-4. Read every changed production/test line.
-5. Re-run the report's focused RED/GREEN outcome from the current combined worktree.
-6. Require the report status to be `READY_FOR_INTEGRATION`, not done.
-7. Apply shared wiring with a new integration-level failing test before production edits.
-8. Stage only exact reviewed paths and commit only after the relevant gate passes.
+No report, unit-test result, or `READY_FOR_INTEGRATION` label is a successful terminal state. Only the runtime gates in `common.md` permit `DONE`.
 
-Do not stage a common progress file. Each worker has a separate report to avoid write conflicts.
+## Stable-Workspace Protocol
 
-## Shared Integration Priority
-
-### SABA
-
-- Preserve the committed expected-launch/error-page/current-baseline readiness rules.
-- Ensure same-tab targeted Socket.IO reconnect leads to a current OPEN/reset/data/done baseline.
-- Prove invalid auth/error pages never report ready.
-
-### CMD
-
-- Wire the provider-local recovery state into the observer.
-- Resolve the current frame, current loader, default-main-world context, and owning child CDP session.
-- Recheck source/document generation after each await.
-- Correlate success to a complete bound current-document `fc=1` response, not expression acknowledgement.
-- Keep retries single-flight, attempt-capped, deadline-bounded, abortable, and non-navigating.
-
-### APSPORT
-
-- Route TSPORT recovery through observer refresh.
-- Capture DOM only as the current expected event-ID set.
-- Reconnect only the exact football event socket in the same tab, including discovery after epoch reset.
-- Pass fresh stream identity and expected coverage to the adapter.
-- Prove candidate DOM alone remains non-authoritative and full WS coverage promotes once.
-
-### IM
-
-- Preserve exact current-document/request/cutoff metadata and atomic two-part commit.
-- Do not move odds normalization into shared generic code.
-
-### SBOBET
-
-- Create and propagate one explicit recovery/baseline generation for paired live/today receipts.
-- Keep independent receipt sequences for ordering and overlap resolution.
-- Preserve current stream/source/document fencing and bounded pending state.
-
-## Static Gates
-
-Run provider-focused suites first, then shared regressions, then full suites. Builds are serialized after tests/typechecks.
-
-Minimum focused API command:
+All sessions share one worktree. Every provider source mutation must be enclosed by a short provider edit lease:
 
 ```powershell
-npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/saba-ws-adapter.test.ts src/chrome-bridge/saba-ws-realtime-regression.test.ts src/chrome-bridge/cmd-http-adapter.test.ts src/chrome-bridge/tsport-ws-adapter.test.ts src/chrome-bridge/im-http-adapter.test.ts src/providers/im/im-football-catalog-source.test.ts src/chrome-bridge/ksport-ws-adapter.test.ts
+node scripts/five-provider-coordinator.mjs begin-edit <PROVIDER> <WORKER_ID>
+# apply one coherent provider-local patch
+node scripts/five-provider-coordinator.mjs end-edit <TOKEN>
 ```
 
-Minimum shared API regression command:
+Five disjoint edit leases may coexist. A deployment lease is denied while any edit lease exists, and new edits are denied during deployment. This gives build/restart/reload a stable filesystem snapshot without serializing diagnosis and tests.
 
-```powershell
-npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/chrome-catalog-data-plane.test.ts src/chrome-bridge/provider-authority-coordinator.test.ts src/chrome-bridge/provider-feed-registry.test.ts src/chrome-bridge/automatic-source-recovery.test.ts src/chrome-bridge/chrome-bridge-route.test.ts src/chrome-bridge/chrome-bridge-control-plane.test.ts src/server.test.ts
-```
+Deployment and acceptance commands are defined in `common.md`. Acceptance leases may coexist for all five providers and block deployment until their evidence windows end.
 
-Minimum extension command:
+## One-Time Legacy Handoff
 
-```powershell
-npm.cmd test --workspace @tool-chenh/chrome-extension
-```
+Before issuing worker prompts, root alone validates that every recorded legacy
+launcher/API/web PID belongs to this exact worktree, stops only that proven
+tree, verifies both live ports are clear, removes only the unchanged legacy
+record, and starts the committed base so it publishes managed state v2. No
+provider worker may read, repair, delete, or replace `.auth` state. After this
+one transition, every deployment uses the zero-argument managed restart command
+and its environment-bound deployment lease; encountering legacy or malformed
+state is a hard stop reported to root.
 
-Then run package typechecks/builds and `git diff --check`. Scan tracked diffs for token/session/cookie/authorization fields and raw provider payloads before every commit.
+## Shared Base Gate
 
-## Build Barrier and Runtime Leases
+Before the five workers start, root must prove:
 
-After every provider-local/shared gate passes:
+1. shared contracts compile;
+2. provider adapters and observer recovery wiring pass focused tests;
+3. API and extension typecheck;
+4. the complete main application builds from the current shared commit;
+5. the managed stack and loaded extension both use that exact base;
+6. the five provider tabs remain separate and are addressed by exact tab/source identity;
+7. no token, cookie, launch URL, raw body, or credential is present in the diff.
 
-1. Commit all reviewed integration changes.
-2. Run the full static matrix, then build contracts/API/extension/web serially.
-3. Start/restart the main application from that exact commit.
-4. Sync and reload the extension once; verify loaded artifact hash.
-5. Create the ignored evidence directory with `New-Item -ItemType Directory -Force .run/five-provider`.
-6. Resolve the five exact provider tab IDs and current bridge source IDs without exposing URLs/tokens.
-7. Send each worker a lease containing only its account, tab ID, source ID, commit, API process identity, extension artifact identity, allowed local endpoints, sampler command, evidence path, and acceptance window.
-8. Keep DevTools/CDP/`chrome.debugger`, global restart, extension reload, and build rights exclusively in the integrator.
+## Review and Commit Loop
 
-## Runtime Gate
+Root continuously reviews disjoint provider diffs while workers continue their runtime loops. Before status review/staging/commit it atomically claims `claim-integration root-integrator`; this lease blocks new edits, deployments, and acceptances until `release-integration <TOKEN>`. Root stages only reviewed files and releases the lease in `finally`. Shared defects reported by a worker are fixed by root with a failing integration test first.
 
-Keep the five provider pages in different Chrome tabs. Build/reload once. Provider workers then select only their leased exact tab/source rather than activating tabs; the integrator watches for cross-provider interference.
-
-For each provider record redacted evidence:
-
-- active source ID and epoch hash/opaque identifier;
-- authority disposition;
-- feed/catalog state;
-- baseline generation/provenance;
-- starting and ending provider evidence/cursor;
-- semantic revision when a real provider delta occurs;
-- targeted recovery duration and result;
-- whether any unrelated provider source/sequence changed unexpectedly.
-
-Do not accept a worker report that contains only unit tests or bridge sequence. Do not turn an unavailable external login/provider into an empty successful catalog.
-
-Integration order is SABA, CMD, APSPORT, IM, SBOBET. Runtime provider checks may run concurrently after leases are issued; the final order is five worker verdicts, BTI regression, restart/reload reproof, then a ten-minute simultaneous soak.
+The final result requires all five provider verdicts, BTI regression, one restart/reload reproof, and a simultaneous soak. A provider may be `BLOCKED` only with redacted evidence of a genuine external auth/provider failure after in-scope code and same-tab recovery alternatives are exhausted.

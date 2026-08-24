@@ -6,13 +6,18 @@ import { z } from "zod";
 import type { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
 import type { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
 import { chromeBridgeSourceIdentity, type ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
+import type { ProviderFeedSnapshot } from "./provider-feed-types.js";
 
 const MAX_FRAME_BYTES = 256 * 1024;
 
 export interface ChromeBridgeRouteOptions {
   readonly installationKey: string;
+  readonly dashboardOrigins: ReadonlySet<string>;
   readonly openProviderTicket?: boolean;
   readonly controlPlane?: ChromeBridgeControlPlane;
+  readonly now?: () => number;
+  readonly currentFeed?: (sourceId: string) => ProviderFeedSnapshot | null;
+  readonly waitForFreshBaseline?: (sourceId: string, afterMs: number) => Promise<ProviderFeedSnapshot>;
 }
 
 const FocusSelectionBodySchema = z.strictObject({
@@ -20,6 +25,10 @@ const FocusSelectionBodySchema = z.strictObject({
   providerEventId: z.string().trim().min(1).max(512),
   providerMarketId: z.string().trim().min(1).max(512),
   providerSelectionId: z.string().trim().min(1).max(512)
+});
+
+const SnapshotRequestBodySchema = z.strictObject({
+  sourceId: z.string().trim().min(1).max(128).regex(/^chrome:[A-Z]+:[0-9]+$/u)
 });
 
 interface WritableBridgeSocket {
@@ -36,9 +45,39 @@ export function registerChromeBridgeRoute(
   if (!options.installationKey.trim()) throw new Error("CHROME_BRIDGE_KEY_REQUIRED");
 
   const openProviderTicket = options.openProviderTicket ?? true;
+  const now = options.now ?? Date.now;
   app.get("/api/chrome-bridge/sources", async () => ({ sources: registry.listSources() }));
   app.get("/api/chrome-bridge/features", async () => ({ openProviderTicket }));
+  app.post("/api/chrome-bridge/request-snapshot", async (request, reply) => {
+    if (!isLoopback(request.ip)) return reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
+    const parsed = SnapshotRequestBodySchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "INVALID_SOURCE_ID" });
+    const prior = options.currentFeed?.(parsed.data.sourceId) ?? null;
+    const requestedAtMs = now();
+    const requested = options.controlPlane?.requestSourceSnapshot(parsed.data.sourceId) ?? 0;
+    if (requested !== 1) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
+    if (options.waitForFreshBaseline === undefined) {
+      return reply.code(202).send({ sourceId: parsed.data.sourceId, requested });
+    }
+    try {
+      const baseline = await options.waitForFreshBaseline(parsed.data.sourceId, requestedAtMs);
+      if (baseline.state !== "LIVE" || baseline.sourceId !== parsed.data.sourceId ||
+        baseline.activeGeneration === null || baseline.lastCompleteBaselineAtMs === null ||
+        baseline.lastCompleteBaselineAtMs <= requestedAtMs ||
+        (prior?.activeGeneration !== null && prior?.activeGeneration !== undefined &&
+          baseline.activeGeneration === prior.activeGeneration)) throw new Error("BASELINE_NOT_NEWER");
+      return reply.send({ sourceId: parsed.data.sourceId, requested, baseline: {
+        sourceEpoch: baseline.sourceEpoch, activeGeneration: baseline.activeGeneration,
+        lastCompleteBaselineAtMs: baseline.lastCompleteBaselineAtMs
+      } });
+    } catch {
+      return reply.code(504).send({ error: "PROVIDER_FEED_BASELINE_TIMEOUT" });
+    }
+  });
   app.post("/api/chrome-bridge/focus-selection", async (request, reply) => {
+    if (!isLoopback(request.ip) || !isTrustedFocusOrigin(request.headers.origin, options.dashboardOrigins)) {
+      return reply.code(403).send({ error: "LOCAL_ACCESS_ONLY" });
+    }
     if (!openProviderTicket) return reply.code(404).send({ error: "FEATURE_DISABLED" });
     const parsed = FocusSelectionBodySchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_SELECTION_IDENTITY" });
@@ -135,6 +174,10 @@ function hasInstallationKey(request: FastifyRequest, expected: string): boolean 
 
 function isExtensionOrigin(origin: string | undefined): boolean {
   return typeof origin === "string" && origin.startsWith("chrome-extension://");
+}
+
+function isTrustedFocusOrigin(origin: string | undefined, dashboardOrigins: ReadonlySet<string>): boolean {
+  return origin === undefined || dashboardOrigins.has(origin);
 }
 
 function isLoopback(address: string): boolean {

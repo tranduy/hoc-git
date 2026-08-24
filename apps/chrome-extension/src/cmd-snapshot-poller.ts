@@ -6,6 +6,7 @@ export interface CmdSnapshotPollerDependencies {
   readonly capture: (source: ObservedSource, hostname: string) => Promise<void>;
   readonly maintain?: (source: ObservedSource) => Promise<void>;
   readonly refreshCatalog?: (source: ObservedSource) => Promise<void>;
+  readonly recoverCmdCatalog?: (source: ObservedSource) => Promise<void>;
   readonly pollSabaDomChanges?: (source: ObservedSource, hostname: string) => Promise<void>;
   readonly replaySnapshots?: () => Promise<boolean>;
   readonly now?: () => number;
@@ -131,14 +132,17 @@ export class CmdSnapshotPoller {
         ? this.#dependencies.imDiscoveryIntervalMs ?? 15_000
         : tab.lobby === "CMD" ? 15_000
         : tab.lobby === "BTI" || tab.lobby === "KSPORT" ? 2_000 : null;
-      if (catalogRefreshIntervalMs !== null && this.#dependencies.refreshCatalog !== undefined &&
+      const refreshCatalog = tab.lobby === "CMD"
+        ? this.#dependencies.recoverCmdCatalog ?? this.#dependencies.refreshCatalog
+        : this.#dependencies.refreshCatalog;
+      if (catalogRefreshIntervalMs !== null && refreshCatalog !== undefined &&
         !this.#catalogRefreshInFlight.has(tab.tabId) &&
         now - (this.#lastCatalogRefreshAtMs.get(tab.tabId) ?? Number.NEGATIVE_INFINITY) >= catalogRefreshIntervalMs) {
         this.#lastCatalogRefreshAtMs.set(tab.tabId, now);
         const token = Symbol("catalog-refresh");
         this.#catalogRefreshInFlight.set(tab.tabId, token);
         const source = { lobby: tab.lobby, sourceId: `chrome:${tab.lobby}:${tab.tabId}`, tabId: tab.tabId } as const;
-        void this.#dependencies.refreshCatalog(source).catch(() => undefined)
+        void refreshCatalog(source).catch(() => undefined)
           .finally(() => {
             if (this.#catalogRefreshInFlight.get(tab.tabId) === token) this.#catalogRefreshInFlight.delete(tab.tabId);
           });

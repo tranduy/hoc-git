@@ -19,6 +19,7 @@ import {
 import { sendBoundedMessage } from "./realtime/opportunity-ws.js";
 import { Runtime, type RuntimeClock } from "./runtime.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
+import { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
 import { createFixtureRuntime, createLiveRuntime, resolveServerConfig, shouldPersistCatalogJournal,
   shouldRunLegacySessionMaintenance } from "./server.js";
 
@@ -308,7 +309,8 @@ describe("Fastify snapshot API", () => {
 
   it("reports observe-mode health with the current revision and all adapter statuses", async () => {
     const runtime = await readyRuntime();
-    const app = buildApp(runtime);
+    const buildIdentity = `sha256:${"a".repeat(64)}`;
+    const app = buildApp(runtime, { buildIdentity });
     apps.push(app);
 
     const response = await app.inject({ method: "GET", url: "/api/health" });
@@ -319,10 +321,19 @@ describe("Fastify snapshot API", () => {
       status: "ok",
       mode: "OBSERVE",
       executionReady: false,
+      buildIdentity,
       revision: runtime.getSnapshot().revision,
       providerStatuses: runtime.getSnapshot().providerStatuses
     });
     expect(response.json().providerStatuses).toHaveLength(4);
+  });
+
+  it("never reflects an invalid runtime build identity through health", async () => {
+    const runtime = await readyRuntime();
+    const app = buildApp(runtime, { buildIdentity: "secret-shaped-untrusted-value" });
+    apps.push(app);
+
+    expect((await app.inject({ method: "GET", url: "/api/health" })).json().buildIdentity).toBeNull();
   });
 
   it("returns a strict AppSnapshot and disables caching", async () => {
@@ -514,6 +525,25 @@ describe("Fastify snapshot API", () => {
     expect(publicDashboard.statusCode).toBe(200);
     expect(publicDashboard.headers["access-control-allow-origin"])
       .toBe("https://live.babiesbo.uk");
+  });
+
+  it("passes the exact configured dashboard Origin to focus selection", async () => {
+    const runtime = await readyRuntime();
+    const app = buildApp(runtime, {
+      viteOrigin: "https://live.babiesbo.uk",
+      chromeBridge: { registry: new ChromeBridgeRegistry(), installationKey: "local-key" }
+    });
+    apps.push(app);
+    await app.ready();
+
+    const response = await app.inject({
+      method: "POST", url: "/api/chrome-bridge/focus-selection",
+      headers: { origin: "https://live.babiesbo.uk" },
+      payload: { sourceId: "chrome:CMD:7", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1" }
+    });
+
+    expect(response.statusCode).toBe(409);
   });
 
   it("sets no-store on every API response including early and generated errors", async () => {
