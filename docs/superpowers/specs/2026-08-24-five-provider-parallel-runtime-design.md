@@ -2,121 +2,175 @@
 
 Date: 2026-08-24
 
-Status: approved for implementation
+Status: approved coordination model
 
-Code foundation: `6c440e8` (`fix(extension): recover authenticated SABA launches`)
+Repository root: `F:\0. PROJECT\tool-chenh`
 
-Scope: SABA, CMD, APSPORT/TSPORT, IM, and SBOBET/KSPORT. BTI is the live regression control.
+Scope: SABA, CMD, APSPORT/TSPORT, IM, and SBOBET/KSPORT. BTI is the live
+regression control.
 
 ## Goal
 
-Finish the five non-BTI realtime feeds quickly without allowing parallel agents to corrupt a shared Git index, overwrite shared integration files, race extension builds, or compete for Chrome debugger ownership.
+Complete five provider feeds quickly without racing shared builds or invalidating
+live evidence. Provider-local diagnosis and TDD run concurrently. Deployment is
+not provider-owned: root freezes the combined tree and performs one build,
+managed restart, and unpacked-extension reload per acceptance round. The five
+workers then prove their own providers concurrently against that exact build.
 
-The final result is one application and one branch. Each worker owns one provider end-to-end: diagnosis, RED/GREEN, deployment, exact-tab runtime recovery, and live acceptance. Provider work runs concurrently; only the short shared build/restart/extension-reload transaction is serialized by the repository coordinator. There is no patch-only completion phase.
+There is no patch-only completion and no per-worker deployment loop.
 
-## Execution Model
+## Roles and Ownership
 
-All six Codex sessions use the same repository checkout and branch:
+All six sessions use the same root checkout. Every shell/tool invocation resolves
+relative paths from `F:\0. PROJECT\tool-chenh`; the linked
+`.worktrees\six-provider-realtime-feed` checkout is out of scope.
 
-```text
-F:\0. PROJECT\tool-chenh
-feat/six-provider-realtime-feed
-```
+| Role | Owned work |
+| --- | --- |
+| Root integrator | shared source, Git history, freeze, combined deploy, round control |
+| SABA worker | SABA whitelist, report/evidence, SABA acceptance |
+| CMD worker | CMD whitelist, report/evidence, CMD acceptance |
+| APSPORT worker | TSPORT whitelist, report/evidence, APSPORT acceptance |
+| IM worker | IM whitelist, report/evidence, IM acceptance |
+| SBOBET worker | KSPORT whitelist, report/evidence, SBOBET acceptance |
 
-Roles are fixed for the whole run:
-
-- Integrator: owns Git, shared source files, common-base defects, and the final six-provider gate.
-- SABA worker: owns only the SABA API adapter files and its report.
-- CMD worker: owns only the CMD HTTP adapter, CMD poller/recovery unit, their tests, and its report.
-- APSPORT worker: owns only the TSPORT API adapter/authority assembler, their tests, and its report.
-- IM worker: owns only the IM adapter/catalog-source files, their tests, and its report.
-- SBOBET worker: owns only the KSPORT adapter/baseline-generation files, their tests, and its report.
-
-An exact worker whitelist is authoritative. Everything not listed in that whitelist belongs to the integrator. Workers do not make opportunistic edits outside their list.
-
-## Browser and Runtime Ownership
-
-The five provider pages should stay open in five distinct Chrome tabs. That isolates page state and lets the integrator address each provider by exact `tabId` rather than relying on whichever tab is active.
-
-Each worker may inspect/control only its already-open exact provider tab and must never fall back to the active tab. DevTools/CDP remain forbidden because a second debugger owner can detach the extension observer. Provider-scoped status, recovery, and acceptance run concurrently.
-
-Each provider-local mutation and its focused verification are enclosed by its short provider edit lease. Five disjoint edit leases may coexist. A still-live lease may be extended only by a token-CAS renewal; an expired or replaced holder cannot renew and must stop immediately. Build, managed-stack restart, and unpacked-extension reload are permitted to a worker only while it holds the exclusive deployment lease from `scripts/five-provider-coordinator.mjs`; deployment is denied until all edit leases are released, and no new edit may start during deployment. Acceptance leases may coexist for all five providers and prevent deployment from interrupting another worker's evidence window. The worker that changes a provider remains responsible until the integrated main application proves that provider realtime.
-
-The deployment transaction is fixed: build with `npm.cmd run build`, place the
-exact live deployment token in `TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN`, invoke the
-zero-argument `node scripts/restart-live-stack.mjs`, reload exactly
-`apps/chrome-extension/dist`, prove the aggregate artifact identity, and only
-then release the lease. Root establishes managed state v2 once before workers
-start. Legacy-state handoff is root-only; a worker never reads or manually
-mutates `.auth` or runtime state.
-
-## Shared-State Safety
-
-Workers must not run Git mutations (`add`, `commit`, `reset`, `restore`, `checkout`, `stash`, `merge`, `rebase`, `clean`). They may run `git status --short` and `git diff -- <their paths>` read-only. Provider writes require the provider edit lease; package builds and shared runtime mutations require the exclusive deployment lease.
-
-Workers must not edit:
-
-- `network-observer.ts`, `background.ts`, contracts, provider authority/coordinator, data plane, registry, route/control, or server wiring;
-- `dist`, `.auth`, runtime state, logs, or launch data;
-- another provider's files;
-- common task documents or another worker's report.
-
-When provider runtime proves a shared-base defect, the worker reports the exact shared file/symbol and failing test immediately. The root fixes shared code under the deployment lease while the worker continues independent provider-local diagnosis. The worker does not stop or claim completion at that handoff.
+`ownership.md` defines exact file whitelists, source mapping, and the current
+root-only deployment rule. Workers never build, restart, reload, or claim
+deployment.
 
 ## Provider Mapping
 
-| User-facing account | Bridge/adapter name | Worker |
+| User-facing account | Bridge/adapter | Worker |
 | --- | --- | --- |
 | SABA | SABA | SABA |
 | CMD | CMD | CMD |
 | APSPORT | TSPORT | APSPORT |
 | IM | IM | IM |
 | SBOBET | KSPORT | SBOBET |
-| BTI | BTI | Integrator regression control |
+| BTI | BTI | root regression control |
 
-Launch URLs and authentication material are stored only in the ignored local `.auth` area. They are never copied into tracked plans, tests, reports, diagnostics, or commits.
+The five provider pages remain in five separate Chrome tabs. A worker controls
+only its exact source/tab, never the active tab. DevTools and competing CDP
+ownership are forbidden. Tokens, cookies, launch URLs, signed URLs, credentials,
+and raw provider bodies never enter code, reports, evidence, or diagnostics.
+
+## Existing Coordination Primitives
+
+This model adds no coordinator feature.
+
+- Provider edit leases serialize mutations to one provider whitelist and may
+  coexist across different providers.
+- The existing deployment lease serializes root's combined deployment only.
+  Root claims it with provider label `SABA` and worker `root-integrator`; `SABA`
+  is a fixed coordination label, not provider ownership.
+- Existing provider acceptance leases pin exact source IDs and the
+  `lastDeployment` build identity and may coexist across all five providers.
+- The root integration lease may protect root Git operations, but it is never
+  used to run the managed restart because the restart requires a provider-labeled
+  deployment token.
+
+There is no stable-runtime-barrier command. Phase transitions use explicit root
+messages plus existing coordinator state.
+
+## Execution State Machine
+
+### 1. Provider-local work
+
+All five workers diagnose and implement concurrently inside disjoint whitelists.
+Each coherent patch holds its provider edit lease from before the RED test is
+written through GREEN tests, affected typechecks, diff checks, secret scan, and
+report update.
+
+The worker reports `LOCAL_GREEN <PROVIDER>` and releases its edit lease. This is
+a wait state, not completion. A worker in `LOCAL_GREEN` must not edit, recover,
+accept, build, restart, or reload. Root/shared edits invalidate affected local
+green checkpoints and require those workers to rerun local verification.
+
+### 2. Freeze and combined deployment
+
+Root waits for all five current `LOCAL_GREEN` reports, resolves shared integration
+requests, reviews the tree, and proves there are no edit, deployment, or
+acceptance leases. Root announces `FREEZE_FOR_COMBINED_DEPLOY <ROUND_ID>`.
+
+Root alone then claims:
+
+```powershell
+node scripts/five-provider-coordinator.mjs claim-deploy SABA root-integrator 1800000
+```
+
+Under that token, root performs one combined `npm.cmd run build`, sets
+`TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN`, runs zero-argument
+`node scripts/restart-live-stack.mjs`, reloads exactly
+`F:\0. PROJECT\tool-chenh\apps\chrome-extension\dist`, proves
+`/api/health.buildIdentity`, and releases the lease. Release records the combined
+artifact as `lastDeployment`.
+
+Root then publishes `ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>`.
+
+### 3. Concurrent live acceptance
+
+All five workers resolve their exact current source IDs, acquire provider-scoped
+acceptance leases, and run their own provider samplers for at least 120 seconds.
+They pin the same root-published build but retain responsibility for their own
+provider gate and exact-tab recovery.
+
+A successful worker ends its acceptance lease and reports
+`ACCEPTANCE_PASS <ROUND_ID> <PROVIDER>`. The pass remains provisional and the
+worker makes no tracked edit until root accepts the whole round.
+
+### 4. Failure and retry
+
+The first `ACCEPTANCE_FAIL` invalidates the round for everyone. Root broadcasts
+`STOP_ACCEPTANCE`; all workers stop sampling, end acceptance leases, and discard
+the round for completion purposes. Root waits for zero acceptance leases before
+allowing edits.
+
+Only failed providers and required root-owned shared seams change. Failed workers
+return to provider-local RED/GREEN and `LOCAL_GREEN`. Root freezes a new round and
+performs one new combined deployment. All five workers rerun acceptance against
+the new build; no evidence or binding crosses rounds.
+
+### 5. Completion
+
+When all five workers pass the same round and all acceptance leases have ended,
+root publishes `ROUND_ACCEPTED <ROUND_ID> <BUILD_IDENTITY>`. Workers may then edit
+only their own reports under provider edit leases and write `DONE` with the live
+evidence from that accepted round.
 
 ## Provider Outcomes
 
-Each worker must leave its adapter in a fail-closed, test-proven state:
+Provider-local implementations remain fail-closed:
 
-- SABA: only a fresh current-stream Socket.IO reset/data/done sequence may establish authority; retired streams cannot re-enter.
-- CMD: a current-document complete `fc=1` body establishes authority; page-call acknowledgement alone does not; pre-baseline deltas cannot poison the full-baseline cursor.
-- APSPORT: DOM supplies expected identity/coverage only; a fresh TSPORT event socket supplies every authoritative quote and the baseline generation.
-- IM: both authenticated GetSE partitions for one cutoff/generation commit atomically; positive Hong Kong odds are normalized without accepting invalid zero/non-finite values.
-- SBOBET: current live and today KSPORT partitions pair by an explicit recovery generation, not accidental equality of independent receipt sequences.
+- SABA: only a fresh current-stream Socket.IO reset/data/done sequence establishes
+  authority; retired streams cannot re-enter.
+- CMD: only a current-document complete authenticated `fc=1` response establishes
+  authority; page-call acknowledgement does not, and pre-baseline deltas cannot
+  poison the full-baseline cursor.
+- APSPORT: DOM supplies expected identity/coverage only; fresh TSPORT WebSocket
+  evidence supplies authoritative quotes and the baseline generation.
+- IM: both authenticated GetSE partitions for one cutoff/generation commit
+  atomically; valid positive Hong Kong odds normalize without accepting zero or
+  non-finite values.
+- SBOBET: KSPORT live/today partitions pair by explicit recovery generation,
+  while independent receipt sequences remain ordering evidence only.
 
-## Integration Order
+## Live Acceptance Contract
 
-The integrator handles shared requests and live acceptance in this order:
+Each worker must prove on the root-published combined build:
 
-1. SABA
-2. CMD
-3. APSPORT
-4. IM
-5. SBOBET
-6. BTI regression and six-provider soak
+- exact pinned source authority is `ACTIVE`;
+- catalog source is `ACTIVE`, reason-free, `FRESH`, and nonempty;
+- the baseline belongs to the current source epoch;
+- provider-native evidence advances at least three times;
+- a real semantic price/status delta is recorded when emitted, while heartbeat,
+  replay, ACK, and unchanged DOM do not renew authority;
+- exact-source targeted recovery creates a strictly newer authoritative baseline
+  without changing any other provider source;
+- BTI remains `ACTIVE` throughout;
+- source/tab and API build identity remain pinned for the full window.
 
-This preserves the requested integration priority while allowing all five adapter workers to work concurrently in both the code phase and the provider-scoped live phase.
-
-## Acceptance Contract
-
-A provider worker may report `DONE` only when all of the following are observed by that worker from the lease-protected built main application whose artifact identity is pinned in its acceptance lease:
-
-- authority disposition is `ACTIVE`;
-- catalog/feed state is `LIVE` and externally reported snapshot state is `FRESH`;
-- a current authoritative baseline has committed for the current source epoch;
-- provider evidence/cursor advances at least three times during observation;
-- a real provider price/status delta changes the semantic catalog when the provider sends one;
-- generic tab heartbeat, replay, unchanged DOM, and control acknowledgement do not renew authority;
-- targeted recovery does not reset another provider;
-- BTI remains active throughout;
-
-After all five provider-local `DONE` verdicts, root separately restarts/reloads
-the final combined artifact and runs the ten-minute six-provider soak. That soak
-is a final integration gate, not a prerequisite that an individual worker must
-somehow complete before the other workers finish.
-
-`READY_FOR_INTEGRATION` is not a completion status. The only successful terminal state is `DONE` after the built main application passes the provider's runtime gates.
-
-External provider/authentication unavailability is not converted into success. In that case the source remains fail-closed with an exact reason and the report records the external evidence.
+`LOCAL_GREEN`, `READY_FOR_INTEGRATION`, a unit-test result, or a provisional
+acceptance pass is not success. The only successful terminal provider status is
+live `DONE` from the same accepted round. A real external auth/provider outage
+remains fail-closed and may be reported as `BLOCKED`; it is never converted into
+success.

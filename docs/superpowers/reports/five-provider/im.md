@@ -1,8 +1,12 @@
 # IM Provider Work Log
 
-Status: `IN_PROGRESS` — provider-local tests are not runtime acceptance. A future worker must continue until the built main application satisfies every gate in `common.md`.
+Status: `IN_PROGRESS` — rerun provider-local checks, report `LOCAL_GREEN`, wait
+for root's combined deployment, then the IM worker must run its own live
+acceptance. Only the accepted round permits `DONE`.
 
-Historical checkpoint only: any patch-only/build/runtime restrictions recorded below describe the prior worker run and are superseded by the current end-to-end worker loop in `common.md`.
+Historical checkpoint only: all coordination/path/build/runtime ownership text
+below is superseded by the current `common.md`; technical evidence remains
+reference material.
 
 ## Worker and base
 
@@ -82,9 +86,9 @@ Shared integration request: none
 
 ## Concerns and external blockers
 
-No provider-local blocker remains. Live provider availability and built-main-
-application acceptance were intentionally not exercised and remain integrator
-responsibilities.
+No historical provider-local blocker remained. Root owns the combined deployment;
+the IM worker owns fresh exact-provider live acceptance after root publishes the
+round.
 
 ## Safety confirmation
 

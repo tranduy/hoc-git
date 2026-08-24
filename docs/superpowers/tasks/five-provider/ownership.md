@@ -68,7 +68,13 @@ The integrator owns every repository file not explicitly whitelisted above. In p
 - Git index and history;
 - DevTools/debugger ownership and cross-provider mutations.
 
-The root integrator owns edits to shared source files. A provider worker encloses each provider-local patch in its provider edit lease and may build, restart the managed stack, and reload the extension only while holding the exclusive deployment lease from `scripts/five-provider-coordinator.mjs`. These actions are runtime operations, not permission to edit shared source or Git history.
+The root integrator owns edits to shared source files and is the only role allowed
+to build, restart the managed stack, reload the extension, or claim/release a
+deployment lease. A provider worker encloses each provider-local patch in its
+provider edit lease, reports `LOCAL_GREEN`, and waits for root's combined
+deployment. Runtime acceptance begins only after root publishes the round build
+identity. None of these runtime permissions expands a worker's source whitelist
+or grants access to Git history.
 
 ## Provider Runtime Ownership
 

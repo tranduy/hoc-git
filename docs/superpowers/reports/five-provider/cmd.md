@@ -1,8 +1,12 @@
 # CMD Provider Work Log
 
-Status: `IN_PROGRESS` — provider-local tests are not runtime acceptance. A future worker must continue until the built main application satisfies every gate in `common.md`.
+Status: `IN_PROGRESS` — rerun provider-local checks, report `LOCAL_GREEN`, wait
+for root's combined deployment, then the CMD worker must run its own live
+acceptance. Only the accepted round permits `DONE`.
 
-Historical checkpoint only: any patch-only/build/runtime restrictions recorded below describe the prior worker run and are superseded by the current end-to-end worker loop in `common.md`.
+Historical checkpoint only: all coordination/path/build/runtime ownership text
+below is superseded by the current `common.md`; technical evidence remains
+reference material.
 
 ## Worker and base
 

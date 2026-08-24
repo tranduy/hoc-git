@@ -1,248 +1,281 @@
 # PROMPT ĐIỀU PHỐI 5 WORKER REALTIME
 
-File này là nguồn prompt duy nhất để mở lại năm Codex tab. Không dùng lại các
-prompt cũ trong lịch sử chat.
+Đây là nguồn prompt duy nhất để mở năm Codex worker tab. Không dùng prompt cũ
+trong lịch sử chat và không dùng linked worktree.
 
-## Cách dùng
+## Một dòng cho từng tab
 
-Paste đúng một dòng tương ứng vào từng Codex tab:
+- SABA: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và ROLE SABA, rồi sở hữu task SABA qua LOCAL_GREEN, chờ combined deploy của root, và tự chạy live acceptance đến DONE.`
+- CMD: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và ROLE CMD, rồi sở hữu task CMD qua LOCAL_GREEN, chờ combined deploy của root, và tự chạy live acceptance đến DONE.`
+- APSPORT: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và ROLE APSPORT/TSPORT, rồi sở hữu task APSPORT qua LOCAL_GREEN, chờ combined deploy của root, và tự chạy live acceptance đến DONE.`
+- IM: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và ROLE IM, rồi sở hữu task IM qua LOCAL_GREEN, chờ combined deploy của root, và tự chạy live acceptance đến DONE.`
+- SBOBET: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và ROLE SBOBET/KSPORT, rồi sở hữu task SBOBET qua LOCAL_GREEN, chờ combined deploy của root, và tự chạy live acceptance đến DONE.`
 
-- SABA: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và mục SABA, rồi tự thực hiện lại task SABA đến live DONE.`
-- CMD: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và mục CMD, rồi tự thực hiện lại task CMD đến live DONE.`
-- APSPORT: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và mục APSPORT/TSPORT, rồi tự thực hiện lại task APSPORT đến live DONE.`
-- IM: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và mục IM, rồi tự thực hiện lại task IM đến live DONE.`
-- SBOBET: `Mở F:\0. PROJECT\tool-chenh\proccess.md, đọc toàn bộ COMMON CONTRACT và mục SBOBET/KSPORT, rồi tự thực hiện lại task SBOBET đến live DONE.`
-
-Không paste cả năm role vào cùng một tab. Mỗi tab chỉ nhận một role.
+Mỗi tab chỉ nhận một role.
 
 ---
 
 # COMMON CONTRACT — BẮT BUỘC CHO CẢ 5 WORKER
 
-## 1. Kết quả cần đạt
+## 1. Mô hình duy nhất
 
-Bạn sở hữu một sàn từ chẩn đoán đến bằng chứng realtime của app chính đã build.
-Không được dừng ở các trạng thái “code xong”, “test pass”, “report xong”,
-`READY_FOR_INTEGRATION` hoặc “chờ integrator test live”.
+Quy trình có ba pha:
 
-`DONE` chỉ hợp lệ khi chính worker đã chứng minh trên app đang chạy:
+1. Năm worker song song diagnose và TDD trong whitelist riêng, ghi
+   `LOCAL_GREEN`, release edit lease và chờ.
+2. Root chờ không còn edit, freeze toàn bộ tracked edits, rồi root một mình
+   build/restart/reload đúng một combined artifact cho vòng đó và công bố build
+   identity.
+3. Năm worker đồng thời tự chạy acceptance 120 giây cho provider riêng trên cùng
+   build. Chỉ live acceptance mới cho phép `DONE`.
 
-1. exact bridge source có `authorityDisposition: ACTIVE`;
-2. catalog source có `sessionState: ACTIVE`, không có reason và catalog không rỗng;
-3. baseline authoritative thuộc source epoch hiện tại;
-4. provider-native cursor/evidence tiến ít nhất ba lần trong cửa sổ 120 giây;
-5. semantic price/status đổi khi provider phát thay đổi; heartbeat, ACK, replay hoặc DOM không đổi không được tính;
-6. targeted recovery của đúng source tạo baseline generation mới mà không thay source của sàn khác;
-7. BTI vẫn `ACTIVE` trong toàn bộ lần acceptance;
-8. acceptance dùng đúng build identity và exact source/tab đã pin.
+Worker không bao giờ build, restart, reload extension, claim/release/abort
+deployment hoặc chạy `restart-live-stack.mjs`. Không có stable-runtime-barrier
+command và không được chờ một barrier không tồn tại.
 
-Nếu gate live fail: kết thúc acceptance lease, quay lại diagnose → RED → fix →
-deploy → barrier → acceptance. Giữ report là `IN_PROGRESS`. Chỉ dùng `BLOCKED`
-khi đã chứng minh lỗi external auth/provider mà code và same-tab recovery không
-thể khắc phục. Không biến external failure thành thành công.
-
-## 2. Workspace và branch chung
+## 2. Repository root bắt buộc
 
 ```text
-Workspace: F:\0. PROJECT\tool-chenh
-Branch: feat/six-provider-realtime-feed
+F:\0. PROJECT\tool-chenh
 ```
 
-- **Mỗi** `shell_command`/tool call phải đặt `workdir` trực tiếp thành exact
-  repo root trên. Không được giả định `Set-Location` hoặc biến PowerShell từ lần
-  gọi trước còn tồn tại, vì mỗi tool call có thể chạy trong process mới. Nếu tool
-  không có trường `workdir`, prefix ngay trong **cùng invocation**:
+- Mọi `shell_command`/tool call phải đặt `workdir` trực tiếp thành exact root trên.
+- Không được dùng
+  `F:\0. PROJECT\tool-chenh\.worktrees\six-provider-realtime-feed`.
+- Nếu tool không có `workdir`, prefix trong cùng invocation:
 
   ```powershell
   $repoRoot = 'F:\0. PROJECT\tool-chenh'
   Set-Location -LiteralPath $repoRoot
-  if ((Get-Location).Path -ne $repoRoot) { throw 'WRONG_SHARED_WORKTREE' }
+  if ((Get-Location).Path -ne $repoRoot) { throw 'WRONG_REPOSITORY_ROOT' }
   ```
 
-  Lặp lại assertion repo root trong từng invocation có lease, mutation, test,
-  build, restart, reload, recovery hoặc sampler. Mọi path tương đối bên dưới
-  phải được resolve từ exact repo root trong chính invocation đó, không phải cwd
-  mặc định khác của Codex tab.
-- Làm ngay trong repo root/branch trên; không tạo linked worktree hoặc branch mới.
-- Không dùng hash base cũ `f6e25d4` trong prompt cũ.
-- Năm worker dùng chung filesystem; thay đổi của một worker hiện ngay với bốn worker còn lại.
-- Root integrator là người duy nhất được stage/commit và sửa shared-base files.
+Không dựa vào `Set-Location` hoặc biến PowerShell từ invocation trước.
 
-## 3. Tài liệu phải đọc đầy đủ, đúng thứ tự
+## 3. Tài liệu phải đọc đúng thứ tự
 
-Trước mọi chỉnh sửa, đọc hết các file sau, không chỉ đọc tiêu đề:
+Trước mọi edit, đọc hết:
 
-1. `F:\0. PROJECT\tool-chenh\proccess.md` — COMMON CONTRACT và đúng role của bạn;
+1. `F:\0. PROJECT\tool-chenh\proccess.md` — COMMON CONTRACT và đúng role;
 2. `docs/superpowers/tasks/five-provider/common.md`;
 3. `docs/superpowers/tasks/five-provider/ownership.md`;
 4. `docs/superpowers/specs/2026-08-24-five-provider-parallel-runtime-design.md`;
 5. `docs/superpowers/plans/2026-08-24-five-provider-parallel-runtime.md`;
-6. task file riêng của role;
-7. report file riêng của role.
+6. task file riêng;
+7. report file riêng.
 
-Preflight phải hoàn tất trước khi lấy edit lease hoặc thực hiện bất kỳ mutation,
-build, restart, reload, recovery hay acceptance nào:
+`ownership.md` authoritative cho whitelist file, provider/source mapping và quy
+tắc deploy root-only hiện tại. Worker không được deploy.
+Report cũ chỉ là lịch sử; không được dùng verdict, build hoặc evidence cũ để kết
+luận vòng hiện tại.
 
-1. xác minh `$repoRoot` tồn tại và cả sáu tài liệu repo-rooted của role đều
-   resolve thành file thật;
-2. đọc toàn bộ các file đó từ `$repoRoot`;
-3. xác minh common/coordinator hiện tại có executable stable-runtime barrier,
-   root base deployment đã được ghi nhận và app đang ở managed state v2;
-4. nếu một điều kiện thiếu, báo đúng `SHARED_BASE_PREFLIGHT_FAILED` kèm tên điều
-   kiện, giữ report `IN_PROGRESS` và không sửa/build/restart/reload gì cả.
+## 4. Live DONE
 
-Worker không được tự đọc `.auth` để kiểm tra state v2. Chỉ dùng public health,
-coordinator preflight/barrier command được common document quy định và thông báo
-base-ready của root.
+`LOCAL_GREEN` là checkpoint bắt buộc nhưng không phải thành công.
+`READY_FOR_INTEGRATION`, unit tests hoặc report cũng không phải thành công.
 
-Report cũ chỉ là lịch sử/chứng cứ tham khảo. Không được tin verdict cũ hoặc lấy
-focused tests cũ thay cho live acceptance mới. Bắt đầu bằng cách kiểm tra trạng
-thái app/runtime hiện tại.
+Worker chỉ được ghi `DONE` sau khi tự chứng minh trên exact combined build của
+vòng được root accept:
 
-## 4. Quyền file và lease
+1. exact bridge source có `authorityDisposition: ACTIVE`;
+2. catalog source có `sessionState: ACTIVE`, không reason, `FRESH`, không rỗng;
+3. authoritative baseline thuộc source epoch hiện tại;
+4. provider-native cursor/evidence tiến ít nhất ba lần trong 120 giây;
+5. semantic price/status đổi khi provider phát thay đổi; heartbeat, ACK, replay
+   hoặc DOM không đổi không được tính;
+6. targeted recovery exact source tạo authoritative baseline generation mới và
+   không đổi source của provider khác;
+7. BTI `ACTIVE` trong toàn bộ acceptance;
+8. exact source/tab và `/api/health.buildIdentity` giữ nguyên, khớp round root
+   công bố.
 
-- Chỉ sửa đúng whitelist ghi trong role và `ownership.md`; dùng `apply_patch`.
-- Mỗi coherent patch phải giữ provider edit lease từ trước khi sửa đến hết RED/GREEN,
-  focused tests, typecheck, scoped diff-check và secret scan.
-- Release edit lease trong `finally` trước khi chờ, build/deploy hoặc acceptance.
-- Không tự mở rộng whitelist. Shared defect phải ghi exact file/symbol/failing test
-  vào report và báo root; tiếp tục phần provider-local không phụ thuộc defect đó.
-- Không chạy Git mutation: `add`, `commit`, `reset`, `restore`, `checkout`, `stash`,
-  `merge`, `rebase`, `clean`, `push`. Chỉ được dùng read-only status/diff nếu task
-  yêu cầu kiểm tra phạm vi.
-- Không sửa `dist` trực tiếp/manual và không tạo build artifact khi thiếu deployment
-  lease. `npm.cmd run build` được phép regenerate `dist` **chỉ** bên trong guarded
-  deployment transaction. Không sửa `.auth`, `.run` state, coordinator state hoặc
-  file của worker khác. Runtime sampler được phép ghi đúng ignored evidence file
-  của role.
-- Sau khi kết thúc acceptance, phải lấy lại edit lease mới được sửa report tracked.
+`BLOCKED` chỉ hợp lệ khi đã chứng minh external auth/provider failure mà code
+provider-local và same-tab recovery không thể khắc phục. Không biến external
+failure thành success.
 
-## 5. Browser/runtime
+## 5. File, Git và browser safety
 
-- Năm provider phải nằm ở năm Chrome tab riêng. Chỉ điều khiển exact tab/source
-  của role; cấm active-tab fallback.
-- Cấm mở DevTools hoặc chiếm debugger/CDP vì extension observer đang sở hữu attachment.
-- Cấm in/đọc/lưu token, cookie, signed URL, raw body hoặc credential.
-- Không reload/navigate provider tab. Targeted recovery dùng exact source API trong
-  task. Provider launch refresh chỉ dành cho source đã được chứng minh missing,
-  expired hoặc auth-invalid.
-- Khi giữ deployment lease, worker được build/restart app và reload đúng duy nhất
-  unpacked-extension card trỏ tới
-  `F:\0. PROJECT\tool-chenh\apps\chrome-extension\dist`.
-  Đây là ngoại lệ duy nhất ngoài provider tab; không reload extension khác.
-- Nếu gặp `LEGACY_STACK_REQUIRES_ROOT_HANDOFF`, dừng mọi runtime mutation và báo
-  root. Worker không được đọc/xóa/sửa `.auth`; root phải hoàn tất handoff v2 trước.
+- Chỉ edit các file được cả role và `ownership.md` liệt kê trong exact provider
+  whitelist; không edit chính `ownership.md`. Tracked edits dùng `apply_patch`.
+- Provider edit lease phải được lấy trước cả RED test mutation và giữ qua RED,
+  fix, GREEN, affected typecheck, scoped diff-check, secret scan và report update.
+- Release edit lease trong `finally`.
+- Không chạy Git mutation: `add`, `commit`, `reset`, `restore`, `checkout`,
+  `stash`, `merge`, `rebase`, `clean`, `push`. Root một mình sở hữu Git.
+- Không edit shared observer/background/contracts/data-plane/server, `dist`,
+  `.auth`, coordinator state, provider khác hoặc planning docs. Sampler chỉ được
+  ghi ignored evidence file của role.
+- Cấm đọc/in/lưu token, cookie, signed URL, raw body, credential, launch material.
+- Chỉ điều khiển exact provider source/tab; cấm active-tab fallback.
+- Cấm mở DevTools hoặc chiếm debugger/CDP.
+- Cấm reload/navigate/focus/replace provider tab. Recovery chỉ dùng exact-source
+  API của sampler/task.
 
-## 6. Luồng làm việc bắt buộc
+## 6. Phase A — diagnose, TDD, LOCAL_GREEN
 
-1. Chạy preflight ở mục 3; thiếu tài liệu, managed-v2 hoặc barrier thì không mutation.
-2. Dùng `systematic-debugging` và read-only runtime/code inspection để xác định
-   invariant live đang fail. Nếu việc tái hiện cần viết/chỉnh test thì chưa làm ở bước này.
-3. Lấy provider edit lease **trước mọi file mutation**. Quy tắc này override mọi
-   câu mơ hồ trong task/common cũ.
-4. Khi edit lease còn hiệu lực, thêm/chạy focused RED tái hiện đúng lỗi.
-5. Sửa production tối thiểu trong whitelist bằng `apply_patch`.
-6. Chạy focused GREEN, typecheck, scoped diff-check và secret scan khi lease còn hiệu lực.
-7. Release edit lease trong `finally`; không để lease hết hạn cùng patch dở.
-8. Lấy deployment lease và thực hiện nguyên transaction trong `common.md`:
-   `npm.cmd run build` → set exact `TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN` →
-   zero-argument `node scripts/restart-live-stack.mjs` → reload đúng extension
-   card → xác minh `/api/health.buildIdentity` → release/abort lease trong `finally`.
-9. Sau lần deploy cuối của role, chờ stable-runtime barrier mở cho đủ năm provider.
-   Không bắt đầu acceptance sớm vì acceptance lease sẽ chặn các deployment còn lại.
-   Mọi acceptance trong một vòng phải pin cùng build identity cuối cùng. Nếu
-   coordinator/common chưa cung cấp barrier này thì shared base chưa sẵn sàng:
-   báo root và giữ task `IN_PROGRESS`, không tự bịa bằng report.
-10. Khi barrier mở, resolve exact current source ID, lấy acceptance lease, chạy đúng
-   sampler 120 giây của role và luôn kết thúc lease trong `finally`.
-11. Nếu một provider fail và cần sửa/deploy, barrier cũ mất hiệu lực; không tái sử
-   dụng evidence/build identity cũ. Lặp lại cho tới khi live gate của role pass trên
-   barrier hiện tại.
-12. Chỉ sau đó lấy edit lease mới để cập nhật report thành `DONE` với exact build,
-    source/tab, baseline generation, evidence advances, semantic changes, recovery
-    isolation và BTI status.
+Cho mỗi coherent patch:
 
-## 7. Ưu tiên
+```powershell
+node scripts/five-provider-coordinator.mjs begin-edit <PROVIDER> <WORKER_ID>
+# RED -> minimal fix -> GREEN/typecheck/diff/secret scan -> report
+node scripts/five-provider-coordinator.mjs end-edit <TOKEN>
+```
 
-- Priority 1: SABA, CMD, APSPORT — bắt đầu và xử lý blocker trước.
-- Priority 2: IM, SBOBET — chạy song song ngay, nhưng không chiếm deployment lease
-  khi Priority 1 đang ở bước deploy đã được cấp lease.
+Luồng bắt buộc:
+
+1. read-only inspect exact provider runtime/code, dùng `systematic-debugging`;
+2. lấy edit lease trước mọi file mutation;
+3. thêm và chạy focused RED;
+4. sửa tối thiểu bằng `apply_patch` trong whitelist;
+5. chạy focused GREEN, mọi affected workspace typecheck, scoped
+   `git diff --check` và redacted secret scan;
+6. ghi exact evidence/shared request vào report, đặt status `LOCAL_GREEN`;
+7. end edit lease trong `finally`, báo `LOCAL_GREEN <PROVIDER>` cho root và chờ.
+
+Trong lúc chờ: không edit, recovery, acceptance, build, restart, reload hoặc claim
+deploy. Nếu root sửa shared seam ảnh hưởng provider, checkpoint bị invalid và
+worker phải rerun local checks trước khi báo `LOCAL_GREEN` lại.
+
+## 7. Phase B — root freeze và combined deploy
+
+Root chờ đủ năm `LOCAL_GREEN`, hoàn tất shared fixes, review tree và xác minh
+coordinator không có edit/deploy/acceptance lease. Root công bố:
+
+```text
+FREEZE_FOR_COMBINED_DEPLOY <ROUND_ID>
+```
+
+Từ đó mọi worker ngừng tracked edits. Root một mình claim:
+
+```powershell
+node scripts/five-provider-coordinator.mjs claim-deploy SABA root-integrator 1800000
+```
+
+`SABA` chỉ là fixed coordinator serialization label cho combined deployment,
+không trao quyền SABA provider cho root và không biến build thành SABA-only. Root
+một mình build toàn repo, set exact deployment token, chạy zero-argument managed
+restart, reload đúng
+`F:\0. PROJECT\tool-chenh\apps\chrome-extension\dist`, verify health identity và
+release lease để ghi `lastDeployment`.
+
+Root sau đó công bố:
+
+```text
+ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>
+```
+
+Đây là handoff đầy đủ; không có barrier command khác.
+
+## 8. Phase C — concurrent live acceptance
+
+Chỉ sau `ACCEPTANCE_ROUND`, mỗi worker:
+
+1. resolve exact current source ID của role;
+2. lấy existing acceptance lease:
+
+   ```powershell
+   node scripts/five-provider-coordinator.mjs begin-acceptance <PROVIDER> <WORKER_ID> <EXACT_SOURCE_ID>
+   ```
+
+3. chạy sampler 120 giây của role, không build/reload;
+4. tự verify mọi gate ở mục 4 và exact round build;
+5. luôn gọi `end-acceptance <TOKEN>` trong `finally`;
+6. nếu pass, báo `ACCEPTANCE_PASS <ROUND_ID> <PROVIDER>` rồi chờ, chưa edit
+   report `DONE`.
+
+## 9. Một failure dừng cả vòng
+
+Khi bất kỳ provider fail:
+
+1. worker đó end lease và báo
+   `ACCEPTANCE_FAIL <ROUND_ID> <PROVIDER> <REDACTED_REASON>`;
+2. root công bố `STOP_ACCEPTANCE <ROUND_ID>`;
+3. cả năm dừng sampler, end lease trong `finally`, bỏ verdict/evidence vòng đó;
+4. root chờ zero acceptance/edit lease rồi mới cho failed provider(s) edit;
+5. failed provider về `IN_PROGRESS`, làm RED/fix/GREEN, báo `LOCAL_GREEN` lại;
+6. root freeze vòng mới và combined deploy đúng một lần;
+7. cả năm rerun fresh 120 giây trên build mới. Cấm reuse build/source/lease/evidence
+   vòng cũ.
+
+Khi đủ năm pass cùng vòng và không còn acceptance lease, root công bố:
+
+```text
+ROUND_ACCEPTED <ROUND_ID> <BUILD_IDENTITY>
+```
+
+Lúc đó mỗi worker mới lấy edit lease mới, cập nhật report riêng thành `DONE` với
+exact build/source/tab/baseline/evidence/semantic/recovery/BTI proof, rồi release
+lease và kết thúc.
+
+## 10. Priority
+
+- Priority 1: SABA, CMD, APSPORT — root review blocker/shared request trước.
+- Priority 2: IM, SBOBET — vẫn làm provider-local TDD và acceptance song song.
+- Priority không cho worker nào quyền deploy; chỉ root combined deploy.
 
 ---
 
 # ROLE 1 — SABA WORKER (PRIORITY 1)
 
-## Mapping và mục tiêu
+## Mapping và invariant
 
-- Account: `SABA`
-- Bridge lobby/source: `SABA`
-- Exact tab: tab đang mở trang SABA; không dùng tab APSPORT/TSPORT.
-- Authority chỉ được lập bởi fresh current-stream Socket.IO
+- Account/source: `SABA` / `SABA`
+- Exact tab: SABA, không dùng APSPORT/TSPORT tab.
+- Authority chỉ từ fresh current-stream Socket.IO
   `OPEN → reset → data → done`.
-- Newer OPEN phải làm authority stream cũ stale ngay cả khi replacement chưa hoàn tất.
-- Retired stream không được re-enter; malformed reset phải fence generation cũ.
-- Baseline/delta giống hệt về semantic không được renew freshness chỉ vì revision đổi.
+- Newer `OPEN` làm stream cũ stale ngay; retired stream không re-enter.
+- Malformed reset fences generation cũ; semantic-identical replay không renew.
 
-## Chỉ được sửa
+## Whitelist
 
 - `apps/api/src/chrome-bridge/saba-ws-adapter.ts`
 - `apps/api/src/chrome-bridge/saba-ws-adapter.test.ts`
 - `apps/api/src/chrome-bridge/saba-ws-realtime-regression.test.ts`
 - `docs/superpowers/reports/five-provider/saba.md`
-- ignored evidence: `.run/five-provider/saba-runtime-evidence.json`
+- ignored evidence `.run/five-provider/saba-runtime-evidence.json`
 
-## Đọc riêng
+Task: `docs/superpowers/tasks/five-provider/saba.md`
 
-- Task: `docs/superpowers/tasks/five-provider/saba.md`
-- Report: `docs/superpowers/reports/five-provider/saba.md`
-
-## Acceptance
-
-Sau stable-runtime barrier và acceptance lease đúng source:
+Acceptance after root round publication:
 
 ```powershell
 node scripts/verify-saba-runtime.mjs 120000 .run/five-provider/saba-runtime-evidence.json
 ```
 
-Recovery phải hoàn tất trong giới hạn task, tạo baseline mới và không đổi source
-CMD/APSPORT/IM/SBOBET/BTI.
+Recovery phải tạo baseline mới trong task limit và không đổi
+CMD/APSPORT/IM/SBOBET/BTI sources.
 
 ---
 
 # ROLE 2 — CMD WORKER (PRIORITY 1)
 
-## Mapping và mục tiêu
+## Mapping và invariant
 
-- Account: `CMD`
-- Bridge lobby/source: `CMD`
-- Exact tab: tab CMD `BasePage/home.aspx` đang mở; không dùng active tab.
-- Authority chỉ đến từ complete authenticated current-document `fc=1` response.
-- Page-call `baseline-requested`/ACK không phải evidence hoàn thành.
-- Recovery phải bounded retry khi `busy` hoặc chưa thấy matching `fc=1`, dùng đúng
-  frame/document/loader/session và dừng khi document/epoch bị retire.
-- Pre-baseline delta không được poison cursor làm full baseline hợp lệ bị loại.
+- Account/source: `CMD` / `CMD`
+- Exact tab: CMD `BasePage/home.aspx`, không active-tab fallback.
+- Authority chỉ từ complete authenticated current-document `fc=1` response.
+- `baseline-requested`, page ACK hoặc `busy` không phải completion evidence.
+- Recovery bounded theo exact frame/document/loader/session; retired document
+  dừng mọi late work.
+- Pre-baseline delta không poison committed full-baseline cursor.
 
-## Chỉ được sửa
+## Whitelist
 
 - `apps/api/src/chrome-bridge/cmd-http-adapter.ts`
 - `apps/api/src/chrome-bridge/cmd-http-adapter.test.ts`
 - `apps/chrome-extension/src/cmd-snapshot-poller.ts`
 - `apps/chrome-extension/src/cmd-snapshot-poller.test.ts`
-- `apps/chrome-extension/src/cmd-recovery-state.ts`
-- `apps/chrome-extension/src/cmd-recovery-state.test.ts`
+- optional `apps/chrome-extension/src/cmd-recovery-state.ts`
+- optional `apps/chrome-extension/src/cmd-recovery-state.test.ts`
 - `docs/superpowers/reports/five-provider/cmd.md`
-- ignored evidence: `.run/five-provider/cmd-runtime-evidence.json`
+- ignored evidence `.run/five-provider/cmd-runtime-evidence.json`
 
-Không sửa `network-observer.ts`, `background.ts`, contracts hoặc data plane. Nếu
-live evidence chỉ ra lỗi ở đó, ghi exact integration request cho root và tiếp tục
-adapter/poller work độc lập.
+Task: `docs/superpowers/tasks/five-provider/cmd.md`
 
-## Đọc riêng
+Không edit `network-observer.ts`, `background.ts`, contracts hoặc data plane.
+Gửi exact shared request cho root nếu cần wiring ngoài whitelist.
 
-- Task: `docs/superpowers/tasks/five-provider/cmd.md`
-- Report: `docs/superpowers/reports/five-provider/cmd.md`
-
-## Acceptance
+Acceptance after root round publication:
 
 ```powershell
 node scripts/verify-cmd-runtime.mjs 120000 .run/five-provider/cmd-runtime-evidence.json
@@ -252,37 +285,32 @@ node scripts/verify-cmd-runtime.mjs 120000 .run/five-provider/cmd-runtime-eviden
 
 # ROLE 3 — APSPORT/TSPORT WORKER (PRIORITY 1)
 
-## Mapping và mục tiêu
+## Mapping và invariant
 
-- User-facing account: `APSPORT`
-- Bridge lobby/adapter: `TSPORT`
-- Exact tab: tab APSPORT/TSPORT đang mở.
-- DOM chỉ cung cấp expected event identity/coverage; mọi authoritative price phải
-  đến từ fresh TSPORT event WebSocket.
-- Một DOM sweep có thể gồm nhiều snapshot `sweepComplete: false → true`; phải tích
-  lũy đủ expected IDs của cả sweep, không chỉ snapshot cuối.
-- Partial/invalid DOM không được xóa committed WS continuity.
-- Chỉ emit WS BASELINE khi fresh stream phủ toàn bộ expected IDs; sau đó chỉ nhận
-  same-generation WS DELTA. Newer OPEN phải invalidate authority cũ ngay.
+- User account: `APSPORT`; bridge/adapter: `TSPORT`.
+- Exact tab: APSPORT/TSPORT.
+- DOM chỉ cung cấp expected identity/coverage; authoritative quote chỉ từ fresh
+  TSPORT WebSocket.
+- Tích lũy toàn bộ bound DOM sweep `false → true`; partial/invalid sweep không
+  xóa committed WS continuity.
+- Chỉ WS full coverage emit `BASELINE`; same-generation frames sau đó emit
+  `DELTA`; newer `OPEN` invalidate authority cũ ngay.
 
-## Chỉ được sửa
+## Whitelist
 
 - `apps/api/src/chrome-bridge/tsport-ws-adapter.ts`
 - `apps/api/src/chrome-bridge/tsport-ws-adapter.test.ts`
 - optional `apps/api/src/chrome-bridge/tsport-authority-assembler.ts`
 - optional `apps/api/src/chrome-bridge/tsport-authority-assembler.test.ts`
 - `docs/superpowers/reports/five-provider/apsport.md`
-- ignored evidence: `.run/five-provider/apsport-runtime-evidence.json`
+- ignored evidence `.run/five-provider/apsport-runtime-evidence.json`
 
-Không sửa observer/background/data-plane. Gửi exact shared request cho root nếu
-same-tab socket reconnect hoặc bound DOM sweep wiring bị thiếu.
+Task: `docs/superpowers/tasks/five-provider/apsport.md`
 
-## Đọc riêng
+Không edit observer/background/data-plane. Gửi exact shared request cho root nếu
+same-tab socket reconnect hoặc bound DOM sweep wiring thiếu.
 
-- Task: `docs/superpowers/tasks/five-provider/apsport.md`
-- Report: `docs/superpowers/reports/five-provider/apsport.md`
-
-## Acceptance
+Acceptance after root round publication:
 
 ```powershell
 node scripts/verify-apsport-runtime.mjs 120000 .run/five-provider/apsport-runtime-evidence.json
@@ -292,33 +320,28 @@ node scripts/verify-apsport-runtime.mjs 120000 .run/five-provider/apsport-runtim
 
 # ROLE 4 — IM WORKER (PRIORITY 2)
 
-## Mapping và mục tiêu
+## Mapping và invariant
 
-- Account: `IM`
-- Bridge lobby/source: `IM`
-- Exact tab: tab IM đang mở.
-- Chuẩn hóa Hong Kong odds dương lớn hơn `1` tại đúng boundary IM; giữ đúng
-  negative odds và reject `0`, `NaN`, infinity, object/malformed value.
-- Chỉ commit baseline sau khi cả hai authenticated GetSE partitions có cùng
-  cutoff/generation và đúng request/document ownership.
-- Delta trước/giữa partitions phải replay đúng thứ tự; overflow/malformed/mismatch
-  phải poison generation fail-closed, không commit snapshot thiếu.
+- Account/source: `IM` / `IM`
+- Exact tab: IM.
+- Normalize finite positive Hong Kong odds `> 1` tại IM boundary; giữ valid Malay
+  odds và reject `0`, non-finite, object/malformed.
+- Chỉ commit khi hai authenticated GetSE partitions cùng cutoff/generation và
+  đúng request/document ownership.
+- Delta replay đúng order; overflow/malformed/mismatch poison generation.
 
-## Chỉ được sửa
+## Whitelist
 
 - `apps/api/src/chrome-bridge/im-http-adapter.ts`
 - `apps/api/src/chrome-bridge/im-http-adapter.test.ts`
 - `apps/api/src/providers/im/im-football-catalog-source.ts`
 - `apps/api/src/providers/im/im-football-catalog-source.test.ts`
 - `docs/superpowers/reports/five-provider/im.md`
-- ignored evidence: `.run/five-provider/im-runtime-evidence.json`
+- ignored evidence `.run/five-provider/im-runtime-evidence.json`
 
-## Đọc riêng
+Task: `docs/superpowers/tasks/five-provider/im.md`
 
-- Task: `docs/superpowers/tasks/five-provider/im.md`
-- Report: `docs/superpowers/reports/five-provider/im.md`
-
-## Acceptance
+Acceptance after root round publication:
 
 ```powershell
 node scripts/verify-im-runtime.mjs 120000 .run/five-provider/im-runtime-evidence.json
@@ -328,39 +351,33 @@ node scripts/verify-im-runtime.mjs 120000 .run/five-provider/im-runtime-evidence
 
 # ROLE 5 — SBOBET/KSPORT WORKER (PRIORITY 2)
 
-## Mapping và mục tiêu
+## Mapping và invariant
 
-- User-facing account: `SBOBET`
-- Bridge lobby/adapter: `KSPORT`
-- Exact tab: tab SBOBET/KSPORT đang mở.
-- Live/today full partitions phải ghép theo explicit recovery generation; receipt
-  order chỉ dùng ordering, không bắt hai partition có receipt sequence bằng nhau.
-- Recovery generation chỉ đổi tại explicit same-socket recovery attempt, không
-  suy ra từ STOMP message-id/arrival.
-- Pending delta phải giữ receipt order theo từng market; delta cũ hơn baseline
-  không được overwrite, delta mới hơn phải replay.
-- Malformed nonempty full partition không được biến thành authoritative empty.
-- Newer OPEN/implicit stream phải invalidate authority cũ; replay/retired stream
-  không được renew. Không persist raw KSPORT URL/header/body.
+- User account: `SBOBET`; bridge/adapter: `KSPORT`.
+- Exact tab: SBOBET/KSPORT.
+- Live/today full partitions pair bằng explicit recovery generation; receipt
+  sequence chỉ ordering.
+- Generation chỉ đổi tại explicit same-socket recovery attempt, không suy từ
+  STOMP message-id hoặc arrival.
+- Pending delta giữ per-market receipt order; malformed nonempty full không thành
+  authoritative empty.
+- Newer stream invalidates authority cũ; không persist raw URL/header/body.
 
-## Chỉ được sửa
+## Whitelist
 
 - `apps/api/src/chrome-bridge/ksport-ws-adapter.ts`
 - `apps/api/src/chrome-bridge/ksport-ws-adapter.test.ts`
 - optional `apps/api/src/chrome-bridge/ksport-baseline-generation.ts`
 - optional `apps/api/src/chrome-bridge/ksport-baseline-generation.test.ts`
 - `docs/superpowers/reports/five-provider/sbobet.md`
-- ignored evidence: `.run/five-provider/sbobet-runtime-evidence.json`
+- ignored evidence `.run/five-provider/sbobet-runtime-evidence.json`
 
-Không sửa observer/contracts/data-plane. Nếu explicit attempt metadata còn thiếu
-ở shared wiring, ghi exact failing test/symbol cho root; không tự widen whitelist.
+Task: `docs/superpowers/tasks/five-provider/sbobet.md`
 
-## Đọc riêng
+Không edit observer/contracts/data-plane. Gửi exact shared request cho root nếu
+explicit recovery metadata thiếu.
 
-- Task: `docs/superpowers/tasks/five-provider/sbobet.md`
-- Report: `docs/superpowers/reports/five-provider/sbobet.md`
-
-## Acceptance
+Acceptance after root round publication:
 
 ```powershell
 node scripts/verify-sbobet-runtime.mjs 120000 .run/five-provider/sbobet-runtime-evidence.json
@@ -368,13 +385,9 @@ node scripts/verify-sbobet-runtime.mjs 120000 .run/five-provider/sbobet-runtime-
 
 ---
 
-# ROOT/WORKER HANDOFF RULE
+# ROOT HANDOFF
 
-Root phải commit/build shared base, hoàn tất legacy→managed-v2 handoff và reload
-đúng extension build trước khi năm prompt được chạy. Worker gặp base chưa sẵn sàng,
-missing barrier hoặc shared coordinator defect phải báo exact blocker cho root và
-giữ `IN_PROGRESS`; worker không được thay thế bước live bằng unit test/report.
-
-Sau khi cả năm worker có `DONE` trên cùng stable build identity, root mới chạy
-restart/reload reproof và simultaneous six-provider soak 10 phút. Soak cuối không
-thay thế acceptance 120 giây mà từng worker bắt buộc tự chạy.
+Root theo `docs/superpowers/tasks/five-provider/integrator.md`: chờ năm
+`LOCAL_GREEN`, freeze, combined deploy một lần, publish round/build, điều phối
+stop-all khi fail và accept round khi cả năm pass. Worker không thay thế live
+acceptance bằng patch/report và root không chạy acceptance thay worker.

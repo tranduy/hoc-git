@@ -10,7 +10,6 @@ import { resolveStackEntries } from "./stack-paths.mjs";
 import { cleanupStaleStack, createManagedStackState, removeStackState, writeStackState } from "./stack-state.mjs";
 import { ensureChromeBridgeKey } from "./chrome-bridge-key.mjs";
 import { resolveApiNodeArgs, resolveLiveStackEnvironment } from "./live-stack-config.mjs";
-import { cleanupOrphanedAutomationBrowsers } from "./automation-browser-cleanup.mjs";
 import { enforceToolResourceRetention } from "./resource-retention.mjs";
 import { resolveLocalAppData } from "./local-app-data.mjs";
 import { computeBuildIdentity } from "./five-provider-coordinator.mjs";
@@ -58,7 +57,6 @@ function startDependencies(overrides = {}) {
     loadEnvFile: (path) => process.loadEnvFile(path),
     ensureChromeBridgeKey,
     readFile,
-    cleanupOrphanedAutomationBrowsers,
     resolveLocalAppData,
     enforceToolResourceRetention,
     computeBuildIdentity,
@@ -173,8 +171,6 @@ export async function startLiveStack(options = {}) {
 
   const chromeBridgeKey = environmentSource.CHROME_BRIDGE_KEY?.trim() ||
     await dependencies.ensureChromeBridgeKey(resolve(repositoryRoot, ".auth", "chrome-bridge.key"));
-  if (stopping) return { stopped: true };
-  await dependencies.cleanupOrphanedAutomationBrowsers();
   if (stopping) return { stopped: true };
   const localAppData = dependencies.resolveLocalAppData();
   if (localAppData === null) throw new Error("LOCAL_APP_DATA_REQUIRED");

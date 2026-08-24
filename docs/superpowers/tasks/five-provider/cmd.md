@@ -51,6 +51,8 @@ Implement or harden a provider-local bounded state machine that the integrator c
 ```powershell
 npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/cmd-http-adapter.test.ts
 npm.cmd test --workspace @tool-chenh/chrome-extension -- src/cmd-snapshot-poller.test.ts src/cmd-recovery-state.test.ts
+npm.cmd run typecheck --workspace @tool-chenh/api -- --pretty false
+npm.cmd run typecheck --workspace @tool-chenh/chrome-extension -- --pretty false
 git diff --check -- apps/api/src/chrome-bridge/cmd-http-adapter.ts apps/api/src/chrome-bridge/cmd-http-adapter.test.ts apps/chrome-extension/src/cmd-snapshot-poller.ts apps/chrome-extension/src/cmd-snapshot-poller.test.ts apps/chrome-extension/src/cmd-recovery-state.ts apps/chrome-extension/src/cmd-recovery-state.test.ts
 ```
 
@@ -68,9 +70,20 @@ The report must specify the observer wiring for:
 
 The common base owns observer wiring; if that shared invariant fails, send the exact failing test/symbol to the root while continuing provider-local work.
 
-## End-to-End Realtime Gate
+## Phase A — LOCAL_GREEN
 
-After focused GREEN, perform the exact common deployment transaction verbatim, then begin the CMD acceptance lease with `begin-acceptance CMD <worker> chrome:CMD:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
+After focused GREEN, both affected workspace typechecks, scoped diff check, and
+redacted secret scan, update only the CMD report to `LOCAL_GREEN` while the CMD
+edit lease remains live. Release it in `finally`, notify root with
+`LOCAL_GREEN CMD`, and wait without editing, building, restarting, reloading,
+recovering, or beginning acceptance. CMD never claims a deployment lease.
+
+## Phase C — End-to-End Realtime Gate
+
+Only after root publishes `ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>`, resolve
+the exact current CMD source and begin the acceptance lease with
+`begin-acceptance CMD <worker> chrome:CMD:<exact-tab-id>`. Always call
+`end-acceptance` in `finally`:
 
 Run the provider sampler without building:
 
@@ -83,9 +96,14 @@ node scripts/verify-cmd-runtime.mjs 120000 .run/five-provider/cmd-runtime-eviden
 3. Sample for at least 120 seconds and record at least three authenticated CMD provider responses/cursor advances, including the scheduled full reconciliation cadence.
 4. Record an ordered semantic delta when emitted and prove a pre-cutoff/pre-baseline delta cannot roll back the committed baseline.
 5. Issue one exact addressed CMD snapshot, then prove it is single-flight, bounded, tied to the same leased tab/document, and leaves every other provider source unchanged. Do not use global maintenance.
-6. Update the report to `DONE` only when all gates pass. On a failed gate keep
-   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
-   the worker loop. `BLOCKED` is legal only after proving a genuine external
-   provider/auth failure that in-scope code and same-tab recovery cannot fix.
+6. If all gates pass, end acceptance and report
+   `ACCEPTANCE_PASS <ROUND_ID> CMD`; do not edit the report to `DONE` yet.
+7. On any failure, end acceptance, report
+   `ACCEPTANCE_FAIL <ROUND_ID> CMD <REDACTED_REASON>`, and obey root's
+   `STOP_ACCEPTANCE`. Wait for all leases to end before returning to
+   `IN_PROGRESS` and provider-local TDD.
+8. Only after root announces `ROUND_ACCEPTED` for this round may CMD acquire a
+   new edit lease and update its report to `DONE`. `BLOCKED` is legal only for a
+   proven external provider/auth failure.
 
 Do not attach DevTools/CDP, use active-tab fallback, or touch another provider. Unit tests without this live gate are not completion.

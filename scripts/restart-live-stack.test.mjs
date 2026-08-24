@@ -510,6 +510,40 @@ test("finds a late instance-marked child after it is no longer parent-linked", a
   assert.equal(harness.actions.spawns, 0);
 });
 
+test("rejects a marked successor spawned during tracked-child inspection", async () => {
+  const dying = processIdentity(13, 999, ["C:\\exact-worktree\\dying-child.js"]);
+  const successor = processIdentity(14, 999, ["C:\\exact-worktree\\successor-child.js"]);
+  let postShutdownScans = 0;
+  const harness = makeHarness({
+    listProcessTree: (rootPid, runtime, { oldState }) => rootPid === oldState.launcher.pid && runtime.oldAlive
+      ? [oldState.launcher, oldState.api, oldState.web] : [],
+    listInstanceProcesses: (instanceId, runtime, { oldState }) => {
+      if (instanceId !== oldState.instanceId) return [];
+      if (runtime.oldAlive) return [oldState.api, oldState.web];
+      postShutdownScans += 1;
+      if (runtime.successorAlive) return [successor];
+      if (runtime.dyingAlive) return [dying];
+      if (postShutdownScans >= 2) {
+        runtime.dyingAlive = true;
+        return [dying];
+      }
+      return [];
+    },
+    inspectProcess: (pid, runtime) => {
+      if (pid === dying.pid && runtime.dyingAlive) {
+        runtime.dyingAlive = false;
+        runtime.successorAlive = true;
+        return null;
+      }
+      if (pid === successor.pid && runtime.successorAlive) return successor;
+      return undefined;
+    }
+  });
+  await assert.rejects(restartLiveStack({ leaseToken: TOKEN, repositoryRoot: harness.repositoryRoot,
+    timeoutMs: 2, pollIntervalMs: 1 }, harness.deps), /OLD_STACK_DID_NOT_CLEAR/u);
+  assert.equal(harness.actions.spawns, 0);
+});
+
 test("cleans the seeded instance when new state publication times out", async () => {
   const harness = makeHarness();
   let spawnInput;

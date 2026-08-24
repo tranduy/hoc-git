@@ -42,6 +42,7 @@ Use a separate `ksport-baseline-generation` unit only if it keeps generation pai
 
 ```powershell
 npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/ksport-ws-adapter.test.ts src/chrome-bridge/ksport-baseline-generation.test.ts
+npm.cmd run typecheck --workspace @tool-chenh/api -- --pretty false
 git diff --check -- apps/api/src/chrome-bridge/ksport-ws-adapter.ts apps/api/src/chrome-bridge/ksport-ws-adapter.test.ts apps/api/src/chrome-bridge/ksport-baseline-generation.ts apps/api/src/chrome-bridge/ksport-baseline-generation.test.ts
 ```
 
@@ -51,9 +52,20 @@ If the optional generation files are unnecessary, do not create them and omit th
 
 The common base must carry the explicit recovery generation. If runtime proves that shared wiring defective, send the exact failing test/symbol to the root while continuing provider-local work.
 
-## End-to-End Realtime Gate
+## Phase A — LOCAL_GREEN
 
-After focused GREEN, perform the exact common deployment transaction verbatim, then begin the SBOBET acceptance lease with `begin-acceptance SBOBET <worker> chrome:KSPORT:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
+After focused GREEN, API typecheck, scoped diff check, and redacted secret scan,
+update only the SBOBET report to `LOCAL_GREEN` while the edit lease remains live.
+Release it in `finally`, notify root with `LOCAL_GREEN SBOBET`, and wait without
+editing, building, restarting, reloading, recovering, or beginning acceptance.
+SBOBET never claims a deployment lease.
+
+## Phase C — End-to-End Realtime Gate
+
+Only after root publishes `ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>`, resolve
+the exact current KSPORT source and begin the acceptance lease with
+`begin-acceptance SBOBET <worker> chrome:KSPORT:<exact-tab-id>`. Always call
+`end-acceptance` in `finally`:
 
 Run the provider sampler without building:
 
@@ -66,9 +78,14 @@ node scripts/verify-sbobet-runtime.mjs 120000 .run/five-provider/sbobet-runtime-
 3. Sample for at least 120 seconds and record at least three current KSPORT evidence/receipt advances and a semantic delta when emitted.
 4. Prove pending-delta overflow/gap/close suppresses liveness until a strictly newer full pair commits.
 5. Trigger one SBOBET-targeted recovery, require a current baseline within 90 seconds, and prove all other provider sources remain unchanged.
-6. Update the report to `DONE` only if every gate passes. On a failed gate keep
-   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
-   the worker loop. `BLOCKED` is legal only after proving a genuine external
-   provider/auth failure that in-scope code and same-tab recovery cannot fix.
+6. If every gate passes, end acceptance and report
+   `ACCEPTANCE_PASS <ROUND_ID> SBOBET`; do not edit the report to `DONE` yet.
+7. On any failure, end acceptance, report
+   `ACCEPTANCE_FAIL <ROUND_ID> SBOBET <REDACTED_REASON>`, and obey root's
+   `STOP_ACCEPTANCE`. Wait for all leases to end before returning to
+   `IN_PROGRESS` and provider-local TDD.
+8. Only after root announces `ROUND_ACCEPTED` for this round may SBOBET acquire a
+   new edit lease and update its report to `DONE`. `BLOCKED` is legal only for a
+   proven external provider/auth failure.
 
 Do not attach DevTools/CDP, use active-tab fallback, inspect launch/auth data, or touch another provider. Unit tests without this live gate are not completion.

@@ -232,6 +232,54 @@ function observedIdentity(pid, parentPid) {
     commandLine: `"${process.execPath}" "entry-${pid}.mjs"`, birthMarker: `birth-${pid}` };
 }
 
+test("managed start leaves another checkout-profile browser untouched", async () => {
+  const api = new FastChild(751, true);
+  const web = new FastChild(752, false);
+  const spawned = [api, web];
+  const timer = { unref: () => undefined };
+  const buildIdentity = `sha256:${"b".repeat(64)}`;
+  const instanceId = "instance-no-browser-cleanup";
+  const identities = new Map([
+    [process.pid, observedIdentity(process.pid, 1)],
+    [api.pid, observedIdentity(api.pid, process.pid)],
+    [web.pid, observedIdentity(web.pid, process.pid)]
+  ]);
+
+  const result = await startLiveStack({
+    repositoryRoot: "C:\\exact-worktree",
+    environment: {
+      CHROME_BRIDGE_KEY: "bridge-key",
+      TOOL_CHENH_STACK_INSTANCE_ID: instanceId,
+      TOOL_CHENH_STACK_SHUTDOWN_TOKEN: "shutdown-token-no-browser-cleanup"
+    },
+    dependencies: {
+      cleanupStaleStack: async () => undefined,
+      existsSync: (path) => !path.endsWith(".env"),
+      readFile: async () => { throw Object.assign(new Error("absent"), { code: "ENOENT" }); },
+      cleanupOrphanedAutomationBrowsers: async () => {
+        throw new Error("BROAD_BROWSER_CLEANUP_INVOKED");
+      },
+      resolveLocalAppData: () => "C:\\local-app-data",
+      enforceToolResourceRetention: async () => ({ removedFiles: 0, reclaimedBytes: 0 }),
+      computeBuildIdentity: async () => buildIdentity,
+      spawn: () => spawned.shift(),
+      inspectProcessIdentity: async (pid) => identities.get(pid),
+      createManagedStackState: (state) => ({ version: 2, ...state }),
+      writeStackState: async () => undefined,
+      waitForFixtureStack: async () => undefined,
+      setInterval: () => timer,
+      clearInterval: () => undefined,
+      registerSignal: () => undefined,
+      stdout: { write: () => undefined },
+      stderr: { write: () => undefined },
+      setExitCode: () => undefined
+    }
+  });
+
+  assert.deepEqual(result, { instanceId, buildIdentity });
+  assert.equal(spawned.length, 0);
+});
+
 async function runStartSignalFixture(signalPhase) {
   const api = new FastChild(801, true);
   const web = new FastChild(802, false);

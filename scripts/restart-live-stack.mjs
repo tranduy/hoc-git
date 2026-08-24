@@ -459,12 +459,23 @@ function addTrackedIdentities(tracked, entries) {
   if (!Array.isArray(entries) || !entries.every(validObservedIdentity)) {
     throw new Error("STACK_PROCESS_TREE_NOT_PROVEN");
   }
-  for (const entry of entries) tracked.set(identityKey(entry), entry);
+  let newIdentities = 0;
+  for (const entry of entries) {
+    const key = identityKey(entry);
+    if (!tracked.has(key)) newIdentities += 1;
+    tracked.set(key, entry);
+  }
+  return newIdentities;
 }
 
 async function scanOwnedProcesses(root, instanceId, tracked, dependencies) {
-  if (root !== null) addTrackedIdentities(tracked, await dependencies.listProcessTree(root.pid));
-  addTrackedIdentities(tracked, await dependencies.listInstanceProcesses(instanceId));
+  const treeEntries = root === null ? [] : await dependencies.listProcessTree(root.pid);
+  const instanceEntries = await dependencies.listInstanceProcesses(instanceId);
+  return {
+    newIdentities: addTrackedIdentities(tracked, treeEntries) +
+      addTrackedIdentities(tracked, instanceEntries),
+    observedIdentities: treeEntries.length + instanceEntries.length
+  };
 }
 
 async function initialProcessTree(state, stack, dependencies) {
@@ -486,14 +497,20 @@ async function initialProcessTree(state, stack, dependencies) {
 async function waitForProcessTreeClear(root, instanceId, tracked, dependencies, attempts, pollIntervalMs) {
   let clearObservations = 0;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    await scanOwnedProcesses(root, instanceId, tracked, dependencies);
+    const beforeInspection = await scanOwnedProcesses(root, instanceId, tracked, dependencies);
+    if (beforeInspection.newIdentities > 0) clearObservations = 0;
     const expected = [...tracked.values()];
     const observed = await Promise.all(expected.map((entry) => dependencies.inspectProcess(entry.pid)));
     const exactProcessAlive = observed.some((entry, index) => sameRuntimeIdentity(expected[index], entry));
+    const afterDeaths = exactProcessAlive ? { newIdentities: 0, observedIdentities: 0 }
+      : await scanOwnedProcesses(root, instanceId, tracked, dependencies);
+    if (afterDeaths.newIdentities > 0) clearObservations = 0;
     const [apiPortClear, webPortClear] = await Promise.all([
       dependencies.isPortClear("127.0.0.1", 4310), dependencies.isPortClear("127.0.0.1", 4311)
     ]);
-    if (!exactProcessAlive && apiPortClear && webPortClear) {
+    const stableClear = !exactProcessAlive && beforeInspection.observedIdentities === 0 &&
+      afterDeaths.observedIdentities === 0 && apiPortClear && webPortClear;
+    if (stableClear) {
       clearObservations += 1;
       if (clearObservations >= 2) return true;
     } else clearObservations = 0;

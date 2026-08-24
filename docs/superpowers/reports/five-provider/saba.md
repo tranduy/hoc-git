@@ -1,8 +1,12 @@
 # SABA Provider Work Log
 
-Status: `IN_PROGRESS` — provider-local tests are not runtime acceptance. A future worker must continue until the built main application satisfies every gate in `common.md`.
+Status: `IN_PROGRESS` — rerun provider-local checks, report `LOCAL_GREEN`, wait
+for root's combined deployment, then the SABA worker must run its own live
+acceptance. Only the accepted round permits `DONE`.
 
-Historical checkpoint only: any patch-only/build/runtime restrictions recorded below describe the prior worker run and are superseded by the current end-to-end worker loop in `common.md`.
+Historical checkpoint only: all coordination/path/build/runtime ownership text
+below is superseded by the current `common.md`; technical evidence remains
+reference material.
 
 ## Worker and base
 
@@ -74,14 +78,16 @@ No SABA type error was reported. The CMD/APSPORT workers or integrator must reso
 - Close, provider refusal, and provider revision/sequence gap invalidate continuity. The same or older stream cannot regain authority; a strictly newer same-epoch stream can establish a fresh baseline.
 - A current post-baseline price frame emits WS `DELTA` against the committed generation.
 - Identical completed-baseline and post-baseline data evidence emits no duplicate update and does not remove or advance the committed generation.
-- The provider-local gap tests assert the exact `PROVIDER_STREAM_GAP` invalidation output consumed by the shared data plane. Shared data-plane/live acceptance remains integrator-owned.
+- The provider-local gap tests assert the exact `PROVIDER_STREAM_GAP` invalidation output consumed by the shared data plane. Shared data-plane source remains root-owned; live SABA acceptance remains the SABA worker's responsibility after root's combined deployment.
 
 Shared integration request: none
 
 ## Concerns and external blockers
 
 - API-wide typecheck is currently blocked by the out-of-whitelist CMD and TSPORT test errors described above.
-- The historical worker performed no build or live SABA acceptance. The current SABA worker must build/restart/reload under the deployment lease and prove its exact-tab runtime under an acceptance lease.
+- The historical worker performed no build or live SABA acceptance. Root alone
+  performs the combined build/restart/reload; the current SABA worker must prove
+  exact-tab runtime under its acceptance lease after root publishes the round.
 - Independent read-only review found no Critical code issues. Its only Important item was the required report, now supplied; its non-blocking note was to retain integrator coverage that generic gap invalidation makes the data plane non-`LIVE`.
 
 ## Scope and safety confirmation

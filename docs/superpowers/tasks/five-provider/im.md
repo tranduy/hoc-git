@@ -46,12 +46,24 @@ The two GetSE partitions must still share one exact cutoff/generation and commit
 
 ```powershell
 npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/im-http-adapter.test.ts src/providers/im/im-football-catalog-source.test.ts
+npm.cmd run typecheck --workspace @tool-chenh/api -- --pretty false
 git diff --check -- apps/api/src/chrome-bridge/im-http-adapter.ts apps/api/src/chrome-bridge/im-http-adapter.test.ts apps/api/src/providers/im/im-football-catalog-source.ts apps/api/src/providers/im/im-football-catalog-source.test.ts
 ```
 
-## End-to-End Realtime Gate
+## Phase A — LOCAL_GREEN
 
-After focused GREEN, perform the exact common deployment transaction verbatim, then begin the IM acceptance lease with `begin-acceptance IM <worker> chrome:IM:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
+After focused GREEN, API typecheck, scoped diff check, and redacted secret scan,
+update only the IM report to `LOCAL_GREEN` while the edit lease remains live.
+Release it in `finally`, notify root with `LOCAL_GREEN IM`, and wait without
+editing, building, restarting, reloading, recovering, or beginning acceptance.
+IM never claims a deployment lease.
+
+## Phase C — End-to-End Realtime Gate
+
+Only after root publishes `ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>`, resolve
+the exact current IM source and begin the acceptance lease with
+`begin-acceptance IM <worker> chrome:IM:<exact-tab-id>`. Always call
+`end-acceptance` in `finally`:
 
 Run the provider sampler without building:
 
@@ -64,9 +76,14 @@ node scripts/verify-im-runtime.mjs 120000 .run/five-provider/im-runtime-evidence
 3. Sample for at least 120 seconds and record at least three authenticated provider response/cursor advances.
 4. Record an ordered semantic delta when emitted; prove pre-cutoff deltas cannot roll back the committed generation and malformed deltas cannot renew liveness.
 5. Trigger one IM-targeted reconciliation and prove the other providers' source identities are unchanged.
-6. Update the report to `DONE` only if every gate passes. On a failed gate keep
-   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
-   the worker loop. `BLOCKED` is legal only after proving a genuine external
-   provider/auth failure that in-scope code and same-tab recovery cannot fix.
+6. If every gate passes, end acceptance and report
+   `ACCEPTANCE_PASS <ROUND_ID> IM`; do not edit the report to `DONE` yet.
+7. On any failure, end acceptance, report
+   `ACCEPTANCE_FAIL <ROUND_ID> IM <REDACTED_REASON>`, and obey root's
+   `STOP_ACCEPTANCE`. Wait for all leases to end before returning to
+   `IN_PROGRESS` and provider-local TDD.
+8. Only after root announces `ROUND_ACCEPTED` for this round may IM acquire a new
+   edit lease and update its report to `DONE`. `BLOCKED` is legal only for a
+   proven external provider/auth failure.
 
 Do not attach DevTools/CDP, use active-tab fallback, inspect raw provider bodies, or touch another provider. Unit tests without this live gate are not completion.

@@ -1,8 +1,12 @@
 # SBOBET/KSPORT Provider Work Log
 
-Status: `IN_PROGRESS` — provider-local tests are not runtime acceptance. A future worker must continue until the built main application satisfies every gate in `common.md`.
+Status: `IN_PROGRESS` — rerun provider-local checks, report `LOCAL_GREEN`, wait
+for root's combined deployment, then the SBOBET worker must run its own live
+acceptance. Only the accepted round permits `DONE`.
 
-Historical checkpoint only: any patch-only/build/runtime restrictions recorded below describe the prior worker run and are superseded by the current end-to-end worker loop in `common.md`.
+Historical checkpoint only: all coordination/path/build/runtime ownership text
+below is superseded by the current `common.md`; technical evidence remains
+reference material.
 
 ## Worker and base
 
@@ -94,7 +98,9 @@ Result: 1 test file passed, exactly 43 tests passed, 0 failed.
 ## Concerns and external blockers
 
 - Shared contract/observer wiring above is required before current live KSPORT WS traffic can establish or renew authority; without it the adapter intentionally fails closed.
-- No provider-local runtime blocker remains in the focused fixture suite. Live page behavior, build output, extension forwarding, shared authority integration, and browser/runtime acceptance remain for the integrator.
+- No historical provider-local runtime blocker remained in the focused fixture
+  suite. Root owns build output and shared integration; the SBOBET worker owns
+  fresh exact-provider browser/runtime acceptance after the combined deployment.
 
 ## Scope and safety confirmation
 

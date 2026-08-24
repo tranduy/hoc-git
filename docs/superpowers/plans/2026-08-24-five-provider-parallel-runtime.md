@@ -1,13 +1,34 @@
 # Five-Provider End-to-End Parallel Runtime Plan
 
 > Use `systematic-debugging`, `test-driven-development`, and
-> `verification-before-completion`. Tests are a checkpoint; realtime acceptance
-> from the currently deployed main application is the outcome.
+> `verification-before-completion`. Provider tests establish `LOCAL_GREEN`;
+> fresh live acceptance on root's combined build establishes `DONE`.
 
-## Goal
+**Goal:** Bring SABA, CMD, APSPORT/TSPORT, IM, and SBOBET/KSPORT to live `DONE`
+while BTI remains `ACTIVE`.
 
-Run five Codex workers concurrently in one repository checkout and branch. Each owns one
-already-open provider tab from diagnosis through live proof:
+**Architecture:** Five workers perform disjoint provider-local TDD in parallel and
+wait at `LOCAL_GREEN`. Root freezes the shared root checkout and performs one
+combined deployment per round. The same five workers then run concurrent
+120-second acceptance against the one published build. Any failure stops the
+whole round, triggers a targeted fix, and causes one new combined deployment.
+
+**Repository:** `F:\0. PROJECT\tool-chenh`
+
+**Spec:** `docs/superpowers/specs/2026-08-24-five-provider-parallel-runtime-design.md`
+
+## Global Constraints
+
+- Every tool call uses the exact repository root; never use the linked worktree.
+- Root alone owns Git, shared files, build, restart, and extension reload.
+- Workers edit only provider whitelists, use no Git mutations, and never deploy.
+- No active-tab fallback, DevTools/CDP, provider-tab navigation/reload, or secret
+  access is allowed.
+- BTI stays `ACTIVE` through every provider acceptance.
+- `LOCAL_GREEN` and provisional acceptance pass are nonterminal. Live `DONE` is
+  the only successful provider terminal state.
+
+## Role Matrix
 
 | Worker | Account | Bridge lobby | Priority |
 | --- | --- | --- | --- |
@@ -17,95 +38,114 @@ already-open provider tab from diagnosis through live proof:
 | IM | IM | IM | 2 |
 | SBOBET | SBOBET | KSPORT | 2 |
 
-BTI stays `ACTIVE` as the regression control. Total elapsed time should approach
-the slowest worker, not the sum of the five tasks.
+Priority controls root review order, not permission to race deployment. SABA,
+CMD, and APSPORT blockers are reviewed first; IM and SBOBET still perform local
+work concurrently.
 
-## Architecture
+## Task 1 — Root Preparation
 
-- All sessions use `F:\0. PROJECT\tool-chenh`
-  on `feat/six-provider-realtime-feed`.
-- Provider workers own disjoint provider files and their exact provider runtime.
-- Root owns shared source, Git index/history, cross-provider review, and the final
-  combined six-provider gate.
-- Five provider edit leases may coexist. Build/restart/reload uses one exclusive
-  deployment lease over a stable source tree. Acceptance leases pin exact
-  source/tab and deployed artifact identity and may coexist for all providers.
-- A worker loops diagnosis -> RED -> fix -> GREEN -> deploy -> exact-tab recovery
-  -> live sampler until `DONE`; it never pauses at a patch/report handoff.
+- [ ] Work only in `F:\0. PROJECT\tool-chenh` and confirm all prompt/task/report
+  paths resolve from that root.
+- [ ] Complete any root-only legacy-to-managed-v2 handoff before worker prompts.
+- [ ] Keep five provider pages in five distinct tabs and confirm the loaded
+  unpacked extension belongs to the repository-root `dist` path.
+- [ ] Issue the five one-line prompts from `proccess.md`.
 
-The binding documents are:
+## Task 2 — Concurrent Provider-Local TDD
 
-- `docs/superpowers/specs/2026-08-24-five-provider-parallel-runtime-design.md`
-- `docs/superpowers/tasks/five-provider/common.md`
-- `docs/superpowers/tasks/five-provider/ownership.md`
-- one provider task file and one provider report.
+Each provider worker completes these steps only inside its whitelist:
 
-## Base Preparation — Root
+- [ ] Read `proccess.md`, `common.md`, `ownership.md`, the spec, this plan, the
+  provider task, and the provider report in order.
+- [ ] Inspect exact provider state and diagnose the first failing invariant
+  without runtime mutation.
+- [ ] Acquire the provider edit lease before writing the focused RED test.
+- [ ] Run RED, apply the minimal provider-local fix, then run GREEN, all affected
+  typechecks, scoped diff check, and redacted secret scan while the lease lives.
+- [ ] Record exact evidence and any shared integration request in the provider
+  report, set status `LOCAL_GREEN`, and end the edit lease in `finally`.
+- [ ] Notify root with `LOCAL_GREEN <PROVIDER>` and wait without editing,
+  accepting, recovering, building, restarting, or reloading.
 
-- [ ] Close shared authority/recovery defects with focused RED/GREEN tests.
-- [ ] Make the coordinator fail closed and pin acceptance to exact source ID and
-  deterministic deployed artifact hash.
-- [ ] Make runtime samplers require `ACTIVE` authority, `ACTIVE` catalog,
-  nonempty authoritative catalog, provider evidence advances, exact source/tab,
-  current build identity, and no unrelated source replacement.
-- [ ] Run provider/shared regressions, complete typechecks, complete builds,
-  diff-check, and credential/raw-payload scan.
-- [ ] Under the root integration lease, commit one coherent base.
-- [ ] Under a deployment lease, build, restart the managed stack from that commit,
-  reload that repository checkout's unpacked extension, and publish the artifact identity.
-- [ ] If the pre-base runtime still uses legacy stack state, root alone validates
-  the exact process tree and performs the one-time handoff to managed state v2;
-  provider workers never inspect or mutate `.auth` state.
-- [ ] Resolve the five exact current source IDs before starting acceptance.
+Root handles exact shared integration requests while local work runs. A root
+shared edit invalidates affected provider checkpoints; those workers rerun their
+local verification and report `LOCAL_GREEN` again.
 
-## Five Concurrent Provider Loops
+## Task 3 — Freeze the Combined Tree
 
-Each worker performs all items below for only its provider:
+- [ ] Confirm all five current reports are `LOCAL_GREEN`.
+- [ ] Resolve every required shared integration request.
+- [ ] Review provider/shared diffs, focused results, typechecks, and secret scans.
+- [ ] Confirm coordinator status has no deployment, edit, or acceptance lease.
+- [ ] Choose a unique round ID and announce
+  `FREEZE_FOR_COMBINED_DEPLOY <ROUND_ID>`.
+- [ ] Recheck the lease-free state immediately before claiming deployment.
 
-- [ ] Confirm the exact provider tab/source and acquire a short provider edit lease.
-- [ ] Reproduce the first failing invariant with a focused test or redacted runtime
-  observation; implement the smallest bounded fix.
-- [ ] Run provider focused tests, typecheck, diff-check, and secret scan while the
-  provider edit lease is still held; release it in `finally` only after those checks.
-- [ ] Renew the exact live lease token before any guarded step that could exhaust its
-  remaining TTL; if renewal fails, stop immediately instead of continuing as owner.
-- [ ] Acquire the exclusive deployment lease, build/restart/reload the main app,
-  verify `/api/health` reports the resulting artifact identity, then release it.
-  Use the exact transaction in `common.md`: `npm.cmd run build`, export the live
-  lease as `TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN`, run zero-argument
-  `node scripts/restart-live-stack.mjs`, and reload only this repository checkout's
-  `apps/chrome-extension/dist` card.
-- [ ] Acquire an acceptance lease with the exact source ID and run the provider
-  sampler. Always end acceptance before returning to source edits.
-- [ ] Require a current authoritative baseline, three provider-native evidence
-  advances, semantic price/status movement when emitted, and provider-targeted
-  recovery to a strictly newer baseline without replacing another source.
-- [ ] Update only the provider report. `DONE` is legal only when all live gates
-  pass. If a gate fails, continue the loop. `BLOCKED` requires proven external
-  auth/provider failure after in-scope alternatives are exhausted.
+The freeze is a root message, not a new coordinator feature. Workers make no
+tracked edit until the round fails or is accepted.
 
-## Root Integration While Workers Run
+## Task 4 — Root-Only Combined Deployment
 
-- [ ] Review provider diffs continuously and fix shared seams with integration RED
-  tests; do not turn workers into patch-only reporters.
-- [ ] Use the root integration lease around every Git stage/commit operation so a
-  provider edit cannot begin between status review and commit.
-- [ ] Reject any evidence produced from an expired lease, different source/tab,
-  different artifact identity, bridge heartbeat alone, replay, unchanged DOM,
-  or control acknowledgement.
-- [ ] Keep all five provider tabs separate; never use active-tab fallback or attach
-  competing DevTools/CDP ownership.
+- [ ] Root claims
+  `node scripts/five-provider-coordinator.mjs claim-deploy SABA root-integrator 1800000`.
+  The SABA label is coordination-only and grants no provider ownership.
+- [ ] Root runs one `npm.cmd run build` for the whole tree.
+- [ ] Root computes the aggregate build identity.
+- [ ] Root exports the exact token as `TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN` and
+  runs zero-argument `node scripts/restart-live-stack.mjs`.
+- [ ] Root reloads exactly
+  `F:\0. PROJECT\tool-chenh\apps\chrome-extension\dist` once and does not
+  reload/navigate provider tabs or another extension.
+- [ ] Root verifies `/api/health.buildIdentity`, releases the deployment lease,
+  and confirms `lastDeployment` records the combined artifact.
+- [ ] Root publishes `ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>`.
 
-## Final Six-Provider Gate
+No provider worker performs any item in this task. There is no stable barrier and
+no per-worker deployment.
 
-- [ ] All five provider reports are `DONE` from pinned live acceptance.
-- [ ] BTI remains `ACTIVE` throughout.
-- [ ] Restart API and reload the extension once from the final artifact; all five
-  providers establish new non-replayed authoritative baselines.
-- [ ] Run the simultaneous ten-minute six-provider soak and retain redacted
-  evidence of authority/freshness/cursor progression and cross-provider isolation.
-- [ ] Report exact commits, artifact identity, tests/builds, five provider verdicts,
-  BTI status, and any real external blocker.
+## Task 5 — Concurrent Provider Acceptance
 
-Provider-local GREEN, a report, or any `READY_FOR_INTEGRATION` wording is never a
-completion state.
+Each worker performs the following against the same published round:
+
+- [ ] Resolve the exact current provider source ID.
+- [ ] Begin the provider acceptance lease with that source ID.
+- [ ] Run the provider's exact sampler for at least 120 seconds without build or
+  reload.
+- [ ] Prove pinned source/tab/build, `ACTIVE` authority and catalog, current
+  baseline, three provider-native evidence advances, semantic movement when
+  emitted, exact-source recovery isolation, and BTI `ACTIVE` throughout.
+- [ ] End the acceptance lease in `finally`.
+- [ ] On success send `ACCEPTANCE_PASS <ROUND_ID> <PROVIDER>` and wait without
+  editing the report to `DONE`.
+
+Root performs no build, restart, reload, edit, stage, or commit while acceptance
+leases are active.
+
+## Task 6 — Failure Round
+
+On the first failed provider gate:
+
+- [ ] The worker ends its lease and sends
+  `ACCEPTANCE_FAIL <ROUND_ID> <PROVIDER> <REDACTED_REASON>`.
+- [ ] Root broadcasts `STOP_ACCEPTANCE <ROUND_ID>`.
+- [ ] All five workers stop sampling, end leases in `finally`, and discard the
+  round for completion purposes.
+- [ ] Root waits for zero acceptance/edit leases, then unfreezes only failed
+  providers and required root-owned shared work.
+- [ ] Failed providers return to `IN_PROGRESS`, add a fresh RED, fix, verify, and
+  report `LOCAL_GREEN` again.
+- [ ] Root repeats Tasks 3–5 with a new round and one new combined deployment.
+- [ ] All five workers rerun acceptance; no old build identity, source binding,
+  lease, or evidence is reused.
+
+## Task 7 — Successful Round and Reports
+
+- [ ] Root receives five `ACCEPTANCE_PASS` messages for the same round.
+- [ ] Root confirms every acceptance lease has ended and announces
+  `ROUND_ACCEPTED <ROUND_ID> <BUILD_IDENTITY>`.
+- [ ] Each worker acquires its provider edit lease, updates only its own report to
+  `DONE` with exact build/source/tab/baseline/evidence/semantic/recovery/BTI
+  proof, and releases the lease.
+- [ ] Root verifies all five `DONE` reports refer to the same accepted build.
+- [ ] Any final soak is read-only against that build; no extra restart/reload may
+  invalidate the accepted identity.

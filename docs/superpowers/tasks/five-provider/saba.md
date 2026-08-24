@@ -51,9 +51,20 @@ npm.cmd run typecheck --workspace @tool-chenh/api -- --pretty false
 git diff --check -- apps/api/src/chrome-bridge/saba-ws-adapter.ts apps/api/src/chrome-bridge/saba-ws-adapter.test.ts apps/api/src/chrome-bridge/saba-ws-realtime-regression.test.ts
 ```
 
-## End-to-End Realtime Gate
+## Phase A — LOCAL_GREEN
 
-After focused GREEN, perform the exact common deployment transaction verbatim, then begin the SABA acceptance lease with `begin-acceptance SABA <worker> chrome:SABA:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
+After focused GREEN, API typecheck, scoped diff check, and redacted secret scan,
+update only the SABA report to `LOCAL_GREEN` while the SABA edit lease remains
+live. Release the lease in `finally`, notify root with `LOCAL_GREEN SABA`, and
+wait without editing, building, restarting, reloading, recovering, or beginning
+acceptance. SABA never claims a deployment lease.
+
+## Phase C — End-to-End Realtime Gate
+
+Only after root publishes `ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>`, resolve
+the exact current SABA source and begin the acceptance lease with
+`begin-acceptance SABA <worker> chrome:SABA:<exact-tab-id>`. Always call
+`end-acceptance` in `finally`:
 
 Run the provider sampler without building:
 
@@ -66,9 +77,14 @@ node scripts/verify-saba-runtime.mjs 120000 .run/five-provider/saba-runtime-evid
 3. Sample for at least 120 seconds and record at least three current provider socket/evidence advances; a bridge/tab heartbeat does not count.
 4. Record a semantic price/status revision if SABA emits one during the window.
 5. Trigger one SABA-targeted recovery. Require a strictly newer current-stream baseline within 60 seconds and prove CMD/APSPORT/IM/SBOBET/BTI source identities were not reset.
-6. Update the report to `DONE` only if every item passes. On a failed gate keep
-   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
-   the worker loop. `BLOCKED` is legal only after proving a genuine external
-   provider/auth failure that in-scope code and same-tab recovery cannot fix.
+6. If every item passes, end acceptance and report
+   `ACCEPTANCE_PASS <ROUND_ID> SABA`; do not edit the report to `DONE` yet.
+7. On any failure, end acceptance, report
+   `ACCEPTANCE_FAIL <ROUND_ID> SABA <REDACTED_REASON>`, and obey root's
+   `STOP_ACCEPTANCE`. Wait until all acceptance leases end before returning to
+   `IN_PROGRESS` and provider-local TDD.
+8. Only after root announces `ROUND_ACCEPTED` for this round may SABA acquire a
+   new edit lease and update its report to `DONE` with the exact live evidence.
+   `BLOCKED` is legal only for a proven external provider/auth failure.
 
 Do not attach a debugger, use active-tab fallback, or touch another provider. Unit tests without this live gate are not completion.

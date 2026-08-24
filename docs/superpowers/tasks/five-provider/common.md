@@ -2,176 +2,211 @@
 
 ## Objective
 
-Five workers run concurrently in the same repository checkout and branch. Each worker owns one outcome, not merely a patch:
+Five workers run concurrently in the same repository checkout. Each worker owns
+one provider from diagnosis through live proof, but workers never deploy the
+shared application.
 
-| Worker | Account | Bridge lobby | Required result |
-| --- | --- | --- | --- |
-| SABA | SABA | SABA | realtime `ACTIVE` |
-| CMD | CMD | CMD | realtime `ACTIVE` |
-| APSPORT | APSPORT | TSPORT | realtime `ACTIVE` |
-| IM | IM | IM | realtime `ACTIVE` |
-| SBOBET | SBOBET | KSPORT | realtime `ACTIVE` |
+| Worker | Account | Bridge lobby | Priority | Successful terminal result |
+| --- | --- | --- | --- | --- |
+| SABA | SABA | SABA | 1 | live `DONE` |
+| CMD | CMD | CMD | 1 | live `DONE` |
+| APSPORT | APSPORT | TSPORT | 1 | live `DONE` |
+| IM | IM | IM | 2 | live `DONE` |
+| SBOBET | SBOBET | KSPORT | 2 | live `DONE` |
 
-BTI is the regression control and must remain `ACTIVE`.
+BTI is the regression control and must remain `ACTIVE` throughout every live
+acceptance window.
 
-Work only in `F:\0. PROJECT\tool-chenh` on
-`feat/six-provider-realtime-feed`. Do not create a linked worktree or another branch.
+Work only in:
+
+```text
+F:\0. PROJECT\tool-chenh
+```
+
+Every shell/tool invocation must set that exact directory as its `workdir`. If a
+tool has no `workdir` field, assert the root in the same invocation before doing
+anything else:
+
+```powershell
+$repoRoot = 'F:\0. PROJECT\tool-chenh'
+Set-Location -LiteralPath $repoRoot
+if ((Get-Location).Path -ne $repoRoot) { throw 'WRONG_REPOSITORY_ROOT' }
+```
+
+Never use `.worktrees\six-provider-realtime-feed` for this run.
+
+## Binding Documents and Precedence
+
+Before any edit, read all of these from the repository root:
+
+1. `proccess.md` — the full common contract and the worker's exact role;
+2. this file;
+3. `docs/superpowers/tasks/five-provider/ownership.md`;
+4. `docs/superpowers/specs/2026-08-24-five-provider-parallel-runtime-design.md`;
+5. `docs/superpowers/plans/2026-08-24-five-provider-parallel-runtime.md`;
+6. the worker's task file;
+7. the worker's current report.
+
+This file and `proccess.md` are authoritative for coordination. `ownership.md`
+remains authoritative for file whitelists, provider/source mapping, and its
+current root-only deployment rule. Provider workers must never build, restart,
+reload, or claim a deployment lease.
+Historical report text is evidence only and never overrides the current contract.
 
 ## Definition of Done
 
-A worker is done only after its built main application proves all of these:
+`LOCAL_GREEN` is a required checkpoint, not success. A worker may write `DONE`
+only after that worker has run a fresh 120-second acceptance against the exact
+combined build published by root and proved all of the following:
 
-1. `/api/chrome-bridge/sources` reports the exact source with `authorityDisposition: "ACTIVE"`.
-2. `/api/catalog/sources` reports the account `sessionState: "ACTIVE"` with no reason.
-3. The account catalog is nonempty unless the provider itself proves an explicit authoritative empty generation.
-4. Provider-native evidence/cursor advances at least three times during the assigned observation window.
-5. A real semantic price/status change is recorded when the provider emits one; unchanged heartbeat/DOM/control ACK never counts.
-6. One provider-targeted recovery establishes a strictly newer authoritative baseline without changing another provider's source identity.
-7. The report contains the build identity and runtime evidence. Unit tests alone can never satisfy completion.
+1. the pinned bridge source has `authorityDisposition: "ACTIVE"`;
+2. the account source has `sessionState: "ACTIVE"`, no reason, and a nonempty
+   authoritative catalog;
+3. the authoritative baseline belongs to the current source epoch;
+4. provider-native cursor/evidence advances at least three times;
+5. a semantic price/status change is recorded when the provider emits one;
+   heartbeat, ACK, replay, or unchanged DOM is not semantic evidence;
+6. one targeted recovery of the exact source establishes a strictly newer
+   authoritative baseline without replacing another provider source;
+7. BTI remains `ACTIVE` for the entire window;
+8. the source/tab and `/api/health.buildIdentity` remain equal to the acceptance
+   binding and root's published round identity.
 
-## Parallel Ownership
+Unit tests, `LOCAL_GREEN`, a report, or `READY_FOR_INTEGRATION` can never replace
+live acceptance. `BLOCKED` is legal only for a demonstrated external auth/provider
+failure after provider-local code and same-tab recovery alternatives are exhausted.
 
-- Read `ownership.md` and edit only the provider whitelist plus the provider's report/evidence file.
-- Normal browser control is allowed only for the worker's already-open exact provider tab. Never rely on the active tab.
-- Do not open DevTools or attach another debugger/CDP owner; the extension observer owns that attachment.
-- Do not read or print `.auth`, launch URLs, cookies, tokens, raw provider bodies, or credentials.
-- Do not run Git mutations. The root integrator alone stages and commits.
-- Focused tests, provider diagnostics, exact provider recovery, build, restart, extension reload, and live sampling are part of the worker outcome, subject to the coordination lease below.
+## File and Safety Rules
 
-## Shared Deployment Coordination
+- Edit only files that the role and `ownership.md` list in that provider's exact
+  whitelist; do not edit `ownership.md` itself.
+- Use `apply_patch` for tracked file edits.
+- Do not run Git mutations: `add`, `commit`, `reset`, `restore`, `checkout`,
+  `stash`, `merge`, `rebase`, `clean`, or `push`. Root alone owns Git history.
+- Do not edit shared observer/background/contracts/data-plane/server files,
+  another provider's files, planning documents, generated `dist`, `.auth`, or
+  coordinator state. The runtime sampler may write only the role's ignored
+  evidence file.
+- Do not read, print, or persist tokens, cookies, signed URLs, raw provider
+  bodies, credentials, or launch material.
+- Do not use active-tab fallback. Control only the exact provider source/tab.
+- Do not open DevTools or claim debugger/CDP ownership.
+- Do not reload, navigate, focus, or replace a provider tab. Targeted recovery
+  must use the exact-source API defined by the task.
 
-Provider diagnosis, focused tests, exact-tab inspection, and provider-scoped API diagnostics run concurrently. Enclose each coherent provider source patch in a short edit lease:
+## Provider Edit Lease
+
+Each coherent provider-local TDD patch, including its RED test, must be enclosed
+by the existing provider edit lease:
 
 ```powershell
 node scripts/five-provider-coordinator.mjs begin-edit <PROVIDER> <WORKER_ID>
-# use apply_patch only on the provider whitelist
+# add and run RED, apply the minimal fix, run GREEN/typecheck/diff/secret checks,
+# and update the provider report
 node scripts/five-provider-coordinator.mjs end-edit <TOKEN>
 ```
 
-Five disjoint provider edit leases may coexist. Keep the provider edit lease through the
-focused tests plus diff/secret checks for that patch, then release it before any runtime
-wait or deployment request. This prevents another worker from building an unverified
-shared-checkout snapshot. Build/restart/extension reload alter the shared runtime and
-therefore use one short exclusive deployment lease:
+Acquire the lease before every file mutation and release it in `finally`. Five
+different provider edit leases may coexist. Workers never call `claim-deploy`,
+`release-deploy`, `abort-deploy`, or `restart-live-stack.mjs` and never build or
+reload the extension.
+
+## Phase A — Concurrent Provider-Local TDD
+
+Each worker performs this phase for only its provider:
+
+1. inspect the exact provider source/tab and provider-local code without runtime
+   mutation;
+2. use systematic debugging to identify the first failing invariant;
+3. acquire the provider edit lease before adding or changing any test;
+4. add and run focused RED, implement the smallest whitelisted fix, then run
+   focused GREEN, every affected workspace typecheck, scoped `git diff --check`,
+   and a redacted secret scan while the lease remains live;
+5. record exact changed files, RED/GREEN evidence, checks, and any exact shared
+   integration request in the provider report;
+6. set the report status to `LOCAL_GREEN`, end the edit lease in `finally`, tell
+   root `LOCAL_GREEN <PROVIDER>`, and wait.
+
+`LOCAL_GREEN` means provider-local work is green on the current shared tree. If
+root changes a shared seam that affects the provider, root invalidates that
+checkpoint and the worker must rerun the affected local checks before reporting
+`LOCAL_GREEN` again. During the wait, the worker must not edit, build, restart,
+reload, recover, begin acceptance, or claim deployment.
+
+## Phase B — Root Freeze and One Combined Deployment
+
+Root waits until all five workers are `LOCAL_GREEN`, all provider edit leases are
+absent, all required shared integration work is complete, and the shared tree is
+reviewed. Root then announces `FREEZE_FOR_COMBINED_DEPLOY <ROUND_ID>`. From that
+announcement until the round ends, workers make no tracked edits.
+
+Root alone claims the existing exclusive deployment lease with the fixed command:
 
 ```powershell
-node scripts/five-provider-coordinator.mjs claim-deploy <PROVIDER> <WORKER_ID>
+node scripts/five-provider-coordinator.mjs claim-deploy SABA root-integrator 1800000
 ```
 
-Before starting any guarded step that could consume the remaining lease window, renew
-the exact still-live token. A failed renewal means ownership was lost: stop immediately
-and do not continue editing, building, reloading, recovering, sampling, staging, or
-committing under that token.
+`SABA` is only the coordinator's fixed serialization label for the combined
+five-provider deployment. It does not give root SABA provider ownership and does
+not make this a SABA-only build. Root alone runs one complete build, managed-stack
+restart, and exact unpacked-extension reload for the round, verifies health, then
+releases the lease so `lastDeployment` pins that combined artifact. Workers do
+none of those actions.
 
-```powershell
-node scripts/five-provider-coordinator.mjs renew-lease <TOKEN> [TTL_MS]
+Root publishes exactly one message for the successful round:
+
+```text
+ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>
 ```
 
-Keep the returned token. While holding the lease:
+There is no stable-runtime-barrier command or prerequisite. The freeze message,
+the root-only combined deployment, the recorded `lastDeployment`, and the
+published build identity are the complete handoff.
 
-1. run the required focused tests and typecheck;
-2. run `npm.cmd run build` from the shared repository root;
-3. set `TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN` to the exact current deployment
-   token and run the zero-argument command `node scripts/restart-live-stack.mjs`;
-4. reload exactly the unpacked extension whose directory is
-   `apps/chrome-extension/dist` in this repository checkout, once, without reloading or
-   navigating a provider tab;
-5. verify `/api/health` reports the deterministic identity computed from the
-   four current `dist` trees and that the loaded unpacked-extension card still
-   resolves to this repository checkout;
-6. release the lease with `node scripts/five-provider-coordinator.mjs release-deploy <TOKEN>`.
+## Phase C — Concurrent 120-Second Live Acceptance
 
-The deployment transaction is exact: `restart-live-stack.mjs` accepts no CLI
-arguments, never builds implicitly, and reads the lease token only from the
-environment. Renew the lease immediately before build, restart, and extension
-reload. Check the exit code of every external command. On any error before a
-verified release, run `abort-deploy` in `finally` and clear the environment
-variable:
+After root publishes the round, all five workers concurrently:
 
-```powershell
-$deployment = node scripts/five-provider-coordinator.mjs claim-deploy <PROVIDER> <WORKER_ID> | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'DEPLOYMENT_LEASE_FAILED' }
-$released = $false
-$env:TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN = $deployment.token
-try {
-  node scripts/five-provider-coordinator.mjs renew-lease $deployment.token 1800000 | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'DEPLOYMENT_LEASE_LOST' }
-  npm.cmd run build
-  if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
-  $expectedBuild = (node --input-type=module -e "import { computeBuildIdentity } from './scripts/five-provider-coordinator.mjs'; console.log(await computeBuildIdentity(process.cwd()));").Trim()
-  if ($LASTEXITCODE -ne 0 -or $expectedBuild -notmatch '^sha256:[a-f0-9]{64}$') { throw 'BUILD_IDENTITY_FAILED' }
+1. resolve the exact current source ID for their own provider from the local API;
+2. begin the existing acceptance lease with that exact source ID;
+3. run only their assigned 120-second sampler, without building or reloading;
+4. verify every Definition of Done gate and the published build identity;
+5. always end the acceptance lease in `finally`;
+6. report `ACCEPTANCE_PASS <ROUND_ID> <PROVIDER>` to root on success, but do not
+   edit the report to `DONE` until root declares the whole round accepted.
 
-  node scripts/five-provider-coordinator.mjs renew-lease $deployment.token 1800000 | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'DEPLOYMENT_LEASE_LOST' }
-  node scripts/restart-live-stack.mjs
-  if ($LASTEXITCODE -ne 0) { throw 'MANAGED_RESTART_FAILED' }
+Acceptance commands are provider-specific and listed in each task. Acceptance
+leases may coexist. Workers may inspect only their exact provider tab/source and
+may issue only the sampler's exact-source targeted recovery.
 
-  node scripts/five-provider-coordinator.mjs renew-lease $deployment.token 1800000 | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'DEPLOYMENT_LEASE_LOST' }
-  # Reload exactly this repository checkout's apps/chrome-extension/dist card once, then
-  # compare API health and the loaded-extension path with the built artifact.
-  $health = Invoke-RestMethod -Uri 'http://127.0.0.1:4310/api/health'
-  if ($health.buildIdentity -ne $expectedBuild) { throw 'RUNTIME_BUILD_IDENTITY_MISMATCH' }
+## Round Failure and Retry
 
-  node scripts/five-provider-coordinator.mjs release-deploy $deployment.token | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'DEPLOYMENT_RELEASE_FAILED' }
-  $released = $true
-} finally {
-  if (-not $released) {
-    node scripts/five-provider-coordinator.mjs abort-deploy $deployment.token | Out-Null
-  }
-  Remove-Item Env:TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN -ErrorAction SilentlyContinue
-}
-```
+Any acceptance failure invalidates the round for all five providers:
 
-Do not claim deployment while another worker is sampling acceptance. Never leave a deployment lease held after failure.
-The coordinator also rejects deployment while any edit lease is active and rejects new source edits during deployment, so every build reads a stable repository snapshot.
-If build/restart/reload fails before a new artifact is verified, run `node scripts/five-provider-coordinator.mjs abort-deploy <TOKEN>`; this releases the lease without falsely replacing the last successful build identity.
+1. the failing worker ends its acceptance lease and immediately reports
+   `ACCEPTANCE_FAIL <ROUND_ID> <PROVIDER> <REDACTED_REASON>`;
+2. root announces `STOP_ACCEPTANCE <ROUND_ID>`;
+3. every worker stops its sampler, ends its acceptance lease in `finally`, and
+   discards that round's verdict/evidence for completion purposes;
+4. root waits until no acceptance or edit lease remains, then allows only the
+   failed provider worker(s) and any required root-owned shared fix to edit;
+5. failed providers return to `IN_PROGRESS`, perform provider-local RED/GREEN,
+   and report `LOCAL_GREEN` again;
+6. root waits for a fully green, edit-free tree, freezes a new round, and performs
+   one new combined deployment;
+7. all five workers rerun fresh 120-second acceptance on the new build. No worker
+   may reuse a prior build identity, source binding, lease, or evidence.
 
-Root establishes a validated version-2 managed stack once before issuing the
-five worker prompts. `LEGACY_STACK_REQUIRES_ROOT_HANDOFF` is a hard stop for a
-worker: do not read, delete, repair, or replace `.auth` or runtime state. The
-root-only handoff is the sole legacy transition; subsequent state changes are
-performed by the managed scripts under the deployment lease.
+When all five workers report acceptance pass for the same round and every
+acceptance lease has ended, root announces
+`ROUND_ACCEPTED <ROUND_ID> <BUILD_IDENTITY>`. Only then may each worker acquire a new provider edit lease,
+write its report as `DONE` with the exact live evidence, release the lease, and
+finish.
 
-Live acceptance leases are provider-scoped and may coexist for all five workers:
+## Shared Defects
 
-```powershell
-node scripts/five-provider-coordinator.mjs begin-acceptance <PROVIDER> <WORKER_ID> <EXACT_SOURCE_ID>
-node scripts/five-provider-coordinator.mjs end-acceptance <TOKEN>
-```
-
-The acceptance lease lasts 15 minutes by default, pins the latest deployed artifact hash and the exact source/tab identity, and rejects same-provider edits. The sampler verifies the same lease and API build identity again at the end. Always call `end-acceptance` in a `finally` path before changing source or requesting deployment. The coordinator rejects deployment while any acceptance lease is active, so one worker cannot invalidate another worker's evidence window.
-
-The sampler automatically performs one normal recovery probe through this exact-source, same-tab route (the command is also available for a bounded diagnostic):
-
-```powershell
-Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:4310/api/chrome-bridge/request-snapshot' -ContentType 'application/json' -Body '{"sourceId":"chrome:<LOBBY>:<TAB_ID>"}'
-```
-
-It sends one `REQUEST_SNAPSHOT` only to the currently attached exact source. Do not substitute global maintenance, active-tab actions, reload, or navigation. A provider launch refresh is reserved for a proven missing/expired/auth-invalid source.
-
-Root protects Git review/staging/commit with a separate exclusive integration lease:
-
-```powershell
-node scripts/five-provider-coordinator.mjs claim-integration root-integrator
-# review/stage/commit exact files
-node scripts/five-provider-coordinator.mjs release-integration <TOKEN>
-```
-
-## Worker Loop
-
-1. Inspect the exact provider tab, bridge source, catalog status, and provider-local code.
-2. Reproduce the blocking behavior with a failing test or redacted runtime observation.
-3. Acquire the provider edit lease, make the smallest provider-owned fix using `apply_patch`, and run its focused tests plus diff/secret checks while the lease remains held.
-4. Release the edit lease in a `finally` path before waiting, deployment, or live acceptance.
-5. Perform the exact deployment transaction above, verify identity, and release it.
-6. Resolve the exact current source ID from the local bridge API, obtain the provider acceptance lease with that ID, and run the assigned sampler while checking authority, catalog state, current API build identity, and the pinned source/tab.
-7. End acceptance even when the sampler fails. If runtime fails, return to step 1. Do not stop at a report or `READY_FOR_INTEGRATION` state.
-8. Mark `DONE` only when every runtime gate passes. Otherwise keep working; use `BLOCKED` only for a demonstrated external provider/auth failure that code cannot correct.
-
-## Collision and Shared-Code Rule
-
-The common base contains shared observer/contract/data-plane wiring. Workers must not edit shared files concurrently. If runtime proves a shared-base defect, report the exact failing test and symbol to the root integrator immediately; continue all provider-local investigation that does not depend on that symbol. The root fixes and deploys shared code under the same deployment lease.
-
-Every final report must list exact changed files, RED/GREEN evidence, build identity, starting/ending authority states, evidence advances, semantic changes, targeted recovery isolation, and the literal final status `DONE` or `BLOCKED`.
+If a worker proves that a required fix is outside its whitelist, it records the
+exact file, symbol, failing test, and redacted runtime symptom in its own report
+and tells root. Root owns that shared fix. The worker continues independent
+provider-local work but cannot claim `LOCAL_GREEN` for an invariant that still
+depends on an unresolved shared defect.

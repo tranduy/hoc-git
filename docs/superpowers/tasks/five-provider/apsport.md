@@ -42,6 +42,7 @@ Use a separate `tsport-authority-assembler` only if it makes these rules explici
 
 ```powershell
 npm.cmd test --workspace @tool-chenh/api -- src/chrome-bridge/tsport-ws-adapter.test.ts src/chrome-bridge/tsport-authority-assembler.test.ts
+npm.cmd run typecheck --workspace @tool-chenh/api -- --pretty false
 git diff --check -- apps/api/src/chrome-bridge/tsport-ws-adapter.ts apps/api/src/chrome-bridge/tsport-ws-adapter.test.ts apps/api/src/chrome-bridge/tsport-authority-assembler.ts apps/api/src/chrome-bridge/tsport-authority-assembler.test.ts
 ```
 
@@ -61,9 +62,20 @@ The report must describe exact extension/data-plane wiring that:
 
 Shared socket wiring belongs to the common base. If runtime proves it defective, send the exact failing test/symbol to the root while continuing provider-local work.
 
-## End-to-End Realtime Gate
+## Phase A — LOCAL_GREEN
 
-After focused GREEN, perform the exact common deployment transaction verbatim, then begin the APSPORT acceptance lease with `begin-acceptance APSPORT <worker> chrome:TSPORT:<exact-tab-id>`. Retain its token and always call `end-acceptance` in `finally` before another edit/deployment:
+After focused GREEN, API typecheck, scoped diff check, and redacted secret scan,
+update only the APSPORT report to `LOCAL_GREEN` while the edit lease remains
+live. Release it in `finally`, notify root with `LOCAL_GREEN APSPORT`, and wait
+without editing, building, restarting, reloading, recovering, or beginning
+acceptance. APSPORT never claims a deployment lease.
+
+## Phase C — End-to-End Realtime Gate
+
+Only after root publishes `ACCEPTANCE_ROUND <ROUND_ID> <BUILD_IDENTITY>`, resolve
+the exact current TSPORT source and begin the acceptance lease with
+`begin-acceptance APSPORT <worker> chrome:TSPORT:<exact-tab-id>`. Always call
+`end-acceptance` in `finally`:
 
 Run the provider sampler without building:
 
@@ -76,9 +88,14 @@ node scripts/verify-apsport-runtime.mjs 120000 .run/five-provider/apsport-runtim
 3. Require APSPORT to become `ACTIVE` and `LIVE/FRESH`; inspect the resulting catalog to ensure authoritative quote values came from WS rather than DOM.
 4. Sample for at least 120 seconds and record at least three current WS evidence advances plus a semantic delta when emitted.
 5. Trigger one APSPORT-targeted recovery, require only the exact football event socket to reconnect in the same tab, and prove all other provider sources remain unchanged.
-6. Update the report to `DONE` only if every gate passes. On a failed gate keep
-   it `IN_PROGRESS`, record the redacted failure, end acceptance, and return to
-   the worker loop. `BLOCKED` is legal only after proving a genuine external
-   provider/auth failure that in-scope code and same-tab recovery cannot fix.
+6. If every gate passes, end acceptance and report
+   `ACCEPTANCE_PASS <ROUND_ID> APSPORT`; do not edit the report to `DONE` yet.
+7. On any failure, end acceptance, report
+   `ACCEPTANCE_FAIL <ROUND_ID> APSPORT <REDACTED_REASON>`, and obey root's
+   `STOP_ACCEPTANCE`. Wait for all leases to end before returning to
+   `IN_PROGRESS` and provider-local TDD.
+8. Only after root announces `ROUND_ACCEPTED` for this round may APSPORT acquire
+   a new edit lease and update its report to `DONE`. `BLOCKED` is legal only for
+   a proven external provider/auth failure.
 
 Do not attach DevTools/CDP, use active-tab fallback, or touch another provider. Unit tests without this live gate are not completion.
