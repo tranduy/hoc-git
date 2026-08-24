@@ -22,7 +22,7 @@ No report, unit-test result, or `READY_FOR_INTEGRATION` label is a successful te
 
 ## Stable-Workspace Protocol
 
-All sessions share one worktree. Every provider source mutation must be enclosed by a short provider edit lease:
+All sessions share one repository checkout. Every provider source mutation must be enclosed by a short provider edit lease:
 
 ```powershell
 node scripts/five-provider-coordinator.mjs begin-edit <PROVIDER> <WORKER_ID>
@@ -37,7 +37,7 @@ Deployment and acceptance commands are defined in `common.md`. Acceptance leases
 ## One-Time Legacy Handoff
 
 Before issuing worker prompts, root alone validates that every recorded legacy
-launcher/API/web PID belongs to this exact worktree, stops only that proven
+launcher/API/web PID belongs to this exact repository checkout, stops only that proven
 tree, verifies both live ports are clear, removes only the unchanged legacy
 record, and starts the committed base so it publishes managed state v2. No
 provider worker may read, repair, delete, or replace `.auth` state. After this

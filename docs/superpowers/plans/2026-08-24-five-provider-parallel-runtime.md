@@ -6,7 +6,7 @@
 
 ## Goal
 
-Run five Codex workers concurrently in one worktree and branch. Each owns one
+Run five Codex workers concurrently in one repository checkout and branch. Each owns one
 already-open provider tab from diagnosis through live proof:
 
 | Worker | Account | Bridge lobby | Priority |
@@ -22,7 +22,7 @@ the slowest worker, not the sum of the five tasks.
 
 ## Architecture
 
-- All sessions use `F:\0. PROJECT\tool-chenh\.worktrees\six-provider-realtime-feed`
+- All sessions use `F:\0. PROJECT\tool-chenh`
   on `feat/six-provider-realtime-feed`.
 - Provider workers own disjoint provider files and their exact provider runtime.
 - Root owns shared source, Git index/history, cross-provider review, and the final
@@ -52,7 +52,7 @@ The binding documents are:
   diff-check, and credential/raw-payload scan.
 - [ ] Under the root integration lease, commit one coherent base.
 - [ ] Under a deployment lease, build, restart the managed stack from that commit,
-  reload that worktree's unpacked extension, and publish the artifact identity.
+  reload that repository checkout's unpacked extension, and publish the artifact identity.
 - [ ] If the pre-base runtime still uses legacy stack state, root alone validates
   the exact process tree and performs the one-time handoff to managed state v2;
   provider workers never inspect or mutate `.auth` state.
@@ -73,7 +73,7 @@ Each worker performs all items below for only its provider:
   verify `/api/health` reports the resulting artifact identity, then release it.
   Use the exact transaction in `common.md`: `npm.cmd run build`, export the live
   lease as `TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN`, run zero-argument
-  `node scripts/restart-live-stack.mjs`, and reload only this worktree's
+  `node scripts/restart-live-stack.mjs`, and reload only this repository checkout's
   `apps/chrome-extension/dist` card.
 - [ ] Acquire an acceptance lease with the exact source ID and run the provider
   sampler. Always end acceptance before returning to source edits.

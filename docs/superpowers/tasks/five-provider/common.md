@@ -2,7 +2,7 @@
 
 ## Objective
 
-Five workers run concurrently in the same worktree and branch. Each worker owns one outcome, not merely a patch:
+Five workers run concurrently in the same repository checkout and branch. Each worker owns one outcome, not merely a patch:
 
 | Worker | Account | Bridge lobby | Required result |
 | --- | --- | --- | --- |
@@ -14,8 +14,8 @@ Five workers run concurrently in the same worktree and branch. Each worker owns 
 
 BTI is the regression control and must remain `ACTIVE`.
 
-Work only in `F:\0. PROJECT\tool-chenh\.worktrees\six-provider-realtime-feed` on
-`feat/six-provider-realtime-feed`. Do not create another worktree or branch.
+Work only in `F:\0. PROJECT\tool-chenh` on
+`feat/six-provider-realtime-feed`. Do not create a linked worktree or another branch.
 
 ## Definition of Done
 
@@ -51,7 +51,7 @@ node scripts/five-provider-coordinator.mjs end-edit <TOKEN>
 Five disjoint provider edit leases may coexist. Keep the provider edit lease through the
 focused tests plus diff/secret checks for that patch, then release it before any runtime
 wait or deployment request. This prevents another worker from building an unverified
-shared-worktree snapshot. Build/restart/extension reload alter the shared runtime and
+shared-checkout snapshot. Build/restart/extension reload alter the shared runtime and
 therefore use one short exclusive deployment lease:
 
 ```powershell
@@ -70,15 +70,15 @@ node scripts/five-provider-coordinator.mjs renew-lease <TOKEN> [TTL_MS]
 Keep the returned token. While holding the lease:
 
 1. run the required focused tests and typecheck;
-2. run `npm.cmd run build` from the shared worktree;
+2. run `npm.cmd run build` from the shared repository root;
 3. set `TOOL_CHENH_DEPLOYMENT_LEASE_TOKEN` to the exact current deployment
    token and run the zero-argument command `node scripts/restart-live-stack.mjs`;
 4. reload exactly the unpacked extension whose directory is
-   `apps/chrome-extension/dist` in this worktree, once, without reloading or
+   `apps/chrome-extension/dist` in this repository checkout, once, without reloading or
    navigating a provider tab;
 5. verify `/api/health` reports the deterministic identity computed from the
    four current `dist` trees and that the loaded unpacked-extension card still
-   resolves to this worktree;
+   resolves to this repository checkout;
 6. release the lease with `node scripts/five-provider-coordinator.mjs release-deploy <TOKEN>`.
 
 The deployment transaction is exact: `restart-live-stack.mjs` accepts no CLI
@@ -108,7 +108,7 @@ try {
 
   node scripts/five-provider-coordinator.mjs renew-lease $deployment.token 1800000 | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'DEPLOYMENT_LEASE_LOST' }
-  # Reload exactly this worktree's apps/chrome-extension/dist card once, then
+  # Reload exactly this repository checkout's apps/chrome-extension/dist card once, then
   # compare API health and the loaded-extension path with the built artifact.
   $health = Invoke-RestMethod -Uri 'http://127.0.0.1:4310/api/health'
   if ($health.buildIdentity -ne $expectedBuild) { throw 'RUNTIME_BUILD_IDENTITY_MISMATCH' }
@@ -125,7 +125,7 @@ try {
 ```
 
 Do not claim deployment while another worker is sampling acceptance. Never leave a deployment lease held after failure.
-The coordinator also rejects deployment while any edit lease is active and rejects new source edits during deployment, so every build reads a stable worktree snapshot.
+The coordinator also rejects deployment while any edit lease is active and rejects new source edits during deployment, so every build reads a stable repository snapshot.
 If build/restart/reload fails before a new artifact is verified, run `node scripts/five-provider-coordinator.mjs abort-deploy <TOKEN>`; this releases the lease without falsely replacing the last successful build identity.
 
 Root establishes a validated version-2 managed stack once before issuing the

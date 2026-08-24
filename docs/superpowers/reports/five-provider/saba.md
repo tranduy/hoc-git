@@ -8,7 +8,7 @@ Historical checkpoint only: any patch-only/build/runtime restrictions recorded b
 
 - Worker/provider: SABA
 - Starting coordination-base commit: `f6e25d4`
-- Worktree/branch verified: `F:\0. PROJECT\tool-chenh\.worktrees\six-provider-realtime-feed` on `feat/six-provider-realtime-feed`
+- Current continuation repo root/branch: `F:\0. PROJECT\tool-chenh` on `feat/six-provider-realtime-feed`
 - `git merge-base --is-ancestor f6e25d4 HEAD` exited `0` before editing.
 
 ## Exact changed files

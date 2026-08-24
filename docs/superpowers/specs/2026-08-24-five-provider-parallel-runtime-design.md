@@ -16,10 +16,10 @@ The final result is one application and one branch. Each worker owns one provide
 
 ## Execution Model
 
-All six Codex sessions use the same linked worktree and branch:
+All six Codex sessions use the same repository checkout and branch:
 
 ```text
-F:\0. PROJECT\tool-chenh\.worktrees\six-provider-realtime-feed
+F:\0. PROJECT\tool-chenh
 feat/six-provider-realtime-feed
 ```
 
