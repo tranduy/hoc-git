@@ -31,6 +31,12 @@ const KSPORT_ORPHAN_FRAME_RETRY_MS = 30_000;
 // Long enough that a click cannot become a storm, short enough that a missing
 // partition is retried well inside the feed's baseline lease.
 const KSPORT_BASELINE_REQUEST_RETRY_MS = 20_000;
+// Measured 2026-08-26: this source forwards two or three catalog frames per five
+// minutes, so 100-150 s gaps are its normal cadence, not silence. The previous
+// 30 s window made a healthy socket look idle for most of every gap, and the
+// baseline request that yields the first full snapshot only ran in the rare
+// seconds right after a frame.
+const KSPORT_QUIET_WINDOW_MS = 180_000;
 const KSPORT_HEARTBEAT_FORWARD_INTERVAL_MS = 5_000;
 const KSPORT_TRANSPORT_HEARTBEAT_MAX_CHARS = 256;
 const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
@@ -334,13 +340,13 @@ const SABA_ODDS_MUTATION_CLEANUP_EXPRESSION = `(() => {
 
 export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
   const normalize = (value) => String(value || '').normalize('NFD')
-    .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+    .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D').trim().toLowerCase().replace(/\\s+/g, ' ');
   const primary = [...document.querySelectorAll('.sport-type-group-item')];
   const fallback = [...document.querySelectorAll(
     '[data-sport-id], [data-sport], button, [role="button"], [class*="sport-type"], [class*="sport-menu"]'
   )].filter((candidate) => {
     const text = normalize(candidate.textContent);
-    return text.length > 0 && text.length < 80 && /^bong da(?:\\s|live|\\d|$)/u.test(text);
+    return text.length > 0 && text.length < 80 && /^(?:bong da|football)(?:\\s|live|\\d|$)/u.test(text);
   });
   const controls = [...new Set([...primary, ...fallback])]
     .filter((control) => !control.classList.contains('sport-odds-boosts') &&
@@ -348,7 +354,7 @@ export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
   const control = controls.find((candidate) => {
     const header = candidate.querySelector('.sport-type-item-header') || candidate;
     const text = normalize(header.textContent);
-    return /^bong da(?:\\s|live|\\d|$)/u.test(text) && !/^bong da\\s*2(?:\\s|$)/u.test(text);
+    return /^(?:bong da|football)(?:\\s|live|\\d|$)/u.test(text) && !/^(?:bong da|football)\\s*2(?:\\s|$)/u.test(text);
   });
   if (!control) return { status: 'football-control-not-found' };
   if (control.classList.contains('active-type')) return { status: 'football-active' };
@@ -359,15 +365,19 @@ export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
 const KSPORT_TODAY_BASELINE_EXPRESSION = ksportTimeTabExpression("hom nay");
 const KSPORT_LIVE_BASELINE_EXPRESSION = ksportTimeTabExpression("truc tiep");
 
+export function ksportTimeTabExpressionForTest(label: string): string {
+  return ksportTimeTabExpression(label);
+}
+
 function ksportTimeTabExpression(label: string): string {
   return `(() => {
     const normalize = (value) => String(value || '').normalize('NFD')
-      .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+      .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D').trim().toLowerCase().replace(/\\s+/g, ' ');
     const group = [...document.querySelectorAll('.sport-type-group-item')].find((candidate) => {
       const header = candidate.querySelector('.sport-type-item-header') || candidate;
       const text = normalize(header.textContent);
       return !candidate.closest('.sport-odds-boosts, [class*="odds-boost"]') &&
-        /^bong da(?:\\s|live|\\d|$)/u.test(text) && !/^bong da\\s*2(?:\\s|$)/u.test(text);
+        /^(?:bong da|football)(?:\\s|live|\\d|$)/u.test(text) && !/^(?:bong da|football)\\s*2(?:\\s|$)/u.test(text);
     });
     const groups = document.querySelectorAll('.sport-type-group-item').length;
     const scopes = document.querySelectorAll('.header-tab-content').length;
@@ -401,7 +411,7 @@ export const KEEP_ACTIVE_EXPRESSION = `(() => {
   let expanded = 0;
   if (!Number.isFinite(prior) || now - prior >= 8000) {
     const normalize = (value) => String(value || '').normalize('NFD')
-      .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+      .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D').trim().toLowerCase().replace(/\\s+/g, ' ');
     const unsafeSelector = '[class*=selection], [class*=ticket], [class*=slip], [class*=betslip], form';
     const controls = [...document.querySelectorAll("button, summary, [role='button'], a")]
       .filter((element) => element.getClientRects().length > 0 && !element.hasAttribute('disabled') &&
@@ -455,7 +465,7 @@ export const TSPORT_CATALOG_DISCOVERY_EXPRESSION = `(() => {
   let expanded = 0;
   if (!Number.isFinite(prior) || now - prior >= 8000) {
     const normalize = (value) => String(value || '').normalize('NFD')
-      .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+      .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D').trim().toLowerCase().replace(/\\s+/g, ' ');
     const unsafeSelector = '[class*=selection], [class*=ticket], [class*=slip], [class*=betslip], form, [id^=odd-item-]';
     const controls = [...document.querySelectorAll(
       '.match a.c-btn--more.c-is-close, .match button.c-btn--more.c-is-close, ' +
@@ -511,7 +521,7 @@ export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
   };
   if (!/^cmd-sweep-\\d+$/u.test(root.dataset.fieldlineCmdSweepId || '')) beginSweep();
   const normalize = (value) => String(value || '').normalize('NFD')
-    .replace(/[\\u0300-\\u036f]/g, '').trim().toLowerCase().replace(/\\s+/g, ' ');
+    .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D').trim().toLowerCase().replace(/\\s+/g, ' ');
   const search = [...document.querySelectorAll("input[type='search'], input[placeholder], input[aria-label]")]
     .find((input) => /(?:tim kiem doi|tim kiem|search team|search)/u.test(normalize(
       input.getAttribute('placeholder') || input.getAttribute('aria-label'))));
@@ -1577,7 +1587,7 @@ export class NetworkObserver {
   async #maintainKsportFeed(source: ObservedSource, options: { readonly quietMs?: number;
     readonly recoveryIntervalMs?: number } = {}): Promise<void> {
     if (source.lobby !== "KSPORT") return;
-    const quietMs = options.quietMs ?? 30_000;
+    const quietMs = options.quietMs ?? KSPORT_QUIET_WINDOW_MS;
     const nowMs = this.#now();
     const activeStream = this.#activeKsportStreams.get(source.sourceId);
     const socketAlive = activeStream !== undefined && [...this.#webSockets.values()].some((socket) =>

@@ -564,3 +564,38 @@ describe("KSPORT liveness must not depend on heartbeats", () => {
     expect(observer.ksportCatalogFrameAgeMs(source.sourceId, 50_000)).toBeNull();
   });
 });
+
+describe("KSPORT quiet window must cover its own catalog cadence", () => {
+  async function socketQuietAt(nowValue: number, quietMs?: number): Promise<boolean> {
+    // Measured 2026-08-26: this source forwards two or three catalog frames per
+    // five minutes, so gaps of 100-150 s are its normal cadence, not silence. A
+    // 30 s window made a healthy socket look idle for most of every gap, and the
+    // baseline request that yields the first full snapshot only ran in the rare
+    // seconds right after a frame.
+    let nowMs = 10_000;
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>, _sessionId?: string) => ({}));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      observerSessionId: "worker-a", now: () => nowMs });
+    const source = { lobby: "KSPORT", sourceId: `chrome:KSPORT:${nowValue}`, tabId: nowValue } as const;
+
+    await observer.handleEvent(source, "Network.webSocketCreated",
+      { requestId: "catalog", url: "wss://d42.sb21.net/sport/538/session/websocket" });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "catalog", response: { opcode: 1, payloadData: ksportReceipt("live", 100) }
+    });
+
+    nowMs = nowValue;
+    await observer.maintainKsportFeed(source, quietMs === undefined ? {} : { quietMs });
+    return sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      String(params?.expression ?? "").includes("fieldline-ksport-catalog-refresh"));
+  }
+
+  it("does not declare the socket quiet a hundred seconds after its last frame", async () => {
+    expect(await socketQuietAt(110_000)).toBe(false);
+  });
+
+  it("still declares it quiet under the old thirty-second window", async () => {
+    expect(await socketQuietAt(110_001, 30_000)).toBe(true);
+  });
+});

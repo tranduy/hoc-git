@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
+import { ksportTimeTabExpressionForTest } from "./network-observer.js";
 import { BTI_CATALOG_REFRESH_EXPRESSION, CMD_CATALOG_DISCOVERY_EXPRESSION,
   CMD_FULL_BASELINE_EXPRESSION, IM_CATALOG_DISCOVERY_EXPRESSION, KEEP_ACTIVE_EXPRESSION,
   NetworkObserver, type NetworkObserverDependencies, type PersistedSabaWsSnapshots } from "./network-observer.js";
@@ -5727,21 +5728,25 @@ describe("NetworkObserver", () => {
       const fullRecoveryCalls = () => sendCommand.mock.calls.filter(([, method, params]) =>
         method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-ksport-catalog-refresh")).length;
 
+      // This case is about the five-second pacing between recovery attempts, not
+      // about the default quiet window, so the window is stated explicitly.
+      const quietMs = 30_000;
+
       now.value = 20_000;
-      await observer.maintainKsportFeed(ksport);
+      await observer.maintainKsportFeed(ksport, { quietMs });
       expect(fullRecoveryCalls()).toBe(0);
 
       now.value = 40_000;
-      await observer.maintainKsportFeed(ksport);
+      await observer.maintainKsportFeed(ksport, { quietMs });
       expect(fullRecoveryCalls()).toBeGreaterThan(0);
       const afterFirst = fullRecoveryCalls();
 
       now.value = 43_000;
-      await observer.maintainKsportFeed(ksport);
+      await observer.maintainKsportFeed(ksport, { quietMs });
       expect(fullRecoveryCalls()).toBe(afterFirst);
 
       now.value = 45_000;
-      await observer.maintainKsportFeed(ksport);
+      await observer.maintainKsportFeed(ksport, { quietMs });
       expect(fullRecoveryCalls()).toBeGreaterThan(afterFirst);
     });
 
@@ -6296,5 +6301,40 @@ describe("NetworkObserver", () => {
       expect(forward).not.toHaveBeenCalled();
       expect(observer.hasCompleteKsportBaseline(ksport.sourceId)).toBe(false);
     });
+  });
+});
+
+describe("KSPORT football group label", () => {
+  const expression = ksportTimeTabExpressionForTest("truc tiep");
+
+  function evaluate(headers: readonly string[]): { status: string; step?: string } {
+    // Minimal DOM stand-in: the expression only reads header text, the
+    // .header-tab-content ancestor and the period tabs.
+    const groups = headers.map((text) => {
+      const period = { textContent: "truc tiep", classList: { contains: () => false },
+        querySelector: () => null, click: (): void => undefined };
+      const scope = { querySelectorAll: () => [period] };
+      return { textContent: text, closest: (selector: string) =>
+        selector === ".header-tab-content" ? scope : null,
+        querySelector: () => null };
+    });
+    const document = {
+      querySelectorAll: (selector: string) =>
+        selector === ".sport-type-group-item" ? groups : selector === ".header-tab-content" ? [{}] : [{}]
+    };
+    return Function("document", `return ${expression};`)(document) as { status: string; step?: string };
+  }
+
+  it("selects the football group whichever language the page renders", () => {
+    // Measured 2026-08-26: 21 groups were present and none matched, because the
+    // predicate only accepted the Vietnamese label while the page rendered
+    // English. Every class name in the selector was still correct.
+    expect(evaluate(["Bóng đá"]).status).not.toBe("time-tab-not-found");
+    expect(evaluate(["Football"]).status).not.toBe("time-tab-not-found");
+  });
+
+  it("still refuses the promotional second football group in either language", () => {
+    expect(evaluate(["Bóng đá 2"]).status).toBe("time-tab-not-found");
+    expect(evaluate(["Football 2"]).status).toBe("time-tab-not-found");
   });
 });
