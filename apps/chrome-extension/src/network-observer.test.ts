@@ -2263,22 +2263,36 @@ describe("NetworkObserver", () => {
       expect(reconnects(sendCommand)).toBe(2);
     });
 
-    it("does not reconnect while catalog frames keep flowing or before the first frame", async () => {
+    it("reconnects a socket that never delivered a frame 60s after the first poll", async () => {
       const now = { value: 1_000 };
       const { sendCommand, observer } = setup(now);
-      // No frame ever seen: the tab may still be bootstrapping.
-      now.value = 200_000;
+      await observer.handleEvent(saba, "Network.webSocketCreated", { requestId: "ws-1",
+        url: "wss://push.example/socket.io/" });
       await observer.pollSabaDomChanges(saba, "push.example");
       expect(reconnects(sendCommand)).toBe(0);
+
+      now.value = 30_000;
+      await observer.pollSabaDomChanges(saba, "push.example");
+      expect(reconnects(sendCommand)).toBe(0);
+
+      now.value = 62_500;
+      await observer.pollSabaDomChanges(saba, "push.example");
+      expect(reconnects(sendCommand)).toBe(1);
+    });
+
+    it("does not reconnect while catalog frames keep flowing", async () => {
+      const now = { value: 1_000 };
+      const { sendCommand, observer } = setup(now);
+      await observer.pollSabaDomChanges(saba, "push.example");
 
       await observer.handleEvent(saba, "Network.webSocketCreated", { requestId: "ws-1",
         url: "wss://push.example/socket.io/" });
       await observer.handleEvent(saba, "Network.webSocketFrameReceived", { requestId: "ws-1",
         response: { opcode: 1, payloadData: frame } });
-      now.value = 230_000;
+      now.value = 50_000;
       await observer.handleEvent(saba, "Network.webSocketFrameReceived", { requestId: "ws-1",
         response: { opcode: 1, payloadData: `42${JSON.stringify(["m", "b11", [[0, "o", 2, 1, 1, 1]], 2])}` } });
-      now.value = 260_000;
+      now.value = 90_000;
       await observer.pollSabaDomChanges(saba, "push.example");
       expect(reconnects(sendCommand)).toBe(0);
     });

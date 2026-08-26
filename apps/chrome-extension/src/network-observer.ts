@@ -826,8 +826,12 @@ export class NetworkObserver {
     // ask the page to reconnect it (bounded to once per minute); a fresh
     // reset/done baseline restores full coverage without reloading the tab.
     const nowMs = this.#now();
-    const lastFrameAtMs = this.#sabaCatalogFrameAtMs.get(source.sourceId);
-    if (lastFrameAtMs !== undefined && nowMs - lastFrameAtMs > 60_000 &&
+    // Seed the silence clock on the first poll: after a worker restart the
+    // provider socket may already be dead, so "never saw a frame" must also
+    // count as silence once a full minute has passed.
+    const lastFrameAtMs = this.#sabaCatalogFrameAtMs.get(source.sourceId) ??
+      (this.#sabaCatalogFrameAtMs.set(source.sourceId, nowMs), nowMs);
+    if (nowMs - lastFrameAtMs > 60_000 &&
       nowMs - (this.#sabaSilentSocketRecoveryAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) > 60_000) {
       this.#sabaSilentSocketRecoveryAtMs.set(source.sourceId, nowMs);
       await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
