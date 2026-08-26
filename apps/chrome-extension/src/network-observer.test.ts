@@ -2984,10 +2984,12 @@ describe("NetworkObserver", () => {
     expect(diagnostics).toEqual([
       { kind: "WS_ATTACH", sourceGeneration: 0, webSocketCreated: 1, webSockets: 1,
         ksportTargets: 2, attachedTargets: 2,
-        framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0 },
+        framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
+        framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0 },
       { kind: "WS_ATTACH", sourceGeneration: 0, webSocketCreated: 0, webSockets: 0,
         ksportTargets: 0, attachedTargets: 0,
-        framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0 }
+        framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
+        framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0 }
     ]);
   });
 

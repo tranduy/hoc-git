@@ -93,6 +93,10 @@ interface AccountState {
     readonly framesOrphan: number;
     readonly framesForwarded: number;
     readonly ignoredSockets: number;
+    readonly framesBinary: number;
+    readonly framesNotOwner: number;
+    readonly framesUnattributed: number;
+    readonly framesNotActiveStream: number;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -342,7 +346,9 @@ export class PipelineTelemetry {
       const value = JSON.parse(body) as { kind?: unknown; counters?: { forcedUnlocks?: unknown };
         sourceGeneration?: unknown; webSocketCreated?: unknown; webSockets?: unknown;
         ksportTargets?: unknown; attachedTargets?: unknown; framesReceived?: unknown;
-        framesOrphan?: unknown; framesForwarded?: unknown; ignoredSockets?: unknown };
+        framesOrphan?: unknown; framesForwarded?: unknown; ignoredSockets?: unknown;
+        framesBinary?: unknown; framesNotOwner?: unknown; framesUnattributed?: unknown;
+        framesNotActiveStream?: unknown };
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
@@ -359,7 +365,11 @@ export class PipelineTelemetry {
           framesReceived: boundedCounter(value.framesReceived),
           framesOrphan: boundedCounter(value.framesOrphan),
           framesForwarded: boundedCounter(value.framesForwarded),
-          ignoredSockets: boundedCounter(value.ignoredSockets)
+          ignoredSockets: boundedCounter(value.ignoredSockets),
+          framesBinary: boundedCounter(value.framesBinary),
+          framesNotOwner: boundedCounter(value.framesNotOwner),
+          framesUnattributed: boundedCounter(value.framesUnattributed),
+          framesNotActiveStream: boundedCounter(value.framesNotActiveStream)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }

@@ -195,6 +195,12 @@ interface WsAttachDiagnosticState {
   framesOrphan: number;
   framesForwarded: number;
   ignoredSockets: number;
+  // A frame can reach its socket and still never be forwarded. These name the
+  // exact gate that consumed it, so the fault does not have to be guessed.
+  framesBinary: number;
+  framesNotOwner: number;
+  framesUnattributed: number;
+  framesNotActiveStream: number;
 }
 
 interface PreexistingSocketReconnectState {
@@ -2191,7 +2197,8 @@ export class NetworkObserver {
     if (existing !== undefined && existing.sourceGeneration === sourceGeneration) return existing;
     const created: WsAttachDiagnosticState = {
       sourceGeneration, webSocketCreated: 0, ksportTargets: 0, attachedTargets: 0,
-      framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0
+      framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
+      framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2582,7 +2589,10 @@ export class NetworkObserver {
         sourceGeneration: diagnostic.sourceGeneration, webSocketCreated: diagnostic.webSocketCreated,
         webSockets, ksportTargets: diagnostic.ksportTargets, attachedTargets: diagnostic.attachedTargets,
         framesReceived: diagnostic.framesReceived, framesOrphan: diagnostic.framesOrphan,
-        framesForwarded: diagnostic.framesForwarded, ignoredSockets: diagnostic.ignoredSockets })
+        framesForwarded: diagnostic.framesForwarded, ignoredSockets: diagnostic.ignoredSockets,
+        framesBinary: diagnostic.framesBinary, framesNotOwner: diagnostic.framesNotOwner,
+        framesUnattributed: diagnostic.framesUnattributed,
+        framesNotActiveStream: diagnostic.framesNotActiveStream })
     });
   }
 
@@ -2962,13 +2972,13 @@ export class NetworkObserver {
         // exact canonical socket. Attribute synchronously in CDP arrival order,
         // then serialize the marker/cache/forward side effects behind the same
         // socket so async Runtime.evaluate cannot reorder provider receipts.
-        if (opcode === 2) return;
+        if (opcode === 2) { this.#wsAttachDiagnostic(source).framesBinary += 1; return; }
         const ownsIdentity = (): boolean => socket.closing !== true &&
           this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration) &&
           this.#webSockets.get(key) === socket;
         const ownsSocket = (): boolean => ownsIdentity() &&
           this.#activeKsportStreams.get(socket.source.sourceId) === socket.streamId;
-        if (!ownsIdentity()) return;
+        if (!ownsIdentity()) { this.#wsAttachDiagnostic(source).framesNotOwner += 1; return; }
         if (isKsportTransportHeartbeat(payloadData)) {
           if (!ownsSocket()) return;
           const prior = socket.ksportFrameTail ?? Promise.resolve();
@@ -3000,13 +3010,16 @@ export class NetworkObserver {
         if (!wasFailed && ksportRecovery.failed && ownsSocket()) {
           await this.#scheduleSabaWsSnapshotClear(socket.source.sourceId);
         }
-        if (attributed.length === 0) return;
+        if (attributed.length === 0) { this.#wsAttachDiagnostic(source).framesUnattributed += 1; return; }
         const prior = socket.ksportFrameTail ?? Promise.resolve();
         const operation = prior.catch(() => undefined).then(async () => {
           if (!ownsIdentity()) return;
           if (this.#activeKsportStreams.get(socket.source.sourceId) !== socket.streamId &&
-            !await this.#activateKsportSocket(key, socket, true)) return;
-          if (!ownsSocket()) return;
+            !await this.#activateKsportSocket(key, socket, true)) {
+            this.#wsAttachDiagnostic(source).framesNotActiveStream += 1;
+            return;
+          }
+          if (!ownsSocket()) { this.#wsAttachDiagnostic(source).framesNotActiveStream += 1; return; }
           if (ksportRecovery.currentBaselineState.complete) {
             this.#retireKsportHttpFallbackIfRecovered(socket.source.sourceId);
           }

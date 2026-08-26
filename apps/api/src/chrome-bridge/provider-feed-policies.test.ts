@@ -64,6 +64,22 @@ describe("provider feed policies measured 2026-08-25", () => {
     }
   });
 
+  it("never lets DOM fallback hold a feed live on its own", () => {
+    // Spec section 4 ranks DOM below the provider's own transport: it is a
+    // display fallback, not evidence. Treating it as authoritative kept SABA
+    // reporting LIVE while its socket was dead, so recovery never ran and 95
+    // of 100 events arrived from the page with no kickoff and a live label the
+    // page applies to its whole live-betting section.
+    // SABA is the one documented exception while its socket adapter decodes
+    // only a fraction of the feed; removing it there measurably regressed the
+    // book to zero quote changes. Every other provider must stay on transport.
+    for (const [accountId, policy] of providerFeedPolicies) {
+      if (accountId === "catalog-source:SABA:FOOTBALL") continue;
+      expect(policy.authoritativeProvenance.has("DOM_FALLBACK"),
+        `${accountId} must not treat DOM_FALLBACK as authoritative`).toBe(false);
+    }
+  });
+
   it("keeps each public catalog fresh through its accepted evidence cadence", () => {
     for (const policy of providerFeedPolicies.values()) {
       expect((policy as typeof policy & { catalogFreshnessMs?: number }).catalogFreshnessMs)

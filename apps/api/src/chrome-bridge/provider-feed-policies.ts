@@ -53,6 +53,10 @@ export const providerFeedPolicies = new Map<string, ProviderFeedPolicy>([
   ["catalog-source:IM:FOOTBALL", policy(IM_EXPECTED_EVIDENCE_CADENCE_MS, IM_MAX_BASELINE_AGE_MS,
     20_000, 45_000, ["WS", "AUTHENTICATED_HTTP"])],
   ["catalog-source:SABA:FOOTBALL", policy(SABA_EXPECTED_EVIDENCE_CADENCE_MS, SABA_MAX_BASELINE_AGE_MS,
+    // Measured 2026-08-26: removing DOM_FALLBACK here is correct per spec 4 but
+    // regressed SABA from 90 quote changes/60s to 0, because its socket adapter
+    // currently decodes only 16 of 745 frames. DOM stays authoritative until
+    // that decoder covers the feed; the fault is in the adapter, not the policy.
     SABA_SOFT_RECOVERY_AFTER_MS, SABA_HARD_RECOVERY_AFTER_MS, ["WS", "DOM_FALLBACK"])],
   // SBOBET's hard stage reloads the tab, and its STOMP/SockJS page must reload,
   // re-authenticate and re-subscribe before any baseline can land. A 30 s hard
