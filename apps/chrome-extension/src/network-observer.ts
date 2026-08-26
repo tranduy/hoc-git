@@ -201,6 +201,7 @@ interface WsAttachDiagnosticState {
   framesNotOwner: number;
   framesUnattributed: number;
   framesNotActiveStream: number;
+  framesDecoderFailed: number;
 }
 
 interface PreexistingSocketReconnectState {
@@ -2198,7 +2199,8 @@ export class NetworkObserver {
     const created: WsAttachDiagnosticState = {
       sourceGeneration, webSocketCreated: 0, ksportTargets: 0, attachedTargets: 0,
       framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
-      framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0
+      framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
+      framesDecoderFailed: 0
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2592,7 +2594,8 @@ export class NetworkObserver {
         framesForwarded: diagnostic.framesForwarded, ignoredSockets: diagnostic.ignoredSockets,
         framesBinary: diagnostic.framesBinary, framesNotOwner: diagnostic.framesNotOwner,
         framesUnattributed: diagnostic.framesUnattributed,
-        framesNotActiveStream: diagnostic.framesNotActiveStream })
+        framesNotActiveStream: diagnostic.framesNotActiveStream,
+        framesDecoderFailed: diagnostic.framesDecoderFailed })
     });
   }
 
@@ -3003,8 +3006,14 @@ export class NetworkObserver {
           return;
         }
         const wasFailed = ksportRecovery.failed;
+        if (wasFailed) this.#wsAttachDiagnostic(source).framesDecoderFailed += 1;
         const attributed = ksportRecovery.push(payloadData);
-        if (ksportRecovery.failed && ownsSocket()) {
+        // A STOMP decoder that has failed returns nothing for every later frame
+        // on this socket. Gating its rebuild behind ownsSocket() meant a socket
+        // whose decoder failed before it was ever promoted to the active stream
+        // could never be rebuilt, so the provider stayed dark until the tab was
+        // reloaded. Owning the source identity is enough to ask for a rebuild.
+        if (ksportRecovery.failed && ownsIdentity()) {
           this.#scheduleFailedKsportSocketRecovery(key, socket);
         }
         if (!wasFailed && ksportRecovery.failed && ownsSocket()) {

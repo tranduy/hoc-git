@@ -97,6 +97,7 @@ interface AccountState {
     readonly framesNotOwner: number;
     readonly framesUnattributed: number;
     readonly framesNotActiveStream: number;
+    readonly framesDecoderFailed: number;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -348,7 +349,7 @@ export class PipelineTelemetry {
         ksportTargets?: unknown; attachedTargets?: unknown; framesReceived?: unknown;
         framesOrphan?: unknown; framesForwarded?: unknown; ignoredSockets?: unknown;
         framesBinary?: unknown; framesNotOwner?: unknown; framesUnattributed?: unknown;
-        framesNotActiveStream?: unknown };
+        framesNotActiveStream?: unknown; framesDecoderFailed?: unknown };
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
@@ -369,7 +370,8 @@ export class PipelineTelemetry {
           framesBinary: boundedCounter(value.framesBinary),
           framesNotOwner: boundedCounter(value.framesNotOwner),
           framesUnattributed: boundedCounter(value.framesUnattributed),
-          framesNotActiveStream: boundedCounter(value.framesNotActiveStream)
+          framesNotActiveStream: boundedCounter(value.framesNotActiveStream),
+          framesDecoderFailed: boundedCounter(value.framesDecoderFailed)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }

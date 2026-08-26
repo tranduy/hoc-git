@@ -137,7 +137,8 @@ describe("PipelineTelemetry", () => {
     expect(result?.hops.find((hop) => hop.hop === "HOP3_ENVELOPE")?.detail.wsAttach).toEqual({
       sourceGeneration: 3, webSocketCreated: 7, webSockets: 2, ksportTargets: 1, attachedTargets: 1,
       framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
-      framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0
+      framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
+      framesDecoderFailed: 0
     });
   });
 
