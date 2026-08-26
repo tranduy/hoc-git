@@ -46,6 +46,17 @@ export class ChromeBridgeControlPlane {
     return requested;
   }
 
+  reloadLobby(lobby: string): number {
+    let requested = 0;
+    for (const [sourceId, socket] of this.#socketsBySource) {
+      if (socket.readyState !== 1 || !sourceId.startsWith(`chrome:${lobby}:`)) continue;
+      const control: ChromeBridgeControlMessage = { version: 1, kind: "RELOAD_SOURCE", sourceId };
+      socket.send(JSON.stringify(control));
+      requested += 1;
+    }
+    return requested;
+  }
+
   navigateLobby(lobby: string, url: string): number {
     let requested = 0;
     for (const [sourceId, socket] of this.#socketsBySource) {

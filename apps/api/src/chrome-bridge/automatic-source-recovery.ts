@@ -6,6 +6,7 @@ type FabetProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
 interface RecoveryControlPlane {
   ensureLobby(lobby: ChromeLobbyId, url: string): number;
   restoreLobby(lobby: ChromeLobbyId): number;
+  reloadLobby?(lobby: ChromeLobbyId): number;
 }
 
 interface AutomaticSourceRecoveryOptions {
@@ -54,16 +55,27 @@ export class AutomaticSourceRecovery {
     if (provider === undefined) return;
 
     const recoveryStartedAtMs = (this.#options.now ?? Date.now)();
-    // Capture fresh one-time launches without restartAll(): the five healthy
-    // readers and their Chrome tabs must remain untouched while one provider
-    // is being recovered.
-    await this.#options.refreshFabetLaunches();
-    await refreshBridgeProviderSources({
-      controlPlane: this.#options.controlPlane,
-      withLatestFabetLaunch: this.#options.withLatestFabetLaunch,
-      minAcquiredAtMs: recoveryStartedAtMs,
-      providers: [provider],
-      restoreCmd: false
-    });
+    try {
+      // Capture fresh one-time launches without restartAll(): the five healthy
+      // readers and their Chrome tabs must remain untouched while one provider
+      // is being recovered.
+      await this.#options.refreshFabetLaunches();
+      await refreshBridgeProviderSources({
+        controlPlane: this.#options.controlPlane,
+        withLatestFabetLaunch: this.#options.withLatestFabetLaunch,
+        minAcquiredAtMs: recoveryStartedAtMs,
+        providers: [provider],
+        restoreCmd: false
+      });
+    } catch (error) {
+      // Without a Fabet session there is no launch URL to rebuild the tab.
+      // SABA authenticates through the browser's own cookies, so reloading
+      // its existing tab (the manual F5 an operator would do) restores the
+      // socket baseline safely. Providers with one-time launch URLs (BTI,
+      // KSPORT) must not be reloaded, so the failure stays fatal for them.
+      if (provider === "SABA" &&
+        (this.#options.controlPlane.reloadLobby?.("SABA") ?? 0) > 0) return;
+      throw error;
+    }
   }
 }

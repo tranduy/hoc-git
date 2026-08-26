@@ -41,6 +41,27 @@ describe("AutomaticSourceRecovery", () => {
     expect(restoreLobby).not.toHaveBeenCalled();
   });
 
+  it("falls back to reloading the existing SABA tab when no Fabet launch exists", async () => {
+    const reloadLobby = vi.fn(() => 1);
+    const errors: unknown[] = [];
+    const recovery = new AutomaticSourceRecovery({
+      controlPlane: { ensureLobby: vi.fn(() => 1), restoreLobby: vi.fn(() => 1), reloadLobby },
+      refreshFabetLaunches: vi.fn(async () => { throw new Error("SESSION_NOT_FOUND"); }),
+      withLatestFabetLaunch: launchReader,
+      onError: (_accountId, error) => errors.push(error)
+    });
+
+    await recovery.recover("catalog-source:SABA:FOOTBALL");
+    expect(reloadLobby).toHaveBeenCalledExactlyOnceWith("SABA");
+    expect(errors).toEqual([]);
+
+    // BTI holds a one-time launch URL: reloading its tab would burn it, so the
+    // failure must surface instead.
+    await recovery.recover("catalog-source:BTI:FOOTBALL");
+    expect(reloadLobby).toHaveBeenCalledTimes(1);
+    expect(errors).toHaveLength(1);
+  });
+
   it("ignores unknown catalog identities instead of resetting every source", async () => {
     const restoreLobby = vi.fn(() => 1);
     const ensureLobby = vi.fn(() => 1);
