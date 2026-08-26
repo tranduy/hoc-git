@@ -762,7 +762,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const rankedEvents = useMemo(() => {
     const sorted = sortRankedEvents(visibleEvents.filter((item) => item.rows.length > 0)
       .map((item) => rankedEvent({ event: item, verified: verifiedTickets, movements,
-        selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake), nowMs }))
+        selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake), nowMs,
+        limit: item.rows.length }))
       .filter((item) => eventEdgeSummary(item) !== null));
     const seen = new Set<string>();
     return sorted.filter((item) => seen.has(item.event.key) ? false : (seen.add(item.event.key), true));
@@ -770,7 +771,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const rankedByEvent = new Map(rankedEvents.map((item) => [item.event.key, item]));
   // This workspace is an exact cross-book comparison list. Never pad it with
   // one-book observations: those rows cannot be balanced across two providers.
-  const displayTicketItems = useMemo(() => topRankedTicketItems(rankedEvents, 25), [rankedEvents]);
+  const displayTicketItems = useMemo(() => topRankedTicketItems(rankedEvents,
+    Math.max(1, rankedEvents.reduce((total, item) => total + item.tickets.length, 0))), [rankedEvents]);
   const crossBookEventCount = displayTicketItems.length;
   useLayoutEffect(() => {
     const list = matchListRef.current;

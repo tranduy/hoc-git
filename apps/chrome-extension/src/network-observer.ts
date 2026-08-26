@@ -28,6 +28,9 @@ const KSPORT_IGNORED_SOCKETS_PER_SOURCE = 64;
 // Long enough that a failed reconnect cannot become a per-frame storm, short
 // enough that a provider is never dark for more than a minute.
 const KSPORT_ORPHAN_FRAME_RETRY_MS = 30_000;
+// Long enough that a click cannot become a storm, short enough that a missing
+// partition is retried well inside the feed's baseline lease.
+const KSPORT_BASELINE_REQUEST_RETRY_MS = 20_000;
 const KSPORT_HEARTBEAT_FORWARD_INTERVAL_MS = 5_000;
 const KSPORT_TRANSPORT_HEARTBEAT_MAX_CHARS = 256;
 const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
@@ -225,6 +228,11 @@ interface WsAttachDiagnosticState {
   targetsTotal: number;
   targetsIframe: number;
   autoAttachEvents: number;
+  // Authority promotion needs a complete baseline: a full snapshot for both
+  // partitions. These say which half is missing instead of leaving it to guesswork.
+  baselineLive: number;
+  baselineToday: number;
+  baselineTabSelections: number;
 }
 
 interface PreexistingSocketReconnectState {
@@ -884,7 +892,7 @@ export class NetworkObserver {
   readonly #ksportDiagnosticAtMs = new Map<string, number>();
   readonly #ksportRefreshesInFlight = new Set<string>();
   readonly #ksportBaselineRequests = new Map<string, { readonly streamId: string;
-    readonly recoveryGeneration: number; readonly requested: Set<"live" | "today"> }>();
+    readonly recoveryGeneration: number; readonly requested: Map<"live" | "today", number> }>();
   readonly #ksportLiveRestored = new Set<string>();
   // Periodic KSPORT maintenance must stay non-destructive while the sportsbook
   // STOMP socket is alive. These clocks gate the heavier recovery paths.
@@ -1115,12 +1123,17 @@ export class NetworkObserver {
     let requests = this.#ksportBaselineRequests.get(source.sourceId);
     if (requests === undefined || requests.streamId !== activeStream ||
       requests.recoveryGeneration !== recoveryGeneration) {
-      requests = { streamId: activeStream, recoveryGeneration, requested: new Set() };
+      requests = { streamId: activeStream, recoveryGeneration, requested: new Map() };
       this.#ksportBaselineRequests.set(source.sourceId, requests);
     }
     const missing = !state.live ? "live" : "today";
-    if (requests.requested.has(missing)) return false;
-    requests.requested.add(missing);
+    // Asking exactly once per generation left the partition permanently missing
+    // whenever that single click did not produce a snapshot, and without both
+    // partitions the feed can never be promoted. Retry on a bounded interval.
+    const nowMs = this.#now();
+    const requestedAtMs = requests.requested.get(missing);
+    if (requestedAtMs !== undefined && nowMs - requestedAtMs < KSPORT_BASELINE_REQUEST_RETRY_MS) return false;
+    requests.requested.set(missing, nowMs);
     const selected = await this.#selectKsportTimeTab(source,
       missing === "live" ? KSPORT_LIVE_BASELINE_EXPRESSION : KSPORT_TODAY_BASELINE_EXPRESSION);
     if (!selected) this.#ksportBaselineAttemptAtMs.set(source.sourceId, this.#now());
@@ -1128,6 +1141,7 @@ export class NetworkObserver {
   }
 
   async #selectKsportTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
+    this.#wsAttachDiagnostic(source).baselineTabSelections += 1;
     const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> = [];
     const activeStream = this.#activeKsportStreams.get(source.sourceId);
     const ownerSessionId = activeStream === undefined ? undefined : [...this.#webSockets.values()]
@@ -2230,7 +2244,8 @@ export class NetworkObserver {
       stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0,
       stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
       destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
-      targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0
+      targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
+      baselineLive: 0, baselineToday: 0, baselineTabSelections: 0
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2636,7 +2651,9 @@ export class NetworkObserver {
         stompFragments: diagnostic.stompFragments, destLiveLike: diagnostic.destLiveLike,
         destTodayLike: diagnostic.destTodayLike, destSportsLike: diagnostic.destSportsLike,
         subSportLike: diagnostic.subSportLike, targetsTotal: diagnostic.targetsTotal,
-        targetsIframe: diagnostic.targetsIframe, autoAttachEvents: diagnostic.autoAttachEvents })
+        targetsIframe: diagnostic.targetsIframe, autoAttachEvents: diagnostic.autoAttachEvents,
+        baselineLive: diagnostic.baselineLive, baselineToday: diagnostic.baselineToday,
+        baselineTabSelections: diagnostic.baselineTabSelections })
     });
   }
 
@@ -3074,6 +3091,9 @@ export class NetworkObserver {
         frameDiagnostic.destTodayLike = shape.destTodayLike;
         frameDiagnostic.destSportsLike = shape.destSportsLike;
         frameDiagnostic.subSportLike = shape.subSportLike;
+        const baseline = ksportRecovery.currentBaselineState;
+        frameDiagnostic.baselineLive = baseline.live ? 1 : 0;
+        frameDiagnostic.baselineToday = baseline.today ? 1 : 0;
         if (ksportRecovery.failed && ownsIdentity()) {
           this.#scheduleFailedKsportSocketRecovery(key, socket);
         }

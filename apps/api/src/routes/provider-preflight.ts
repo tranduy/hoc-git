@@ -93,10 +93,12 @@ export interface ProviderPreflightRouteOptions {
 }
 
 function identityMatches(displayed: TicketRealtimeDisplayedLeg, direct: ProviderTicketPreflight): boolean {
+  const providerSelection = displayed.providerSelection ?? displayed.selection;
+  const providerLine = displayed.providerLine === undefined ? displayed.line : displayed.providerLine;
   return direct.provider === displayed.provider && direct.accountId === displayed.accountId &&
     direct.providerEventId === displayed.providerEventId && direct.providerMarketId === displayed.providerMarketId &&
-    direct.providerSelectionId === displayed.providerSelectionId && direct.selection === displayed.selection &&
-    direct.line === displayed.line;
+    direct.providerSelectionId === displayed.providerSelectionId && direct.selection === providerSelection &&
+    direct.line === providerLine;
 }
 
 function directStatus(displayed: TicketRealtimeDisplayedLeg, direct: ProviderTicketPreflight):
@@ -160,16 +162,21 @@ Promise<TicketRealtimeCheckLegResult> {
   let directMethod: TicketRealtimeCheckLegResult["directMethod"] = null;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
+    const providerSelection = displayed.providerSelection ?? displayed.selection;
+    const providerLine = displayed.providerLine === undefined ? displayed.line : displayed.providerLine;
+    const providerParticipantA = displayed.providerParticipantA ?? ticket.participantA;
+    const providerParticipantB = displayed.providerParticipantB ?? ticket.participantB;
+    const providerEventLabel = `${providerParticipantA} vs ${providerParticipantB}`;
     const directRead = visiblePriceProbe === undefined ? preflight.preflight({
       accountId: displayed.accountId, providerEventId: displayed.providerEventId,
       providerMarketId: displayed.providerMarketId, providerSelectionId: displayed.providerSelectionId,
-      selection: displayed.selection, line: displayed.line, expectedDecimalOdds: displayed.decimalOdds,
+      selection: providerSelection, line: providerLine, expectedDecimalOdds: displayed.decimalOdds,
       requestedStake: displayed.requestedStake
     }) : visiblePriceProbe.probe({ provider: displayed.provider, providerEventId: displayed.providerEventId,
       providerMarketId: displayed.providerMarketId, providerSelectionId: displayed.providerSelectionId,
-      eventLabel: ticket.eventLabel, participantA: ticket.participantA, participantB: ticket.participantB,
+      eventLabel: providerEventLabel, participantA: providerParticipantA, participantB: providerParticipantB,
       marketType: ticket.marketType, scope: ticket.scope,
-      selection: displayed.selection, line: displayed.line,
+      selection: providerSelection, line: providerLine,
       requestedAtMs }).then((visible): ProviderTicketPreflight => {
       if (visible.observedAtMs < requestedAtMs) throw new Error("VISIBLE_PRICE_NOT_FRESH");
       directMethod = visible.method;
@@ -177,7 +184,7 @@ Promise<TicketRealtimeCheckLegResult> {
       const normalized = decimalOdds.toFixed(decimalOdds.decimalPlaces());
       return { accountId: displayed.accountId, provider: displayed.provider,
         providerEventId: displayed.providerEventId, providerMarketId: displayed.providerMarketId,
-        providerSelectionId: displayed.providerSelectionId, selection: displayed.selection, line: displayed.line,
+        providerSelectionId: displayed.providerSelectionId, selection: providerSelection, line: providerLine,
         rawOdds: visible.rawOdds, rawFormat: displayed.rawFormat, decimalOdds: normalized, quoteStatus: "OPEN",
         providerObservedAtMs: visible.observedAtMs, receivedMonotonicMs: performance.now(), sequence: null,
         limitEvidence: null, constraint: null, eligible: false, reasons: ["LIMIT_UNAVAILABLE"] };

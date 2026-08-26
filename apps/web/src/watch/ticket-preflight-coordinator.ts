@@ -40,9 +40,12 @@ function pairRequest(row: ComparisonRow, pair: OpposingLegPair, provider: Provid
     value.market.providerMarketId === candidate.quote.providerMarketId);
   const odds = decimalOdds(candidate.quote);
   if (cell === undefined || odds === null) return null;
-  return { accountId, providerEventId: cell.market.providerEventId,
-    providerMarketId: cell.market.providerMarketId, providerSelectionId: candidate.quote.providerSelectionId,
-    selection: candidate.quote.selection, line: cell.market.line,
+  const providerQuote = cell.sourceQuotes?.find((quote) =>
+    quote.providerSelectionId === candidate.quote.providerSelectionId) ?? candidate.quote;
+  const providerMarket = cell.sourceMarket ?? cell.market;
+  return { accountId, providerEventId: providerMarket.providerEventId,
+    providerMarketId: providerMarket.providerMarketId, providerSelectionId: providerQuote.providerSelectionId,
+    selection: providerQuote.selection, line: providerMarket.line,
     expectedDecimalOdds: new Decimal(odds).toFixed(new Decimal(odds).decimalPlaces()), requestedStake: stake };
 }
 

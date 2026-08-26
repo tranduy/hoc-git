@@ -2994,7 +2994,8 @@ describe("NetworkObserver", () => {
         // Three targets are offered, all three are iframes, two are on the
         // provider host. Separating these tells a missing target from a
         // rejected host.
-        targetsTotal: 3, targetsIframe: 3, autoAttachEvents: 0 },
+        targetsTotal: 3, targetsIframe: 3, autoAttachEvents: 0,
+        baselineLive: 0, baselineToday: 0, baselineTabSelections: 0 },
       { kind: "WS_ATTACH", sourceGeneration: 0, webSocketCreated: 0, webSockets: 0,
         ksportTargets: 0, attachedTargets: 0,
         framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
@@ -3004,7 +3005,8 @@ describe("NetworkObserver", () => {
         stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0,
         stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
         destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
-        targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0 }
+        targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
+        baselineLive: 0, baselineToday: 0, baselineTabSelections: 0 }
     ]);
   });
 

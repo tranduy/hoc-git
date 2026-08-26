@@ -139,7 +139,8 @@ describe("provider preflight route", () => {
       marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
       legs: [displayed, { ...displayed, provider: "CMD", accountId: "account-2", providerEventId: "event-2",
         providerMarketId: "market-2", providerSelectionId: "selection-2", selection: "UNDER", rawOdds: "1.1",
-        decimalOdds: "2.1" }]
+        decimalOdds: "2.1", providerParticipantA: "Beta Local", providerParticipantB: "Alpha Local",
+        providerSelection: "OVER", providerLine: "-2.5" }]
     } });
 
     expect(response.statusCode).toBe(200);
@@ -157,9 +158,9 @@ describe("provider preflight route", () => {
         participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
         scope: "FULL_TIME", selection: "OVER", line: "2.5", requestedAtMs: 1_000 },
       { provider: "CMD", providerEventId: "event-2", providerMarketId: "market-2",
-        providerSelectionId: "selection-2", eventLabel: "Alpha vs Beta",
-        participantA: "Alpha", participantB: "Beta", marketType: "FT_TOTAL",
-        scope: "FULL_TIME", selection: "UNDER", line: "2.5", requestedAtMs: 1_000 }
+        providerSelectionId: "selection-2", eventLabel: "Beta Local vs Alpha Local",
+        participantA: "Beta Local", participantB: "Alpha Local", marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection: "OVER", line: "-2.5", requestedAtMs: 1_000 }
     ]);
     const completed = response.json();
     expect(completed).toMatchObject({ participantA: "Alpha", participantB: "Beta" });

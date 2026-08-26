@@ -103,11 +103,20 @@ function TicketRow({ event, providers, ticket, compact, highlighted, stakePolicy
     const capturedAtMs = Date.now();
     const toDisplayedLeg = ({ leg, quote }: (typeof openableLegs)[number]): TicketRealtimeCheckRequest["legs"][number] => {
       const evidence = providerCatalogEvidence![leg.provider]!;
+      const cell = ticket.row.cells.find((candidate) => candidate.provider === leg.provider &&
+        candidate.market.providerMarketId === quote.providerMarketId);
+      const providerQuote = cell?.sourceQuotes?.find((candidate) =>
+        candidate.providerSelectionId === quote.providerSelectionId) ?? quote;
+      const providerEvent = cell?.sourceEvent;
+      const providerMarket = cell?.sourceMarket;
       const normalized = decimalOdds(quote);
       if (normalized === null) throw new Error("DISPLAYED_ODDS_INVALID");
       return { provider: leg.provider, accountId: evidence.accountId, providerEventId: quote.providerEventId,
         providerMarketId: quote.providerMarketId, providerSelectionId: quote.providerSelectionId,
         selection: quote.selection, line: quote.line, rawOdds: quote.rawOdds, rawFormat: quote.rawFormat,
+        providerParticipantA: providerEvent?.participantA ?? event.participantA,
+        providerParticipantB: providerEvent?.participantB ?? event.participantB,
+        providerSelection: providerQuote.selection, providerLine: providerMarket?.line ?? providerQuote.line,
         decimalOdds: normalized.toString(), quoteStatus: quote.status, providerObservedAtMs: evidence.observedAtMs,
         receivedMonotonicMs: quote.receivedMonotonicMs, sequence: quote.sequence,
         requestedStake: displayedStake(leg.provider, leg.selection) };

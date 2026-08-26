@@ -71,6 +71,28 @@ class FakeApi implements ProviderPreflightApiLike {
 }
 
 describe("TicketPreflightCoordinator", () => {
+  it("preflights a reversed provider with its native selection and handicap sign", async () => {
+    const saba = catalog("SABA", "saba-account", ["2.5", "1.2"]);
+    const sbobetBase = catalog("SBOBET", "sbobet-account", ["2.5", "1.2"]);
+    const sbobet = { ...sbobetBase,
+      events: [{ ...sbobetBase.events[0]!, participantA: "Beta FC", participantB: "Alpha FC" }],
+      markets: [{ ...sbobetBase.markets[0]!, line: "0.5" }],
+      quotes: sbobetBase.quotes.map((quote) => ({ ...quote, line: "0.5" })) };
+    const events = buildComparisonEvents([saba, sbobet]);
+    const api = new FakeApi();
+    const coordinator = new TicketPreflightCoordinator(api, () => nowMs);
+
+    await coordinator.refresh({ events,
+      selectedAccounts: [account("saba-account", "SABA"), account("sbobet-account", "SBOBET")],
+      selectedProviders: new Set<ProviderId>(["SABA", "SBOBET"]), policy });
+
+    expect(api.requests.filter((request) => request.accountId === "sbobet-account")
+      .map((request) => ({ id: request.providerSelectionId, selection: request.selection, line: request.line })))
+      .toEqual(expect.arrayContaining([
+        { id: "SBOBET-HOME", selection: "HOME", line: "0.5" }
+      ]));
+  });
+
   it("verifies both exact final stakes after provider step rounding changes the hedge", async () => {
     const events = buildComparisonEvents([
       catalog("SABA", "saba-account", ["2.2", "1.2"]),

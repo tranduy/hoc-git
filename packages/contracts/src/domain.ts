@@ -147,6 +147,11 @@ export interface TicketRealtimeDisplayedLeg {
   readonly providerSelectionId: string;
   readonly selection: string;
   readonly line: string | null;
+  /** Canonical fields above describe the cross-book row; these fields identify the provider's own fixture. */
+  readonly providerParticipantA?: string | undefined;
+  readonly providerParticipantB?: string | undefined;
+  readonly providerSelection?: string | undefined;
+  readonly providerLine?: string | null | undefined;
   readonly rawOdds: string;
   readonly rawFormat: OddsFormat;
   readonly decimalOdds: string;
