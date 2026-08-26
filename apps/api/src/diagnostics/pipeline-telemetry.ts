@@ -120,6 +120,8 @@ interface AccountState {
     readonly baselineLive: number;
     readonly baselineToday: number;
     readonly baselineTabSelections: number;
+    readonly baselineTabStatus: string;
+    readonly baselineTabTargets: number;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -134,6 +136,13 @@ const decoderFailCodes = new Set(["NONE", "PAYLOAD_TOO_LONG", "ENVELOPE_INVALID"
 
 function failCode(value: unknown): string {
   return typeof value === "string" && decoderFailCodes.has(value) ? value : "NONE";
+}
+
+const tabStatuses = new Set(["NONE", "EVALUATE_FAILED", "time-tab-not-found",
+  "time-tab-active", "time-tab-selected"]);
+
+function tabStatus(value: unknown): string {
+  return typeof value === "string" && tabStatuses.has(value) ? value : "NONE";
 }
 
 function boundedCounter(value: unknown): number {
@@ -387,7 +396,8 @@ export class PipelineTelemetry {
         destLiveLike?: unknown; destTodayLike?: unknown; destSportsLike?: unknown;
         subSportLike?: unknown; targetsTotal?: unknown; targetsIframe?: unknown;
         autoAttachEvents?: unknown; baselineLive?: unknown; baselineToday?: unknown;
-        baselineTabSelections?: unknown };
+        baselineTabSelections?: unknown; baselineTabStatus?: unknown;
+        baselineTabTargets?: unknown };
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
@@ -431,7 +441,9 @@ export class PipelineTelemetry {
           autoAttachEvents: boundedCounter(value.autoAttachEvents),
           baselineLive: boundedCounter(value.baselineLive),
           baselineToday: boundedCounter(value.baselineToday),
-          baselineTabSelections: boundedCounter(value.baselineTabSelections)
+          baselineTabSelections: boundedCounter(value.baselineTabSelections),
+          baselineTabStatus: tabStatus(value.baselineTabStatus),
+          baselineTabTargets: boundedCounter(value.baselineTabTargets)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }

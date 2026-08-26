@@ -233,6 +233,10 @@ interface WsAttachDiagnosticState {
   baselineLive: number;
   baselineToday: number;
   baselineTabSelections: number;
+  /** Last status the in-page time-tab selector returned, so a stale selector is
+   *  distinguishable from a page that simply refused to re-emit its table. */
+  baselineTabStatus: string;
+  baselineTabTargets: number;
 }
 
 interface PreexistingSocketReconnectState {
@@ -1141,7 +1145,8 @@ export class NetworkObserver {
   }
 
   async #selectKsportTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
-    this.#wsAttachDiagnostic(source).baselineTabSelections += 1;
+    const diagnostic = this.#wsAttachDiagnostic(source);
+    diagnostic.baselineTabSelections += 1;
     const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> = [];
     const activeStream = this.#activeKsportStreams.get(source.sourceId);
     const ownerSessionId = activeStream === undefined ? undefined : [...this.#webSockets.values()]
@@ -1166,6 +1171,7 @@ export class NetworkObserver {
     for (const sessionId of this.#ksportAttachedTargetSessions.get(source.sourceId)?.values() ?? []) {
       if (!targets.some((target) => target.sessionId === sessionId)) targets.push({ sessionId });
     }
+    diagnostic.baselineTabTargets = targets.length;
     for (const target of targets) {
       const params = { expression, ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
         returnByValue: true, awaitPromise: false };
@@ -1173,6 +1179,8 @@ export class NetworkObserver {
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId)).catch(() => null);
       const status = nestedValue(evaluation, "result", "value", "status");
+      if (typeof status === "string") diagnostic.baselineTabStatus = status;
+      else if (evaluation === null) diagnostic.baselineTabStatus = "EVALUATE_FAILED";
       if (status === "time-tab-selected" || status === "time-tab-active") return true;
     }
     return false;
@@ -2245,7 +2253,8 @@ export class NetworkObserver {
       stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
       destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
       targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
-      baselineLive: 0, baselineToday: 0, baselineTabSelections: 0
+      baselineLive: 0, baselineToday: 0, baselineTabSelections: 0,
+      baselineTabStatus: "NONE", baselineTabTargets: 0
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2653,7 +2662,9 @@ export class NetworkObserver {
         subSportLike: diagnostic.subSportLike, targetsTotal: diagnostic.targetsTotal,
         targetsIframe: diagnostic.targetsIframe, autoAttachEvents: diagnostic.autoAttachEvents,
         baselineLive: diagnostic.baselineLive, baselineToday: diagnostic.baselineToday,
-        baselineTabSelections: diagnostic.baselineTabSelections })
+        baselineTabSelections: diagnostic.baselineTabSelections,
+        baselineTabStatus: diagnostic.baselineTabStatus,
+        baselineTabTargets: diagnostic.baselineTabTargets })
     });
   }
 
