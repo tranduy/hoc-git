@@ -47,7 +47,9 @@ export class BridgeWakeup {
     const rebuild = this.#dependencies.rebuildBridge;
     if (contactAgeMs === undefined || rebuild === undefined) return;
     const limitMs = this.#dependencies.rebuildAfterMs ?? DEFAULT_REBUILD_AFTER_MS;
-    if (!Number.isFinite(contactAgeMs) || contactAgeMs <= limitMs) return;
+    // No bridge at all reports Infinity and is the strongest reason to rebuild,
+    // so only a value that is not a number at all is refused here.
+    if (Number.isNaN(contactAgeMs) || contactAgeMs <= limitMs) return;
     try { await rebuild(); }
     catch { /* a failed rebuild is retried by the next alarm */ }
   }

@@ -127,3 +127,25 @@ describe("bridge rebuild watchdog", () => {
     expect(rebuilds).toEqual([]);
   });
 });
+
+describe("watchdog on a bridge that does not exist", () => {
+  it("rebuilds when there is no bridge at all", async () => {
+    // The worst case is no bridge object: the worker restarted and its configure
+    // never completed. Reporting that as "contacted infinitely recently" made the
+    // watchdog skip exactly the case it exists for.
+    const rebuilds: number[] = [];
+    const wakeup = new BridgeWakeup({
+      createAlarm: vi.fn(),
+      addAlarmListener: vi.fn(),
+      ensureConnected: vi.fn(async () => true),
+      pollNow: vi.fn(),
+      bridgeContactAgeMs: () => Number.POSITIVE_INFINITY,
+      rebuildBridge: async () => { rebuilds.push(1); },
+      rebuildAfterMs: 180_000
+    });
+
+    await wakeup.wakeNow();
+
+    expect(rebuilds).toEqual([1]);
+  });
+});

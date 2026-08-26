@@ -403,7 +403,10 @@ const bridgeWakeup = new BridgeWakeup({
   addAlarmListener: (listener) => chrome.alarms.onAlarm.addListener(listener),
   reconcileTabs: reconcilePreferredTabs,
   ensureConnected: ensureBridgeConnected,
-  bridgeContactAgeMs: () => bridge?.serverContactAgeMs() ?? Number.NEGATIVE_INFINITY,
+  // No bridge object means the worker restarted and its configure never
+  // completed. That is the case the watchdog exists for, so it reports the
+  // largest possible age rather than a sentinel that reads as "just contacted".
+  bridgeContactAgeMs: () => bridge?.serverContactAgeMs() ?? Number.POSITIVE_INFINITY,
   // Clearing the in-flight configure first is the point: a hung configure would
   // otherwise hand every caller the same never-settling promise forever.
   rebuildBridge: async () => {
