@@ -23,6 +23,7 @@ interface QueueEntry {
   readonly bytes: number;
   readonly priority: "QUOTE" | "DIAGNOSTIC";
   readonly insertedAt: number;
+  readonly settleAcknowledgement: (() => void) | null;
   sentGeneration: number | null;
 }
 
@@ -76,6 +77,7 @@ export class LocalBridge {
   readonly #onSelectionPriceProbe: NonNullable<LocalBridgeOptions["onSelectionPriceProbe"]>;
   readonly #onCmdHiddenMarketProbe: NonNullable<LocalBridgeOptions["onCmdHiddenMarketProbe"]>;
   readonly #queue: QueueEntry[] = [];
+  readonly #queueSpaceWaiters = new Set<() => void>();
   readonly #recoveryScheduler = new ProviderWorkScheduler();
   readonly #sourceEpochs = new Map<string, SourceEpochAdmission>();
   #socket: BridgeSocket | null = null;
@@ -85,6 +87,7 @@ export class LocalBridge {
   #insertCounter = 0;
   #probeInFlight = false;
   #connectToken = 0;
+  #closeOrdinal = 0;
   #sourceRecoveryTail: Promise<void> | null = null;
   #lastServerContactAtMs = 0;
 
@@ -121,7 +124,16 @@ export class LocalBridge {
 
   #removeAt(index: number): void {
     const [removed] = this.#queue.splice(index, 1);
-    if (removed !== undefined) this.#queueBytes -= removed.bytes;
+    if (removed === undefined) return;
+    this.#queueBytes -= removed.bytes;
+    removed.settleAcknowledgement?.();
+    this.#notifyQueueSpace();
+  }
+
+  #notifyQueueSpace(): void {
+    const waiters = [...this.#queueSpaceWaiters];
+    this.#queueSpaceWaiters.clear();
+    for (const resolve of waiters) resolve();
   }
 
   pendingSequences(): number[] {
@@ -130,16 +142,30 @@ export class LocalBridge {
 
   async enqueue(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): Promise<void> {
     if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch ?? null)) return;
+    const closeOrdinal = this.#closeOrdinal;
     const serialized = JSON.stringify(envelope);
+    const acknowledgedBackpressure = envelope.lobby === "KSPORT" && envelope.transport === "HTTP_RESPONSE"
+      && "providerContentIntent" in envelope.request
+      && envelope.request.providerContentIntent === "FOOTBALL_FULL_CATALOG";
+    let settleAcknowledgement: (() => void) | null = null;
+    const acknowledgement = acknowledgedBackpressure
+      ? new Promise<void>((resolve) => { settleAcknowledgement = resolve; })
+      : null;
     const entry: QueueEntry = {
       envelope,
       serialized,
       bytes: utf8ByteLength(serialized),
       priority,
       insertedAt: this.#insertCounter++,
+      settleAcknowledgement,
       sentGeneration: null
     };
     if (entry.bytes > this.#maxQueueBytes) throw new Error("BRIDGE_QUEUE_ITEM_TOO_LARGE");
+    while (this.queueBytes + entry.bytes > this.#maxQueueBytes && acknowledgedBackpressure) {
+      await new Promise<void>((resolve) => this.#queueSpaceWaiters.add(resolve));
+      if (this.#closeOrdinal !== closeOrdinal) return;
+      if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch ?? null)) return;
+    }
     if (this.queueBytes + entry.bytes > this.#maxQueueBytes) {
       // Every envelope is sequenced, including diagnostics. Dropping any one
       // would manufacture continuity across a hole, so retire the incoming
@@ -150,6 +176,7 @@ export class LocalBridge {
     this.#queue.push(entry);
     this.#queueBytes += entry.bytes;
     this.#flush();
+    if (acknowledgement !== null) await acknowledgement;
   }
 
   connect(): void {
@@ -233,6 +260,7 @@ export class LocalBridge {
   }
 
   close(): void {
+    this.#closeOrdinal += 1;
     this.#connectToken++;
     this.#probeInFlight = false;
     if (this.#timer !== null) this.#clearTimer(this.#timer);
@@ -240,6 +268,8 @@ export class LocalBridge {
     const socket = this.#socket;
     this.#socket = null;
     socket?.close();
+    for (const entry of this.#queue) entry.settleAcknowledgement?.();
+    this.#notifyQueueSpace();
   }
 
   #ordered(entries: readonly QueueEntry[] = this.#queue): QueueEntry[] {

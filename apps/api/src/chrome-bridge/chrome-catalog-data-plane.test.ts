@@ -8,6 +8,7 @@ import { ProviderFeedRegistry } from "./provider-feed-registry.js";
 import { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
 import { ChromeBridgeRegistry } from "./chrome-bridge-registry.js";
 import { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js";
+import { providerFeedPolicies } from "./provider-feed-policies.js";
 
 const SBOBET = "catalog-source:SBOBET:FOOTBALL";
 const SABA = "catalog-source:SABA:FOOTBALL";
@@ -68,6 +69,16 @@ function imEnvelope(sequence: number, partition: "IM_MARKET_1" | "IM_MARKET_2",
     payload: { encoding: "UTF8", body: JSON.stringify(body) } } as ChromeBridgeEnvelope;
 }
 
+function imDeltaEnvelope(sequence: number, observedAtMs: number, body: unknown): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs, receivedMonotonicMs: 50 + sequence,
+    transport: "HTTP_RESPONSE", request: { hostname: "imsports.directsb.net",
+      pathnameClass: "/api/EventV6/GetSEDelta", resourceType: "XHR", method: "POST",
+      observerRequestId: `observer-a:delta:${sequence}`,
+      requestFrameKey: "http-frame:im-main", requestDocumentKey: "http-document:im-document" },
+    payload: { encoding: "UTF8", body: JSON.stringify(body) } } as ChromeBridgeEnvelope;
+}
+
 const sabaFields = ["type", "leagueid", "leaguenameen", "sporttype", "matchid", "hteamnameen",
   "ateamnameen", "kickofftime", "isrunning", "markettype", "bettype", "hdp", "odds", "selectionid"];
 
@@ -86,6 +97,50 @@ function sabaEnvelope(sequence: number, matchIds: readonly number[]): ChromeBrid
       fields: sabaFields, rows }])}` } };
 }
 
+const sabaPushFields = ["type", "leagueid", "leaguenameen", "sporttype", "matchid", "hteamnameen",
+  "ateamnameen", "kickofftime", "marketid", "oddsid", "bettype", "parenttypeid", "oddsstatus",
+  "enable", "odds1a", "odds2a", "hdp1", "hdp2"];
+
+function sabaPushEnvelope(sequence: number, streamId: string, body: string,
+  transport: "WS_FRAME" | "WS_STATE" = "WS_FRAME"): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 100_000 + sequence,
+    receivedMonotonicMs: 50 + sequence, transport,
+    request: { hostname: "sports.example", pathnameClass: "/socket.io/",
+      resourceType: "WebSocket", streamId },
+    payload: { encoding: "UTF8", body } };
+}
+
+function sabaPushOpen(sequence: number, streamId: string): ChromeBridgeEnvelope {
+  return sabaPushEnvelope(sequence, streamId, '{"state":"OPEN"}', "WS_STATE");
+}
+
+function sabaPushBaseline(sequence: number, streamId: string): ChromeBridgeEnvelope {
+  const encode = (record: Record<string, unknown>): readonly unknown[] => Object.entries(record)
+    .flatMap(([key, value]) => [sabaPushFields.indexOf(key), value]);
+  const rows = [["f", 0, sabaPushFields], [0, "reset"],
+    encode({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+    encode({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+      kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+    encode({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+      oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+    [0, "done"]];
+  return sabaPushEnvelope(sequence, streamId,
+    `42${JSON.stringify(["m", "b1", rows, `revision-${sequence}`])}`);
+}
+
+function sabaDomEnvelope(sequence: number): ChromeBridgeEnvelope {
+  const records = Array.from({ length: 20 }, (_, index) => ({ ...record,
+    matchId: `saba-event-${index}`, teamNames: [`Home ${index}`, `Away ${index}`],
+    groups: record.groups.map((group) => ({ ...group, odds: group.odds.map((odds) => ({ ...odds,
+      marketOddsId: `saba-market-${index}` })) })) }));
+  return { ...cmdEnvelope(sequence, records, 0, 1,
+    `saba:7:stable-generation-${sequence.toString().padStart(4, "0")}`),
+    lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7, sourceEpoch: "worker-a:0",
+    observedAtMs: 100_000 + sequence,
+    request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" } };
+}
+
 function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds: readonly number[],
   sourceEpoch = "worker-a:0", receiptGeneration = Math.floor((sequence + 1) / 2)): ChromeBridgeEnvelope {
   const events = eventIds.map((eventId) => ({ "2": `Home ${eventId}`, "3": `Away ${eventId}`, "8": eventId,
@@ -98,7 +153,7 @@ function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds:
       body: JSON.stringify([{ "1": "League", "2": events }]) })}\0`;
   return { version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8,
     sourceEpoch, sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
-    transport: "WS_FRAME", request: { hostname: "sports.example", pathnameClass: "/sport/session/websocket",
+    transport: "WS_FRAME", request: { hostname: "d42.sb21.net", pathnameClass: "/sport/session/websocket",
       resourceType: "WebSocket", streamId: "ksport-stream-1", recoveryGeneration: receiptGeneration },
     payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
 }
@@ -127,7 +182,9 @@ function ksportHttpEnvelope(sequence: number, partition: "live" | "today", gener
     transport: "HTTP_RESPONSE", request: { hostname: "zenandfe.com", pathnameClass: "/api/v2/getEvent",
       resourceType: "Fetch", method: "GET", observerRequestId: `observer-a:request:${sequence}`,
       requestFrameKey: `http-frame:ksport-${tabId}`, requestDocumentKey: `http-document:ksport-${tabId}`,
-      streamId: `ksport-http:${tabId}:${generation}:${partition}` },
+      streamId: `ksport-http:${tabId}:${generation}`,
+      providerPartition: partition === "live" ? "KSPORT_LIVE" : "KSPORT_TODAY",
+      providerContentIntent: "FOOTBALL_FULL_CATALOG", requestStartSequence: 0 },
     payload: { encoding: "UTF8", body: JSON.stringify(partition === "live"
       ? [{ "1": "League", "2": events }] : []) } };
 }
@@ -198,6 +255,62 @@ class RejectingPromotionFeedRegistry extends ProviderFeedRegistry {
 afterEach(() => vi.restoreAllMocks());
 
 describe("ChromeCatalogDataPlane", () => {
+  it("promotes a late-attached SABA candidate from two stable complete DOM generations", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const feeds = new ProviderFeedRegistry({ now: () => 100_002 });
+    const onIngestRejected = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 100_002,
+      authorityCoordinator: coordinator, feedRegistry: feeds, onIngestRejected });
+
+    expect(plane.ingest(sabaDomEnvelope(1), { connectionGeneration: 1 })).toBe(false);
+    const accepted = plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 });
+    expect(onIngestRejected.mock.calls.map((call) => call[1])).toEqual([
+      "ADAPTER_DECODE_EMPTY:saba-ws-catalog-v1"
+    ]);
+    expect(accepted).toBe(true);
+    expect(coordinator.snapshot(SABA)).toMatchObject({
+      active: expect.objectContaining({ sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0" }),
+      candidate: null
+    });
+    expect(feeds.snapshot(SABA)).toMatchObject({
+      state: "LIVE", activeGeneration: "worker-a:0:dom:2"
+    });
+    await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA", events: expect.any(Array) });
+  });
+
+  it("keeps an active SABA DOM generation when a non-authoritative socket frame is malformed", async () => {
+    const feeds = new ProviderFeedRegistry({ now: () => 100_002 });
+    const plane = new ChromeCatalogDataPlane({ now: () => 100_002, feedRegistry: feeds });
+
+    expect(plane.ingest(sabaDomEnvelope(1), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 })).toBe(true);
+    expect(feeds.snapshot(SABA).activeGeneration).toBe("worker-a:0:dom:2");
+
+    expect(plane.ingest(sabaPushOpen(3, "1"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaPushEnvelope(4, "1", '42["m","b1",[],1,"extra"]'),
+      { connectionGeneration: 1 })).toBe(false);
+    expect(feeds.snapshot(SABA)).toMatchObject({
+      state: "LIVE", activeGeneration: "worker-a:0:dom:2"
+    });
+    await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA" });
+  });
+
+  it("keeps an active SABA DOM generation when its non-authoritative socket closes", async () => {
+    const feeds = new ProviderFeedRegistry({ now: () => 100_002 });
+    const plane = new ChromeCatalogDataPlane({ now: () => 100_002, feedRegistry: feeds });
+
+    expect(plane.ingest(sabaDomEnvelope(1), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 })).toBe(true);
+    expect(plane.ingest(sabaPushOpen(3, "1"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaPushEnvelope(4, "1", '{"state":"CLOSED"}', "WS_STATE"),
+      { connectionGeneration: 1 })).toBe(false);
+
+    expect(feeds.snapshot(SABA)).toMatchObject({
+      state: "LIVE", activeGeneration: "worker-a:0:dom:2"
+    });
+    await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA" });
+  });
+
   it("keeps unbound HTTP candidate evidence out of authority and decoder state", async () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const feeds = new ProviderFeedRegistry({ now: () => 1_500 });
@@ -1025,9 +1138,57 @@ describe("ChromeCatalogDataPlane", () => {
     await plane.overlayStatuses([activeSbobet]);
     expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(1);
 
-    now = 47_005;
+    // The hard stage reloads the tab, so it is gated on the provider's own
+    // hard window rather than a fixed offset.
+    now = 1_500 + providerFeedPolicies.get(SBOBET)!.hardRecoveryAfterMs + 1;
     await plane.overlayStatuses([activeSbobet]);
     expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers a malformed current SABA stream without promoting its retired frames", async () => {
+    let now = 100_002;
+    const onSourceRecoveryNeeded = vi.fn();
+    const registry = new ProviderFeedRegistry({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: registry,
+      onSourceRecoveryNeeded });
+
+    expect(plane.ingest(sabaPushOpen(1, "1"))).toBe(false);
+    expect(plane.ingest(sabaPushBaseline(2, "1"))).toBe(true);
+    await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA", observedAtMs: 100_002 });
+
+    now = 100_003;
+    const malformed = sabaPushEnvelope(3, "1",
+      `42${JSON.stringify(["m", "b1", [[999, "o"]], "revision-3"])}`);
+    expect(plane.ingest(malformed)).toBe(true);
+    expect(registry.snapshot(SABA)).toMatchObject({ state: "STALLED", reason: "SCHEMA_CHANGED",
+      sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0", lastAuthoritativeEvidenceAtMs: null,
+      activeGeneration: null, recoveryStage: "NONE" });
+    await expect(plane.read(SABA)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    expect(plane.ingest(sabaPushEnvelope(4, "1", '42["m","b1",[],1,"extra"]'))).toBe(false);
+    expect(plane.ingest(sabaPushEnvelope(5, "1", "2"))).toBe(false);
+    expect(registry.snapshot(SABA)).toMatchObject({ state: "STALLED",
+      providerTransportAtMs: null, lastAuthoritativeEvidenceAtMs: null, recoveryAttempt: 0 });
+
+    now = 190_003;
+    await plane.overlayStatuses([activeSaba]);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledExactlyOnceWith(SABA);
+    expect(registry.snapshot(SABA)).toMatchObject({ state: "SOFT_RECOVERY",
+      recoveryStage: "SOFT", recoveryAttempt: 1 });
+
+    now = 280_003;
+    await plane.overlayStatuses([activeSaba]);
+    expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(2);
+    expect(registry.snapshot(SABA)).toMatchObject({ state: "HARD_RECOVERY",
+      recoveryStage: "HARD", recoveryAttempt: 2 });
+
+    now = 280_009;
+    expect(plane.ingest({ ...sabaPushOpen(6, "2"), observedAtMs: 280_008 })).toBe(false);
+    expect(plane.ingest({ ...sabaPushBaseline(7, "2"), observedAtMs: 280_009 })).toBe(true);
+    expect(registry.snapshot(SABA)).toMatchObject({ state: "LIVE", reason: null,
+      sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0", recoveryStage: "NONE",
+      recoveryAttempt: 0, activeGeneration: "worker-a:0:saba:2:7" });
+    await expect(plane.read(SABA)).resolves.toMatchObject({ observedAtMs: 280_009 });
   });
 
   it("does not request recovery for a provider with no tab or feed evidence", async () => {
@@ -1095,13 +1256,14 @@ describe("ChromeCatalogDataPlane", () => {
     });
   });
 
-  it("publishes a stale CMD DOM overlay with network prices after authority expires", async () => {
+  it("publishes a stale CMD DOM overlay after the configured evidence cadence expires", async () => {
+    const policy = providerFeedPolicies.get(CMD)!;
     let now = 1_100;
     const publish = vi.fn();
     const registry = new ProviderFeedRegistry({ now: () => now });
     const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: registry, publish });
     expect(plane.ingest(cmdHttpEnvelope(1))).toBe(true);
-    now = 5_100;
+    now = 1_001 + policy.expectedEvidenceCadenceMs + 1;
     await expect(plane.read("catalog-source:CMD:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
     const visible = { ...record, matchId: "24881365", leagueId: "318", leagueName: "Visible Premier",
       teamNames: ["Visible Newcastle", "Visible Liverpool"], groups: [{
@@ -1109,14 +1271,14 @@ describe("ChromeCatalogDataPlane", () => {
           marketOddsId: "visible-ah", priceText: "0.55" }))
       }] };
     const dom = { ...cmdEnvelope(2, [visible], 0, 1, "cmd:9:visible-overlay-0001"),
-      sourceEpoch: "worker-a:0", observedAtMs: 5_100 };
+      sourceEpoch: "worker-a:0", observedAtMs: now };
     expect(plane.ingest(dom)).toBe(true);
     expect(publish).toHaveBeenLastCalledWith(expect.objectContaining({
       events: [expect.objectContaining({ participantA: "Visible Newcastle" })],
       quotes: expect.arrayContaining([expect.objectContaining({ rawOdds: "-0.96", sequence: 1 })])
     }), "STALE");
     const calls = publish.mock.calls.length;
-    expect(plane.ingest({ ...dom, sequence: 3, observedAtMs: 5_200 })).toBe(false);
+    expect(plane.ingest({ ...dom, sequence: 3, observedAtMs: now + 100 })).toBe(false);
     expect(publish).toHaveBeenCalledTimes(calls);
   });
 
@@ -1126,6 +1288,59 @@ describe("ChromeCatalogDataPlane", () => {
       sel: [{ eid: 1, malformed: true }] }))).toBe(false);
     expect(plane.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100, sel: [] }))).toBe(false);
     await expect(plane.read("catalog-source:IM:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+  });
+
+  it("uses quiet IM transport through the configured cadence without extending maximum baseline age",
+    async () => {
+      const policy = providerFeedPolicies.get("catalog-source:IM:FOOTBALL")!;
+      let now = 1_500;
+      const publish = vi.fn();
+      const plane = new ChromeCatalogDataPlane({ now: () => now, publish });
+      const validEvent = { eid: 112516390, htn: "Monterrey", atn: "Nashville", cn: "Cup",
+        edt: "1970-01-01T00:00:02.000Z", isrbt: false, iscyb: false, mls: [{ mi: 10, bti: 1, gp: 1,
+          ws: [{ wsi: 101, si: 1, hdp: -0.5, dih: "+0.5", o: 0.67 },
+            { wsi: 102, si: 2, hdp: -0.5, dih: "-0.5", o: -0.79 }] }] };
+      expect(plane.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100, sel: [validEvent] }))).toBe(false);
+      expect(plane.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100, sel: [] }))).toBe(true);
+      expect(publish).toHaveBeenCalledTimes(1);
+
+      const baselineAtMs = 1_002;
+      const effectiveCadenceMs = policy.expectedEvidenceCadenceMs / 3;
+      let sequence = 3;
+      for (let atMs = baselineAtMs + effectiveCadenceMs;
+        atMs <= baselineAtMs + policy.maxBaselineAgeMs; atMs += effectiveCadenceMs) {
+        now = atMs;
+        expect(plane.ingest(imDeltaEnvelope(sequence, atMs, { StatusCode: 100, dc: [] }))).toBe(false);
+        sequence += 1;
+      }
+      expect(publish).toHaveBeenCalledTimes(1);
+      await expect(plane.read("catalog-source:IM:FOOTBALL")).resolves.toMatchObject({ observedAtMs: 1_002 });
+
+      now = baselineAtMs + policy.maxBaselineAgeMs + 1;
+      await expect(plane.read("catalog-source:IM:FOOTBALL")).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+      expect(publish).toHaveBeenCalledTimes(1);
+    });
+
+  it("does not publish or replace the IM catalog when a market delta repeats current values", async () => {
+    let now = 1_500;
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, publish });
+    const validEvent = { eid: 112516390, htn: "Monterrey", atn: "Nashville", cn: "Cup",
+      edt: "1970-01-01T00:00:02.000Z", isrbt: false, iscyb: false, mls: [{ mi: 10, bti: 1, gp: 1,
+        ws: [{ wsi: 101, si: 1, hdp: -0.5, dih: "+0.5", o: 0.67 },
+          { wsi: 102, si: 2, hdp: -0.5, dih: "-0.5", o: -0.79 }] }] };
+    expect(plane.ingest(imEnvelope(1, "IM_MARKET_1", { StatusCode: 100, sel: [validEvent] }))).toBe(false);
+    expect(plane.ingest(imEnvelope(2, "IM_MARKET_2", { StatusCode: 100, sel: [] }))).toBe(true);
+    const baseline = await plane.read("catalog-source:IM:FOOTBALL");
+    expect(publish).toHaveBeenCalledTimes(1);
+
+    now = 6_000;
+    expect(plane.ingest(imDeltaEnvelope(3, now, { StatusCode: 100,
+      dc: [{ eid: validEvent.eid, a: 3, v: structuredClone(validEvent.mls) }] }))).toBe(false);
+    expect(publish).toHaveBeenCalledTimes(1);
+    const retained = await plane.read("catalog-source:IM:FOOTBALL");
+    expect(retained).toBe(baseline);
+    expect(retained.observedAtMs).toBe(1_002);
   });
 
   it("does not authorize an unexplained iscyb-only IM partition or malformed Market 2", async () => {

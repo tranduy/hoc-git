@@ -140,4 +140,45 @@ describe("SabaPushDecoder", () => {
       [0, "reset"], [0, "m", 1, 9], [0, "done"]
     ] }).records).toEqual([expect.objectContaining({ matchid: 9 })]);
   });
+
+  it("rejects sparse field offsets synchronously without poisoning a later valid snapshot", () => {
+    const decoder = new SabaPushDecoder();
+    const startedAt = performance.now();
+
+    expect(() => decoder.apply({ bridgeId: "b1", revision: "r1", rows: [
+      ["f", 4_294_967_294, ["type"]]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:BOUND_EXCEEDED");
+    expect(performance.now() - startedAt).toBeLessThan(100);
+
+    expect(decoder.apply({ bridgeId: "b1", revision: "r2", rows: [
+      ["f", 0, fields], [0, "reset"], [0, "m", 1, 5], [0, "done"]
+    ] }).records).toEqual([expect.objectContaining({ matchid: 5 })]);
+  });
+
+  it("bounds bridge ids, logical channels, and dense field columns", () => {
+    const decoder = new SabaPushDecoder();
+    for (let index = 1; index <= 64; index += 1) {
+      expect(decoder.apply({ bridgeId: `b${index}`, revision: "r1", rows: [
+        ["c", `c${index}`], ["f", 0, ["type"]]
+      ] })).toMatchObject({ duplicate: false });
+    }
+    expect(() => decoder.apply({ bridgeId: "b65", revision: "r1", rows: [
+      ["c", "c65"], ["f", 0, ["type"]]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:BOUND_EXCEEDED");
+
+    const rotatingChannels = new SabaPushDecoder();
+    for (let index = 1; index <= 64; index += 1) {
+      expect(rotatingChannels.apply({ bridgeId: "b1", revision: `schema-${index}`, rows: [
+        ["c", `c${index}`], ["f", 0, ["type"]]
+      ] })).toMatchObject({ duplicate: false });
+    }
+    expect(() => rotatingChannels.apply({ bridgeId: "b1", revision: "schema-65", rows: [
+      ["c", "c65"], ["f", 0, ["type"]]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:BOUND_EXCEEDED");
+
+    const wide = new SabaPushDecoder();
+    expect(() => wide.apply({ bridgeId: "b1", revision: "r1", rows: [
+      ["f", 0, Array.from({ length: 513 }, (_, index) => `field${index}`)]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:BOUND_EXCEEDED");
+  });
 });

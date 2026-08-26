@@ -242,6 +242,9 @@ describe("LiveCatalogPage", () => {
     fireEvent.click(cards[1]!);
     expect(new URLSearchParams(window.location.search).get("ticket")).not.toBeNull();
     expect(document.querySelector(".ranked-ticket-row--highlight")).toBeTruthy();
+    expect(cards[1]!.classList.contains("catalog-event--selected")).toBe(true);
+    expect(cards[1]!.className).not.toMatch(/catalog-event--roi-/u);
+    expect(cards[0]!.className).toMatch(/catalog-event--roi-/u);
   });
 
   it("shows provider buttons only after the profitable match is opened in detail", async () => {
@@ -1093,7 +1096,7 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
 
-  it("restores last verified catalogs as display-only after a page reload", async () => {
+  it("hides restored stale catalogs after a page reload", async () => {
     const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
     const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
     const providerCatalog = (providerAccount: AccountStatus): LiveCatalogResponse => ({
@@ -1115,16 +1118,48 @@ describe("LiveCatalogPage", () => {
 
     render(<LiveCatalogPage accountApi={accounts} catalogApi={{ read: async () => {
       throw new Error("provider temporarily unavailable");
-    } }} />);
+    } }} ticketReportApi={{
+      list: async () => ({ reports: [] }),
+      create: async (request) => ({ reportId: "report-1", createdAtMs: 1, request })
+    }} />);
 
-    expect((await screen.findAllByText("Alpha vs Beta")).length).toBeGreaterThan(0);
-    expect(await screen.findByRole("columnheader", { name: "SABA" })).toBeTruthy();
-    expect(screen.getByRole("columnheader", { name: "SBOBET" })).toBeTruthy();
-    expect(screen.getByText("STALE")).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Compare Alpha vs Beta" })).toBeNull();
+    expect(screen.queryByText("GIÁ CŨ · CHỈ XEM")).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "SABA" })).toBeNull();
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Kiểm tra giá thật" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Report vé/u })).toBeNull();
   });
 
-  it("keeps an API stale-while-revalidate snapshot display-only", async () => {
+  it("replaces restored browser cache with the first successful server catalog after reload", async () => {
+    const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
+    const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
+    const providerCatalog = (providerAccount: AccountStatus, observedAtMs: number,
+      participantA: string, participantB: string): LiveCatalogResponse => ({
+      ...catalog, observedAtMs, accountId: providerAccount.id, provider: providerAccount.provider,
+      events: [{ ...event, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event`,
+        participantA, participantB }],
+      markets: [{ ...market, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event`,
+        providerMarketId: `${providerAccount.provider}-market` }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: providerAccount.provider,
+        providerEventId: `${providerAccount.provider}-event`, providerMarketId: `${providerAccount.provider}-market`,
+        providerSelectionId: `${providerAccount.provider}-${quote.selection}` }))
+    });
+    const accounts = { ...accountApi, list: async () => [sabaAccount, sbobetAccount] };
+    const first = render(<LiveCatalogPage accountApi={accounts} catalogApi={{ read: async (id) =>
+      providerCatalog(id === sabaAccount.id ? sabaAccount : sbobetAccount, 200, "Cached Home", "Cached Away") }} />);
+    expect(await screen.findByRole("button", { name: "Compare Cached Home vs Cached Away" })).toBeTruthy();
+    first.unmount();
+
+    render(<LiveCatalogPage accountApi={accounts} catalogApi={{ read: async (id) =>
+      providerCatalog(id === sabaAccount.id ? sabaAccount : sbobetAccount, 100, "Server Home", "Server Away") }} />);
+
+    expect(await screen.findByRole("button", { name: "Compare Server Home vs Server Away" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Compare Cached Home vs Cached Away" })).toBeNull();
+  });
+
+  it("hides an API stale-while-revalidate snapshot", async () => {
     const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
     const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
     const providerCatalog = (providerAccount: AccountStatus): LiveCatalogResponse => ({
@@ -1140,7 +1175,9 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }}
       catalogApi={{ read: async (id) => providerCatalog(id === sabaAccount.id ? sabaAccount : sbobetAccount) }} />);
 
-    expect(await screen.findByText("STALE")).toBeTruthy();
+    expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Compare Alpha vs Beta" })).toBeNull();
+    expect(screen.queryByText("GIÁ CŨ · CHỈ XEM")).toBeNull();
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
 

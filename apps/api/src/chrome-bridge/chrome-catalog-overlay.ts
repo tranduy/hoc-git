@@ -2,6 +2,7 @@ import type { CatalogSourceStatus } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import type { CatalogReaderLike } from "../routes/catalog.js";
 import type { CatalogSourceRegistryLike } from "../routes/catalog-sources.js";
+import { providerFeedPolicies } from "./provider-feed-policies.js";
 
 interface ChromeCatalogAccess {
   owns(accountId: string): boolean;
@@ -41,6 +42,8 @@ function copyReaderTimings(reader: CatalogReaderLike): Partial<CatalogReaderLike
     requestTimeoutMs: Math.min(reader.requestTimeoutMs ?? 3_000, 3_000),
     responseCacheMaxAgeMs: 1_000,
     snapshotFreshnessMaxAgeMs: 20_000,
+    snapshotFreshnessMaxAgeMsFor: (accountId) =>
+      providerFeedPolicies.get(accountId)?.catalogFreshnessMs ?? 20_000,
     failureRetryBaseMs: 1_000,
     failureRetryMaxMs: 5_000,
     ...(reader.collectionTimeoutMs === undefined ? {} : { collectionTimeoutMs: reader.collectionTimeoutMs }),

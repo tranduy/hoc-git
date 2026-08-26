@@ -6,11 +6,32 @@ import { CatalogTelemetryRegistry } from "./catalog-telemetry.js";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import type { CatalogStoreLike } from "../catalog/durable-catalog-store.js";
 import { CatalogRevisionStore } from "../catalog/catalog-revision-store.js";
+import type { CatalogReaderLike } from "./catalog.js";
 
 const apps: FastifyInstance[] = [];
 afterEach(async () => Promise.all(apps.splice(0).map(async (app) => app.close())));
 
 describe("provider catalog route", () => {
+  it("publishes a catalog with the source-specific freshness window", async () => {
+    const revisions = new CatalogRevisionStore({ now: () => 100 });
+    const reader = {
+      responseCacheMaxAgeMs: 5,
+      snapshotFreshnessMaxAgeMs: 20,
+      snapshotFreshnessMaxAgeMsFor: () => 75,
+      read: async (accountId: string): Promise<ObservedProviderCatalog> => ({
+        dataMode: "LIVE", accountId, provider: "SABA", category: "FOOTBALL",
+        comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 100,
+        rejectedMarketCount: 0, events: [], markets: [], quotes: []
+      })
+    } as CatalogReaderLike & { snapshotFreshnessMaxAgeMsFor(accountId: string): number };
+    const app = buildApp(createFixtureRuntime(1_000), { catalogReader: reader, catalogRevisions: revisions });
+    apps.push(app);
+
+    expect((await app.inject({ method: "GET", url: "/api/catalog/accounts/catalog-source:SABA:FOOTBALL" }))
+      .json()).toMatchObject({ snapshotState: "FRESH" });
+    expect(revisions.get("catalog-source:SABA:FOOTBALL")?.freshUntilMs).toBe(175);
+  });
+
   it("restores the last verified catalog as stale and refreshes it without another request", async () => {
     const persisted: ObservedProviderCatalog = {
       dataMode: "LIVE", accountId: "old-account", provider: "IM", category: "LOL",

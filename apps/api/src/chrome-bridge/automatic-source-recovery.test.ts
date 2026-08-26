@@ -5,6 +5,7 @@ import { AutomaticSourceRecovery } from "./automatic-source-recovery.js";
 const CMD = "catalog-source:CMD:FOOTBALL";
 const SABA = "catalog-source:SABA:FOOTBALL";
 const SBOBET = "catalog-source:SBOBET:FOOTBALL";
+const APSPORT = "catalog-source:APSPORT:FOOTBALL";
 const BTI = "catalog-source:BTI:FOOTBALL";
 
 function snapshot(accountId: string, overrides: Partial<ProviderFeedSnapshot> = {}): ProviderFeedSnapshot {
@@ -20,13 +21,15 @@ function request(accountId: string, stage: "SOFT" | "HARD" = "SOFT"): ProviderRe
   return { accountId, stage, attempt: stage === "SOFT" ? 1 : 2, requestedAtMs: 1_000 };
 }
 
-function setup() {
+function setup(now: () => number = () => 2_000, browserRefreshEnabled = true) {
   const requestLobbySnapshot = vi.fn(() => 1);
+  const reloadSource = vi.fn(() => 1);
+  const reloadRecoverySource = vi.fn(() => 1);
   const restoreLobby = vi.fn(() => 1);
   const ensureLobby = vi.fn(() => 1);
   const refreshFabetLaunches = vi.fn(async (_signal?: AbortSignal) => undefined);
   const waitForFreshBaseline = vi.fn(async (requestedAccountId: string) =>
-    snapshot(requestedAccountId, { state: "LIVE", reason: null, lastCompleteBaselineAtMs: 1_001 }));
+    snapshot(requestedAccountId, { state: "LIVE", reason: null, lastCompleteBaselineAtMs: 2_001 }));
   const feedRegistry = {
     snapshot: vi.fn((requestedAccountId: string) => snapshot(requestedAccountId)),
     subscribe: vi.fn(() => () => undefined),
@@ -37,19 +40,72 @@ function setup() {
     _signal?: AbortSignal): Promise<T> =>
     consume(`https://${provider.toLowerCase()}.provider.test/fresh`);
   const onError = vi.fn();
+  const onStateChange = vi.fn();
   const recovery = new AutomaticSourceRecovery({
-    controlPlane: { requestLobbySnapshot, ensureLobby, restoreLobby },
+    controlPlane: { requestLobbySnapshot, reloadSource, reloadRecoverySource, ensureLobby, restoreLobby },
     feedRegistry,
     refreshFabetLaunches,
+    browserRefreshEnabled,
     withLatestFabetLaunch,
     baselineTimeoutMs: 50,
-    onError
+    now,
+    onError,
+    onStateChange
   });
-  return { recovery, requestLobbySnapshot, restoreLobby, ensureLobby, refreshFabetLaunches,
-    waitForFreshBaseline, feedRegistry, onError };
+  return { recovery, requestLobbySnapshot, reloadSource, reloadRecoverySource,
+    restoreLobby, ensureLobby, refreshFabetLaunches,
+    waitForFreshBaseline, feedRegistry, onError, onStateChange };
 }
 
 describe("AutomaticSourceRecovery", () => {
+  it("backs one repeated failure off to at most nine log state changes in five minutes", async () => {
+    let nowMs = 0;
+    const context = setup(() => nowMs);
+    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+
+    for (nowMs = 0; nowMs <= 300_000; nowMs += 1_000) {
+      await context.recovery.recover(request(CMD, "HARD"));
+    }
+
+    expect(context.restoreLobby).toHaveBeenCalledTimes(9);
+    expect(context.onStateChange).toHaveBeenCalledTimes(9);
+    expect(context.onStateChange.mock.calls.map(([status]) => status.nextAttemptInMs))
+      .toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000]);
+    expect(context.onStateChange.mock.calls.every(([status]) =>
+      status.lastFailureCode === "BASELINE_TIMEOUT")).toBe(true);
+
+    nowMs = 511_000;
+    await context.recovery.recover(request(CMD, "HARD"));
+    expect(context.onStateChange).toHaveBeenCalledTimes(10);
+    expect(context.onStateChange.mock.calls.at(-1)?.[0].nextAttemptInMs).toBe(300_000);
+  });
+
+  it("resets exponential backoff after a confirmed recovery", async () => {
+    let nowMs = 0;
+    const context = setup(() => nowMs);
+    context.waitForFreshBaseline.mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+    await context.recovery.recover(request(CMD, "HARD"));
+
+    nowMs = 1_000;
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(CMD, {
+      state: "LIVE", reason: null, lastCompleteBaselineAtMs: 1_001
+    }));
+    await expect(context.recovery.recover(request(CMD, "HARD"))).resolves.toMatchObject({
+      outcome: "RECOVERED", reason: null
+    });
+
+    context.waitForFreshBaseline.mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+    await context.recovery.recover(request(CMD, "HARD"));
+    expect(context.onStateChange.mock.calls.map(([status]) => ({
+      state: status.state, consecutiveFailures: status.consecutiveFailures,
+      nextAttemptInMs: status.nextAttemptInMs
+    }))).toEqual([
+      { state: "BACKOFF", consecutiveFailures: 1, nextAttemptInMs: 1_000 },
+      { state: "RECOVERED", consecutiveFailures: 0, nextAttemptInMs: 0 },
+      { state: "BACKOFF", consecutiveFailures: 1, nextAttemptInMs: 1_000 }
+    ]);
+  });
+
   it("creates a missing KSPORT source instead of ending at snapshot-undelivered", async () => {
     const context = setup();
     context.requestLobbySnapshot.mockReturnValue(0);
@@ -63,17 +119,341 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.restoreLobby).not.toHaveBeenCalled();
   });
 
-  it("replaces only SABA after delivered soft recovery fails to produce a newer baseline", async () => {
+  it("does not launch a private browser during automatic recovery when browser refresh is disabled", async () => {
+    const context = setup(() => 2_000, false);
+    context.requestLobbySnapshot.mockReturnValue(0);
+
+    const result = await context.recovery.recover(request(SBOBET));
+
+    expect(result).toEqual({ accountId: SBOBET, stage: "HARD", outcome: "ACTION_REQUIRED",
+      reason: "BROWSER_REFRESH_DISABLED" });
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [SABA, "SABA"],
+    [SBOBET, "KSPORT"],
+    [APSPORT, "TSPORT"]
+  ] as const)("reloads a candidate-only %s authority before requesting a fresh launch",
+    async (accountId, lobby) => {
     const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(accountId));
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(accountId, {
+      state: "LIVE", reason: null, sourceId: `chrome:${lobby}:7`, sourceEpoch: "observer-b:0",
+      activeGeneration: "generation-1", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    const result = await context.recovery.recover(request(accountId, "HARD"));
+
+    expect(result).toEqual({ accountId, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).not.toHaveBeenCalled();
+    expect(context.reloadRecoverySource).toHaveBeenCalledExactlyOnceWith(accountId, lobby);
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+    expect(context.waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(
+      accountId, 2_000, 50, expect.any(AbortSignal)
+    );
+  });
+
+  it("uses the current candidate when a retained SABA source identity is stale", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.reloadSource.mockReturnValueOnce(0);
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(SABA, {
+      state: "LIVE", reason: null, sourceId: "chrome:SABA:2", sourceEpoch: "observer-b:0",
+      activeGeneration: "generation-2", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    const result = await context.recovery.recover(request(SABA, "HARD"));
+
+    expect(result).toEqual({ accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:SABA:1");
+    expect(context.reloadRecoverySource).toHaveBeenCalledExactlyOnceWith(SABA, "SABA");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [SABA, "chrome:TSPORT:9", "SABA"],
+    [APSPORT, "chrome:SABA:7", "TSPORT"]
+  ] as const)("never reloads a cross-account retained source while recovering %s",
+    async (accountId, retainedSourceId, lobby) => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(accountId, { sourceId: retainedSourceId,
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(accountId, {
+      state: "LIVE", reason: null, sourceId: `chrome:${lobby}:11`, sourceEpoch: "observer-b:0",
+      activeGeneration: "generation-2", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    const result = await context.recovery.recover(request(accountId, "HARD"));
+
+    expect(result).toEqual({ accountId, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).not.toHaveBeenCalled();
+    expect(context.reloadRecoverySource).toHaveBeenCalledExactlyOnceWith(accountId, lobby);
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+  });
+
+  it.each([SABA, SBOBET, APSPORT] as const)(
+    "still rebuilds the %s tab when browser refresh is disabled", async (accountId) => {
+    // The live stack runs with SESSION_MAINTENANCE_ENABLED=0, so the Fabet
+    // relaunch path is closed. Reloading the existing source is the only
+    // recovery a WebSocket provider has, and it must not be skipped.
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(accountId));
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(accountId, {
+      state: "LIVE", reason: null, sourceId: "chrome:REPLACEMENT:7", sourceEpoch: "observer-b:0",
+      activeGeneration: "generation-1", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    const result = await context.recovery.recover(request(accountId, "HARD"));
+
+    expect(result).toEqual({ accountId, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadRecoverySource).toHaveBeenCalledTimes(1);
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+  });
+
+  it("accepts a replacement source id even when its epoch and provider generation collide", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline.mockResolvedValue(snapshot(SABA, {
+      state: "LIVE", reason: null, sourceId: "chrome:SABA:8", sourceEpoch: "observer-a:0",
+      activeGeneration: "generation-1", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    const result = await context.recovery.recover(request(SABA, "HARD"));
+
+    expect(result).toEqual({ accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+    expect(context.waitForFreshBaseline).toHaveBeenCalledOnce();
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a fresh launch when a candidate-only reload times out", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT));
     context.waitForFreshBaseline
       .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
-      .mockResolvedValueOnce(snapshot(SABA, { state: "LIVE", reason: null, lastCompleteBaselineAtMs: 1_001 }));
+      .mockResolvedValueOnce(snapshot(APSPORT, { state: "LIVE", reason: null,
+        lastCompleteBaselineAtMs: 2_001 }));
+
+    const result = await context.recovery.recover(request(APSPORT, "HARD"));
+
+    expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadRecoverySource).toHaveBeenCalledExactlyOnceWith(APSPORT, "TSPORT");
+    expect(context.refreshFabetLaunches).toHaveBeenCalledOnce();
+    expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith(
+      "TSPORT", "https://apsport.provider.test/fresh"
+    );
+    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["returns zero", (): number => 0],
+    ["throws", (): number => { throw new Error("SOCKET_SEND_FAILED"); }]
+  ] as const)("falls back to a fresh launch when candidate-only reload %s", async (_condition, reload) => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA));
+    context.reloadRecoverySource.mockImplementationOnce(reload);
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(SABA, {
+      state: "LIVE", reason: null, lastCompleteBaselineAtMs: 2_001
+    }));
+
+    const result = await context.recovery.recover(request(SABA, "HARD"));
+
+    expect(result).toEqual({ accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadRecoverySource).toHaveBeenCalledExactlyOnceWith(SABA, "SABA");
+    expect(context.refreshFabetLaunches).toHaveBeenCalledOnce();
+    expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith("SABA", "https://saba.provider.test/fresh");
+    expect(context.waitForFreshBaseline).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an old-source baseline that arrives during launch lookup before delivery", async () => {
+    const now = vi.fn()
+      .mockReturnValueOnce(2_000)
+      .mockReturnValueOnce(2_050)
+      .mockReturnValueOnce(2_100)
+      .mockReturnValue(2_100);
+    const context = setup(now);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA));
+    context.reloadRecoverySource.mockReturnValueOnce(0);
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(SABA, {
+      state: "LIVE", reason: null, sourceId: "chrome:SABA:7", sourceEpoch: "observer-a:0",
+      activeGeneration: "generation-1", lastCompleteBaselineAtMs: 2_075
+    }));
+
+    const result = await context.recovery.recover(request(SABA, "HARD"));
+
+    expect(result).toEqual({ accountId: SABA, stage: "HARD", outcome: "DELIVERED",
+      reason: "BASELINE_TIMEOUT" });
+    expect(context.refreshFabetLaunches).toHaveBeenCalledOnce();
+    expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith("SABA", "https://saba.provider.test/fresh");
+    expect(context.waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(
+      SABA, 2_100, 50, expect.any(AbortSignal)
+    );
+  });
+
+  it("reloads the exact current SABA source and confirms a post-action generation", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(SABA, { state: "LIVE", reason: null, sourceId: "chrome:SABA:7",
+        sourceEpoch: "observer-a:0", activeGeneration: "generation-2", lastCompleteBaselineAtMs: 2_001 }));
 
     const result = await context.recovery.recover(request(SABA));
 
     expect(result).toEqual({ accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(2);
+    expect(context.waitForFreshBaseline).toHaveBeenNthCalledWith(
+      2, SABA, 2_000, 50, expect.any(AbortSignal)
+    );
+  });
+
+  it("keeps waiting when a delayed old-generation baseline arrives before the reloaded epoch", async () => {
+    const now = vi.fn()
+      .mockReturnValueOnce(2_000)
+      .mockReturnValueOnce(2_000)
+      .mockReturnValueOnce(2_020)
+      .mockReturnValue(2_020);
+    const context = setup(now);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(SABA, { state: "LIVE", reason: null, sourceId: "chrome:SABA:7",
+        sourceEpoch: "observer-a:0", activeGeneration: "generation-1", lastCompleteBaselineAtMs: 2_001 }))
+      .mockResolvedValueOnce(snapshot(SABA, { state: "LIVE", reason: null, sourceId: "chrome:SABA:7",
+        sourceEpoch: "observer-b:0", activeGeneration: "generation-1", lastCompleteBaselineAtMs: 2_002 }));
+
+    const result = await context.recovery.recover(request(SABA));
+
+    expect(result).toEqual({ accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(3);
+    expect(context.waitForFreshBaseline).toHaveBeenNthCalledWith(
+      2, SABA, 2_000, 50, expect.any(AbortSignal)
+    );
+    expect(context.waitForFreshBaseline).toHaveBeenNthCalledWith(
+      3, SABA, 2_001, 30, expect.any(AbortSignal)
+    );
+  });
+
+  it("falls back to a fresh SABA launch when the targeted reload also times out", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(SABA, { state: "LIVE", reason: null, lastCompleteBaselineAtMs: 2_001 }));
+
+    const result = await context.recovery.recover(request(SABA));
+
+    expect(result).toEqual({ accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+    expect(context.refreshFabetLaunches).toHaveBeenCalledOnce();
     expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith("SABA", "https://saba.provider.test/fresh");
-    expect(context.ensureLobby).not.toHaveBeenCalledWith("KSPORT", expect.any(String));
+    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["returns zero", (): number => 0],
+    ["throws", (): number => { throw new Error("SOCKET_SEND_FAILED"); }]
+  ] as const)("falls back to a fresh SABA launch when targeted reload %s before delivery",
+    async (_condition, reload) => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.reloadSource.mockImplementationOnce(reload);
+    context.reloadRecoverySource.mockReturnValueOnce(0);
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(SABA, { state: "LIVE", reason: null, lastCompleteBaselineAtMs: 2_001 }));
+
+    const result = await context.recovery.recover(request(SABA));
+
+    expect(result).toEqual({ accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadRecoverySource).toHaveBeenCalledExactlyOnceWith(SABA, "SABA");
+    expect(context.refreshFabetLaunches).toHaveBeenCalledOnce();
+    expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith("SABA", "https://saba.provider.test/fresh");
+    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(2);
+  });
+
+  it("reloads the exact current TSPORT source before launching a replacement", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT, { sourceId: "chrome:TSPORT:9",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(APSPORT, { state: "LIVE", reason: null,
+        sourceId: "chrome:TSPORT:9", sourceEpoch: "observer-a:0", activeGeneration: "generation-2",
+        lastCompleteBaselineAtMs: 2_001 }));
+
+    const result = await context.recovery.recover(request(APSPORT));
+
+    expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:TSPORT:9");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(2);
+    expect(context.waitForFreshBaseline).toHaveBeenNthCalledWith(
+      2, APSPORT, 2_000, 50, expect.any(AbortSignal)
+    );
+  });
+
+  it("falls back to a fresh TSPORT launch when the targeted reload baseline times out", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT, { sourceId: "chrome:TSPORT:9",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(APSPORT, { state: "LIVE", reason: null,
+        lastCompleteBaselineAtMs: 2_001 }));
+
+    const result = await context.recovery.recover(request(APSPORT));
+
+    expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:TSPORT:9");
+    expect(context.refreshFabetLaunches).toHaveBeenCalledOnce();
+    expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith(
+      "TSPORT", "https://apsport.provider.test/fresh"
+    );
+    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["returns zero", (): number => 0],
+    ["throws", (): number => { throw new Error("SOCKET_SEND_FAILED"); }]
+  ] as const)("falls back to a fresh TSPORT launch when targeted reload %s before delivery",
+    async (_condition, reload) => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT, { sourceId: "chrome:TSPORT:9",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.reloadSource.mockImplementationOnce(reload);
+    context.reloadRecoverySource.mockReturnValueOnce(0);
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(APSPORT, { state: "LIVE", reason: null,
+        lastCompleteBaselineAtMs: 2_001 }));
+
+    const result = await context.recovery.recover(request(APSPORT));
+
+    expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:TSPORT:9");
+    expect(context.reloadRecoverySource).toHaveBeenCalledExactlyOnceWith(APSPORT, "TSPORT");
+    expect(context.refreshFabetLaunches).toHaveBeenCalledOnce();
+    expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith(
+      "TSPORT", "https://apsport.provider.test/fresh"
+    );
     expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(2);
   });
 

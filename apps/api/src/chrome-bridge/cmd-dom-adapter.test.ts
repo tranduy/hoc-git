@@ -78,9 +78,13 @@ describe("CmdDomCatalogAdapter", () => {
 
   it("assembles every record from a multi-chunk snapshot before publishing", () => {
     const adapter = new CmdDomCatalogAdapter();
+    // Distinct fixtures need distinct participants: records that share a
+    // competition, live phase and both team names are one fixture published
+    // twice, and the merge collapses them on purpose.
     const records = Array.from({ length: 783 }, (_, index) => ({
       ...record,
       matchId: `event-${index}`,
+      teamNames: [`Alpha ${index} FC`, `Beta ${index} FC`],
       groups: [{
         ...record.groups[0],
         odds: record.groups[0]!.odds.map((odd) => ({ ...odd, marketOddsId: `ah-${index}` }))

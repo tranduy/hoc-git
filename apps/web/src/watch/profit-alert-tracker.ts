@@ -25,7 +25,7 @@ export class ProfitAlertTracker {
     const alerts: ProfitAlert[] = [];
     for (const rankedEvent of events) {
       for (const ticket of rankedEvent.tickets) {
-        if (ticket.state !== "VERIFIED_PROFIT") continue;
+        if (ticket.state === "VERIFIED_NO_PROFIT") continue;
         const identity = identityOf(ticket);
         if (identity === null) continue;
         if (this.alerted.has(identity) || !new Decimal(ticket.plan!.roi).gt("0.05")) continue;

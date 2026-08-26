@@ -34,4 +34,37 @@ describe("SourceTabKeepAlive", () => {
     expect(attach).not.toHaveBeenCalled();
     expect(sendCommand).toHaveBeenCalledWith(17, "Page.setWebLifecycleState", { state: "active" });
   });
+
+  it("keeps a successful debugger attachment when the initial pulse fails", async () => {
+    const detach = vi.fn(async () => undefined);
+    const keepAlive = new SourceTabKeepAlive({
+      attach: vi.fn(async () => undefined),
+      detach,
+      sendCommand: vi.fn(async () => { throw new Error("CDP_COMMAND_FAILED"); })
+    });
+
+    await expect(keepAlive.attach(17)).resolves.toBeUndefined();
+    expect(detach).not.toHaveBeenCalled();
+  });
+
+  it("bounds the initial pulse after the debugger has attached", async () => {
+    vi.useFakeTimers();
+    try {
+      const detach = vi.fn(async () => undefined);
+      const keepAlive = new SourceTabKeepAlive({
+        attach: vi.fn(async () => undefined),
+        detach,
+        sendCommand: vi.fn(() => new Promise<void>(() => undefined))
+      });
+      let settled = false;
+
+      void keepAlive.attach(17).then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(settled).toBe(true);
+      expect(detach).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

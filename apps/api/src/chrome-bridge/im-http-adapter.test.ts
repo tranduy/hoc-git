@@ -40,6 +40,19 @@ describe("ImHttpCatalogAdapter", () => {
     });
   });
 
+  it("emits transport continuity for a valid incomplete newer GetSE generation after a baseline", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    seedBothPartitions(adapter);
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 3, undefined,
+      "IM_MARKET_1", "im:8:2"))).toEqual([{
+      sourceId: "chrome:IM:8",
+      sequence: 3,
+      observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + 3,
+      transportAlive: true
+    }]);
+  });
+
   it("commits Hong Kong odds only after both partitions share one cutoff and generation", () => {
     const adapter = new ImHttpCatalogAdapter();
     const hongKongEvent = { ...event, mls: [{ ...event.mls[0], ws: [
@@ -87,18 +100,56 @@ describe("ImHttpCatalogAdapter", () => {
   });
 
   it("applies GetSEDelta only after a baseline and keeps provider IDs stable", () => {
-    const adapter = new ImHttpCatalogAdapter();
     const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ mi: 10, bti: 1, gp: 1, ws: [
       { wsi: 101, si: 1, hdp: -0.5, dih: "+0.5", o: 0.8, ot: 1 },
       { wsi: 102, si: 2, hdp: -0.5, dih: "-0.5", o: -0.9, ot: 1 }
     ] }] }] };
-    expect(adapter.decode(envelope(delta, 1, "/api/EventV6/GetSEDelta"))).toEqual([]);
+    expect(new ImHttpCatalogAdapter().decode(envelope(delta, 1, "/api/EventV6/GetSEDelta"))).toEqual([]);
+    const adapter = new ImHttpCatalogAdapter();
     seedBothPartitions(adapter);
     const update = adapter.decode(envelope(delta, 3, "/api/EventV6/GetSEDelta"))[0]?.value as {
       quotes: readonly { providerSelectionId: string; rawOdds: string }[];
     };
     expect(update.quotes.map((quote) => [quote.providerSelectionId, quote.rawOdds]))
       .toEqual([["101", "0.8"], ["102", "-0.9"]]);
+  });
+
+  it("emits authenticated transport continuity for a valid ordered quiet delta after the baseline", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    seedBothPartitions(adapter);
+
+    expect(adapter.decode(envelope({ StatusCode: 100, dc: [] }, 3,
+      "/api/EventV6/GetSEDelta"))).toEqual([{
+      sourceId: "chrome:IM:8",
+      sequence: 3,
+      observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + 3,
+      transportAlive: true
+    }]);
+  });
+
+  it("emits only transport continuity when an ordered market delta repeats the current values", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    seedBothPartitions(adapter);
+    const sameMarket = structuredClone(event.mls[0]);
+
+    expect(adapter.decode(envelope({ StatusCode: 100,
+      dc: [{ eid: event.eid, a: 3, v: [sameMarket] }] }, 3,
+    "/api/EventV6/GetSEDelta"))).toEqual([{
+      sourceId: "chrome:IM:8",
+      sequence: 3,
+      observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + 3,
+      transportAlive: true
+    }]);
+  });
+
+  it("does not treat a delta with non-IM partition metadata as transport continuity", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    seedBothPartitions(adapter);
+    const quiet = envelope({ StatusCode: 100, dc: [] }, 3, "/api/EventV6/GetSEDelta");
+
+    expect(adapter.decode({ ...quiet,
+      request: { ...quiet.request, providerPartition: "KSPORT_LIVE",
+        providerContentIntent: "FOOTBALL_FULL_CATALOG", requestStartSequence: 0 } })).toEqual([]);
   });
 
   it("normalizes a later ordered Hong Kong delta without changing exact identities", () => {
@@ -197,7 +248,10 @@ describe("ImHttpCatalogAdapter", () => {
 
     const replacement = makeEvent(303, 33, "Replacement");
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 3, undefined,
-      "IM_MARKET_1", "im:8:2"))).toEqual([]);
+      "IM_MARKET_1", "im:8:2"))).toEqual([{
+      sourceId: "chrome:IM:8", sequence: 3,
+      observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + 3, transportAlive: true
+    }]);
     const catalog = adapter.decode(envelope({ StatusCode: 100, sel: [marketTwo] }, 4, undefined,
       "IM_MARKET_2", "im:8:2"))[0]!.value as { events: Array<{ providerEventId: string }>;
         quotes: Array<{ providerEventId: string; receivedMonotonicMs: number; sequence: number | null }> };
@@ -220,7 +274,10 @@ describe("ImHttpCatalogAdapter", () => {
     expect(oldCatalog).toHaveLength(1);
 
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(303, 33, "New One")] }, 3,
-      undefined, "IM_MARKET_1", "im:8:2"))).toEqual([]);
+      undefined, "IM_MARKET_1", "im:8:2"))).toEqual([{
+      sourceId: "chrome:IM:8", sequence: 3,
+      observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + 3, transportAlive: true
+    }]);
     const current = adapter.decode(envelope({ StatusCode: 100, sel: [makeEvent(404, 44, "New Two")] }, 4,
       undefined, "IM_MARKET_2", "im:8:2"))[0]!.value as {
         events: Array<{ providerEventId: string }> };
@@ -387,7 +444,10 @@ describe("ImHttpCatalogAdapter", () => {
     const replacement = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
       ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 10, undefined,
-      "IM_MARKET_1", "im:8:2"))).toEqual([]);
+      "IM_MARKET_1", "im:8:2"))).toEqual([{
+      sourceId: "chrome:IM:8", sequence: 10,
+      observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + 10, transportAlive: true
+    }]);
     const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{ ...event.mls[0],
       ws: event.mls[0]!.ws.map((selection) => ({ ...selection, o: selection.wsi === 101 ? 0.84 : -0.91 })) }] }] };
     adapter.decode(envelope(delta, 11, "/api/EventV6/GetSEDelta"));
@@ -409,7 +469,10 @@ describe("ImHttpCatalogAdapter", () => {
     const replacement = { ...structuredClone(event), mls: event.mls.map((market) => ({ ...market,
       ws: market.ws.map((selection) => ({ ...selection, o: 0.60 })) })) };
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [replacement] }, 11, undefined,
-      "IM_MARKET_1", "im:8:2", "observer-im:0", 9))).toEqual([]);
+      "IM_MARKET_1", "im:8:2", "observer-im:0", 9))).toEqual([{
+      sourceId: "chrome:IM:8", sequence: 11,
+      observedAtMs: Date.parse("2026-08-16T00:00:00.000Z") + 11, transportAlive: true
+    }]);
     const committed = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 12, undefined,
       "IM_MARKET_2", "im:8:2", "observer-im:0", 9)).at(-1)?.value as {
         quotes: Array<{ providerSelectionId: string; rawOdds: string }> };

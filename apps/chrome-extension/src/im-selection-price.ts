@@ -74,7 +74,7 @@ export function buildImExactSelectionPriceExpression(identity: SelectionPricePro
             Number(selection?.si) === 3 ? 'OVER' : Number(selection?.si) === 4 ? 'UNDER' : '';
           const line = Math.abs(Number(selection?.hdp));
           if (String(selection?.wsi ?? '') === input.providerSelectionId && outcome === input.selection &&
-            Number.isFinite(line) && input.line !== null && Math.abs(line - Number(input.line)) < 1e-9 &&
+            Number.isFinite(line) && input.line !== null && Math.abs(line - Math.abs(Number(input.line))) < 1e-9 &&
             typeof selection?.o === 'number' && Number.isFinite(selection.o) && selection.o !== 0) {
             candidates.push(String(selection.o));
           }

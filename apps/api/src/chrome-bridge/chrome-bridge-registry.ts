@@ -11,6 +11,7 @@ import {
 } from "./chrome-bridge-account.js";
 import { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
 import type { AuthorityIdentity, AuthorityObservation } from "./provider-authority-types.js";
+import type { EnvelopeRejectReason } from "../diagnostics/pipeline-telemetry.js";
 
 const MAX_LISTENERS = 8;
 
@@ -48,6 +49,7 @@ export interface ChromeBridgeRegistryOptions {
   readonly staleAfterMs?: number;
   readonly retireAfterMs?: number;
   readonly authorityCoordinator?: ProviderAuthorityCoordinator;
+  readonly onRejected?: (accountId: ChromeBridgeProviderAccountId, reason: EnvelopeRejectReason) => void;
 }
 
 export interface ChromeBridgeIngestContext {
@@ -66,6 +68,7 @@ export class ChromeBridgeRegistry {
   readonly #staleAfterMs: number;
   readonly #retireAfterMs: number;
   readonly #authorityCoordinator: ProviderAuthorityCoordinator;
+  readonly #onRejected: ((accountId: ChromeBridgeProviderAccountId, reason: EnvelopeRejectReason) => void) | null;
   readonly #slots: ReadonlyMap<ChromeBridgeProviderAccountId, AccountTransportSlot>;
   readonly #listeners = new Set<(envelope: ChromeBridgeEnvelope, context: ChromeBridgeIngestContext) => void>();
   readonly #connectionGenerations = new WeakMap<object, number>();
@@ -78,6 +81,7 @@ export class ChromeBridgeRegistry {
     this.#staleAfterMs = options.staleAfterMs ?? 20_000;
     this.#retireAfterMs = options.retireAfterMs ?? 300_000;
     this.#authorityCoordinator = options.authorityCoordinator ?? new ProviderAuthorityCoordinator();
+    this.#onRejected = options.onRejected ?? null;
     this.#slots = new Map(CHROME_BRIDGE_PROVIDER_ACCOUNT_IDS.map((accountId) => [accountId, {
       active: null,
       candidate: null,
@@ -131,7 +135,10 @@ export class ChromeBridgeRegistry {
     const connectionGeneration = this.#connectionGeneration(actualConnection);
     const accountId = chromeBridgeProviderAccountIdForLobby(envelope.lobby);
     const sourceEpoch = normalizedSourceEpoch(envelope);
-    if (sourceEpoch === null) return { control: reject(envelope, "OUT_OF_ORDER"), context: null };
+    if (sourceEpoch === null) {
+      this.#onRejected?.(accountId, "RETIRED_EPOCH");
+      return { control: reject(envelope, "OUT_OF_ORDER"), context: null };
+    }
     const identity: AuthorityIdentity = Object.freeze({ accountId, sourceId: envelope.sourceId,
       sourceEpoch, connectionGeneration });
 
@@ -142,11 +149,13 @@ export class ChromeBridgeRegistry {
     const observation = this.#authorityCoordinator.observe(identity,
       envelope.transport === "TAB_STATE" || envelope.transport === "WS_STATE" ? "TRANSPORT" : "CANDIDATE_DATA");
     if (observation.disposition === "REJECTED") {
+      this.#onRejected?.(accountId, "RETIRED_EPOCH");
       return { control: reject(envelope, "OUT_OF_ORDER"), context: null };
     }
     const slot = this.#slot(accountId);
     if (slot.retiredActiveTransportIdentity !== null &&
       sameIdentity(slot.retiredActiveTransportIdentity, identity)) {
+      this.#onRejected?.(accountId, "RETIRED_EPOCH");
       return { control: reject(envelope, "OUT_OF_ORDER"), context: null };
     }
     this.#reconcile(accountId);
@@ -167,6 +176,7 @@ export class ChromeBridgeRegistry {
         record.state = "ERROR";
         record.reason = "SEQUENCE_GAP";
         record.quarantined = true;
+        this.#onRejected?.(accountId, "SEQUENCE_GAP");
         return { control: reject(envelope, "SEQUENCE_GAP"), context: null };
       }
     }

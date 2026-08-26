@@ -1,7 +1,13 @@
 interface CoverageState {
   acceptedEventIds: ReadonlySet<string>;
-  consumedAuthoritativeGenerations: ReadonlySet<string>;
+  comparableAuthoritativeOrders: ReadonlyMap<string, ComparableAuthoritativeOrder>;
+  opaqueAuthoritativeGenerations: ReadonlySet<string>;
 }
+
+type ComparableAuthoritativeOrder = readonly [major: number, minor: number];
+
+const MAX_COMPARABLE_AUTHORITATIVE_LINEAGES = 32;
+const MAX_OPAQUE_AUTHORITATIVE_GENERATIONS = 256;
 
 export interface CatalogCoverageCandidate {
   readonly generation: string;
@@ -27,7 +33,7 @@ export class CatalogCoverageGuard {
     const current = this.#states.get(sourceKey);
     if (current === undefined) return true;
     if (candidate.authoritativeBaseline) {
-      return !current.consumedAuthoritativeGenerations.has(candidate.generation);
+      return allowsAuthoritativeGeneration(current, candidate.generation);
     }
     const proposed = new Set(candidate.providerEventIds);
     return [...current.acceptedEventIds].every((eventId) => proposed.has(eventId));
@@ -44,7 +50,8 @@ export class CatalogCoverageGuard {
   checkpoint(): CatalogCoverageCheckpoint {
     return { owner: this, states: new Map([...this.#states].map(([key, state]) => [key, {
       acceptedEventIds: new Set(state.acceptedEventIds),
-      consumedAuthoritativeGenerations: new Set(state.consumedAuthoritativeGenerations)
+      comparableAuthoritativeOrders: new Map(state.comparableAuthoritativeOrders),
+      opaqueAuthoritativeGenerations: new Set(state.opaqueAuthoritativeGenerations)
     }])) };
   }
 
@@ -53,13 +60,145 @@ export class CatalogCoverageGuard {
     this.#states.clear();
     for (const [key, state] of checkpoint.states) {
       this.#states.set(key, { acceptedEventIds: new Set(state.acceptedEventIds),
-        consumedAuthoritativeGenerations: new Set(state.consumedAuthoritativeGenerations) });
+        comparableAuthoritativeOrders: new Map(state.comparableAuthoritativeOrders),
+        opaqueAuthoritativeGenerations: new Set(state.opaqueAuthoritativeGenerations) });
     }
   }
 }
 
 function stateAfter(current: CoverageState | null, candidate: CatalogCoverageCandidate): CoverageState {
-  const consumed = new Set(current?.consumedAuthoritativeGenerations ?? []);
-  if (candidate.authoritativeBaseline) consumed.add(candidate.generation);
-  return { acceptedEventIds: new Set(candidate.providerEventIds), consumedAuthoritativeGenerations: consumed };
+  const comparable = new Map(current?.comparableAuthoritativeOrders ?? []);
+  const opaque = new Set(current?.opaqueAuthoritativeGenerations ?? []);
+  if (candidate.authoritativeBaseline) {
+    const generation = comparableAuthoritativeGeneration(candidate.generation);
+    if (generation === null) {
+      rememberOpaqueGeneration(opaque, candidate.generation);
+    } else {
+      const currentOrder = comparable.get(generation.lineage);
+      if ((currentOrder !== undefined || comparable.size < MAX_COMPARABLE_AUTHORITATIVE_LINEAGES) &&
+        (currentOrder === undefined || compareOrder(generation.order, currentOrder) > 0)) {
+        comparable.set(generation.lineage, generation.order);
+      }
+    }
+  }
+  return { acceptedEventIds: new Set(candidate.providerEventIds),
+    comparableAuthoritativeOrders: comparable, opaqueAuthoritativeGenerations: opaque };
+}
+
+function allowsAuthoritativeGeneration(current: CoverageState, generation: string): boolean {
+  const comparable = comparableAuthoritativeGeneration(generation);
+  if (comparable === null) {
+    return !current.opaqueAuthoritativeGenerations.has(generation) &&
+      current.opaqueAuthoritativeGenerations.size < MAX_OPAQUE_AUTHORITATIVE_GENERATIONS;
+  }
+  const highWatermark = current.comparableAuthoritativeOrders.get(comparable.lineage);
+  if (highWatermark !== undefined) return compareOrder(comparable.order, highWatermark) > 0;
+  return current.comparableAuthoritativeOrders.size < MAX_COMPARABLE_AUTHORITATIVE_LINEAGES;
+}
+
+interface ComparableAuthoritativeGeneration {
+  readonly lineage: string;
+  readonly order: ComparableAuthoritativeOrder;
+}
+
+function comparableAuthoritativeGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  const parsers = [comparableCmdGeneration, comparableImGeneration, comparableKsportGeneration,
+    comparableSabaGeneration, comparableTsportGeneration] as const;
+  for (const parse of parsers) {
+    const comparable = parse(generation);
+    if (comparable !== null) return comparable;
+  }
+  if (hasReservedGenerationSyntax(generation)) return null;
+  return comparableFallbackGeneration(generation);
+}
+
+function comparableCmdGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  const match = /^cmd:(0|[1-9]\d*)(?::observation:(0|[1-9]\d*))?$/u.exec(generation);
+  if (match === null) return null;
+  const cursor = Number(match[1]);
+  const observation = match[2] === undefined ? -1 : Number(match[2]);
+  if (!Number.isSafeInteger(cursor) || !Number.isSafeInteger(observation)) return null;
+  return { lineage: lineageKey("CMD"), order: [cursor, observation] };
+}
+
+function comparableImGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  const match = /^im:(0|[1-9]\d*):([1-9]\d*)$/u.exec(generation);
+  if (match === null) return null;
+  const tabId = Number(match[1]);
+  const ordinal = Number(match[2]);
+  if (!Number.isSafeInteger(tabId) || !Number.isSafeInteger(ordinal)) return null;
+  return { lineage: lineageKey("IM", match[1]!), order: [ordinal, 0] };
+}
+
+function comparableKsportGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  const http = /^(?:(.+):)?ksport-http:(0|[1-9]\d*):([1-9]\d*)$/u.exec(generation);
+  if (http !== null) {
+    const tabId = Number(http[2]);
+    const ordinal = Number(http[3]);
+    if (!Number.isSafeInteger(tabId) || !Number.isSafeInteger(ordinal)) return null;
+    return { lineage: lineageKey("KSPORT_HTTP", http[1] ?? "", http[2]!), order: [ordinal, 0] };
+  }
+
+  const ws = /^(.+):ksport-ws:(?:ksport-stream-)?([1-9]\d*):([1-9]\d*)$/u.exec(generation);
+  if (ws === null) return null;
+  const streamOrdinal = Number(ws[2]);
+  const recoveryOrdinal = Number(ws[3]);
+  if (!Number.isSafeInteger(streamOrdinal) || !Number.isSafeInteger(recoveryOrdinal)) return null;
+  return { lineage: lineageKey("KSPORT_WS", ws[1]!), order: [streamOrdinal, recoveryOrdinal] };
+}
+
+function comparableSabaGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  const match = /^(.+):saba:([1-9]\d*):(0|[1-9]\d*)$/u.exec(generation);
+  if (match === null) return null;
+  const streamOrdinal = Number(match[2]);
+  const sequence = Number(match[3]);
+  if (!Number.isSafeInteger(streamOrdinal) || !Number.isSafeInteger(sequence)) return null;
+  return { lineage: lineageKey("SABA", match[1]!), order: [streamOrdinal, sequence] };
+}
+
+function comparableTsportGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  if (!generation.startsWith('["TSPORT",')) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(generation); } catch { return null; }
+  if (!Array.isArray(parsed) || parsed.length !== 5 || parsed[0] !== "TSPORT" ||
+    typeof parsed[1] !== "string" || parsed[1].length === 0 ||
+    typeof parsed[2] !== "string" || parsed[2].length === 0 ||
+    typeof parsed[3] !== "string" || parsed[3].length === 0 ||
+    typeof parsed[4] !== "number" || !Number.isSafeInteger(parsed[4]) || parsed[4] < 0) return null;
+  return { lineage: lineageKey("TSPORT", parsed[1], parsed[2]), order: [parsed[4], 0] };
+}
+
+function comparableFallbackGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  const match = /^(.+):(0|[1-9]\d*)$/u.exec(generation);
+  if (match === null) return null;
+  const sourceEpoch = match[1]!;
+  const canonicalEpoch = /^(.+):(0|[1-9]\d*)$/u.exec(sourceEpoch);
+  if (canonicalEpoch === null) return null;
+  const epochGeneration = Number(canonicalEpoch[2]);
+  const sequence = Number(match[2]);
+  if (!Number.isSafeInteger(epochGeneration) || !Number.isSafeInteger(sequence)) return null;
+  return { lineage: lineageKey("FALLBACK", sourceEpoch), order: [sequence, 0] };
+}
+
+function hasReservedGenerationSyntax(generation: string): boolean {
+  return generation.startsWith("cmd:") || generation.startsWith("im:") ||
+    generation.startsWith("ksport-http:") || generation.includes(":ksport-http:") ||
+    generation.includes(":ksport-ws:") || generation.includes(":saba:") ||
+    generation.startsWith("[") || generation.startsWith("{");
+}
+
+function lineageKey(kind: string, ...parts: readonly string[]): string {
+  return JSON.stringify([kind, ...parts]);
+}
+
+function compareOrder(left: ComparableAuthoritativeOrder, right: ComparableAuthoritativeOrder): number {
+  if (left[0] !== right[0]) return left[0] < right[0] ? -1 : 1;
+  if (left[1] !== right[1]) return left[1] < right[1] ? -1 : 1;
+  return 0;
+}
+
+function rememberOpaqueGeneration(generations: Set<string>, generation: string): void {
+  if (!generations.has(generation) && generations.size < MAX_OPAQUE_AUTHORITATIVE_GENERATIONS) {
+    generations.add(generation);
+  }
 }

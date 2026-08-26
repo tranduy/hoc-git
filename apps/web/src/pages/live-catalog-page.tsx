@@ -413,6 +413,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const matchListRef = useRef<HTMLDivElement>(null);
   const matchListAnchorRef = useRef<ScrollAnchor | null>(null);
   const staleAccountIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const restoredCacheAccountIdsRef = useRef(new Set<string>());
   const accountsRef = useRef<readonly AccountStatus[]>([]);
   const sourcesRef = useRef<readonly CatalogSourceStatus[]>([]);
   const catalogRefreshesInFlight = useRef(new Set<string>());
@@ -486,7 +487,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const source = sourcesRef.current.find((candidate) => candidate.id === catalog.accountId);
     if (source === undefined || source.category !== catalog.category || source.provider !== catalog.provider) return;
     const previous = catalogsRef.current.find((candidate) => candidate.accountId === catalog.accountId);
-    if (previous !== undefined && catalog.observedAtMs < previous.observedAtMs) return;
+    const restoredFromCache = restoredCacheAccountIdsRef.current.has(catalog.accountId);
+    if (!restoredFromCache && previous !== undefined && catalog.observedAtMs < previous.observedAtMs) return;
+    restoredCacheAccountIdsRef.current.delete(catalog.accountId);
     const nextCatalogs = [catalog, ...catalogsRef.current.filter((candidate) =>
       candidate.accountId !== catalog.accountId)];
     const nextStale = new Set(staleAccountIdsRef.current);
@@ -570,11 +573,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       // newer poll has already committed, otherwise exact pairs blink out and
       // back in on every alternating response.
       const accepted = completed.filter((candidate) => {
+        if (restoredCacheAccountIdsRef.current.has(candidate.accountId)) return true;
         const previous = previousByAccount.get(candidate.accountId);
         if (previous === undefined || candidate.observedAtMs > previous.observedAtMs) return true;
         return candidate.observedAtMs === previous.observedAtMs &&
           catalogRevision(candidate) === catalogRevision(previous);
       });
+      for (const candidate of accepted) restoredCacheAccountIdsRef.current.delete(candidate.accountId);
       const supersededIds = new Set(completed.filter((candidate) => !accepted.includes(candidate))
         .map((candidate) => candidate.accountId));
       const failedIds = new Set(requestedIds.filter((_id, index) => {
@@ -659,6 +664,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const initial = new Set(availableCandidates.filter((source) => source.category === initialCategory)
         .map((source) => source.id));
       const cached = loadCatalogCache(window.localStorage).filter((catalog) => initial.has(catalog.accountId));
+      restoredCacheAccountIdsRef.current = new Set(cached.map((catalog) => catalog.accountId));
       catalogsRef.current = cached;
       setCatalogs(cached);
       const cachedStale = new Set(cached.map((catalog) => catalog.accountId));
@@ -741,12 +747,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
       .map((candidate) => candidate.providerEventId)).size
   ])), [catalogs, category]);
-  // Keep the last verified comparison visible through a provider refresh or
-  // restart. Stale rows are display-only: signals and preflight above continue
-  // to use freshCatalogs exclusively.
+  // Stale catalogs remain cached for recovery, but stale comparisons are not
+  // shown. A cross-book ticket is useful only while every contributing source
+  // is fresh.
   const events = useMemo(() => comparisonEvents.filter((item) =>
-    item.event.category === category && !(item.event.category === "FOOTBALL" && item.event.isVirtual !== false)),
-  [comparisonEvents, category]);
+    item.event.category === category && !(item.event.category === "FOOTBALL" && item.event.isVirtual !== false) &&
+    item.catalogs.every((catalog) => !staleAccountIds.has(catalog.accountId))),
+  [comparisonEvents, category, staleAccountIds]);
   const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs) &&
     matchesEventPhase(item.event, eventPhases)), [events, eventPhases, nowMs]);
   const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
@@ -792,8 +799,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const selectedEvent = useMemo(() => {
     if (pinnedEventIdentity === null) return undefined;
     return events.find((item) => item.providerEventIds[pinnedEventIdentity.provider] === pinnedEventIdentity.providerEventId &&
-      item.catalogs.some((catalog) => catalog.accountId === pinnedEventIdentity.accountId)) ?? pinnedEvent ?? undefined;
-  }, [events, pinnedEvent, pinnedEventIdentity]);
+      item.catalogs.some((catalog) => catalog.accountId === pinnedEventIdentity.accountId)) ??
+      (pinnedEvent?.catalogs.every((catalog) => !staleAccountIds.has(catalog.accountId)) ? pinnedEvent : undefined);
+  }, [events, pinnedEvent, pinnedEventIdentity, staleAccountIds]);
   const isPinnedEvent = (item: ComparisonEvent): boolean => pinnedEventIdentity !== null &&
     item.providerEventIds[pinnedEventIdentity.provider] === pinnedEventIdentity.providerEventId &&
     item.catalogs.some((catalog) => catalog.accountId === pinnedEventIdentity.accountId);
@@ -818,6 +826,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   };
   const changeCategory = (next: CatalogCategory): void => {
     setCategory(next); setCatalogs([]); catalogsRef.current = []; staleAccountIdsRef.current = new Set();
+    restoredCacheAccountIdsRef.current.clear();
     setStaleAccountIds(new Set());
     saveCatalogCategory(window.localStorage, next);
     setSignals([]); setMovements([]); setSelectedKey(null); setPinnedEvent(null); setPinnedEventIdentity(null); setVerifiedTickets(new Map());
@@ -847,7 +856,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         hasExactEvent: selectedEvent.providers.includes(provider) };
     });
     return <MatchWatchDetail accountId={primary.accountId} catalogApi={catalogApi} initialCatalog={primary}
-      baseStake={baseStake} books={detailBooks} comparisonCatalogs={freshCatalogs} comparisonEvent={selectedEvent} externallyRefreshed
+      baseStake={baseStake} books={detailBooks} comparisonCatalogs={catalogs} comparisonEvent={selectedEvent} externallyRefreshed
       highlightTicketKey={highlightTicketKey} rankedTickets={rankedByEvent.get(selectedEvent.key)?.tickets ?? []}
       onOpenProviderTicket={openProviderTicketEnabled ? openProviderTicket : undefined}
       ticketReportApi={ticketReportApi}
@@ -909,20 +918,20 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       const edge = ticketEdgeSummary(ticket);
       const label = `${item.event.participantA} vs ${item.event.participantB}`;
       const displayOnly = item.catalogs.some((catalog) => staleAccountIds.has(catalog.accountId));
-      // Observation/stale controls whether the ticket is executable, not how
-      // its displayed ROI is coloured.  Always colour every numeric ROI by
-      // its sign so a negative display-only estimate can never look neutral.
+      const selected = isPinnedEvent(item) && highlightTicketKey === ticket.key;
       const edgeTone = edge === null ? null : roiTone(edge.roiPercent);
-      return <article aria-label={`${edge === null ? "Observe" : "Compare"} ${label}`} aria-pressed={isPinnedEvent(item)}
-        className={`catalog-event catalog-event--stable catalog-event--dense${isPinnedEvent(item) ? " catalog-event--selected" : ""}${
-          edgeTone === null ? "" : ` catalog-event--roi-${edgeTone}`}`}
+      const roiClass = displayOnly || selected || edgeTone === null ? "" : ` catalog-event--roi-${edgeTone}`;
+      return <article aria-label={`${edge === null ? "Observe" : "Compare"} ${label}`} aria-pressed={selected}
+        className={`catalog-event catalog-event--stable catalog-event--dense${displayOnly ? " catalog-event--display-only" : ""}${
+          selected ? " catalog-event--selected" : ""}${roiClass}`}
         data-scroll-key={`${item.key}::${ticket.key}`} key={`${item.key}::${ticket.key}`} onClick={() => watch(item, ticket.key)} onKeyDown={(event) => {
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault(); watch(item, ticket.key);
         }} role="button" tabIndex={0}><header><div className="catalog-event__identity"><span>{item.event.competition}</span><h3>{label}</h3>
         <div className="provider-tags">{(edge?.providers ?? item.providers.slice(0, 2)).map((provider) =>
           <ProviderBrand compact key={provider} provider={provider} />)}
-          {displayOnly && <strong className="catalog-event__stale">STALE</strong>}</div></div>
+          {displayOnly && <strong className="catalog-event__display-only"
+            title="Giá không còn mới, chỉ dùng để tham khảo">GIÁ CŨ · CHỈ XEM</strong>}</div></div>
         {edge === null ? <div className="event-edge-summary event-edge-summary--waiting">
           <strong>WAITING</strong><small>ONE BOOK / NO EXACT PAIR</small>
           <span>{item.observedRows.length} supported two-way ticket(s)</span>

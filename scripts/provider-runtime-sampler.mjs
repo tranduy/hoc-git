@@ -5,6 +5,32 @@ import { FiveProviderCoordinator, computeBuildIdentity } from "./five-provider-c
 
 const internalState = new WeakMap();
 const buildIdentityPattern = /^sha256:[a-f0-9]{64}$/u;
+const minimumSemanticChangesByProvider = Object.freeze({
+  CMD: 2,
+  SABA: 2,
+  SBOBET: 2,
+  APSPORT: 2,
+  IM: 2,
+  BTI: 2
+});
+
+export function isNoLeaseDiagnostic(options = {}, argv = process.argv) {
+  return options.noLease === true || argv.includes("--no-lease");
+}
+
+export function resolveDiagnosticBinding(sources, config, localBuildIdentity) {
+  if (typeof localBuildIdentity !== "string" || !buildIdentityPattern.test(localBuildIdentity)) {
+    throw new Error("LOCAL_ARTIFACT_IDENTITY_MISMATCH");
+  }
+  const candidates = Array.isArray(sources) ? sources.filter((source) => source?.lobby === config.lobby &&
+    source?.state === "LIVE" && source?.authorityDisposition === "ACTIVE") : [];
+  if (candidates.length !== 1) throw new Error("NO_LEASE_ACTIVE_SOURCE_REQUIRED");
+  const sourceId = candidates[0].sourceId;
+  const tabId = Number.isSafeInteger(candidates[0].tabId) ? candidates[0].tabId : sourceIdTab(sourceId);
+  if (typeof sourceId !== "string" || tabId === null) throw new Error("NO_LEASE_ACTIVE_SOURCE_INVALID");
+  return { token: null, sourceId, tabId, buildIdentity: localBuildIdentity,
+    expiresAtMs: Number.MAX_SAFE_INTEGER, noLease: true };
+}
 
 export function resolveAcceptanceBinding(state, config, localBuildIdentity, nowMs = Date.now()) {
   if (typeof localBuildIdentity !== "string" || !buildIdentityPattern.test(localBuildIdentity) ||
@@ -37,6 +63,7 @@ export function createRuntimeAccumulator(config, startedAtMs, durationMs, bindin
     expectedSourceId: binding?.sourceId ?? null,
     expectedTabId: binding?.tabId ?? null,
     buildIdentity: binding?.buildIdentity ?? null,
+    diagnosticNoLease: binding?.noLease === true,
     acceptanceLeaseValid: binding !== null,
     requiredControlLobbies: config.requiredControlLobbies ?? ["BTI"],
     regressionControlMissingSamples: 0,
@@ -238,6 +265,9 @@ export function runtimeVerdict(result) {
   if (result.finalCatalogSnapshotState !== "FRESH") reasons.push("CATALOG_NOT_FRESH");
   if (!(result.lastEventCount > 0)) reasons.push("CATALOG_EMPTY_OR_UNAVAILABLE");
   if (result.providerEvidenceAdvances < 3) reasons.push("PROVIDER_EVIDENCE_NOT_ADVANCING");
+  const minimumSemanticChanges = minimumSemanticChangesByProvider[result.provider] ?? 2;
+  if (result.quoteChanges.length === 0) reasons.push("SEMANTIC_CHANGE_NOT_OBSERVED");
+  else if (result.quoteChanges.length < minimumSemanticChanges) reasons.push("SEMANTIC_CHANGE_TOO_SPARSE");
   if (result.regressionControlMissingSamples > 0) reasons.push("REGRESSION_CONTROL_NOT_ACTIVE");
   if (result.recoverySucceeded !== true) reasons.push("TARGETED_RECOVERY_NOT_CONFIRMED");
   if (result.crossProviderSourceChanges.length > 0) reasons.push("CROSS_PROVIDER_SOURCE_CHANGED");
@@ -255,7 +285,16 @@ export async function runProviderRuntimeVerification(config, options = {}) {
     root: resolve(repositoryRoot, ".run", "five-provider")
   });
   const localBuildIdentity = await (options.computeBuildIdentity ?? computeBuildIdentity)(repositoryRoot);
-  const binding = resolveAcceptanceBinding(await coordinator.status(), config, localBuildIdentity);
+  const noLease = isNoLeaseDiagnostic(options);
+  let binding;
+  if (noLease) {
+    const response = await fetch(baseUrl + "/api/chrome-bridge/sources", { cache: "no-store" });
+    if (!response.ok) throw new Error(`NO_LEASE_SOURCE_HTTP_${response.status}`);
+    const payload = await response.json();
+    binding = resolveDiagnosticBinding(payload.sources, config, localBuildIdentity);
+  } else {
+    binding = resolveAcceptanceBinding(await coordinator.status(), config, localBuildIdentity);
+  }
   const startedAtMs = Date.now();
   if (!Number.isFinite(durationMs) || startedAtMs + durationMs >= binding.expiresAtMs) {
     throw new Error("ACCEPTANCE_WINDOW_TOO_SHORT");
@@ -315,9 +354,14 @@ export async function runProviderRuntimeVerification(config, options = {}) {
   result.finishedAtMs = Date.now();
   try {
     const finalBuildIdentity = await (options.computeBuildIdentity ?? computeBuildIdentity)(repositoryRoot);
-    const finalBinding = resolveAcceptanceBinding(await coordinator.status(), config, finalBuildIdentity);
-    result.acceptanceLeaseValid = finalBinding.token === binding.token &&
-      finalBinding.sourceId === binding.sourceId && finalBinding.buildIdentity === binding.buildIdentity;
+    if (noLease) {
+      result.acceptanceLeaseValid = true;
+      if (finalBuildIdentity !== binding.buildIdentity) throw new Error("LOCAL_ARTIFACT_IDENTITY_MISMATCH");
+    } else {
+      const finalBinding = resolveAcceptanceBinding(await coordinator.status(), config, finalBuildIdentity);
+      result.acceptanceLeaseValid = finalBinding.token === binding.token &&
+        finalBinding.sourceId === binding.sourceId && finalBinding.buildIdentity === binding.buildIdentity;
+    }
   } catch (error) {
     result.acceptanceLeaseValid = false;
     result.errors.push(safeError(error));

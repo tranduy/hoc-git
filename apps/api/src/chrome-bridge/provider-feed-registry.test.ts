@@ -113,7 +113,7 @@ describe("ProviderFeedRegistry", () => {
 
   it("does not publish or resolve an already expired evidence baseline as fresh", async () => {
     vi.useFakeTimers();
-    const registry = new ProviderFeedRegistry({ now: () => 12_000 });
+    const registry = new ProviderFeedRegistry({ now: () => 77_000 });
 
     expect(registry.accept(wsBaseline(SABA, 1_001, "reset-old"))).toMatchObject({
       accepted: true, publish: { snapshotState: "STALE" }
@@ -228,12 +228,26 @@ describe("ProviderFeedRegistry", () => {
     const listener = vi.fn();
     registry.subscribe(listener);
 
-    nowMs = 11_001;
+    nowMs = 76_001;
     expect(() => registry.read(SABA)).toThrow("PROVIDER_FEED_NOT_LIVE");
 
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({
       accountId: SABA, state: "STALLED", reason: "EVIDENCE_CADENCE_EXCEEDED"
     }));
+  });
+
+  it("keeps one SABA bootstrap generation live through 30 minutes of measured-cadence deltas", () => {
+    let nowMs = 1_000;
+    const registry = new ProviderFeedRegistry({ now: () => nowMs });
+    expect(registry.accept(wsBaseline(SABA, nowMs, "saba-bootstrap"))).toMatchObject({ accepted: true });
+
+    for (nowMs += 69_600; nowMs <= 1_861_000; nowMs += 69_600) {
+      expect(registry.accept(wsDelta(SABA, nowMs, "saba-bootstrap"))).toMatchObject({ accepted: true });
+      expect(registry.read(SABA)).toEqual(catalogFor(SABA, nowMs));
+      expect(registry.snapshot(SABA)).toMatchObject({
+        state: "LIVE", activeGeneration: "saba-bootstrap", lastDeltaAtMs: nowMs
+      });
+    }
   });
 });

@@ -125,7 +125,7 @@ describe("KSPORT light snapshot recovery", () => {
       ? { result: { value: "1787251000000.5" } } : {});
     const current = new NetworkObserver({ sendCommand: marker, forward, saveSabaWsSnapshots });
     await current.handleEvent(ksport, "Network.webSocketCreated", {
-      requestId: "ksocket-1", url: "wss://sports.example/sport/socket"
+      requestId: "ksocket-1", url: "wss://d42.sb21.net/sport/socket"
     });
     for (const payloadData of [live, today]) {
       await current.handleEvent(ksport, "Network.webSocketFrameReceived", {
@@ -140,9 +140,9 @@ describe("KSPORT light snapshot recovery", () => {
 
     const loadSabaWsSnapshots = vi.fn(async () => ({ version: 1, sourceId: ksport.sourceId,
       documentMarker: "1787251000000.5", partitions: [{ partition: "1", frames: [
-        { url: "wss://sports.example/sport/socket", body: live, streamId: "1", recoveryGeneration: 1,
+        { url: "wss://d42.sb21.net/sport/socket", body: live, streamId: "1", recoveryGeneration: 1,
           observedAtMs: 1_000, receivedMonotonicMs: 10 },
-        { url: "wss://sports.example/sport/socket", body: today, streamId: "1", recoveryGeneration: 1,
+        { url: "wss://d42.sb21.net/sport/socket", body: today, streamId: "1", recoveryGeneration: 1,
           observedAtMs: 1_001, receivedMonotonicMs: 11 }
       ] }] }));
     const restartedForward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);

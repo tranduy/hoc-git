@@ -12,12 +12,12 @@ function ranked(profit: string, state: RankedTicket["state"] = "VERIFIED_PROFIT"
 }
 
 describe("ProfitAlertTracker", () => {
-  it("never emits an unverified observation even when its estimated ROI is above five percent", () => {
+  it("alerts for a fresh two-book observation only when its estimated ROI is above five percent", () => {
     const tracker = new ProfitAlertTracker();
     expect(tracker.update([ranked("50000", "OBSERVATION", "ticket-1", "0.05")], 100)).toEqual([]);
-    expect(tracker.update([ranked("50001", "OBSERVATION", "ticket-1", "0.050001")], 101)).toEqual([]);
-    expect(tracker.update([ranked("50001", "VERIFIED_NO_PROFIT", "ticket-1", "0.2")], 102)).toEqual([]);
-    expect(tracker.update([ranked("50001", "VERIFIED_PROFIT", "ticket-1", "0.050001")], 103)).toHaveLength(1);
+    expect(tracker.update([ranked("50001", "OBSERVATION", "ticket-1", "0.050001")], 101)).toHaveLength(1);
+    expect(tracker.update([ranked("50001", "VERIFIED_NO_PROFIT", "ticket-2", "0.2")], 102)).toEqual([]);
+    expect(tracker.update([ranked("50001", "VERIFIED_PROFIT", "ticket-3", "0.050001")], 103)).toHaveLength(1);
   });
 
   it("emits each exact ticket only once for the mounted dashboard session", () => {

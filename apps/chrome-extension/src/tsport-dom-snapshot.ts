@@ -11,21 +11,56 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
     const match = clean(value, 32).match(/[+-]?(?:0|[1-9]\\d*)(?:\\.(?:25|5|75))?(?:\\s*[\\/-]\\s*(?:0|[1-9]\\d*)(?:\\.(?:25|5|75))?)?/u);
     return match?.[0]?.replace(/\\s+/gu, "") ?? null;
   };
+  // Cache ancestor/style checks across every match. This catches CSS-hidden
+  // provider panels without forcing geometry/layout reads for every row.
+  const hiddenByTree = new WeakMap();
+  const isHiddenByTree = (element) => {
+    if (!element || typeof element !== "object") return true;
+    const cached = hiddenByTree.get(element);
+    if (cached !== undefined) return cached;
+    const hiddenByAttribute = element.hidden === true ||
+      element.getAttribute?.("hidden") !== null ||
+      element.getAttribute?.("aria-hidden") === "true";
+    let hiddenByStyle = false;
+    if (typeof getComputedStyle === "function") {
+      try {
+        const style = getComputedStyle(element);
+        hiddenByStyle = style.display === "none" ||
+          style.visibility === "hidden" || style.visibility === "collapse" ||
+          style.contentVisibility === "hidden";
+      } catch {
+        hiddenByStyle = true;
+      }
+    }
+    const hidden = hiddenByAttribute || hiddenByStyle ||
+      (element.parentElement != null && isHiddenByTree(element.parentElement));
+    hiddenByTree.set(element, hidden);
+    return hidden;
+  };
   const footballRoots = [...document.querySelectorAll(
+    '[data-sport-id="1"], ' +
+    '[data-sportid="1"], ' +
     '[data-football-event-list="true"][data-loaded="true"], ' +
     '[data-role="football-event-list"][data-loaded="true"], ' +
     '.football-match-list[data-loaded="true"], ' +
     '.match-list[data-sport-id="1"][data-loaded="true"], ' +
     '.match-list[data-sportid="1"][data-loaded="true"]'
-  )];
+  )].filter((root) => !isHiddenByTree(root));
   if (footballRoots.length !== 1) return JSON.stringify([]);
   const footballRoot = footballRoots[0];
-  if (footballRoot.getAttribute('data-loaded') !== 'true' ||
-    footballRoot.getAttribute('aria-busy') !== 'false') return JSON.stringify([]);
+  if (isHiddenByTree(footballRoot) || footballRoot.getAttribute('data-loaded') === 'false' ||
+    footballRoot.getAttribute('aria-busy') === 'true' ||
+    footballRoot.querySelector('[aria-busy="true"], [data-loading="true"]') !== null) {
+    return JSON.stringify([]);
+  }
   const candidates = [...footballRoot.querySelectorAll(".match")];
   const records = [];
   let invalidCandidates = 0;
   for (const node of candidates) {
+    if (isHiddenByTree(node)) {
+      invalidCandidates += 1;
+      continue;
+    }
     const favoriteId = clean(node.querySelector(".match-favorite")?.id, 128);
     const favoriteEventId = favoriteId.match(/eventId-[^-]+-\\d+-([0-9]+)$/u)?.[1] ?? "";
     const dataEventId = clean(node.getAttribute("data-event-id") || node.getAttribute("data-eventid"), 128);

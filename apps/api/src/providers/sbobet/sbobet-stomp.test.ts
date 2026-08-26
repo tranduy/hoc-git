@@ -27,6 +27,26 @@ describe("SBOBET SockJS/STOMP decoding", () => {
     }]);
   });
 
+  it("reassembles a raw STOMP MESSAGE fragmented across websocket frames", () => {
+    const decoder = new SbobetStompReceiptDecoder();
+    const nested = JSON.stringify([{ "8": 5603586 }]);
+    const frame = `MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n` +
+      `subscription:subSportBookLive\nmessage-id:stream-411\n\n${JSON.stringify({
+        statusCode: "OK", statusCodeValue: 200, body: nested
+      })}\0`;
+    const splitAt = frame.indexOf("[");
+    expect(splitAt).toBeGreaterThan(0);
+
+    expect(decoder.push(frame.slice(0, splitAt))).toEqual([]);
+    expect(decoder.push(frame.slice(splitAt))).toEqual([{
+      destination: "/topic/sports/1_1/live/ma/event/vi",
+      subscription: "subSportBookLive",
+      messageId: "stream-411",
+      receiptSequence: 411,
+      body: [{ "8": 5603586 }]
+    }]);
+  });
+
   it("ignores a late STOMP RECEIPT without replaying the preceding MESSAGE", () => {
     const decoder = new SbobetStompReceiptDecoder();
     const message = `MESSAGE\ndestination:/topic/sports/1_1/today/ma/event/vi\n` +

@@ -412,6 +412,80 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
+  it("requests recovery from an exact listed LIVE candidate source", async () => {
+    const { app, registry } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const initialControls = new Promise<void>((resolve) => {
+      let count = 0;
+      socket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "KSPORT", sourceId: "chrome:KSPORT:7" }));
+    await initialControls;
+    expect(registry.listSources()).toEqual([expect.objectContaining({
+      sourceId: "chrome:KSPORT:7", state: "LIVE", authorityDisposition: "CANDIDATE"
+    })]);
+
+    const recovery = nextMessage(socket);
+    const response = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:KSPORT:7" } });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ sourceId: "chrome:KSPORT:7", requested: 1 });
+    await expect(recovery).resolves.toEqual({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:KSPORT:7" });
+    const wrongSource = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:KSPORT:999" } });
+    expect(wrongSource.statusCode).toBe(409);
+    socket.terminate();
+    await app.close();
+  });
+
+  it("rejects a replaced candidate and requests only the exact current candidate", async () => {
+    const { app } = await appWithRoute();
+    const firstSocket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const firstControls = new Promise<void>((resolve) => {
+      let count = 0;
+      firstSocket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    firstSocket.send(JSON.stringify({ ...validEnvelope, lobby: "KSPORT", sourceId: "chrome:KSPORT:7" }));
+    await firstControls;
+
+    const currentSocket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const currentControls = new Promise<void>((resolve) => {
+      let count = 0;
+      currentSocket.on("message", () => { if (++count === 2) resolve(); });
+    });
+    currentSocket.send(JSON.stringify({ ...validEnvelope, lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 }));
+    await currentControls;
+
+    const replaced = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:KSPORT:7" } });
+    expect(replaced.statusCode).toBe(409);
+    const wrong = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:KSPORT:999" } });
+    expect(wrong.statusCode).toBe(409);
+
+    const recovery = nextMessage(currentSocket);
+    const current = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
+      payload: { sourceId: "chrome:KSPORT:8" } });
+    expect(current.statusCode).toBe(202);
+    expect(current.json()).toEqual({ sourceId: "chrome:KSPORT:8", requested: 1 });
+    await expect(recovery).resolves.toEqual({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:KSPORT:8" });
+    firstSocket.terminate();
+    currentSocket.terminate();
+    await app.close();
+  });
+
   it("requests recovery only from the exact attached source ID", async () => {
     const { app, registry } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {

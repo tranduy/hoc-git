@@ -66,14 +66,14 @@ describe("SABA websocket realtime regressions", () => {
         expect.objectContaining({ providerSelectionId: "30:away", selection: "AWAY", rawOdds: "-0.99" })
       ]
     });
-    expect(baseline[0]).not.toHaveProperty("authoritativeBaseline");
+    expect(baseline[0]).toMatchObject({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+    });
 
     expect(adapter.decode(socketState("OPEN", 3))).toEqual([]);
-    const authoritative = adapter.decode(envelope([["f", 0, fields], [0, "reset"],
+    const duplicate = adapter.decode(envelope([["f", 0, fields], [0, "reset"],
       ...eventRows(0.91, -0.99), [0, "done"]], "r0001", 4));
-    expect(authoritative).toEqual([expect.objectContaining({
-      authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
-    })]);
+    expect(duplicate).toEqual([]);
 
     const delta = adapter.decode(envelope([
       encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.73, odds2a: -0.83 })
@@ -151,7 +151,7 @@ describe("SABA websocket realtime regressions", () => {
 
     expect(adapter.decode(envelope([
       encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.72, odds2a: -0.82 })
-    ], "r0002", 60_002))).toEqual([]);
+    ], "r0002", 3_600_002))).toEqual([]);
   });
 
   it("treats duplicate current OPEN as a no-op after a complete SABA baseline", () => {
@@ -206,7 +206,7 @@ describe("SABA websocket realtime regressions", () => {
     })]);
   });
 
-  it("requires a strictly newer stream to rebaseline after a current-stream revision gap", () => {
+  it("re-baselines the current running stream after a revision gap without another OPEN", () => {
     const adapter = new SabaWsCatalogAdapter();
     expect(adapter.decode(socketState("OPEN", 1))).toEqual([]);
     expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
@@ -218,8 +218,12 @@ describe("SABA websocket realtime regressions", () => {
     })]);
 
     expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.01, -0.01),
-      [0, "done"]], "r0004", 4))).toEqual([]);
-    expect(adapter.decode(socketState("OPEN", 5, "worker-a:0", "2"))).toEqual([]);
+      [0, "done"]], "r0004", 4))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+    })]);
+    expect(adapter.decode(socketState("OPEN", 5, "worker-a:0", "2"))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
     const replacement = adapter.decode(onStream(envelope([["f", 0, fields], [0, "reset"],
       ...eventRows(0.72, -0.82), [0, "done"]], "r0001", 6), "2"));
     expect(replacement).toEqual([expect.objectContaining({
@@ -227,7 +231,7 @@ describe("SABA websocket realtime regressions", () => {
     })]);
   });
 
-  it("requires a strictly newer stream to rebaseline after an A003 gap", () => {
+  it("re-baselines the current running stream after an A003 gap without another OPEN", () => {
     const adapter = new SabaWsCatalogAdapter();
     expect(adapter.decode(socketState("OPEN", 1))).toEqual([]);
     expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
@@ -237,8 +241,12 @@ describe("SABA websocket realtime regressions", () => {
     })]);
 
     expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.01, -0.01),
-      [0, "done"]], "r0003", 4))).toEqual([]);
-    expect(adapter.decode(socketState("OPEN", 5, "worker-a:0", "2"))).toEqual([]);
+      [0, "done"]], "r0003", 4))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+    })]);
+    expect(adapter.decode(socketState("OPEN", 5, "worker-a:0", "2"))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
     const replacement = adapter.decode(onStream(envelope([["f", 0, fields], [0, "reset"],
       ...eventRows(0.72, -0.82), [0, "done"]], "r0001", 6), "2"));
     expect(replacement).toEqual([expect.objectContaining({
@@ -311,7 +319,7 @@ describe("SABA websocket realtime regressions", () => {
     ], "r0002", 9_002))).toBe(false);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
 
-    nowMs = 1_786_449_550_003;
+    nowMs = 1_786_449_615_003;
     await expect(plane.read("catalog-source:SABA:FOOTBALL"))
       .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
@@ -332,7 +340,7 @@ describe("SABA websocket realtime regressions", () => {
       observedAtMs: nowMs, receivedMonotonicMs: 9_002 })).toBe(false);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
 
-    nowMs = 1_786_449_550_003;
+    nowMs = 1_786_449_615_003;
     await expect(plane.read("catalog-source:SABA:FOOTBALL"))
       .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
@@ -351,6 +359,22 @@ describe("SABA websocket realtime regressions", () => {
       encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.72, odds2a: -0.82 })
     ], "r0002", 4))).toBe(false);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
+  });
+
+  it("keeps authority when a late-attached partition without a field table cannot decode", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(envelope([["f", 0, fields], [0, "reset"], ...eventRows(0.91, -0.99),
+      [0, "done"]], "r0001", 1, "worker-a:0", "b14"))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+    })]);
+
+    expect(adapter.decode(envelope([[0, "o", 3, 30]], "late1", 2,
+      "worker-a:0", "b21"))).toEqual([]);
+    expect(adapter.decode(envelope([
+      encoded({ type: "o", oddsid: 30, matchid: 20, odds1a: 0.72, odds2a: -0.82 })
+    ], "r0002", 3, "worker-a:0", "b14"))).toEqual([expect.objectContaining({
+      evidenceMode: "DELTA", provenance: "WS"
+    })]);
   });
 
   it("commits a proven complete empty SABA baseline but not a partial empty reset", async () => {

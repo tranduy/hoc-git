@@ -22,6 +22,7 @@ import type {
   AuthorityObservation,
   CatalogCommitProof
 } from "./provider-authority-types.js";
+import type { PipelineTelemetry } from "../diagnostics/pipeline-telemetry.js";
 
 export interface ChromeCatalogDataPlaneOptions {
   readonly now?: () => number;
@@ -37,6 +38,8 @@ export interface ChromeCatalogDataPlaneOptions {
   readonly onSourceRecoveryNeeded?: (accountId: string) => void;
   readonly networkBodyBudget?: NetworkBodyAssemblyBudget;
   readonly authorityCoordinator?: ProviderAuthorityCoordinator;
+  readonly telemetry?: PipelineTelemetry;
+  readonly onIngestRejected?: (envelope: ChromeBridgeEnvelope, reason: string) => void;
 }
 
 export interface ChromeCatalogIngestContext {
@@ -98,6 +101,8 @@ export class ChromeCatalogDataPlane {
   readonly #onSourceRecoveryNeeded: ((accountId: string) => void) | null;
   readonly #networkBodyBudget: NetworkBodyAssemblyBudget;
   readonly #authorityCoordinator: ProviderAuthorityCoordinator;
+  readonly #telemetry: PipelineTelemetry | null;
+  readonly #onIngestRejected: ((envelope: ChromeBridgeEnvelope, reason: string) => void) | null;
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
@@ -112,6 +117,8 @@ export class ChromeCatalogDataPlane {
     this.#feeds = options.feedRegistry ?? new ProviderFeedRegistry({ now: this.#now });
     this.#networkBodyBudget = options.networkBodyBudget ?? new NetworkBodyAssemblyBudget({ now: this.#now });
     this.#authorityCoordinator = options.authorityCoordinator ?? new ProviderAuthorityCoordinator();
+    this.#telemetry = options.telemetry ?? null;
+    this.#onIngestRejected = options.onIngestRejected ?? null;
     this.#authorityCoordinator.subscribe((transition) => {
       if (transition.kind === "ACTIVE_TRANSPORT_RELEASED") {
         const active = this.#activePipelines.get(transition.accountId);
@@ -133,21 +140,26 @@ export class ChromeCatalogDataPlane {
   }
 
   ingest(envelope: ChromeBridgeEnvelope, context: ChromeCatalogIngestContext = {}): boolean {
+    const transportAccountId = accountIdForLobby(envelope.lobby);
     const ageMs = this.#now() - envelope.observedAtMs;
     const replayed = envelope.request.replayed === true;
     if (!Number.isFinite(ageMs) ||
-      (ageMs > this.#maxEnvelopeAgeMs && (!replayed || ageMs > 86_400_000))) return false;
-    const transportAccountId = accountIdForLobby(envelope.lobby);
+      (ageMs > this.#maxEnvelopeAgeMs && (!replayed || ageMs > 86_400_000))) {
+      this.#telemetry?.recordEnvelopeRejected(transportAccountId, "TOO_OLD");
+      return this.#reject(envelope, "ENVELOPE_TOO_OLD");
+    }
     const epoch = envelopeEpoch(envelope);
-    if (epoch === null) return false;
+    if (epoch === null) return this.#reject(envelope, "SOURCE_EPOCH_INVALID");
     // Durable replay is display/bootstrap material only. It must not allocate
     // source ownership or touch body, router, or adapter authority state.
-    if (replayed) return false;
+    if (replayed) return this.#reject(envelope, "DURABLE_REPLAY_NOT_AUTHORITATIVE");
     // Direct callers have no authenticated socket generation. The tab id is a
     // stable, bounded compatibility generation; the bridge route always
     // supplies the registry's real monotonically increasing generation.
     const connectionGeneration = context.connectionGeneration ?? Math.max(1, envelope.tabId);
-    if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration <= 0) return false;
+    if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration <= 0) {
+      return this.#reject(envelope, "CONNECTION_GENERATION_INVALID");
+    }
     const identity: AuthorityIdentity = context.authorityIdentity ?? {
       accountId: transportAccountId,
       sourceId: envelope.sourceId,
@@ -155,13 +167,19 @@ export class ChromeCatalogDataPlane {
       connectionGeneration
     };
     if (!identityMatchesEnvelope(identity, transportAccountId, envelope, epoch.sourceEpoch,
-      connectionGeneration)) return false;
+      connectionGeneration)) return this.#reject(envelope, "AUTHORITY_IDENTITY_MISMATCH");
     const admission = this.#authorityCoordinator.observe(identity,
       envelope.transport === "TAB_STATE" || envelope.transport === "WS_STATE" ? "TRANSPORT" : "CANDIDATE_DATA");
-    if (admission.disposition === "REJECTED") return false;
+    if (admission.disposition === "REJECTED") {
+      this.#telemetry?.recordEnvelopeRejected(transportAccountId, "RETIRED_EPOCH");
+      return this.#reject(envelope, "AUTHORITY_EPOCH_RETIRED");
+    }
     if (context.authorityObservation !== undefined &&
-      !sameAuthorityObservation(admission, context.authorityObservation)) return false;
+      !sameAuthorityObservation(admission, context.authorityObservation)) {
+      return this.#reject(envelope, "AUTHORITY_OBSERVATION_MISMATCH");
+    }
     const sourceEpoch = identity.sourceEpoch;
+    this.#telemetry?.recordEnvelope(envelope, sourceEpoch);
     if (admission.disposition === "ACTIVE") {
       this.#lastEnvelopeAtMsBySource.set(envelope.sourceId, this.#now());
       this.#feeds.accept({ kind: "TAB_REACHABLE", accountId: transportAccountId, sourceId: envelope.sourceId,
@@ -169,38 +187,72 @@ export class ChromeCatalogDataPlane {
     }
     if (envelope.transport === "TAB_STATE") {
       if (admission.disposition === "ACTIVE") this.#requestRecoveries();
-      return false;
+      return this.#reject(envelope, "TAB_STATE_TRANSPORT_ONLY");
     }
     const pipeline = admission.disposition === "ACTIVE"
       ? this.#activePipeline(identity, admission.laneToken)
       : this.#candidatePipeline(identity, admission.token, admission.laneToken);
-    if (pipeline === null) return false;
+    if (pipeline === null) return this.#reject(envelope, "DECODE_PIPELINE_UNAVAILABLE");
     const assembled = pipeline.networkBodies.ingest(envelope);
-    if (assembled === null) return false;
-    if (assembled.transport === "HTTP_RESPONSE" && !hasBoundHttpDocument(assembled)) return false;
+    if (assembled === null) return this.#reject(envelope, "NETWORK_BODY_INCOMPLETE");
+    if (assembled.transport === "HTTP_RESPONSE" && !hasBoundHttpDocument(assembled)) {
+      return this.#reject(envelope, "HTTP_DOCUMENT_NOT_BOUND");
+    }
     const route = pipeline.router.route(assembled);
-    if (route.status !== "TRUSTED" || route.adapter === null) return false;
+    if (route.status !== "TRUSTED" || route.adapter === null) {
+      this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs);
+      const reason = route.reason ?? (route.providerFamily === null
+        ? "ADAPTER_FINGERPRINT_UNMATCHED" : "ADAPTER_CONFIRMATION_PENDING");
+      return this.#reject(envelope, reason);
+    }
     const update = route.adapter.decode(assembled).at(-1);
-    if (update === undefined) return false;
-    if (update.sourceId !== identity.sourceId) return false;
+    if (update === undefined) {
+      this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs);
+      return this.#reject(envelope, `ADAPTER_DECODE_EMPTY:${route.adapter.id}`);
+    }
+    this.#telemetry?.recordAdapterDecoded(transportAccountId, update.observedAtMs);
+    if (update.sourceId !== identity.sourceId) {
+      return this.#reject(envelope, `ADAPTER_SOURCE_MISMATCH:${route.adapter.id}`);
+    }
     if (update.transportAlive === true) {
-      if (admission.disposition === "CANDIDATE") return false;
+      if (admission.disposition === "CANDIDATE") {
+        return this.#reject(envelope, `CANDIDATE_TRANSPORT_ONLY:${route.adapter.id}`);
+      }
       const provenance = transportProvenance(envelope.transport);
       if (provenance !== null) this.#feeds.accept({ kind: "TRANSPORT", accountId: transportAccountId,
         sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, provenance,
         providerSequence: update.sequence });
-      return false;
+      return this.#reject(envelope, `ADAPTER_TRANSPORT_ONLY:${route.adapter.id}`);
     }
     if (update.invalidateAccountId !== undefined) {
-      if (admission.disposition === "CANDIDATE" ||
-        !this.#authorityCoordinator.invalidate(identity, update.reason).accepted) return false;
-      return this.#applyDecision(this.#feeds.accept({ kind: "INVALIDATE", accountId: update.invalidateAccountId,
-        sourceId: update.sourceId, sourceEpoch, atMs: update.observedAtMs, reason: update.reason }));
+      if (update.reason === "PROVIDER_STREAM_GAP" || update.reason === "SCHEMA_CHANGED") {
+        this.#telemetry?.recordAdapterRejected(transportAccountId, update.reason, update.observedAtMs);
+      }
+      const shadowsSabaDomAuthority = envelope.lobby === "SABA" &&
+        this.#catalogBases.get(update.invalidateAccountId) === "DOM_FALLBACK" &&
+        ((envelope.transport === "WS_FRAME" &&
+          (update.reason === "PROVIDER_STREAM_GAP" || update.reason === "SCHEMA_CHANGED")) ||
+          (envelope.transport === "WS_STATE" && update.reason === "PROVIDER_STREAM_CLOSED"));
+      if (shadowsSabaDomAuthority) {
+        return this.#reject(envelope, `SABA_SOCKET_INVALIDATION_SHADOWED_BY_DOM:${route.adapter.id}`);
+      }
+      if (admission.disposition === "CANDIDATE") {
+        return this.#reject(envelope, `CANDIDATE_INVALIDATION_IGNORED:${route.adapter.id}`);
+      }
+      if (!this.#authorityCoordinator.invalidate(identity, update.reason).accepted) {
+        return this.#reject(envelope, `AUTHORITY_INVALIDATION_REJECTED:${route.adapter.id}`);
+      }
+      const applied = this.#applyDecision(this.#feeds.accept({ kind: "INVALIDATE",
+        accountId: update.invalidateAccountId, sourceId: update.sourceId, sourceEpoch,
+        atMs: update.observedAtMs, reason: update.reason }));
+      return applied ? true : this.#reject(envelope, `FEED_INVALIDATION_REJECTED:${route.adapter.id}`);
     }
-    if (!isObservedCatalog(update.value)) return false;
+    if (!isObservedCatalog(update.value)) return this.#reject(envelope, `ADAPTER_VALUE_INVALID:${route.adapter.id}`);
     let nextCatalog = update.value;
     const provenance = update.provenance ?? catalogProvenance(envelope.transport);
-    if (admission.disposition === "CANDIDATE" && provenance === "DOM_FALLBACK") return false;
+    if (admission.disposition === "CANDIDATE" && provenance === "DOM_FALLBACK" && envelope.lobby !== "SABA") {
+      return this.#reject(envelope, `CANDIDATE_DOM_FALLBACK:${route.adapter.id}`);
+    }
     let catalogBasis = provenance;
     if (envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT") {
       const retained = this.#catalogs.get(nextCatalog.accountId);
@@ -209,7 +261,7 @@ export class ChromeCatalogDataPlane {
         // While network authority is current, DOM evidence is intentionally
         // silent. Once authority stalls it can update visible identity/status
         // fields, but never price clocks or LIVE freshness.
-        if (feed.state === "LIVE") return false;
+        if (feed.state === "LIVE") return this.#reject(envelope, "CMD_DOM_SUPPRESSED_BY_LIVE_HTTP");
         nextCatalog = overlayCmdDomCatalog(retained, nextCatalog);
         catalogBasis = "AUTHENTICATED_HTTP";
       }
@@ -218,26 +270,38 @@ export class ChromeCatalogDataPlane {
       const retained = this.#catalogs.get(nextCatalog.accountId);
       if (retained !== undefined) nextCatalog = overlaySabaDomCatalog(retained, nextCatalog);
     }
-    if (nextCatalog.category !== "FOOTBALL" || nextCatalog.accountId !== transportAccountId) return false;
+    if (nextCatalog.category !== "FOOTBALL" || nextCatalog.accountId !== transportAccountId) {
+      return this.#reject(envelope, `CATALOG_IDENTITY_MISMATCH:${route.adapter.id}`);
+    }
     // A provider page can briefly render the event shell before its market
     // rows. Such a snapshot is transport-valid but unusable for comparison;
     // publishing it would erase the last complete catalog on every refresh.
     if (nextCatalog.events.length > 0 &&
-      (nextCatalog.markets.length === 0 || nextCatalog.quotes.length === 0)) return false;
+      (nextCatalog.markets.length === 0 || nextCatalog.quotes.length === 0)) {
+      return this.#reject(envelope, `CATALOG_MARKETS_OR_QUOTES_EMPTY:${route.adapter.id}`);
+    }
     const mode = update.evidenceMode ?? (update.authoritativeBaseline === true ? "BASELINE" : "DELTA");
     const generation = update.generation ?? (mode === "BASELINE" && update.authoritativeBaseline === true
       ? `${sourceEpoch}:${update.sequence}` : null);
-    if (generation === null) return false;
+    if (generation === null) {
+      this.#telemetry?.recordAdapterRejected(transportAccountId, "PRE_BASELINE", update.observedAtMs);
+      return this.#reject(envelope, `PRE_BASELINE:${route.adapter.id}`);
+    }
     if (admission.disposition === "CANDIDATE" &&
-      (mode !== "BASELINE" || update.authoritativeBaseline !== true || provenance === "DOM_FALLBACK")) return false;
+      (mode !== "BASELINE" || update.authoritativeBaseline !== true ||
+        (provenance === "DOM_FALLBACK" && envelope.lobby !== "SABA"))) {
+      return this.#reject(envelope, `CANDIDATE_AUTHORITATIVE_BASELINE_REQUIRED:${route.adapter.id}`);
+    }
     const coverage = { generation, authoritativeBaseline: mode === "BASELINE",
       providerEventIds: nextCatalog.events.map((event) => event.providerEventId) };
     const explicitDomSweep = envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
       update.completeSweepEvidence === true;
-    if (!explicitDomSweep && !pipeline.coverage.allows(nextCatalog.accountId, coverage)) return false;
+    if (!explicitDomSweep && !pipeline.coverage.allows(nextCatalog.accountId, coverage)) {
+      return this.#reject(envelope, `CATALOG_COVERAGE_REJECTED:${route.adapter.id}`);
+    }
     if (admission.disposition === "CANDIDATE") {
       const proof = compatibilityCatalogProof(nextCatalog, provenance, update.sequence, generation);
-      if (proof === null) return false;
+      if (proof === null) return this.#reject(envelope, `CANDIDATE_PROOF_INVALID:${route.adapter.id}`);
       const catalogEvidence: Extract<ProviderFeedEvidence, { readonly kind: "CATALOG" }> = {
         kind: "CATALOG", accountId: nextCatalog.accountId, sourceId: update.sourceId, sourceEpoch,
         atMs: update.observedAtMs, generation, mode, provenance,
@@ -245,7 +309,10 @@ export class ChromeCatalogDataPlane {
       };
       const stagedDecision = this.#promoteCandidate(identity, admission.token, pipeline, proof,
         envelope.observedAtMs, catalogEvidence, coverage, catalogBasis);
-      if (stagedDecision === null || stagedDecision.publish === null) return false;
+      if (stagedDecision === null || stagedDecision.publish === null) {
+        return this.#reject(envelope, `CANDIDATE_PROMOTION_REJECTED:${route.adapter.id}`);
+      }
+      this.#telemetry?.recordCatalog(stagedDecision.publish.catalog);
       this.#publish?.(stagedDecision.publish.catalog, stagedDecision.publish.snapshotState);
       return true;
     }
@@ -254,7 +321,13 @@ export class ChromeCatalogDataPlane {
       providerTimestampMs: update.providerTimestampMs ?? null, catalog: nextCatalog });
     if (decision.accepted) pipeline.coverage.commit(nextCatalog.accountId, coverage);
     if (decision.accepted) this.#catalogBases.set(nextCatalog.accountId, catalogBasis);
-    return this.#applyDecision(decision);
+    const applied = this.#applyDecision(decision);
+    return applied ? true : this.#reject(envelope, `FEED_CONTROLLER_REJECTED:${route.adapter.id}`);
+  }
+
+  #reject(envelope: ChromeBridgeEnvelope, reason: string): false {
+    this.#onIngestRejected?.(envelope, reason);
+    return false;
   }
 
   async read(accountId: string): Promise<ObservedProviderCatalog> {
@@ -442,6 +515,7 @@ export class ChromeCatalogDataPlane {
   #applyDecision(decision: FeedDecision): boolean {
     if (decision.publish === null) return false;
     this.#catalogs.set(decision.publish.catalog.accountId, decision.publish.catalog);
+    this.#telemetry?.recordCatalog(decision.publish.catalog);
     this.#publish?.(decision.publish.catalog, decision.publish.snapshotState);
     return true;
   }
@@ -525,11 +599,12 @@ function identityMatchesEnvelope(identity: AuthorityIdentity, accountId: ChromeB
 
 function compatibilityCatalogProof(catalog: ObservedProviderCatalog, provenance: FeedProvenance,
   sequence: number, generation: string): CatalogCommitProof | null {
-  if (provenance !== "WS" && provenance !== "AUTHENTICATED_HTTP") return null;
+  const proofProvenance = provenance === "DOM_FALLBACK" && catalog.provider === "SABA" ? "WS" : provenance;
+  if (proofProvenance !== "WS" && proofProvenance !== "AUTHENTICATED_HTTP") return null;
   if (!Number.isSafeInteger(sequence) || sequence < 0) return null;
   return {
     authorityCursor: BigInt(sequence),
-    provenance,
+    provenance: proofProvenance,
     contentClass: "FOOTBALL",
     completeness: "COMPLETE",
     scope: "ACCOUNT",

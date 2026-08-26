@@ -37,6 +37,8 @@ import { refreshCatalogSources } from "./catalog-refresh.js";
 import { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 import { ProviderAuthorityCoordinator } from "./chrome-bridge/provider-authority-coordinator.js";
 import { chromeBridgeSourceIdentity } from "./chrome-bridge/chrome-bridge-account.js";
+import { PipelineTelemetry } from "./diagnostics/pipeline-telemetry.js";
+import { providerFeedPolicies } from "./chrome-bridge/provider-feed-policies.js";
 
 export interface ServerConfig {
   readonly host: string;
@@ -103,10 +105,16 @@ export function startProviderRecoverySweep(
 interface TargetedProviderRefreshOptions {
   readonly now?: () => number;
   readonly baselineTimeoutMs?: number;
-  readonly deliver: (provider: RefreshableProvider) => Promise<number>;
+  readonly restore?: (lobby: ChromeLobbyId) => number;
+  readonly deliver: (provider: RefreshableProvider, beforeDelivery: () => void) => Promise<number>;
   readonly waitForFreshBaseline: (accountId: string, afterMs: number,
     timeoutMs: number) => Promise<ProviderFeedSnapshot>;
 }
+
+const TARGETED_PROVIDER_LOBBIES = {
+  SABA: "SABA", IM: "IM", SBOBET: "KSPORT", APSPORT: "TSPORT", BTI: "BTI"
+} as const satisfies Record<RefreshableProvider, ChromeLobbyId>;
+const RESTORE_FIRST_PROVIDERS = new Set<RefreshableProvider>(["SABA", "APSPORT"]);
 
 export function createTargetedProviderRefresh(options: TargetedProviderRefreshOptions): {
   refresh(provider: RefreshableProvider): Promise<number>;
@@ -127,11 +135,36 @@ export function createTargetedProviderRefresh(options: TargetedProviderRefreshOp
   return {
     async refresh(provider): Promise<number> {
       const accountId = `catalog-source:${provider}:FOOTBALL`;
-      const requestedAtMs = now();
+      const deadlineAtMs = now() + baselineTimeoutMs;
+      const lobby = TARGETED_PROVIDER_LOBBIES[provider];
       acquire(accountId);
       try {
-        const delivered = await options.deliver(provider);
-        await options.waitForFreshBaseline(accountId, requestedAtMs, baselineTimeoutMs);
+        if (RESTORE_FIRST_PROVIDERS.has(provider) && options.restore !== undefined) {
+          const restoreStartedAtMs = now();
+          let restored = 0;
+          try { restored = options.restore(lobby); }
+          catch { /* installation send failure falls through to a fresh provider launch */ }
+          if (restored > 0) {
+            const remainingMs = deadlineAtMs - now();
+            const restoreDeadlineAtMs = now() + Math.max(0, remainingMs / 2);
+            try {
+              await confirmTargetedBaseline(options, accountId, lobby, restoreStartedAtMs,
+                restoreDeadlineAtMs, now);
+              return restored;
+            } catch (error) {
+              if (!isTargetedBaselineTimeout(error)) throw error;
+            }
+          }
+        }
+
+        let deliveryStartedAtMs: number | null = null;
+        const delivered = await options.deliver(provider, () => {
+          const actionAtMs = now();
+          if (actionAtMs >= deadlineAtMs) throw targetedBaselineTimeout();
+          deliveryStartedAtMs = actionAtMs;
+        });
+        if (deliveryStartedAtMs === null) throw new Error("TARGETED_PROVIDER_DELIVERY_BOUNDARY_MISSING");
+        await confirmTargetedBaseline(options, accountId, lobby, deliveryStartedAtMs, deadlineAtMs, now);
         return delivered;
       } finally {
         release(accountId);
@@ -141,6 +174,36 @@ export function createTargetedProviderRefresh(options: TargetedProviderRefreshOp
       return (owners.get(accountId) ?? 0) > 0;
     }
   };
+}
+
+async function confirmTargetedBaseline(options: TargetedProviderRefreshOptions, accountId: string,
+  lobby: ChromeLobbyId, actionStartedAtMs: number, deadlineAtMs: number, now: () => number): Promise<void> {
+  let afterMs = actionStartedAtMs;
+  while (true) {
+    const remainingMs = deadlineAtMs - now();
+    if (remainingMs <= 0) throw targetedBaselineTimeout();
+    const baseline = await options.waitForFreshBaseline(accountId, afterMs, remainingMs);
+    if (isExactTargetedBaseline(baseline, accountId, lobby, actionStartedAtMs)) return;
+    const completedAtMs = baseline.lastCompleteBaselineAtMs;
+    if (completedAtMs === null || completedAtMs <= afterMs) throw targetedBaselineTimeout();
+    afterMs = completedAtMs;
+  }
+}
+
+function isExactTargetedBaseline(snapshot: ProviderFeedSnapshot, accountId: string,
+  lobby: ChromeLobbyId, actionStartedAtMs: number): boolean {
+  const identity = snapshot.sourceId === null ? null : chromeBridgeSourceIdentity(snapshot.sourceId);
+  return snapshot.accountId === accountId && snapshot.state === "LIVE" &&
+    snapshot.lastCompleteBaselineAtMs !== null && snapshot.lastCompleteBaselineAtMs > actionStartedAtMs &&
+    identity?.accountId === accountId && identity.lobby === lobby;
+}
+
+function isTargetedBaselineTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("PROVIDER_FEED_BASELINE_TIMEOUT");
+}
+
+function targetedBaselineTimeout(): Error {
+  return new Error("PROVIDER_FEED_BASELINE_TIMEOUT");
 }
 
 const fixtureSources = [
@@ -342,14 +405,17 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const catalogStore = new DurableCatalogStore(join(localAppData, "tool-chenh", "catalog-cache"));
   const catalogPersister = new LatestCatalogPersister(catalogStore);
   const catalogRevisions = new CatalogRevisionStore();
+  const pipelineTelemetry = new PipelineTelemetry();
   const chromeBridgeKey = env.CHROME_BRIDGE_KEY?.trim();
   const providerAuthorityCoordinator = chromeBridgeKey ? new ProviderAuthorityCoordinator() : null;
   const chromeBridgeRegistry = providerAuthorityCoordinator
-    ? new ChromeBridgeRegistry({ authorityCoordinator: providerAuthorityCoordinator }) : null;
+    ? new ChromeBridgeRegistry({ authorityCoordinator: providerAuthorityCoordinator,
+      onRejected: (accountId, reason) => pipelineTelemetry.recordEnvelopeRejected(accountId, reason) }) : null;
   const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane({
     authorityCoordinator: chromeBridgeRegistry.authorityCoordinator
   }) : null;
   const providerFeeds = chromeBridgeRegistry ? new ProviderFeedRegistry() : null;
+  providerFeeds?.subscribe((snapshot) => pipelineTelemetry.recordFeed(snapshot));
   const cmdHiddenMarketProbe = chromeBridgeRegistry && chromeBridgeControlPlane
     ? new CmdHiddenMarketProbeCoordinator({ listSources: () => chromeBridgeRegistry.listActiveSources(),
       controlPlane: chromeBridgeControlPlane })
@@ -360,10 +426,11 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     : null;
   const chromeCatalogDataPlane = chromeBridgeRegistry
     ? new ChromeCatalogDataPlane({ publish: (catalog, snapshotState) => {
-      catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs: 20_000 });
+      const freshnessMs = providerFeedPolicies.get(catalog.accountId)?.catalogFreshnessMs ?? 20_000;
+      catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs });
       catalogPersister.schedule(`catalog-source|${catalog.provider}|${catalog.category}`, catalog);
     }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }),
-    authorityCoordinator: chromeBridgeRegistry.authorityCoordinator })
+    authorityCoordinator: chromeBridgeRegistry.authorityCoordinator, telemetry: pipelineTelemetry })
     : null;
   if (chromeCatalogDataPlane !== null) {
     await Promise.all(["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"].map(async (provider) => {
@@ -427,12 +494,14 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       join(localAppData, "tool-chenh", "maintenance", "events.jsonl")) });
   const targetedProviderRefresh = chromeBridgeControlPlane === null || providerFeeds === null ? null
     : createTargetedProviderRefresh({
-      deliver: async (provider) => refreshBridgeProviderSources({
+      restore: (lobby) => chromeBridgeControlPlane.restoreLobby(lobby),
+      deliver: async (provider, beforeDelivery) => refreshBridgeProviderSources({
           controlPlane: chromeBridgeControlPlane,
           withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
           minAcquiredAtMs: 0,
           providers: [provider],
-          restoreCmd: false
+          restoreCmd: false,
+          beforeDelivery
         }),
       waitForFreshBaseline: providerFeeds.waitForFreshBaseline.bind(providerFeeds)
     });
@@ -444,6 +513,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     ? new AutomaticSourceRecovery({
       controlPlane: chromeBridgeControlPlane,
       feedRegistry: providerFeeds,
+      browserRefreshEnabled: shouldRunLegacySessionMaintenance(env),
       refreshFabetLaunches: async (signal) => {
         assertRecoveryActive(signal);
         await sessionServices.refreshFabetLaunches();
@@ -457,9 +527,11 @@ export async function startServer(env: Readonly<Record<string, string | undefine
           return result;
         }, minAcquiredAtMs),
       isRecoverySuppressed,
-      onError: (accountId, error) => {
-        const reason = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`[source-recovery] ${accountId} failed: ${reason}\n`);
+      onStateChange: (status) => {
+        pipelineTelemetry.recordRecovery(status.accountId, status);
+        process.stderr.write(`[source-recovery] ${status.accountId} state=${status.state} ` +
+          `code=${status.lastFailureCode ?? "NONE"} repeatCount=${status.repeatCount} ` +
+          `consecutiveFailures=${status.consecutiveFailures} nextAttemptInMs=${status.nextAttemptInMs}\n`);
       }
     })
     : null;
@@ -480,6 +552,22 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     catalogTelemetry,
     catalogStore,
     catalogRevisions,
+    pipelineDiagnostics: {
+      list: () => pipelineTelemetry.diagnostics({
+        listSources: () => pipelineDiagnosticSources(chromeBridgeRegistry),
+        listAuthorities: () => providerAuthorityCoordinator?.snapshots() ?? [],
+        listFeeds: () => providerFeeds?.list() ?? [],
+        listCatalogStatuses: () => catalogAccess.sources.listStatuses(),
+        catalogRevision: (accountId) => catalogRevisions.get(accountId)
+      }),
+      get: (accountId) => pipelineTelemetry.diagnostic({
+        listSources: () => pipelineDiagnosticSources(chromeBridgeRegistry),
+        listAuthorities: () => providerAuthorityCoordinator?.snapshots() ?? [],
+        listFeeds: () => providerFeeds?.list() ?? [],
+        listCatalogStatuses: () => catalogAccess.sources.listStatuses(),
+        catalogRevision: (id) => catalogRevisions.get(id)
+      }, accountId)
+    },
     providerPreflight: sessionServices.providerPreflight,
     providerPreflightOptions: { journal: ticketRealtimeAudit, reportJournal: ticketReports,
       ...(selectionPriceProbe === null ? {} : { visiblePriceProbe: selectionPriceProbe }) },
@@ -511,9 +599,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     ? null
     : startProviderRecoverySweep(providerFeeds, automaticSourceRecovery, {
       isRecoverySuppressed,
-      onError: (accountId, error) => {
-        const reason = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`[source-recovery] ${accountId ?? "sweep"} failed: ${reason}\n`);
+      onError: (accountId) => {
+        process.stderr.write(`[source-recovery] ${accountId ?? "sweep"} state=SWEEP_ERROR ` +
+          "code=RECOVERY_SWEEP_FAILED repeatCount=1\n");
       }
     });
   if (providerRecovery !== null) {
@@ -543,6 +631,12 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       await sessionServices.close();
     }
   };
+}
+
+export function pipelineDiagnosticSources(
+  registry: Pick<ChromeBridgeRegistry, "listSources"> | null
+) {
+  return registry?.listSources() ?? [];
 }
 
 export function localWarpAuthEnabled(value: string | undefined): boolean {

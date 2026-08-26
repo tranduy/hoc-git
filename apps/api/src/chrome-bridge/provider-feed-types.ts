@@ -18,6 +18,7 @@ export type ProviderFeedEvidence =
 
 export interface ProviderFeedPolicy {
   readonly expectedEvidenceCadenceMs: number;
+  readonly catalogFreshnessMs: number;
   readonly maxBaselineAgeMs: number;
   readonly softRecoveryAfterMs: number;
   readonly hardRecoveryAfterMs: number;

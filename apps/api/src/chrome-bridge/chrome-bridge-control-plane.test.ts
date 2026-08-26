@@ -51,6 +51,311 @@ describe("ChromeBridgeControlPlane", () => {
     expect(activeSocket.send).not.toHaveBeenCalled();
   });
 
+  it("keeps exact routine snapshot control active-only while candidate bootstrap requires its token", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const activeSocket = { send: vi.fn(), readyState: 1 };
+    const candidateSocket = { send: vi.fn(), readyState: 1 };
+    const replacementSocket = { send: vi.fn(), readyState: 1 };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+    coordinator.promote(first.token, proof(1n));
+
+    const candidateIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:2",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const candidate = coordinator.observe(candidateIdentity, "CANDIDATE_DATA");
+    if (candidate.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(candidateIdentity, candidate, "SABA", candidateSocket);
+
+    expect(plane.requestSourceSnapshot("chrome:SABA:2")).toBe(0);
+    expect(candidateSocket.send).not.toHaveBeenCalled();
+    expect(plane.requestCandidateSnapshot(candidate.token)).toBe(1);
+    expect(candidateSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:2"
+    }));
+    expect(activeSocket.send).not.toHaveBeenCalled();
+    expect(plane.requestSourceSnapshot("chrome:SABA:1")).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:1"
+    }));
+
+    const replacementIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:3",
+      sourceEpoch: "observer-c:0", connectionGeneration: 3 };
+    const replacement = coordinator.observe(replacementIdentity, "CANDIDATE_DATA");
+    if (replacement.disposition !== "CANDIDATE") throw new Error("expected replacement candidate");
+    plane.attachAuthority(replacementIdentity, replacement, "SABA", replacementSocket);
+
+    expect(plane.requestSourceSnapshot("chrome:SABA:2")).toBe(0);
+    expect(plane.requestSourceSnapshot("chrome:SABA:999")).toBe(0);
+    expect(plane.requestSourceSnapshot("chrome:SABA:3")).toBe(0);
+    expect(plane.requestCandidateSnapshot(replacement.token)).toBe(1);
+    expect(replacementSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:3"
+    }));
+  });
+
+  it("reloads only an exact active or current candidate source", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const activeSocket = { send: vi.fn(), readyState: 1 };
+    const candidateSocket = { send: vi.fn(), readyState: 1 };
+    const replacementSocket = { send: vi.fn(), readyState: 1 };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+    coordinator.promote(first.token, proof(1n));
+
+    const candidateIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:2",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const candidate = coordinator.observe(candidateIdentity, "CANDIDATE_DATA");
+    if (candidate.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(candidateIdentity, candidate, "SABA", candidateSocket);
+
+    expect(plane.reloadSource("chrome:SABA:1")).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:1"
+    }));
+    expect(plane.reloadSource("chrome:SABA:2")).toBe(1);
+    expect(candidateSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:2"
+    }));
+
+    const replacementIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:3",
+      sourceEpoch: "observer-c:0", connectionGeneration: 3 };
+    const replacement = coordinator.observe(replacementIdentity, "CANDIDATE_DATA");
+    if (replacement.disposition !== "CANDIDATE") throw new Error("expected replacement candidate");
+    plane.attachAuthority(replacementIdentity, replacement, "SABA", replacementSocket);
+
+    expect(plane.reloadSource("chrome:SABA:2")).toBe(0);
+    expect(plane.reloadSource("chrome:SABA:999")).toBe(0);
+    expect(plane.reloadSource("chrome:SABA:3")).toBe(1);
+    expect(replacementSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:3"
+    }));
+  });
+
+  it("reloads an exact current candidate when the same-source active lane is closed", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const activeSocket = { send: vi.fn(), readyState: 3 };
+    const candidateSocket = { send: vi.fn(), readyState: 1 };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+    coordinator.promote(first.token, proof(1n));
+    const candidateIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const candidate = coordinator.observe(candidateIdentity, "CANDIDATE_DATA");
+    if (candidate.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(candidateIdentity, candidate, "SABA", candidateSocket);
+
+    expect(plane.reloadSource("chrome:SABA:1")).toBe(1);
+    expect(activeSocket.send).not.toHaveBeenCalled();
+    expect(candidateSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:1"
+    }));
+  });
+
+  it("continues same-source reload on the current candidate when the active send throws", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const activeSocket = { send: vi.fn(() => { throw new Error("SOCKET_CLOSED_DURING_SEND"); }), readyState: 1 };
+    const candidateSocket = { send: vi.fn(), readyState: 1 };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+    coordinator.promote(first.token, proof(1n));
+    const candidateIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const candidate = coordinator.observe(candidateIdentity, "CANDIDATE_DATA");
+    if (candidate.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(candidateIdentity, candidate, "SABA", candidateSocket);
+
+    expect(plane.reloadSource("chrome:SABA:1")).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledOnce();
+    expect(candidateSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:1"
+    }));
+  });
+
+  it("revalidates the exact candidate after an active send retires it and throws", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const retiredCandidateSocket = { send: vi.fn(), readyState: 1 };
+    const replacementSocket = { send: vi.fn(), readyState: 1 };
+    const replacementIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-c:0", connectionGeneration: 3 };
+    const activeSocket = { readyState: 1, send: vi.fn(() => {
+      const replacement = coordinator.observe(replacementIdentity, "CANDIDATE_DATA");
+      if (replacement.disposition !== "CANDIDATE") throw new Error("expected replacement candidate");
+      plane.attachAuthority(replacementIdentity, replacement, "SABA", replacementSocket);
+      throw new Error("ACTIVE_SEND_FAILED");
+    }) };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+    coordinator.promote(first.token, proof(1n));
+    const retiredIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const retired = coordinator.observe(retiredIdentity, "CANDIDATE_DATA");
+    if (retired.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(retiredIdentity, retired, "SABA", retiredCandidateSocket);
+
+    expect(plane.reloadSource("chrome:SABA:1")).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledOnce();
+    expect(retiredCandidateSocket.send).not.toHaveBeenCalled();
+    expect(replacementSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:1"
+    }));
+  });
+
+  it("reports reload as undelivered when every exact open lane throws", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const activeSocket = { send: vi.fn(() => { throw new Error("ACTIVE_SEND_FAILED"); }), readyState: 1 };
+    const candidateSocket = { send: vi.fn(() => { throw new Error("CANDIDATE_SEND_FAILED"); }), readyState: 1 };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+    coordinator.promote(first.token, proof(1n));
+    const candidateIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const candidate = coordinator.observe(candidateIdentity, "CANDIDATE_DATA");
+    if (candidate.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(candidateIdentity, candidate, "SABA", candidateSocket);
+
+    expect(plane.reloadSource("chrome:SABA:1")).toBe(0);
+    expect(activeSocket.send).toHaveBeenCalledOnce();
+    expect(candidateSocket.send).toHaveBeenCalledOnce();
+  });
+
+  it("reloads the internally authenticated candidate for an exact account and lobby", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const candidateSocket = { send: vi.fn(), readyState: 1 };
+    const identity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const candidate = coordinator.observe(identity, "CANDIDATE_DATA");
+    if (candidate.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(identity, candidate, "SABA", candidateSocket);
+
+    expect(plane.reloadRecoverySource(SABA_ACCOUNT, "SABA")).toBe(1);
+    expect(candidateSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:7"
+    }));
+  });
+
+  it("prefers active authority over a current recovery candidate", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const activeSocket = { send: vi.fn(), readyState: 1 };
+    const candidateSocket = { send: vi.fn(), readyState: 1 };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+    coordinator.promote(first.token, proof(1n));
+    const candidateIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:2",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const candidate = coordinator.observe(candidateIdentity, "CANDIDATE_DATA");
+    if (candidate.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(candidateIdentity, candidate, "SABA", candidateSocket);
+
+    expect(plane.reloadRecoverySource(SABA_ACCOUNT, "SABA")).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:1"
+    }));
+    expect(candidateSocket.send).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the account candidate after an active send replaces it and throws", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const retiredCandidateSocket = { send: vi.fn(), readyState: 1 };
+    const replacementSocket = { send: vi.fn(), readyState: 1 };
+    const replacementIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:3",
+      sourceEpoch: "observer-c:0", connectionGeneration: 3 };
+    const activeSocket = { readyState: 1, send: vi.fn(() => {
+      const replacement = coordinator.observe(replacementIdentity, "CANDIDATE_DATA");
+      if (replacement.disposition !== "CANDIDATE") throw new Error("expected replacement candidate");
+      plane.attachAuthority(replacementIdentity, replacement, "SABA", replacementSocket);
+      throw new Error("ACTIVE_SEND_FAILED");
+    }) };
+    const activeIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const first = coordinator.observe(activeIdentity, "CANDIDATE_DATA");
+    if (first.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(activeIdentity, first, "SABA", activeSocket);
+    coordinator.promote(first.token, proof(1n));
+    const retiredIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:2",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const retired = coordinator.observe(retiredIdentity, "CANDIDATE_DATA");
+    if (retired.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(retiredIdentity, retired, "SABA", retiredCandidateSocket);
+
+    expect(plane.reloadRecoverySource(SABA_ACCOUNT, "SABA")).toBe(1);
+    expect(activeSocket.send).toHaveBeenCalledOnce();
+    expect(retiredCandidateSocket.send).not.toHaveBeenCalled();
+    expect(replacementSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:3"
+    }));
+  });
+
+  it("fails closed for wrong account/lobby pairs and never addresses a retired candidate", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const retiredSocket = { send: vi.fn(), readyState: 1 };
+    const currentSocket = { send: vi.fn(), readyState: 1 };
+    const retiredIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const retired = coordinator.observe(retiredIdentity, "CANDIDATE_DATA");
+    if (retired.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(retiredIdentity, retired, "SABA", retiredSocket);
+    const currentIdentity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:2",
+      sourceEpoch: "observer-b:0", connectionGeneration: 2 };
+    const current = coordinator.observe(currentIdentity, "CANDIDATE_DATA");
+    if (current.disposition !== "CANDIDATE") throw new Error("expected replacement candidate");
+    plane.attachAuthority(currentIdentity, current, "SABA", currentSocket);
+
+    expect(plane.reloadRecoverySource(SABA_ACCOUNT, "TSPORT")).toBe(0);
+    expect(plane.reloadRecoverySource("catalog-source:APSPORT:FOOTBALL", "SABA")).toBe(0);
+    expect(retiredSocket.send).not.toHaveBeenCalled();
+    expect(currentSocket.send).not.toHaveBeenCalled();
+    expect(plane.reloadRecoverySource(SABA_ACCOUNT, "SABA")).toBe(1);
+    expect(retiredSocket.send).not.toHaveBeenCalled();
+    expect(currentSocket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:2"
+    }));
+  });
+
+  it("reports a current candidate reload as undelivered when its send throws", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const candidateSocket = { send: vi.fn(() => { throw new Error("SOCKET_SEND_FAILED"); }), readyState: 1 };
+    const identity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const candidate = coordinator.observe(identity, "CANDIDATE_DATA");
+    if (candidate.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(identity, candidate, "SABA", candidateSocket);
+
+    expect(plane.reloadRecoverySource(SABA_ACCOUNT, "SABA")).toBe(0);
+    expect(candidateSocket.send).toHaveBeenCalledOnce();
+  });
+
   it("requests a snapshot only from the targeted provider lobby", () => {
     const saba = { send: vi.fn(), readyState: 1 };
     const bti = { send: vi.fn(), readyState: 1 };

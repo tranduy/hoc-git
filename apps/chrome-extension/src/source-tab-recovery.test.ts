@@ -473,6 +473,32 @@ describe("SourceTabRecovery", () => {
     expect(attach).toHaveBeenCalledWith({ id: 10, url: "https://cgnew.fts368.com/live" });
   });
 
+  it("never restores a recently closed window and uses the exact remembered provider instead", async () => {
+    const restore = vi.fn(async () => ({ id: 10, url: "https://cgnew.fts368.com/live" }));
+    const create = vi.fn(async (url: string) => ({ id: 11, url }));
+    const update = vi.fn(navigate);
+    const attach = vi.fn(async () => undefined);
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [], query: async () => [], create, update, attach,
+      recentlyClosed: async () => [{
+        sessionId: "closed-window",
+        window: { tabs: [
+          { id: 9, url: "https://cgnew.fts368.com/live" },
+          { id: 12, url: "https://unrelated.example/account" }
+        ] }
+      }],
+      restore,
+      loadRemembered: async () => "https://cgnew.fts368.com/remembered"
+    });
+
+    await recovery.restore("CMD");
+
+    expect(restore).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledWith("about:blank", false);
+    expect(update).toHaveBeenCalledWith(11, "https://cgnew.fts368.com/remembered");
+    expect(attach).toHaveBeenCalledWith({ id: 11, url: "https://cgnew.fts368.com/remembered" });
+  });
+
   it("replaces an attached source during restore so CMD reset also releases its old renderer", async () => {
     const operations: string[] = [];
     const recovery = new SourceTabRecovery({

@@ -18,7 +18,9 @@ function selectionIndex(identity: SelectionFocusIdentity): number {
   throw new Error("SELECTION_IDENTITY_MISMATCH");
 }
 
-export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentity): string {
+export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentity): string;
+export function buildCmdSelectionPriceExpression(identity: SelectionPriceProbeIdentity): string;
+export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentity | SelectionPriceProbeIdentity): string {
   const input = JSON.stringify({ ...identity, selectionIndex: selectionIndex(identity) });
   return `(() => {
     const input = ${input};
@@ -65,6 +67,43 @@ export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentit
           }
           if (candidates.length === 1) target = candidates[0][input.selectionIndex] ?? null;
         }
+      }
+    }
+    if (!target && !input.providerMarketId.startsWith('legacy:') && input.line != null) {
+      const expectedBetType = { FT_AH: '1', FT_TOTAL: '3', FH_AH: '7', FH_TOTAL: '8' }[input.marketType];
+      const expectedLine = Math.abs(Number(input.line));
+      if (expectedBetType && Number.isFinite(expectedLine) &&
+        input.providerMarketId === input.providerEventId + ':' + expectedBetType) {
+        const rows = [...document.querySelectorAll('.match')];
+        const baseMatches = rows.filter((row) => row.classList.contains('default-match') &&
+          row.id === 'R_' + input.providerEventId);
+        const baseIndex = baseMatches.length === 1 ? rows.indexOf(baseMatches[0]) : -1;
+        const candidates = [];
+        for (let rowIndex = baseIndex; rowIndex >= 0 && rowIndex < rows.length; rowIndex += 1) {
+          const row = rows[rowIndex];
+          if (rowIndex > baseIndex && row.classList.contains('default-match')) break;
+          let firstHalfStarted = false;
+          for (const container of row.querySelectorAll('.Dbox_b2, .Dbox_b3, .Dbox_b5')) {
+            const odds = [...container.querySelectorAll('.odds')].slice(0, 2);
+            if (odds.length !== 2) continue;
+            let containerBetType = null;
+            if (container.classList.contains('Dbox_b5')) { firstHalfStarted = true; containerBetType = '7'; }
+            else if (container.classList.contains('Dbox_b2')) containerBetType = '1';
+            else containerBetType = firstHalfStarted ? '8' : '3';
+            const clone = container.cloneNode(true);
+            clone.querySelectorAll('.odds').forEach((price) => price.remove());
+            const evidence = String(clone.textContent ?? '').replace(/\\b(?:o|u|ou)\\b/giu, ' ');
+            const visibleLine = evidence.match(/[+-]?\\d+(?:\\.\\d+)?(?:\\s*\\/\\s*\\d+(?:\\.\\d+)?)?/u)?.[0]
+              ?.replace(/\\s+/gu, '') ?? '';
+            const parts = visibleLine.split('/').map(Number);
+            const numericLine = parts.length > 0 && parts.length <= 2 && parts.every(Number.isFinite)
+              ? Math.abs(parts.reduce((sum, value) => sum + value, 0) / parts.length) : Number.NaN;
+            if (containerBetType === expectedBetType && Math.abs(numericLine - expectedLine) < 1e-9) {
+              candidates.push(odds);
+            }
+          }
+        }
+        if (candidates.length === 1) target = candidates[0][input.selectionIndex] ?? null;
       }
     }
     if (!target || target.getClientRects().length === 0) return { ok: false, reason: 'EXACT_SELECTION_NOT_FOUND' };

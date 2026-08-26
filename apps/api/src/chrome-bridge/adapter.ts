@@ -20,7 +20,7 @@ export type DecodedCatalogUpdate = {
   readonly sequence: number;
   readonly observedAtMs: number;
   readonly invalidateAccountId: string;
-  readonly reason: "PROVIDER_STREAM_CLOSED" | "PROVIDER_STREAM_GAP";
+  readonly reason: "PROVIDER_STREAM_CLOSED" | "PROVIDER_STREAM_GAP" | "SCHEMA_CHANGED";
   readonly value?: never;
   readonly evidenceMode?: never;
   readonly generation?: never;

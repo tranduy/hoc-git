@@ -311,7 +311,7 @@ async function listWindowsInstanceProcesses(instanceId) {
   let stdout;
   try {
     ({ stdout } = await execFile(windowsPowerShellExecutable(),
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", script], {
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script], {
         encoding: "utf8",
         timeout: 10_000,
         windowsHide: true,

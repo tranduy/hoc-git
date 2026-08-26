@@ -36,6 +36,26 @@ function envelope(body: unknown, sequence: number, providerFunctionCode = 1): Ch
 }
 
 describe("CmdHttpCatalogAdapter", () => {
+  it("accepts the current decimal-string cursor and bounded alternating metadata row", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    const metadata = Array.from({ length: 64 }, (_, index) => [index + 1, `league-${index + 1}`]).flat();
+    const update = adapter.decode(envelope({ ...fullResponse, t: "8281247",
+      data: [metadata] }, 1)).at(-1);
+
+    expect(update).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE",
+      generation: "cmd:8281247" });
+  });
+
+  it("rejects noncanonical string cursors and short metadata lookalikes", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+
+    for (const t of ["08281247", "8.281247e6", "8281247.0", "9007199254740992", ""] as const) {
+      expect(adapter.decode(envelope({ ...fullResponse, t }, 1))).toEqual([]);
+    }
+    expect(adapter.decode(envelope({ ...fullResponse,
+      data: [[1, "metadata-lookalike"]] }, 2))).toEqual([]);
+  });
+
   it("commits only the observed atomic running-plus-today full response", () => {
     const adapter = new CmdHttpCatalogAdapter();
     const update = adapter.decode(envelope(fullResponse, 1)).at(-1);

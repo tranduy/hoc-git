@@ -455,6 +455,27 @@ describe("catalog comparison", () => {
     expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SBOBET"]);
   });
 
+  it("does not pair pre-match quotes with a provider-confirmed live event", () => {
+    const liveState = { period: "1H", scoreHome: 0, scoreAway: 0, clockMs: 600_000 } as const;
+    const sabaBase = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
+    const sbobetBase = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
+    const sabaEvent = sabaBase.events[0]!;
+    const sbobetEvent = sbobetBase.events[0]!;
+    if (sabaEvent.category !== "FOOTBALL" || sbobetEvent.category !== "FOOTBALL") {
+      throw new Error("handicap fixture must contain football events");
+    }
+    const saba = { ...sabaBase, events: [{ ...sabaEvent, isLive: true, liveState }],
+      quotes: sabaBase.quotes.map((quote) => ({ ...quote, isLive: false })) };
+    const sbobet = { ...sbobetBase, events: [{ ...sbobetEvent, isLive: true, liveState }],
+      quotes: sbobetBase.quotes.map((quote) => ({ ...quote, isLive: true })) };
+
+    const result = buildComparisonEvents([saba, sbobet]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.rows).toEqual([]);
+    expect(result[0]?.observedRows[0]?.cells.map((cell) => cell.provider)).toEqual(["SBOBET"]);
+  });
+
   it("does not pair same-name prematch participants across different competitions", () => {
     const saba = handicapCatalog("SABA", "saba-event", "-0.5", ["0.82", "-0.90"]);
     const sbobetBase = handicapCatalog("SBOBET", "sbo-event", "-0.5", ["0.78", "-0.86"]);
@@ -704,5 +725,61 @@ describe("catalog comparison", () => {
       .toEqual([["MAP_WINNER", "MAP_2"]]);
     expect(buildComparisonEvents([mapCatalog("SABA", "saba", "MAP_1"),
       mapCatalog("IM", "im", "MAP_2")])[0]?.rows).toEqual([]);
+  });
+});
+
+describe("competition identity learned from shared fixtures", () => {
+  const liveEvent = (provider: "SABA" | "SBOBET", id: string, competition: string,
+    participantA: string, participantB: string): ProviderEvent => ({
+    provider, category: "FOOTBALL", providerEventId: id, competition,
+    seasonStage: null, startAtUtcMs: 2_000_000, participantA, participantB,
+    eventScope: "REGULATION", bestOf: null, isLive: true, rematchCandidate: false,
+    fixtureDiscriminator: null, isVirtual: false, sportVariant: "FOOTBALL",
+    liveState: { period: null, scoreHome: null, scoreAway: null, clockMs: null }
+  });
+
+  const liveCatalog = (provider: "SABA" | "SBOBET", competition: string,
+    fixtures: readonly (readonly [string, string])[]): LiveCatalogResponse => {
+    const events = fixtures.map(([a, b], index) =>
+      liveEvent(provider, `${provider}-${index}`, competition, a, b));
+    const markets: ProviderMarket[] = events.map((entry) => ({ provider, category: "FOOTBALL",
+      providerEventId: entry.providerEventId, providerMarketId: `${entry.providerEventId}-total`,
+      marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5",
+      settlementProfile: "football-regulation-including-added-time", status: "OPEN" }));
+    const quotes: ProviderQuote[] = markets.flatMap((market) =>
+      (["OVER", "UNDER"] as const).map((selection) => ({ provider, category: "FOOTBALL" as const,
+        providerEventId: market.providerEventId, providerMarketId: market.providerMarketId,
+        providerSelectionId: `${market.providerMarketId}-${selection}`, marketType: "FT_TOTAL",
+        scope: "FULL_TIME", selection, line: "2.5", rawOdds: "1.95", rawFormat: "DECIMAL" as const,
+        status: "OPEN" as const, isLive: true, sourceTimestampMs: null, receivedMonotonicMs: 1, sequence: 1 })));
+    return { dataMode: "LIVE", accountId: `catalog-source:${provider}:FOOTBALL`, provider,
+      category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: 1,
+      rejectedMarketCount: 0, events, markets, quotes };
+  };
+
+  it("pairs live fixtures whose books name the same competition differently", () => {
+    // Books name competitions by their own convention and language, so equal
+    // text is not available as evidence. Two competitions that agree on more
+    // than one exact fixture are the same competition.
+    const left = liveCatalog("SABA", "Japan Emperor Cup",
+      [["Kashima Antlers", "Urawa Reds"], ["Gamba Osaka", "Vissel Kobe"]]);
+    const right = liveCatalog("SBOBET", "Cup Thien Hoang Nhat Ban",
+      [["Kashima Antlers", "Urawa Reds"], ["Gamba Osaka", "Vissel Kobe"]]);
+
+    const paired = buildComparisonEvents([left, right]).filter((entry) => entry.providers.length > 1);
+
+    expect(paired).toHaveLength(2);
+    expect([...paired[0]!.providers].sort()).toEqual(["SABA", "SBOBET"]);
+  });
+
+  it("refuses to link two competitions that share only one fixture", () => {
+    const left = liveCatalog("SABA", "Japan Emperor Cup",
+      [["Kashima Antlers", "Urawa Reds"], ["Gamba Osaka", "Vissel Kobe"]]);
+    const right = liveCatalog("SBOBET", "Some Other Cup",
+      [["Kashima Antlers", "Urawa Reds"], ["Sydney FC", "Perth Glory"]]);
+
+    const paired = buildComparisonEvents([left, right]).filter((entry) => entry.providers.length > 1);
+
+    expect(paired).toHaveLength(0);
   });
 });

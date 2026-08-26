@@ -52,9 +52,26 @@ interface SocketEpoch {
 
 interface HttpEpoch {
   committedPartitions: Map<CatalogPartition, PartitionSnapshot>;
-  pendingBaseline: PendingBaseline | null;
+  pendingBaseline: HttpPendingBaseline | null;
   committedOrdinal: number;
   generation: string;
+}
+
+interface HttpPendingBaseline {
+  readonly generation: string;
+  readonly ordinal: number;
+  readonly requestStartSequence: number;
+  readonly partitions: Map<CatalogPartition, PartitionSnapshot>;
+}
+
+type CatalogAuthority = "NONE" | "WS" | "HTTP";
+
+interface SourceEpochState {
+  socket: SocketEpoch | null;
+  readonly http: HttpEpoch;
+  wsSequenceHighWatermark: number;
+  authority: CatalogAuthority;
+  httpAuthorityCutoff: number | null;
 }
 
 function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
@@ -63,6 +80,11 @@ function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
 
 function sourceEpochKey(envelope: ChromeBridgeEnvelope): string {
   return `${envelope.sourceId}|${sourceEpoch(envelope)}`;
+}
+
+function isKsportSocketHost(hostname: string): boolean {
+  const canonical = hostname.toLowerCase();
+  return canonical === "sb21.net" || canonical.endsWith(".sb21.net");
 }
 
 function wsRecoveryGeneration(envelope: ChromeBridgeEnvelope): number | null {
@@ -81,17 +103,29 @@ function receiptPartition(receipt: SbobetStompProviderReceipt): CatalogPartition
 }
 
 function httpGeneration(envelope: ChromeBridgeEnvelope): {
-  readonly generation: string; readonly ordinal: number; readonly partition: CatalogPartition
+  readonly generation: string; readonly ordinal: number; readonly partition: CatalogPartition;
+  readonly requestStartSequence: number
 } | null {
-  const streamId = envelope.request.streamId ?? "";
-  const match = /^ksport-http:(0|[1-9]\d*):([1-9]\d*):(live|today)$/u.exec(streamId);
+  const request = envelope.request as ChromeBridgeEnvelope["request"] & {
+    readonly providerPartition?: unknown;
+    readonly providerContentIntent?: unknown;
+    readonly requestStartSequence?: unknown;
+  };
+  const streamId = request.streamId ?? "";
+  const match = /^ksport-http:(0|[1-9]\d*):([1-9]\d*)$/u.exec(streamId);
   const tabId = match === null ? Number.NaN : Number(match[1]);
   if (match === null || !Number.isSafeInteger(tabId) || tabId !== envelope.tabId ||
-    streamId !== `ksport-http:${match[1]}:${match[2]}:${match[3]}`) return null;
+    streamId !== `ksport-http:${match[1]}:${match[2]}` ||
+    request.providerContentIntent !== "FOOTBALL_FULL_CATALOG") return null;
   const ordinal = Number(match[2]);
-  if (!Number.isSafeInteger(ordinal)) return null;
+  const requestStartSequence = request.requestStartSequence;
+  if (!Number.isSafeInteger(ordinal) || typeof requestStartSequence !== "number" ||
+    !Number.isSafeInteger(requestStartSequence) || requestStartSequence < 0) return null;
+  const partition = request.providerPartition === "KSPORT_LIVE" ? "live" :
+    request.providerPartition === "KSPORT_TODAY" ? "today" : null;
+  if (partition === null) return null;
   return { generation: `${sourceEpoch(envelope)}:ksport-http:${match[1]}:${match[2]}`,
-    ordinal, partition: match[3] as CatalogPartition };
+    ordinal, partition, requestStartSequence };
 }
 
 function isFullPartitionSnapshot(body: unknown): boolean {
@@ -154,12 +188,27 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly id = "ksport-ws-catalog-v1";
   readonly lobby = "KSPORT" as const;
   readonly providerFamily = "SBOBET";
-  readonly #epochs = new Map<string, SocketEpoch>();
-  readonly #httpPartitions = new Map<string, HttpEpoch>();
+  readonly #states = new Map<string, SourceEpochState>();
 
   resetSource(sourceId: string): void {
-    for (const key of this.#epochs.keys()) if (key.startsWith(`${sourceId}|`)) this.#epochs.delete(key);
-    for (const key of this.#httpPartitions.keys()) if (key.startsWith(`${sourceId}|`)) this.#httpPartitions.delete(key);
+    for (const key of this.#states.keys()) if (key.startsWith(`${sourceId}|`)) this.#states.delete(key);
+  }
+
+  #stateFor(envelope: ChromeBridgeEnvelope): SourceEpochState {
+    const key = sourceEpochKey(envelope);
+    const existing = this.#states.get(key);
+    if (existing !== undefined) return existing;
+    const created: SourceEpochState = {
+      socket: null,
+      http: { committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(),
+        pendingBaseline: null, committedOrdinal: 0,
+        generation: `${sourceEpoch(envelope)}:ksport-http:${envelope.tabId}:0` },
+      wsSequenceHighWatermark: 0,
+      authority: "NONE",
+      httpAuthorityCutoff: null
+    };
+    this.#states.set(key, created);
+    return created;
   }
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
@@ -168,11 +217,12 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       return envelope.request.pathnameClass === "/api/v2/getEvent" &&
         httpGeneration(envelope) !== null;
     }
-    const providerSocket = envelope.request.pathnameClass.startsWith("/sport/");
+    const providerSocket = isKsportSocketHost(envelope.request.hostname) &&
+      envelope.request.pathnameClass.startsWith("/sport/");
     if (!providerSocket || envelope.request.streamId === undefined ||
       wsStreamOrdinal(envelope.request.streamId) === null) return false;
     if (envelope.transport === "WS_STATE") return websocketLifecycleState(envelope) !== null;
-    if (envelope.transport !== "WS_FRAME" || envelope.payload.body.includes("destination:/topic/jackpot/")) return false;
+    if (envelope.transport !== "WS_FRAME") return false;
     return envelope.payload.body.includes("destination:/topic/sports/") || !envelope.payload.body.includes("destination:");
   }
 
@@ -183,26 +233,28 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     // cursor: a fresh copy of the same provider generation must still be able
     // to establish authority after an API/bridge reconnect.
     if (envelope.request.replayed === true) return [];
-    const epochKey = sourceEpochKey(envelope);
+    const source = this.#stateFor(envelope);
     if (envelope.transport === "HTTP_RESPONSE") {
       const requestGeneration = httpGeneration(envelope);
       if (requestGeneration === null) return [];
+      if (source.wsSequenceHighWatermark > requestGeneration.requestStartSequence) return [];
       let body: unknown;
       try { body = JSON.parse(envelope.payload.body) as unknown; } catch { return []; }
       if (!isFullPartitionSnapshot(body)) return [];
       const bootstrap = bootstrapRecords(body, requestGeneration.partition === "live");
       const changed = extractSbobetDirectCatalogRecords(body, bootstrap);
       if (bootstrap.length > 0 && changed.length === 0) return [];
-      const epoch = this.#httpPartitions.get(epochKey) ?? {
-        committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(), pendingBaseline: null,
-        committedOrdinal: 0, generation: `${sourceEpoch(envelope)}:ksport-http:${envelope.tabId}:0`
-      };
+      const epoch = source.http;
       if (requestGeneration.ordinal <= epoch.committedOrdinal ||
         (epoch.pendingBaseline !== null && requestGeneration.ordinal < epoch.pendingBaseline.ordinal)) return [];
       if (epoch.pendingBaseline === null || requestGeneration.ordinal > epoch.pendingBaseline.ordinal) {
-        epoch.pendingBaseline = pendingBaseline(requestGeneration.generation, requestGeneration.ordinal);
+        epoch.pendingBaseline = { generation: requestGeneration.generation,
+          ordinal: requestGeneration.ordinal,
+          requestStartSequence: requestGeneration.requestStartSequence,
+          partitions: new Map<CatalogPartition, PartitionSnapshot>() };
       }
-      if (epoch.pendingBaseline.generation !== requestGeneration.generation) return [];
+      if (epoch.pendingBaseline.generation !== requestGeneration.generation ||
+        epoch.pendingBaseline.requestStartSequence !== requestGeneration.requestStartSequence) return [];
       const prior = epoch.pendingBaseline.partitions.get(requestGeneration.partition);
       if (prior !== undefined && envelope.sequence <= prior.receiptSequence) return [];
       const records = new Map<string, RetainedRecord>();
@@ -211,12 +263,19 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         sequence: envelope.sequence, receiptSequence: envelope.sequence });
       epoch.pendingBaseline.partitions.set(requestGeneration.partition,
         { records, receiptSequence: envelope.sequence });
-      this.#httpPartitions.set(epochKey, epoch);
       if (!epoch.pendingBaseline.partitions.has("live") || !epoch.pendingBaseline.partitions.has("today")) return [];
+      if (source.wsSequenceHighWatermark > epoch.pendingBaseline.requestStartSequence) {
+        epoch.pendingBaseline = null;
+        return [];
+      }
+      const committedCutoff = epoch.pendingBaseline.requestStartSequence;
       epoch.committedPartitions = epoch.pendingBaseline.partitions;
       epoch.committedOrdinal = epoch.pendingBaseline.ordinal;
       epoch.generation = epoch.pendingBaseline.generation;
       epoch.pendingBaseline = null;
+      source.authority = "HTTP";
+      source.httpAuthorityCutoff = committedCutoff;
+      if (source.socket !== null) source.socket.pendingBaseline = null;
       const retained = new Map<string, RetainedRecord>();
       for (const partition of ["today", "live"] as const) {
         for (const [eventId, entry] of epoch.committedPartitions.get(partition)!.records) {
@@ -239,18 +298,20 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     const streamId = envelope.request.streamId!;
     const streamOrdinal = wsStreamOrdinal(streamId)!;
     if (envelope.transport === "WS_STATE") {
-      const state = websocketLifecycleState(envelope);
-      if (state === null) return [];
-      if (state === "OPEN") {
-        const current = this.#epochs.get(epochKey);
+      const lifecycle = websocketLifecycleState(envelope);
+      if (lifecycle === null) return [];
+      if (lifecycle === "OPEN") {
+        const current = source.socket;
         if (current?.activeStreamId === streamId) return [];
-        if (current !== undefined && streamOrdinal <= current.streamHighWatermark) return [];
-        const retiresAuthority = current !== undefined && hasCommittedSocketAuthority(current);
-        this.#epochs.set(epochKey, socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal,
-          current?.receiptHighWatermarks));
+        if (current !== null && streamOrdinal <= current.streamHighWatermark) return [];
+        const retiresAuthority = source.authority === "WS" && current !== null &&
+          hasCommittedSocketAuthority(current);
+        source.socket = socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal,
+          current?.receiptHighWatermarks);
+        if (retiresAuthority) source.authority = "NONE";
         return retiresAuthority ? [streamGap(envelope)] : [];
       }
-      const current = this.#epochs.get(epochKey);
+      const current = source.socket;
       if (current?.activeStreamId !== streamId || current.activeStreamOrdinal !== streamOrdinal) return [];
       current.activeStreamId = null;
       current.activeStreamOrdinal = null;
@@ -260,23 +321,26 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       current.generation = `${sourceEpoch(envelope)}:ksport-ws:${streamId}:closed`;
       current.committedGeneration = 0;
       current.authorityLost = true;
+      if (source.authority === "HTTP") return [];
+      source.authority = "NONE";
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }
-    let epoch = this.#epochs.get(epochKey);
+    let epoch = source.socket;
     let retiresAuthority = false;
-    if (epoch === undefined || streamOrdinal > epoch.streamHighWatermark) {
-      retiresAuthority = epoch !== undefined && hasCommittedSocketAuthority(epoch);
+    if (epoch === null || streamOrdinal > epoch.streamHighWatermark) {
+      retiresAuthority = source.authority === "WS" && epoch !== null && hasCommittedSocketAuthority(epoch);
       epoch = socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal,
         epoch?.receiptHighWatermarks);
-      this.#epochs.set(epochKey, epoch);
+      source.socket = epoch;
+      if (retiresAuthority) source.authority = "NONE";
     }
     if (epoch.activeStreamId !== streamId || epoch.activeStreamOrdinal !== streamOrdinal ||
       epoch.decoder === null) return [];
     const recoveryGeneration = wsRecoveryGeneration(envelope);
     if (recoveryGeneration === null) return retiresAuthority ? [streamGap(envelope)] : [];
     if (isSportsbookHeartbeat(envelope.payload.body)) {
-      if (epoch.authorityLost || epoch.pendingBaseline !== null ||
+      if (source.authority !== "WS" || epoch.authorityLost || epoch.pendingBaseline !== null ||
         recoveryGeneration !== epoch.committedGeneration ||
         !epoch.committedPartitions.has("live") || !epoch.committedPartitions.has("today")) {
         return retiresAuthority ? [streamGap(envelope)] : [];
@@ -288,11 +352,15 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (receipts.length === 0) return retiresAuthority ? [streamGap(envelope)] : [];
     let acceptedDelta = false;
     let completedBaseline = false;
+    let acceptedCatalogEvidence = false;
+    let transportEvidence = false;
     let invalidated = false;
     for (const receipt of receipts) {
       const partition = receiptPartition(receipt);
       if (partition === null) continue;
       const fullSnapshot = isFullPartitionSnapshot(receipt.body);
+      if (source.authority === "HTTP" && (!fullSnapshot || source.httpAuthorityCutoff === null ||
+        envelope.sequence <= source.httpAuthorityCutoff)) continue;
       const order = receipt.receiptSequence;
       if (order === null || !Number.isSafeInteger(order) || order <= 0) continue;
       const bootstrap = bootstrapRecords(receipt.body, partition === "live");
@@ -300,7 +368,25 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (fullSnapshot && bootstrap.length > 0 && changed.length === 0) continue;
       if (!fullSnapshot && changed.length === 0) continue;
       if (fullSnapshot) {
-        if (recoveryGeneration <= epoch.committedGeneration) continue;
+        if (recoveryGeneration < epoch.committedGeneration) continue;
+        if (recoveryGeneration === epoch.committedGeneration) {
+          if (source.authority !== "WS" || epoch.authorityLost || epoch.pendingBaseline !== null) continue;
+          const committed = epoch.committedPartitions.get(partition);
+          if (committed === undefined || order <= committed.receiptSequence) continue;
+          const records = new Map<string, RetainedRecord>();
+          for (const incoming of changed) records.set(incoming.eventId, retainedRecord(incoming, envelope, order));
+          const unchanged = samePartitionContent(committed.records, records);
+          epoch.committedPartitions.set(partition, {
+            records: unchanged ? committed.records : records,
+            receiptSequence: order
+          });
+          epoch.receiptHighWatermarks.set(partition,
+            Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
+          acceptedCatalogEvidence = true;
+          if (unchanged) transportEvidence = true;
+          else acceptedDelta = true;
+          continue;
+        }
         if (epoch.pendingBaseline === null || recoveryGeneration > epoch.pendingBaseline.ordinal) {
           // A full replacement part must be newer than valid evidence for
           // that partition, including applied deltas retained across a socket
@@ -315,6 +401,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         const prior = epoch.pendingBaseline.partitions.get(partition);
         if (order <= (epoch.pendingBaseline.receiptFloors.get(partition) ?? 0) ||
           (prior !== undefined && order <= prior.receiptSequence)) continue;
+        acceptedCatalogEvidence = true;
         const records = new Map<string, RetainedRecord>();
         for (const incoming of changed) records.set(incoming.eventId, retainedRecord(incoming, envelope, order));
         epoch.pendingBaseline.partitions.set(partition, { records, receiptSequence: order });
@@ -328,6 +415,8 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
           epoch.committedGeneration = epoch.pendingBaseline.ordinal;
           epoch.pendingBaseline = null;
           epoch.authorityLost = false;
+          source.authority = "WS";
+          source.httpAuthorityCutoff = null;
           completedBaseline = true;
         }
         continue;
@@ -347,7 +436,9 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         if (epoch.pendingBaseline.fenced) continue;
         epoch.receiptHighWatermarks.set(partition,
           Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
-        if (bufferPendingDeltas(epoch.pendingBaseline, partition, changed, envelope, order) === "OVERFLOW") {
+        const bufferResult = bufferPendingDeltas(epoch.pendingBaseline, partition, changed, envelope, order);
+        if (bufferResult !== "NOOP") acceptedCatalogEvidence = true;
+        if (bufferResult === "OVERFLOW") {
           if (!epoch.authorityLost) invalidated = true;
           epoch.authorityLost = true;
           // Loss dominates every later receipt coalesced into this transport
@@ -360,6 +451,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (recoveryGeneration !== epoch.committedGeneration) continue;
       const committed = epoch.committedPartitions.get(partition);
       if (committed === undefined || order <= committed.receiptSequence) continue;
+      acceptedCatalogEvidence = true;
       epoch.receiptHighWatermarks.set(partition,
         Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
       const records = new Map(committed.records);
@@ -370,9 +462,26 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       epoch.committedPartitions.set(partition, { records, receiptSequence: order });
       acceptedDelta = changed.length > 0 || acceptedDelta;
     }
-    if (invalidated) return [streamGap(envelope)];
+    if (acceptedCatalogEvidence) {
+      source.wsSequenceHighWatermark = Math.max(source.wsSequenceHighWatermark, envelope.sequence);
+      if (source.http.pendingBaseline !== null &&
+        envelope.sequence > source.http.pendingBaseline.requestStartSequence) {
+        source.http.pendingBaseline = null;
+      }
+    }
+    if (invalidated) {
+      if (source.authority === "WS") source.authority = "NONE";
+      return [streamGap(envelope)];
+    }
     if ((!acceptedDelta && !completedBaseline) || !epoch.committedPartitions.has("live") ||
-      !epoch.committedPartitions.has("today")) return retiresAuthority ? [streamGap(envelope)] : [];
+      !epoch.committedPartitions.has("today")) {
+      if (transportEvidence && source.authority === "WS" && !epoch.authorityLost &&
+        epoch.committedPartitions.has("live") && epoch.committedPartitions.has("today")) {
+        return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+          observedAtMs: envelope.observedAtMs, transportAlive: true }];
+      }
+      return retiresAuthority ? [streamGap(envelope)] : [];
+    }
     const retained = new Map<string, RetainedRecord>();
     for (const partition of ["today", "live"] as const) {
       for (const [eventId, entry] of epoch.committedPartitions.get(partition)!.records) {
@@ -455,9 +564,10 @@ function mergeDeltaRecord(existing: SbobetCatalogInputRecord | undefined,
 
 function bufferPendingDeltas(pending: PendingBaseline, partition: CatalogPartition,
   changed: readonly SbobetCatalogInputRecord[], envelope: ChromeBridgeEnvelope,
-  order: number): "BUFFERED" | "OVERFLOW" {
+  order: number): "BUFFERED" | "NOOP" | "OVERFLOW" {
   const records = pending.deltas.get(partition) ?? new Map<string, Map<string, RetainedRecord>>();
   pending.deltas.set(partition, records);
+  let buffered = false;
   for (const incoming of changed) {
     const previous = records.get(incoming.eventId);
     const acceptedMarkets = incoming.markets.filter((market) => {
@@ -479,11 +589,22 @@ function bufferPendingDeltas(pending: PendingBaseline, partition: CatalogPartiti
     for (const market of acceptedMarkets) {
       markets.set(market.marketId, retainedRecord({ ...incoming, markets: [market] }, envelope, order));
     }
+    buffered = true;
     records.set(incoming.eventId, markets);
     pending.deltaRecordCount = nextRecordCount;
     pending.deltaMarketCount = nextMarketCount;
   }
-  return "BUFFERED";
+  return buffered ? "BUFFERED" : "NOOP";
+}
+
+function samePartitionContent(left: ReadonlyMap<string, RetainedRecord>,
+  right: ReadonlyMap<string, RetainedRecord>): boolean {
+  if (left.size !== right.size) return false;
+  for (const [eventId, entry] of left) {
+    const candidate = right.get(eventId);
+    if (candidate === undefined || JSON.stringify(entry.record) !== JSON.stringify(candidate.record)) return false;
+  }
+  return true;
 }
 
 function applyPendingDeltas(pending: PendingBaseline): void {

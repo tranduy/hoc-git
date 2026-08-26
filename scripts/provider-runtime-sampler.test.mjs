@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createRuntimeAccumulator, recordRecoveryConfirmation, recordRuntimeSample, resolveAcceptanceBinding,
-  runtimeVerdict } from "./provider-runtime-sampler.mjs";
+import { createRuntimeAccumulator, isNoLeaseDiagnostic, recordRecoveryConfirmation, recordRuntimeSample,
+  resolveAcceptanceBinding, resolveDiagnosticBinding, runtimeVerdict } from "./provider-runtime-sampler.mjs";
 
 const config = { provider: "SABA", lobby: "SABA", accountId: "catalog-source:SABA:FOOTBALL" };
 const binding = { token: "acceptance-token-123456", sourceId: "chrome:SABA:7", tabId: 7,
@@ -32,6 +32,7 @@ test("requires ACTIVE authority, ACTIVE catalog, nonempty data and three provide
   for (let index = 0; index < 4; index += 1) {
     recordRuntimeSample(result, sample({ nowMs: 1_000 + index, statuses: [{ id: config.accountId,
       sessionState: "ACTIVE", acquiredAtMs: 1_000 + index, reason: null }],
+      catalog: { ...catalog, quotes: [{ ...catalog.quotes[0], rawOdds: `0.9${index + 1}` }] },
       catalogRevision: `revision-${index + 1}` }));
   }
   recordRecoveryConfirmation(result, { sourceId: binding.sourceId, requested: 1, baseline: {
@@ -40,6 +41,47 @@ test("requires ACTIVE authority, ACTIVE catalog, nonempty data and three provide
   assert.deepEqual(runtimeVerdict(result), { passed: true, reasons: [] });
   assert.equal(result.providerEvidenceAdvances, 3);
   assert.equal(result.catalogRevisionChanges, 3);
+});
+
+test("fails an otherwise-green session when no semantic quote change is observed", () => {
+  const result = createRuntimeAccumulator(config, 1_000, 30_000, binding);
+  for (let index = 0; index < 4; index += 1) {
+    recordRuntimeSample(result, sample({ nowMs: 1_000 + index, statuses: [{ id: config.accountId,
+      sessionState: "ACTIVE", acquiredAtMs: 1_000 + index, reason: null }],
+      catalogRevision: `revision-${index + 1}` }));
+  }
+  recordRecoveryConfirmation(result, { sourceId: binding.sourceId, requested: 1, baseline: {
+    sourceEpoch: "observer:2", activeGeneration: "saba:stream-2", lastCompleteBaselineAtMs: 2_100
+  } }, 2_000, 2_101);
+  assert.equal(result.failedInvariantSamples, 0);
+  assert.equal(result.acceptedRealtimeSamples, result.samples);
+  assert.equal(result.providerEvidenceAdvances, 3);
+  assert.equal(result.recoverySucceeded, true);
+  assert.deepEqual(runtimeVerdict(result), { passed: false, reasons: ["SEMANTIC_CHANGE_NOT_OBSERVED"] });
+});
+
+test("fails when semantic changes are below the provider minimum", () => {
+  const result = createRuntimeAccumulator(config, 1_000, 30_000, binding);
+  for (let index = 0; index < 4; index += 1) {
+    recordRuntimeSample(result, sample({ nowMs: 1_000 + index, statuses: [{ id: config.accountId,
+      sessionState: "ACTIVE", acquiredAtMs: 1_000 + index, reason: null }],
+      catalog: { ...catalog, quotes: [{ ...catalog.quotes[0], rawOdds: index === 3 ? "0.92" : "0.91" }] },
+      catalogRevision: `revision-${index + 1}` }));
+  }
+  recordRecoveryConfirmation(result, { sourceId: binding.sourceId, requested: 1, baseline: {
+    sourceEpoch: "observer:2", activeGeneration: "saba:stream-2", lastCompleteBaselineAtMs: 2_100
+  } }, 2_000, 2_101);
+  assert.deepEqual(runtimeVerdict(result), { passed: false, reasons: ["SEMANTIC_CHANGE_TOO_SPARSE"] });
+});
+
+test("supports diagnostic --no-lease binding while official mode remains lease-bound", () => {
+  assert.equal(isNoLeaseDiagnostic({}, ["node", "verify-saba-runtime.mjs", "--no-lease"]), true);
+  assert.equal(isNoLeaseDiagnostic({}, ["node", "verify-saba-runtime.mjs"]), false);
+  const diagnostic = resolveDiagnosticBinding([{ lobby: "SABA", sourceId: binding.sourceId,
+    tabId: binding.tabId, state: "LIVE", authorityDisposition: "ACTIVE" }], config, binding.buildIdentity);
+  assert.equal(diagnostic.noLease, true);
+  assert.equal(diagnostic.token, null);
+  assert.equal(createRuntimeAccumulator(config, 1_000, 30_000, diagnostic).diagnosticNoLease, true);
 });
 
 test("fails closed when any accepted catalog sample is stale even if the final sample is fresh", () => {

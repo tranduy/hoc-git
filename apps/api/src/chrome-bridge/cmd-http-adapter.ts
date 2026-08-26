@@ -7,7 +7,8 @@ const ACCOUNT_ID = "catalog-source:CMD:FOOTBALL";
 const HOST = "cgnew.fts368.com";
 const PATH = "/Member/BetsView/BetLight/DataOdds.ashx";
 const FULL_ROW_LENGTH = 91;
-const KNOWN_METADATA_ROW_LENGTH = 3_046;
+const MIN_METADATA_ROW_LENGTH = 128;
+const MAX_METADATA_ROW_LENGTH = 4_096;
 const MAX_PRE_BASELINE_RESPONSES = 32;
 const MAX_PRE_BASELINE_OPERATIONS = 256;
 
@@ -253,7 +254,9 @@ function boundBaselineObservation(envelope: ChromeBridgeEnvelope): {
 function parseRoot(body: string): CmdRoot | null {
   try {
     const value: unknown = JSON.parse(body);
-    if (!isRecord(value) || typeof value.t !== "number" || !Number.isSafeInteger(value.t) || value.t < 0 ||
+    if (!isRecord(value)) return null;
+    const cursor = providerCursor(value.t);
+    if (cursor === null ||
       typeof value.a !== "boolean" ||
       !Array.isArray(value.data) || !value.data.every(Array.isArray)) return null;
     const keys = Object.keys(value);
@@ -261,8 +264,16 @@ function parseRoot(body: string): CmdRoot | null {
     if (keys.some((key) => !allowed.has(key)) ||
       ((value.today === undefined) !== (value.f === undefined))) return null;
     if (value.today !== undefined && (!Array.isArray(value.today) || !value.today.every(Array.isArray))) return null;
-    return value as unknown as CmdRoot;
+    return { t: cursor, a: value.a, data: value.data as unknown[][],
+      ...(value.today === undefined ? {} : { today: value.today as unknown[][], f: value.f }) };
   } catch { return null; }
+}
+
+function providerCursor(value: unknown): number | null {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/u.test(value)) return null;
+  const cursor = Number(value);
+  return Number.isSafeInteger(cursor) && cursor >= 0 && String(cursor) === value ? cursor : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -272,7 +283,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isFullRow(value: readonly unknown[]): value is unknown[] { return value.length === FULL_ROW_LENGTH; }
 
 function isKnownMetadataRow(value: readonly unknown[]): boolean {
-  return value.length === KNOWN_METADATA_ROW_LENGTH;
+  if (value.length < MIN_METADATA_ROW_LENGTH || value.length > MAX_METADATA_ROW_LENGTH ||
+    value.length % 2 !== 0) return false;
+  for (let index = 0; index < value.length; index += 2) {
+    if (typeof value[index] !== "number" || !Number.isSafeInteger(value[index]) ||
+      (value[index] as number) <= 0 || publicText(value[index + 1], 256) === null) return false;
+  }
+  return true;
 }
 
 function retainPendingDeltaData(data: readonly unknown[][]): readonly unknown[][] | null {
@@ -390,5 +407,6 @@ function materialize(rows: Map<string, RetainedRow>, observedAtMs: number) {
       timezoneOffsetMinutes: 480, sequence: retained.sequence
     }));
   }
-  return mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "CMD", observedAtMs, parts });
+  return mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "CMD", observedAtMs, parts,
+    collapseDuplicateEvents: true });
 }

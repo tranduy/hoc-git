@@ -147,6 +147,7 @@ $marker = "TOOL_CHENH_STACK_INSTANCE_ID=$query"
 $matches = [System.Collections.Generic.List[object]]::new()
 
 foreach ($candidate in @(Get-CimInstance Win32_Process)) {
+  if ([int]$candidate.ProcessId -in @(0, 4)) { continue }
   try {
     $candidateBirth = $candidate.CreationDate.ToUniversalTime().ToString('o')
   } catch {

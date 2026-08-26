@@ -13,13 +13,37 @@ function envelope(sequence: number, body = "{}", sourceId = "chrome:SABA:7",
   };
 }
 
+function ksportCatalogChunk(sequence: number, partition: "KSPORT_LIVE" | "KSPORT_TODAY",
+  chunkIndex: number, chunkCount: number): ChromeBridgeEnvelope {
+  const partitionName = partition === "KSPORT_LIVE" ? "live" : "today";
+  return {
+    version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId: "chrome:KSPORT:14", tabId: 14,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000, receivedMonotonicMs: 50,
+    transport: "HTTP_RESPONSE",
+    request: {
+      hostname: "sb21.net", pathnameClass: "/api/v2/getEvent", resourceType: "Fetch", method: "GET",
+      observerRequestId: `worker-a:request:${sequence}`, requestFrameKey: "worker-a:frame:14",
+      requestDocumentKey: "worker-a:document:14", streamId: "ksport-http:14:1", providerPartition: partition,
+      providerContentIntent: "FOOTBALL_FULL_CATALOG", requestStartSequence: 0
+    },
+    payload: { encoding: "UTF8", body: JSON.stringify({
+      schemaVersion: 1, snapshotId: `ksport-http:14:1:${partitionName}`, chunkIndex, chunkCount,
+      bodyEncoding: "UTF8", bodyFragment: "x".repeat(110_000)
+    }) }
+  };
+}
+
 class FakeSocket implements BridgeSocket {
   readonly sent: string[] = [];
+  readonly sentSourceIds: string[] = [];
   readyState = 0;
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
-  send(data: string): void { this.sent.push(data); }
+  send(data: string): void {
+    this.sent.push(data);
+    this.sentSourceIds.push((JSON.parse(data) as ChromeBridgeEnvelope).sourceId);
+  }
   close(): void { this.readyState = 3; this.onclose?.(); }
   open(): void { this.readyState = 1; this.onopen?.(); }
 }
@@ -448,6 +472,67 @@ describe("LocalBridge", () => {
     }).not.toThrow();
     expect(bridge.queueBytes).toBeGreaterThan(5 * 1024 * 1024);
     expect(bridge.queueBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+  });
+
+  it("backpressures a paired KSPORT catalog larger than 16 MiB without resyncing or dropping another provider",
+    async () => {
+      const socket = new FakeSocket();
+      const onSourceResync = vi.fn();
+      const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceResync });
+      bridge.connect();
+      socket.open();
+      const chunks = (["KSPORT_LIVE", "KSPORT_TODAY"] as const).flatMap((partition, partitionIndex) =>
+        Array.from({ length: 77 }, (_, chunkIndex) =>
+          ksportCatalogChunk(partitionIndex * 77 + chunkIndex, partition, chunkIndex, 77)));
+      expect(chunks.length * 110_000).toBeGreaterThan(16 * 1024 * 1024);
+
+      const publish = (async () => {
+        for (const chunk of chunks) await bridge.enqueue(chunk);
+      })();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      const sentKsportCount = () => socket.sentSourceIds
+        .filter((sourceId) => sourceId === "chrome:KSPORT:14").length;
+      expect(sentKsportCount()).toBe(1);
+      expect(onSourceResync).not.toHaveBeenCalled();
+      await bridge.enqueue(envelope(7, "healthy", "chrome:IM:8"));
+      expect(socket.sentSourceIds).toContain("chrome:IM:8");
+
+      let maximumQueueBytes = bridge.queueBytes;
+      for (let index = 0; index < chunks.length; index += 1) {
+        socket.onmessage?.({ data: JSON.stringify({
+          version: 1, kind: "ACK", sourceId: "chrome:KSPORT:14", sequence: index
+        }) });
+        if (index + 1 < chunks.length) {
+          for (let turn = 0; turn < 4 && sentKsportCount() < index + 2; turn += 1) {
+            await Promise.resolve();
+          }
+          expect(sentKsportCount()).toBe(index + 2);
+        }
+        maximumQueueBytes = Math.max(maximumQueueBytes, bridge.queueBytes);
+      }
+      await publish;
+
+      expect(maximumQueueBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+      expect(bridge.pendingSequences()).toEqual([7]);
+      expect(onSourceResync).not.toHaveBeenCalled();
+      expect(socket.readyState).toBe(1);
+    });
+
+  it("releases an acknowledged KSPORT producer when the bridge is closed", async () => {
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key" });
+    bridge.connect();
+    socket.open();
+    let settled = false;
+    const pending = bridge.enqueue(ksportCatalogChunk(0, "KSPORT_LIVE", 0, 2))
+      .then(() => { settled = true; });
+
+    bridge.close();
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+
+    expect(settled).toBe(true);
+    await pending;
   });
 
   it("retires an overflowing quote generation without blocking producers", async () => {

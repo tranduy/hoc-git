@@ -1,5 +1,5 @@
 import type { ChromeBridgeControlMessage, ChromeLobbyId } from "@tool-chenh/contracts";
-import { chromeBridgeSourceIdentity, type ChromeBridgeAccountKey,
+import { chromeBridgeProviderAccountIdForLobby, chromeBridgeSourceIdentity, type ChromeBridgeAccountKey,
   type ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
 import type { ProviderAuthorityCoordinator } from "./provider-authority-coordinator.js";
 import type { AuthorityCandidateToken, AuthorityIdentity,
@@ -139,6 +139,69 @@ export class ChromeBridgeControlPlane {
     const control: ChromeBridgeControlMessage = { version: 1, kind: "REQUEST_SNAPSHOT", sourceId };
     socket.send(JSON.stringify(control));
     return 1;
+  }
+
+  reloadSource(sourceId: string): number {
+    if (this.#sendReload(sourceId, this.#exactSocket(sourceId)) === 1) return 1;
+    // Re-resolve only after the active attempt. Its synchronous send can close
+    // or replace the candidate as a side effect.
+    if (this.#sendReload(sourceId, this.#exactCandidateSocket(sourceId)) === 1) return 1;
+    return 0;
+  }
+
+  reloadRecoverySource(accountId: string, lobby: ChromeLobbyId): number {
+    if (this.#authorityCoordinator === null) return 0;
+    const expectedAccountId = chromeBridgeProviderAccountIdForLobby(lobby);
+    if (accountId !== expectedAccountId) return 0;
+    const active = this.#recoveryAuthoritySource(expectedAccountId, lobby, "ACTIVE");
+    if (active !== null && this.#sendReload(active.sourceId, active.socket) === 1) return 1;
+    // The active send can synchronously retire or replace the candidate. Read
+    // coordinator token+identity again before addressing any candidate lane.
+    const candidate = this.#recoveryAuthoritySource(expectedAccountId, lobby, "CANDIDATE");
+    if (candidate !== null && this.#sendReload(candidate.sourceId, candidate.socket) === 1) return 1;
+    return 0;
+  }
+
+  #recoveryAuthoritySource(accountId: ChromeBridgeProviderAccountId, lobby: ChromeLobbyId,
+    disposition: "ACTIVE" | "CANDIDATE"): AttachedAuthoritySource | null {
+    if (this.#authorityCoordinator === null) return null;
+    this.#reconcileAuthoritySlot(accountId);
+    const authority = this.#authorityCoordinator.snapshot(accountId);
+    const attached = this.#authoritySourcesByAccount.get(accountId)?.[
+      disposition === "ACTIVE" ? "active" : "candidate"
+    ] ?? null;
+    if (attached === null || attached.lobby !== lobby) return null;
+    if (disposition === "ACTIVE") {
+      return authority.active !== null && sameAuthorityIdentity(attached.identity, authority.active)
+        ? attached : null;
+    }
+    return authority.candidate !== null && authority.candidateToken !== null &&
+      attached.candidateToken === authority.candidateToken &&
+      sameAuthorityIdentity(attached.identity, authority.candidate) ? attached : null;
+  }
+
+  #sendReload(sourceId: string, socket: BridgeControlSocket | undefined): number {
+    if (socket === undefined || socket.readyState !== 1) return 0;
+    const control: ChromeBridgeControlMessage = { version: 1, kind: "RELOAD_SOURCE", sourceId };
+    try {
+      socket.send(JSON.stringify(control));
+      return 1;
+    } catch {
+      return 0;
+    }
+  }
+
+  #exactCandidateSocket(sourceId: string): BridgeControlSocket | undefined {
+    if (this.#authorityCoordinator === null) return undefined;
+    const identity = chromeBridgeSourceIdentity(sourceId);
+    if (identity === null) return undefined;
+    this.#reconcileAuthoritySlot(identity.accountId);
+    const authority = this.#authorityCoordinator.snapshot(identity.accountId);
+    const candidate = this.#authoritySourcesByAccount.get(identity.accountId)?.candidate;
+    if (authority.candidate === null || authority.candidateToken === null || candidate?.sourceId !== sourceId ||
+      candidate.candidateToken !== authority.candidateToken ||
+      !sameAuthorityIdentity(candidate.identity, authority.candidate)) return undefined;
+    return candidate.socket;
   }
 
   reloadAllSources(): number {

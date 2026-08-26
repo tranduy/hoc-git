@@ -10,6 +10,7 @@ export interface CatalogReaderLike {
   readonly requestTimeoutMs?: number;
   readonly responseCacheMaxAgeMs?: number;
   readonly snapshotFreshnessMaxAgeMs?: number;
+  readonly snapshotFreshnessMaxAgeMsFor?: (accountId: string) => number;
   readonly failureRetryBaseMs?: number;
   readonly failureRetryMaxMs?: number;
   readonly collectionTimeoutMs?: number;
@@ -208,6 +209,12 @@ export function registerCatalogRoutes(
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_REQUEST" });
     try {
       const accountId = parsed.data.accountId;
+      const accountSnapshotFreshnessMaxAgeMs = reader.snapshotFreshnessMaxAgeMsFor?.(accountId) ??
+        snapshotFreshnessMaxAgeMs;
+      if (!Number.isFinite(accountSnapshotFreshnessMaxAgeMs) ||
+        accountSnapshotFreshnessMaxAgeMs < responseCacheMaxAgeMs) {
+        throw new Error("CATALOG_SNAPSHOT_FRESHNESS_INVALID");
+      }
       const sendRevision = (entry: StoredCatalogRevision) => {
         const etag = `"${entry.revision}"`;
         reply.header("etag", etag).header("x-catalog-revision", entry.revision);
@@ -216,7 +223,7 @@ export function registerCatalogRoutes(
       };
       const sendCatalog = (catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => {
         if (revisions !== undefined) return sendRevision(revisions.publish(accountId, catalog, {
-          snapshotState, freshnessMs: snapshotFreshnessMaxAgeMs
+          snapshotState, freshnessMs: accountSnapshotFreshnessMaxAgeMs
         }));
         const etag = `"${catalog.provider}-${catalog.category}-${catalog.observedAtMs}-${snapshotState}"`;
         reply.header("etag", etag);
@@ -249,7 +256,7 @@ export function registerCatalogRoutes(
       const failure = sourceFailures.get(sourceKey);
       if (failure !== undefined && failure.retryAtMs > performance.now()) {
         if (recent !== undefined) return sendCatalog(recent.catalog,
-          !recent.restored && recentAgeMs < snapshotFreshnessMaxAgeMs ? "FRESH" : "STALE");
+          !recent.restored && recentAgeMs < accountSnapshotFreshnessMaxAgeMs ? "FRESH" : "STALE");
         throw new Error("CATALOG_RETRY_BACKOFF");
       }
       const operation = startRead(sourceKey, accountId);
@@ -257,7 +264,7 @@ export function registerCatalogRoutes(
       // UI response path once this source has produced verified data. The
       // observedAt timestamp lets the client keep it display-only when old.
       if (recent !== undefined) return sendCatalog(recent.catalog,
-        recentAgeMs < snapshotFreshnessMaxAgeMs ? "FRESH" : "STALE");
+        recentAgeMs < accountSnapshotFreshnessMaxAgeMs ? "FRESH" : "STALE");
       const catalog = await within(operation, deadlineMs - performance.now());
       return sendCatalog(catalog, "FRESH");
     } catch (error) {

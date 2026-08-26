@@ -36,6 +36,24 @@ describe("SabaWsCatalogAdapter", () => {
     expect((update.value as { quotes: unknown[] }).quotes).toHaveLength(2);
   });
 
+  it("authorizes a complete late-attached baseline without a preceding OPEN", () => {
+    const rows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 })];
+    const adapter = new SabaWsCatalogAdapter();
+    const start = envelope(`42${JSON.stringify(["m", "b1", rows, "r1"])}`);
+    const done = { ...envelope(`42${JSON.stringify(["m", "b1", [[0, "done"]], "r1"])}`),
+      sequence: 5 };
+
+    expect(adapter.decode(start)).toEqual([]);
+    expect(adapter.decode(done)).toEqual([expect.objectContaining({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+    })]);
+  });
+
   it("preserves Today lifecycle in a mixed socket baseline instead of marking future events live", () => {
     const rows = [["f", 0, fields], [0, "reset"],
       encoded({ type: "l", leagueid: 1, leaguenameen: "Japan J-League Division 1", sporttype: 1 }),
@@ -60,6 +78,107 @@ describe("SabaWsCatalogAdapter", () => {
     const adapter = new SabaWsCatalogAdapter();
     expect(adapter.fingerprint(envelope('42["notice",{}]'))).toBe(false);
     expect(adapter.decode(envelope("2"))).toEqual([]);
+  });
+
+  it("emits liveness only for an exact heartbeat on the current completed SABA stream", () => {
+    const rows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const adapter = new SabaWsCatalogAdapter();
+    const opened = (streamId: string, sequence: number): ChromeBridgeEnvelope => ({
+      ...envelope(""), sequence, transport: "WS_STATE",
+      request: { ...envelope("").request, streamId },
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' }
+    });
+    const heartbeat = (streamId: string, sequence: number, body = "2",
+      observedAtMs = 1_786_449_540_000 + sequence): ChromeBridgeEnvelope => ({
+      ...envelope(body), sequence, observedAtMs,
+      request: { ...envelope(body).request, streamId }
+    });
+
+    expect(adapter.decode(heartbeat("1", 1))).toEqual([]);
+    expect(adapter.decode(opened("1", 2))).toEqual([]);
+    expect(adapter.decode({ ...envelope(`42${JSON.stringify(["m", "b1", rows, "r1"])}`),
+      sequence: 3, request: { ...envelope("").request, streamId: "1" } }))
+      .toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
+    expect(adapter.decode(heartbeat("1", 4))).toEqual([expect.objectContaining({
+      sourceId: "chrome:SABA:7", sequence: 4, transportAlive: true
+    })]);
+    expect(adapter.decode(heartbeat("1", 5, "2", 1_786_453_140_004))).toEqual([]);
+
+    expect(adapter.decode({ ...heartbeat("1", 6),
+      request: { ...heartbeat("1", 6).request, replayed: true } })).toEqual([]);
+    expect(adapter.decode(opened("2", 7))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
+    expect(adapter.decode(heartbeat("1", 8))).toEqual([]);
+    expect(adapter.decode(heartbeat("2", 9))).toEqual([]);
+  });
+
+  it("rejects malformed and post-baseline-age SABA heartbeat lookalikes", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    for (const body of ["", "20", "3x", " 2 ", '42["ping"]']) {
+      expect(adapter.fingerprint(envelope(body))).toBe(false);
+      expect(adapter.decode(envelope(body))).toEqual([]);
+    }
+  });
+
+  it("recovers a malformed current stream from a complete baseline without another OPEN", () => {
+    const fullRows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const adapter = new SabaWsCatalogAdapter();
+    const onStream = (input: ChromeBridgeEnvelope, streamId: string, sequence: number): ChromeBridgeEnvelope => ({
+      ...input, sequence, observedAtMs: 1_786_449_540_000 + sequence,
+      request: { ...input.request, streamId }
+    });
+    const open = (streamId: string, sequence: number): ChromeBridgeEnvelope => onStream({
+      ...envelope(""), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' }
+    }, streamId, sequence);
+    const snapshot = (streamId: string, sequence: number): ChromeBridgeEnvelope =>
+      onStream(envelope(`42${JSON.stringify(["m", "b1", fullRows, `r${sequence}`])}`), streamId, sequence);
+
+    expect(adapter.decode(open("1", 1))).toEqual([]);
+    expect(adapter.decode(snapshot("1", 2))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true
+    })]);
+    const malformed = onStream(envelope(`42${JSON.stringify(["m", "b1", [[999, "o"]], "r3"])}`), "1", 3);
+    expect(adapter.decode(malformed)).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "SCHEMA_CHANGED"
+    })]);
+    expect(adapter.decode(onStream(envelope("2"), "1", 4))).toEqual([]);
+    expect(adapter.decode(snapshot("1", 5))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true
+    })]);
+
+    expect(adapter.decode(open("2", 6))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
+    expect(adapter.decode(snapshot("2", 7))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true
+    })]);
+  });
+
+  it("latches an invalid current Socket.IO frame as a schema fault", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    const open: ChromeBridgeEnvelope = { ...envelope(""), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' } };
+    expect(adapter.decode(open)).toEqual([]);
+
+    const invalid = envelope('42["m","b1",[],1,"extra"]');
+    expect(adapter.decode(invalid)).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "SCHEMA_CHANGED"
+    })]);
+    expect(adapter.decode({ ...envelope("2"), sequence: 4 })).toEqual([]);
   });
 
   it("retains complete events from parallel SABA catalog channels instead of replacing them", () => {
@@ -145,9 +264,9 @@ describe("SabaWsCatalogAdapter", () => {
     expect(adapter.decode(dom)).toEqual([]);
   });
 
-  it("promotes two stable full-page DOM generations when the SABA socket is absent and rejects a later partial view", () => {
+  it("promotes one atomic full-page DOM generation on late attach and rejects a later partial view", () => {
     const adapter = new SabaWsCatalogAdapter();
-    const records = (priceText: string, count = 24) => Array.from({ length: count }, (_, index) => ({
+    const records = (priceText: string, count = 50) => Array.from({ length: count }, (_, index) => ({
       sportId: "1", leagueId: String(10_000 + index), leagueName: `League ${index}`,
       matchId: String(20_000 + index), timeText: "1H0'", teamNames: [`Home ${index}`, `Away ${index}`],
       groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
@@ -163,18 +282,31 @@ describe("SabaWsCatalogAdapter", () => {
         chunkIndex: 0, chunkCount: 1, records: values }) }
     });
 
-    expect(adapter.decode(dom("saba-full-generation-0001", 10, records("0.92")))).toEqual([]);
-    const baseline = adapter.decode(dom("saba-full-generation-0002", 11, records("0.92")));
+    const baseline = adapter.decode(dom("saba-full-generation-0001", 10, records("0.92")));
     expect(baseline).toHaveLength(1);
-    expect((baseline[0]!.value as { events: unknown[] }).events).toHaveLength(24);
-    expect(baseline[0]).toMatchObject({ provenance: "DOM_FALLBACK", evidenceMode: "DELTA" });
-    expect(baseline[0]).not.toHaveProperty("authoritativeBaseline");
+    expect((baseline[0]!.value as { events: unknown[] }).events).toHaveLength(50);
+    expect(baseline[0]).toMatchObject({ provenance: "DOM_FALLBACK", evidenceMode: "BASELINE",
+      authoritativeBaseline: true });
+
+    const unchanged = adapter.decode(dom("saba-full-generation-0002", 11, records("0.92")));
+    expect(unchanged).toHaveLength(1);
+    expect(unchanged[0]).toMatchObject({ provenance: "DOM_FALLBACK", evidenceMode: "BASELINE",
+      authoritativeBaseline: true });
 
     expect(adapter.decode(dom("saba-partial-generation-0003", 12, records("0.10", 6)))).toEqual([]);
     const changed = adapter.decode(dom("saba-full-generation-0004", 13, records("0.81")));
     expect(changed).toHaveLength(1);
     expect((changed[0]!.value as { quotes: Array<{ rawOdds: string }> }).quotes)
       .toContainEqual(expect.objectContaining({ rawOdds: "0.81" }));
+
+    const open: ChromeBridgeEnvelope = { ...envelope(""), sequence: 14,
+      observedAtMs: 1_786_449_554_000, transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' } };
+    expect(adapter.decode(open)).toEqual([]);
+    expect(adapter.decode({ ...envelope("2"), sequence: 15,
+      observedAtMs: 1_786_449_555_000 })).toEqual([expect.objectContaining({
+      transportAlive: true
+    })]);
   });
 
   it("publishes current SABA DOM only as fallback evidence after the socket bootstrap", () => {
@@ -222,7 +354,7 @@ describe("SabaWsCatalogAdapter", () => {
     const adapter = new SabaWsCatalogAdapter();
     adapter.decode(snapshot("b1", 101, 1_000));
 
-    const current = adapter.decode(snapshot("b2", 202, 61_001))[0]!.value as {
+    const current = adapter.decode(snapshot("b2", 202, 3_601_001))[0]!.value as {
       events: Array<{ providerEventId: string }> };
 
     expect(current.events.map((event) => event.providerEventId)).toEqual(["202"]);

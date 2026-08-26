@@ -10,7 +10,13 @@ import { decodePublicDomRecords } from "./cmd-dom-adapter.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:SABA:FOOTBALL";
-const MAX_RETAINED_PART_AGE_MS = 60_000;
+const MAX_RETAINED_PART_AGE_MS = 3_600_000;
+const MIN_STABLE_DOM_EVENTS = 20;
+const SINGLE_GENERATION_DOM_EVENTS = 50;
+
+function isSabaEngineIoHeartbeat(body: string): boolean {
+  return body === "2" || body === "3";
+}
 
 function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
   return envelope.sourceEpoch ?? "legacy";
@@ -97,7 +103,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     // Parsing large Socket.IO frames here and again in decode doubled the hot
     // path cost. The route and lobby already identify SABA; decode performs
     // the strict provider-frame validation once.
-    return /^42\["m",/u.test(envelope.payload.body);
+    return isSabaEngineIoHeartbeat(envelope.payload.body) || /^42\["m",/u.test(envelope.payload.body);
   }
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
@@ -122,16 +128,17 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       if (!socketReady) {
         // Some SABA deployments expose the complete current event table in the
         // page but do not recreate their Socket.IO transport after a service
-        // worker restart. Promote that table only after two atomic generations
-        // have nearly identical event coverage. A scrolling viewport or a
-        // half-rendered generation cannot satisfy this quorum and cannot erase
-        // the last good catalog.
-        if (usable.length < 20) return [];
+        // worker restart. One large atomic generation can establish fallback
+        // authority; a smaller complete-looking table still needs a second
+        // stable generation. Later generations must retain nearly identical
+        // coverage, so a scrolling viewport cannot erase the last good catalog.
+        if (usable.length < MIN_STABLE_DOM_EVENTS) return [];
         const identities = new Set(usable.map((record) => record.matchId));
         const previous = this.#domCandidates.get(envelope.sourceId);
         if (!this.#domReadySources.has(envelope.sourceId)) {
           this.#domCandidates.set(envelope.sourceId, identities);
-          if (previous === undefined || !stableDomCoverage(previous, identities)) return [];
+          if (previous === undefined && usable.length < SINGLE_GENERATION_DOM_EVENTS) return [];
+          if (previous !== undefined && !stableDomCoverage(previous, identities)) return [];
           this.#domReadySources.add(envelope.sourceId);
         } else if (previous !== undefined && !stableDomCoverage(previous, identities)) {
           return [];
@@ -142,15 +149,33 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
         timezoneOffsetMinutes: 480, sequence: envelope.sequence
       });
-      return this.#update(envelope, "DOM", normalized, {
-        evidenceMode: "DELTA", generation: `${sourceEpoch(envelope)}:dom:${envelope.sequence}`,
-        provenance: "DOM_FALLBACK"
-      });
+      const establishesDomAuthority = !socketReady && this.#domReadySources.has(envelope.sourceId);
+      return this.#update(envelope, "DOM", normalized, establishesDomAuthority
+        ? { authoritativeBaseline: true, evidenceMode: "BASELINE",
+            generation: `${sourceEpoch(envelope)}:dom:${envelope.sequence}`, provenance: "DOM_FALLBACK" }
+        : { evidenceMode: "DELTA", generation: `${sourceEpoch(envelope)}:dom:${envelope.sequence}`,
+            provenance: "DOM_FALLBACK" });
     }
     const streamId = envelope.request.streamId!;
     const streamOrdinal = sabaStreamOrdinal(streamId)!;
     const epochKey = sourceEpochKey(envelope);
     const decoderKey = `${epochKey}|${streamId}`;
+    if (envelope.transport === "WS_FRAME" && isSabaEngineIoHeartbeat(envelope.payload.body)) {
+      const current = this.#streamStates.get(epochKey);
+      const wsBaselineAtMs = this.#authoritativeBaselineAtMs.get(epochKey);
+      const domBaselineAtMs = this.#domReadySources.has(envelope.sourceId)
+        ? this.#partObservedAtMs.get(`${epochKey}|DOM`) : undefined;
+      const baselineAtMs = wsBaselineAtMs === undefined ? domBaselineAtMs : domBaselineAtMs === undefined
+        ? wsBaselineAtMs : Math.max(wsBaselineAtMs, domBaselineAtMs);
+      const baselineAgeMs = baselineAtMs === undefined ? Number.POSITIVE_INFINITY
+        : envelope.observedAtMs - baselineAtMs;
+      if (current?.activeStreamId !== streamId || current.activeStreamOrdinal !== streamOrdinal ||
+        current.authorizing !== true ||
+        (!this.#authoritativeGenerations.has(epochKey) && domBaselineAtMs === undefined) ||
+        baselineAgeMs < 0 || baselineAgeMs > MAX_RETAINED_PART_AGE_MS) return [];
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+        observedAtMs: envelope.observedAtMs, transportAlive: true }];
+    }
     if (envelope.transport === "WS_STATE") {
       const state = websocketLifecycleState(envelope);
       if (state === null) return [];
@@ -200,12 +225,30 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       stream = { activeStreamId: streamId, activeStreamOrdinal: streamOrdinal,
         highWatermark: streamOrdinal, authorizing: false };
       this.#streamStates.set(epochKey, stream);
+    } else if (stream.activeStreamId === null && stream.activeStreamOrdinal === null &&
+      streamOrdinal >= stream.highWatermark) {
+      let recoveryFrame: ReturnType<typeof parseSabaSocketFrame>;
+      try {
+        recoveryFrame = parseSabaSocketFrame(envelope.payload.body);
+      } catch {
+        return [];
+      }
+      const recoveryStartsBaseline = recoveryFrame !== null &&
+        (recoveryFrame.rows as readonly unknown[]).some((row) => Array.isArray(row) &&
+          (row[1] === "reset" || row[1] === "empty"));
+      if (!recoveryStartsBaseline) return [];
+      stream.activeStreamId = streamId;
+      stream.activeStreamOrdinal = streamOrdinal;
+      stream.highWatermark = streamOrdinal;
+      stream.authorizing = false;
     }
     if (stream.activeStreamId !== streamId || stream.activeStreamOrdinal !== streamOrdinal) return [];
     let startsBaseline = false;
+    let faultingReadyKey: string | null = null;
     try {
       const frame = parseSabaSocketFrame(envelope.payload.body);
       if (frame === null) return [];
+      faultingReadyKey = `${decoderKey}|${frame.bridgeId}`;
       if (JSON.stringify(frame.rows).includes('"A003"')) {
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
         stream.activeStreamId = null;
@@ -277,8 +320,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         change.record?.type === "do" || change.record?.type === "-o");
       if (!applied.fullSnapshot && !changesPrice && envelope.observedAtMs - lastPublishedAtMs < 500) return [];
       this.#lastWsPublishAtMs.set(publishKey, envelope.observedAtMs);
-      if (applied.fullSnapshot && this.#streamStates.get(epochKey)?.activeStreamId === streamId &&
-        this.#streamStates.get(epochKey)?.authorizing === true) {
+      const currentStream = this.#streamStates.get(epochKey);
+      if (applied.fullSnapshot && currentStream?.activeStreamId === streamId &&
+        currentStream.activeStreamOrdinal === streamOrdinal) {
+        currentStream.authorizing = true;
         this.#authoritativeGenerations.set(epochKey,
           `${sourceEpoch(envelope)}:saba:${streamId}:${envelope.sequence}`);
         this.#authoritativeBaselineAtMs.set(epochKey, envelope.observedAtMs);
@@ -310,16 +355,31 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
             ? { evidenceMode: "DELTA", generation, provenance: "WS" } : {},
         authoritative && applied.records.length === 0);
     } catch (error) {
-      if ((error instanceof Error && error.message.includes("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP")) ||
-        startsBaseline) {
+      const errorMessage = error instanceof Error ? error.message : "";
+      const sequenceGap = errorMessage.includes("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP");
+      const schemaFault = errorMessage.startsWith("SABA_PUSH_SCHEMA_CHANGED") ||
+        errorMessage === "SABA_PUSH_FRAME_INVALID";
+      const faultingPartitionWasReady = faultingReadyKey !== null && this.#readyPartitions.has(faultingReadyKey);
+      if (startsBaseline || faultingReadyKey === null ||
+        ((sequenceGap || schemaFault) && faultingPartitionWasReady)) {
+        const requireStrictlyNewerOpen = stream.authorizing || this.#authoritativeGenerations.has(epochKey);
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
-        stream.activeStreamId = null;
-        stream.activeStreamOrdinal = null;
-        stream.authorizing = false;
+        if (requireStrictlyNewerOpen) {
+          stream.activeStreamId = null;
+          stream.activeStreamOrdinal = null;
+          stream.authorizing = false;
+        } else {
+          // On MV3/API handover a frame can arrive before CDP replays OPEN. A
+          // schema-less orphan has never owned authority, so discarding its
+          // provisional state must still allow that same observed OPEN to seed
+          // the new epoch. Once OPEN or a baseline owned the stream, faults stay
+          // latched behind the strictly-higher stream watermark.
+          this.#streamStates.delete(epochKey);
+        }
         this.#authoritativeGenerations.delete(epochKey);
         this.#authoritativeBaselineAtMs.delete(epochKey);
         return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
-          invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_GAP" }];
+          invalidateAccountId: ACCOUNT_ID, reason: sequenceGap ? "PROVIDER_STREAM_GAP" : "SCHEMA_CHANGED" }];
       }
       return [];
     }

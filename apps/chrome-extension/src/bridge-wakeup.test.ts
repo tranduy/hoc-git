@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BridgeWakeup } from "./bridge-wakeup.js";
 
 describe("BridgeWakeup", () => {
-  it("reconciles, reconnects, reattaches, and polls immediately on worker start and alarm", async () => {
+  it("forces attached sources only on worker start and preserves poller cadence on alarms", async () => {
     let listener: ((alarm: { readonly name: string }) => void) | undefined;
     const calls: string[] = [];
     const reconcileTabs = vi.fn(async () => { calls.push("reconcile"); });
@@ -20,14 +20,68 @@ describe("BridgeWakeup", () => {
     }).start();
 
     expect(createAlarm).toHaveBeenCalledWith("fieldline-bridge-wakeup", { periodInMinutes: 0.5 });
-    await vi.waitFor(() => expect(calls).toEqual(["reconcile", "connect", "attach", "poll"]));
+    await vi.waitFor(() => expect(calls).toEqual(["connect", "reconcile", "attach", "poll"]));
     listener?.({ name: "unrelated" });
     listener?.({ name: "fieldline-bridge-wakeup" });
     await vi.waitFor(() => expect(calls).toEqual([
-      "reconcile", "connect", "attach", "poll", "reconcile", "connect", "attach", "poll"
+      "connect", "reconcile", "attach", "poll", "connect", "reconcile", "attach", "poll"
     ]));
     expect(pollNow).toHaveBeenCalledTimes(2);
     expect(pollNow).toHaveBeenNthCalledWith(1, ["chrome:IM:7"]);
-    expect(pollNow).toHaveBeenNthCalledWith(2, ["chrome:IM:7"]);
+    expect(pollNow).toHaveBeenNthCalledWith(2);
+  });
+
+  it("connects before a stalled tab reconciliation can block worker startup", () => {
+    const ensureConnected = vi.fn(async () => true);
+    const reconcileTabs = vi.fn(() => new Promise<void>(() => undefined));
+    const ensureAttached = vi.fn(async () => ["chrome:IM:7"]);
+    const pollNow = vi.fn();
+    const wakeup = new BridgeWakeup({
+      createAlarm: vi.fn(),
+      addAlarmListener: vi.fn(),
+      reconcileTabs,
+      ensureConnected,
+      ensureAttached,
+      pollNow
+    });
+
+    void wakeup.wakeNow(true);
+
+    expect(ensureConnected).toHaveBeenCalledTimes(1);
+    expect(reconcileTabs).not.toHaveBeenCalled();
+    expect(ensureAttached).not.toHaveBeenCalled();
+    expect(pollNow).not.toHaveBeenCalled();
+  });
+
+  it("keeps waking on later alarms after a wake hangs forever", async () => {
+    vi.useFakeTimers();
+    try {
+      let listener: ((alarm: { readonly name: string }) => void) | undefined;
+      // A chrome.debugger command against an unresponsive tab never settles.
+      // Without a bound, the in-flight latch is held for the life of the
+      // service worker and every later alarm becomes a silent no-op, so the
+      // bridge stays disconnected until someone reloads the extension.
+      const ensureConnected = vi.fn(async () => true);
+      const ensureAttached = vi.fn(() => new Promise<string[]>(() => undefined));
+      const wakeup = new BridgeWakeup({
+        createAlarm: vi.fn(),
+        addAlarmListener: (next) => { listener = next; },
+        ensureConnected,
+        ensureAttached,
+        pollNow: vi.fn()
+      });
+      wakeup.start();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ensureConnected).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      listener?.({ name: "fieldline-bridge-wakeup" });
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(ensureConnected).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -22,6 +22,22 @@ describe("CMD direct selection-price regressions", () => {
     await page.close();
   });
 
+  it("maps an authenticated HTTP market identity to the visible legacy CMD row", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`<div class="match default-match" id="R_25224742"></div>
+      <div class="match" id="R_25252758"><div class="Dbox_b5"><span>0/0.5</span>
+        <i class="odds">-0.67</i><i class="odds">0.84</i></div></div>`);
+    const marketId = "25224742:7";
+
+    const value = await page.evaluate(buildCmdSelectionPriceExpression({ providerEventId: "25224742",
+      providerMarketId: marketId, providerSelectionId: `${marketId}:away`, eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta", marketType: "FH_AH", scope: "FIRST_HALF",
+      selection: "AWAY", line: "-0.25" })) as { ok: boolean; rawOdds?: string };
+
+    expect(value).toEqual(expect.objectContaining({ ok: true, rawOdds: "0.84" }));
+    await page.close();
+  });
+
   it("does not read the same market and line from a different event", async () => {
     const page = await browser.newPage();
     await page.setContent(`<section class="c-match" data-matchid="event-a">

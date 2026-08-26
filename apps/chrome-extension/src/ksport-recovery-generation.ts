@@ -1,5 +1,8 @@
 type CatalogPartition = "live" | "today";
 
+const KSPORT_MAX_PENDING_DELTA_RECORDS = 256;
+const KSPORT_MAX_PENDING_DELTA_MARKETS = 2_048;
+
 export interface KsportRecoveryGenerationOptions {
   readonly maxPendingChars?: number;
   readonly maxPendingFrames?: number;
@@ -14,6 +17,8 @@ interface ProviderReceipt {
   readonly partition: CatalogPartition;
   readonly order: number | null;
   readonly full: boolean;
+  readonly catalogEvidence: boolean;
+  readonly catalogMarketKeys: readonly string[];
 }
 
 interface RecoveryState {
@@ -41,6 +46,12 @@ export class KsportRecoveryGenerationTracker {
   #pendingChars = 0;
   #pendingSentStomp = "";
   #pendingSentFrames = 0;
+  #catalogEvidenceVersion = 0;
+  #catalogEvidenceHighWatermarks = new Map<CatalogPartition, number>();
+  #catalogCommittedGeneration = 0;
+  #catalogPendingFullOrders = new Map<CatalogPartition, number>();
+  #catalogPendingEventKeys = new Set<string>();
+  #catalogPendingMarketHighWatermarks = new Map<string, number>();
   #failed = false;
 
   constructor(options: KsportRecoveryGenerationOptions = {}) {
@@ -49,6 +60,10 @@ export class KsportRecoveryGenerationTracker {
   }
 
   get currentGeneration(): number { return this.#state.generation; }
+
+  get catalogEvidenceVersion(): number { return this.#catalogEvidenceVersion; }
+
+  get catalogAuthorityGeneration(): number { return this.#catalogCommittedGeneration; }
 
   get failed(): boolean { return this.#failed; }
 
@@ -127,10 +142,7 @@ export class KsportRecoveryGenerationTracker {
     }
     const fragments = encoded.kind === "VALID" ? encoded.strings
       : (this.#pendingStomp !== "" || isRawStompStart(payload, "RECEIVED") ? [payload] : null);
-    if (fragments === null) {
-      return this.#pendingStomp === "" ? [{ payload,
-        recoveryGeneration: this.#state.generation }] : [];
-    }
+    if (fragments === null) return [];
     this.#pendingPayloads.push(payload);
     this.#pendingChars += payload.length;
     if (this.#pendingPayloads.length > this.#maxPendingFrames || this.#pendingChars > this.#maxPendingChars) {
@@ -154,6 +166,12 @@ export class KsportRecoveryGenerationTracker {
     const receipts = this.#pendingReceipts;
     const candidate = cloneState(this.#state);
     const generations = new Set<number>();
+    const catalogEvidenceHighWatermarks = new Map(this.#catalogEvidenceHighWatermarks);
+    let catalogCommittedGeneration = this.#catalogCommittedGeneration;
+    const catalogPendingFullOrders = new Map(this.#catalogPendingFullOrders);
+    const catalogPendingEventKeys = new Set(this.#catalogPendingEventKeys);
+    const catalogPendingMarketHighWatermarks = new Map(this.#catalogPendingMarketHighWatermarks);
+    let catalogEvidenceAdvanced = false;
     for (const receipt of receipts) {
       const generation = attributeReceipt(candidate, receipt);
       if (generation === null) {
@@ -161,10 +179,53 @@ export class KsportRecoveryGenerationTracker {
         return [];
       }
       generations.add(generation);
+      const order = receipt.order;
+      let acceptedCatalogEvidence = false;
+      if (receipt.catalogEvidence && order !== null && generation === candidate.generation &&
+        candidate.generation > catalogCommittedGeneration) {
+        if (receipt.full) {
+          const floor = candidate.attemptFloors.get(receipt.partition) ?? 0;
+          const priorFullOrder = catalogPendingFullOrders.get(receipt.partition);
+          if (order > floor && (priorFullOrder === undefined || order > priorFullOrder)) {
+            catalogPendingFullOrders.set(receipt.partition, order);
+            acceptedCatalogEvidence = true;
+          }
+        } else {
+          const partitionEvidence = catalogPendingFullOrders.get(receipt.partition) ??
+            candidate.attemptFloors.get(receipt.partition) ?? 0;
+          if (order > partitionEvidence) {
+            for (const marketKey of receipt.catalogMarketKeys) {
+              const key = `${receipt.partition}\u0000${marketKey}`;
+              if (order <= (catalogPendingMarketHighWatermarks.get(key) ?? 0)) continue;
+              const eventId = marketKey.slice(0, marketKey.indexOf("\u0000"));
+              const eventKey = `${receipt.partition}\u0000${eventId}`;
+              const addsEvent = !catalogPendingEventKeys.has(eventKey);
+              const addsMarket = !catalogPendingMarketHighWatermarks.has(key);
+              if ((addsEvent && catalogPendingEventKeys.size >= KSPORT_MAX_PENDING_DELTA_RECORDS) ||
+                (addsMarket && catalogPendingMarketHighWatermarks.size >= KSPORT_MAX_PENDING_DELTA_MARKETS)) {
+                this.#fail();
+                return [];
+              }
+              catalogPendingEventKeys.add(eventKey);
+              catalogPendingMarketHighWatermarks.set(key, order);
+              acceptedCatalogEvidence = true;
+            }
+          }
+        }
+      } else if (receipt.catalogEvidence && !receipt.full && order !== null &&
+        generation === catalogCommittedGeneration && candidate.generation === catalogCommittedGeneration &&
+        order > (catalogEvidenceHighWatermarks.get(receipt.partition) ?? 0)) {
+        acceptedCatalogEvidence = true;
+      }
+      if (acceptedCatalogEvidence && order !== null) {
+        catalogEvidenceHighWatermarks.set(receipt.partition,
+          Math.max(catalogEvidenceHighWatermarks.get(receipt.partition) ?? 0, order));
+        catalogEvidenceAdvanced = true;
+        if (receipt.full && catalogPendingFullOrders.has("live") &&
+          catalogPendingFullOrders.has("today")) catalogCommittedGeneration = candidate.generation;
+      }
     }
-    if (receipts.length === 0 && candidate.previousGeneration !== null && !candidate.complete) {
-      // A heartbeat/config frame has no attempt identity while replacement is
-      // pending. Forwarding it as either generation could renew stale authority.
+    if (receipts.length === 0) {
       this.#dropPending();
       return [];
     }
@@ -173,7 +234,17 @@ export class KsportRecoveryGenerationTracker {
       return [];
     }
     const generation = generations.values().next().value as number | undefined ?? candidate.generation;
+    if (catalogEvidenceAdvanced && this.#catalogEvidenceVersion >= Number.MAX_SAFE_INTEGER) {
+      this.#fail();
+      return [];
+    }
     this.#state = candidate;
+    this.#catalogEvidenceHighWatermarks = catalogEvidenceHighWatermarks;
+    this.#catalogCommittedGeneration = catalogCommittedGeneration;
+    this.#catalogPendingFullOrders = catalogPendingFullOrders;
+    this.#catalogPendingEventKeys = catalogPendingEventKeys;
+    this.#catalogPendingMarketHighWatermarks = catalogPendingMarketHighWatermarks;
+    if (catalogEvidenceAdvanced) this.#catalogEvidenceVersion += 1;
     const output = this.#pendingPayloads.map((pending) => ({ payload: pending,
       recoveryGeneration: generation }));
     this.#dropPending();
@@ -194,6 +265,9 @@ export class KsportRecoveryGenerationTracker {
       candidate.attemptPartitions.clear();
       candidate.attemptPartitions.add(partition);
       this.#state = candidate;
+      this.#catalogPendingFullOrders.clear();
+      this.#catalogPendingEventKeys.clear();
+      this.#catalogPendingMarketHighWatermarks.clear();
       return candidate.generation;
     }
     // Multiple partition subscriptions are one attempt. During initial socket
@@ -217,6 +291,9 @@ export class KsportRecoveryGenerationTracker {
     this.#pendingStomp = "";
     this.#pendingSentStomp = "";
     this.#pendingSentFrames = 0;
+    this.#catalogPendingFullOrders.clear();
+    this.#catalogPendingEventKeys.clear();
+    this.#catalogPendingMarketHighWatermarks.clear();
     this.#dropPending();
   }
 }
@@ -309,8 +386,10 @@ function providerReceipt(frame: string): ProviderReceipt | null {
     typeof record.body !== "string") return null;
   let body: unknown;
   try { body = JSON.parse(record.body) as unknown; } catch { return null; }
-  return { partition, order: receiptSequence(header["message-id"]),
-    full: isFullPartitionSnapshot(body) };
+  const full = isFullPartitionSnapshot(body);
+  const catalogMarketKeys = full ? [] : decodableKsportCatalogMarketKeys(body);
+  return { partition, order: receiptSequence(header["message-id"]), full,
+    catalogEvidence: full || catalogMarketKeys.length > 0, catalogMarketKeys };
 }
 
 function catalogSubscription(frame: string): CatalogPartition | null {
@@ -345,19 +424,105 @@ function receiptSequence(messageId?: string): number | null {
 }
 
 function isFullPartitionSnapshot(body: unknown): boolean {
-  return Array.isArray(body) && body.every((value) => {
+  if (!Array.isArray(body)) return false;
+  let eventCount = 0;
+  let decodableMarkets = 0;
+  const valid = body.every((value) => {
     const league = asRecord(value);
     if (league === null || typeof league["1"] !== "string" || league["1"].trim() === "" ||
       !Array.isArray(league["2"])) return false;
     return league["2"].every((candidate) => {
       const event = asRecord(candidate);
       const eventId = event?.["8"];
+      const markets = event === null ? null : asRecord(event["7"]);
+      if (event !== null) eventCount += 1;
+      if (markets !== null && hasDecodableKsportMarket(markets)) decodableMarkets += 1;
       return event !== null && (typeof eventId === "string" || typeof eventId === "number") &&
         /^\d+$/u.test(String(eventId)) && typeof event["2"] === "string" && event["2"].trim() !== "" &&
         typeof event["3"] === "string" && event["3"].trim() !== "" && event["2"].trim() !== event["3"].trim() &&
-        event["7"] !== null && typeof event["7"] === "object" && !Array.isArray(event["7"]);
+        markets !== null;
     });
   });
+  return valid && (eventCount === 0 || decodableMarkets > 0);
+}
+
+const KSPORT_SUPPORTED_MARKET_GROUPS = new Set([
+  "3", "4", "5", "6", "19", "20", "21", "22", "31", "32", "33", "34", "80", "85"
+]);
+const KSPORT_TOTAL_MARKET_GROUPS = new Set(["3", "4", "21", "22", "31", "32", "80"]);
+
+function isSupportedKsportTwoWayLine(value: string | undefined): boolean {
+  if (value === undefined || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) return false;
+  const quarterUnits = Math.abs(Number(value)) * 4;
+  return Number.isFinite(quarterUnits) && Number.isInteger(quarterUnits) && quarterUnits % 4 !== 0;
+}
+
+function isEligibleKsportPrice(value: string | undefined, side: "h" | "a"): boolean {
+  const match = /^(-?(?:0|1)(?:\.\d+)?)\*\d+([ha])$/u.exec(value ?? "");
+  if (match === null || match[2] !== side) return false;
+  const price = Number(match[1]);
+  return Number.isFinite(price) && price !== 0 && Math.abs(price) <= 1;
+}
+
+function decodableKsportMarketIds(groups: Readonly<Record<string, unknown>>,
+  firstOnly = false): readonly string[] {
+  const marketIds = new Set<string>();
+  for (const [groupKey, rows] of Object.entries(groups)) {
+    if (!KSPORT_SUPPORTED_MARKET_GROUPS.has(groupKey) || !Array.isArray(rows)) continue;
+    const isHandicap = !KSPORT_TOTAL_MARKET_GROUPS.has(groupKey);
+    for (const row of rows) {
+      if (typeof row !== "string") continue;
+      const tokens = row.trim().split(/\s+/u);
+      const first = isEligibleKsportPrice(tokens[1], "h");
+      const second = isEligibleKsportPrice(tokens[2], "a");
+      const marketId = tokens[isHandicap ? 4 : 3] ?? "";
+      const favored = tokens[3] ?? "";
+      if (isSupportedKsportTwoWayLine(tokens[0]) && first && second && /^\d{4,30}$/u.test(marketId) &&
+        (!isHandicap || favored === "h" || favored === "a")) {
+        marketIds.add(marketId);
+        if (firstOnly) return [...marketIds];
+      }
+    }
+  }
+  return [...marketIds];
+}
+
+function hasDecodableKsportMarket(groups: Readonly<Record<string, unknown>>): boolean {
+  return decodableKsportMarketIds(groups, true).length > 0;
+}
+
+function decodableKsportCatalogMarketKeys(body: unknown): readonly string[] {
+  const pending: Array<{ readonly value: unknown; readonly depth: number }> = [{ value: body, depth: 0 }];
+  const marketKeys = new Set<string>();
+  let visited = 0;
+  while (pending.length > 0 && visited < 50_000) {
+    const current = pending.pop()!;
+    if (current.depth > 20 || current.value === null || typeof current.value !== "object") continue;
+    visited += 1;
+    if (Array.isArray(current.value)) {
+      for (let index = current.value.length - 1; index >= 0; index -= 1) {
+        pending.push({ value: current.value[index], depth: current.depth + 1 });
+      }
+      continue;
+    }
+    const event = current.value as Record<string, unknown>;
+    const eventId = event["8"];
+    const home = event["2"];
+    const away = event["3"];
+    const markets = asRecord(event["7"]);
+    if ((typeof eventId === "string" || typeof eventId === "number") && /^\d+$/u.test(String(eventId)) &&
+      typeof home === "string" && home.trim() !== "" && typeof away === "string" && away.trim() !== "" &&
+      home.trim() !== away.trim() && markets !== null) {
+      for (const marketId of decodableKsportMarketIds(markets)) {
+        marketKeys.add(`${String(eventId)}\u0000${marketId}`);
+      }
+    }
+    const children = Object.values(event);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push({ value: children[index], depth: current.depth + 1 });
+    }
+  }
+  return [...marketKeys];
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

@@ -136,7 +136,7 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
           marketKeys.has(`${quote.providerEventId}|${quote.providerMarketId}`)) };
     });
     const catalog = mergeObservedCatalogParts({ accountId: "catalog-source:CMD:FOOTBALL", provider: "CMD",
-      observedAtMs: envelope.observedAtMs, parts });
+      observedAtMs: envelope.observedAtMs, parts, collapseDuplicateEvents: true });
     const snapshotId = chunk.snapshotId;
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog, evidenceMode: "DELTA",

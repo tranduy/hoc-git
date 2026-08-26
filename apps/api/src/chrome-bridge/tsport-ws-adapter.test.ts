@@ -67,7 +67,7 @@ function domEnvelope(
 
 function expectedRecord(id: number, firstPrice = "0.11", secondPrice = "-0.22") {
   return {
-    eventId: String(id), leagueName: "DOM League", timeText: "LIVE", scoreText: "0 - 0",
+    eventId: String(id), sportId: "1", leagueName: "DOM League", timeText: "LIVE", scoreText: "0 - 0",
     teamNames: ["DOM Home " + id, "DOM Away " + id], markets: [{
       marketId: id + "-total", marketType: "FT_TOTAL", lineText: "2.5", selections: [
         { selectionId: id + "-over", selection: "OVER", priceText: firstPrice, locked: false },
@@ -159,6 +159,130 @@ describe("TsportWsCatalogAdapter", () => {
     });
   });
 
+  it("bootstraps the current s/1 generation when capture has no WS_STATE OPEN", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([expectedRecord(1)], 1));
+
+    const updates = adapter.decode(envelope(event(1, "WS Home 1"), 2)) as readonly AuthorityUpdate[];
+
+    expect(updates).toEqual([expect.objectContaining({
+      authoritativeBaseline: true,
+      evidenceMode: "BASELINE",
+      provenance: "WS",
+      generation: expect.any(String)
+    })]);
+  });
+
+  it("does not require WS coverage for a complete DOM event with zero supported markets", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([
+      expectedRecord(1),
+      { ...expectedRecord(2), markets: [] }
+    ], 1));
+    adapter.decode(stateEnvelope("OPEN", DEFAULT_STREAM_ID, 2));
+
+    const updates = adapter.decode(envelope(event(1, "WS Home 1"), 3)) as readonly AuthorityUpdate[];
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      authoritativeBaseline: true,
+      evidenceMode: "BASELINE",
+      provenance: "WS",
+      value: {
+        events: [expect.objectContaining({ providerEventId: "1" })],
+        markets: expect.any(Array),
+        quotes: expect.arrayContaining([expect.objectContaining({ providerEventId: "1" })])
+      }
+    });
+  });
+
+  it("excludes a DOM-visible virtual event from fresh WS coverage", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([
+      expectedRecord(1),
+      { ...expectedRecord(2), leagueName: "E Soccer Synthetic League",
+        teamNames: ["Arsenal (player_one)", "Chelsea (player_two)"] }
+    ], 1));
+    adapter.decode(stateEnvelope("OPEN", DEFAULT_STREAM_ID, 2));
+    const virtual = {
+      ...event(2, "Arsenal (player_one)"),
+      "22": "Chelsea (player_two)",
+      "53": "E Soccer Synthetic League"
+    };
+
+    expect(adapter.decode(envelope(virtual, 3))).toEqual([]);
+    const updates = adapter.decode(envelope(event(1, "Real Home"), 4)) as readonly AuthorityUpdate[];
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      authoritativeBaseline: true,
+      evidenceMode: "BASELINE",
+      provenance: "WS",
+      value: {
+        events: [expect.objectContaining({ providerEventId: "1" })],
+        markets: expect.arrayContaining([expect.objectContaining({ providerEventId: "1" })]),
+        quotes: expect.arrayContaining([expect.objectContaining({ providerEventId: "1" })])
+      }
+    });
+    expect(updates[0]!.value.events).toHaveLength(1);
+    expect(updates[0]!.value.markets.every((market) =>
+      (market as { readonly providerEventId?: string }).providerEventId === "1")).toBe(true);
+    expect(updates[0]!.value.quotes.every((quote) => quote.providerEventId === "1")).toBe(true);
+  });
+
+  it("does not require s/1 coverage for sport 97 or a DOM event marked by a (V) team", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([
+      expectedRecord(1),
+      { ...expectedRecord(97), sportId: 97, leagueName: "Synthetic League",
+        teamNames: ["Synthetic Home", "Synthetic Away"] },
+      { ...expectedRecord(98), leagueName: "Synthetic League",
+        teamNames: ["Chelsea (V)", "Napoli"] },
+      { ...expectedRecord(99), sportId: undefined, leagueName: "UTR Pro Tennis Series Women",
+        teamNames: ["Player One", "Player Two"] },
+      { ...expectedRecord(100), sportId: undefined, leagueName: "International UPVL Nations League W",
+        teamNames: ["Spain Pro W", "USA Pro W"] }
+    ], 1));
+    adapter.decode(stateEnvelope("OPEN", DEFAULT_STREAM_ID, 2));
+
+    const updates = adapter.decode(envelope(event(1, "Real Home"), 3)) as readonly AuthorityUpdate[];
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      authoritativeBaseline: true,
+      evidenceMode: "BASELINE",
+      provenance: "WS",
+      value: { events: [expect.objectContaining({ providerEventId: "1" })] }
+    });
+  });
+
+  it("does not let an s/1 virtual frame block an explicit empty real-football baseline", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([{
+      ...expectedRecord(97), sportId: 97, leagueName: "GS Club Friendlies (Virtual)",
+      teamNames: ["Chelsea (V)", "Napoli (V)"]
+    }], 1));
+    const virtual = { ...event(97, "Chelsea (V)"), "22": "Napoli (V)",
+      "53": "E Soccer Battle 8 mins" };
+
+    const updates = adapter.decode(envelope(virtual, 2)) as readonly AuthorityUpdate[];
+
+    expect(updates).toEqual([expect.objectContaining({
+      authoritativeBaseline: true,
+      evidenceMode: "BASELINE",
+      provenance: "WS",
+      value: expect.objectContaining({ events: [], markets: [], quotes: [] })
+    })]);
+  });
+
+  it("does not turn an all-zero-market DOM sweep into authoritative empty authority", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([{ ...expectedRecord(1), markets: [] }], 1));
+
+    expect(adapter.decode(stateEnvelope("OPEN", DEFAULT_STREAM_ID, 2))).toEqual([]);
+    expect(adapter.decode(envelope(event(99, "Unproven Home"), 3))).toEqual([]);
+  });
+
   it("uses only fresh WS quote values in the baseline when DOM prices differ", () => {
     const adapter = new TsportWsCatalogAdapter();
     adapter.decode(domEnvelope([expectedRecord(1, "0.11", "-0.22"), expectedRecord(2, "0.12", "-0.23")]));
@@ -191,6 +315,22 @@ describe("TsportWsCatalogAdapter", () => {
         expect.objectContaining({ rawOdds: "0.44", receivedMonotonicMs: 90, sequence: 5 }),
         expect.objectContaining({ rawOdds: "-0.55", receivedMonotonicMs: 90, sequence: 5 })
       ]));
+  });
+
+  it("refreshes a complete authoritative baseline before the 30 second feed SLA", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    beginFreshStream(adapter, [1]);
+    const baseline = adapter.decode(envelope(event(1, "WS Home 1"), 3))[0] as AuthorityUpdate;
+    const later = envelope(event(1, "WS Home 1", "0.44", "-0.55"), 4);
+
+    const refreshed = adapter.decode({ ...later, observedAtMs: later.observedAtMs + 20_000 })[0] as AuthorityUpdate;
+
+    expect(refreshed).toMatchObject({
+      authoritativeBaseline: true,
+      evidenceMode: "BASELINE",
+      provenance: "WS",
+      generation: baseline.generation
+    });
   });
 
   it("starts a new stream with empty coverage and a new generation", () => {
@@ -226,16 +366,69 @@ describe("TsportWsCatalogAdapter", () => {
     });
   });
 
-  it("does not consume a fresh OPEN before its complete DOM proof arrives", () => {
+  it("retains a fresh OPEN until its complete DOM proof arrives", () => {
     const adapter = new TsportWsCatalogAdapter();
     expect(adapter.decode(stateEnvelope("OPEN", "proof-race", 1))).toEqual([]);
     expect(adapter.decode(domEnvelope([expectedRecord(1)], 2))).toEqual([]);
-    expect(adapter.decode(stateEnvelope("OPEN", "proof-race", 3))).toEqual([]);
 
-    expect(adapter.decode(envelope(event(1, "Recovered Home"), 4, "proof-race")))
+    expect(adapter.decode(envelope(event(1, "Recovered Home"), 3, "proof-race")))
       .toEqual([expect.objectContaining({
         authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
       })]);
+  });
+
+  it("publishes buffered current-stream coverage when the DOM proof completes", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    expect(adapter.decode(stateEnvelope("OPEN", "proof-race", 1))).toEqual([]);
+    expect(adapter.decode(envelope(event(1, "Recovered Home"), 2, "proof-race"))).toEqual([]);
+
+    expect(adapter.decode(domEnvelope([expectedRecord(1)], 3)))
+      .toEqual([expect.objectContaining({
+        authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+      })]);
+  });
+
+  it("does not let a replayed frame satisfy a pending stream's fresh coverage", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    expect(adapter.decode(stateEnvelope("OPEN", "proof-race", 1))).toEqual([]);
+    const replayed = envelope(event(1, "Retired Home"), 2, "proof-race");
+    expect(adapter.decode({ ...replayed, request: { ...replayed.request, replayed: true } })).toEqual([]);
+    expect(adapter.decode(domEnvelope([expectedRecord(1)], 3))).toEqual([]);
+
+    expect(adapter.decode(envelope(event(1, "Fresh Home"), 4, "proof-race")))
+      .toEqual([expect.objectContaining({
+        authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+      })]);
+  });
+
+  it("drops pre-proof records outside the completed DOM coverage set", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(stateEnvelope("OPEN", "proof-race", 1));
+    adapter.decode(envelope(event(1, "Current Home"), 2, "proof-race"));
+    adapter.decode(envelope(event(2, "Retired Home"), 3, "proof-race"));
+
+    const baseline = adapter.decode(domEnvelope([expectedRecord(1)], 4))[0] as AuthorityUpdate;
+    expect(baseline.value.events).toEqual([expect.objectContaining({ providerEventId: "1" })]);
+    expect(baseline.value.markets.every((market) =>
+      (market as { readonly providerEventId?: string }).providerEventId === "1")).toBe(true);
+    expect(baseline.value.quotes.every((quote) => quote.providerEventId === "1")).toBe(true);
+  });
+
+  it("rebuilds an overflowed pending generation without retaining its stream identity", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const streamId = "proof-overflow";
+    adapter.decode(stateEnvelope("OPEN", streamId, 1));
+    for (let eventId = 1; eventId <= 5_001; eventId += 1) {
+      expect(adapter.decode(envelope(event(eventId, `Home ${eventId}`), eventId + 1, streamId)))
+        .toEqual([]);
+    }
+
+    expect(adapter.decode(domEnvelope([expectedRecord(1)], 5_003))).toEqual([]);
+    expect(adapter.decode(envelope(event(1, "Recovered After Overflow"), 5_004, streamId)))
+      .toEqual([expect.objectContaining({
+        authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+      })]);
+    expect(adapter.decode(stateEnvelope("OPEN", streamId, 5_005))).toEqual([]);
   });
 
   it("invalidates existing authority when a replacement OPEN races an incomplete DOM proof", () => {
@@ -300,6 +493,28 @@ describe("TsportWsCatalogAdapter", () => {
     incomplete.decode(domEnvelope([expectedRecord(1)], 1, 0, 1, "INCOMPLETE"));
     incomplete.decode(stateEnvelope("OPEN", "incomplete-proof", 2));
     expect(incomplete.decode(envelope(event(1, "Incomplete Proof"), 3, "incomplete-proof"))).toEqual([]);
+  });
+
+  it("invalidates complete DOM proof when an event markets field is malformed", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([{ ...expectedRecord(1), markets: "hidden" }], 1));
+    adapter.decode(stateEnvelope("OPEN", DEFAULT_STREAM_ID, 2));
+
+    expect(adapter.decode(envelope(event(1, "Malformed Proof"), 3))).toEqual([]);
+  });
+
+  it("does not reuse same-epoch expected IDs after a malformed replacement DOM proof", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    beginFreshStream(adapter, [1], "stream-a");
+    adapter.decode(envelope(event(1, "Current Home"), 3, "stream-a"));
+    adapter.decode(domEnvelope([{ ...expectedRecord(1), markets: "hidden" }],
+      4, 0, 1, "COMPLETE", DEFAULT_SOURCE_EPOCH, "malformed-replacement"));
+
+    expect(adapter.decode(stateEnvelope("OPEN", "stream-b", 5))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:APSPORT:FOOTBALL",
+      reason: "PROVIDER_STREAM_GAP"
+    })]);
+    expect(adapter.decode(envelope(event(1, "Stale Proof"), 6, "stream-b"))).toEqual([]);
   });
 
   it("requires WS coverage for IDs from every snapshot in one completed DOM sweep", () => {
@@ -386,6 +601,32 @@ describe("TsportWsCatalogAdapter", () => {
 
     expect(adapter.decode(stateEnvelope("OPEN", "epoch-b-stream", 2, "observer-a:2"))).toEqual([]);
     expect(adapter.decode(envelope(event(1, "Wrong Epoch"), 3, "epoch-b-stream", "observer-a:2"))).toEqual([]);
+  });
+
+  it("does not authorize an older epoch OPEN after a newer incomplete DOM sweep starts", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([expectedRecord(1)], 1, 0, 1, "COMPLETE",
+      "observer-a:1", "epoch-1-complete"));
+    adapter.decode(domEnvelope([expectedRecord(1)], 2, 0, 1, "INCOMPLETE",
+      "observer-a:2", "epoch-2-incomplete"));
+
+    expect(adapter.decode(stateEnvelope("OPEN", "epoch-1-stale", 3, "observer-a:1"))).toEqual([]);
+    expect(adapter.decode(envelope(event(1, "Stale Epoch"), 4, "epoch-1-stale", "observer-a:1")))
+      .toEqual([]);
+  });
+
+  it("retains a strictly newer epoch OPEN until its matching DOM proof arrives", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(domEnvelope([expectedRecord(1)], 1, 0, 1, "COMPLETE",
+      "observer-a:1", "epoch-1-complete"));
+    expect(adapter.decode(stateEnvelope("OPEN", "epoch-2-current", 2, "observer-a:2"))).toEqual([]);
+    expect(adapter.decode(envelope(event(1, "Current Epoch"), 3, "epoch-2-current", "observer-a:2")))
+      .toEqual([]);
+
+    expect(adapter.decode(domEnvelope([expectedRecord(1)], 4, 0, 1, "COMPLETE",
+      "observer-a:2", "epoch-2-complete"))).toEqual([expect.objectContaining({
+      authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS"
+    })]);
   });
 
   it("does not let an OPEN from another source epoch retire the current generation", () => {

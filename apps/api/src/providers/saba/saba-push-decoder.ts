@@ -48,6 +48,10 @@ const typeKeys: Readonly<Record<string, readonly string[]>> = {
   st: ["matchid", "streamingsrc", "siteid"]
 };
 
+const MAX_BRIDGE_IDS = 64;
+const MAX_LOGICAL_CHANNELS = 64;
+const MAX_FIELD_COLUMNS = 512;
+
 function protocolError(reason = "INVALID"): never {
   throw new Error(`SABA_PUSH_SCHEMA_CHANGED:${reason}`);
 }
@@ -95,11 +99,40 @@ export class SabaPushDecoder {
     const announcedChannel = frame.rows.find((row) => Array.isArray(row) && row[0] === "c" &&
       typeof row[1] === "string")?.[1] as string | undefined;
     const providerChannel = announcedChannel ?? this.#bridgeChannels.get(frame.bridgeId) ?? frame.bridgeId;
-    if (announcedChannel !== undefined) this.#bridgeChannels.set(frame.bridgeId, announcedChannel);
+    const knownBridgeIds = new Set([...this.#channels.keys(), ...this.#bridgeChannels.keys()]);
+    if (!knownBridgeIds.has(frame.bridgeId) && knownBridgeIds.size >= MAX_BRIDGE_IDS) {
+      protocolError("BOUND_EXCEEDED");
+    }
+    const knownLogicalChannels = new Set([...this.#fieldTables.keys(), ...this.#bridgeChannels.values()]);
+    if (!knownLogicalChannels.has(providerChannel) && knownLogicalChannels.size >= MAX_LOGICAL_CHANNELS) {
+      protocolError("BOUND_EXCEEDED");
+    }
+    for (const rawRow of frame.rows) {
+      if (!Array.isArray(rawRow) || rawRow.length === 0) protocolError();
+      if (rawRow[0] === "c") continue;
+      if (rawRow[0] === "f") {
+        const offset = rawRow[1];
+        const names = rawRow[2];
+        if (!Number.isSafeInteger(offset) || (offset as number) < 0 || !Array.isArray(names)) protocolError();
+        if ((offset as number) > MAX_FIELD_COLUMNS || names.length > MAX_FIELD_COLUMNS - (offset as number)) {
+          protocolError("BOUND_EXCEEDED");
+        }
+        continue;
+      }
+      if (rawRow.length % 2 !== 0) protocolError();
+      for (let index = 0; index < rawRow.length; index += 2) {
+        const fieldIndex = rawRow[index];
+        if (!Number.isSafeInteger(fieldIndex)) protocolError();
+        if ((fieldIndex as number) < 0 || (fieldIndex as number) >= MAX_FIELD_COLUMNS) {
+          protocolError("BOUND_EXCEEDED");
+        }
+      }
+    }
     const current = this.#channels.get(frame.bridgeId) ?? {
       fields: this.#fieldTables.get(providerChannel) ?? [], records: new Map(), lastRevision: null, pending: null
     };
     if (current.pending === null && frame.revision !== null && frame.revision === current.lastRevision) {
+      if (announcedChannel !== undefined) this.#bridgeChannels.set(frame.bridgeId, announcedChannel);
       return {
         bridgeId: frame.bridgeId,
         revision: frame.revision,
@@ -170,11 +203,13 @@ export class SabaPushDecoder {
     // provider channel (c1, c2, ...). The field table belongs to that logical
     // channel and is commonly announced on one bridge before data arrives on
     // another. Keeping it per bridge makes every later numeric row undecodable.
-    if (fields.length > 0) this.#fieldTables.set(providerChannel, [...fields]);
+    if (fields.length > MAX_FIELD_COLUMNS) protocolError("BOUND_EXCEEDED");
 
     const snapshotOpen = current.pending !== null || sawReset;
     if (snapshotOpen && !sawDone) {
       const pending: PendingSnapshot = { fields, records, changes, lastRevision: frame.revision };
+      if (announcedChannel !== undefined) this.#bridgeChannels.set(frame.bridgeId, announcedChannel);
+      if (fields.length > 0) this.#fieldTables.set(providerChannel, [...fields]);
       this.#channels.set(frame.bridgeId, { ...current, pending });
       return {
         bridgeId: frame.bridgeId,
@@ -191,6 +226,8 @@ export class SabaPushDecoder {
     }
     const committedRevision = frame.revision ?? current.pending?.lastRevision ?? null;
     const next: ChannelState = { fields, records, lastRevision: committedRevision, pending: null };
+    if (announcedChannel !== undefined) this.#bridgeChannels.set(frame.bridgeId, announcedChannel);
+    if (fields.length > 0) this.#fieldTables.set(providerChannel, [...fields]);
     this.#channels.set(frame.bridgeId, next);
     return {
       bridgeId: frame.bridgeId,

@@ -156,7 +156,10 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       }
       state.pending.partitions.set(partition, { records, inputCount: classified.inputCount });
       this.#states.set(envelope.sourceId, state);
-      if (!state.pending.partitions.has("IM_MARKET_1") || !state.pending.partitions.has("IM_MARKET_2")) return [];
+      if (!state.pending.partitions.has("IM_MARKET_1") || !state.pending.partitions.has("IM_MARKET_2")) {
+        return state.current === null ? [] : [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+          observedAtMs: envelope.observedAtMs, transportAlive: true }];
+      }
       const pendingPartitions = state.pending.partitions;
       const acceptedCount = [...pendingPartitions.values()].reduce((sum, value) => sum + value.records.size, 0);
       const inputCount = [...pendingPartitions.values()].reduce((sum, value) => sum + value.inputCount, 0);
@@ -176,6 +179,8 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
     } else {
       const root = parseRecord(envelope.payload.body);
       if (root === null || !isValidImFootballDelta(root)) return [];
+      if (envelope.request.providerPartition !== undefined &&
+        !isImPartition(envelope.request.providerPartition)) return [];
       if (state.currentCutoffSequence !== null && envelope.sequence <= state.currentCutoffSequence) return [];
       if (state.latestDeltaSequence !== null && envelope.sequence <= state.latestDeltaSequence) return [];
       state.latestDeltaSequence = envelope.sequence;
@@ -192,7 +197,8 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       const sourcePartitions = state.current;
       if (sourcePartitions === null) return [];
       const changed = this.#applyDelta(sourcePartitions, envelope);
-      if (!changed) return [];
+      if (!changed) return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+        observedAtMs: envelope.observedAtMs, transportAlive: true }];
     }
     this.#states.set(envelope.sourceId, state);
     const sourcePartitions = state.current;
@@ -231,7 +237,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       for (const [eventId, entry] of [...records]) {
         const updated = mergeImFootballDelta([entry.record], root);
         if (updated.length === 0) { records.delete(eventId); changed = true; }
-        else if (updated[0] !== entry.record) {
+        else if (!sameImRecord(updated[0]!, entry.record)) {
           records.set(eventId, { record: updated[0]!, observedAtMs: envelope.observedAtMs,
             receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
           changed = true;
@@ -240,6 +246,37 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
     }
     return changed;
   }
+}
+
+function sameImRecord(left: ImRecord, right: ImRecord): boolean {
+  if (left.eventId !== right.eventId || left.leagueName !== right.leagueName ||
+    left.timeText !== right.timeText || left.scoreText !== right.scoreText ||
+    (left.startAtUtcMs ?? null) !== (right.startAtUtcMs ?? null) ||
+    left.teamNames.length !== right.teamNames.length ||
+    left.teamNames.some((team, index) => team !== right.teamNames[index]) ||
+    left.markets.length !== right.markets.length) return false;
+  const unmatched = [...right.markets];
+  for (const market of left.markets) {
+    const index = unmatched.findIndex((candidate) => sameImMarket(market, candidate));
+    if (index < 0) return false;
+    unmatched.splice(index, 1);
+  }
+  return true;
+}
+
+function sameImMarket(left: ImRecord["markets"][number], right: ImRecord["markets"][number]): boolean {
+  if (left.marketId !== right.marketId || left.marketType !== right.marketType ||
+    left.lineText !== right.lineText || left.selections.length !== right.selections.length) return false;
+  const unmatched = [...right.selections];
+  for (const selection of left.selections) {
+    const index = unmatched.findIndex((candidate) =>
+      selection.selectionId === candidate.selectionId && selection.selection === candidate.selection &&
+      selection.priceText === candidate.priceText && selection.locked === candidate.locked &&
+      (selection.lineText ?? null) === (candidate.lineText ?? null));
+    if (index < 0) return false;
+    unmatched.splice(index, 1);
+  }
+  return true;
 }
 
 function classifySnapshot(root: Record<string, unknown>, nowMs: number): {

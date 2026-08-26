@@ -7,7 +7,8 @@ function ksportReceipt(partition: "live" | "today", order: number, full = true):
   const subscription = partition === "live" ? "subSportBookLive" : "subSportBookToday";
   const path = partition === "live" ? "1_1/live" : "1_11/today";
   const body = full ? [{ "1": `${partition} league`,
-    "2": [{ "8": `${order}`, "2": "Home", "3": "Away", "7": {} }] }]
+    "2": [{ "8": `${order}`, "2": "Home", "3": "Away",
+      "7": { "3": [`2.5 0.91*${order}h -0.99*${order}a ${order}0001`] } }] }]
     : [{ "8": `${order}`, "7": {} }];
   const wrapper = JSON.stringify({ statusCode: "OK", statusCodeValue: 200, body: JSON.stringify(body) });
   const stomp = `MESSAGE\ndestination:/topic/sports/${path}/ma/event/vi\n` +
@@ -23,9 +24,18 @@ function ksportSubscribe(partition: "live" | "today"): string {
   ]);
 }
 
-function tsportMatch(eventId: string | null): unknown {
+function tsportMatch(eventId: string | null, options: {
+  readonly display?: "block" | "none";
+  readonly visibility?: "visible" | "hidden";
+} = {}): unknown {
   const textNode = (textContent: string) => ({ textContent });
   return {
+    __computedStyle: {
+      display: options.display ?? "block",
+      visibility: options.visibility ?? "visible",
+      contentVisibility: "visible"
+    },
+    parentElement: null,
     id: "",
     getAttribute: () => null,
     querySelector: (selector: string) => selector === ".match-favorite"
@@ -39,56 +49,104 @@ function tsportMatch(eventId: string | null): unknown {
 
 function evaluateTsportDocument(candidates: readonly unknown[], options: {
   readonly busy?: boolean;
+  readonly duplicateRoot?: boolean;
   readonly explicitEmpty?: boolean;
   readonly unrelatedNoData?: boolean;
   readonly includeRoot?: boolean;
+  readonly productionRoot?: boolean;
+  readonly rootDisplay?: "block" | "none";
+  readonly ancestorDisplay?: "block" | "none";
 } = {}): unknown[] {
+  const hiddenAncestor = {
+    __computedStyle: { display: options.ancestorDisplay ?? "block", visibility: "visible",
+      contentVisibility: "visible" },
+    parentElement: null,
+    getAttribute: () => null,
+    matches: () => false
+  };
   const root = {
-    getAttribute: (name: string) => name === "data-loaded" ? "true"
-      : name === "aria-busy" ? options.busy === true ? "true" : "false" : null,
+    __computedStyle: { display: options.rootDisplay ?? "block", visibility: "visible",
+      contentVisibility: "visible" },
+    parentElement: options.ancestorDisplay === undefined ? null : hiddenAncestor,
+    getAttribute: (name: string) => options.productionRoot === true
+      ? name === "data-sport-id" ? "1"
+        : name === "aria-busy" && options.busy === true ? "true" : null
+      : name === "data-loaded" ? "true"
+        : name === "aria-busy" ? options.busy === true ? "true" : "false" : null,
     matches: (selector: string) => options.explicitEmpty === true && selector.includes('[data-empty="true"]'),
     querySelector: (selector: string) => options.explicitEmpty === true && selector.includes('[data-empty="true"]')
       ? {} : options.unrelatedNoData === true && selector.includes(".no-data") ? {} : null,
     querySelectorAll: (selector: string) => selector === ".match" ? candidates : []
   };
+  for (const candidate of candidates) {
+    if (typeof candidate === "object" && candidate !== null) {
+      (candidate as { parentElement: unknown }).parentElement = root;
+    }
+  }
   const includeRoot = options.includeRoot !== false;
+  const roots = options.duplicateRoot === true ? [root, { ...root }] : [root];
   const fakeDocument = {
     documentElement: { dataset: {} },
     querySelector: () => includeRoot ? root : null,
-    querySelectorAll: (selector: string) => selector === ".match" ? candidates : includeRoot ? [root] : []
+    querySelectorAll: (selector: string) => {
+      if (!includeRoot) return [];
+      const selectors = selector.split(",").map((part) => part.trim());
+      const selectsProductionRoot = selectors.includes('[data-sport-id="1"]') ||
+        selectors.includes('[data-sportid="1"]');
+      const selectsLegacyRoot = selectors.includes('[data-football-event-list="true"][data-loaded="true"]');
+      return options.productionRoot === true
+        ? selectsProductionRoot ? roots : []
+        : selectsLegacyRoot ? roots : [];
+    }
   };
-  const evaluate = new Function("document", `return ${TSPORT_PUBLIC_CATALOG_EXPRESSION}`) as
-    (document: unknown) => string;
-  return JSON.parse(evaluate(fakeDocument)) as unknown[];
+  const evaluate = new Function("document", "getComputedStyle",
+    `return ${TSPORT_PUBLIC_CATALOG_EXPRESSION}`) as
+    (document: unknown, getComputedStyle: (element: unknown) => unknown) => string;
+  return JSON.parse(evaluate(fakeDocument, (element: unknown) => {
+    const style = (element as { readonly __computedStyle?: Record<string, string> }).__computedStyle ?? {};
+    return { display: style.display ?? "block", visibility: style.visibility ?? "visible",
+      contentVisibility: style.contentVisibility ?? "visible" };
+  })) as unknown[];
 }
 
 describe("five-provider shared runtime wiring", () => {
-  it("binds every KSPORT socket envelope to its immutable recovery generation", async () => {
+  it("drops retired KSPORT frames and keeps the current socket recovery generation immutable", async () => {
     const forwarded: ChromeBridgeEnvelope[] = [];
     const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
       forward: async (envelope) => { forwarded.push(envelope); }, observerSessionId: "worker-a" });
     const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
+    const oldLive = ksportReceipt("live", 100);
+    const retiredToday = ksportReceipt("today", 104);
+    const currentLive = ksportReceipt("live", 200);
 
     await observer.handleEvent(source, "Network.webSocketCreated", {
       requestId: "old", url: "wss://d42.sb21.net/sport/538/session/websocket"
     });
     await observer.handleEvent(source, "Network.webSocketFrameReceived", {
-      requestId: "old", response: { opcode: 1, payloadData: "h" }
+      requestId: "old", response: { opcode: 1, payloadData: oldLive }
     });
     await observer.handleEvent(source, "Network.webSocketCreated", {
       requestId: "current", url: "wss://d42.sb21.net/sport/538/session/websocket"
     });
+    await observer.handleEvent(source, "Network.webSocketClosed", { requestId: "old" });
     await observer.handleEvent(source, "Network.webSocketFrameReceived", {
-      requestId: "old", response: { opcode: 1, payloadData: "h" }
+      requestId: "old", response: { opcode: 1, payloadData: retiredToday }
     });
     await observer.handleEvent(source, "Network.webSocketFrameReceived", {
-      requestId: "current", response: { opcode: 1, payloadData: "h" }
+      requestId: "current", response: { opcode: 1, payloadData: currentLive }
     });
 
-    expect(forwarded.filter((envelope) => envelope.request.streamId === "1")
-      .map((envelope) => envelope.request.recoveryGeneration)).toEqual([1, 1, 1]);
-    expect(forwarded.filter((envelope) => envelope.request.streamId === "2")
-      .map((envelope) => envelope.request.recoveryGeneration)).toEqual([1, 1]);
+    const oldFrames = forwarded.filter((envelope) => envelope.transport === "WS_FRAME" &&
+      envelope.request.streamId === "1");
+    const currentFrames = forwarded.filter((envelope) => envelope.transport === "WS_FRAME" &&
+      envelope.request.streamId === "2");
+    expect(oldFrames.map((envelope) => envelope.payload.body)).toEqual([oldLive]);
+    expect(oldFrames.map((envelope) => envelope.request.recoveryGeneration)).toEqual([1]);
+    expect(currentFrames.map((envelope) => envelope.payload.body)).toEqual([currentLive]);
+    expect(currentFrames.map((envelope) => envelope.request.recoveryGeneration)).toEqual([1]);
+    expect(forwarded.filter((envelope) => envelope.request.streamId === "1" ||
+      envelope.request.streamId === "2")
+      .every((envelope) => envelope.request.recoveryGeneration === 1)).toBe(true);
   });
 
   it("attributes newer same-socket KSPORT baselines without relabelling a delayed old partition", async () => {
@@ -165,7 +223,8 @@ describe("five-provider shared runtime wiring", () => {
 
     for (let index = 0; index < 2_047; index += 1) {
       await observer.handleEvent(source, "Network.webSocketFrameReceived", {
-        requestId: "catalog", response: { opcode: 1, payloadData: `heartbeat-${index}` }
+        requestId: "catalog", response: { opcode: 1,
+          payloadData: ksportReceipt("live", 1_000 + index, false) }
       });
     }
 
@@ -193,7 +252,8 @@ describe("five-provider shared runtime wiring", () => {
     // Consume the generic source-wide recovery and its five-second cooldown.
     // A tracker failure on the subsequently observed socket must bypass both.
     await observer.handleEvent(source, "Network.webSocketFrameReceived", {
-      requestId: "orphan", response: { opcode: 1, payloadData: "orphan" }
+      requestId: "orphan", response: { opcode: 1,
+        payloadData: "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n\norphan\u0000" }
     });
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.callFunctionOn")).toHaveLength(1);
 
@@ -235,12 +295,14 @@ describe("five-provider shared runtime wiring", () => {
     const blockedFrame = new Promise<void>((resolve) => { releaseFrame = resolve; });
     const frameObserved = new Promise<void>((resolve) => { observeFrame = resolve; });
     const forwarded: ChromeBridgeEnvelope[] = [];
+    const firstPayload = ksportReceipt("live", 100);
+    const latePayload = ksportReceipt("today", 104);
     const observer = new NetworkObserver({
       sendCommand: vi.fn(async (_tabId: number, method: string) => method === "Runtime.evaluate"
         ? { result: { value: "1787555000000" } } : {}),
       forward: async (envelope) => {
         forwarded.push(envelope);
-        if (envelope.transport === "WS_FRAME" && envelope.payload.body === "h-first") {
+        if (envelope.transport === "WS_FRAME" && envelope.payload.body === firstPayload) {
           observeFrame();
           await blockedFrame;
         }
@@ -253,12 +315,12 @@ describe("five-provider shared runtime wiring", () => {
       url: "wss://d42.sb21.net/sport/538/session/websocket" }, sessionId);
 
     const first = observer.handleEvent(source, "Network.webSocketFrameReceived", {
-      requestId: "catalog", response: { opcode: 1, payloadData: "h-first" }
+      requestId: "catalog", response: { opcode: 1, payloadData: firstPayload }
     }, sessionId);
     await frameObserved;
     const detach = observer.handleEvent(source, "Target.detachedFromTarget", { sessionId });
     const late = observer.handleEvent(source, "Network.webSocketFrameReceived", {
-      requestId: "catalog", response: { opcode: 1, payloadData: "h-late" }
+      requestId: "catalog", response: { opcode: 1, payloadData: latePayload }
     }, sessionId);
 
     await expect(Promise.race([late.then(() => "dropped"),
@@ -267,10 +329,10 @@ describe("five-provider shared runtime wiring", () => {
     releaseFrame();
     await Promise.all([first, detach, late]);
     expect(forwarded.filter((envelope) => envelope.transport === "WS_FRAME")
-      .map((envelope) => envelope.payload.body)).toEqual(["h-first"]);
+      .map((envelope) => envelope.payload.body)).toEqual([firstPayload]);
   });
 
-  it("captures TSPORT coverage then reconnects only its exact event socket after an epoch bump", async () => {
+  it("captures TSPORT coverage without running unsupported socket recovery after an epoch bump", async () => {
     const forwarded: ChromeBridgeEnvelope[] = [];
     const snapshot = JSON.stringify([
       { eventId: "event-1" },
@@ -293,6 +355,8 @@ describe("five-provider shared runtime wiring", () => {
     const source = { lobby: "TSPORT", sourceId: "chrome:TSPORT:11", tabId: 11 } as const;
 
     observer.beginSourceEpoch(source.sourceId);
+    await observer.handleEvent(source, "Network.webSocketCreated", { requestId: "tsport-event",
+      url: "wss://spws.agenate.com/ln/en/s/1/mg/0/tr/0" }, "tsport-owner");
     await observer.refreshCatalog(source);
 
     const domEnvelope = forwarded.find((envelope) => envelope.transport === "DOM_SNAPSHOT");
@@ -303,10 +367,9 @@ describe("five-provider shared runtime wiring", () => {
       sweepDocumentKey: expect.stringMatching(/^cmd-document:[a-z0-9]+:[a-z0-9]+$/u),
       records: [{ eventId: "event-1" }]
     });
-    const reconnect = sendCommand.mock.calls.find(([, method]) => method === "Runtime.callFunctionOn");
-    expect(reconnect?.[2]?.functionDeclaration).toContain("spws\\.(?:agenate|racern)\\.com");
-    expect(reconnect?.[2]?.functionDeclaration).toContain("\\/ln\\/");
-    expect(reconnect?.[2]?.functionDeclaration).not.toContain("/sport/");
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Network.closeWebSocket")).toBe(false);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects" ||
+      method === "Runtime.callFunctionOn")).toBe(false);
     expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
   });
 
@@ -338,7 +401,7 @@ describe("five-provider shared runtime wiring", () => {
     expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.callFunctionOn")).toBe(false);
   });
 
-  it("reconnects a root TSPORT socket even when only an unrelated child context is known", async () => {
+  it("does not heap-scan a root TSPORT socket when only an unrelated child context is known", async () => {
     const snapshot = JSON.stringify([{ eventId: "event-1" },
       { __fieldlineSweep: { sweepId: "tsport-root-sweep", complete: true } }]);
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>,
@@ -370,12 +433,25 @@ describe("five-provider shared runtime wiring", () => {
 
     await observer.refreshCatalog(source);
 
-    expect(sendCommand.mock.calls.some(([, method, , sessionId]) =>
-      method === "Runtime.callFunctionOn" && sessionId === undefined)).toBe(true);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Network.closeWebSocket")).toBe(false);
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects" ||
+      method === "Runtime.callFunctionOn")).toBe(false);
   });
 
-  it("marks an explicitly empty-ready TSPORT football document as one complete bounded sweep", () => {
-    const records = evaluateTsportDocument([], { explicitEmpty: true });
+  it("binds a production TSPORT sweep to one sport-id Football root without synthetic readiness attributes", () => {
+    const records = evaluateTsportDocument([tsportMatch("12345")], { productionRoot: true });
+
+    expect(records).toEqual([
+      { eventId: "12345", leagueName: "League", timeText: "12:00", scoreText: null,
+        teamNames: ["Home", "Away"], markets: [] },
+      { __fieldlineSweep: {
+        sweepId: expect.stringMatching(/^tsport-sweep-[1-9]\d*$/u), complete: true
+      } }
+    ]);
+  });
+
+  it("marks an explicitly empty-ready production TSPORT football document as one complete bounded sweep", () => {
+    const records = evaluateTsportDocument([], { explicitEmpty: true, productionRoot: true });
 
     expect(records).toEqual([{ __fieldlineSweep: {
       sweepId: expect.stringMatching(/^tsport-sweep-[1-9]\d*$/u), complete: true
@@ -395,13 +471,47 @@ describe("five-provider shared runtime wiring", () => {
   });
 
   it("withholds TSPORT completion when any football event candidate is still incomplete", () => {
-    const records = evaluateTsportDocument([tsportMatch("12345"), tsportMatch(null)]);
+    const records = evaluateTsportDocument([tsportMatch("12345"), tsportMatch(null)], {
+      productionRoot: true
+    });
 
     expect(records).not.toContainEqual(expect.objectContaining({ __fieldlineSweep: expect.anything() }));
   });
 
   it("withholds TSPORT completion while the football event-list root is busy", () => {
-    const records = evaluateTsportDocument([tsportMatch("12345")], { busy: true });
+    const records = evaluateTsportDocument([tsportMatch("12345")], { busy: true, productionRoot: true });
+
+    expect(records).not.toContainEqual(expect.objectContaining({ __fieldlineSweep: expect.anything() }));
+  });
+
+  it("fails closed when two production TSPORT Football roots compete for authority", () => {
+    const records = evaluateTsportDocument([tsportMatch("12345")], {
+      duplicateRoot: true, productionRoot: true
+    });
+
+    expect(records).toEqual([]);
+  });
+
+  it("does not complete an empty TSPORT sweep from a CSS-hidden football root", () => {
+    const records = evaluateTsportDocument([], {
+      explicitEmpty: true, productionRoot: true, rootDisplay: "none"
+    });
+
+    expect(records).toEqual([]);
+  });
+
+  it("does not complete a TSPORT sweep beneath a CSS-hidden ancestor", () => {
+    const records = evaluateTsportDocument([tsportMatch("12345")], {
+      productionRoot: true, ancestorDisplay: "none"
+    });
+
+    expect(records).toEqual([]);
+  });
+
+  it("does not complete a TSPORT sweep while a stale match is CSS-hidden", () => {
+    const records = evaluateTsportDocument([
+      tsportMatch("12345"), tsportMatch("67890", { display: "none" })
+    ], { productionRoot: true });
 
     expect(records).not.toContainEqual(expect.objectContaining({ __fieldlineSweep: expect.anything() }));
   });

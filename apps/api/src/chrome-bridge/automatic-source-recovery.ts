@@ -2,6 +2,7 @@ import type { ChromeLobbyId } from "@tool-chenh/contracts";
 import type { ProviderFeedRegistry } from "./provider-feed-registry.js";
 import type { ProviderFeedSnapshot, ProviderRecoveryRequest } from "./provider-feed-types.js";
 import { refreshBridgeProviderSources } from "./provider-source-refresh.js";
+import { chromeBridgeSourceIdentity } from "./chrome-bridge-account.js";
 
 type FabetProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
 type RecoveryStage = "SOFT" | "HARD";
@@ -10,6 +11,8 @@ type RecoveryFeedRegistry = Pick<ProviderFeedRegistry,
 
 interface RecoveryControlPlane {
   requestLobbySnapshot(lobby: ChromeLobbyId): number;
+  reloadSource?(sourceId: string): number;
+  reloadRecoverySource?(accountId: string, lobby: ChromeLobbyId): number;
   ensureLobby(lobby: ChromeLobbyId, url: string): number;
   restoreLobby(lobby: ChromeLobbyId): number;
 }
@@ -18,12 +21,24 @@ interface AutomaticSourceRecoveryOptions {
   readonly controlPlane: RecoveryControlPlane;
   readonly feedRegistry: RecoveryFeedRegistry;
   readonly refreshFabetLaunches: (signal: AbortSignal) => Promise<void>;
+  readonly browserRefreshEnabled?: boolean;
   readonly withLatestFabetLaunch: <T>(provider: FabetProvider, category: "FOOTBALL",
     consume: (url: string) => Promise<T>, minAcquiredAtMs: number, signal?: AbortSignal) => Promise<T>;
   readonly baselineTimeoutMs?: number;
   readonly now?: () => number;
   readonly isRecoverySuppressed?: (accountId: string) => boolean;
   readonly onError?: (accountId: string, error: unknown) => void;
+  readonly onStateChange?: (status: RecoveryBackoffStatus) => void;
+}
+
+export interface RecoveryBackoffStatus {
+  readonly accountId: string;
+  readonly state: "BACKOFF" | "RECOVERED";
+  readonly consecutiveFailures: number;
+  readonly nextAttemptAtMs: number | null;
+  readonly nextAttemptInMs: number;
+  readonly lastFailureCode: string | null;
+  readonly repeatCount: number;
 }
 
 export interface RecoveryResult {
@@ -48,17 +63,35 @@ const SOURCES = new Map<string, RecoverySource>([
   ["catalog-source:BTI:FOOTBALL", source("BTI", "BTI", ["BTI"])]
 ]);
 
+// Chrome never replays Network.webSocketCreated for a socket opened before the
+// debugger attached, so a re-attached WebSocket tab stays permanently blind.
+// Reloading the source is the only recovery that rebuilds an observable socket,
+// and unlike the Fabet relaunch it works while browser refresh is disabled.
+const WEBSOCKET_PROVIDERS: ReadonlySet<FabetProvider | null> = new Set<FabetProvider>([
+  "SABA", "SBOBET", "APSPORT"
+]);
+
 const ACTIONABLE_REASONS = new Set([
   "AUTH_EGRESS_UNAVAILABLE", "LAUNCH_EXPIRED", "LAUNCH_CONSUMED",
   "PORTAL_VALIDATION_FAILED", "PROVIDER_SCHEMA_CHANGED"
 ]);
 const DISPOSED = Symbol("RECOVERY_DISPOSED");
+const INITIAL_BACKOFF_MS = 1_000;
+const MAX_BACKOFF_MS = 300_000;
+
+interface RecoveryBackoffState {
+  readonly consecutiveFailures: number;
+  readonly nextAttemptAtMs: number;
+  readonly lastFailureCode: string;
+  readonly repeatCount: number;
+}
 
 export class AutomaticSourceRecovery {
   readonly #options: AutomaticSourceRecoveryOptions;
   readonly #baselineTimeoutMs: number;
   readonly #now: () => number;
   readonly #inflight = new Map<string, Promise<RecoveryResult>>();
+  readonly #backoff = new Map<string, RecoveryBackoffState>();
   readonly #disposeSignal: Promise<typeof DISPOSED>;
   readonly #abortController = new AbortController();
   #signalDispose!: () => void;
@@ -81,7 +114,18 @@ export class AutomaticSourceRecovery {
   recover(request: ProviderRecoveryRequest): Promise<RecoveryResult> {
     const existing = this.#inflight.get(request.accountId);
     if (existing !== undefined) return existing;
-    const operation = this.#recover(request).finally(() => {
+    const backoff = this.#backoff.get(request.accountId);
+    if (backoff !== undefined && this.#now() < backoff.nextAttemptAtMs) {
+      return Promise.resolve({ accountId: request.accountId, stage: request.stage,
+        outcome: "ACTION_REQUIRED", reason: "RECOVERY_BACKOFF" });
+    }
+    const operation = this.#recover(request).then((result) => {
+      this.#recordResult(result);
+      return result;
+    }, (error: unknown) => {
+      this.#recordFailure(request.accountId, recoveryFailureCode(recoveryReason(error)));
+      throw error;
+    }).finally(() => {
       if (this.#inflight.get(request.accountId) === operation) this.#inflight.delete(request.accountId);
     });
     this.#inflight.set(request.accountId, operation);
@@ -127,10 +171,40 @@ export class AutomaticSourceRecovery {
     if (this.#disposed) return stopped(request.accountId, "HARD");
     if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
     try {
+      if (WEBSOCKET_PROVIDERS.has(source.provider) &&
+        (this.#options.controlPlane.reloadSource !== undefined ||
+          this.#options.controlPlane.reloadRecoverySource !== undefined)) {
+        const prior = this.#options.feedRegistry.snapshot(request.accountId);
+        const actionStartedAtMs = this.#now();
+        let delivered = 0;
+        if (prior.sourceId !== null && this.#options.controlPlane.reloadSource !== undefined &&
+          matchesRecoverySource(prior.sourceId, request.accountId, source.hardLobby)) {
+          try { delivered = this.#options.controlPlane.reloadSource(prior.sourceId); }
+          catch { /* send failure is undelivered; fall through to a fresh launch */ }
+        }
+        if (delivered <= 0 && this.#options.controlPlane.reloadRecoverySource !== undefined) {
+          try {
+            delivered = this.#options.controlPlane.reloadRecoverySource(request.accountId, source.hardLobby);
+          } catch { /* candidate send failure is undelivered; fall through to a fresh launch */ }
+        }
+        if (delivered > 0) {
+          const confirmation = await this.#confirmReplacement(request, prior, actionStartedAtMs);
+          if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
+            return confirmation;
+          }
+          if (this.#disposed) return stopped(request.accountId, "HARD");
+          if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+        }
+      }
       let delivered: number;
+      let confirmationAfterMs = request.requestedAtMs;
       if (source.provider === null) {
         delivered = this.#options.controlPlane.restoreLobby("CMD");
       } else {
+        if (this.#options.browserRefreshEnabled === false) {
+          return { accountId: request.accountId, stage: "HARD", outcome: "ACTION_REQUIRED",
+            reason: "BROWSER_REFRESH_DISABLED" };
+        }
         const recoveryStartedAtMs = this.#now();
         const refresh = await this.#whileActive(this.#options.refreshFabetLaunches(this.#abortController.signal));
         if (refresh === DISPOSED) return stopped(request.accountId, "HARD");
@@ -145,36 +219,81 @@ export class AutomaticSourceRecovery {
           beforeDelivery: () => {
             if (this.#disposed) throw new Error("RECOVERY_DISPOSED");
             if (this.#suppressed(request.accountId)) throw new Error("RECOVERY_SUPPRESSED");
+            confirmationAfterMs = this.#now();
           }
         }));
         if (targetedDelivery === DISPOSED) return stopped(request.accountId, "HARD");
         delivered = targetedDelivery;
       }
       if (delivered <= 0) return noSource(request.accountId, "HARD");
-      return this.#confirm(request, "HARD");
+      return this.#confirmAfter(request.accountId, "HARD", confirmationAfterMs);
     } catch (error) {
       if (this.#disposed) return stopped(request.accountId, "HARD");
       return this.#failure(request.accountId, "HARD", error);
     }
   }
 
+  async #confirmReplacement(request: ProviderRecoveryRequest, prior: ProviderFeedSnapshot,
+    actionStartedAtMs: number): Promise<RecoveryResult> {
+    const deadlineAtMs = actionStartedAtMs + this.#baselineTimeoutMs;
+    let afterMs = actionStartedAtMs;
+    while (true) {
+      const remainingMs = deadlineAtMs - this.#now();
+      if (remainingMs <= 0) {
+        return { accountId: request.accountId, stage: "HARD", outcome: "DELIVERED",
+          reason: "BASELINE_TIMEOUT" };
+      }
+      try {
+        const baseline = await this.#whileActive(this.#options.feedRegistry.waitForFreshBaseline(
+          request.accountId, afterMs, remainingMs, this.#abortController.signal
+        ));
+        if (baseline === DISPOSED) return stopped(request.accountId, "HARD");
+        if (!isBaselineAfter(baseline, request.accountId, actionStartedAtMs)) {
+          return { accountId: request.accountId, stage: "HARD", outcome: "DELIVERED",
+            reason: "BASELINE_TIMEOUT" };
+        }
+        if (baseline.sourceId !== prior.sourceId || baseline.sourceEpoch !== prior.sourceEpoch ||
+          baseline.activeGeneration !== prior.activeGeneration) {
+          return { accountId: request.accountId, stage: "HARD", outcome: "RECOVERED", reason: null };
+        }
+        const completedAtMs = baseline.lastCompleteBaselineAtMs;
+        if (completedAtMs === null || completedAtMs <= afterMs) {
+          return { accountId: request.accountId, stage: "HARD", outcome: "DELIVERED",
+            reason: "BASELINE_TIMEOUT" };
+        }
+        afterMs = completedAtMs;
+      } catch (error) {
+        if (this.#disposed) return stopped(request.accountId, "HARD");
+        const reason = recoveryReason(error);
+        if (reason === "BASELINE_TIMEOUT") {
+          return { accountId: request.accountId, stage: "HARD", outcome: "DELIVERED", reason };
+        }
+        return this.#failure(request.accountId, "HARD", error);
+      }
+    }
+  }
+
   async #confirm(request: ProviderRecoveryRequest, stage: RecoveryStage): Promise<RecoveryResult> {
+    return this.#confirmAfter(request.accountId, stage, request.requestedAtMs);
+  }
+
+  async #confirmAfter(accountId: string, stage: RecoveryStage, afterMs: number): Promise<RecoveryResult> {
     try {
       const baseline = await this.#whileActive(this.#options.feedRegistry.waitForFreshBaseline(
-        request.accountId, request.requestedAtMs, this.#baselineTimeoutMs, this.#abortController.signal
+        accountId, afterMs, this.#baselineTimeoutMs, this.#abortController.signal
       ));
-      if (baseline === DISPOSED) return stopped(request.accountId, stage);
-      if (!isStrictlyNewerBaseline(baseline, request)) {
-        return { accountId: request.accountId, stage, outcome: "DELIVERED", reason: "BASELINE_TIMEOUT" };
+      if (baseline === DISPOSED) return stopped(accountId, stage);
+      if (!isBaselineAfter(baseline, accountId, afterMs)) {
+        return { accountId, stage, outcome: "DELIVERED", reason: "BASELINE_TIMEOUT" };
       }
-      return { accountId: request.accountId, stage, outcome: "RECOVERED", reason: null };
+      return { accountId, stage, outcome: "RECOVERED", reason: null };
     } catch (error) {
-      if (this.#disposed) return stopped(request.accountId, stage);
+      if (this.#disposed) return stopped(accountId, stage);
       const reason = recoveryReason(error);
       if (reason === "BASELINE_TIMEOUT") {
-        return { accountId: request.accountId, stage, outcome: "DELIVERED", reason };
+        return { accountId, stage, outcome: "DELIVERED", reason };
       }
-      return this.#failure(request.accountId, stage, error);
+      return this.#failure(accountId, stage, error);
     }
   }
 
@@ -192,6 +311,38 @@ export class AutomaticSourceRecovery {
   #whileActive<T>(operation: Promise<T>): Promise<T | typeof DISPOSED> {
     return Promise.race([operation, this.#disposeSignal]);
   }
+
+  #recordResult(result: RecoveryResult): void {
+    if (result.outcome === "RECOVERED") {
+      const prior = this.#backoff.get(result.accountId);
+      if (prior === undefined) return;
+      this.#backoff.delete(result.accountId);
+      this.#emitState({ accountId: result.accountId, state: "RECOVERED", consecutiveFailures: 0,
+        nextAttemptAtMs: null, nextAttemptInMs: 0, lastFailureCode: null,
+        repeatCount: prior.repeatCount });
+      return;
+    }
+    if (result.reason === "RECOVERY_DISPOSED" || result.reason === "RECOVERY_SUPPRESSED" ||
+      result.reason === "RECOVERY_BACKOFF") return;
+    this.#recordFailure(result.accountId, recoveryFailureCode(result.reason));
+  }
+
+  #recordFailure(accountId: string, code: string): void {
+    const prior = this.#backoff.get(accountId);
+    const consecutiveFailures = (prior?.consecutiveFailures ?? 0) + 1;
+    const delayMs = Math.min(INITIAL_BACKOFF_MS * (2 ** Math.min(30, consecutiveFailures - 1)),
+      MAX_BACKOFF_MS);
+    const nextAttemptAtMs = this.#now() + delayMs;
+    const repeatCount = prior?.lastFailureCode === code ? prior.repeatCount + 1 : 1;
+    this.#backoff.set(accountId, { consecutiveFailures, nextAttemptAtMs, lastFailureCode: code,
+      repeatCount });
+    this.#emitState({ accountId, state: "BACKOFF", consecutiveFailures, nextAttemptAtMs,
+      nextAttemptInMs: delayMs, lastFailureCode: code, repeatCount });
+  }
+
+  #emitState(status: RecoveryBackoffStatus): void {
+    try { this.#options.onStateChange?.(status); } catch { /* telemetry/logging cannot stop recovery */ }
+  }
 }
 
 function source(provider: FabetProvider | null, hardLobby: ChromeLobbyId,
@@ -204,9 +355,14 @@ function softLobby(snapshot: ProviderFeedSnapshot, source: RecoverySource): Chro
   return lobby !== undefined && source.softLobbies.has(lobby) ? lobby : source.hardLobby;
 }
 
-function isStrictlyNewerBaseline(snapshot: ProviderFeedSnapshot, request: ProviderRecoveryRequest): boolean {
-  return snapshot.accountId === request.accountId && snapshot.state === "LIVE" &&
-    snapshot.lastCompleteBaselineAtMs !== null && snapshot.lastCompleteBaselineAtMs > request.requestedAtMs;
+function isBaselineAfter(snapshot: ProviderFeedSnapshot, accountId: string, afterMs: number): boolean {
+  return snapshot.accountId === accountId && snapshot.state === "LIVE" &&
+    snapshot.lastCompleteBaselineAtMs !== null && snapshot.lastCompleteBaselineAtMs > afterMs;
+}
+
+function matchesRecoverySource(sourceId: string, accountId: string, lobby: ChromeLobbyId): boolean {
+  const identity = chromeBridgeSourceIdentity(sourceId);
+  return identity?.accountId === accountId && identity.lobby === lobby;
 }
 
 function recoveryReason(error: unknown): string {
@@ -218,6 +374,11 @@ function recoveryReason(error: unknown): string {
   if (message.includes("UNDELIVERED") || message.includes("LAUNCH_UNAVAILABLE") ||
     message === "SOURCE_MISSING") return "SOURCE_MISSING";
   return message.length === 0 ? "SOURCE_MISSING" : message;
+}
+
+function recoveryFailureCode(reason: string | null): string {
+  if (reason === null || reason.length === 0) return "SOURCE_MISSING";
+  return /^[A-Z][A-Z0-9_]{0,63}$/u.test(reason) ? reason : "RECOVERY_FAILED";
 }
 
 function stopped(accountId: string, stage: RecoveryStage): RecoveryResult {

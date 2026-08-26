@@ -54,7 +54,7 @@ export function registerChromeBridgeRoute(
     if (!parsed.success) return reply.code(400).send({ error: "INVALID_SOURCE_ID" });
     const prior = options.currentFeed?.(parsed.data.sourceId) ?? null;
     const requestedAtMs = now();
-    const requested = options.controlPlane?.requestSourceSnapshot(parsed.data.sourceId) ?? 0;
+    const requested = requestExactSourceSnapshot(registry, options.controlPlane, parsed.data.sourceId);
     if (requested !== 1) return reply.code(409).send({ error: "SOURCE_NOT_ATTACHED" });
     if (options.waitForFreshBaseline === undefined) {
       return reply.code(202).send({ sourceId: parsed.data.sourceId, requested });
@@ -157,6 +157,19 @@ export function registerChromeBridgeRoute(
       });
     });
   });
+}
+
+function requestExactSourceSnapshot(registry: ChromeBridgeRegistry,
+  controlPlane: ChromeBridgeControlPlane | undefined, sourceId: string): number {
+  if (controlPlane === undefined) return 0;
+  const source = chromeBridgeSourceIdentity(sourceId);
+  if (source !== null) {
+    const authority = registry.authorityCoordinator.snapshot(source.accountId);
+    if (authority.candidate?.sourceId === sourceId && authority.candidateToken !== null) {
+      return controlPlane.requestCandidateSnapshot(authority.candidateToken);
+    }
+  }
+  return controlPlane.requestSourceSnapshot(sourceId);
 }
 
 function reject(reason: "MALFORMED" | "PAYLOAD_TOO_LARGE"): ChromeBridgeControlMessage {

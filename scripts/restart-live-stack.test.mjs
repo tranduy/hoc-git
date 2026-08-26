@@ -246,7 +246,8 @@ namespace ToolChenh {
 }
 '@
 $global:DiscoveryCandidate = [pscustomobject]@{
-  ProcessId = 321
+  ProcessId = $(if ($env:DISCOVERY_TEST_MODE -eq 'pid-zero') { 0 }
+    elseif ($env:DISCOVERY_TEST_MODE -eq 'pid-system') { 4 } else { 321 })
   ParentProcessId = 1
   ExecutablePath = 'C:\工具\node.exe'
   CommandLine = '"C:\工具\node.exe" "C:\exact\entry.mjs"'
@@ -333,6 +334,16 @@ test("round3 rejects an unreadable Windows process when owner lookup is ambiguou
     assert.match(`${error.message}\n${error.stderr ?? ""}`, /STACK_INSTANCE_DISCOVERY_UNAVAILABLE/u);
     return true;
   });
+});
+
+test("round5 ignores Windows PID zero before environment and owner inspection", async () => {
+  const { stdout } = await runWindowsDiscoveryFixture("pid-zero");
+  assert.deepEqual(JSON.parse(stdout.trim()), []);
+});
+
+test("round5 ignores Windows kernel PID four before environment and owner inspection", async () => {
+  const { stdout } = await runWindowsDiscoveryFixture("pid-system");
+  assert.deepEqual(JSON.parse(stdout.trim()), []);
 });
 
 test("round3 ignores the Windows environment-read exit race after the exact birth disappears", async () => {
@@ -909,6 +920,42 @@ test("round4 invokes discovery through the absolute system PowerShell executable
     const systemRoot = systemEnvironment.SystemRoot ?? systemEnvironment.WINDIR;
     assert.equal(observedCommand.toLowerCase(),
       `${systemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`.toLowerCase());
+  } finally {
+    hooks.deregister();
+    Object.defineProperty(process, "platform", platformDescriptor);
+    delete globalThis[callbackName];
+  }
+});
+
+test("round5 bypasses machine execution policy only for the Windows discovery process", async () => {
+  const callbackName = `__toolChenhWindowsPolicy${Date.now()}`;
+  let observedArgs;
+  globalThis[callbackName] = (command, args, options, callback) => {
+    observedArgs = args;
+    callback(null, { stdout: "[]", stderr: "" });
+  };
+  const childProcessMock = moduleSource(`
+    export const execFile = (...args) => globalThis[${JSON.stringify(callbackName)}](...args);
+    export function spawn() { throw new Error("unexpected spawn"); }
+  `);
+  const query = `round5-windows-policy-${Date.now()}-${Math.random()}`;
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.includes(`/restart-live-stack.mjs?${query}`) && specifier === "node:child_process") {
+        return { url: childProcessMock, shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    }
+  });
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  try {
+    const module = await import(`./restart-live-stack.mjs?${query}`);
+    const processes = await module.listStackInstanceProcesses("instance-round5-policy");
+    assert.deepEqual(processes, []);
+    assert.deepEqual(observedArgs.slice(0, 5),
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"]);
+    assert.equal(observedArgs[5], "-File");
   } finally {
     hooks.deregister();
     Object.defineProperty(process, "platform", platformDescriptor);

@@ -9,6 +9,8 @@ import { websocketLifecycleState } from "./websocket-lifecycle.js";
 const ACCOUNT_ID = "catalog-source:APSPORT:FOOTBALL";
 const MAX_RETIRED_DOM_SWEEPS = 64;
 const MAX_SOURCE_EPOCH_LINEAGES = 16;
+const MAX_PENDING_PRE_PROOF_RECORDS = 5_000;
+const AUTHORITATIVE_BASELINE_REFRESH_MS = 20_000;
 interface RetainedRecord {
   readonly record: SbobetCatalogInputRecord;
   readonly seenAtMs: number;
@@ -20,9 +22,12 @@ interface TsportStreamGeneration {
   readonly streamId: string;
   readonly sourceEpoch: string;
   readonly generation: string;
-  readonly expectedEventIds: ReadonlySet<string>;
+  expectedEventIds: ReadonlySet<string>;
+  explicitEmptyProof: boolean;
   readonly records: Map<string, RetainedRecord>;
+  proofReady: boolean;
   baselineEmitted: boolean;
+  lastBaselineAtMs: number | null;
 }
 
 interface DomSweepState {
@@ -34,12 +39,14 @@ interface DomSweepState {
   readonly startedAtSequence: number;
   readonly retiredSnapshotIds: Set<string>;
   readonly eventIds: Set<string>;
+  sawEventRecord: boolean;
   completed: boolean;
 }
 
 interface ExpectedEventSet {
   readonly sourceEpoch: string;
   readonly eventIds: ReadonlySet<string>;
+  readonly explicitEmptyProof: boolean;
 }
 
 interface SourceEpochFence {
@@ -59,7 +66,32 @@ const marketTypeByGroup: Readonly<Record<string, TsportTwoWayMarketType>> = {
 };
 
 const boundedText = (max: number) => z.string().trim().min(1).max(max);
-const domExpectedEventSchema = z.object({ eventId: boundedText(128) }).passthrough();
+// DOM coverage must use the same virtual-football identity boundary as the
+// normalizer. Otherwise a fresh socket can deliver every raw expected event
+// while the normalized catalog can never contain the virtual identities.
+function isVirtualFootballIdentity(sportId: string | number | undefined,
+  competition: string, teams: readonly string[]): boolean {
+  if (sportId !== undefined && String(sportId) !== "1") return true;
+  const label = competition.normalize("NFKC").toLocaleLowerCase("en");
+  if (sportId === undefined &&
+    /(?:\butr\b|\btennis\b|\bbasketball\b|\bcdbl\b|\bupvl\b|\bvolleyball\b|\btt elite\b|table tennis)/u
+      .test(label)) return true;
+  if (sportId === undefined && teams.length === 2 &&
+    teams.every((team) => /\bpro w\s*$/iu.test(team))) return true;
+  if (/(?:e[\s-]?soccer|\bvirtual\b|simulated reality|soccer marble|\bpes\b|\u1ea3o|\u0111i\u1ec7n t\u1eed)/u
+    .test(label)) return true;
+  if (teams.some((team) => /\(v\)\s*$/iu.test(team))) return true;
+  return teams.length === 2 && teams.every((team) =>
+    /(?:\((?:pg|e|pes|v|s)\)(?:\s*\([^)]*\))*|\([a-z0-9_]{4,}\))\s*$/iu.test(team));
+}
+
+const domExpectedEventSchema = z.object({
+  eventId: boundedText(128),
+  sportId: z.union([boundedText(16), z.number().int().nonnegative().max(10_000)]).optional(),
+  leagueName: boundedText(160),
+  teamNames: z.tuple([boundedText(160), boundedText(160)]),
+  markets: z.array(z.unknown())
+}).passthrough();
 
 function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
   return envelope.sourceEpoch ?? "legacy";
@@ -200,6 +232,8 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
   }
 
   #invalidateDomEvidence(sourceId: string, epoch: string): void {
+    const expected = this.#expectedEventIds.get(sourceId);
+    if (expected?.sourceEpoch === epoch) this.#expectedEventIds.delete(sourceId);
     const sweep = this.#domSweepStates.get(sourceId);
     if (sweep?.sourceEpoch === epoch) {
       sweep.completed = true;
@@ -272,7 +306,8 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     const parts: NormalizedCatalogPart[] = retainedEntries.map(normalizeEntry);
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
       observedAtMs: envelope.observedAtMs, parts });
-    const explicitEmpty = evidenceMode === "BASELINE" && stream.expectedEventIds.size === 0 &&
+    const explicitEmpty = evidenceMode === "BASELINE" && stream.explicitEmptyProof &&
+      stream.expectedEventIds.size === 0 &&
       stream.records.size === 0;
     const normalizedEventIds = new Set(catalog.events.map((event) => event.providerEventId));
     const normalizedMarketEventIds = new Set(catalog.markets.map((market) => market.providerEventId));
@@ -298,6 +333,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
+    if (envelope.request.replayed === true) return [];
     if (envelope.transport === "DOM_SNAPSHOT") {
       const envelopeSourceEpoch = sourceEpoch(envelope);
       let raw: unknown;
@@ -326,13 +362,13 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (existing === undefined) {
         if (!this.#acceptDomSourceEpoch(envelope.sourceId, binding.sourceEpoch)) return [];
         sweep = { ...binding, startedAtSequence: envelope.sequence,
-          retiredSnapshotIds: new Set(), eventIds: new Set(), completed: false };
+          retiredSnapshotIds: new Set(), eventIds: new Set(), sawEventRecord: false, completed: false };
         this.#assembler.resetSource(envelope.sourceId);
         this.#domSweepStates.set(envelope.sourceId, sweep);
       } else if (existing.sourceEpoch !== binding.sourceEpoch) {
         if (!this.#acceptDomSourceEpoch(envelope.sourceId, binding.sourceEpoch)) return [];
         sweep = { ...binding, startedAtSequence: envelope.sequence,
-          retiredSnapshotIds: new Set(), eventIds: new Set(), completed: false };
+          retiredSnapshotIds: new Set(), eventIds: new Set(), sawEventRecord: false, completed: false };
         this.#assembler.resetSource(envelope.sourceId);
         this.#domSweepStates.set(envelope.sourceId, sweep);
       } else if (existing.snapshotId !== binding.snapshotId) {
@@ -345,6 +381,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
           existing.sweepDocumentKey === binding.sweepDocumentKey;
         sweep = { ...binding, startedAtSequence: envelope.sequence,
           retiredSnapshotIds, eventIds: sameSweep ? new Set(existing.eventIds) : new Set(),
+          sawEventRecord: sameSweep && existing.sawEventRecord,
           completed: false };
         this.#assembler.resetSource(envelope.sourceId);
         this.#domSweepStates.set(envelope.sourceId, sweep);
@@ -363,7 +400,12 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
           this.#invalidateDomEvidence(envelope.sourceId, envelopeSourceEpoch);
           return [];
         }
-        sweep.eventIds.add(parsed.data.eventId);
+        const outsideFootballSocket = isVirtualFootballIdentity(parsed.data.sportId,
+          parsed.data.leagueName, parsed.data.teamNames);
+        if (!outsideFootballSocket) {
+          sweep.sawEventRecord = true;
+          if (parsed.data.markets.length > 0) sweep.eventIds.add(parsed.data.eventId);
+        }
         if (sweep.eventIds.size > 5_000) {
           this.#invalidateDomEvidence(envelope.sourceId, envelopeSourceEpoch);
           return [];
@@ -371,10 +413,31 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       }
       if (chunk.data.sweepComplete !== true) return [];
       sweep.completed = true;
-      this.#expectedEventIds.set(envelope.sourceId, {
+      const expectedEventIds: ExpectedEventSet = {
         sourceEpoch: sweep.sourceEpoch,
-        eventIds: new Set(sweep.eventIds)
-      });
+        eventIds: new Set(sweep.eventIds),
+        explicitEmptyProof: !sweep.sawEventRecord
+      };
+      this.#expectedEventIds.set(envelope.sourceId, expectedEventIds);
+      const pending = this.#currentStreams.get(envelope.sourceId);
+      if (pending !== undefined && !pending.proofReady &&
+        pending.sourceEpoch === expectedEventIds.sourceEpoch &&
+        (expectedEventIds.explicitEmptyProof || expectedEventIds.eventIds.size > 0)) {
+        pending.expectedEventIds = new Set(expectedEventIds.eventIds);
+        pending.explicitEmptyProof = expectedEventIds.explicitEmptyProof;
+        pending.proofReady = true;
+        for (const eventId of pending.records.keys()) {
+          if (!pending.expectedEventIds.has(eventId)) pending.records.delete(eventId);
+        }
+        if ([...pending.expectedEventIds].every((eventId) => pending.records.has(eventId))) {
+          const baseline = this.#catalogUpdate(envelope, pending, "BASELINE");
+          if (baseline !== null) {
+            pending.baselineEmitted = true;
+            pending.lastBaselineAtMs = envelope.observedAtMs;
+            return [baseline];
+          }
+        }
+      }
       return [];
     }
 
@@ -388,21 +451,15 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         const seenStreamIds = this.#seenStreamIds.get(lifecycleKey) ?? new Set<string>();
         const lastOpenSequence = this.#lastOpenSequences.get(lifecycleKey) ?? -1;
         if (seenStreamIds.has(streamId) || envelope.sequence <= lastOpenSequence) return [];
-        const expectedEventIds = this.#expectedEventIds.get(envelope.sourceId);
         const currentSourceEpoch = sourceEpoch(envelope);
+        if (!this.#acceptDomSourceEpoch(envelope.sourceId, currentSourceEpoch)) return [];
+        const expectedEventIds = this.#expectedEventIds.get(envelope.sourceId);
         const sweep = this.#domSweepStates.get(envelope.sourceId);
         const retired = this.#currentStreams.get(envelope.sourceId);
         const retiresCurrent = retired?.sourceEpoch === currentSourceEpoch && retired.streamId !== streamId;
         const proofReady = !(sweep?.sourceEpoch === currentSourceEpoch && !sweep.completed) &&
-          expectedEventIds !== undefined && expectedEventIds.sourceEpoch === currentSourceEpoch;
-        if (!proofReady) {
-          if (retiresCurrent) this.#currentStreams.delete(envelope.sourceId);
-          return retiresCurrent && retired.baselineEmitted
-            ? [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-                observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
-                reason: "PROVIDER_STREAM_GAP" }]
-            : [];
-        }
+          expectedEventIds !== undefined && expectedEventIds.sourceEpoch === currentSourceEpoch &&
+          (expectedEventIds.explicitEmptyProof || expectedEventIds.eventIds.size > 0);
         seenStreamIds.add(streamId);
         this.#seenStreamIds.set(lifecycleKey, seenStreamIds);
         this.#lastOpenSequences.set(lifecycleKey, envelope.sequence);
@@ -411,11 +468,21 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
           streamId,
           sourceEpoch: currentSourceEpoch,
           generation: generationIdentity(envelope, streamId),
-          expectedEventIds: new Set(expectedEventIds.eventIds),
+          expectedEventIds: new Set(proofReady ? expectedEventIds!.eventIds : []),
+          explicitEmptyProof: proofReady && expectedEventIds!.explicitEmptyProof,
           records: new Map(),
-          baselineEmitted: false
+          proofReady,
+          baselineEmitted: false,
+          lastBaselineAtMs: null
         };
         this.#currentStreams.set(envelope.sourceId, stream);
+        if (!proofReady) {
+          return retiresCurrent && retired.baselineEmitted
+            ? [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+                observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
+                reason: "PROVIDER_STREAM_GAP" }]
+            : [];
+        }
         if (stream.expectedEventIds.size > 0) {
           return retired?.sourceEpoch === currentSourceEpoch && retired.baselineEmitted
             ? [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
@@ -426,6 +493,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         const baseline = this.#catalogUpdate(envelope, stream, "BASELINE");
         if (baseline === null) return [];
         stream.baselineEmitted = true;
+        stream.lastBaselineAtMs = envelope.observedAtMs;
         return [baseline];
       }
       const current = this.#currentStreams.get(envelope.sourceId);
@@ -436,27 +504,80 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }
 
-    const current = this.#currentStreams.get(envelope.sourceId);
-    if (current === undefined || current.streamId !== streamId ||
+    let current = this.#currentStreams.get(envelope.sourceId);
+    if (current === undefined) {
+      const currentSourceEpoch = sourceEpoch(envelope);
+      if (!this.#acceptDomSourceEpoch(envelope.sourceId, currentSourceEpoch)) return [];
+      const lifecycleKey = sourceEpochKey(envelope);
+      const seenStreamIds = this.#seenStreamIds.get(lifecycleKey) ?? new Set<string>();
+      if (seenStreamIds.has(streamId)) return [];
+      const expectedEventIds = this.#expectedEventIds.get(envelope.sourceId);
+      const sweep = this.#domSweepStates.get(envelope.sourceId);
+      const proofReady = !(sweep?.sourceEpoch === currentSourceEpoch && !sweep.completed) &&
+        expectedEventIds !== undefined && expectedEventIds.sourceEpoch === currentSourceEpoch &&
+        (expectedEventIds.explicitEmptyProof || expectedEventIds.eventIds.size > 0);
+      seenStreamIds.add(streamId);
+      this.#seenStreamIds.set(lifecycleKey, seenStreamIds);
+      this.#lastOpenSequences.set(lifecycleKey, envelope.sequence);
+      current = {
+        streamId,
+        sourceEpoch: currentSourceEpoch,
+        generation: generationIdentity(envelope, streamId),
+        expectedEventIds: new Set(proofReady ? expectedEventIds!.eventIds : []),
+        explicitEmptyProof: proofReady && expectedEventIds!.explicitEmptyProof,
+        records: new Map(),
+        proofReady,
+        baselineEmitted: false,
+        lastBaselineAtMs: null
+      };
+      this.#currentStreams.set(envelope.sourceId, current);
+    }
+    if (current.streamId !== streamId ||
       current.sourceEpoch !== sourceEpoch(envelope)) return [];
     const event = this.#parsed.get(envelope);
     const incoming = event === null || event === undefined ? null : extractTsportFootballRecord(event);
     if (incoming === null) return [];
+    if (isVirtualFootballIdentity(undefined, incoming.leagueName, incoming.teamNames)) {
+      if (!current.proofReady || !current.explicitEmptyProof ||
+        current.expectedEventIds.size > 0) return [];
+      const baselineDue = !current.baselineEmitted || current.lastBaselineAtMs === null ||
+        envelope.observedAtMs - current.lastBaselineAtMs >= AUTHORITATIVE_BASELINE_REFRESH_MS;
+      if (!baselineDue) return [];
+      const baseline = this.#catalogUpdate(envelope, current, "BASELINE");
+      if (baseline === null) return [];
+      current.baselineEmitted = true;
+      current.lastBaselineAtMs = envelope.observedAtMs;
+      return [baseline];
+    }
+    if (!current.proofReady && !current.records.has(incoming.eventId) &&
+      current.records.size >= MAX_PENDING_PRE_PROOF_RECORDS) {
+      const lifecycleKey = sourceEpochKey(envelope);
+      const seenStreamIds = this.#seenStreamIds.get(lifecycleKey);
+      seenStreamIds?.delete(streamId);
+      if (seenStreamIds?.size === 0) this.#seenStreamIds.delete(lifecycleKey);
+      this.#lastOpenSequences.delete(lifecycleKey);
+      this.#currentStreams.delete(envelope.sourceId);
+      return [];
+    }
     current.records.set(incoming.eventId, {
       record: incoming,
       seenAtMs: envelope.observedAtMs,
       receivedMonotonicMs: envelope.receivedMonotonicMs,
       sequence: envelope.sequence
     });
+    if (!current.proofReady) return [];
     if (!current.baselineEmitted) {
       for (const expectedEventId of current.expectedEventIds) {
         if (!current.records.has(expectedEventId)) return [];
       }
     }
-    const evidenceMode = current.baselineEmitted ? "DELTA" : "BASELINE";
+    const baselineDue = !current.baselineEmitted || current.lastBaselineAtMs === null ||
+      envelope.observedAtMs - current.lastBaselineAtMs >= AUTHORITATIVE_BASELINE_REFRESH_MS;
+    const evidenceMode = baselineDue ? "BASELINE" : "DELTA";
     const update = this.#catalogUpdate(envelope, current, evidenceMode);
     if (update === null) return [];
     current.baselineEmitted = true;
+    if (evidenceMode === "BASELINE") current.lastBaselineAtMs = envelope.observedAtMs;
     return [update];
   }
 }

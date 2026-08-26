@@ -99,7 +99,11 @@ export class ProviderFeedController {
       this.#transition("SOFT_RECOVERY", "RECOVERY_SOFT");
       return this.#requestRecovery("SOFT", nowMs);
     }
-    if (this.#state !== "SOFT_RECOVERY" || this.#authorityAgeMs(nowMs) <= this.#policy.hardRecoveryAfterMs ||
+    // HARD_RECOVERY is not a resting place. A hard stage that fails leaves the
+    // source dead, and only another request can rebuild it, so keep asking once
+    // per cooldown instead of stranding the provider until the API restarts.
+    if ((this.#state !== "SOFT_RECOVERY" && this.#state !== "HARD_RECOVERY") ||
+      this.#authorityAgeMs(nowMs) <= this.#policy.hardRecoveryAfterMs ||
       !this.#canRequestRecovery(nowMs)) return null;
     this.#recoveryStage = "HARD";
     this.#transition("HARD_RECOVERY", "RECOVERY_HARD");
@@ -221,7 +225,7 @@ export class ProviderFeedController {
 
   #invalidate(evidence: Extract<ProviderFeedEvidence, { readonly kind: "INVALIDATE" }>): FeedDecision {
     const recoverableStreamFault = evidence.reason === "PROVIDER_STREAM_GAP" ||
-      evidence.reason === "PROVIDER_STREAM_CLOSED";
+      evidence.reason === "PROVIDER_STREAM_CLOSED" || evidence.reason === "SCHEMA_CHANGED";
     if (!recoverableStreamFault) {
       // Older retirement history is fenced by the registry connection owner
       // and the data plane's account-scoped epoch high-watermark. The
@@ -238,8 +242,7 @@ export class ProviderFeedController {
     this.#activeGeneration = null;
     this.#recoveryStage = "NONE";
     this.#lastRecoveryRequestedAtMs = null;
-    const next = evidence.reason === "SCHEMA_CHANGED" ? "ACTION_REQUIRED" :
-      evidence.reason === "SOURCE_REPLACED" ? "SYNCING" : "STALLED";
+    const next = evidence.reason === "SOURCE_REPLACED" ? "SYNCING" : "STALLED";
     const reason = evidence.reason === "SOURCE_REPLACED" ? "BASELINE_REQUIRED" : evidence.reason;
     this.#transition(next, reason);
     return { accepted: true, publish: this.#latestCatalog === null ? null :

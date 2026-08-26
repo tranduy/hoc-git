@@ -122,9 +122,12 @@ export class SourceTabRecovery {
 
     const recentlyClosed = await this.#options.recentlyClosed?.() ?? [];
     for (const session of recentlyClosed) {
-      const tabs = [session.tab, ...(session.window?.tabs ?? [])]
-        .filter((tab): tab is TabDescriptor => tab !== undefined);
-      if (!tabs.some((tab) => recognizeLobbyTab(tab)?.lobby === lobby) || !session.sessionId || !this.#options.restore) continue;
+      // Restoring a Chrome window revives every tab in that session, including
+      // tabs unrelated to this provider. Only a single-tab session is safe to
+      // recover; window sessions must fall through to the exact remembered or
+      // canonical provider launch below.
+      if (session.window !== undefined || recognizeLobbyTab(session.tab ?? {})?.lobby !== lobby ||
+        !session.sessionId || !this.#options.restore) continue;
       const restored = await this.#waitForLobby(await this.#options.restore(session.sessionId), lobby);
       await this.#options.attach(restored);
       return;

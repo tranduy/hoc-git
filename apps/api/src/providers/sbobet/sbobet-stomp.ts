@@ -6,13 +6,26 @@ export interface SbobetStompProviderReceipt {
   readonly body: unknown;
 }
 
-function sockJsStrings(payload: string): readonly string[] {
+function sockJsStrings(payload: string): readonly string[] | null {
   const candidate = payload.startsWith("a[") ? payload.slice(1) : payload.startsWith("[") ? payload : null;
-  if (candidate === null) return [];
+  if (candidate === null) return null;
   try {
     const parsed = JSON.parse(candidate) as unknown;
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
   } catch { return []; }
+}
+
+type StompTransport = "RAW" | "SOCKJS";
+
+function stompFragments(payload: string, pendingTransport: StompTransport | null): {
+  readonly fragments: readonly string[]; readonly transport: StompTransport
+} | null {
+  if (pendingTransport === "RAW") return { fragments: [payload], transport: "RAW" };
+  const sockJs = sockJsStrings(payload);
+  if (sockJs !== null) return { fragments: sockJs, transport: "SOCKJS" };
+  if (pendingTransport === "SOCKJS") return { fragments: [payload], transport: "SOCKJS" };
+  return /^(?:CONNECTED|MESSAGE|RECEIPT|ERROR)\r?\n/u.test(payload)
+    ? { fragments: [payload], transport: "RAW" } : null;
 }
 
 function headers(value: string): Readonly<Record<string, string>> {
@@ -33,16 +46,22 @@ function receiptSequence(messageId: string | null): number | null {
 
 export class SbobetStompReceiptDecoder {
   #pending = "";
+  #pendingTransport: StompTransport | null = null;
 
-  reset(): void { this.#pending = ""; }
+  reset(): void {
+    this.#pending = "";
+    this.#pendingTransport = null;
+  }
 
   push(payload: string): readonly SbobetStompProviderReceipt[] {
-    const strings = sockJsStrings(payload);
+    const input = stompFragments(payload, this.#pendingTransport);
+    if (input === null) return [];
     const output: SbobetStompProviderReceipt[] = [];
-    for (const fragment of strings) {
-      if (fragment.trim() === "") continue;
+    for (const fragment of input.fragments) {
+      if (this.#pending === "" && fragment.trim() === "") continue;
+      this.#pendingTransport = input.transport;
       this.#pending += fragment;
-      if (this.#pending.length > 4_000_000) { this.#pending = ""; continue; }
+      if (this.#pending.length > 4_000_000) { this.reset(); continue; }
       let terminator = this.#pending.indexOf("\0");
       while (terminator >= 0) {
         const frame = this.#pending.slice(0, terminator);
@@ -67,6 +86,7 @@ export class SbobetStompReceiptDecoder {
           messageId, receiptSequence: receiptSequence(messageId), body });
       }
     }
+    if (this.#pending === "") this.#pendingTransport = null;
     return output;
   }
 }

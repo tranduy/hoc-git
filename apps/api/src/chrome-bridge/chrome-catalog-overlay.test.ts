@@ -53,4 +53,18 @@ describe("createChromeCatalogOverlay", () => {
     await expect(overlay.reader.read(imId)).resolves.toBe(chromeCatalog);
     expect(fallbackRead).not.toHaveBeenCalled();
   });
+
+  it("uses each Chrome provider evidence cadence as its public catalog freshness window", () => {
+    const overlay = createChromeCatalogOverlay({
+      sources: { listStatuses: async () => [] }, reader: { read: async () => Promise.reject(new Error("unused")) },
+      chrome: { owns: () => true, read: async () => Promise.reject(new Error("unused")),
+        overlayStatuses: async (values) => values }
+    });
+    const freshnessFor = (overlay.reader as typeof overlay.reader & {
+      snapshotFreshnessMaxAgeMsFor?: (accountId: string) => number;
+    }).snapshotFreshnessMaxAgeMsFor;
+
+    expect(freshnessFor?.("catalog-source:SABA:FOOTBALL")).toBe(75_000);
+    expect(freshnessFor?.("catalog-source:BTI:FOOTBALL")).toBe(45_000);
+  });
 });

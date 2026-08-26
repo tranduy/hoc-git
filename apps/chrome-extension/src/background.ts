@@ -90,7 +90,9 @@ const snapshotPoller = new CmdSnapshotPoller({
   refreshCatalog: async (source) => source.lobby === "KSPORT"
     ? observer.maintainKsportFeed(source)
     : observer.refreshCatalog(source),
-  recoverCmdCatalog: async (source) => observer.recoverCmdCatalog(source)
+  recoverCmdCatalog: async (source) => observer.recoverCmdCatalog(source),
+  reportWorkHealth: async (source, health) => observer.emitWorkHealth(source, health),
+  log: (message) => console.warn(message)
 });
 snapshotPoller.start();
 
@@ -377,10 +379,12 @@ async function reattachPreferredTabs(): Promise<readonly string[]> {
       tabId: attached.tabId,
       sourceId: `chrome:${attached.lobby}:${attached.tabId}`
     };
-    await observer.start(source);
-    await tabBootstrapper.ensure(attached);
-    await sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
-    sourceIds.push(source.sourceId);
+    try {
+      await observer.start(source);
+      await tabBootstrapper.ensure(attached);
+      await sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
+      sourceIds.push(source.sourceId);
+    } catch { /* one unavailable tab must not block the other preferred lobbies */ }
   }
   return sourceIds;
 }

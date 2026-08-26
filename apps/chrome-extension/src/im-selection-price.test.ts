@@ -46,6 +46,27 @@ describe("IM exact current selection price", () => {
     await page.close();
   });
 
+  it("reads a first-half handicap selection when the canonical line is negative", async () => {
+    const page = await openPage();
+    await page.evaluate(() => {
+      sessionStorage.setItem("token", "session-token");
+      window.addEventListener("helo", ((event: CustomEvent) => {
+        window.dispatchEvent(new CustomEvent(`halo_${event.detail.c}`, { detail: "signed" }));
+      }) as EventListener);
+    });
+    await page.route("**/api/EventV6/GetSE", async (route) => route.fulfill({ contentType: "application/json",
+      body: JSON.stringify({ StatusCode: 100, sel: [{
+        eid: 112738921, htn: "KaPa", atn: "JIPPO", mls: [{ mi: 2503913473, bti: 1, gp: 2, ws: [
+          { wsi: 32394906714, si: 2, hdp: -0.25, dih: "-0/0.5", o: 0.84 }
+        ] }]
+      }] }) }));
+
+    await expect(page.evaluate(buildImExactSelectionPriceExpression({ ...identity,
+      marketType: "FH_AH", scope: "FIRST_HALF", line: "-0.25" }))).resolves.toEqual(
+      expect.objectContaining({ ok: true, rawOdds: "0.84", method: "IN_PAGE_FETCH" }));
+    await page.close();
+  });
+
   it("never clicks or requests navigation when the selection is absent", async () => {
     const page = await openPage();
     await page.setContent(`<button id="event-row">KaPa vs JIPPO</button>`);

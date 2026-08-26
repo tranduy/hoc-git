@@ -87,7 +87,7 @@ function serializedStorageCalls(storage: ReturnType<typeof createChromeHarness>[
   ]);
 }
 
-function mockNetworkObserver(): void {
+function mockNetworkObserver(start = vi.fn(async (_source: { readonly tabId: number }) => undefined)) {
   class NetworkObserver {
     beginSourceEpoch = vi.fn();
     captureCmdSnapshot = vi.fn(async () => undefined);
@@ -105,10 +105,11 @@ function mockNetworkObserver(): void {
     recoverCmdCatalog = vi.fn(async () => undefined);
     refreshCatalog = vi.fn(async () => undefined);
     releaseTab = vi.fn();
-    start = vi.fn(async () => undefined);
+    start = start;
     stop = vi.fn(async () => undefined);
   }
   vi.doMock("./network-observer.js", () => ({ NetworkObserver }));
+  return start;
 }
 
 describe("background source launch memory", () => {
@@ -161,5 +162,22 @@ describe("background source launch memory", () => {
     expect(harness.storage.session.set).not.toHaveBeenCalled();
     expect(harness.storage.session.remove).not.toHaveBeenCalled();
     expect(serializedStorageCalls(harness.storage)).not.toContain(signedUrl);
+  });
+
+  it("continues reattaching preferred tabs after one observer startup fails", async () => {
+    const harness = createChromeHarness("https://imsports.directsb.net/live");
+    harness.api.tabs.query.mockResolvedValue([
+      { id: 7, url: "https://imsports.directsb.net/live", title: "IM" },
+      { id: 8, url: "https://prod20091.fxf774.com/vi/asian-view/today", title: "BTI" }
+    ]);
+    vi.stubGlobal("chrome", harness.api);
+    const start = mockNetworkObserver(vi.fn(async (source: { readonly tabId: number }) => {
+      if (source.tabId === 7) throw new Error("frame-command-timeout");
+    }));
+
+    await import("./background.js");
+    await vi.advanceTimersByTimeAsync(25);
+
+    expect(start.mock.calls.map(([source]) => source.tabId)).toEqual([7, 8]);
   });
 });
