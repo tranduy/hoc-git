@@ -268,8 +268,11 @@ describe("five-provider shared runtime wiring", () => {
       requestId: "catalog", response: { opcode: 1, payloadData: ksportSubscribe("live") }
     }, ownerSession);
 
+    // A repeated subscription is no longer a failure: it rolls the attempt into
+    // a new generation. A malformed outbound envelope still is, and that is the
+    // case this reconnect path exists for.
     await observer.handleEvent(source, "Network.webSocketFrameSent", {
-      requestId: "catalog", response: { opcode: 1, payloadData: ksportSubscribe("live") }
+      requestId: "catalog", response: { opcode: 1, payloadData: '["SUBSCRIBE\nid:subSportBookLive' }
     }, ownerSession);
 
     await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method]) =>

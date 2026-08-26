@@ -107,6 +107,13 @@ interface AccountState {
     readonly stompFrames: number;
     readonly stompMessages: number;
     readonly stompPartitionRejected: number;
+    readonly stompPendingChars: number;
+    readonly stompCommandFragments: number;
+    readonly stompFragments: number;
+    readonly destLiveLike: number;
+    readonly destTodayLike: number;
+    readonly destSportsLike: number;
+    readonly subSportLike: number;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -369,7 +376,10 @@ export class PipelineTelemetry {
         framesNotActiveStream?: unknown; framesDecoderFailed?: unknown;
         sockjsOpen?: unknown; sockjsHeartbeat?: unknown; sockjsArray?: unknown;
         sockjsClose?: unknown; sockjsOther?: unknown; decoderFailCode?: unknown;
-        stompFrames?: unknown; stompMessages?: unknown; stompPartitionRejected?: unknown };
+        stompFrames?: unknown; stompMessages?: unknown; stompPartitionRejected?: unknown;
+        stompPendingChars?: unknown; stompCommandFragments?: unknown; stompFragments?: unknown;
+        destLiveLike?: unknown; destTodayLike?: unknown; destSportsLike?: unknown;
+        subSportLike?: unknown };
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
@@ -400,7 +410,14 @@ export class PipelineTelemetry {
           decoderFailCode: failCode(value.decoderFailCode),
           stompFrames: boundedCounter(value.stompFrames),
           stompMessages: boundedCounter(value.stompMessages),
-          stompPartitionRejected: boundedCounter(value.stompPartitionRejected)
+          stompPartitionRejected: boundedCounter(value.stompPartitionRejected),
+          stompPendingChars: boundedCounter(value.stompPendingChars),
+          stompCommandFragments: boundedCounter(value.stompCommandFragments),
+          stompFragments: boundedCounter(value.stompFragments),
+          destLiveLike: boundedCounter(value.destLiveLike),
+          destTodayLike: boundedCounter(value.destTodayLike),
+          destSportsLike: boundedCounter(value.destSportsLike),
+          subSportLike: boundedCounter(value.subSportLike)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }

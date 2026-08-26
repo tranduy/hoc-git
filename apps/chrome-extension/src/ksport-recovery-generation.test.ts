@@ -222,17 +222,19 @@ describe("KsportRecoveryGenerationTracker", () => {
     expect(tracker.push(receipt("live", 200, true))).toEqual([]);
   });
 
-  it("fails closed instead of coalescing an overlapping retry into the prior attempt", () => {
+  it("never coalesces an overlapping retry into the prior attempt", () => {
     const tracker = new KsportRecoveryGenerationTracker();
     tracker.push(receipt("live", 100, true));
     tracker.push(receipt("today", 104, true));
     expect(tracker.observeSent(subscribe("live"))).toBe(2);
     tracker.push(receipt("live", 200, true));
 
-    expect(tracker.observeSent(subscribe("live"))).toBeNull();
-    expect(tracker.failed).toBe(true);
-    expect(tracker.observeSent(subscribe("today"))).toBeNull();
-    expect(tracker.push(receipt("today", 204, true))).toEqual([]);
+    // The retry gets an ordinal of its own so the retired attempt's frames stay
+    // separable. Reusing generation 2 would mix them; failing outright kills the
+    // decoder for the life of the socket, which is what left SBOBET dark.
+    const retry = tracker.observeSent(subscribe("live"));
+    expect(retry).toBe(3);
+    expect(tracker.failed).toBe(false);
   });
 
   it("suppresses SockJS transport noise without poisoning the next baseline receipt", () => {
@@ -410,5 +412,27 @@ describe("KsportRecoveryGenerationTracker", () => {
     expect(tracker.observeSent('["SUBSCRIBE\\nid:subSportBookLive')).toBeNull();
     expect(tracker.failed).toBe(true);
     expect(tracker.observeSent(subscribe("live"))).toBeNull();
+  });
+});
+
+describe("a repeated subscription must not kill the decoder", () => {
+  it("retires the overlapping attempt into a new generation and keeps decoding", () => {
+    // Measured 2026-08-26 on the live KSPORT socket: the page re-subscribed to a
+    // partition before the previous attempt completed, the tracker failed with
+    // ATTEMPT_UNAVAILABLE, and every later frame was dropped by the failed
+    // latch. 30 SockJS frames produced 1 STOMP fragment and no catalog at all.
+    const tracker = new KsportRecoveryGenerationTracker();
+
+    const first = tracker.observeSent(subscribe("live"));
+    expect(first).not.toBeNull();
+
+    const second = tracker.observeSent(subscribe("live"));
+
+    expect(tracker.failed).toBe(false);
+    expect(second).not.toBeNull();
+    expect(second).toBeGreaterThan(first!);
+    // The decoder must still be alive for the frames that follow the retry.
+    tracker.push(receipt("live", 100, true));
+    expect(tracker.failed).toBe(false);
   });
 });

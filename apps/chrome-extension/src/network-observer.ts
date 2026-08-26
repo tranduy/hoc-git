@@ -213,6 +213,13 @@ interface WsAttachDiagnosticState {
   stompFrames: number;
   stompMessages: number;
   stompPartitionRejected: number;
+  stompPendingChars: number;
+  stompCommandFragments: number;
+  stompFragments: number;
+  destLiveLike: number;
+  destTodayLike: number;
+  destSportsLike: number;
+  subSportLike: number;
 }
 
 interface PreexistingSocketReconnectState {
@@ -2213,7 +2220,9 @@ export class NetworkObserver {
       framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
       framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
       sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
-      stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0
+      stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0,
+      stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
+      destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2613,7 +2622,12 @@ export class NetworkObserver {
         sockjsArray: diagnostic.sockjsArray, sockjsClose: diagnostic.sockjsClose,
         sockjsOther: diagnostic.sockjsOther, decoderFailCode: diagnostic.decoderFailCode,
         stompFrames: diagnostic.stompFrames, stompMessages: diagnostic.stompMessages,
-        stompPartitionRejected: diagnostic.stompPartitionRejected })
+        stompPartitionRejected: diagnostic.stompPartitionRejected,
+        stompPendingChars: diagnostic.stompPendingChars,
+        stompCommandFragments: diagnostic.stompCommandFragments,
+        stompFragments: diagnostic.stompFragments, destLiveLike: diagnostic.destLiveLike,
+        destTodayLike: diagnostic.destTodayLike, destSportsLike: diagnostic.destSportsLike,
+        subSportLike: diagnostic.subSportLike })
     });
   }
 
@@ -3043,6 +3057,13 @@ export class NetworkObserver {
         frameDiagnostic.stompFrames = shape.stompFrames;
         frameDiagnostic.stompMessages = shape.stompMessages;
         frameDiagnostic.stompPartitionRejected = shape.partitionRejected;
+        frameDiagnostic.stompPendingChars = shape.pendingChars;
+        frameDiagnostic.stompCommandFragments = shape.commandFragments;
+        frameDiagnostic.stompFragments = shape.fragments;
+        frameDiagnostic.destLiveLike = shape.destLiveLike;
+        frameDiagnostic.destTodayLike = shape.destTodayLike;
+        frameDiagnostic.destSportsLike = shape.destSportsLike;
+        frameDiagnostic.subSportLike = shape.subSportLike;
         if (ksportRecovery.failed && ownsIdentity()) {
           this.#scheduleFailedKsportSocketRecovery(key, socket);
         }

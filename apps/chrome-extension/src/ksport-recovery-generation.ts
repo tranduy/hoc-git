@@ -56,6 +56,12 @@ export class KsportRecoveryGenerationTracker {
   #stompFrames = 0;
   #stompMessages = 0;
   #partitionRejected = 0;
+  #commandFragments = 0;
+  #fragments = 0;
+  #destLiveLike = 0;
+  #destTodayLike = 0;
+  #destSportsLike = 0;
+  #subSportLike = 0;
   #failReason: "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" | "PENDING_OVERFLOW" |
     "SENT_PENDING_OVERFLOW" | "SUBSCRIBE_STRADDLE" | "ATTEMPT_UNAVAILABLE" |
     "DELTA_BUFFER_FULL" | "EVIDENCE_VERSION_EXHAUSTED" | "OTHER" = "NONE";
@@ -78,9 +84,15 @@ export class KsportRecoveryGenerationTracker {
    * refused. Never records a destination, header or body.
    */
   get frameShape(): { readonly stompFrames: number; readonly stompMessages: number;
-    readonly partitionRejected: number } {
+    readonly partitionRejected: number; readonly pendingChars: number;
+    readonly commandFragments: number; readonly fragments: number;
+    readonly destLiveLike: number; readonly destTodayLike: number;
+    readonly destSportsLike: number; readonly subSportLike: number } {
     return { stompFrames: this.#stompFrames, stompMessages: this.#stompMessages,
-      partitionRejected: this.#partitionRejected };
+      partitionRejected: this.#partitionRejected, pendingChars: this.#pendingStomp.length,
+      commandFragments: this.#commandFragments, fragments: this.#fragments,
+      destLiveLike: this.#destLiveLike, destTodayLike: this.#destTodayLike,
+      destSportsLike: this.#destSportsLike, subSportLike: this.#subSportLike };
   }
   /** Why the decoder latched, so the fault is named rather than inferred. */
   get failReason(): "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" | "PENDING_OVERFLOW" |
@@ -172,6 +184,8 @@ export class KsportRecoveryGenerationTracker {
       return [];
     }
     for (const fragment of fragments) {
+      this.#fragments += 1;
+      if (isRawStompStart(fragment, "RECEIVED")) this.#commandFragments += 1;
       const appended = appendStompFragment(this.#pendingStomp, fragment);
       this.#pendingStomp = appended.pending;
       if (this.#pendingStomp.length > this.#maxPendingChars) {
@@ -185,7 +199,20 @@ export class KsportRecoveryGenerationTracker {
           frame.slice(0, separator).split(String.fromCharCode(10))[0]?.trim() === "MESSAGE";
         if (isMessage) this.#stompMessages += 1;
         const receipt = providerReceipt(frame);
-        if (receipt === null) { if (isMessage) this.#partitionRejected += 1; continue; }
+        if (receipt === null) {
+          if (isMessage) {
+            this.#partitionRejected += 1;
+            // Shape only: which known path segment the destination carries, so a
+            // renamed topic can be told from an unrelated stream. The value is
+            // never recorded.
+            const header = separator < 0 ? "" : frame.slice(0, separator);
+            if (/\/live\//u.test(header)) this.#destLiveLike += 1;
+            if (/\/today\//u.test(header)) this.#destTodayLike += 1;
+            if (/\/sports\//u.test(header)) this.#destSportsLike += 1;
+            if (/subscription:\s*subSport/u.test(header)) this.#subSportLike += 1;
+          }
+          continue;
+        }
         this.#pendingReceipts.push(receipt);
       }
     }
@@ -301,11 +328,31 @@ export class KsportRecoveryGenerationTracker {
     // Multiple partition subscriptions are one attempt. During initial socket
     // bootstrap they all remain generation 1; during replacement they extend
     // the already-open explicit attempt without allocating another ordinal.
-    // Repeating the same partition before completion is a distinct overlapping
-    // retry whose old/current frames cannot be separated on this socket.
-    if (this.#state.attemptPartitions.has(partition)) return null;
-    this.#state.attemptPartitions.add(partition);
-    return this.#state.generation;
+    if (!this.#state.attemptPartitions.has(partition)) {
+      this.#state.attemptPartitions.add(partition);
+      return this.#state.generation;
+    }
+    // Repeating the same partition before completion is an overlapping retry
+    // whose old and current frames cannot be separated on this socket. Failing
+    // here latched the decoder for the life of the socket, and the provider
+    // then produced no catalog at all. Retire the attempt into a new generation
+    // and drop everything pending instead: old frames belong to the retired
+    // ordinal and are discarded, new frames are attributed to the new one.
+    if (this.#state.generation >= Number.MAX_SAFE_INTEGER) return null;
+    const retry = cloneState(this.#state);
+    retry.previousGeneration = retry.generation;
+    retry.generation += 1;
+    retry.complete = false;
+    retry.fullPartitions.clear();
+    retry.attemptPartitions.clear();
+    retry.attemptPartitions.add(partition);
+    this.#state = retry;
+    this.#dropPending();
+    this.#pendingStomp = "";
+    this.#catalogPendingFullOrders.clear();
+    this.#catalogPendingEventKeys.clear();
+    this.#catalogPendingMarketHighWatermarks.clear();
+    return retry.generation;
   }
 
   #dropPending(): void {
