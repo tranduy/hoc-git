@@ -223,7 +223,13 @@ describe("Chrome bridge route", () => {
     await app.close();
   });
 
-  it("closes a sequence-gapped connection so the client can reconnect and replay", async () => {
+  it("keeps every other book connected when one source reports a sequence gap", async () => {
+    // Measured 2026-08-26 over a ninety-minute soak: all six books vanished
+    // together within seconds of each other, repeatedly, and the best book was
+    // usable 24% of the time. One source's gap was closing the shared socket
+    // and taking the other five down with it. The client already drops just the
+    // rejected source and republishes its snapshot, so the reject alone is the
+    // whole recovery.
     const { app } = await appWithRoute();
     const socket = await app.injectWS("/api/chrome-bridge", {
       headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
@@ -232,12 +238,18 @@ describe("Chrome bridge route", () => {
     socket.send(JSON.stringify(validEnvelope));
     await nextMessage(socket);
     const rejected = nextMessage(socket);
-    const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
+    let closed = false;
+    socket.once("close", () => { closed = true; });
 
     socket.send(JSON.stringify({ ...validEnvelope, sequence: 2 }));
-
     await expect(rejected).resolves.toMatchObject({ kind: "REJECT", reason: "SEQUENCE_GAP" });
-    await expect(closed).resolves.toBeUndefined();
+
+    const healthy = nextMessage(socket);
+    socket.send(JSON.stringify({ ...validEnvelope, lobby: "BTI", tabId: 9,
+      sourceId: "chrome:BTI:9", sequence: 0 }));
+
+    await expect(healthy).resolves.toMatchObject({ kind: "ACK", sourceId: "chrome:BTI:9" });
+    expect(closed).toBe(false);
     await app.close();
   });
 

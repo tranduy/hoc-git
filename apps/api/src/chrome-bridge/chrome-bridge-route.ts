@@ -141,7 +141,11 @@ export function registerChromeBridgeRoute(
       });
       const control = result.control;
       socket.send(JSON.stringify(control), () => {
-        if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") { socket.close(); return; }
+        // A gap belongs to one source, but this socket carries all six. Closing
+        // it took every other book down too, and the client already drops just
+        // the rejected source and republishes its authoritative snapshot, so
+        // the reject alone is the whole recovery.
+        if (control.kind === "REJECT" && control.reason === "SEQUENCE_GAP") return;
         const observation = result.context?.authorityObservation;
         if (control.kind === "ACK" && observation?.disposition === "CANDIDATE" &&
           requestedSnapshots.get(observation.token.accountId) !== observation.token.nonce) {
