@@ -2216,6 +2216,74 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls.every(([message]) => message.request.streamId === "2")).toBe(true);
   });
 
+  describe("SABA silent-socket recovery", () => {
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
+    const frame = `42${JSON.stringify(["m", "b11", [[0, "o", 2, 1, 1, 0]], 1])}`;
+
+    function setup(now: { value: number }) {
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+        if (method === "Runtime.evaluate" && String(params?.expression).includes("WebSocket.prototype")) {
+          return { result: { objectId: "prototype-1" } };
+        }
+        if (method === "Runtime.queryObjects") return { objects: { objectId: "instances-1" } };
+        if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+        return {};
+      });
+      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+        now: () => now.value, monotonicNow: () => now.value });
+      return { sendCommand, observer };
+    }
+
+    const reconnects = (sendCommand: ReturnType<typeof vi.fn>) => sendCommand.mock.calls.filter(([, method]) =>
+      method === "Runtime.callFunctionOn").length;
+
+    it("asks the page to reconnect after a minute without catalog frames, at most once per minute", async () => {
+      const now = { value: 1_000 };
+      const { sendCommand, observer } = setup(now);
+      await observer.handleEvent(saba, "Network.webSocketCreated", { requestId: "ws-1",
+        url: "wss://push.example/socket.io/" });
+      await observer.handleEvent(saba, "Network.webSocketFrameReceived", { requestId: "ws-1",
+        response: { opcode: 1, payloadData: frame } });
+      sendCommand.mockClear();
+
+      now.value = 30_000;
+      await observer.pollSabaDomChanges(saba, "push.example");
+      expect(reconnects(sendCommand)).toBe(0);
+
+      now.value = 62_000;
+      await observer.pollSabaDomChanges(saba, "push.example");
+      expect(reconnects(sendCommand)).toBe(1);
+
+      now.value = 90_000;
+      await observer.pollSabaDomChanges(saba, "push.example");
+      expect(reconnects(sendCommand)).toBe(1);
+
+      now.value = 125_000;
+      await observer.pollSabaDomChanges(saba, "push.example");
+      expect(reconnects(sendCommand)).toBe(2);
+    });
+
+    it("does not reconnect while catalog frames keep flowing or before the first frame", async () => {
+      const now = { value: 1_000 };
+      const { sendCommand, observer } = setup(now);
+      // No frame ever seen: the tab may still be bootstrapping.
+      now.value = 200_000;
+      await observer.pollSabaDomChanges(saba, "push.example");
+      expect(reconnects(sendCommand)).toBe(0);
+
+      await observer.handleEvent(saba, "Network.webSocketCreated", { requestId: "ws-1",
+        url: "wss://push.example/socket.io/" });
+      await observer.handleEvent(saba, "Network.webSocketFrameReceived", { requestId: "ws-1",
+        response: { opcode: 1, payloadData: frame } });
+      now.value = 230_000;
+      await observer.handleEvent(saba, "Network.webSocketFrameReceived", { requestId: "ws-1",
+        response: { opcode: 1, payloadData: `42${JSON.stringify(["m", "b11", [[0, "o", 2, 1, 1, 1]], 2])}` } });
+      now.value = 260_000;
+      await observer.pollSabaDomChanges(saba, "push.example");
+      expect(reconnects(sendCommand)).toBe(0);
+    });
+  });
+
   describe("KSPORT periodic maintenance", () => {
     const url = "wss://d42.sb21.net/sport/538/session/websocket";
     const liveFrame = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\nsubscription:subSportBookLive\n\n{}\u0000";

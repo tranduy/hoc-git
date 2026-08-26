@@ -589,6 +589,8 @@ export class NetworkObserver {
   readonly #ksportMaintenanceRecoveryAtMs = new Map<string, number>();
   readonly #ksportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
+  readonly #sabaCatalogFrameAtMs = new Map<string, number>();
+  readonly #sabaSilentSocketRecoveryAtMs = new Map<string, number>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
     readonly headers: Readonly<Record<string, string>> }>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
@@ -753,6 +755,8 @@ export class NetworkObserver {
       this.#ksportMaintenanceRecoveryAtMs.delete(sourceId);
       this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
+      this.#sabaCatalogFrameAtMs.delete(sourceId);
+      this.#sabaSilentSocketRecoveryAtMs.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
       this.#imCatalogRefreshes.delete(sourceId);
@@ -816,6 +820,18 @@ export class NetworkObserver {
 
   async pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
     if (source.lobby !== "SABA" || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    // SABA's Socket.IO connection can die without a close event; the DOM
+    // fallback then only covers the visible viewport and cannot replace the
+    // complete catalog. Once the socket has been silent for a full minute,
+    // ask the page to reconnect it (bounded to once per minute); a fresh
+    // reset/done baseline restores full coverage without reloading the tab.
+    const nowMs = this.#now();
+    const lastFrameAtMs = this.#sabaCatalogFrameAtMs.get(source.sourceId);
+    if (lastFrameAtMs !== undefined && nowMs - lastFrameAtMs > 60_000 &&
+      nowMs - (this.#sabaSilentSocketRecoveryAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) > 60_000) {
+      this.#sabaSilentSocketRecoveryAtMs.set(source.sourceId, nowMs);
+      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+    }
     const evaluations: unknown[] = [];
     evaluations.push(await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
       expression: SABA_ODDS_MUTATION_EXPRESSION, returnByValue: true, awaitPromise: false
@@ -2154,6 +2170,7 @@ export class NetworkObserver {
           !Array.isArray(payload[2])) return;
         partition = `${streamId}:${payload[1]}`;
         if (source.lobby === "SABA") {
+          this.#sabaCatalogFrameAtMs.set(source.sourceId, clocks.observedAtMs);
           startsBaseline = payload[2].some((row) => Array.isArray(row) &&
             (row[1] === "reset" || row[1] === "empty"));
           completesBaseline = payload[2].some((row) => Array.isArray(row) && row[1] === "done");
