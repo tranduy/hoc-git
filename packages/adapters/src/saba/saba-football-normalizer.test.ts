@@ -194,3 +194,37 @@ describe("normalizeSabaFootballRecords", () => {
     ]);
   });
 });
+
+describe("SABA live classification requires a started fixture", () => {
+  it("keeps a live-group match pre-match until its own kickoff has passed", () => {
+    // Measured 2026-08-26: SABA published 92 live-group matches with no period,
+    // clock or score, and CMD gave 83 of them a kickoff still six hours away.
+    // The live group alone is not evidence that a fixture has started, and a
+    // live event can never be compared against another book's pre-match one.
+    const kickoffSeconds = Math.floor(options.observedAtMs / 1_000) + 6 * 60 * 60;
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "Japan Emperor Cup", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Sagan Tosu", ateamnameen: "Kataller Toyama",
+        kickofftime: kickoffSeconds, marketid: "L", sporttype: 1 },
+      { type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }
+    ], options);
+
+    expect(normalized.events[0]).toMatchObject({ isLive: false, liveState: null });
+    expect(normalized.quotes[0]).toMatchObject({ isLive: false });
+  });
+
+  it("still reports a live-group match as live once its kickoff has passed", () => {
+    const kickoffSeconds = Math.floor(options.observedAtMs / 1_000) - 30 * 60;
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: kickoffSeconds, marketid: "L", sporttype: 1 },
+      { type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }
+    ], options);
+
+    expect(normalized.events[0]).toMatchObject({ isLive: true });
+    expect(normalized.quotes[0]).toMatchObject({ isLive: true });
+  });
+});

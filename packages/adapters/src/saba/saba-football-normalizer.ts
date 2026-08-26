@@ -143,6 +143,7 @@ export function normalizeSabaFootballRecords(
 
   const acceptedMatches = new Set<string>();
   const classifiedMatches = new Map<string, ClassifiedSabaEvent>();
+  const liveByMatchId = new Map<string, boolean>();
   for (const [matchId, match] of matches) {
     const leagueId = id(match.leagueid);
     const participantA = text(match.hteamnameen);
@@ -162,7 +163,11 @@ export function normalizeSabaFootballRecords(
       diagnostics.push("SABA_FOOTBALL_EVENT_UNSUPPORTED");
       continue;
     }
-    const isLive = match.marketid === "L";
+    // SABA's live market group also carries fixtures that have not kicked off,
+    // with no period, clock or score to contradict it. Its own kickoff time is
+    // the evidence that decides the phase; a mislabelled live event can never
+    // be compared against another book's pre-match one.
+    const isLive = match.marketid === "L" && kickoffSeconds * 1_000 <= options.observedAtMs;
     events.push({
       provider: "SABA", category: "FOOTBALL", providerEventId: matchId, competition: classified.competition,
       seasonStage: null, startAtUtcMs: kickoffSeconds * 1_000,
@@ -172,6 +177,7 @@ export function normalizeSabaFootballRecords(
       liveState: isLive ? { period: null, scoreHome: null, scoreAway: null, clockMs: null } : null
     });
     acceptedMatches.add(matchId);
+    liveByMatchId.set(matchId, isLive);
     classifiedMatches.set(matchId, classified);
   }
 
@@ -196,7 +202,7 @@ export function normalizeSabaFootballRecords(
     }
     seenMarkets.add(oddsId);
     const status = record.oddsstatus === "running" && record.enable !== 0 ? "OPEN" as const : "SUSPENDED" as const;
-    const isLive = matches.get(matchId)?.marketid === "L";
+    const isLive = liveByMatchId.get(matchId) === true;
     markets.push({
       provider: "SABA", category: "FOOTBALL", providerEventId: matchId, providerMarketId: oddsId,
       marketType, scope, line,

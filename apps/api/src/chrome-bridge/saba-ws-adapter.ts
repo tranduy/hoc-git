@@ -34,7 +34,19 @@ function liveIdentityScore(event: CatalogEvent): number {
 }
 
 function selectStableSabaEvent(current: CatalogEvent, candidate: CatalogEvent): CatalogEvent {
-  return liveIdentityScore(candidate) > liveIdentityScore(current) ? candidate : current;
+  const currentScore = liveIdentityScore(current);
+  const candidateScore = liveIdentityScore(candidate);
+  if (candidateScore !== currentScore) return candidateScore > currentScore ? candidate : current;
+  // SABA's page labels its whole live-betting section "TRỰC TIẾP", so the DOM
+  // reports fixtures as live hours before kickoff with no period, clock or
+  // score behind it. When neither record carries live evidence, keep the one
+  // that does not claim live: it is the socket record, and it still holds the
+  // provider's real kickoff time. A live event is never comparable with
+  // another book's pre-match one, so guessing here silently hides fixtures.
+  if (currentScore === 0 && current.isLive !== candidate.isLive) {
+    return current.isLive ? candidate : current;
+  }
+  return current;
 }
 
 function stableDomCoverage(previous: ReadonlySet<string>, current: ReadonlySet<string>): boolean {
