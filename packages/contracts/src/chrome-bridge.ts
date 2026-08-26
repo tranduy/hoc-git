@@ -180,6 +180,16 @@ const SnapshotRequestMessageSchema = z.strictObject({
 // their session and are neither navigated nor closed. The build identity lets
 // the worker ignore a request naming the bundle it is already running, so a
 // repeated request can never become a reload loop.
+// Chrome terminates an extension service worker after roughly thirty seconds
+// without activity, and receiving a WebSocket message resets that timer. The
+// bridge socket carries nothing while every provider is quiet, so the worker was
+// being collected, its debugger detached from all six tabs, and nothing was left
+// to wake it. This message exists only to keep that timer alive.
+const KeepAliveMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("KEEPALIVE")
+});
+
 const ReloadExtensionMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("RELOAD_EXTENSION"),
@@ -294,6 +304,7 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
   SnapshotRequestMessageSchema,
   ReloadSourceMessageSchema,
   ReloadExtensionMessageSchema,
+  KeepAliveMessageSchema,
   NavigateSourceMessageSchema,
   EnsureSourceMessageSchema,
   RestoreSourceMessageSchema,

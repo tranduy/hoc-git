@@ -34,7 +34,11 @@ export class BridgeWakeup {
   }
 
   start(): void {
-    this.#dependencies.createAlarm(ALARM_NAME, { periodInMinutes: 0.5 });
+    // Chrome refuses a period below one minute for a released extension, so a
+    // half-minute alarm is not the safety net it looks like. The bridge socket's
+    // own keepalive is what holds the worker; this alarm is the fallback for
+    // when the worker has already been collected.
+    this.#dependencies.createAlarm(ALARM_NAME, { periodInMinutes: 1 });
     this.#dependencies.addAlarmListener((alarm) => {
       if (alarm.name !== ALARM_NAME) return;
       void this.wakeNow(false);

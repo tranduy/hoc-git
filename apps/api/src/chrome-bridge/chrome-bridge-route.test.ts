@@ -631,3 +631,35 @@ describe("Chrome bridge route", () => {
     await app.close();
   }, 15_000);
 });
+
+describe("bridge keepalive", () => {
+  it("keeps the socket busy while every provider is quiet", async () => {
+    // Chrome collects an extension service worker after about thirty seconds
+    // without activity. This socket carried nothing between provider updates,
+    // so the worker was collected, its debugger detached from all six tabs, and
+    // only opening chrome://extensions brought it back. Measured 2026-08-26: one
+    // outage lasted 77 minutes.
+    const { app } = await appWithRoute(true, { keepAliveIntervalMs: 20 });
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+
+    await expect(nextMessage(socket)).resolves.toEqual({ version: 1, kind: "KEEPALIVE" });
+    await expect(nextMessage(socket)).resolves.toEqual({ version: 1, kind: "KEEPALIVE" });
+    await app.close();
+  });
+
+  it("stops pinging once the connection is gone", async () => {
+    const { app } = await appWithRoute(true, { keepAliveIntervalMs: 20 });
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    await nextMessage(socket);
+    socket.terminate();
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await expect(app.close()).resolves.toBeUndefined();
+  });
+});

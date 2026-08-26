@@ -636,3 +636,25 @@ describe("bridge must always be able to reconnect", () => {
     expect(bridge.serverContactAgeMs()).toBe(199_000);
   });
 });
+
+describe("keepalive from the server", () => {
+  it("refreshes the contact clock without disturbing anything else", () => {
+    let nowMs = 1_000;
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({
+      socketFactory: () => socket,
+      installationKey: "local-key",
+      now: () => nowMs,
+      onSourceReload: () => { throw new Error("must not run"); }
+    });
+    bridge.connect();
+    socket.open();
+
+    nowMs = 61_000;
+    expect(bridge.serverContactAgeMs()).toBe(60_000);
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "KEEPALIVE" }) });
+
+    expect(bridge.serverContactAgeMs()).toBe(0);
+  });
+});

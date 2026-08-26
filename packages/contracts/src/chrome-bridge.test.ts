@@ -362,3 +362,14 @@ describe("RELOAD_EXTENSION control message", () => {
     }).success).toBe(false);
   });
 });
+
+describe("KEEPALIVE control message", () => {
+  it("accepts a bare keepalive and rejects extra fields", () => {
+    expect(contracts.ChromeBridgeControlMessageSchema.safeParse({
+      version: 1, kind: "KEEPALIVE"
+    }).success).toBe(true);
+    expect(contracts.ChromeBridgeControlMessageSchema.safeParse({
+      version: 1, kind: "KEEPALIVE", sourceId: "chrome:CMD:1"
+    }).success).toBe(false);
+  });
+});

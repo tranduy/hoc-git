@@ -9,6 +9,7 @@ import { chromeBridgeSourceIdentity, type ChromeBridgeProviderAccountId } from "
 import type { ProviderFeedSnapshot } from "./provider-feed-types.js";
 
 const MAX_FRAME_BYTES = 256 * 1024;
+const DEFAULT_KEEPALIVE_INTERVAL_MS = 20_000;
 
 export interface ChromeBridgeRouteOptions {
   readonly installationKey: string;
@@ -18,6 +19,14 @@ export interface ChromeBridgeRouteOptions {
   readonly now?: () => number;
   readonly currentFeed?: (sourceId: string) => ProviderFeedSnapshot | null;
   readonly waitForFreshBaseline?: (sourceId: string, afterMs: number) => Promise<ProviderFeedSnapshot>;
+  /**
+   * Chrome collects an extension service worker after roughly thirty seconds
+   * without activity, and receiving a WebSocket message resets that timer. This
+   * socket carried nothing between provider updates, so the worker was
+   * collected, its debugger detached from every provider tab, and nothing
+   * remained to wake it. Must stay comfortably under that idle window.
+   */
+  readonly keepAliveIntervalMs?: number;
 }
 
 const FocusSelectionBodySchema = z.strictObject({
@@ -113,7 +122,15 @@ export function registerChromeBridgeRoute(
     // replacement atomically overwrites its prior identity, keeping the route
     // bounded to the six supported provider accounts even before socket close.
     const requestedSnapshots = new Map<ChromeBridgeProviderAccountId, number>();
+    const keepAliveIntervalMs = options.keepAliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
+    const keepAlive = setInterval(() => {
+      if (writableSocket.readyState !== 1) return;
+      try { socket.send(JSON.stringify({ version: 1, kind: "KEEPALIVE" })); }
+      catch { /* the close handler clears this timer */ }
+    }, keepAliveIntervalMs);
+    keepAlive.unref?.();
     writableSocket.on("close", () => {
+      clearInterval(keepAlive);
       registry.releaseConnection(connection);
       options.controlPlane?.detach(writableSocket);
     });

@@ -19,7 +19,7 @@ describe("BridgeWakeup", () => {
       pollNow
     }).start();
 
-    expect(createAlarm).toHaveBeenCalledWith("fieldline-bridge-wakeup", { periodInMinutes: 0.5 });
+    expect(createAlarm).toHaveBeenCalledWith("fieldline-bridge-wakeup", { periodInMinutes: 1 });
     await vi.waitFor(() => expect(calls).toEqual(["connect", "reconcile", "attach", "poll"]));
     listener?.({ name: "unrelated" });
     listener?.({ name: "fieldline-bridge-wakeup" });
