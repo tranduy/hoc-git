@@ -249,6 +249,7 @@ interface WsAttachDiagnosticState {
   baselineTabGroups: number;
   baselineTabScopes: number;
   baselineTabPeriods: number;
+  baselineTabLabels: string;
 }
 
 interface PreexistingSocketReconnectState {
@@ -390,9 +391,24 @@ function ksportTimeTabExpression(labels: readonly string[]): string {
     const scope = group.closest('.header-tab-content');
     if (!scope) return { status: 'time-tab-not-found', step: 'scope', ...shape };
     const tab = [...scope.querySelectorAll('.sport-menu-tab .period-item')]
-      .find((candidate) => ${JSON.stringify(labels)}.includes(
-        normalize((candidate.querySelector('.period-tab') || candidate).textContent)));
-    if (!tab) return { status: 'time-tab-not-found', step: 'tab', ...shape };
+      .find((candidate) => {
+        // Measured 2026-08-26: the live tab renders as "truc tiep42" because the
+        // page appends a running-match count to the label text. Exact equality
+        // therefore never matched. Accept the label followed only by that count.
+        const text = normalize((candidate.querySelector('.period-tab') || candidate).textContent);
+        return ${JSON.stringify(labels)}.some((name) => text === name ||
+          (text.startsWith(name) && /^[\\s\\d]*$/u.test(text.slice(name.length))));
+      });
+    if (!tab) {
+      // UI labels only, so the tab can be named instead of guessed: normalized,
+      // letters/digits/spaces, each capped and at most eight reported.
+      const seen = [...scope.querySelectorAll('.sport-menu-tab .period-item')]
+        .map((candidate) => normalize((candidate.querySelector('.period-tab') || candidate).textContent))
+        .map((value) => value.replace(/[^a-z0-9 ]+/g, '').slice(0, 24))
+        .filter((value) => value.length > 0)
+        .slice(0, 8);
+      return { status: 'time-tab-not-found', step: 'tab', labels: seen, ...shape };
+    }
     if (tab.classList.contains('active-period')) return { status: 'time-tab-active' };
     tab.click();
     return { status: 'time-tab-selected' };
@@ -1216,6 +1232,15 @@ export class NetworkObserver {
         if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) {
           diagnostic[field] = count;
         }
+      }
+      const labels = nestedValue(evaluation, "result", "value", "labels");
+      if (Array.isArray(labels)) {
+        diagnostic.baselineTabLabels = labels
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => value.replace(/[^a-z0-9 ]+/gu, "").slice(0, 24))
+          .filter((value) => value.length > 0)
+          .slice(0, 8)
+          .join("|");
       }
       if (typeof status === "string") diagnostic.baselineTabStatus = status;
       else if (evaluation === null) diagnostic.baselineTabStatus = "EVALUATE_FAILED";
@@ -2293,7 +2318,7 @@ export class NetworkObserver {
       targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
       baselineLive: 0, baselineToday: 0, baselineTabSelections: 0,
       baselineTabStatus: "NONE", baselineTabTargets: 0, baselineTabStep: "NONE",
-      baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0
+      baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0, baselineTabLabels: ""
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2705,7 +2730,8 @@ export class NetworkObserver {
         baselineTabStatus: diagnostic.baselineTabStatus,
         baselineTabTargets: diagnostic.baselineTabTargets, baselineTabStep: diagnostic.baselineTabStep,
         baselineTabGroups: diagnostic.baselineTabGroups, baselineTabScopes: diagnostic.baselineTabScopes,
-        baselineTabPeriods: diagnostic.baselineTabPeriods })
+        baselineTabPeriods: diagnostic.baselineTabPeriods,
+        baselineTabLabels: diagnostic.baselineTabLabels })
     });
   }
 

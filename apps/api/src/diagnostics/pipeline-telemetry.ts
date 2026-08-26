@@ -126,6 +126,7 @@ interface AccountState {
     readonly baselineTabGroups: number;
     readonly baselineTabScopes: number;
     readonly baselineTabPeriods: number;
+    readonly baselineTabLabels: string;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -146,6 +147,12 @@ const tabStatuses = new Set(["NONE", "EVALUATE_FAILED", "time-tab-not-found",
   "time-tab-active", "time-tab-selected"]);
 
 const tabSteps = new Set(["NONE", "group", "scope", "tab"]);
+
+/** UI period-tab labels only: lowercase letters, digits, spaces and separators,
+ *  bounded in length. Anything else is discarded rather than reported. */
+function tabLabels(value: unknown): string {
+  return typeof value === "string" && /^[a-z0-9 |]{0,208}$/u.test(value) ? value : "";
+}
 
 function tabStep(value: unknown): string {
   return typeof value === "string" && tabSteps.has(value) ? value : "NONE";
@@ -408,7 +415,7 @@ export class PipelineTelemetry {
         autoAttachEvents?: unknown; baselineLive?: unknown; baselineToday?: unknown;
         baselineTabSelections?: unknown; baselineTabStatus?: unknown;
         baselineTabTargets?: unknown; baselineTabStep?: unknown; baselineTabGroups?: unknown;
-        baselineTabScopes?: unknown; baselineTabPeriods?: unknown };
+        baselineTabScopes?: unknown; baselineTabPeriods?: unknown; baselineTabLabels?: unknown };
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
@@ -458,7 +465,8 @@ export class PipelineTelemetry {
           baselineTabStep: tabStep(value.baselineTabStep),
           baselineTabGroups: boundedCounter(value.baselineTabGroups),
           baselineTabScopes: boundedCounter(value.baselineTabScopes),
-          baselineTabPeriods: boundedCounter(value.baselineTabPeriods)
+          baselineTabPeriods: boundedCounter(value.baselineTabPeriods),
+          baselineTabLabels: tabLabels(value.baselineTabLabels)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }
