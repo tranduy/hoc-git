@@ -30,7 +30,12 @@ const KSPORT_IGNORED_SOCKETS_PER_SOURCE = 64;
 const KSPORT_ORPHAN_FRAME_RETRY_MS = 30_000;
 // Long enough that a click cannot become a storm, short enough that a missing
 // partition is retried well inside the feed's baseline lease.
-const KSPORT_BASELINE_REQUEST_RETRY_MS = 20_000;
+const KSPORT_BASELINE_REQUEST_RETRY_MS = 45_000;
+// Re-selecting a period tab drives the provider's own SPA. Measured 35 toggles
+// in eight minutes before this cap, which is churn on a page the operator is
+// also using. Bounded per attempt generation; a genuinely new generation gets a
+// fresh budget.
+const KSPORT_BASELINE_REQUESTS_PER_GENERATION = 6;
 // Measured 2026-08-26: this source forwards two or three catalog frames per five
 // minutes, so 100-150 s gaps are its normal cadence, not silence. The previous
 // 30 s window made a healthy socket look idle for most of every gap, and the
@@ -368,12 +373,16 @@ export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
 // with 24 period tabs present, none matching the Vietnamese label alone.
 const KSPORT_TODAY_BASELINE_EXPRESSION = ksportTimeTabExpression(["hom nay", "today"]);
 const KSPORT_LIVE_BASELINE_EXPRESSION = ksportTimeTabExpression(["truc tiep", "live"]);
+// Used only when a partition is still missing: the tab may already be selected,
+// and then nothing short of re-selecting it makes the page resend its table.
+const KSPORT_TODAY_FORCE_EXPRESSION = ksportTimeTabExpression(["hom nay", "today"], true);
+const KSPORT_LIVE_FORCE_EXPRESSION = ksportTimeTabExpression(["truc tiep", "live"], true);
 
-export function ksportTimeTabExpressionForTest(labels: readonly string[]): string {
-  return ksportTimeTabExpression(labels);
+export function ksportTimeTabExpressionForTest(labels: readonly string[], force = false): string {
+  return ksportTimeTabExpression(labels, force);
 }
 
-function ksportTimeTabExpression(labels: readonly string[]): string {
+function ksportTimeTabExpression(labels: readonly string[], force = false): string {
   return `(() => {
     const normalize = (value) => String(value || '').normalize('NFD')
       .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D').trim().toLowerCase().replace(/\\s+/g, ' ');
@@ -409,7 +418,19 @@ function ksportTimeTabExpression(labels: readonly string[]): string {
         .slice(0, 8);
       return { status: 'time-tab-not-found', step: 'tab', labels: seen, ...shape };
     }
-    if (tab.classList.contains('active-period')) return { status: 'time-tab-active' };
+    if (tab.classList.contains('active-period')) {
+      if (!${JSON.stringify(force)}) return { status: 'time-tab-active' };
+      // An already-selected tab produces no click, so the page never re-emits
+      // its table and the feed never gets a complete baseline. Move to a
+      // sibling period and come back, letting the page's own SPA rebuild the
+      // subscription. Only period tabs are touched; no odds cell is involved.
+      const sibling = [...scope.querySelectorAll('.sport-menu-tab .period-item')]
+        .find((candidate) => candidate !== tab);
+      if (!sibling) return { status: 'time-tab-active' };
+      sibling.click();
+      setTimeout(() => { try { tab.click(); } catch (error) { void error; } }, 400);
+      return { status: 'time-tab-reselected' };
+    }
     tab.click();
     return { status: 'time-tab-selected' };
   })()`;
@@ -935,7 +956,8 @@ export class NetworkObserver {
   readonly #ksportDiagnosticAtMs = new Map<string, number>();
   readonly #ksportRefreshesInFlight = new Set<string>();
   readonly #ksportBaselineRequests = new Map<string, { readonly streamId: string;
-    readonly recoveryGeneration: number; readonly requested: Map<"live" | "today", number> }>();
+    readonly recoveryGeneration: number; readonly requested: Map<"live" | "today", number>;
+    attempts: number }>();
   readonly #ksportLiveRestored = new Set<string>();
   // Periodic KSPORT maintenance must stay non-destructive while the sportsbook
   // STOMP socket is alive. These clocks gate the heavier recovery paths.
@@ -1172,7 +1194,7 @@ export class NetworkObserver {
     let requests = this.#ksportBaselineRequests.get(source.sourceId);
     if (requests === undefined || requests.streamId !== activeStream ||
       requests.recoveryGeneration !== recoveryGeneration) {
-      requests = { streamId: activeStream, recoveryGeneration, requested: new Map() };
+      requests = { streamId: activeStream, recoveryGeneration, requested: new Map(), attempts: 0 };
       this.#ksportBaselineRequests.set(source.sourceId, requests);
     }
     const missing = !state.live ? "live" : "today";
@@ -1182,9 +1204,11 @@ export class NetworkObserver {
     const nowMs = this.#now();
     const requestedAtMs = requests.requested.get(missing);
     if (requestedAtMs !== undefined && nowMs - requestedAtMs < KSPORT_BASELINE_REQUEST_RETRY_MS) return false;
+    if (requests.attempts >= KSPORT_BASELINE_REQUESTS_PER_GENERATION) return false;
+    requests.attempts += 1;
     requests.requested.set(missing, nowMs);
     const selected = await this.#selectKsportTimeTab(source,
-      missing === "live" ? KSPORT_LIVE_BASELINE_EXPRESSION : KSPORT_TODAY_BASELINE_EXPRESSION);
+      missing === "live" ? KSPORT_LIVE_FORCE_EXPRESSION : KSPORT_TODAY_FORCE_EXPRESSION);
     if (!selected) this.#ksportBaselineAttemptAtMs.set(source.sourceId, this.#now());
     return false;
   }
@@ -1244,7 +1268,8 @@ export class NetworkObserver {
       }
       if (typeof status === "string") diagnostic.baselineTabStatus = status;
       else if (evaluation === null) diagnostic.baselineTabStatus = "EVALUATE_FAILED";
-      if (status === "time-tab-selected" || status === "time-tab-active") return true;
+      if (status === "time-tab-selected" || status === "time-tab-active" ||
+        status === "time-tab-reselected") return true;
     }
     return false;
   }

@@ -144,7 +144,7 @@ function failCode(value: unknown): string {
 }
 
 const tabStatuses = new Set(["NONE", "EVALUATE_FAILED", "time-tab-not-found",
-  "time-tab-active", "time-tab-selected"]);
+  "time-tab-active", "time-tab-selected", "time-tab-reselected"]);
 
 const tabSteps = new Set(["NONE", "group", "scope", "tab"]);
 

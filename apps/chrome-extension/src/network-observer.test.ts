@@ -6343,6 +6343,36 @@ describe("KSPORT football group label", () => {
     expect(evaluate(["Bóng đá"], "truc tiep sau").status).toBe("time-tab-not-found");
   });
 
+  it("re-selects an already-active tab so the page re-emits its table", () => {
+    // Measured 2026-08-26: the selector reached time-tab-active, meaning the
+    // live tab was already selected, so no click happened and the provider
+    // never re-sent a full partition table. Without that table the feed has no
+    // complete baseline and can never be promoted.
+    const forcing = ksportTimeTabExpressionForTest(["truc tiep", "live"], true);
+    const clicks: string[] = [];
+    const scheduled: Array<() => void> = [];
+    const makeTab = (text: string, active: boolean) => ({
+      textContent: text, classList: { contains: (name: string) => active && name === "active-period" },
+      querySelector: () => null, click: (): void => { clicks.push(text); }
+    });
+    const target = makeTab("truc tiep42", true);
+    const sibling = makeTab("hom nay", false);
+    const scope = { querySelectorAll: () => [sibling, target] };
+    const group = { textContent: "Bóng đá", querySelector: () => null,
+      closest: (selector: string) => selector === ".header-tab-content" ? scope : null };
+    const document = { querySelectorAll: (selector: string) =>
+      selector === ".sport-type-group-item" ? [group] : [{}] };
+    const setTimeoutStub = (callback: () => void): number => scheduled.push(callback);
+
+    const result = Function("document", "setTimeout", `return ${forcing};`)(
+      document, setTimeoutStub) as { status: string };
+
+    expect(result.status).toBe("time-tab-reselected");
+    expect(clicks).toEqual(["hom nay"]);
+    for (const callback of scheduled) callback();
+    expect(clicks).toEqual(["hom nay", "truc tiep42"]);
+  });
+
   it("finds the period tab in either language", () => {
     // The group step passing is not enough: the period tab is named in the site
     // language too, and 24 tabs were present with none matching Vietnamese.
