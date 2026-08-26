@@ -122,6 +122,10 @@ interface AccountState {
     readonly baselineTabSelections: number;
     readonly baselineTabStatus: string;
     readonly baselineTabTargets: number;
+    readonly baselineTabStep: string;
+    readonly baselineTabGroups: number;
+    readonly baselineTabScopes: number;
+    readonly baselineTabPeriods: number;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -140,6 +144,12 @@ function failCode(value: unknown): string {
 
 const tabStatuses = new Set(["NONE", "EVALUATE_FAILED", "time-tab-not-found",
   "time-tab-active", "time-tab-selected"]);
+
+const tabSteps = new Set(["NONE", "group", "scope", "tab"]);
+
+function tabStep(value: unknown): string {
+  return typeof value === "string" && tabSteps.has(value) ? value : "NONE";
+}
 
 function tabStatus(value: unknown): string {
   return typeof value === "string" && tabStatuses.has(value) ? value : "NONE";
@@ -397,7 +407,8 @@ export class PipelineTelemetry {
         subSportLike?: unknown; targetsTotal?: unknown; targetsIframe?: unknown;
         autoAttachEvents?: unknown; baselineLive?: unknown; baselineToday?: unknown;
         baselineTabSelections?: unknown; baselineTabStatus?: unknown;
-        baselineTabTargets?: unknown };
+        baselineTabTargets?: unknown; baselineTabStep?: unknown; baselineTabGroups?: unknown;
+        baselineTabScopes?: unknown; baselineTabPeriods?: unknown };
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
@@ -443,7 +454,11 @@ export class PipelineTelemetry {
           baselineToday: boundedCounter(value.baselineToday),
           baselineTabSelections: boundedCounter(value.baselineTabSelections),
           baselineTabStatus: tabStatus(value.baselineTabStatus),
-          baselineTabTargets: boundedCounter(value.baselineTabTargets)
+          baselineTabTargets: boundedCounter(value.baselineTabTargets),
+          baselineTabStep: tabStep(value.baselineTabStep),
+          baselineTabGroups: boundedCounter(value.baselineTabGroups),
+          baselineTabScopes: boundedCounter(value.baselineTabScopes),
+          baselineTabPeriods: boundedCounter(value.baselineTabPeriods)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }

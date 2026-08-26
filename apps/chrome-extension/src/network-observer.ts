@@ -237,6 +237,12 @@ interface WsAttachDiagnosticState {
    *  distinguishable from a page that simply refused to re-emit its table. */
   baselineTabStatus: string;
   baselineTabTargets: number;
+  /** Which selector step failed and how many nodes each step sees, so a renamed
+   *  class is separable from a page that simply has no football group open. */
+  baselineTabStep: string;
+  baselineTabGroups: number;
+  baselineTabScopes: number;
+  baselineTabPeriods: number;
 }
 
 interface PreexistingSocketReconnectState {
@@ -363,13 +369,17 @@ function ksportTimeTabExpression(label: string): string {
       return !candidate.closest('.sport-odds-boosts, [class*="odds-boost"]') &&
         /^bong da(?:\\s|live|\\d|$)/u.test(text) && !/^bong da\\s*2(?:\\s|$)/u.test(text);
     });
-    if (!group) return { status: 'time-tab-not-found' };
+    const groups = document.querySelectorAll('.sport-type-group-item').length;
+    const scopes = document.querySelectorAll('.header-tab-content').length;
+    const periods = document.querySelectorAll('.sport-menu-tab .period-item').length;
+    const shape = { groups, scopes, periods };
+    if (!group) return { status: 'time-tab-not-found', step: 'group', ...shape };
     const scope = group.closest('.header-tab-content');
-    if (!scope) return { status: 'time-tab-not-found' };
+    if (!scope) return { status: 'time-tab-not-found', step: 'scope', ...shape };
     const tab = [...scope.querySelectorAll('.sport-menu-tab .period-item')]
       .find((candidate) => normalize((candidate.querySelector('.period-tab') || candidate).textContent) ===
         ${JSON.stringify(label)});
-    if (!tab) return { status: 'time-tab-not-found' };
+    if (!tab) return { status: 'time-tab-not-found', step: 'tab', ...shape };
     if (tab.classList.contains('active-period')) return { status: 'time-tab-active' };
     tab.click();
     return { status: 'time-tab-selected' };
@@ -937,6 +947,12 @@ export class NetworkObserver {
     }
   }
 
+  /** Age of the last frame that proved this source's catalog socket alive. */
+  ksportCatalogFrameAgeMs(sourceId: string, nowMs = this.#now()): number | null {
+    const atMs = this.#ksportCatalogFrameAtMs.get(sourceId);
+    return atMs === undefined ? null : nowMs - atMs;
+  }
+
   hasCompleteKsportBaseline(sourceId: string): boolean {
     const activeStream = this.#activeKsportStreams.get(sourceId);
     if (activeStream === undefined) return false;
@@ -1179,6 +1195,15 @@ export class NetworkObserver {
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId)).catch(() => null);
       const status = nestedValue(evaluation, "result", "value", "status");
+      const step = nestedValue(evaluation, "result", "value", "step");
+      if (typeof step === "string") diagnostic.baselineTabStep = step;
+      for (const [field, key] of [["baselineTabGroups", "groups"],
+        ["baselineTabScopes", "scopes"], ["baselineTabPeriods", "periods"]] as const) {
+        const count = nestedValue(evaluation, "result", "value", key);
+        if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) {
+          diagnostic[field] = count;
+        }
+      }
       if (typeof status === "string") diagnostic.baselineTabStatus = status;
       else if (evaluation === null) diagnostic.baselineTabStatus = "EVALUATE_FAILED";
       if (status === "time-tab-selected" || status === "time-tab-active") return true;
@@ -2254,7 +2279,8 @@ export class NetworkObserver {
       destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
       targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
       baselineLive: 0, baselineToday: 0, baselineTabSelections: 0,
-      baselineTabStatus: "NONE", baselineTabTargets: 0
+      baselineTabStatus: "NONE", baselineTabTargets: 0, baselineTabStep: "NONE",
+      baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2664,7 +2690,9 @@ export class NetworkObserver {
         baselineLive: diagnostic.baselineLive, baselineToday: diagnostic.baselineToday,
         baselineTabSelections: diagnostic.baselineTabSelections,
         baselineTabStatus: diagnostic.baselineTabStatus,
-        baselineTabTargets: diagnostic.baselineTabTargets })
+        baselineTabTargets: diagnostic.baselineTabTargets, baselineTabStep: diagnostic.baselineTabStep,
+        baselineTabGroups: diagnostic.baselineTabGroups, baselineTabScopes: diagnostic.baselineTabScopes,
+        baselineTabPeriods: diagnostic.baselineTabPeriods })
     });
   }
 
@@ -3052,6 +3080,16 @@ export class NetworkObserver {
         const ownsSocket = (): boolean => ownsIdentity() &&
           this.#activeKsportStreams.get(socket.source.sourceId) === socket.streamId;
         if (!ownsIdentity()) { this.#wsAttachDiagnostic(source).framesNotOwner += 1; return; }
+        // A frame arriving here proves the catalog socket is alive, whether or
+        // not its receipt maps to a catalog partition. Marking liveness only on
+        // a heartbeat or an already-forwarded frame deadlocked this deployment:
+        // it sends no heartbeats, so the baseline request that yields the first
+        // full snapshot was never allowed to run, and without that snapshot no
+        // frame is ever forwarded. Jackpot traffic on the sibling stream is
+        // excluded, exactly as the retained-frame path already excludes it.
+        if (!payloadData.includes("destination:/topic/jackpot/")) {
+          this.#ksportCatalogFrameAtMs.set(socket.source.sourceId, clocks.observedAtMs);
+        }
         if (isKsportTransportHeartbeat(payloadData)) {
           if (!ownsSocket()) return;
           const prior = socket.ksportFrameTail ?? Promise.resolve();

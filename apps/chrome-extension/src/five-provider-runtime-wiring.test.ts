@@ -525,3 +525,42 @@ describe("five-provider shared runtime wiring", () => {
     expect(records).not.toContainEqual(expect.objectContaining({ __fieldlineSweep: expect.anything() }));
   });
 });
+
+describe("KSPORT liveness must not depend on heartbeats", () => {
+  it("marks the catalog socket alive from an ordinary frame that is not jackpot traffic", async () => {
+    // Measured 2026-08-26: this deployment sends no SockJS heartbeats at all
+    // (sockjsHeartbeat 0). Liveness was only marked on a heartbeat or on a frame
+    // that had already been forwarded, so the baseline request that produces the
+    // first full snapshot could never run, and without that snapshot no frame is
+    // ever forwarded. The provider deadlocked itself.
+    const sendCommand = vi.fn(async () => ({}));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      observerSessionId: "worker-a", now: () => 50_000 });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:31", tabId: 31 } as const;
+
+    await observer.handleEvent(source, "Network.webSocketCreated",
+      { requestId: "catalog", url: "wss://d42.sb21.net/sport/538/session/websocket" });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "catalog", response: { opcode: 1,
+        payloadData: `a${JSON.stringify(["MESSAGE\ndestination:/topic/other/feed\n\n{}\u0000"])}` }
+    });
+
+    expect(observer.ksportCatalogFrameAgeMs(source.sourceId, 50_000)).toBe(0);
+  });
+
+  it("never counts jackpot traffic as catalog liveness", async () => {
+    const sendCommand = vi.fn(async () => ({}));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      observerSessionId: "worker-a", now: () => 50_000 });
+    const source = { lobby: "KSPORT", sourceId: "chrome:KSPORT:32", tabId: 32 } as const;
+
+    await observer.handleEvent(source, "Network.webSocketCreated",
+      { requestId: "catalog", url: "wss://d42.sb21.net/sport/538/session/websocket" });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "catalog", response: { opcode: 1,
+        payloadData: `a${JSON.stringify(["MESSAGE\ndestination:/topic/jackpot/live/feed\n\n{}\u0000"])}` }
+    });
+
+    expect(observer.ksportCatalogFrameAgeMs(source.sourceId, 50_000)).toBeNull();
+  });
+});

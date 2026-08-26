@@ -145,7 +145,8 @@ describe("PipelineTelemetry", () => {
       destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
       targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
       baselineLive: 0, baselineToday: 0, baselineTabSelections: 0,
-      baselineTabStatus: "NONE", baselineTabTargets: 0
+      baselineTabStatus: "NONE", baselineTabTargets: 0, baselineTabStep: "NONE",
+      baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0
     });
   });
 
