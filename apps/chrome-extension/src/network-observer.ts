@@ -220,6 +220,11 @@ interface WsAttachDiagnosticState {
   destTodayLike: number;
   destSportsLike: number;
   subSportLike: number;
+  // Target discovery shape: distinguishes "no child target is visible at all"
+  // from "iframes are visible but none is on the provider host".
+  targetsTotal: number;
+  targetsIframe: number;
+  autoAttachEvents: number;
 }
 
 interface PreexistingSocketReconnectState {
@@ -2192,6 +2197,8 @@ export class NetworkObserver {
     });
     const diagnostic = this.#wsAttachDiagnostic(source);
     diagnostic.ksportTargets = matchingTargets.length;
+    diagnostic.targetsTotal = infos.length;
+    diagnostic.targetsIframe = infos.filter((info) => isRecord(info) && info.type === "iframe").length;
     for (const info of infos.slice(0, 32)) {
       if (!isRecord(info) || info.type !== "iframe" || typeof info.targetId !== "string" ||
         typeof info.url !== "string" ||
@@ -2222,7 +2229,8 @@ export class NetworkObserver {
       sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
       stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0,
       stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
-      destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0
+      destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
+      targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2627,7 +2635,8 @@ export class NetworkObserver {
         stompCommandFragments: diagnostic.stompCommandFragments,
         stompFragments: diagnostic.stompFragments, destLiveLike: diagnostic.destLiveLike,
         destTodayLike: diagnostic.destTodayLike, destSportsLike: diagnostic.destSportsLike,
-        subSportLike: diagnostic.subSportLike })
+        subSportLike: diagnostic.subSportLike, targetsTotal: diagnostic.targetsTotal,
+        targetsIframe: diagnostic.targetsIframe, autoAttachEvents: diagnostic.autoAttachEvents })
     });
   }
 
@@ -2652,6 +2661,7 @@ export class NetworkObserver {
     if (method === "Target.attachedToTarget") {
       const childSessionId = typeof params.sessionId === "string" ? params.sessionId : null;
       const targetInfo = isRecord(params.targetInfo) ? params.targetInfo : null;
+      if (source.lobby === "KSPORT") this.#wsAttachDiagnostic(source).autoAttachEvents += 1;
       if (childSessionId !== null && targetInfo?.type === "iframe") {
         const targetId = typeof targetInfo.targetId === "string" ? targetInfo.targetId : undefined;
         await this.#observeChildTarget(source, childSessionId, targetId, true);

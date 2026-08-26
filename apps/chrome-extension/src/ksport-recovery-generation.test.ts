@@ -436,3 +436,40 @@ describe("a repeated subscription must not kill the decoder", () => {
     expect(tracker.failed).toBe(false);
   });
 });
+
+describe("catalog receipts survive a renamed subscription and topic path", () => {
+  function renamedReceipt(partition: "live" | "today", order: number): string {
+    // Measured 2026-08-26: the provider kept a subSport* subscription id and a
+    // live/today topic segment, but dropped the exact ids and the /sports/
+    // path segment the mapping keyed on.
+    const providerBody = [{ "1": `${partition} league`, "2": [{ "8": `${order}`, "2": "Home",
+      "3": "Away", "7": { "3": [`2.5 0.91*${order}h -0.99*${order}a ${order}0001`] } }] }];
+    const wrapper = JSON.stringify({ statusCode: "OK", statusCodeValue: 200,
+      body: JSON.stringify(providerBody) });
+    const stomp = `MESSAGE\ndestination:/topic/sb/2_7/${partition}/ma/event/vi\n` +
+      `subscription:subSportBook${partition === "live" ? "Running" : "Upcoming"}\n` +
+      `message-id:socket-${order}\n\n${wrapper}\u0000`;
+    return `a${JSON.stringify([stomp])}`;
+  }
+
+  it("accepts a receipt carrying both a sportsbook subscription and a live topic", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    expect(tracker.push(renamedReceipt("live", 100))).not.toEqual([]);
+  });
+
+  it("accepts a receipt carrying both a sportsbook subscription and a today topic", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    expect(tracker.push(renamedReceipt("today", 104))).not.toEqual([]);
+  });
+
+  it("refuses a frame that carries only one of the two signals", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    const wrapper = JSON.stringify({ statusCode: "OK", statusCodeValue: 200, body: "[]" });
+    // Jackpot traffic on the sibling socket: a topic segment but no sportsbook
+    // subscription id. One signal alone must never admit a stream.
+    const jackpot = `MESSAGE\ndestination:/topic/jackpot/live/feed\n` +
+      `subscription:subJackpot\nmessage-id:socket-9\n\n${wrapper}\u0000`;
+    expect(tracker.push(`a${JSON.stringify([jackpot])}`)).toEqual([]);
+    expect(tracker.failed).toBe(false);
+  });
+});

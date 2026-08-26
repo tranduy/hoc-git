@@ -142,7 +142,8 @@ describe("PipelineTelemetry", () => {
       sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
       stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0,
       stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
-      destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0
+      destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
+      targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0
     });
   });
 

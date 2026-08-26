@@ -493,6 +493,16 @@ function receiptPartition(destination?: string, subscription?: string): CatalogP
   if (subscription === "subSportBookLive" || /\/1_1\/live\//u.test(destination ?? "")) return "live";
   if (subscription === "subSportBookToday" || subscription === "subSportHotMatch" ||
     /\/sports\/1_\d+\/today\//u.test(destination ?? "")) return "today";
+  // Measured 2026-08-26: the provider renamed the subscription ids and dropped
+  // the /sports/ segment from the topic path, so every catalog receipt was
+  // refused and the book went dark. A frame carrying BOTH a sportsbook
+  // subscription id AND a live/today topic segment is a catalog receipt. Two
+  // independent signals are required on purpose: the jackpot stream that shares
+  // this socket's host carries neither, and one signal alone would admit it.
+  if (/^subSport/u.test(subscription ?? "")) {
+    if (/\/live\//u.test(destination ?? "")) return "live";
+    if (/\/today\//u.test(destination ?? "")) return "today";
+  }
   return null;
 }
 

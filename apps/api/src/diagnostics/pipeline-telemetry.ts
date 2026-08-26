@@ -114,6 +114,9 @@ interface AccountState {
     readonly destTodayLike: number;
     readonly destSportsLike: number;
     readonly subSportLike: number;
+    readonly targetsTotal: number;
+    readonly targetsIframe: number;
+    readonly autoAttachEvents: number;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -379,7 +382,8 @@ export class PipelineTelemetry {
         stompFrames?: unknown; stompMessages?: unknown; stompPartitionRejected?: unknown;
         stompPendingChars?: unknown; stompCommandFragments?: unknown; stompFragments?: unknown;
         destLiveLike?: unknown; destTodayLike?: unknown; destSportsLike?: unknown;
-        subSportLike?: unknown };
+        subSportLike?: unknown; targetsTotal?: unknown; targetsIframe?: unknown;
+        autoAttachEvents?: unknown };
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
@@ -417,7 +421,10 @@ export class PipelineTelemetry {
           destLiveLike: boundedCounter(value.destLiveLike),
           destTodayLike: boundedCounter(value.destTodayLike),
           destSportsLike: boundedCounter(value.destSportsLike),
-          subSportLike: boundedCounter(value.subSportLike)
+          subSportLike: boundedCounter(value.subSportLike),
+          targetsTotal: boundedCounter(value.targetsTotal),
+          targetsIframe: boundedCounter(value.targetsIframe),
+          autoAttachEvents: boundedCounter(value.autoAttachEvents)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }
