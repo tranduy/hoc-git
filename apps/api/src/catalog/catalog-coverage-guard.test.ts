@@ -307,3 +307,42 @@ describe("CatalogCoverageGuard", () => {
       providerEventIds: ["event-1"] })).toBe(true);
   });
 });
+
+describe("an authoritative baseline must not collapse a populated catalog", () => {
+  const ids = (count: number, offset = 0): string[] =>
+    Array.from({ length: count }, (_, index) => `event-${index + offset}`);
+
+  it("refuses a baseline that drops almost every event it had accepted", () => {
+    // Measured 2026-08-26 on the live stack: SABA held 269 events, a recovery
+    // baseline replaced it with 12, and the next one with 0. The old catalog was
+    // correct and the replacement was a viewport-sized snapshot. Keeping the
+    // last good catalog stale is strictly better than serving a collapsed one.
+    const guard = new CatalogCoverageGuard();
+    guard.commit("saba", { generation: "gen-1", authoritativeBaseline: true,
+      providerEventIds: ids(269) });
+
+    expect(guard.allows("saba", { generation: "gen-2", authoritativeBaseline: true,
+      providerEventIds: ids(12) })).toBe(false);
+    expect(guard.allows("saba", { generation: "gen-3", authoritativeBaseline: true,
+      providerEventIds: [] })).toBe(false);
+  });
+
+  it("still accepts the ordinary shrink of finished fixtures", () => {
+    const guard = new CatalogCoverageGuard();
+    guard.commit("saba", { generation: "gen-1", authoritativeBaseline: true,
+      providerEventIds: ids(100) });
+
+    expect(guard.allows("saba", { generation: "gen-2", authoritativeBaseline: true,
+      providerEventIds: ids(70) })).toBe(true);
+  });
+
+  it("accepts a baseline that replaces the card entirely with a comparable size", () => {
+    // A new day's fixtures share no ids with yesterday's and must still land.
+    const guard = new CatalogCoverageGuard();
+    guard.commit("saba", { generation: "gen-1", authoritativeBaseline: true,
+      providerEventIds: ids(100) });
+
+    expect(guard.allows("saba", { generation: "gen-2", authoritativeBaseline: true,
+      providerEventIds: ids(100, 500) })).toBe(true);
+  });
+});

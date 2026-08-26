@@ -6,6 +6,13 @@ interface CoverageState {
 
 type ComparableAuthoritativeOrder = readonly [major: number, minor: number];
 
+// Measured 2026-08-26: a SABA recovery replaced a 269-event catalog with 12 and
+// then with 0. The old catalog was correct; the replacement was a viewport-sized
+// snapshot. Ordinary attrition as fixtures finish is far gentler than that, and a
+// new day's card arrives at a comparable size, so a baseline keeping less than
+// this share of a populated catalog is refused and the last good one is kept.
+const MIN_RETAINED_BASELINE_SHARE = 0.5;
+const COVERAGE_COLLAPSE_FLOOR = 20;
 const MAX_COMPARABLE_AUTHORITATIVE_LINEAGES = 32;
 const MAX_OPAQUE_AUTHORITATIVE_GENERATIONS = 256;
 
@@ -18,6 +25,12 @@ export interface CatalogCoverageCandidate {
 export interface CatalogCoverageCheckpoint {
   readonly owner: CatalogCoverageGuard;
   readonly states: ReadonlyMap<string, CoverageState>;
+}
+
+function collapsesCoverage(current: CoverageState, candidate: CatalogCoverageCandidate): boolean {
+  const accepted = current.acceptedEventIds.size;
+  if (accepted < COVERAGE_COLLAPSE_FLOOR) return false;
+  return candidate.providerEventIds.length < accepted * MIN_RETAINED_BASELINE_SHARE;
 }
 
 export class CatalogCoverageGuard {
@@ -33,7 +46,8 @@ export class CatalogCoverageGuard {
     const current = this.#states.get(sourceKey);
     if (current === undefined) return true;
     if (candidate.authoritativeBaseline) {
-      return allowsAuthoritativeGeneration(current, candidate.generation);
+      return allowsAuthoritativeGeneration(current, candidate.generation) &&
+        !collapsesCoverage(current, candidate);
     }
     const proposed = new Set(candidate.providerEventIds);
     return [...current.acceptedEventIds].every((eventId) => proposed.has(eventId));
