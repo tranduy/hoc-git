@@ -6305,13 +6305,13 @@ describe("NetworkObserver", () => {
 });
 
 describe("KSPORT football group label", () => {
-  const expression = ksportTimeTabExpressionForTest("truc tiep");
+  const expression = ksportTimeTabExpressionForTest(["truc tiep", "live"]);
 
-  function evaluate(headers: readonly string[]): { status: string; step?: string } {
+  function evaluate(headers: readonly string[], periodLabel = "truc tiep"): { status: string; step?: string } {
     // Minimal DOM stand-in: the expression only reads header text, the
     // .header-tab-content ancestor and the period tabs.
     const groups = headers.map((text) => {
-      const period = { textContent: "truc tiep", classList: { contains: () => false },
+      const period = { textContent: periodLabel, classList: { contains: () => false },
         querySelector: () => null, click: (): void => undefined };
       const scope = { querySelectorAll: () => [period] };
       return { textContent: text, closest: (selector: string) =>
@@ -6331,6 +6331,13 @@ describe("KSPORT football group label", () => {
     // English. Every class name in the selector was still correct.
     expect(evaluate(["Bóng đá"]).status).not.toBe("time-tab-not-found");
     expect(evaluate(["Football"]).status).not.toBe("time-tab-not-found");
+  });
+
+  it("finds the period tab in either language", () => {
+    // The group step passing is not enough: the period tab is named in the site
+    // language too, and 24 tabs were present with none matching Vietnamese.
+    expect(evaluate(["Football"], "live").status).not.toBe("time-tab-not-found");
+    expect(evaluate(["Football"], "truc tiep").status).not.toBe("time-tab-not-found");
   });
 
   it("still refuses the promotional second football group in either language", () => {

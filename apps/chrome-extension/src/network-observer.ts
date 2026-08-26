@@ -362,14 +362,17 @@ export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
   return { status: 'football-selected' };
 })()`;
 
-const KSPORT_TODAY_BASELINE_EXPRESSION = ksportTimeTabExpression("hom nay");
-const KSPORT_LIVE_BASELINE_EXPRESSION = ksportTimeTabExpression("truc tiep");
+// The page renders its period tabs in the site language, so each tab is named
+// in both. Measured 2026-08-26: the group step passed and the tab step failed
+// with 24 period tabs present, none matching the Vietnamese label alone.
+const KSPORT_TODAY_BASELINE_EXPRESSION = ksportTimeTabExpression(["hom nay", "today"]);
+const KSPORT_LIVE_BASELINE_EXPRESSION = ksportTimeTabExpression(["truc tiep", "live"]);
 
-export function ksportTimeTabExpressionForTest(label: string): string {
-  return ksportTimeTabExpression(label);
+export function ksportTimeTabExpressionForTest(labels: readonly string[]): string {
+  return ksportTimeTabExpression(labels);
 }
 
-function ksportTimeTabExpression(label: string): string {
+function ksportTimeTabExpression(labels: readonly string[]): string {
   return `(() => {
     const normalize = (value) => String(value || '').normalize('NFD')
       .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D').trim().toLowerCase().replace(/\\s+/g, ' ');
@@ -387,8 +390,8 @@ function ksportTimeTabExpression(label: string): string {
     const scope = group.closest('.header-tab-content');
     if (!scope) return { status: 'time-tab-not-found', step: 'scope', ...shape };
     const tab = [...scope.querySelectorAll('.sport-menu-tab .period-item')]
-      .find((candidate) => normalize((candidate.querySelector('.period-tab') || candidate).textContent) ===
-        ${JSON.stringify(label)});
+      .find((candidate) => ${JSON.stringify(labels)}.includes(
+        normalize((candidate.querySelector('.period-tab') || candidate).textContent)));
     if (!tab) return { status: 'time-tab-not-found', step: 'tab', ...shape };
     if (tab.classList.contains('active-period')) return { status: 'time-tab-active' };
     tab.click();
