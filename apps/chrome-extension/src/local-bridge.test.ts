@@ -593,3 +593,46 @@ describe("RELOAD_EXTENSION control message", () => {
     expect(reloads).toEqual([]);
   });
 });
+
+describe("bridge must always be able to reconnect", () => {
+  it("releases the readiness latch even when the connect token moved on", async () => {
+    // The whole bridge dies together and never returns: every source goes stale
+    // within seconds of the others and no reconnect follows. A readiness probe
+    // whose resolution is discarded on a token mismatch leaves #probeInFlight
+    // set, and connect() returns early on it for the life of the worker, so the
+    // 30 s wake alarm can no longer do anything.
+    let settleProbe!: (ready: boolean) => void;
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({
+      socketFactory: () => socket,
+      installationKey: "local-key",
+      readinessProbe: () => new Promise<boolean>((resolve) => { settleProbe = resolve; }),
+      setTimer: () => 1,
+      clearTimer: () => undefined
+    });
+
+    bridge.connect();
+    bridge.close();
+    settleProbe(true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(bridge.readinessLatched()).toBe(false);
+  });
+
+  it("reports how long the bridge has been out of contact", () => {
+    let nowMs = 1_000;
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({
+      socketFactory: () => socket,
+      installationKey: "local-key",
+      now: () => nowMs
+    });
+
+    bridge.connect();
+    socket.open();
+    nowMs = 200_000;
+
+    expect(bridge.serverContactAgeMs()).toBe(199_000);
+  });
+});

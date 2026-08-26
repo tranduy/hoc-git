@@ -85,3 +85,45 @@ describe("BridgeWakeup", () => {
     }
   });
 });
+
+describe("bridge rebuild watchdog", () => {
+  it("forces a rebuild once the bridge has been silent past the limit", async () => {
+    // Belt and braces for the failure that ends every source at once: whatever
+    // latch or lost timer caused it, a bridge that has said nothing for minutes
+    // must be torn down and rebuilt rather than waited on.
+    const rebuilds: number[] = [];
+    let contactAgeMs = 10_000;
+    const wakeup = new BridgeWakeup({
+      createAlarm: vi.fn(),
+      addAlarmListener: vi.fn(),
+      ensureConnected: vi.fn(async () => true),
+      pollNow: vi.fn(),
+      bridgeContactAgeMs: () => contactAgeMs,
+      rebuildBridge: async () => { rebuilds.push(contactAgeMs); },
+      rebuildAfterMs: 180_000
+    });
+
+    await wakeup.wakeNow();
+    expect(rebuilds).toEqual([]);
+
+    contactAgeMs = 180_001;
+    await wakeup.wakeNow();
+    expect(rebuilds).toEqual([180_001]);
+  });
+
+  it("never rebuilds while the bridge is still in contact", async () => {
+    const rebuilds: number[] = [];
+    const wakeup = new BridgeWakeup({
+      createAlarm: vi.fn(),
+      addAlarmListener: vi.fn(),
+      ensureConnected: vi.fn(async () => true),
+      pollNow: vi.fn(),
+      bridgeContactAgeMs: () => 179_999,
+      rebuildBridge: async () => { rebuilds.push(1); },
+      rebuildAfterMs: 180_000
+    });
+
+    await wakeup.wakeNow();
+    expect(rebuilds).toEqual([]);
+  });
+});

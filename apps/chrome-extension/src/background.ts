@@ -403,6 +403,13 @@ const bridgeWakeup = new BridgeWakeup({
   addAlarmListener: (listener) => chrome.alarms.onAlarm.addListener(listener),
   reconcileTabs: reconcilePreferredTabs,
   ensureConnected: ensureBridgeConnected,
+  bridgeContactAgeMs: () => bridge?.serverContactAgeMs() ?? Number.NEGATIVE_INFINITY,
+  // Clearing the in-flight configure first is the point: a hung configure would
+  // otherwise hand every caller the same never-settling promise forever.
+  rebuildBridge: async () => {
+    configureInFlight = null;
+    await configureBridge(true);
+  },
   ensureAttached: reattachPreferredTabs,
   pollNow: (sourceIds) => snapshotPoller.pollNow(sourceIds)
 });

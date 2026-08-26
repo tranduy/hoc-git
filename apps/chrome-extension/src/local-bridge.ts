@@ -186,6 +186,16 @@ export class LocalBridge {
     if (acknowledgement !== null) await acknowledgement;
   }
 
+  /** True while a readiness probe is still holding connect() off. */
+  readinessLatched(): boolean {
+    return this.#probeInFlight;
+  }
+
+  /** How long since the server last said anything on this bridge. */
+  serverContactAgeMs(nowMs = this.#now()): number {
+    return nowMs - this.#lastServerContactAtMs;
+  }
+
   connect(): void {
     if (this.#socket && (this.#socket.readyState === 0 || this.#socket.readyState === 1)) {
       if (this.#now() - this.#lastServerContactAtMs <= this.#livenessTimeoutMs) return;
@@ -208,14 +218,18 @@ export class LocalBridge {
     }
     if (typeof (readiness as Promise<boolean>)?.then === "function") {
       this.#probeInFlight = true;
+      // The latch must be released on every settlement, including the one whose
+      // token has moved on. Leaving it set makes connect() return early for the
+      // life of the worker, and the whole bridge then dies together with no
+      // reconnect: exactly the observed failure.
       void Promise.resolve(readiness).then((ready) => {
-        if (token !== this.#connectToken) return;
         this.#probeInFlight = false;
+        if (token !== this.#connectToken) return;
         if (ready) this.#openSocket();
         else this.#scheduleReconnect();
       }).catch(() => {
-        if (token !== this.#connectToken) return;
         this.#probeInFlight = false;
+        if (token !== this.#connectToken) return;
         this.#scheduleReconnect();
       });
       return;
