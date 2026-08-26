@@ -98,12 +98,29 @@ interface AccountState {
     readonly framesUnattributed: number;
     readonly framesNotActiveStream: number;
     readonly framesDecoderFailed: number;
+    readonly sockjsOpen: number;
+    readonly sockjsHeartbeat: number;
+    readonly sockjsArray: number;
+    readonly sockjsClose: number;
+    readonly sockjsOther: number;
+    readonly decoderFailCode: string;
+    readonly stompFrames: number;
+    readonly stompMessages: number;
+    readonly stompPartitionRejected: number;
   } | null;
   recovery: {
     consecutiveFailures: number;
     nextAttemptAtMs: number | null;
     lastFailureCode: string | null;
   };
+}
+
+const decoderFailCodes = new Set(["NONE", "PAYLOAD_TOO_LONG", "ENVELOPE_INVALID",
+  "PENDING_OVERFLOW", "SENT_PENDING_OVERFLOW", "SUBSCRIBE_STRADDLE", "ATTEMPT_UNAVAILABLE",
+  "DELTA_BUFFER_FULL", "EVIDENCE_VERSION_EXHAUSTED", "OTHER"]);
+
+function failCode(value: unknown): string {
+  return typeof value === "string" && decoderFailCodes.has(value) ? value : "NONE";
 }
 
 function boundedCounter(value: unknown): number {
@@ -349,7 +366,10 @@ export class PipelineTelemetry {
         ksportTargets?: unknown; attachedTargets?: unknown; framesReceived?: unknown;
         framesOrphan?: unknown; framesForwarded?: unknown; ignoredSockets?: unknown;
         framesBinary?: unknown; framesNotOwner?: unknown; framesUnattributed?: unknown;
-        framesNotActiveStream?: unknown; framesDecoderFailed?: unknown };
+        framesNotActiveStream?: unknown; framesDecoderFailed?: unknown;
+        sockjsOpen?: unknown; sockjsHeartbeat?: unknown; sockjsArray?: unknown;
+        sockjsClose?: unknown; sockjsOther?: unknown; decoderFailCode?: unknown;
+        stompFrames?: unknown; stompMessages?: unknown; stompPartitionRejected?: unknown };
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
@@ -371,7 +391,16 @@ export class PipelineTelemetry {
           framesNotOwner: boundedCounter(value.framesNotOwner),
           framesUnattributed: boundedCounter(value.framesUnattributed),
           framesNotActiveStream: boundedCounter(value.framesNotActiveStream),
-          framesDecoderFailed: boundedCounter(value.framesDecoderFailed)
+          framesDecoderFailed: boundedCounter(value.framesDecoderFailed),
+          sockjsOpen: boundedCounter(value.sockjsOpen),
+          sockjsHeartbeat: boundedCounter(value.sockjsHeartbeat),
+          sockjsArray: boundedCounter(value.sockjsArray),
+          sockjsClose: boundedCounter(value.sockjsClose),
+          sockjsOther: boundedCounter(value.sockjsOther),
+          decoderFailCode: failCode(value.decoderFailCode),
+          stompFrames: boundedCounter(value.stompFrames),
+          stompMessages: boundedCounter(value.stompMessages),
+          stompPartitionRejected: boundedCounter(value.stompPartitionRejected)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }

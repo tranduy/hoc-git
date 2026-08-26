@@ -53,6 +53,12 @@ export class KsportRecoveryGenerationTracker {
   #catalogPendingEventKeys = new Set<string>();
   #catalogPendingMarketHighWatermarks = new Map<string, number>();
   #failed = false;
+  #stompFrames = 0;
+  #stompMessages = 0;
+  #partitionRejected = 0;
+  #failReason: "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" | "PENDING_OVERFLOW" |
+    "SENT_PENDING_OVERFLOW" | "SUBSCRIBE_STRADDLE" | "ATTEMPT_UNAVAILABLE" |
+    "DELTA_BUFFER_FULL" | "EVIDENCE_VERSION_EXHAUSTED" | "OTHER" = "NONE";
 
   constructor(options: KsportRecoveryGenerationOptions = {}) {
     this.#maxPendingChars = positiveBound(options.maxPendingChars ?? 4_000_000);
@@ -66,6 +72,22 @@ export class KsportRecoveryGenerationTracker {
   get catalogAuthorityGeneration(): number { return this.#catalogCommittedGeneration; }
 
   get failed(): boolean { return this.#failed; }
+  /**
+   * Structural counts only: how many complete STOMP frames arrived, how many
+   * were MESSAGE frames, and how many of those the catalog partition mapping
+   * refused. Never records a destination, header or body.
+   */
+  get frameShape(): { readonly stompFrames: number; readonly stompMessages: number;
+    readonly partitionRejected: number } {
+    return { stompFrames: this.#stompFrames, stompMessages: this.#stompMessages,
+      partitionRejected: this.#partitionRejected };
+  }
+  /** Why the decoder latched, so the fault is named rather than inferred. */
+  get failReason(): "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" | "PENDING_OVERFLOW" |
+    "SENT_PENDING_OVERFLOW" | "SUBSCRIBE_STRADDLE" | "ATTEMPT_UNAVAILABLE" |
+    "DELTA_BUFFER_FULL" | "EVIDENCE_VERSION_EXHAUSTED" | "OTHER" {
+    return this.#failReason;
+  }
 
   get currentBaselineState(): { readonly live: boolean; readonly today: boolean;
     readonly complete: boolean } {
@@ -83,12 +105,12 @@ export class KsportRecoveryGenerationTracker {
   observeSent(payload: string): number | null {
     if (this.#failed || typeof payload !== "string") return null;
     if (payload.length > this.#maxPendingChars) {
-      this.#fail();
+      this.#fail("PAYLOAD_TOO_LONG");
       return null;
     }
     const encoded = parseSockJsEnvelope(payload);
     if (encoded.kind === "INVALID") {
-      this.#fail();
+      this.#fail("ENVELOPE_INVALID");
       return null;
     }
     const fragments = encoded.kind === "VALID" ? encoded.strings
@@ -96,7 +118,7 @@ export class KsportRecoveryGenerationTracker {
     if (fragments === null) return null;
     this.#pendingSentFrames += 1;
     if (this.#pendingSentFrames > this.#maxPendingFrames) {
-      this.#fail();
+      this.#fail("PENDING_OVERFLOW");
       return null;
     }
     let observedGeneration: number | null = null;
@@ -104,7 +126,7 @@ export class KsportRecoveryGenerationTracker {
       const appended = appendStompFragment(this.#pendingSentStomp, fragment);
       this.#pendingSentStomp = appended.pending;
       if (this.#pendingSentStomp.length > this.#maxPendingChars) {
-        this.#fail();
+        this.#fail("SENT_PENDING_OVERFLOW");
         return null;
       }
       for (const frame of appended.frames) {
@@ -114,12 +136,12 @@ export class KsportRecoveryGenerationTracker {
             this.#pendingReceipts.length > 0) {
             // An inbound receipt straddling an outbound recovery boundary has no
             // observable immutable origin. Retire this tracker instead of guessing.
-            this.#fail();
+            this.#fail("SUBSCRIBE_STRADDLE");
             return null;
           }
           observedGeneration = this.#beginExplicitAttempt(partition);
           if (observedGeneration === null) {
-            this.#fail();
+            this.#fail("ATTEMPT_UNAVAILABLE");
             return null;
           }
         }
@@ -132,12 +154,12 @@ export class KsportRecoveryGenerationTracker {
   push(payload: string): readonly AttributedKsportFrame[] {
     if (this.#failed || typeof payload !== "string") return [];
     if (payload.length > this.#maxPendingChars) {
-      this.#fail();
+      this.#fail("PAYLOAD_TOO_LONG");
       return [];
     }
     const encoded = parseSockJsEnvelope(payload);
     if (encoded.kind === "INVALID") {
-      this.#fail();
+      this.#fail("ENVELOPE_INVALID");
       return [];
     }
     const fragments = encoded.kind === "VALID" ? encoded.strings
@@ -146,19 +168,25 @@ export class KsportRecoveryGenerationTracker {
     this.#pendingPayloads.push(payload);
     this.#pendingChars += payload.length;
     if (this.#pendingPayloads.length > this.#maxPendingFrames || this.#pendingChars > this.#maxPendingChars) {
-      this.#fail();
+      this.#fail("PENDING_OVERFLOW");
       return [];
     }
     for (const fragment of fragments) {
       const appended = appendStompFragment(this.#pendingStomp, fragment);
       this.#pendingStomp = appended.pending;
       if (this.#pendingStomp.length > this.#maxPendingChars) {
-        this.#fail();
+        this.#fail("PENDING_OVERFLOW");
         return [];
       }
       for (const frame of appended.frames) {
+        this.#stompFrames += 1;
+        const separator = frame.indexOf(String.fromCharCode(10, 10));
+        const isMessage = separator >= 0 &&
+          frame.slice(0, separator).split(String.fromCharCode(10))[0]?.trim() === "MESSAGE";
+        if (isMessage) this.#stompMessages += 1;
         const receipt = providerReceipt(frame);
-        if (receipt !== null) this.#pendingReceipts.push(receipt);
+        if (receipt === null) { if (isMessage) this.#partitionRejected += 1; continue; }
+        this.#pendingReceipts.push(receipt);
       }
     }
     if (this.#pendingStomp !== "") return [];
@@ -203,7 +231,7 @@ export class KsportRecoveryGenerationTracker {
               const addsMarket = !catalogPendingMarketHighWatermarks.has(key);
               if ((addsEvent && catalogPendingEventKeys.size >= KSPORT_MAX_PENDING_DELTA_RECORDS) ||
                 (addsMarket && catalogPendingMarketHighWatermarks.size >= KSPORT_MAX_PENDING_DELTA_MARKETS)) {
-                this.#fail();
+                this.#fail("DELTA_BUFFER_FULL");
                 return [];
               }
               catalogPendingEventKeys.add(eventKey);
@@ -235,7 +263,7 @@ export class KsportRecoveryGenerationTracker {
     }
     const generation = generations.values().next().value as number | undefined ?? candidate.generation;
     if (catalogEvidenceAdvanced && this.#catalogEvidenceVersion >= Number.MAX_SAFE_INTEGER) {
-      this.#fail();
+      this.#fail("EVIDENCE_VERSION_EXHAUSTED");
       return [];
     }
     this.#state = candidate;
@@ -286,8 +314,9 @@ export class KsportRecoveryGenerationTracker {
     this.#pendingChars = 0;
   }
 
-  #fail(): void {
+  #fail(reason: KsportDecoderFailReason = "OTHER"): void {
     this.#failed = true;
+    if (this.#failReason === "NONE") this.#failReason = reason;
     this.#pendingStomp = "";
     this.#pendingSentStomp = "";
     this.#pendingSentFrames = 0;
@@ -354,6 +383,10 @@ function stripLeadingStompHeartbeats(value: string): string {
 type ParsedSockJsEnvelope = { readonly kind: "NOT_SOCKJS" } |
   { readonly kind: "VALID"; readonly strings: readonly string[] } |
   { readonly kind: "INVALID" };
+
+export type KsportDecoderFailReason = "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" |
+  "PENDING_OVERFLOW" | "SENT_PENDING_OVERFLOW" | "SUBSCRIBE_STRADDLE" | "ATTEMPT_UNAVAILABLE" |
+  "DELTA_BUFFER_FULL" | "EVIDENCE_VERSION_EXHAUSTED" | "OTHER";
 
 function parseSockJsEnvelope(payload: string): ParsedSockJsEnvelope {
   const candidate = payload.startsWith("a[") ? payload.slice(1) : payload.startsWith("[") ? payload : null;

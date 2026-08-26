@@ -138,7 +138,9 @@ describe("PipelineTelemetry", () => {
       sourceGeneration: 3, webSocketCreated: 7, webSockets: 2, ksportTargets: 1, attachedTargets: 1,
       framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
       framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
-      framesDecoderFailed: 0
+      framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
+      sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
+      stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0
     });
   });
 

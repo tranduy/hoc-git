@@ -202,6 +202,17 @@ interface WsAttachDiagnosticState {
   framesUnattributed: number;
   framesNotActiveStream: number;
   framesDecoderFailed: number;
+  // Classification only: the leading SockJS frame character and the decoder's
+  // own reason code. No payload content is ever recorded.
+  sockjsOpen: number;
+  sockjsHeartbeat: number;
+  sockjsArray: number;
+  sockjsClose: number;
+  sockjsOther: number;
+  decoderFailCode: string;
+  stompFrames: number;
+  stompMessages: number;
+  stompPartitionRejected: number;
 }
 
 interface PreexistingSocketReconnectState {
@@ -2200,7 +2211,9 @@ export class NetworkObserver {
       sourceGeneration, webSocketCreated: 0, ksportTargets: 0, attachedTargets: 0,
       framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
       framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
-      framesDecoderFailed: 0
+      framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
+      sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
+      stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2595,7 +2608,12 @@ export class NetworkObserver {
         framesBinary: diagnostic.framesBinary, framesNotOwner: diagnostic.framesNotOwner,
         framesUnattributed: diagnostic.framesUnattributed,
         framesNotActiveStream: diagnostic.framesNotActiveStream,
-        framesDecoderFailed: diagnostic.framesDecoderFailed })
+        framesDecoderFailed: diagnostic.framesDecoderFailed,
+        sockjsOpen: diagnostic.sockjsOpen, sockjsHeartbeat: diagnostic.sockjsHeartbeat,
+        sockjsArray: diagnostic.sockjsArray, sockjsClose: diagnostic.sockjsClose,
+        sockjsOther: diagnostic.sockjsOther, decoderFailCode: diagnostic.decoderFailCode,
+        stompFrames: diagnostic.stompFrames, stompMessages: diagnostic.stompMessages,
+        stompPartitionRejected: diagnostic.stompPartitionRejected })
     });
   }
 
@@ -3006,13 +3024,25 @@ export class NetworkObserver {
           return;
         }
         const wasFailed = ksportRecovery.failed;
-        if (wasFailed) this.#wsAttachDiagnostic(source).framesDecoderFailed += 1;
+        const frameDiagnostic = this.#wsAttachDiagnostic(source);
+        const lead = payloadData.charAt(0);
+        if (lead === "o") frameDiagnostic.sockjsOpen += 1;
+        else if (lead === "h") frameDiagnostic.sockjsHeartbeat += 1;
+        else if (lead === "a" || lead === "[") frameDiagnostic.sockjsArray += 1;
+        else if (lead === "c") frameDiagnostic.sockjsClose += 1;
+        else frameDiagnostic.sockjsOther += 1;
+        if (wasFailed) frameDiagnostic.framesDecoderFailed += 1;
         const attributed = ksportRecovery.push(payloadData);
         // A STOMP decoder that has failed returns nothing for every later frame
         // on this socket. Gating its rebuild behind ownsSocket() meant a socket
         // whose decoder failed before it was ever promoted to the active stream
         // could never be rebuilt, so the provider stayed dark until the tab was
         // reloaded. Owning the source identity is enough to ask for a rebuild.
+        if (ksportRecovery.failed) frameDiagnostic.decoderFailCode = ksportRecovery.failReason;
+        const shape = ksportRecovery.frameShape;
+        frameDiagnostic.stompFrames = shape.stompFrames;
+        frameDiagnostic.stompMessages = shape.stompMessages;
+        frameDiagnostic.stompPartitionRejected = shape.partitionRejected;
         if (ksportRecovery.failed && ownsIdentity()) {
           this.#scheduleFailedKsportSocketRecovery(key, socket);
         }
