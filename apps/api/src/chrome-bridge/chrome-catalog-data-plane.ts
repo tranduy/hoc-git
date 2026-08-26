@@ -201,14 +201,16 @@ export class ChromeCatalogDataPlane {
     }
     const route = pipeline.router.route(assembled);
     if (route.status !== "TRUSTED" || route.adapter === null) {
-      this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs);
+      this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs,
+        envelope.request.pathnameClass);
       const reason = route.reason ?? (route.providerFamily === null
         ? "ADAPTER_FINGERPRINT_UNMATCHED" : "ADAPTER_CONFIRMATION_PENDING");
       return this.#reject(envelope, reason);
     }
     const update = route.adapter.decode(assembled).at(-1);
     if (update === undefined) {
-      this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs);
+      this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs,
+        envelope.request.pathnameClass);
       return this.#reject(envelope, `ADAPTER_DECODE_EMPTY:${route.adapter.id}`);
     }
     this.#telemetry?.recordAdapterDecoded(transportAccountId, update.observedAtMs);

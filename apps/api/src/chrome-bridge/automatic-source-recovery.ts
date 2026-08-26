@@ -202,6 +202,19 @@ export class AutomaticSourceRecovery {
         delivered = this.#options.controlPlane.restoreLobby("CMD");
       } else {
         if (this.#options.browserRefreshEnabled === false) {
+          // Returning here did nothing at all, and once a feed reaches the hard
+          // stage only the hard stage is requested again, so the book stayed
+          // dead with its tab alive. A lobby snapshot is the cheap action that
+          // still works with the relaunch path closed: it triggers the
+          // extension-driven reconciliation some providers ingest exclusively,
+          // and it neither reloads nor navigates a tab.
+          const snapshotStartedAtMs = this.#now();
+          if (this.#options.controlPlane.requestLobbySnapshot(source.hardLobby) > 0) {
+            const confirmation = await this.#confirmAfter(request.accountId, "HARD", snapshotStartedAtMs);
+            if (confirmation.outcome === "RECOVERED") return confirmation;
+            if (this.#disposed) return stopped(request.accountId, "HARD");
+            if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+          }
           return { accountId: request.accountId, stage: "HARD", outcome: "ACTION_REQUIRED",
             reason: "BROWSER_REFRESH_DISABLED" };
         }

@@ -83,6 +83,12 @@ interface AccountState {
   lastEvidenceAtMs: number | null;
   lastSemanticChangeAtMs: number | null;
   forcedUnlocks: number;
+  /** Endpoints an adapter refused, so a renamed provider path is visible. */
+  readonly ignoredEndpoints: Map<string, number>;
+  /** Outcomes an extension-driven catalog refresh reported, already allowlisted
+   *  at the source. A provider that lives on those refreshes is otherwise silent
+   *  about why one produced nothing. */
+  readonly refreshOutcomes: Map<string, number>;
   wsAttach: {
     readonly sourceGeneration: number;
     readonly webSocketCreated: number;
@@ -134,6 +140,9 @@ interface AccountState {
     lastFailureCode: string | null;
   };
 }
+
+const refreshOutcomes = new Set(["catalog-requested", "rate-limited", "token-unavailable",
+  "navigation-not-found", "unavailable"]);
 
 const decoderFailCodes = new Set(["NONE", "PAYLOAD_TOO_LONG", "ENVELOPE_INVALID",
   "PENDING_OVERFLOW", "SENT_PENDING_OVERFLOW", "SUBSCRIBE_STRADDLE", "ATTEMPT_UNAVAILABLE",
@@ -187,6 +196,7 @@ function createState(): AccountState {
     buckets: [], selections: new Map(), sourceId: null, sourceEpoch: null, tabId: null,
     attachedAtMs: null, lastEnvelopeAtMs: null, lastSequence: null, lastDecodedAtMs: null,
     lastEvidenceAtMs: null, lastSemanticChangeAtMs: null, forcedUnlocks: 0,
+    ignoredEndpoints: new Map(), refreshOutcomes: new Map(),
     wsAttach: null,
     recovery: { consecutiveFailures: 0, nextAttemptAtMs: null, lastFailureCode: null }
   };
@@ -232,8 +242,17 @@ export class PipelineTelemetry {
     state.lastDecodedAtMs = atMs;
   }
 
-  recordAdapterIgnored(accountId: ChromeBridgeProviderAccountId, atMs = this.#now()): void {
-    this.#bucket(this.#state(accountId), atMs).ignored += 1;
+  recordAdapterIgnored(accountId: ChromeBridgeProviderAccountId, atMs = this.#now(),
+    pathnameClass?: string): void {
+    const state = this.#state(accountId);
+    this.#bucket(state, atMs).ignored += 1;
+    // Path shape only, bounded in length and in how many distinct endpoints are
+    // remembered. An adapter that matches exact provider paths goes silent when
+    // the provider renames one, and nothing else in the pipeline can show that.
+    if (pathnameClass === undefined || !/^\/[\w./-]{0,63}$/u.test(pathnameClass)) return;
+    const seen = state.ignoredEndpoints.get(pathnameClass) ?? 0;
+    if (seen === 0 && state.ignoredEndpoints.size >= 8) return;
+    state.ignoredEndpoints.set(pathnameClass, seen + 1);
   }
 
   recordAdapterRejected(accountId: ChromeBridgeProviderAccountId, reason: AdapterRejectReason,
@@ -364,7 +383,13 @@ export class PipelineTelemetry {
       { hop: "HOP4_ADAPTER", ok: state.lastDecodedAtMs !== null &&
         nowMs - state.lastDecodedAtMs <= PIPELINE_TELEMETRY_LIMITS.windowMs, detail: {
         decoded: sums.decoded, ignored: sums.ignored, rejectReasons: sums.adapterRejectReasons,
-        lastDecodedAgeMs: age(nowMs, state.lastDecodedAtMs), forcedUnlocks: state.forcedUnlocks
+        lastDecodedAgeMs: age(nowMs, state.lastDecodedAtMs), forcedUnlocks: state.forcedUnlocks,
+        ignoredEndpoints: [...state.ignoredEndpoints.entries()]
+          .sort((left, right) => right[1] - left[1]).slice(0, 6)
+          .map(([pathnameClass, count]) => ({ pathnameClass, count })),
+        refreshOutcomes: [...state.refreshOutcomes.entries()]
+          .sort((left, right) => right[1] - left[1]).slice(0, 6)
+          .map(([status, count]) => ({ status, count }))
       } },
       { hop: "HOP5_AUTHORITY", ok: authority?.active !== null && authority?.active !== undefined, detail: {
         authorityDisposition: authority?.active !== null && authority?.active !== undefined ? "ACTIVE" : "NONE"
@@ -400,7 +425,8 @@ export class PipelineTelemetry {
 
   #recordWorkHealth(state: AccountState, body: string): void {
     try {
-      const value = JSON.parse(body) as { kind?: unknown; counters?: { forcedUnlocks?: unknown };
+      const value = JSON.parse(body) as { kind?: unknown; results?: unknown;
+        counters?: { forcedUnlocks?: unknown };
         sourceGeneration?: unknown; webSocketCreated?: unknown; webSockets?: unknown;
         ksportTargets?: unknown; attachedTargets?: unknown; framesReceived?: unknown;
         framesOrphan?: unknown; framesForwarded?: unknown; ignoredSockets?: unknown;
@@ -416,6 +442,14 @@ export class PipelineTelemetry {
         baselineTabSelections?: unknown; baselineTabStatus?: unknown;
         baselineTabTargets?: unknown; baselineTabStep?: unknown; baselineTabGroups?: unknown;
         baselineTabScopes?: unknown; baselineTabPeriods?: unknown; baselineTabLabels?: unknown };
+      if (Array.isArray((value as { results?: unknown }).results)) {
+        for (const entry of (value as { results: readonly unknown[] }).results) {
+          if (typeof entry !== "string" || !refreshOutcomes.has(entry)) continue;
+          const seen = state.refreshOutcomes.get(entry) ?? 0;
+          if (seen === 0 && state.refreshOutcomes.size >= 8) continue;
+          state.refreshOutcomes.set(entry, seen + 1);
+        }
+      }
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,

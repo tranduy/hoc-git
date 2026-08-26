@@ -7,6 +7,7 @@ const SABA = "catalog-source:SABA:FOOTBALL";
 const SBOBET = "catalog-source:SBOBET:FOOTBALL";
 const APSPORT = "catalog-source:APSPORT:FOOTBALL";
 const BTI = "catalog-source:BTI:FOOTBALL";
+const IM = "catalog-source:IM:FOOTBALL";
 
 function snapshot(accountId: string, overrides: Partial<ProviderFeedSnapshot> = {}): ProviderFeedSnapshot {
   return {
@@ -675,3 +676,37 @@ function deferredBaseline() {
   const promise = new Promise<ProviderFeedSnapshot>((resolvePromise) => { resolve = resolvePromise; });
   return { promise, resolve };
 }
+
+describe("a hard stage that cannot relaunch must still ask for a snapshot", () => {
+  it("requests a lobby snapshot before reporting that browser refresh is off", async () => {
+    // IM discards the page's own traffic and only ingests an extension-driven
+    // reconciliation, which a REQUEST_SNAPSHOT triggers. Its feed reached
+    // HARD_RECOVERY, the hard stage saw browser refresh disabled and returned
+    // without doing anything at all, and the sweep then only ever re-requested
+    // the hard stage: the book stayed dead with its tab alive and 80 envelopes
+    // a window arriving. Asking for a snapshot is cheap and touches no tab.
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(IM));
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(IM, {
+      state: "LIVE", reason: null, sourceId: "chrome:IM:5", sourceEpoch: "observer-b:0",
+      activeGeneration: "im:5:1", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    const result = await context.recovery.recover(request(IM, "HARD"));
+
+    expect(context.requestLobbySnapshot).toHaveBeenCalledWith("IM");
+    expect(result).toEqual({ accountId: IM, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+  });
+
+  it("still reports browser refresh disabled when the snapshot changes nothing", async () => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(IM));
+    context.requestLobbySnapshot.mockReturnValue(0);
+
+    const result = await context.recovery.recover(request(IM, "HARD"));
+
+    expect(result).toEqual({ accountId: IM, stage: "HARD", outcome: "ACTION_REQUIRED",
+      reason: "BROWSER_REFRESH_DISABLED" });
+  });
+});

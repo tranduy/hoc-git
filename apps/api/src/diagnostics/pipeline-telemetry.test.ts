@@ -258,3 +258,57 @@ describe("PipelineTelemetry", () => {
     });
   });
 });
+
+describe("ignored-envelope endpoints", () => {
+  it("names the endpoints an adapter refused, bounded and path-shaped", async () => {
+    // IM went to zero with its tab alive and 76 HTTP envelopes arriving, all
+    // ignored and none rejected: the adapter matches one exact host and two
+    // exact paths, so a renamed endpoint is silently invisible. HOP4 has to say
+    // which endpoint arrived or the rename cannot be seen at all.
+    const telemetry = new PipelineTelemetry({ now: () => 120_000 });
+    for (const pathnameClass of ["/api/EventV7/GetSE", "/api/EventV7/GetSE", "/api/Other/Ping"]) {
+      telemetry.recordAdapterIgnored(accountId, 110_000, pathnameClass);
+    }
+    telemetry.recordAdapterIgnored(accountId, 110_000, "not a path");
+    telemetry.recordAdapterIgnored(accountId, 110_000, `/${"a".repeat(300)}`);
+
+    const result = await telemetry.diagnostic(readers(
+      { accountId, catalog: catalog(100_000, []), revision: "rev-ignored", observedAtMs: 100_000,
+        snapshotState: "STALE", sequence: 1, freshUntilMs: 100_000 },
+      { accountId, state: "STARTING", reason: null, sourceId: "chrome:CMD:7", sourceEpoch: "worker-a:0",
+        tabReachableAtMs: 100_000, providerTransportAtMs: null, lastAuthoritativeEvidenceAtMs: null,
+        lastCompleteBaselineAtMs: null, lastDeltaAtMs: null, lastSemanticChangeAtMs: null,
+        activeGeneration: null, recoveryStage: "NONE", recoveryAttempt: 0 }), accountId);
+
+    expect(result?.hops.find((hop) => hop.hop === "HOP4_ADAPTER")?.detail.ignoredEndpoints)
+      .toEqual([{ pathnameClass: "/api/EventV7/GetSE", count: 2 }, { pathnameClass: "/api/Other/Ping", count: 1 }]);
+  });
+});
+
+describe("provider refresh outcomes", () => {
+  it("keeps the allowlisted statuses an IM reconciliation reported", async () => {
+    // IM discards the page's own traffic by design and lives entirely on
+    // extension-driven reconciliation. Those reconciliations were running - 93
+    // heartbeats - and still produced nothing, and the status each one returned
+    // was the only thing that could say why. It was already allowlisted at the
+    // source and simply never read.
+    const telemetry = new PipelineTelemetry({ now: () => 120_000 });
+    telemetry.recordEnvelope({ ...envelope(1, 110_000), transport: "TAB_STATE",
+      request: { hostname: "provider.invalid", pathnameClass: "/__fieldline_im_catalog_refresh__",
+        resourceType: "Diagnostic" },
+      payload: { encoding: "UTF8", body: JSON.stringify({
+        results: ["token-unavailable", "token-unavailable", "catalog-requested", "not-in-allowlist"] }) }
+    }, "worker-a:0");
+
+    const result = await telemetry.diagnostic(readers(
+      { accountId, catalog: catalog(100_000, []), revision: "rev-im", observedAtMs: 100_000,
+        snapshotState: "STALE", sequence: 1, freshUntilMs: 100_000 },
+      { accountId, state: "STARTING", reason: null, sourceId: "chrome:CMD:7", sourceEpoch: "worker-a:0",
+        tabReachableAtMs: 100_000, providerTransportAtMs: null, lastAuthoritativeEvidenceAtMs: null,
+        lastCompleteBaselineAtMs: null, lastDeltaAtMs: null, lastSemanticChangeAtMs: null,
+        activeGeneration: null, recoveryStage: "NONE", recoveryAttempt: 0 }), accountId);
+
+    expect(result?.hops.find((hop) => hop.hop === "HOP4_ADAPTER")?.detail.refreshOutcomes)
+      .toEqual([{ status: "token-unavailable", count: 2 }, { status: "catalog-requested", count: 1 }]);
+  });
+});
