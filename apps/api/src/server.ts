@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
 import { TwoLegPreflight } from "./preflight/two-leg-preflight.js";
 import { FixtureAdapter, type FixtureSnapshot } from "@tool-chenh/adapters";
 import type { Category, ChromeLobbyId, DataMode } from "@tool-chenh/contracts";
@@ -62,6 +62,43 @@ interface RecoverySweepActor {
 interface RecoverySweepOptions {
   readonly isRecoverySuppressed?: (accountId: string) => boolean;
   readonly onError?: (accountId: string | null, error: unknown) => void;
+}
+
+/**
+ * Reads the build identity written by the extension bundler. A deployment can
+ * then tell a running worker that a newer bundle exists, instead of a person
+ * having to click reload after every extension change.
+ */
+export function readExtensionBuildIdentity(
+  repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
+  read: (path: string) => string = (path) => readFileSync(path, "utf8")
+): string | null {
+  try {
+    const raw = read(join(repositoryRoot, "apps", "chrome-extension", "dist", "build-identity.json"));
+    const value = JSON.parse(raw) as { readonly buildIdentity?: unknown };
+    return typeof value.buildIdentity === "string" && /^sha256:[0-9a-f]{64}$/u.test(value.buildIdentity)
+      ? value.buildIdentity
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function startExtensionReloadSweep(
+  controlPlane: { reloadExtension(buildIdentity: string): number },
+  buildIdentity: string | null,
+  intervalMs = 30_000
+): { dispose(): void } | null {
+  if (buildIdentity === null) return null;
+  // The worker ignores an identity matching its own bundle, so repeating the
+  // announcement is a no-op once it has converged, and it also covers a worker
+  // that was evicted and restarted on the old bundle after the deployment.
+  const timer = setInterval(() => {
+    try { controlPlane.reloadExtension(buildIdentity); }
+    catch { /* a reload announcement must never stop the stack */ }
+  }, intervalMs);
+  timer.unref();
+  return { dispose(): void { clearInterval(timer); } };
 }
 
 export function startProviderRecoverySweep(
@@ -607,6 +644,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   if (providerRecovery !== null) {
     app.addHook("onClose", async () => { await providerRecovery.dispose(); });
   }
+  const extensionReload = chromeBridgeControlPlane === null
+    ? null
+    : startExtensionReloadSweep(chromeBridgeControlPlane, readExtensionBuildIdentity());
+  if (extensionReload !== null) app.addHook("onClose", async () => { extensionReload.dispose(); });
   await app.listen({ host: config.host, port: config.port });
   const dailyMaintenance = createDailyMaintenanceScheduler(() => maintenance.runScheduled());
   dailyMaintenance.start();

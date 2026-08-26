@@ -342,3 +342,23 @@ describe("ChromeNetworkBodyChunkSchema", () => {
     ]) expect(contracts.ChromeNetworkBodyChunkSchema.safeParse(invalid).success).toBe(false);
   });
 });
+
+describe("RELOAD_EXTENSION control message", () => {
+  it("accepts a sha256 build identity and rejects anything else", () => {
+    const identity = `sha256:${"a".repeat(64)}`;
+    expect(contracts.ChromeBridgeControlMessageSchema.safeParse({
+      version: 1, kind: "RELOAD_EXTENSION", buildIdentity: identity
+    }).success).toBe(true);
+    for (const buildIdentity of ["", "sha256:short", "plain-text", `md5:${"a".repeat(64)}`]) {
+      expect(contracts.ChromeBridgeControlMessageSchema.safeParse({
+        version: 1, kind: "RELOAD_EXTENSION", buildIdentity
+      }).success).toBe(false);
+    }
+  });
+
+  it("refuses unknown fields on the reload request", () => {
+    expect(contracts.ChromeBridgeControlMessageSchema.safeParse({
+      version: 1, kind: "RELOAD_EXTENSION", buildIdentity: `sha256:${"b".repeat(64)}`, sourceId: "chrome:CMD:1"
+    }).success).toBe(false);
+  });
+});

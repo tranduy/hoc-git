@@ -204,6 +204,26 @@ export class ChromeBridgeControlPlane {
     return candidate.socket;
   }
 
+  /**
+   * Asks the extension worker to restart itself so a freshly built bundle takes
+   * effect without a human clicking reload. The whole extension shares one
+   * bridge socket, so the request is sent once per distinct socket; the worker
+   * ignores an identity matching the bundle it already runs.
+   */
+  reloadExtension(buildIdentity: string): number {
+    const control: ChromeBridgeControlMessage = { version: 1, kind: "RELOAD_EXTENSION", buildIdentity };
+    const serialized = JSON.stringify(control);
+    const seen = new Set<unknown>();
+    let requested = 0;
+    for (const { socket } of this.#attachedSources()) {
+      if (socket.readyState !== 1 || seen.has(socket)) continue;
+      seen.add(socket);
+      socket.send(serialized);
+      requested += 1;
+    }
+    return requested;
+  }
+
   reloadAllSources(): number {
     return this.#broadcast("RELOAD_SOURCE");
   }

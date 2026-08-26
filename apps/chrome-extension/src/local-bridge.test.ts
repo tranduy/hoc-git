@@ -552,3 +552,44 @@ describe("LocalBridge", () => {
     expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
   });
 });
+
+describe("RELOAD_EXTENSION control message", () => {
+  it("reloads only when the deployed bundle differs from the running one", () => {
+    const reloads: string[] = [];
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({
+      socketFactory: () => socket,
+      installationKey: "local-key",
+      buildIdentity: `sha256:${"a".repeat(64)}`,
+      onExtensionReload: (identity: string) => { reloads.push(identity); }
+    });
+    bridge.connect();
+    socket.open();
+
+    // Its own bundle must never trigger a reload, or a server that keeps
+    // announcing the current build turns every message into a reload loop.
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "RELOAD_EXTENSION",
+      buildIdentity: `sha256:${"a".repeat(64)}` }) });
+    expect(reloads).toEqual([]);
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "RELOAD_EXTENSION",
+      buildIdentity: `sha256:${"b".repeat(64)}` }) });
+    expect(reloads).toEqual([`sha256:${"b".repeat(64)}`]);
+  });
+
+  it("ignores a reload request when the worker does not know its own build", () => {
+    const reloads: string[] = [];
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({
+      socketFactory: () => socket,
+      installationKey: "local-key",
+      onExtensionReload: (identity: string) => { reloads.push(identity); }
+    });
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "RELOAD_EXTENSION",
+      buildIdentity: `sha256:${"c".repeat(64)}` }) });
+    expect(reloads).toEqual([]);
+  });
+});

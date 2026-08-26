@@ -46,6 +46,9 @@ export interface LocalBridgeOptions {
   readonly onSnapshotRequest?: (sourceId: string) => void | Promise<void>;
   readonly onSourceResync?: (sourceId: string) => void | Promise<void>;
   readonly onSourceReload?: (sourceId: string) => void | Promise<void>;
+  /** Identity of the bundle this worker is running, injected at build time. */
+  readonly buildIdentity?: string;
+  readonly onExtensionReload?: (buildIdentity: string) => void;
   readonly onSourceNavigate?: (sourceId: string, url: string) => void | Promise<void>;
   readonly onSourceEnsure?: (lobby: ChromeBridgeEnvelope["lobby"], url: string) => void | Promise<void>;
   readonly onSourceRestore?: (lobby: ChromeBridgeEnvelope["lobby"]) => void | Promise<void>;
@@ -70,6 +73,8 @@ export class LocalBridge {
   readonly #onSnapshotRequest: (sourceId: string) => void | Promise<void>;
   readonly #onSourceResync: (sourceId: string) => void | Promise<void>;
   readonly #onSourceReload: (sourceId: string) => void | Promise<void>;
+  readonly #buildIdentity: string | null;
+  readonly #onExtensionReload: ((buildIdentity: string) => void) | null;
   readonly #onSourceNavigate: NonNullable<LocalBridgeOptions["onSourceNavigate"]>;
   readonly #onSourceEnsure: NonNullable<LocalBridgeOptions["onSourceEnsure"]>;
   readonly #onSourceRestore: NonNullable<LocalBridgeOptions["onSourceRestore"]>;
@@ -108,6 +113,8 @@ export class LocalBridge {
     this.#onSnapshotRequest = options.onSnapshotRequest ?? (() => undefined);
     this.#onSourceResync = options.onSourceResync ?? this.#onSnapshotRequest;
     this.#onSourceReload = options.onSourceReload ?? (() => undefined);
+    this.#buildIdentity = options.buildIdentity ?? null;
+    this.#onExtensionReload = options.onExtensionReload ?? null;
     this.#onSourceNavigate = options.onSourceNavigate ?? (() => undefined);
     this.#onSourceEnsure = options.onSourceEnsure ?? (() => undefined);
     this.#onSourceRestore = options.onSourceRestore ?? (() => undefined);
@@ -299,6 +306,16 @@ export class LocalBridge {
       this.#lastServerContactAtMs = this.#now();
       if (parsed.data.kind === "REQUEST_SNAPSHOT") {
         this.#enqueueSnapshotRecovery(parsed.data.sourceId);
+        return;
+      }
+      if (parsed.data.kind === "RELOAD_EXTENSION") {
+        // Only a worker that knows its own bundle can tell a newer deployment
+        // from its own. Without that it must stay put: reloading on every
+        // announcement would restart the worker forever.
+        const deployed = parsed.data.buildIdentity;
+        if (this.#buildIdentity === null || this.#buildIdentity === deployed) return;
+        try { this.#onExtensionReload?.(deployed); }
+        catch { /* a failed reload must not disrupt the bridge */ }
         return;
       }
       if (parsed.data.kind === "RELOAD_SOURCE") {

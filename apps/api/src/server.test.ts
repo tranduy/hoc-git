@@ -4,7 +4,8 @@ import { ProviderFeedRegistry } from "./chrome-bridge/provider-feed-registry.js"
 import { providerFeedPolicies } from "./chrome-bridge/provider-feed-policies.js";
 import type { ProviderFeedSnapshot, ProviderRecoveryRequest } from "./chrome-bridge/provider-feed-types.js";
 import { PipelineTelemetry } from "./diagnostics/pipeline-telemetry.js";
-import { localWarpAuthEnabled, startProviderRecoverySweep } from "./server.js";
+import { localWarpAuthEnabled, readExtensionBuildIdentity, startExtensionReloadSweep,
+  startProviderRecoverySweep } from "./server.js";
 import * as serverModule from "./server.js";
 
 const SABA = "catalog-source:SABA:FOOTBALL";
@@ -385,5 +386,54 @@ describe("targeted manual provider refresh ownership", () => {
 
     await expect(manual.refresh("SABA")).rejects.toThrow("DELIVERY_FAILED");
     expect(manual.isRecoverySuppressed(SABA)).toBe(false);
+  });
+});
+
+describe("extension reload announcement", () => {
+  const identity = `sha256:${"e".repeat(64)}`;
+
+  it("reads only a well-formed build identity", () => {
+    expect(readExtensionBuildIdentity("/repo", () => JSON.stringify({ buildIdentity: identity })))
+      .toBe(identity);
+    for (const body of ["{}", '{"buildIdentity":"nope"}', "not json", '{"buildIdentity":123}']) {
+      expect(readExtensionBuildIdentity("/repo", () => body)).toBeNull();
+    }
+    expect(readExtensionBuildIdentity("/repo", () => { throw new Error("ENOENT"); })).toBeNull();
+  });
+
+  it("repeats the announcement so an evicted worker still converges", () => {
+    vi.useFakeTimers();
+    try {
+      const reloadExtension = vi.fn(() => 1);
+      const sweep = startExtensionReloadSweep({ reloadExtension }, identity, 1_000);
+      expect(sweep).not.toBeNull();
+
+      vi.advanceTimersByTime(3_000);
+      expect(reloadExtension).toHaveBeenCalledTimes(3);
+      expect(reloadExtension).toHaveBeenLastCalledWith(identity);
+
+      sweep!.dispose();
+      vi.advanceTimersByTime(3_000);
+      expect(reloadExtension).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stays off when no extension bundle identity is available", () => {
+    expect(startExtensionReloadSweep({ reloadExtension: vi.fn(() => 1) }, null)).toBeNull();
+  });
+
+  it("never lets a failing announcement stop the stack", () => {
+    vi.useFakeTimers();
+    try {
+      const reloadExtension = vi.fn(() => { throw new Error("SEND_FAILED"); });
+      const sweep = startExtensionReloadSweep({ reloadExtension }, identity, 1_000);
+      expect(() => vi.advanceTimersByTime(2_000)).not.toThrow();
+      expect(reloadExtension).toHaveBeenCalledTimes(2);
+      sweep!.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

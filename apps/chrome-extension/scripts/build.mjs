@@ -1,4 +1,5 @@
-import { cp, mkdir, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -14,6 +15,17 @@ let installationKey = "";
 try {
   installationKey = (await readFile(resolve(repositoryRoot, ".auth/chrome-bridge.key"), "utf8")).trim();
 } catch { /* production/CI builds remain explicitly unconfigured */ }
+
+// A build identity lets the running worker tell "this bundle is already mine"
+// from "a newer bundle was deployed", so a reload request can never loop.
+const sourceRoot = resolve(root, "src");
+const sourceNames = (await readdir(sourceRoot)).filter((name) => name.endsWith(".ts")).sort();
+const digest = createHash("sha256");
+for (const name of sourceNames) {
+  digest.update(name);
+  digest.update(await readFile(resolve(sourceRoot, name)));
+}
+const buildIdentity = `sha256:${digest.digest("hex")}`;
 
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
@@ -39,6 +51,15 @@ await build({
       }));
     }
   }],
-  define: { __CHROME_BRIDGE_DEFAULT_KEY__: JSON.stringify(installationKey) }
+  define: {
+    __CHROME_BRIDGE_DEFAULT_KEY__: JSON.stringify(installationKey),
+    __CHROME_EXTENSION_BUILD_IDENTITY__: JSON.stringify(buildIdentity)
+  }
 });
 await cp(resolve(root, "public"), output, { recursive: true });
+// The API reads this to tell a running worker which bundle is deployed.
+await writeFile(resolve(output, "build-identity.json"),
+  `${JSON.stringify({ buildIdentity }, null, 2)}
+`, "utf8");
+process.stdout.write(`extension build ${buildIdentity}
+`);

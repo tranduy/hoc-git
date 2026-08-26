@@ -19,6 +19,7 @@ import { SabaSnapshotStorage } from "./saba-snapshot-storage.js";
 import { SourceLaunchMemory } from "./source-launch-memory.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
+declare const __CHROME_EXTENSION_BUILD_IDENTITY__: string;
 
 let bridge: LocalBridge | null = null;
 let configureInFlight: Promise<boolean> | null = null;
@@ -298,6 +299,14 @@ async function configureBridgeOnce(): Promise<boolean> {
       onOpen: () => undefined,
       onSnapshotRequest: async (sourceId) => recoverSourceSnapshot(sourceId, false),
       onSourceResync: async (sourceId) => recoverSourceSnapshot(sourceId, true),
+      ...(typeof __CHROME_EXTENSION_BUILD_IDENTITY__ === "string" &&
+        __CHROME_EXTENSION_BUILD_IDENTITY__.length > 0
+        ? { buildIdentity: __CHROME_EXTENSION_BUILD_IDENTITY__ }
+        : {}),
+      // Restarts this service worker only. Provider tabs keep their session and
+      // are neither navigated nor closed, which is exactly what a manual
+      // "reload extension" does, so a deployment no longer needs a human.
+      onExtensionReload: () => { chrome.runtime.reload(); },
       onSourceReload: async (sourceId) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
         if (attached) await chrome.tabs.reload(attached.tabId);

@@ -591,3 +591,23 @@ describe("ChromeBridgeControlPlane", () => {
     }));
   });
 });
+
+describe("reloadExtension", () => {
+  it("sends one request per bridge socket and skips closed ones", () => {
+    const identity = `sha256:${"d".repeat(64)}`;
+    const plane = new ChromeBridgeControlPlane();
+    const open = { send: vi.fn(), readyState: 1 };
+    const closed = { send: vi.fn(), readyState: 3 };
+    // One extension shares a single bridge socket across all of its sources,
+    // so a per-source broadcast would restart the same worker many times.
+    plane.attach("chrome:CMD:1", open);
+    plane.attach("chrome:IM:2", open);
+    plane.attach("chrome:BTI:3", closed);
+
+    expect(plane.reloadExtension(identity)).toBe(1);
+    expect(open.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "RELOAD_EXTENSION", buildIdentity: identity
+    }));
+    expect(closed.send).not.toHaveBeenCalled();
+  });
+});

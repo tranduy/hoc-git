@@ -176,6 +176,16 @@ const SnapshotRequestMessageSchema = z.strictObject({
   sourceId: SourceIdSchema
 });
 
+// Reloading the extension restarts only its service worker; provider tabs keep
+// their session and are neither navigated nor closed. The build identity lets
+// the worker ignore a request naming the bundle it is already running, so a
+// repeated request can never become a reload loop.
+const ReloadExtensionMessageSchema = z.strictObject({
+  version: z.literal(1),
+  kind: z.literal("RELOAD_EXTENSION"),
+  buildIdentity: z.string().trim().min(1).max(128).regex(/^sha256:[0-9a-f]{64}$/u)
+});
+
 const ReloadSourceMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("RELOAD_SOURCE"),
@@ -283,6 +293,7 @@ export const ChromeBridgeControlMessageSchema = z.discriminatedUnion("kind", [
   AckMessageSchema,
   SnapshotRequestMessageSchema,
   ReloadSourceMessageSchema,
+  ReloadExtensionMessageSchema,
   NavigateSourceMessageSchema,
   EnsureSourceMessageSchema,
   RestoreSourceMessageSchema,
