@@ -1,6 +1,7 @@
 import { CatalogSourceStatusSchema, type CatalogSourceStatus, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { CatalogCoverageGuard, type CatalogCoverageCandidate } from "../catalog/catalog-coverage-guard.js";
+import { withAlignedQuotePhase } from "./catalog-part-merge.js";
 import { AdapterRouter } from "./adapter-router.js";
 import { CmdDomCatalogAdapter } from "./cmd-dom-adapter.js";
 import { CmdHttpCatalogAdapter } from "./cmd-http-adapter.js";
@@ -642,8 +643,12 @@ function overlaySabaDomCatalog(retained: ObservedProviderCatalog,
   for (const event of current.events) events.set(event.providerEventId, event);
   for (const market of current.markets) markets.set(market.providerMarketId, market);
   for (const quote of current.quotes) quotes.set(quote.providerSelectionId, quote);
-  return { ...current, rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
-    events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()] };
+  // Unioning a retained catalog with a newer one can keep an event from one and
+  // its quotes from the other. The comparison layer only shows a quote whose
+  // phase equals its event's, so a mismatch here hides every ticket.
+  return withAlignedQuotePhase({ ...current,
+    rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
+    events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()] });
 }
 
 function overlayCmdDomCatalog(retained: ObservedProviderCatalog,
@@ -670,8 +675,9 @@ function overlayCmdDomCatalog(retained: ObservedProviderCatalog,
     const visible = visibleQuotes.get(quoteSemanticKey(quote));
     return visible === undefined ? quote : { ...quote, status: visible.status, isLive: visible.isLive };
   });
-  return { ...retained, rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
-    events, markets, quotes };
+  return withAlignedQuotePhase({ ...retained,
+    rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
+    events, markets, quotes });
 }
 
 function marketSemanticKey(market: ObservedProviderCatalog["markets"][number]): string {

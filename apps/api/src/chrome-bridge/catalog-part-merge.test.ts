@@ -87,3 +87,31 @@ describe("mergeObservedCatalogParts", () => {
     expect(catalog.events).toHaveLength(2);
   });
 });
+
+describe("quote phase follows its own event", () => {
+  it("realigns quotes whose live phase disagrees with the event that owns them", () => {
+    // A provider merged from two parts can keep the event record from one and
+    // the quotes from the other. When those parts disagree about live phase the
+    // comparison layer drops every quote, so the fixture pairs but shows no
+    // ticket at all. The event owns the phase.
+    const live = event("1", { isLive: true });
+    const staleQuote = { ...quote("1", "m1", "s1"), isLive: false } as ProviderQuote;
+    const catalog = mergeObservedCatalogParts({
+      accountId: "catalog-source:SABA:FOOTBALL", provider: "SABA", observedAtMs: 1_000,
+      parts: [part([live], [market("1", "m1")], [staleQuote])]
+    });
+
+    expect(catalog.quotes.map((entry) => entry.isLive)).toEqual([true]);
+  });
+
+  it("leaves a quote alone when it already agrees with its event", () => {
+    const prematch = event("1", { isLive: false });
+    const agreeing = { ...quote("1", "m1", "s1"), isLive: false } as ProviderQuote;
+    const catalog = mergeObservedCatalogParts({
+      accountId: "catalog-source:SABA:FOOTBALL", provider: "SABA", observedAtMs: 1_000,
+      parts: [part([prematch], [market("1", "m1")], [agreeing])]
+    });
+
+    expect(catalog.quotes[0]).toBe(agreeing);
+  });
+});
