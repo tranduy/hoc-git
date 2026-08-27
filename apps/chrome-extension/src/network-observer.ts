@@ -3,6 +3,7 @@ import { splitUtf8Text } from "./utf8-length.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
+import { LIVE_TAB_LABELS, TODAY_TAB_LABELS, timeTabExpression } from "./time-tab-selector.js";
 import { buildTsportSelectionPriceExpression } from "./tsport-selection-price.js";
 import { buildImExactSelectionPriceExpression } from "./im-selection-price.js";
 import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
@@ -45,6 +46,13 @@ const KSPORT_QUIET_WINDOW_MS = 180_000;
 const KSPORT_HEARTBEAT_FORWARD_INTERVAL_MS = 5_000;
 const KSPORT_TRANSPORT_HEARTBEAT_MAX_CHARS = 256;
 const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
+// SABA publishes only what its page is showing, so a lobby left on the running
+// fixtures never reports the ones that have not kicked off - and those are
+// almost all of what another book can be compared against. Visiting the day's
+// list moves the user's view, so do it rarely and always come back.
+const SABA_TODAY_CAPTURE_INTERVAL_MS = 600_000;
+const SABA_TODAY_TAB_EXPRESSION = timeTabExpression([...TODAY_TAB_LABELS], true);
+const SABA_LIVE_TAB_EXPRESSION = timeTabExpression([...LIVE_TAB_LABELS], true);
 const SABA_SNAPSHOT_PERSIST_INTERVAL_MS = 5_000;
 const CMD_RECOVERY_MAX_ATTEMPTS = 6;
 const CMD_RECOVERY_DEADLINE_MS = 10_000;
@@ -905,6 +913,7 @@ export class NetworkObserver {
   readonly #socketBaselineRecoveries = new Map<string, { readonly token: symbol;
     readonly operation: Promise<void> }>();
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
+  readonly #sabaTodayCaptureAtMs = new Map<string, number>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
@@ -1185,7 +1194,7 @@ export class NetworkObserver {
       this.#ksportBaselineRequests.delete(source.sourceId);
       this.#ksportBaselineAttemptAtMs.delete(source.sourceId);
       if (!this.#ksportLiveRestored.has(source.sourceId)) {
-        if (await this.#selectKsportTimeTab(source, KSPORT_LIVE_BASELINE_EXPRESSION)) {
+        if (await this.#selectTimeTab(source, KSPORT_LIVE_BASELINE_EXPRESSION)) {
           this.#ksportLiveRestored.add(source.sourceId);
         }
       }
@@ -1209,13 +1218,35 @@ export class NetworkObserver {
     if (requests.attempts >= KSPORT_BASELINE_REQUESTS_PER_GENERATION) return false;
     requests.attempts += 1;
     requests.requested.set(missing, nowMs);
-    const selected = await this.#selectKsportTimeTab(source,
+    const selected = await this.#selectTimeTab(source,
       missing === "live" ? KSPORT_LIVE_FORCE_EXPRESSION : KSPORT_TODAY_FORCE_EXPRESSION);
     if (!selected) this.#ksportBaselineAttemptAtMs.set(source.sourceId, this.#now());
     return false;
   }
 
-  async #selectKsportTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
+  /**
+   * Visits SABA's day list long enough for its socket to publish the fixtures
+   * that have not kicked off, then returns the lobby to the running ones. The
+   * live view alone left SABA reporting 39 running fixtures and 3 upcoming
+   * while BTI held the same day a median of twelve hours ahead, so nothing
+   * could be paired.
+   */
+  async #captureSabaTodayBaseline(source: ObservedSource): Promise<void> {
+    const nowMs = this.#now();
+    const lastAtMs = this.#sabaTodayCaptureAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY;
+    if (nowMs - lastAtMs < SABA_TODAY_CAPTURE_INTERVAL_MS) return;
+    this.#sabaTodayCaptureAtMs.set(source.sourceId, nowMs);
+    if (!await this.#selectTimeTab(source, SABA_TODAY_TAB_EXPRESSION)) return;
+    try {
+      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+    } finally {
+      // The lobby must never be left on a view the user did not choose, even if
+      // the day's baseline never arrives.
+      await this.#selectTimeTab(source, SABA_LIVE_TAB_EXPRESSION);
+    }
+  }
+
+  async #selectTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
     const diagnostic = this.#wsAttachDiagnostic(source);
     diagnostic.baselineTabSelections += 1;
     const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> = [];
@@ -1949,6 +1980,7 @@ export class NetworkObserver {
       // reset/done remains the only SABA LIVE proof.
       await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true, true);
       await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+      await this.#captureSabaTodayBaseline(source);
       return;
     }
     if (source.lobby === "KSPORT") {
