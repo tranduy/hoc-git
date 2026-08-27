@@ -51,8 +51,15 @@ const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
 // almost all of what another book can be compared against. Visiting the day's
 // list moves the user's view, so do it rarely and always come back.
 const SABA_TODAY_CAPTURE_INTERVAL_MS = 600_000;
-const SABA_TODAY_TAB_EXPRESSION = timeTabExpression([...TODAY_TAB_LABELS], true);
-const SABA_LIVE_TAB_EXPRESSION = timeTabExpression([...LIVE_TAB_LABELS], true);
+// APSPORT reads its catalog from the page as well, and showed a single running
+// fixture with none upcoming while the books that carry the day's list held
+// dozens. It retains records per fixture, so the day's subscription adds to
+// what the live view already established rather than replacing it.
+const TSPORT_TODAY_CAPTURE_INTERVAL_MS = 600_000;
+// Selected by label, so both lobbies that read their catalog from the page can
+// share one expression.
+const TODAY_TAB_EXPRESSION = timeTabExpression([...TODAY_TAB_LABELS], true);
+const LIVE_TAB_EXPRESSION = timeTabExpression([...LIVE_TAB_LABELS], true);
 const SABA_SNAPSHOT_PERSIST_INTERVAL_MS = 5_000;
 const CMD_RECOVERY_MAX_ATTEMPTS = 6;
 const CMD_RECOVERY_DEADLINE_MS = 10_000;
@@ -914,6 +921,7 @@ export class NetworkObserver {
     readonly operation: Promise<void> }>();
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
   readonly #sabaTodayCaptureAtMs = new Map<string, number>();
+  readonly #tsportTodayCaptureAtMs = new Map<string, number>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
@@ -1236,13 +1244,29 @@ export class NetworkObserver {
     const lastAtMs = this.#sabaTodayCaptureAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY;
     if (nowMs - lastAtMs < SABA_TODAY_CAPTURE_INTERVAL_MS) return;
     this.#sabaTodayCaptureAtMs.set(source.sourceId, nowMs);
-    if (!await this.#selectTimeTab(source, SABA_TODAY_TAB_EXPRESSION)) return;
+    if (!await this.#selectTimeTab(source, TODAY_TAB_EXPRESSION)) return;
     try {
       await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
     } finally {
       // The lobby must never be left on a view the user did not choose, even if
       // the day's baseline never arrives.
-      await this.#selectTimeTab(source, SABA_LIVE_TAB_EXPRESSION);
+      await this.#selectTimeTab(source, LIVE_TAB_EXPRESSION);
+    }
+  }
+
+  /** The same visit for APSPORT, whose page also reports only what it shows. */
+  async #captureTsportTodayBaseline(source: ObservedSource): Promise<void> {
+    const nowMs = this.#now();
+    const lastAtMs = this.#tsportTodayCaptureAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY;
+    if (nowMs - lastAtMs < TSPORT_TODAY_CAPTURE_INTERVAL_MS) return;
+    this.#tsportTodayCaptureAtMs.set(source.sourceId, nowMs);
+    if (!await this.#selectTimeTab(source, TODAY_TAB_EXPRESSION)) return;
+    try {
+      await this.#capturePublicCatalogSnapshot(source, "tsport.invalid",
+        TSPORT_PUBLIC_CATALOG_EXPRESSION, false, true);
+      await this.#requestFreshSocketBaseline(source, isTsportEventSocket);
+    } finally {
+      await this.#selectTimeTab(source, LIVE_TAB_EXPRESSION);
     }
   }
 
@@ -2026,6 +2050,7 @@ export class NetworkObserver {
         TSPORT_PUBLIC_CATALOG_EXPRESSION, false, true);
       if ((this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0) <= previousSweep) return;
       await this.#requestFreshSocketBaseline(source, isTsportEventSocket);
+      await this.#captureTsportTodayBaseline(source);
       return;
     }
     if (source.lobby !== "BTI") return;

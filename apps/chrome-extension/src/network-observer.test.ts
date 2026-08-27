@@ -2952,7 +2952,10 @@ describe("NetworkObserver", () => {
         pathnameClass: "/__fieldline_heartbeat__",
         resourceType: "Tab"
       },
-      payload: { encoding: "UTF8", body: "{}" }
+      // SABA reads its catalog from the page, so its heartbeat now carries the
+      // attach diagnostic: without it a tab selector that never found its tab
+      // could not be told from a day list the page never sent.
+      payload: { encoding: "UTF8", body: expect.stringContaining('"kind":"WS_ATTACH"') as unknown as string }
     }));
   });
 
