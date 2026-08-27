@@ -948,6 +948,10 @@ export class NetworkObserver {
   readonly #lastTabLabels = new Map<string, string>();
   readonly #lastCatalogShape = new Map<string, string>();
   readonly #lastCaptureExit = new Map<string, string>();
+  // Only a target reported as an iframe is observed, while the attach counter
+  // counts them all: two events with none observed says the type is not what is
+  // expected, and nothing said what it was.
+  readonly #targetTypesSeen = new Map<string, Map<string, number>>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
@@ -2904,6 +2908,8 @@ export class NetworkObserver {
         baselineTabLabels: diagnostic.baselineTabLabels.length > 0
           ? diagnostic.baselineTabLabels : this.#lastTabLabels.get(source.sourceId) ?? "",
         catalogShape: `${this.#lastCaptureExit.get(source.sourceId) ?? "NONE"} ` +
+          `targets[${[...(this.#targetTypesSeen.get(source.sourceId) ?? new Map())]
+            .map(([type, count]) => `${type}:${count}`).join(",")}] ` +
           (this.#lastCatalogShape.get(source.sourceId) ?? "") })
     });
     // The day list is what the other books can be compared against, and nothing
@@ -2940,7 +2946,13 @@ export class NetworkObserver {
     if (method === "Target.attachedToTarget") {
       const childSessionId = typeof params.sessionId === "string" ? params.sessionId : null;
       const targetInfo = isRecord(params.targetInfo) ? params.targetInfo : null;
-      if (source.lobby === "KSPORT") this.#wsAttachDiagnostic(source).autoAttachEvents += 1;
+      if (source.lobby === "KSPORT") {
+        this.#wsAttachDiagnostic(source).autoAttachEvents += 1;
+        const type = typeof targetInfo?.type === "string" ? targetInfo.type.slice(0, 24) : "none";
+        const seen = this.#targetTypesSeen.get(source.sourceId) ?? new Map<string, number>();
+        seen.set(type, (seen.get(type) ?? 0) + 1);
+        this.#targetTypesSeen.set(source.sourceId, seen);
+      }
       if (childSessionId !== null && targetInfo?.type === "iframe") {
         const targetId = typeof targetInfo.targetId === "string" ? targetInfo.targetId : undefined;
         await this.#observeChildTarget(source, childSessionId, targetId, true);
