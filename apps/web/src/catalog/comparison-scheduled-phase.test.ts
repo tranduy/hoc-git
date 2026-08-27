@@ -6,7 +6,7 @@ import { buildComparisonEvents } from "./comparison.js";
 const OBSERVED_AT_MS = 1_700_000_000_000;
 const KICKOFF_MS = OBSERVED_AT_MS + 5 * 3_600_000;
 
-function catalogOf(provider: "SABA" | "BTI", overrides: Partial<ProviderEvent>,
+function catalogOf(provider: "SABA" | "BTI" | "SBOBET", overrides: Partial<ProviderEvent>,
   odds: readonly [string, string]): LiveCatalogResponse {
   const id = `${provider}-1`;
   const base: ProviderEvent = {
@@ -65,5 +65,20 @@ describe("a live claim loses to another book's scheduled kickoff", () => {
     ]);
 
     expect(groups.filter((group) => group.providers.length >= 2)).toEqual([]);
+  });
+
+  it("believes two books that agree a fixture is running over a third's schedule", () => {
+    // Overruling both cost more than it won: 24 fixtures that priced against
+    // each other fell to 5. A third book listing the same teams later is more
+    // likely naming a different meeting than contradicting the two watching it.
+    const groups = buildComparisonEvents([
+      catalogOf("SABA", { isLive: true, startAtUtcMs: OBSERVED_AT_MS - 60_000 }, ["2.05", "1.85"]),
+      catalogOf("SBOBET", { isLive: true, startAtUtcMs: OBSERVED_AT_MS - 60_000 }, ["2.00", "1.90"]),
+      catalogOf("BTI", {}, ["1.90", "2.00"])
+    ]);
+    const live = groups.filter((group) => group.event.isLive && group.providers.length >= 2);
+
+    expect(live).toHaveLength(1);
+    expect([...live[0]!.providers].sort()).toEqual(["SABA", "SBOBET"]);
   });
 });
