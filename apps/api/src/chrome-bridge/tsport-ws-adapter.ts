@@ -282,7 +282,16 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if ((envelope.transport !== "WS_FRAME" && envelope.transport !== "WS_STATE") ||
       envelope.request.streamId === undefined ||
       !/^spws\.(?:agenate|racern)\.com$/iu.test(envelope.request.hostname) ||
-      !/^\/ln\/[^/]+\/(?:p\/1\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/0\/tr\/0$/u.test(
+      // Measured 2026-08-27: every one of APSPORT's 4389 socket frames was
+      // refused before reaching any adapter, all of them on /ln/en/lm, while
+      // this required /ln/{lang}/.../s/1/mg/0/tr/0 - a path the provider no
+      // longer uses. Matching an exact path means a rename silences the book
+      // completely and looks identical to a book with no traffic.
+      //
+      // The host still has to be theirs, and the frame still has to parse as a
+      // TSPORT football record below, which is what actually decides. Only
+      // where on that host the stream lives is allowed to move.
+      !/^\/ln\/[\w-]{1,24}\/[\w/-]{1,48}$/u.test(
         envelope.request.pathnameClass)) return false;
     if (envelope.transport === "WS_STATE") return websocketLifecycleState(envelope) !== null;
     const parsed = parseOuter(envelope.payload.body)?.event ?? null;

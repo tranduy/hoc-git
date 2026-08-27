@@ -830,3 +830,24 @@ describe("TsportWsCatalogAdapter", () => {
     })).toBe(false);
   });
 });
+
+describe("TSPORT socket path", () => {
+  it("accepts the stream path the provider moved to", () => {
+    // Measured 2026-08-27: all 4389 of APSPORT's socket frames arrived on
+    // /ln/en/lm and were refused for not being /ln/{lang}/.../s/1/mg/0/tr/0.
+    const adapter = new TsportWsCatalogAdapter();
+    const base = envelope(event(1, "Home", "0.44", "-0.55"));
+    const moved = { ...base, request: { ...base.request, pathnameClass: "/ln/en/lm" } };
+
+    expect(adapter.fingerprint(moved)).toBe(true);
+  });
+
+  it("still refuses a stream that is not on the provider's host", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const base = envelope(event(1, "Home", "0.44", "-0.55"));
+    const elsewhere = { ...base,
+      request: { ...base.request, hostname: "spws.example.com", pathnameClass: "/ln/en/lm" } };
+
+    expect(adapter.fingerprint(elsewhere)).toBe(false);
+  });
+});
