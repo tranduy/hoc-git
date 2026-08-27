@@ -206,24 +206,24 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       if (current?.activeStreamId !== streamId || current.activeStreamOrdinal !== streamOrdinal ||
         current.authorizing !== true ||
         (!this.#authoritativeGenerations.has(epochKey) && domBaselineAtMs === undefined) ||
-        baselineAgeMs < 0 || baselineAgeMs > MAX_RETAINED_PART_AGE_MS) return [];
+        baselineAgeMs < 0 || baselineAgeMs > MAX_RETAINED_PART_AGE_MS) return this.#ignore("retained-part-too-old");
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
         observedAtMs: envelope.observedAtMs, transportAlive: true }];
     }
     if (envelope.transport === "WS_STATE") {
       const state = websocketLifecycleState(envelope);
-      if (state === null) return [];
+      if (state === null) return this.#ignore("not-a-lifecycle-frame");
       if (state === "OPEN") {
         const current = this.#streamStates.get(epochKey);
         if (current?.activeStreamId === streamId && current.activeStreamOrdinal === streamOrdinal) {
-          if (current.authorizing) return [];
+          if (current.authorizing) return this.#ignore("stream-authorizing");
           this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
           current.authorizing = true;
           this.#authoritativeGenerations.delete(epochKey);
           this.#authoritativeBaselineAtMs.delete(epochKey);
-          return [];
+          return this.#ignore("stream-dropped");
         }
-        if (current !== undefined && streamOrdinal <= current.highWatermark) return [];
+        if (current !== undefined && streamOrdinal <= current.highWatermark) return this.#ignore("stale-stream-ordinal");
         const retiresAuthoritativeStream = current?.activeStreamId !== null && current?.activeStreamId !== undefined &&
           this.#authoritativeGenerations.has(epochKey);
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
@@ -240,7 +240,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
           : [];
       }
       const current = this.#streamStates.get(epochKey);
-      if (current?.activeStreamId !== streamId || current.activeStreamOrdinal !== streamOrdinal) return [];
+      if (current?.activeStreamId !== streamId || current.activeStreamOrdinal !== streamOrdinal) return this.#ignore("stream-superseded");
       this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
       current.activeStreamId = null;
       current.activeStreamOrdinal = null;
@@ -270,7 +270,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const recoveryStartsBaseline = recoveryFrame !== null &&
         (recoveryFrame.rows as readonly unknown[]).some((row) => Array.isArray(row) &&
           (row[1] === "reset" || row[1] === "empty"));
-      if (!recoveryStartsBaseline) return [];
+      if (!recoveryStartsBaseline) return this.#ignore("recovery-without-baseline");
       stream.activeStreamId = streamId;
       stream.activeStreamOrdinal = streamOrdinal;
       stream.highWatermark = streamOrdinal;
@@ -347,7 +347,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       }
       const readyKey = `${decoderKey}|${frame.bridgeId}`;
       if (applied.fullSnapshot) this.#readyPartitions.add(readyKey);
-      if (!this.#readyPartitions.has(readyKey)) return [];
+      if (!this.#readyPartitions.has(readyKey)) return this.#ignore("partition-not-ready");
       // Price deltas must be published immediately: a time-only throttle can
       // swallow the final odds change in a burst forever when no later frame
       // arrives. Only coalesce rapid metadata-only changes; the next metadata
@@ -356,7 +356,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const lastPublishedAtMs = this.#lastWsPublishAtMs.get(publishKey) ?? Number.NEGATIVE_INFINITY;
       const changesPrice = applied.changes.some((change) => change.record?.type === "o" ||
         change.record?.type === "do" || change.record?.type === "-o");
-      if (!applied.fullSnapshot && !changesPrice && envelope.observedAtMs - lastPublishedAtMs < 500) return [];
+      if (!applied.fullSnapshot && !changesPrice && envelope.observedAtMs - lastPublishedAtMs < 500) return this.#ignore("no-price-change");
       this.#lastWsPublishAtMs.set(publishKey, envelope.observedAtMs);
       const currentStream = this.#streamStates.get(epochKey);
       if (applied.fullSnapshot && currentStream?.activeStreamId === streamId &&
@@ -430,7 +430,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     allowCompleteEmpty = false): readonly DecodedCatalogUpdate[] {
     const empty = normalized.events.length === 0 && normalized.markets.length === 0 && normalized.quotes.length === 0;
     if ((!empty && (normalized.events.length === 0 || normalized.markets.length === 0 || normalized.quotes.length === 0)) ||
-      (empty && !allowCompleteEmpty)) return [];
+      (empty && !allowCompleteEmpty)) return this.#ignore("incomplete-normalized-catalog");
     const epochKey = sourceEpochKey(envelope);
     const partitionKey = `${epochKey}|${partition}`;
     this.#parts.delete(partitionKey);
