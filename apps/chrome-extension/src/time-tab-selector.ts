@@ -1,6 +1,15 @@
 /**
  * Selecting a lobby's time tab by its label rather than its markup.
  *
+ * NOT WIRED UP, and it must not be until a caller scopes it to the football
+ * section first. A lobby carries the same labels in more than one place: SABA's
+ * Asian Games section has its own "som | hom nay | truc tiep" strip, and this
+ * expression - matching on label alone - clicked that one and left the page on
+ * a section with no fixtures in it. A page showing nothing subscribes to
+ * nothing, so its socket then carried no football at all and the book went
+ * dark. KSPORT's selector finds its football group before it looks for a tab,
+ * which is the part this is missing.
+ *
  * KSPORT's selector is written against that site's own class names, which do
  * not exist anywhere else. SABA and APSPORT publish only what their page is
  * showing, so a book left on "live" never reports the fixtures that have not

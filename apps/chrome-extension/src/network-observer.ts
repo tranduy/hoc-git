@@ -3,7 +3,6 @@ import { splitUtf8Text } from "./utf8-length.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
-import { LIVE_TAB_LABELS, TODAY_TAB_LABELS, timeTabExpression } from "./time-tab-selector.js";
 import { TSPORT_CATALOG_SHAPE_EXPRESSION } from "./tsport-catalog-shape.js";
 import { buildTsportSelectionPriceExpression } from "./tsport-selection-price.js";
 import { buildImExactSelectionPriceExpression } from "./im-selection-price.js";
@@ -19,6 +18,9 @@ import { buildCmdHiddenMarketProbeExpression, summarizeCmdHiddenProtocolFrame,
 import { CmdRecoveryState, type CmdRecoveryDocument, type CmdRecoverySession } from "./cmd-recovery-state.js";
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
 import { KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
+import { apsportPageResponseFromEvaluation, buildApsportPageRequestExpression,
+  collectApsportCatalog, type ApsportCatalogBatch, type ApsportCatalogPageRequest,
+  type ApsportRequestTemplate, type CollectApsportCatalogOptions } from "./apsport-catalog-refresh.js";
 
 const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
@@ -47,16 +49,6 @@ const KSPORT_QUIET_WINDOW_MS = 180_000;
 const KSPORT_HEARTBEAT_FORWARD_INTERVAL_MS = 5_000;
 const KSPORT_TRANSPORT_HEARTBEAT_MAX_CHARS = 256;
 const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
-// SABA publishes only what its page is showing, so a lobby left on the running
-// fixtures never reports the ones that have not kicked off - and those are
-// almost all of what another book can be compared against. Visiting the day's
-// list moves the user's view, so do it rarely and always come back.
-const SABA_TODAY_CAPTURE_INTERVAL_MS = 600_000;
-// APSPORT reads its catalog from the page as well, and showed a single running
-// fixture with none upcoming while the books that carry the day's list held
-// dozens. It retains records per fixture, so the day's subscription adds to
-// what the live view already established rather than replacing it.
-const TSPORT_TODAY_CAPTURE_INTERVAL_MS = 600_000;
 // The DOM sweep is what gives APSPORT a generation and tells the adapter which
 // fixtures the page is showing. The poller only ran it inside a short bootstrap
 // window, so once that closed the sweep stopped for good: measured 2026-08-27,
@@ -66,13 +58,37 @@ const TSPORT_CATALOG_SWEEP_INTERVAL_MS = 30_000;
 // A fresh socket baseline tears down a working stream, so it stays rare even
 // when the sweep beneath it runs often.
 const TSPORT_SOCKET_BASELINE_FLOOR_MS = 300_000;
+const APSPORT_PAGE_REQUEST_TIMEOUT_MS = 30_000;
+const APSPORT_DETAIL_DELAY_MS = 500;
+const APSPORT_BOOTSTRAP_EXPRESSION = `(() => {
+  try {
+    const fieldlineApsportBootstrap = true;
+    const page = new URL(location.href);
+    if (!fieldlineApsportBootstrap || page.protocol !== 'https:' ||
+      !(page.hostname === 'agenate.com' || page.hostname.endsWith('.agenate.com'))) return null;
+    const language = page.searchParams.get('lng') || '';
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    const resources = performance.getEntriesByType('resource')
+      .map((entry) => typeof entry.name === 'string' ? entry.name : '');
+    const hints = [...document.querySelectorAll('link[rel="dns-prefetch"],link[rel="preconnect"]')]
+      .map((link) => typeof link.href === 'string' ? link.href : '');
+    let origin = '';
+    for (const raw of [...resources, ...hints]) {
+      try {
+        const candidate = new URL(raw, page.origin);
+        if (candidate.protocol !== 'https:' ||
+          !/^(?:spbui|spbtui)\.agenate\.com$/u.test(candidate.hostname)) continue;
+        if (resources.includes(raw) && !candidate.pathname.startsWith('/be-ui/pac/api/v3/')) continue;
+        origin = candidate.origin;
+        break;
+      } catch { /* Ignore malformed resource timing and link values. */ }
+    }
+    return origin === '' ? null : { origin, language, timeZone };
+  } catch { return null; }
+})()`;
 // Long enough that two captures never overlap, short enough that one which will
 // never settle cannot silence the sweep for the rest of the worker's life.
 const CAPTURE_IN_FLIGHT_LIMIT_MS = 60_000;
-// Selected by label, so both lobbies that read their catalog from the page can
-// share one expression.
-const TODAY_TAB_EXPRESSION = timeTabExpression([...TODAY_TAB_LABELS], true);
-const LIVE_TAB_EXPRESSION = timeTabExpression([...LIVE_TAB_LABELS], true);
 const SABA_SNAPSHOT_PERSIST_INTERVAL_MS = 5_000;
 const CMD_RECOVERY_MAX_ATTEMPTS = 6;
 const CMD_RECOVERY_DEADLINE_MS = 10_000;
@@ -117,6 +133,10 @@ export interface ObservedSource {
   readonly tabId: number;
 }
 
+export interface CatalogRefreshOptions {
+  readonly prematchWindowHours?: number;
+}
+
 export interface NetworkObserverDependencies {
   readonly sendCommand: (tabId: number, method: string, params?: Record<string, unknown>,
     sessionId?: string) => Promise<unknown>;
@@ -134,6 +154,7 @@ export interface NetworkObserverDependencies {
   readonly saveSabaWsSnapshots?: (snapshots: PersistedSabaWsSnapshots) => Promise<void>;
   readonly clearSabaWsSnapshots?: (sourceId: string) => Promise<void>;
   readonly workScheduler?: ProviderWorkScheduler;
+  readonly collectApsportCatalog?: (options: CollectApsportCatalogOptions) => Promise<void>;
 }
 
 type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
@@ -924,6 +945,7 @@ export class NetworkObserver {
   readonly #saveSabaWsSnapshots: NetworkObserverDependencies["saveSabaWsSnapshots"];
   readonly #clearSabaWsSnapshots: NonNullable<NetworkObserverDependencies["clearSabaWsSnapshots"]>;
   readonly #workScheduler: ProviderWorkScheduler;
+  readonly #collectApsportCatalog: NonNullable<NetworkObserverDependencies["collectApsportCatalog"]>;
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
   readonly #tabGenerations = new Map<number, number>();
@@ -938,8 +960,6 @@ export class NetworkObserver {
   readonly #socketBaselineRecoveries = new Map<string, { readonly token: symbol;
     readonly operation: Promise<void> }>();
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
-  readonly #sabaTodayCaptureAtMs = new Map<string, number>();
-  readonly #tsportTodayCaptureAtMs = new Map<string, number>();
   readonly #tsportSweepAtMs = new Map<string, number>();
   readonly #tsportSocketBaselineAtMs = new Map<string, number>();
   // The attach diagnostic is rebuilt whenever a source generation rolls, which
@@ -973,6 +993,9 @@ export class NetworkObserver {
   readonly #tsportSnapshots = new Map<string, Map<string, ReplayableWsEvent>>();
   readonly #tsportRequestUrls = new Map<string, string[]>();
   readonly #tsportCompletedSweepOrdinals = new Map<string, number>();
+  readonly #apsportRequestTemplates = new Map<string, BoundApsportRequestTemplate>();
+  readonly #apsportRefreshOrdinals = new Map<string, number>();
+  readonly #apsportRefreshesInFlight = new Set<string>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
   readonly #activeKsportStreams = new Map<string, string>();
@@ -1039,6 +1062,7 @@ export class NetworkObserver {
     this.#saveSabaWsSnapshots = dependencies.saveSabaWsSnapshots;
     this.#clearSabaWsSnapshots = dependencies.clearSabaWsSnapshots ?? (async () => undefined);
     this.#workScheduler = dependencies.workScheduler ?? new ProviderWorkScheduler();
+    this.#collectApsportCatalog = dependencies.collectApsportCatalog ?? collectApsportCatalog;
     if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
       throw new Error("OBSERVER_SESSION_ID_INVALID");
     }
@@ -1265,44 +1289,6 @@ export class NetworkObserver {
   }
 
   /**
-   * Visits SABA's day list long enough for its socket to publish the fixtures
-   * that have not kicked off, then returns the lobby to the running ones. The
-   * live view alone left SABA reporting 39 running fixtures and 3 upcoming
-   * while BTI held the same day a median of twelve hours ahead, so nothing
-   * could be paired.
-   */
-  async #captureSabaTodayBaseline(source: ObservedSource): Promise<void> {
-    const nowMs = this.#now();
-    const lastAtMs = this.#sabaTodayCaptureAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY;
-    if (nowMs - lastAtMs < SABA_TODAY_CAPTURE_INTERVAL_MS) return;
-    this.#sabaTodayCaptureAtMs.set(source.sourceId, nowMs);
-    if (!await this.#selectTimeTab(source, TODAY_TAB_EXPRESSION)) return;
-    try {
-      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
-    } finally {
-      // The lobby must never be left on a view the user did not choose, even if
-      // the day's baseline never arrives.
-      await this.#selectTimeTab(source, LIVE_TAB_EXPRESSION);
-    }
-  }
-
-  /** The same visit for APSPORT, whose page also reports only what it shows. */
-  async #captureTsportTodayBaseline(source: ObservedSource): Promise<void> {
-    const nowMs = this.#now();
-    const lastAtMs = this.#tsportTodayCaptureAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY;
-    if (nowMs - lastAtMs < TSPORT_TODAY_CAPTURE_INTERVAL_MS) return;
-    this.#tsportTodayCaptureAtMs.set(source.sourceId, nowMs);
-    if (!await this.#selectTimeTab(source, TODAY_TAB_EXPRESSION)) return;
-    try {
-      await this.#capturePublicCatalogSnapshot(source, "tsport.invalid",
-        TSPORT_PUBLIC_CATALOG_EXPRESSION, false, true);
-      await this.#requestFreshSocketBaseline(source, isTsportEventSocket);
-    } finally {
-      await this.#selectTimeTab(source, LIVE_TAB_EXPRESSION);
-    }
-  }
-
-  /**
    * Keeps APSPORT's DOM sweep running. It is the only thing that establishes a
    * generation and names the fixtures the page is showing, and hanging it off
    * the poller's bootstrap window meant it stopped once that window closed.
@@ -1486,6 +1472,8 @@ export class NetworkObserver {
     this.#tsportSnapshots.delete(sourceId);
     this.#tsportRequestUrls.delete(sourceId);
     this.#tsportCompletedSweepOrdinals.delete(sourceId);
+    this.#apsportRequestTemplates.delete(sourceId);
+    this.#apsportRefreshOrdinals.delete(sourceId);
     this.#clearCatalogWsSnapshots(sourceId);
     this.#activeKsportStreams.delete(sourceId);
     this.#ksportAuthorityTransitions.delete(sourceId);
@@ -1574,6 +1562,7 @@ export class NetworkObserver {
     for (const sourceId of this.#httpSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#tsportSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#tsportRequestUrls.keys()) remember(sourceId);
+    for (const sourceId of this.#apsportRequestTemplates.keys()) remember(sourceId);
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
     for (const sourceId of this.#publicSourceEpochs.keys()) remember(sourceId);
@@ -1597,6 +1586,8 @@ export class NetworkObserver {
       this.#ksportSnapshotOrdinals.delete(sourceId);
       this.#tsportSnapshots.delete(sourceId);
       this.#tsportRequestUrls.delete(sourceId);
+      this.#apsportRequestTemplates.delete(sourceId);
+      this.#apsportRefreshOrdinals.delete(sourceId);
       this.#clearCatalogWsSnapshots(sourceId);
       this.#activeKsportStreams.delete(sourceId);
       this.#ksportAuthorityTransitions.delete(sourceId);
@@ -2046,18 +2037,18 @@ export class NetworkObserver {
     }
   }
 
-  async refreshCatalog(source: ObservedSource): Promise<void> {
+  async refreshCatalog(source: ObservedSource, options: CatalogRefreshOptions = {}): Promise<void> {
     if (source.lobby === "CMD") return this.recoverCmdCatalog(source);
     const existing = this.#catalogRefreshes.get(source.sourceId);
     if (existing !== undefined) return existing;
-    const operation = this.#runPeriodicDomWork(source.sourceId, () => this.#refreshCatalog(source)).finally(() => {
+    const operation = this.#runPeriodicDomWork(source.sourceId, () => this.#refreshCatalog(source, options)).finally(() => {
       if (this.#catalogRefreshes.get(source.sourceId) === operation) this.#catalogRefreshes.delete(source.sourceId);
     });
     this.#catalogRefreshes.set(source.sourceId, operation);
     return operation;
   }
 
-  async #refreshCatalog(source: ObservedSource): Promise<void> {
+  async #refreshCatalog(source: ObservedSource, _options: CatalogRefreshOptions): Promise<void> {
     if (source.lobby === "IM") {
       const results = await this.#evaluateImCatalogMainWorlds(source, true);
       await this.#emit(source, "https://imsports.directsb.net/__fieldline_im_catalog_refresh__",
@@ -2081,7 +2072,6 @@ export class NetworkObserver {
       // reset/done remains the only SABA LIVE proof.
       await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true, true);
       await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
-      await this.#captureSabaTodayBaseline(source);
       return;
     }
     if (source.lobby === "KSPORT") {
@@ -2126,15 +2116,7 @@ export class NetworkObserver {
       return;
     }
     if (source.lobby === "TSPORT") {
-      // A replacement epoch requires new authority from the unchanged tab;
-      // retained frames belong to the retired epoch and cannot establish LIVE.
-      const previousSweep = this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0;
-      await this.#capturePublicCatalogSnapshot(source, "tsport.invalid",
-        TSPORT_PUBLIC_CATALOG_EXPRESSION, false, true);
-      if ((this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0) <= previousSweep) return;
-      await this.#requestFreshSocketBaseline(source, isTsportEventSocket);
-      await this.#captureTsportTodayBaseline(source);
-      return;
+      return this.#refreshApsportCatalog(source, _options);
     }
     if (source.lobby !== "BTI") return;
     const frameTree = await this.#withFrameCommandTimeout(
@@ -2188,6 +2170,107 @@ export class NetworkObserver {
         await this.#withFrameCommandTimeout(discoverChildren(), this.#btiCatalogRefreshTimeoutMs);
       } catch { /* A bounded refresh will retry on the next normal cadence. */ }
       finally { discoveryExpired = true; }
+  }
+
+  async #bootstrapApsportRequestTemplate(source: ObservedSource, sourceGeneration: number,
+    tabGeneration: number): Promise<BoundApsportRequestTemplate | null> {
+    const contexts = [...(this.#mainWorldContexts.get(source.tabId)?.entries() ?? [])];
+    for (const [frameId, binding] of contexts) {
+      const params = { expression: APSPORT_BOOTSTRAP_EXPRESSION, contextId: binding.contextId,
+        returnByValue: true, awaitPromise: false };
+      const evaluation = await this.#withFrameCommandTimeout(binding.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId)).catch(() => null);
+      const value = nestedValue(evaluation, "result", "value");
+      if (!isRecord(value) || typeof value.origin !== "string" || typeof value.language !== "string" ||
+        typeof value.timeZone !== "string" || !/^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$/u.test(value.language) ||
+        value.timeZone.length > 128 ||
+        !/^[A-Za-z0-9_+.-]{1,64}(?:\/[A-Za-z0-9_+.-]{1,64})*$/u.test(value.timeZone)) continue;
+      let origin: URL;
+      try { origin = new URL(value.origin); } catch { continue; }
+      if (value.origin !== origin.origin || origin.protocol !== "https:" || origin.username !== "" ||
+        origin.password !== "" || origin.search !== "" || origin.hash !== "" ||
+        !/^(?:spbui|spbtui)\.agenate\.com$/u.test(origin.hostname)) continue;
+      const frameTree = await this.#withFrameCommandTimeout(binding.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Page.getFrameTree")
+        : this.#sendCommand(source.tabId, "Page.getFrameTree", {}, binding.sessionId)).catch(() => null);
+      const loaderId = currentFrameLoader(frameTree, frameId);
+      if (loaderId === null || !this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration ||
+        this.#mainWorldContexts.get(source.tabId)?.get(frameId) !== binding) continue;
+      const template: BoundApsportRequestTemplate = {
+        origin: origin.origin,
+        headers: { "content-type": "application/json", lng: value.language, tz: value.timeZone },
+        body: { mno: 2, si: 1, mg: 1 },
+        frameId, loaderId,
+        ...(binding.sessionId === undefined ? {} : { sessionId: binding.sessionId }),
+        sourceGeneration, tabGeneration
+      };
+      this.#apsportRequestTemplates.set(source.sourceId, template);
+      return template;
+    }
+    return null;
+  }
+
+  async #refreshApsportCatalog(source: ObservedSource, options: CatalogRefreshOptions): Promise<void> {
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const template = this.#apsportRequestTemplates.get(source.sourceId) ??
+      await this.#bootstrapApsportRequestTemplate(source, sourceGeneration, tabGeneration);
+    if (template === undefined || template === null) {
+      this.#lastCaptureExit.set(source.sourceId, "APSPORT_REQUEST_TEMPLATE_MISSING");
+      return;
+    }
+    const prematchWindowHours = options.prematchWindowHours ?? 24;
+    if (!Number.isSafeInteger(prematchWindowHours) || prematchWindowHours < 1 || prematchWindowHours > 48) {
+      this.#lastCaptureExit.set(source.sourceId, "APSPORT_PREMATCH_WINDOW_INVALID");
+      return;
+    }
+    if (template.sourceGeneration !== sourceGeneration || template.tabGeneration !== tabGeneration) return;
+    const ordinal = (this.#apsportRefreshOrdinals.get(source.sourceId) ?? 0) + 1;
+    this.#apsportRefreshOrdinals.set(source.sourceId, ordinal);
+    const generation = `apsport:${source.tabId}:${ordinal}`;
+    const templateIsCurrent = (): boolean => this.#apsportRequestTemplates.get(source.sourceId) === template &&
+      this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration;
+    const request = async (input: ApsportCatalogPageRequest) => {
+      if (!templateIsCurrent()) return { status: 0, data: null };
+      this.#lastCaptureExit.set(source.sourceId, `APSPORT_${input.kind}_START`);
+      const binding = this.#mainWorldContexts.get(source.tabId)?.get(template.frameId);
+      if (binding === undefined || binding.sessionId !== template.sessionId) return { status: 0, data: null };
+      let expression: string;
+      try { expression = buildApsportPageRequestExpression(template, input); }
+      catch { return { status: 0, data: null }; }
+      const params = { expression, contextId: binding.contextId, returnByValue: true, awaitPromise: true };
+      const evaluation = await this.#withFrameCommandTimeout(binding.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId),
+      APSPORT_PAGE_REQUEST_TIMEOUT_MS).catch(() => null);
+      const response = apsportPageResponseFromEvaluation(evaluation);
+      this.#lastCaptureExit.set(source.sourceId, `APSPORT_${input.kind}_${response.status}`);
+      return response;
+    };
+    const emitBatch = async (batch: ApsportCatalogBatch): Promise<void> => {
+      if (!templateIsCurrent()) return;
+      await this.ingestHttpResponse(source,
+        `${template.origin}/__fieldline_apsport_catalog_refresh__`, "Fetch", JSON.stringify(batch), {
+          method: "POST",
+          verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
+            ...(template.sessionId === undefined ? {} : { sessionId: template.sessionId }) }
+        });
+    };
+    this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_START");
+    this.#apsportRefreshesInFlight.add(source.sourceId);
+    try {
+      await this.#collectApsportCatalog({ generation, nowMs: this.#now(), prematchWindowHours,
+        template: { origin: template.origin, headers: template.headers, body: template.body }, request,
+        sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
+        isCurrent: templateIsCurrent, onRoster: emitBatch, onDetail: emitBatch,
+        detailBatchSize: 5, detailDelayMs: APSPORT_DETAIL_DELAY_MS });
+      if (templateIsCurrent()) this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_DONE");
+    } finally {
+      this.#apsportRefreshesInFlight.delete(source.sourceId);
+    }
   }
 
   async #closeSocketsForSession(source: ObservedSource, sessionId: string): Promise<void> {
@@ -2920,10 +3003,14 @@ export class NetworkObserver {
     // never and APSPORT's only inside a short bootstrap window. This heartbeat
     // runs every ten seconds for every attached tab, and the visit keeps its own
     // ten-minute floor, so it is a no-op almost every time.
-    if (source.lobby === "SABA") void this.#captureSabaTodayBaseline(source).catch(() => undefined);
-    else if (source.lobby === "TSPORT") {
+    // The day-list visit is not called here any more. It selects a tab by its
+    // label alone, and a lobby carries that same label in more than one place:
+    // SABA's Asian Games section has its own "som | hom nay | truc tiep" strip,
+    // and the visit clicked that one, leaving the page on an empty section. A
+    // page showing nothing subscribes to nothing, which is the whole reason its
+    // socket then carried no football at all.
+    if (source.lobby === "TSPORT") {
       void this.#sweepTsportCatalog(source).catch(() => undefined);
-      void this.#captureTsportTodayBaseline(source).catch(() => undefined);
       void this.#recordTsportCatalogShape(source).catch(() => undefined);
     }
   }
@@ -3114,6 +3201,14 @@ export class NetworkObserver {
             this.#sbobetEventRequests.set(source.sourceId, template);
           }
         } catch { /* Ignore malformed provider URLs. */ }
+      }
+      if (source.lobby === "TSPORT" && request !== null &&
+        !this.#apsportRefreshesInFlight.has(source.sourceId)) {
+        const template = apsportRequestTemplateFromObserved(request, String(params.type ?? ""),
+          params.frameId, params.loaderId, sessionId,
+          this.#sourceGenerations.get(source.sourceId) ?? 0,
+          this.#captureTabGeneration(source.tabId));
+        if (template !== null) this.#apsportRequestTemplates.set(source.sourceId, template);
       }
       if (source.lobby === "TSPORT" && /^(?:XHR|Fetch)$/u.test(String(params.type ?? "")) &&
         request !== null && request.method === "GET" && typeof request.url === "string") {
@@ -4695,6 +4790,14 @@ interface MainWorldContextBinding {
   readonly sessionId?: string;
 }
 
+interface BoundApsportRequestTemplate extends ApsportRequestTemplate {
+  readonly frameId: string;
+  readonly loaderId: string;
+  readonly sessionId?: string;
+  readonly sourceGeneration: number;
+  readonly tabGeneration: number;
+}
+
 interface CmdRecoveryTarget {
   readonly document: CmdRecoveryDocument;
   readonly sourceGeneration: number;
@@ -4801,6 +4904,45 @@ function cmdProviderFunctionCode(request: Record<string, unknown>): number | nul
 interface KsportHttpFallbackMode {
   readonly streamId: string | null;
   readonly recoveryGeneration: number | null;
+}
+
+function apsportRequestTemplateFromObserved(
+  request: Record<string, unknown>,
+  resourceType: string,
+  frameIdValue: unknown,
+  loaderIdValue: unknown,
+  sessionId: string | undefined,
+  sourceGeneration: number,
+  tabGeneration: number
+): BoundApsportRequestTemplate | null {
+  if (!/^(?:XHR|Fetch)$/u.test(resourceType) || request.method !== "POST" ||
+    typeof request.url !== "string" || typeof request.postData !== "string" ||
+    request.postData.length > 16_384 || typeof frameIdValue !== "string" ||
+    typeof loaderIdValue !== "string") return null;
+  let url: URL;
+  let body: unknown;
+  try {
+    url = new URL(request.url);
+    body = JSON.parse(request.postData);
+  } catch { return null; }
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
+    url.search !== "" || url.pathname !== "/be-ui/pac/api/v3/events" ||
+    !(url.hostname === "agenate.com" || url.hostname.endsWith(".agenate.com")) ||
+    !isRecord(body)) return null;
+  const rawHeaders = isRecord(request.headers) ? request.headers : {};
+  const headers: Record<string, string> = {};
+  for (const [rawName, rawValue] of Object.entries(rawHeaders)) {
+    const name = rawName.toLowerCase();
+    if (!/^[a-z0-9!#$%&'*+.^_`|~-]{1,64}$/u.test(name) ||
+      /^(?:cookie|host|content-length|accept-encoding|connection|origin|referer|user-agent|sec-|:)/u.test(name) ||
+      (typeof rawValue !== "string" && typeof rawValue !== "number")) continue;
+    const value = String(rawValue);
+    if (value.length > 4_096) continue;
+    headers[name] = value;
+  }
+  return { origin: url.origin, headers, body,
+    frameId: frameIdValue, loaderId: loaderIdValue,
+    ...(sessionId === undefined ? {} : { sessionId }), sourceGeneration, tabGeneration };
 }
 
 function isProviderCatalogWebSocket(source: ObservedSource, _value: string): boolean {
