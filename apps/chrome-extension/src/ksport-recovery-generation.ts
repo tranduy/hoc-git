@@ -67,6 +67,7 @@ export class KsportRecoveryGenerationTracker {
   #destSportsLike = 0;
   #subSportLike = 0;
   readonly #snapshotRejections = new Map<SnapshotRejection, number>();
+  readonly #destinationShapes = new Map<string, number>();
   #failReason: "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" | "PENDING_OVERFLOW" |
     "SENT_PENDING_OVERFLOW" | "SUBSCRIBE_STRADDLE" | "ATTEMPT_UNAVAILABLE" |
     "DELTA_BUFFER_FULL" | "EVIDENCE_VERSION_EXHAUSTED" | "OTHER" = "NONE";
@@ -93,15 +94,36 @@ export class KsportRecoveryGenerationTracker {
     readonly commandFragments: number; readonly fragments: number;
     readonly destLiveLike: number; readonly destTodayLike: number;
     readonly destSportsLike: number; readonly subSportLike: number;
-    readonly snapshotRejections: string } {
+    readonly snapshotRejections: string; readonly destinationShapes: string } {
     return { stompFrames: this.#stompFrames, stompMessages: this.#stompMessages,
       partitionRejected: this.#partitionRejected, pendingChars: this.#pendingStomp.length,
       commandFragments: this.#commandFragments, fragments: this.#fragments,
       destLiveLike: this.#destLiveLike, destTodayLike: this.#destTodayLike,
       destSportsLike: this.#destSportsLike, subSportLike: this.#subSportLike,
       snapshotRejections: [...this.#snapshotRejections.entries()]
-        .map(([reason, count]) => `${reason}:${count}`).join("|") };
+        .map(([reason, count]) => `${reason}:${count}`).join("|"),
+      destinationShapes: [...this.#destinationShapes.entries()]
+        .map(([shape, count]) => `${shape}:${count}`).join(" ") };
   }
+  /**
+   * The shape of a destination that matched none of the known partitions.
+   *
+   * Every one of the four shape counters reads zero while messages are refused
+   * in their hundreds, which says the topic naming moved but not what it moved
+   * to. Digits and long opaque tokens are replaced before anything is kept, so
+   * this records the structure of a topic path and never an identifier.
+   */
+  #noteDestinationShape(header: string): void {
+    if (this.#destinationShapes.size >= 6) return;
+    const destination = /^destination:(.*)$/mu.exec(header)?.[1]?.trim() ?? "";
+    if (destination.length === 0 || destination.length > 160) return;
+    const shape = destination
+      .replace(/[0-9]+/gu, "#")
+      .replace(/[a-z0-9_-]{9,}/giu, "*")
+      .slice(0, 48);
+    this.#destinationShapes.set(shape, (this.#destinationShapes.get(shape) ?? 0) + 1);
+  }
+
   /** Why the decoder latched, so the fault is named rather than inferred. */
   get failReason(): "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" | "PENDING_OVERFLOW" |
     "SENT_PENDING_OVERFLOW" | "SUBSCRIBE_STRADDLE" | "ATTEMPT_UNAVAILABLE" |
@@ -218,6 +240,7 @@ export class KsportRecoveryGenerationTracker {
             if (/\/today\//u.test(header)) this.#destTodayLike += 1;
             if (/\/sports\//u.test(header)) this.#destSportsLike += 1;
             if (/subscription:\s*subSport/u.test(header)) this.#subSportLike += 1;
+            this.#noteDestinationShape(header);
           }
           continue;
         }

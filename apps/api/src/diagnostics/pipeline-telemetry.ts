@@ -114,6 +114,7 @@ interface AccountState {
     readonly stompMessages: number;
     readonly stompPartitionRejected: number;
     readonly snapshotRejections: string;
+    readonly destinationShapes: string;
     readonly stompPendingChars: number;
     readonly stompCommandFragments: number;
     readonly stompFragments: number;
@@ -447,7 +448,7 @@ export class PipelineTelemetry {
         sockjsOpen?: unknown; sockjsHeartbeat?: unknown; sockjsArray?: unknown;
         sockjsClose?: unknown; sockjsOther?: unknown; decoderFailCode?: unknown;
         stompFrames?: unknown; stompMessages?: unknown; stompPartitionRejected?: unknown;
-        snapshotRejections?: unknown;
+        snapshotRejections?: unknown; destinationShapes?: unknown;
         stompPendingChars?: unknown; stompCommandFragments?: unknown; stompFragments?: unknown;
         destLiveLike?: unknown; destTodayLike?: unknown; destSportsLike?: unknown;
         subSportLike?: unknown; targetsTotal?: unknown; targetsIframe?: unknown;
@@ -496,6 +497,7 @@ export class PipelineTelemetry {
           stompMessages: boundedCounter(value.stompMessages),
           stompPartitionRejected: boundedCounter(value.stompPartitionRejected),
           snapshotRejections: snapshotRejections(value.snapshotRejections),
+          destinationShapes: catalogShape(value.destinationShapes),
           stompPendingChars: boundedCounter(value.stompPendingChars),
           stompCommandFragments: boundedCounter(value.stompCommandFragments),
           stompFragments: boundedCounter(value.stompFragments),
