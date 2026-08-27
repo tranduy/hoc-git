@@ -2823,6 +2823,13 @@ export class NetworkObserver {
         baselineTabPeriods: diagnostic.baselineTabPeriods,
         baselineTabLabels: diagnostic.baselineTabLabels })
     });
+    // The day list is what the other books can be compared against, and nothing
+    // else runs often enough to fetch it: the poller refreshes SABA's catalog
+    // never and APSPORT's only inside a short bootstrap window. This heartbeat
+    // runs every ten seconds for every attached tab, and the visit keeps its own
+    // ten-minute floor, so it is a no-op almost every time.
+    if (source.lobby === "SABA") void this.#captureSabaTodayBaseline(source).catch(() => undefined);
+    else if (source.lobby === "TSPORT") void this.#captureTsportTodayBaseline(source).catch(() => undefined);
   }
 
   async emitWorkHealth(source: ObservedSource, health: {
