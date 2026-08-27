@@ -922,6 +922,10 @@ export class NetworkObserver {
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
   readonly #sabaTodayCaptureAtMs = new Map<string, number>();
   readonly #tsportTodayCaptureAtMs = new Map<string, number>();
+  // The attach diagnostic is rebuilt whenever a source generation rolls, which
+  // erased what the tab selector had just seen before it could be read. The
+  // labels are the whole point of the report, so keep the last ones per source.
+  readonly #lastTabLabels = new Map<string, string>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
@@ -1316,12 +1320,14 @@ export class NetworkObserver {
       }
       const labels = nestedValue(evaluation, "result", "value", "labels");
       if (Array.isArray(labels)) {
-        diagnostic.baselineTabLabels = labels
+        const seen = labels
           .filter((value): value is string => typeof value === "string")
           .map((value) => value.replace(/[^a-z0-9 ]+/gu, "").slice(0, 24))
           .filter((value) => value.length > 0)
           .slice(0, 8)
           .join("|");
+        if (seen.length > 0) this.#lastTabLabels.set(source.sourceId, seen);
+        diagnostic.baselineTabLabels = seen;
       }
       if (typeof status === "string") diagnostic.baselineTabStatus = status;
       else if (evaluation === null) diagnostic.baselineTabStatus = "EVALUATE_FAILED";
@@ -2821,7 +2827,8 @@ export class NetworkObserver {
         baselineTabTargets: diagnostic.baselineTabTargets, baselineTabStep: diagnostic.baselineTabStep,
         baselineTabGroups: diagnostic.baselineTabGroups, baselineTabScopes: diagnostic.baselineTabScopes,
         baselineTabPeriods: diagnostic.baselineTabPeriods,
-        baselineTabLabels: diagnostic.baselineTabLabels })
+        baselineTabLabels: diagnostic.baselineTabLabels.length > 0
+          ? diagnostic.baselineTabLabels : this.#lastTabLabels.get(source.sourceId) ?? "" })
     });
     // The day list is what the other books can be compared against, and nothing
     // else runs often enough to fetch it: the poller refreshes SABA's catalog
