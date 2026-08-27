@@ -533,7 +533,42 @@ function receiptSequence(messageId?: string): number | null {
  * knowing which one refused is the difference between a fix and a guess. Names a
  * shape only; no destination, header or body value is ever recorded.
  */
-function fullPartitionSnapshotRejection(body: unknown): SnapshotRejection {
+function fullPartitionSnapshotRejection(payload: unknown): SnapshotRejection {
+  let firstRejection: SnapshotRejection | null = null;
+  for (const body of snapshotArrays(payload)) {
+    const rejection = leagueArrayRejection(body);
+    if (rejection === "NONE") return "NONE";
+    firstRejection ??= rejection;
+  }
+  return firstRejection ?? "NOT_ARRAY";
+}
+
+/**
+ * Where the league array can be found in a partition payload.
+ *
+ * Measured 2026-08-27: fifteen baseline payloads in one generation were refused
+ * as NOT_ARRAY, because the provider now nests the leagues inside an object
+ * rather than sending them at the top level. Only the search widens here - every
+ * candidate still has to pass the full league and event check, so a wrapper that
+ * holds some other array cannot pass as a baseline.
+ */
+function snapshotArrays(payload: unknown): readonly unknown[] {
+  if (Array.isArray(payload)) return [payload];
+  const record = asRecord(payload);
+  if (record === null) return [payload];
+  const candidates: unknown[] = [];
+  for (const value of Object.values(record)) {
+    if (Array.isArray(value)) candidates.push(value);
+    else {
+      const nested = asRecord(value);
+      if (nested === null) continue;
+      for (const inner of Object.values(nested)) if (Array.isArray(inner)) candidates.push(inner);
+    }
+  }
+  return candidates.length > 0 ? candidates : [payload];
+}
+
+function leagueArrayRejection(body: unknown): SnapshotRejection {
   if (!Array.isArray(body)) return "NOT_ARRAY";
   let eventCount = 0;
   let decodableMarkets = 0;

@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
 
-function receipt(partition: "live" | "today", order: number, full: boolean): string {
+function receipt(partition: "live" | "today", order: number, full: boolean,
+  wrap: "none" | "object" | "nested" = "none"): string {
   const subscription = partition === "live" ? "subSportBookLive" : "subSportBookToday";
   const path = partition === "live" ? "1_1/live" : "1_11/today";
   const providerBody = full
     ? [{ "1": `${partition} league`, "2": [{ "8": `${order}`, "2": "Home", "3": "Away",
       "7": { "3": [`2.5 0.91*${order}h -0.99*${order}a ${order}0001`] } }] }]
     : [{ "8": `${order}`, "7": {} }];
+  const wrapped = wrap === "object" ? { data: providerBody }
+    : wrap === "nested" ? { result: { leagues: providerBody } }
+    : providerBody;
   const wrapper = JSON.stringify({ statusCode: "OK", statusCodeValue: 200,
-    body: JSON.stringify(providerBody) });
+    body: JSON.stringify(wrapped) });
   const stomp = `MESSAGE\ndestination:/topic/sports/${path}/ma/event/vi\n` +
     `subscription:${subscription}\nmessage-id:socket-${order}\n\n${wrapper}\u0000`;
   return `a${JSON.stringify([stomp])}`;
@@ -71,6 +75,29 @@ describe("KsportRecoveryGenerationTracker", () => {
     const payload = receiptWithMarketRow("live", 100, "2.5 0*100h -0.99*100a 1000001");
 
     expect(tracker.push(payload)).toEqual([{ payload, recoveryGeneration: 1 }]);
+    expect(tracker.currentBaselineState).toEqual({ live: false, today: false, complete: false });
+  });
+
+  it("completes a baseline whose leagues the provider now nests inside an object", () => {
+    // Measured 2026-08-27: fifteen SBOBET baselines in one generation were
+    // refused as NOT_ARRAY, so baselineLive and baselineToday never left zero
+    // and the feed could not hold LIVE. The leagues had moved one level in.
+    const tracker = new KsportRecoveryGenerationTracker();
+
+    tracker.push(receipt("live", 100, true, "object"));
+    expect(tracker.currentBaselineState).toEqual({ live: true, today: false, complete: false });
+    tracker.push(receipt("today", 104, true, "nested"));
+    expect(tracker.currentBaselineState).toEqual({ live: true, today: true, complete: true });
+  });
+
+  it("refuses a wrapper whose nested array is not a league array", () => {
+    // Only the search widened; the league and event check did not. An unrelated
+    // array riding in the same envelope must never pass as a baseline.
+    const tracker = new KsportRecoveryGenerationTracker();
+    const payload = receiptWithProviderBody("live", 100,
+      { audit: [{ note: "unrelated" }], meta: { trail: [1, 2, 3] } } as unknown as never);
+
+    tracker.push(payload);
     expect(tracker.currentBaselineState).toEqual({ live: false, today: false, complete: false });
   });
 
