@@ -84,6 +84,52 @@ function collapseDuplicates(
  * discards every quote, and the fixture pairs across books while displaying no
  * ticket at all. The event record owns the phase, so quotes follow it.
  */
+/** A kickoff must sit this far ahead before it can contradict a live claim, so a
+ * fixture seconds from kick-off is not read as one that starts later. */
+const SCHEDULED_KICKOFF_MARGIN_MS = 300_000;
+
+function participantsKey(event: CatalogEvent): string {
+  const participant = (value: string): string => value.normalize("NFKD").replace(/\p{M}+/gu, "")
+    .toLocaleLowerCase("en").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return [event.category, event.eventScope,
+    [participant(event.participantA), participant(event.participantB)].sort().join("~")].join("|");
+}
+
+/**
+ * A provider whose live section is really "live and about to be" claims fixtures
+ * that have not kicked off. SABA stamps every event in that section with the
+ * moment the snapshot was built rather than a kickoff - 63 of 66 shared one
+ * timestamp to the second - so the section's own evidence that a match has
+ * started is always true and never means anything.
+ *
+ * Its day list carries the same fixtures with real, whole-minute kickoffs hours
+ * away, and the two only meet once the parts are merged. A fixture that starts
+ * later is not running now: take the scheduled kickoff as the truth on both
+ * counts, which also puts the event in the pre-match window where the books that
+ * price the same fixture can reach it. A live event is never compared against
+ * another book's pre-match one, so believing the claim strands exactly the
+ * markets worth comparing.
+ */
+function resolveScheduledPhase(events: Map<string, CatalogEvent>, observedAtMs: number): void {
+  const scheduledByFixture = new Map<string, number>();
+  for (const event of events.values()) {
+    if (event.startAtUtcMs <= observedAtMs + SCHEDULED_KICKOFF_MARGIN_MS) continue;
+    const key = participantsKey(event);
+    const previous = scheduledByFixture.get(key);
+    if (previous === undefined || event.startAtUtcMs < previous) {
+      scheduledByFixture.set(key, event.startAtUtcMs);
+    }
+  }
+  if (scheduledByFixture.size === 0) return;
+  for (const [id, event] of events) {
+    if (!event.isLive) continue;
+    const scheduled = scheduledByFixture.get(participantsKey(event));
+    if (scheduled === undefined) continue;
+    events.set(id, { ...event, isLive: false, startAtUtcMs: scheduled,
+      rematchCandidate: false, liveState: null });
+  }
+}
+
 function alignQuotePhase(
   events: ReadonlyMap<string, CatalogEvent>,
   quotes: Map<string, ObservedProviderCatalog["quotes"][number]>
@@ -116,6 +162,9 @@ export function mergeObservedCatalogParts(input: {
   readonly parts: readonly NormalizedCatalogPart[];
   readonly selectEvent?: (current: CatalogEvent, candidate: CatalogEvent) => CatalogEvent;
   readonly collapseDuplicateEvents?: boolean;
+  /** Let a scheduled kickoff overrule a live section that also lists fixtures
+   *  which have not started. */
+  readonly resolveScheduledPhase?: boolean;
 }): ObservedProviderCatalog {
   const events = new Map<string, ObservedProviderCatalog["events"][number]>();
   const markets = new Map<string, ObservedProviderCatalog["markets"][number]>();
@@ -137,6 +186,7 @@ export function mergeObservedCatalogParts(input: {
       ...(input.selectEvent === undefined ? {} : { selectEvent: input.selectEvent })
     });
   }
+  if (input.resolveScheduledPhase === true) resolveScheduledPhase(events, input.observedAtMs);
   alignQuotePhase(events, quotes);
   return {
     dataMode: "LIVE",

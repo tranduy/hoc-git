@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
-import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
+import { mergeObservedCatalogParts, type CatalogEvent,
+  type NormalizedCatalogPart } from "./catalog-part-merge.js";
 
 function event(providerEventId: string, overrides: Partial<ProviderEvent> = {}): ProviderEvent {
   return {
@@ -113,5 +114,56 @@ describe("quote phase follows its own event", () => {
     });
 
     expect(catalog.quotes[0]).toBe(agreeing);
+  });
+});
+
+describe("a scheduled kickoff overrules a live section that lists fixtures early", () => {
+  const observedAtMs = 1_700_000_000_000;
+  const scheduled = observedAtMs + 12 * 3_600_000;
+
+  const event = (id: string, overrides: Partial<CatalogEvent>): CatalogEvent => ({
+    provider: "SABA", category: "FOOTBALL", providerEventId: id, competition: "La Liga",
+    seasonStage: null, startAtUtcMs: scheduled, participantA: "Celta Vigo", participantB: "Osasuna",
+    eventScope: "REGULATION", bestOf: null, isLive: false, rematchCandidate: false,
+    fixtureDiscriminator: null, isVirtual: false, sportVariant: "FOOTBALL", liveState: null,
+    ...overrides
+  } as CatalogEvent);
+
+  const merge = (events: readonly CatalogEvent[]) => mergeObservedCatalogParts({
+    accountId: "catalog-source:SABA:FOOTBALL", provider: "SABA", observedAtMs,
+    parts: [{ diagnostics: [], events, markets: [], quotes: [] }],
+    resolveScheduledPhase: true
+  });
+
+  it("moves a live claim onto the kickoff the same catalog schedules", () => {
+    const merged = merge([
+      event("live", { isLive: true, startAtUtcMs: observedAtMs - 60_000, rematchCandidate: true,
+        liveState: { period: null, scoreHome: null, scoreAway: null, clockMs: null } }),
+      event("scheduled", {})
+    ]);
+
+    expect(merged.events.find((entry) => entry.providerEventId === "live")).toEqual(
+      expect.objectContaining({ isLive: false, startAtUtcMs: scheduled, liveState: null }));
+  });
+
+  it("leaves a running fixture the catalog does not schedule for later alone", () => {
+    const merged = merge([
+      event("live", { isLive: true, startAtUtcMs: observedAtMs - 60_000, participantA: "Home",
+        participantB: "Away" }),
+      event("scheduled", {})
+    ]);
+
+    expect(merged.events.find((entry) => entry.providerEventId === "live")).toEqual(
+      expect.objectContaining({ isLive: true, startAtUtcMs: observedAtMs - 60_000 }));
+  });
+
+  it("does not let a kickoff moments away contradict a live claim", () => {
+    const merged = merge([
+      event("live", { isLive: true, startAtUtcMs: observedAtMs - 60_000 }),
+      event("scheduled", { startAtUtcMs: observedAtMs + 60_000 })
+    ]);
+
+    expect(merged.events.find((entry) => entry.providerEventId === "live")).toEqual(
+      expect.objectContaining({ isLive: true }));
   });
 });

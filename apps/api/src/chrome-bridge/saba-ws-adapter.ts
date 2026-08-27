@@ -418,7 +418,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     const sourceParts = [...this.#parts].filter(([key]) => key.startsWith(`${epochKey}|`))
       .map(([, value]) => value);
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SABA",
-      observedAtMs: envelope.observedAtMs, parts: sourceParts, selectEvent: selectStableSabaEvent });
+      observedAtMs: envelope.observedAtMs, parts: sourceParts, selectEvent: selectStableSabaEvent,
+      // SABA's live section also lists fixtures that have not kicked off, and
+      // only here do its two partitions meet, so only here can its own schedule
+      // contradict them.
+      resolveScheduledPhase: true });
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog, ...evidence }];
   }
