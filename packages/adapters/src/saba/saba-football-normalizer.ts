@@ -111,6 +111,16 @@ function canonicalTotalLine(record: RawRecord): string | null {
   return isSupportedFootballTwoWayLine(canonical) ? canonical : null;
 }
 
+/** A kickoff no further from the observation than this restates it rather than
+ * dating the fixture, so it is not evidence of when the match starts. */
+const SABA_KICKOFF_OBSERVATION_MARGIN_MS = 60_000;
+
+function informativeKickoff(value: unknown, observedAtMs: number): boolean {
+  const seconds = finite(value);
+  return seconds !== null && seconds >= 0 &&
+    Math.abs(seconds * 1_000 - observedAtMs) > SABA_KICKOFF_OBSERVATION_MARGIN_MS;
+}
+
 export function normalizeSabaFootballRecords(
   records: readonly RawRecord[],
   options: SabaFootballNormalizeOptions
@@ -134,11 +144,25 @@ export function normalizeSabaFootballRecords(
     }
   }
 
+  // SABA repeats a fixture across its market groups, and the live group stamps
+  // kickofftime with the moment the snapshot was taken rather than the kickoff.
+  // Measured 2026-08-27: 59 of 80 events carried a kickoff within a minute of
+  // the observation, while the books that do publish one placed the same
+  // fixtures a median of twelve hours away. Letting that value overwrite a real
+  // kickoff erases the evidence that decides both the phase and the pre-match
+  // pairing window, so an upcoming fixture claims to be live and can never be
+  // compared against another book's pre-match one.
   const matches = new Map<string, RawRecord>();
   for (const record of records) {
     if (record.type !== "m") continue;
     const matchId = id(record.matchid);
-    if (matchId !== null) matches.set(matchId, { ...(matches.get(matchId) ?? {}), ...record });
+    if (matchId === null) continue;
+    const previous = matches.get(matchId);
+    const keepPreviousKickoff = previous !== undefined &&
+      !informativeKickoff(record.kickofftime, options.observedAtMs) &&
+      informativeKickoff(previous.kickofftime, options.observedAtMs);
+    matches.set(matchId, { ...(previous ?? {}), ...record,
+      ...(keepPreviousKickoff ? { kickofftime: previous.kickofftime } : {}) });
   }
 
   const acceptedMatches = new Set<string>();

@@ -195,6 +195,43 @@ describe("normalizeSabaFootballRecords", () => {
   });
 });
 
+describe("SABA kickoff evidence survives its live-group record", () => {
+  it("keeps a real kickoff when a later record only restates the observation", () => {
+    // The live group stamps kickofftime with the moment of the snapshot. Letting
+    // it win makes "kickoff has passed" trivially true, so an upcoming fixture
+    // claims to be live and can never pair with another book's pre-match one.
+    const kickoffSeconds = Math.floor(options.observedAtMs / 1_000) + 7_200;
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: kickoffSeconds, eventstatus: "running", marketid: "T", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: Math.floor(options.observedAtMs / 1_000), eventstatus: "running",
+        marketid: "L", sporttype: 1 }
+    ], options);
+
+    expect(normalized.events).toEqual([expect.objectContaining({
+      providerEventId: "2", isLive: false, startAtUtcMs: kickoffSeconds * 1_000
+    })]);
+  });
+
+  it("still takes a later kickoff that carries real evidence", () => {
+    const corrected = Math.floor(options.observedAtMs / 1_000) + 3_600;
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: Math.floor(options.observedAtMs / 1_000) + 7_200, eventstatus: "running",
+        marketid: "T", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: corrected, eventstatus: "running", marketid: "T", sporttype: 1 }
+    ], options);
+
+    expect(normalized.events).toEqual([expect.objectContaining({
+      providerEventId: "2", startAtUtcMs: corrected * 1_000
+    })]);
+  });
+});
+
 describe("SABA live classification requires a started fixture", () => {
   it("keeps a live-group match pre-match until its own kickoff has passed", () => {
     // Measured 2026-08-26: SABA published 92 live-group matches with no period,
