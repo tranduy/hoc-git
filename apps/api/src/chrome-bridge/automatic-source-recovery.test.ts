@@ -456,6 +456,29 @@ describe("AutomaticSourceRecovery", () => {
     })).toThrow("RECOVERY_OPTIONS_INVALID");
   });
 
+  it("will not reload one provider tab twice inside the settling window", async () => {
+    // A reload destroys the page and every socket it owns. The backoff does not
+    // protect it - one successful beat clears the counter - so APSPORT was
+    // reloaded out of every burst it managed to start: 21 socket opens and 48
+    // bursts of one to eight minutes across two days, never settling.
+    let clock = 1_000_000;
+    const context = setup(() => clock);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT, { sourceId: "chrome:TSPORT:9",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+
+    await context.recovery.recover(request(APSPORT, "HARD"));
+    expect(context.reloadSource).toHaveBeenCalledTimes(1);
+
+    clock += 60_000;
+    await context.recovery.recover(request(APSPORT, "HARD"));
+    expect(context.reloadSource).toHaveBeenCalledTimes(1);
+
+    clock += 300_000;
+    await context.recovery.recover(request(APSPORT, "HARD"));
+    expect(context.reloadSource).toHaveBeenCalledTimes(2);
+  });
+
   it("falls back to a fresh TSPORT launch when the targeted reload baseline times out", async () => {
     const context = setup();
     context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT, { sourceId: "chrome:TSPORT:9",

@@ -85,6 +85,19 @@ const ACTIONABLE_REASONS = new Set([
 const DISPOSED = Symbol("RECOVERY_DISPOSED");
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 300_000;
+/**
+ * The least time between two reloads of one provider tab.
+ *
+ * A reload destroys the page and every socket it owns, and the page needs
+ * minutes to authenticate and subscribe again. The backoff alone does not
+ * protect it: a recovery that succeeds for even one beat clears the counter, so
+ * a book that comes up briefly and falls over drops straight back to a
+ * one-second delay. Measured 2026-08-27: APSPORT opened its football socket 21
+ * times and produced 48 separate bursts of one to eight minutes across two
+ * days, never once settling - it was being reloaded out of every burst it
+ * managed to start.
+ */
+const MIN_SOURCE_RELOAD_INTERVAL_MS = 300_000;
 
 interface RecoveryBackoffState {
   readonly consecutiveFailures: number;
@@ -100,6 +113,7 @@ export class AutomaticSourceRecovery {
   readonly #now: () => number;
   readonly #inflight = new Map<string, Promise<RecoveryResult>>();
   readonly #backoff = new Map<string, RecoveryBackoffState>();
+  readonly #lastReloadAtMs = new Map<string, number>();
   readonly #disposeSignal: Promise<typeof DISPOSED>;
   readonly #abortController = new AbortController();
   #signalDispose!: () => void;
@@ -194,14 +208,21 @@ export class AutomaticSourceRecovery {
         const prior = this.#options.feedRegistry.snapshot(request.accountId);
         const actionStartedAtMs = this.#now();
         let delivered = 0;
-        if (prior.sourceId !== null && this.#options.controlPlane.reloadSource !== undefined &&
+        const lastReloadAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
+        const reloadAllowed = actionStartedAtMs - lastReloadAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS;
+        if (reloadAllowed && prior.sourceId !== null &&
+          this.#options.controlPlane.reloadSource !== undefined &&
           matchesRecoverySource(prior.sourceId, request.accountId, source.hardLobby)) {
-          try { delivered = this.#options.controlPlane.reloadSource(prior.sourceId); }
-          catch { /* send failure is undelivered; fall through to a fresh launch */ }
+          try {
+            delivered = this.#options.controlPlane.reloadSource(prior.sourceId);
+            if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
+          } catch { /* send failure is undelivered; fall through to a fresh launch */ }
         }
-        if (delivered <= 0 && this.#options.controlPlane.reloadRecoverySource !== undefined) {
+        if (reloadAllowed && delivered <= 0 &&
+          this.#options.controlPlane.reloadRecoverySource !== undefined) {
           try {
             delivered = this.#options.controlPlane.reloadRecoverySource(request.accountId, source.hardLobby);
+            if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
           } catch { /* candidate send failure is undelivered; fall through to a fresh launch */ }
         }
         if (delivered > 0) {
