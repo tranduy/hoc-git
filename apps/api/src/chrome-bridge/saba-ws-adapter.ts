@@ -66,6 +66,28 @@ interface SabaStreamState {
 }
 
 export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
+  /**
+   * Which gate a frame left through, for the frames that produce nothing.
+   *
+   * Measured 2026-08-27: SABA received frames continuously - between 100 and
+   * 330 per sample - while its catalog was republished roughly once every
+   * hundred seconds, past its own 75 s freshness window, so the feed fell to
+   * STALLED and the book read as offline for most of six hours. Every one of
+   * these exits returns the same empty result, so nothing could say which.
+   */
+  #lastIgnoreReason: string | null = null;
+
+  takeIgnoreReason(): string | null {
+    const reason = this.#lastIgnoreReason;
+    this.#lastIgnoreReason = null;
+    return reason;
+  }
+
+  #ignore(reason: string): [] {
+    this.#lastIgnoreReason = reason;
+    return [];
+  }
+
   readonly id = "saba-ws-catalog-v1";
   readonly lobby = "SABA" as const;
   readonly providerFamily = "SABA";
@@ -254,12 +276,14 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       stream.highWatermark = streamOrdinal;
       stream.authorizing = false;
     }
-    if (stream.activeStreamId !== streamId || stream.activeStreamOrdinal !== streamOrdinal) return [];
+    if (stream.activeStreamId !== streamId || stream.activeStreamOrdinal !== streamOrdinal) {
+      return this.#ignore("stream-not-active");
+    }
     let startsBaseline = false;
     let faultingReadyKey: string | null = null;
     try {
       const frame = parseSabaSocketFrame(envelope.payload.body);
-      if (frame === null) return [];
+      if (frame === null) return this.#ignore("unparsed-frame");
       faultingReadyKey = `${decoderKey}|${frame.bridgeId}`;
       if (JSON.stringify(frame.rows).includes('"A003"')) {
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
@@ -291,13 +315,15 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const applied = decoder.apply(frame);
       if (applied.duplicate) {
         restorePriorAuthority();
-        return [];
+        return this.#ignore("duplicate");
       }
       if (startsBaseline && !applied.fullSnapshot) {
         restorePriorAuthority();
-        return [];
+        return this.#ignore("baseline-not-full");
       }
-      if (applied.records.length === 0 && !applied.fullSnapshot) return [];
+      if (applied.records.length === 0 && !applied.fullSnapshot) {
+        return this.#ignore("no-records");
+      }
       const normalized = normalizeSabaFootballRecords(applied.records, {
         observedAtMs: envelope.observedAtMs,
         receivedMonotonicMs: envelope.receivedMonotonicMs,
@@ -307,7 +333,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const previousPart = this.#parts.get(`${epochKey}|${partition}`);
       if (previousPart !== undefined && sameSabaCatalogPart(previousPart, normalized)) {
         restorePriorAuthority();
-        return [];
+        return this.#ignore("same-part");
       }
       if (!startsBaseline) {
         const baselineAtMs = this.#authoritativeBaselineAtMs.get(epochKey);

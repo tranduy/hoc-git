@@ -209,8 +209,14 @@ export class ChromeCatalogDataPlane {
     }
     const update = route.adapter.decode(assembled).at(-1);
     if (update === undefined) {
+      // An adapter that produces nothing has already decided why, and every one
+      // of its exits looks the same from here. Report that reason where the
+      // endpoint would go: it is the one thing that shows an adapter going
+      // quiet on frames it is still receiving.
+      const adapter = route.adapter as { takeIgnoreReason?: () => string | null };
+      const reason = adapter.takeIgnoreReason?.() ?? null;
       this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs,
-        envelope.request.pathnameClass);
+        reason === null ? envelope.request.pathnameClass : `/ignored/${reason}`);
       return this.#reject(envelope, `ADAPTER_DECODE_EMPTY:${route.adapter.id}`);
     }
     this.#telemetry?.recordAdapterDecoded(transportAccountId, update.observedAtMs);
