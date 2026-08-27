@@ -275,6 +275,26 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     return true;
   }
 
+  /**
+   * Which gate a frame left through, for the frames that produce nothing.
+   *
+   * Measured 2026-08-27: with the socket path corrected the frames reach this
+   * adapter and still decode to nothing, and every exit below returns the same
+   * empty result.
+   */
+  #lastIgnoreReason: string | null = null;
+
+  takeIgnoreReason(): string | null {
+    const reason = this.#lastIgnoreReason;
+    this.#lastIgnoreReason = null;
+    return reason;
+  }
+
+  #ignore(reason: string): [] {
+    this.#lastIgnoreReason = reason;
+    return [];
+  }
+
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "TSPORT" || envelope.payload.encoding !== "UTF8") return false;
     if (envelope.transport === "DOM_SNAPSHOT") return envelope.request.resourceType === "DOM" &&
@@ -451,15 +471,15 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     }
 
     const streamId = envelope.request.streamId;
-    if (streamId === undefined) return [];
+    if (streamId === undefined) return this.#ignore("no-stream-id");
     if (envelope.transport === "WS_STATE") {
       const lifecycle = websocketLifecycleState(envelope);
-      if (lifecycle === null) return [];
+      if (lifecycle === null) return this.#ignore("not-a-lifecycle-frame");
       if (lifecycle === "OPEN") {
         const lifecycleKey = sourceEpochKey(envelope);
         const seenStreamIds = this.#seenStreamIds.get(lifecycleKey) ?? new Set<string>();
         const lastOpenSequence = this.#lastOpenSequences.get(lifecycleKey) ?? -1;
-        if (seenStreamIds.has(streamId) || envelope.sequence <= lastOpenSequence) return [];
+        if (seenStreamIds.has(streamId) || envelope.sequence <= lastOpenSequence) return this.#ignore("stale-open");
         const currentSourceEpoch = sourceEpoch(envelope);
         if (!this.#acceptDomSourceEpoch(envelope.sourceId, currentSourceEpoch)) return [];
         const expectedEventIds = this.#expectedEventIds.get(envelope.sourceId);
@@ -500,7 +520,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
             : [];
         }
         const baseline = this.#catalogUpdate(envelope, stream, "BASELINE");
-        if (baseline === null) return [];
+        if (baseline === null) return this.#ignore("no-baseline");
         stream.baselineEmitted = true;
         stream.lastBaselineAtMs = envelope.observedAtMs;
         return [baseline];
@@ -519,7 +539,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (!this.#acceptDomSourceEpoch(envelope.sourceId, currentSourceEpoch)) return [];
       const lifecycleKey = sourceEpochKey(envelope);
       const seenStreamIds = this.#seenStreamIds.get(lifecycleKey) ?? new Set<string>();
-      if (seenStreamIds.has(streamId)) return [];
+      if (seenStreamIds.has(streamId)) return this.#ignore("stream-already-seen");
       const expectedEventIds = this.#expectedEventIds.get(envelope.sourceId);
       const sweep = this.#domSweepStates.get(envelope.sourceId);
       const proofReady = !(sweep?.sourceEpoch === currentSourceEpoch && !sweep.completed) &&
@@ -545,15 +565,15 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       current.sourceEpoch !== sourceEpoch(envelope)) return [];
     const event = this.#parsed.get(envelope);
     const incoming = event === null || event === undefined ? null : extractTsportFootballRecord(event);
-    if (incoming === null) return [];
+    if (incoming === null) return this.#ignore("unparsed-record");
     if (isVirtualFootballIdentity(undefined, incoming.leagueName, incoming.teamNames)) {
       if (!current.proofReady || !current.explicitEmptyProof ||
         current.expectedEventIds.size > 0) return [];
       const baselineDue = !current.baselineEmitted || current.lastBaselineAtMs === null ||
         envelope.observedAtMs - current.lastBaselineAtMs >= AUTHORITATIVE_BASELINE_REFRESH_MS;
-      if (!baselineDue) return [];
+      if (!baselineDue) return this.#ignore("baseline-not-due");
       const baseline = this.#catalogUpdate(envelope, current, "BASELINE");
-      if (baseline === null) return [];
+      if (baseline === null) return this.#ignore("no-baseline");
       current.baselineEmitted = true;
       current.lastBaselineAtMs = envelope.observedAtMs;
       return [baseline];
@@ -574,7 +594,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       receivedMonotonicMs: envelope.receivedMonotonicMs,
       sequence: envelope.sequence
     });
-    if (!current.proofReady) return [];
+    if (!current.proofReady) return this.#ignore("proof-not-ready");
     if (!current.baselineEmitted) {
       for (const expectedEventId of current.expectedEventIds) {
         if (!current.records.has(expectedEventId)) return [];
@@ -584,7 +604,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       envelope.observedAtMs - current.lastBaselineAtMs >= AUTHORITATIVE_BASELINE_REFRESH_MS;
     const evidenceMode = baselineDue ? "BASELINE" : "DELTA";
     const update = this.#catalogUpdate(envelope, current, evidenceMode);
-    if (update === null) return [];
+    if (update === null) return this.#ignore("no-catalog-update");
     current.baselineEmitted = true;
     if (evidenceMode === "BASELINE") current.lastBaselineAtMs = envelope.observedAtMs;
     return [update];
