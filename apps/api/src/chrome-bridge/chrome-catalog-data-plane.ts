@@ -201,10 +201,15 @@ export class ChromeCatalogDataPlane {
     }
     const route = pipeline.router.route(assembled);
     if (route.status !== "TRUSTED" || route.adapter === null) {
-      this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs,
-        envelope.request.pathnameClass);
       const reason = route.reason ?? (route.providerFamily === null
         ? "ADAPTER_FINGERPRINT_UNMATCHED" : "ADAPTER_CONFIRMATION_PENDING");
+      // Frames refused here never reach an adapter, so an adapter's own report
+      // cannot account for them: 278 of SABA's socket frames stopped at this
+      // gate against 8 that reached its decoder, and the endpoint alone could
+      // not say whether the router had failed to recognise them or was still
+      // waiting to trust them.
+      this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs,
+        `/route/${reason.toLowerCase().replace(/[^a-z0-9]+/gu, "-").slice(0, 40)}`);
       return this.#reject(envelope, reason);
     }
     const update = route.adapter.decode(assembled).at(-1);
