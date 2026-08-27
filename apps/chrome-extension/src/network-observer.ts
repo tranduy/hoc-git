@@ -3738,7 +3738,8 @@ export class NetworkObserver {
         // merge multiple frames or erase its frame/loader-bound sweep metadata.
         // An ambiguous multi-frame result fails closed until a later scan finds
         // the single football document.
-        if (source.lobby === "TSPORT" && tsportFrames.length !== 1) { this.#noteCaptureExit(source, "TSPORT_FRAME_COUNT"); return; }
+        if (source.lobby === "TSPORT" && tsportFrames.length !== 1) { this.#noteCaptureExit(source,
+            `TSPORT_FRAME_COUNT=${tsportFrames.length}/${eligibleFrames.length}`); return; }
         const emissionCandidates = source.lobby === "CMD" ? eligibleFrames
           : source.lobby === "TSPORT" ? tsportFrames
           : [{ frameKey: "aggregate", frameId: null, loaderId: null,
