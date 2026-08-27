@@ -66,6 +66,9 @@ const TSPORT_CATALOG_SWEEP_INTERVAL_MS = 30_000;
 // A fresh socket baseline tears down a working stream, so it stays rare even
 // when the sweep beneath it runs often.
 const TSPORT_SOCKET_BASELINE_FLOOR_MS = 300_000;
+// Long enough that two captures never overlap, short enough that one which will
+// never settle cannot silence the sweep for the rest of the worker's life.
+const CAPTURE_IN_FLIGHT_LIMIT_MS = 60_000;
 // Selected by label, so both lobbies that read their catalog from the page can
 // share one expression.
 const TODAY_TAB_EXPRESSION = timeTabExpression([...TODAY_TAB_LABELS], true);
@@ -972,7 +975,8 @@ export class NetworkObserver {
   readonly #sabaSnapshotSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #sabaSnapshotLastSavedAtMs = new Map<string, number>();
   readonly #sabaDocumentMarkers = new Map<string, string>();
-  readonly #cmdCapturesInFlight = new Map<string, { readonly token: symbol; readonly operation: Promise<void> }>();
+  readonly #cmdCapturesInFlight = new Map<string, { readonly token: symbol;
+    readonly operation: Promise<void>; readonly startedAtMs: number }>();
   readonly #imLastRecoveryAtMs = new Map<string, number>();
   readonly #catalogRefreshes = new Map<string, Promise<void>>();
   readonly #cmdRecoveryState = new CmdRecoveryState();
@@ -3645,7 +3649,14 @@ export class NetworkObserver {
     forceGeneration: boolean, alreadyScheduled = false): Promise<void> {
     if (!/^[a-z0-9.-]+$/iu.test(hostname)) return;
     const existing = this.#cmdCapturesInFlight.get(source.sourceId);
-    if (existing !== undefined) return existing.operation;
+    // A capture that never settles holds this entry forever, and every later
+    // sweep is handed that dead promise instead of running: measured
+    // 2026-08-27, APSPORT's DOM_SNAPSHOT count sat at zero for as long as it
+    // was watched while its sweep was called every thirty seconds. The in-flight
+    // guard exists to stop two captures overlapping, which is a matter of
+    // seconds; past that, whatever it is holding is not going to finish.
+    if (existing !== undefined &&
+      this.#now() - existing.startedAtMs < CAPTURE_IN_FLIGHT_LIMIT_MS) return existing.operation;
     const token = Symbol("provider-capture");
     const operation = (async () => {
       try {
@@ -3787,7 +3798,7 @@ export class NetworkObserver {
       }
       }
     })();
-    this.#cmdCapturesInFlight.set(source.sourceId, { token, operation });
+    this.#cmdCapturesInFlight.set(source.sourceId, { token, operation, startedAtMs: this.#now() });
     return operation;
   }
 
