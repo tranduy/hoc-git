@@ -130,6 +130,17 @@ function resolveScheduledPhase(events: Map<string, CatalogEvent>, observedAtMs: 
   }
 }
 
+/** Same rule applied to a whole catalog, for the overlay path that unions
+ *  SABA's retained catalog with a newer one: its live section and its day list
+ *  can arrive in separate snapshots, and only the union holds both. */
+export function withScheduledPhaseResolved(
+  catalog: ObservedProviderCatalog, observedAtMs = catalog.observedAtMs
+): ObservedProviderCatalog {
+  const events = new Map(catalog.events.map((event) => [event.providerEventId, event]));
+  resolveScheduledPhase(events, observedAtMs);
+  return withAlignedQuotePhase({ ...catalog, events: [...events.values()] });
+}
+
 function alignQuotePhase(
   events: ReadonlyMap<string, CatalogEvent>,
   quotes: Map<string, ObservedProviderCatalog["quotes"][number]>

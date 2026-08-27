@@ -1,7 +1,7 @@
 import { CatalogSourceStatusSchema, type CatalogSourceStatus, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { CatalogCoverageGuard, type CatalogCoverageCandidate } from "../catalog/catalog-coverage-guard.js";
-import { withAlignedQuotePhase } from "./catalog-part-merge.js";
+import { withAlignedQuotePhase, withScheduledPhaseResolved } from "./catalog-part-merge.js";
 import { AdapterRouter } from "./adapter-router.js";
 import { CmdDomCatalogAdapter } from "./cmd-dom-adapter.js";
 import { CmdHttpCatalogAdapter } from "./cmd-http-adapter.js";
@@ -648,7 +648,11 @@ function overlaySabaDomCatalog(retained: ObservedProviderCatalog,
   // Unioning a retained catalog with a newer one can keep an event from one and
   // its quotes from the other. The comparison layer only shows a quote whose
   // phase equals its event's, so a mismatch here hides every ticket.
-  return withAlignedQuotePhase({ ...current,
+  // SABA's live section also lists fixtures that have not kicked off, and its
+  // day list - the one carrying their real kickoff - can arrive in a different
+  // snapshot. Only this union holds both, so only here can the schedule
+  // contradict the live claim.
+  return withScheduledPhaseResolved({ ...current,
     rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
     events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()] });
 }
