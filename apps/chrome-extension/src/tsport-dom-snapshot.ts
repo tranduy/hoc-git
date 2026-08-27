@@ -69,9 +69,21 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
   const candidates = rootCandidates.length >= documentCandidates.length
     ? rootCandidates : documentCandidates;
   const records = [];
+  // A row that is not a fixture at all - a header, a promotion, anything with
+  // no teams behind it - is not a failed read, and neither is one the page is
+  // not showing. Counting them made the sweep incomplete for as long as the
+  // page carried one: measured 2026-08-27, 26 rows of which 23 carried every
+  // field, so the sweep never completed, no frame ever answered, no snapshot
+  // was ever sent and the feed sat in hard recovery with no generation - and
+  // with no generation there was nothing to capture against. Only a row that
+  // looks like a fixture and still cannot be read means the list was caught
+  // half-rendered, which is what this count is for.
   let invalidCandidates = 0;
+  let fixtureCandidates = 0;
   for (const node of candidates) {
     if (isHiddenByTree(node)) {
+      // A stale row the page is hiding means it is still changing, which is a
+      // genuine reason to withhold completion.
       invalidCandidates += 1;
       continue;
     }
@@ -90,8 +102,13 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
       ? scores.join(" - ") : null;
     const timeText = /(?:live|trực\\s*tiếp|hiệp|\\d+h)/iu.test(rawStatus) || scoreText !== null
       ? (rawStatus || "LIVE") : rawStatus;
+    // Two teams is what makes a row a fixture. A row carrying them but missing
+    // an id, a league or a time is a fixture still rendering and must withhold
+    // completion; a row with no teams at all was never one.
+    const looksLikeFixture = teamNames.length === 2;
+    if (looksLikeFixture) fixtureCandidates += 1;
     if (!eventId || !leagueName || teamNames.length !== 2 || !timeText) {
-      invalidCandidates += 1;
+      if (looksLikeFixture) invalidCandidates += 1;
       continue;
     }
     const markets = [...node.querySelectorAll(".match-odd-pair-list")].flatMap((group, groupIndex) => {
@@ -144,8 +161,8 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
       '.football-match-list__empty, .match-list__empty'
     ) !== null
   );
-  const complete = candidates.length > 0
-    ? invalidCandidates === 0 && records.length === candidates.length
+  const complete = fixtureCandidates > 0
+    ? invalidCandidates === 0 && records.length === fixtureCandidates
     : exactEmpty;
   if (complete) {
     // The observer adds the current frame/loader binding before forwarding it,

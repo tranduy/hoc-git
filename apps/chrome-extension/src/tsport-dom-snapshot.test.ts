@@ -72,4 +72,28 @@ describe("TSPORT_PUBLIC_CATALOG_EXPRESSION", () => {
     expect(records.filter((record) => record.eventId !== undefined).map((record) => record.eventId))
       .toEqual(["111", "222", "333"]);
   });
+
+  it("completes a sweep past rows that were never fixtures", () => {
+    // Measured 2026-08-27: the page carried 26 rows of which 23 held teams, and
+    // counting the other three as failed reads withheld completion every time.
+    // No frame then answered, no snapshot was sent, and the feed sat in hard
+    // recovery with no generation to capture against.
+    const notAFixture = { ...match("999"), querySelectorAll: () => [] };
+    const rows = [match("111"), notAFixture, match("222")];
+    const document = {
+      querySelectorAll: (selector: string) => selector === ".match" ? rows : [root("1", "block")]
+    };
+    const evaluate = new Function("document", "getComputedStyle",
+      `return ${TSPORT_PUBLIC_CATALOG_EXPRESSION}`) as
+      (document: unknown, getComputedStyle: (element: unknown) => unknown) => string;
+    const records = JSON.parse(evaluate(document, (element: unknown) =>
+      (element as { readonly __computedStyle: unknown }).__computedStyle)) as Array<
+        { readonly eventId?: string; readonly __fieldlineSweep?: unknown }>;
+
+    expect(records.filter((record) => record.eventId !== undefined).map((record) => record.eventId))
+      .toEqual(["111", "222"]);
+    expect(records.at(-1)?.__fieldlineSweep).toEqual({
+      sweepId: expect.stringMatching(/^tsport-sweep-[1-9]\d*$/u), complete: true
+    });
+  });
 });
