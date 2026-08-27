@@ -11,6 +11,11 @@ const HOST_TO_LOBBY = new Map<string, ChromeLobbyId>([
   ["sports-sbomaind-play.jjsskktt.com", "SBO"]
 ]);
 
+/** Every lobby host the extension recognises outright, so callers that must
+ * cover all of them - the heartbeat that restarts a collected worker - cannot
+ * silently miss one that was added here. */
+export const LOBBY_HOSTNAMES: readonly string[] = [...HOST_TO_LOBBY.keys()];
+
 export interface TabDescriptor {
   readonly id?: number | undefined;
   readonly url?: string | undefined;

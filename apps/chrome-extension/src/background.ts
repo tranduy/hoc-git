@@ -6,6 +6,8 @@ import { recognizeLobbyTab, shouldPreserveKsportObserver,
 import { TabRegistry } from "./tab-registry.js";
 import { resolveInstallationKey } from "./bridge-key.js";
 import { BridgeWakeup } from "./bridge-wakeup.js";
+import { WakeTriggers } from "./wake-triggers.js";
+import { HEARTBEAT_SCRIPT, injectHeartbeatIntoOpenLobbies } from "./lobby-heartbeat-injection.js";
 import { TabBootstrapper } from "./tab-bootstrapper.js";
 import { recoverAttachedSource } from "./snapshot-recovery.js";
 import { tabsNeedingContentScriptRefresh } from "./extension-update.js";
@@ -20,6 +22,19 @@ import { SourceLaunchMemory } from "./source-launch-memory.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 declare const __CHROME_EXTENSION_BUILD_IDENTITY__: string;
+
+// First, before anything else this module builds. An alarm registered at the
+// end of a long initialisation is only as reliable as every constructor ahead
+// of it: one throw and the worker keeps being collected with no way back in,
+// silently, for as long as the browser stays open.
+const wakeTriggers = new WakeTriggers({
+  createAlarm: (name, info) => { void chrome.alarms.create(name, info); },
+  addAlarmListener: (listener) => chrome.alarms.onAlarm.addListener(listener),
+  addMessageListener: (listener) => chrome.runtime.onMessage.addListener((message) => {
+    listener(message);
+    return false;
+  })
+});
 
 let bridge: LocalBridge | null = null;
 let configureInFlight: Promise<boolean> | null = null;
@@ -399,8 +414,7 @@ async function reattachPreferredTabs(): Promise<readonly string[]> {
 }
 
 const bridgeWakeup = new BridgeWakeup({
-  createAlarm: (name, info) => { void chrome.alarms.create(name, info); },
-  addAlarmListener: (listener) => chrome.alarms.onAlarm.addListener(listener),
+  attachWake: (handler) => wakeTriggers.attach(handler),
   reconcileTabs: reconcilePreferredTabs,
   ensureConnected: ensureBridgeConnected,
   // No bridge object means the worker restarted and its configure never
@@ -425,15 +439,31 @@ function sourceForTab(tabId: number): ObservedSource | null {
     : null;
 }
 
+// Lobby tabs open before this version arrived carry no heartbeat, and a
+// deployment is not allowed to navigate them into having one. Injecting the
+// script leaves the authenticated page exactly as it is.
+async function installLobbyHeartbeat(): Promise<void> {
+  await injectHeartbeatIntoOpenLobbies({
+    listTabs: () => chrome.tabs.query({}),
+    inject: async (tabId) => {
+      await chrome.scripting.executeScript({ target: { tabId }, files: [HEARTBEAT_SCRIPT] });
+    }
+  });
+}
+
 chrome.runtime.onInstalled.addListener((details) => {
   void (async () => {
+    await installLobbyHeartbeat().catch(() => undefined);
     await bridgeWakeup.wakeNow();
     for (const tabId of tabsNeedingContentScriptRefresh(details.reason, registry.list())) {
       await chrome.tabs.reload(tabId);
     }
   })().catch(() => undefined);
 });
-chrome.runtime.onStartup.addListener(() => { void bridgeWakeup.wakeNow(); });
+chrome.runtime.onStartup.addListener(() => {
+  void installLobbyHeartbeat().catch(() => undefined);
+  void bridgeWakeup.wakeNow();
+});
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   bootstrappingSourceTabs.delete(tabId);

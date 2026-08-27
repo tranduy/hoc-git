@@ -1,10 +1,30 @@
 {
   "manifest_version": 3,
   "name": "Fieldline Chrome Feed",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "description": "Read-only observer for explicitly selected sportsbook tabs.",
-  "permissions": ["alarms", "debugger", "sessions", "storage", "tabs"],
-  "host_permissions": ["http://127.0.0.1:4310/*"],
+  "permissions": [
+    "alarms",
+    "debugger",
+    "scripting",
+    "sessions",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:4310/*",
+    "https://*.bpb7jrm5.com/*",
+    "https://*.bpd3a3fn.com/*",
+    "https://*.bpf7t7s9.com/*",
+    "https://*.zenandfe.com/*",
+    "https://cgnew.fts368.com/*",
+    "https://imsports.directsb.net/*",
+    "https://pacific.agenate.com/*",
+    "https://pacific.racern.com/*",
+    "https://prod20091.fxf774.com/*",
+    "https://sport.asportsb.com/*",
+    "https://sports-sbomaind-play.jjsskktt.com/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -15,5 +35,29 @@
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'none'; connect-src http://127.0.0.1:4310 ws://127.0.0.1:4310"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://imsports.directsb.net/*",
+        "https://prod20091.fxf774.com/*",
+        "https://pacific.agenate.com/*",
+        "https://pacific.racern.com/*",
+        "https://sport.asportsb.com/*",
+        "https://*.zenandfe.com/*",
+        "https://cgnew.fts368.com/*",
+        "https://sports-sbomaind-play.jjsskktt.com/*",
+        "https://*.bpd3a3fn.com/*",
+        "https://*.bpb7jrm5.com/*",
+        "https://*.bpf7t7s9.com/*",
+        "http://127.0.0.1:4311/*",
+        "http://localhost:4311/*"
+      ],
+      "js": [
+        "lobby-heartbeat.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
 }

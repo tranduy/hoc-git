@@ -56,6 +56,19 @@ await build({
     __CHROME_EXTENSION_BUILD_IDENTITY__: JSON.stringify(buildIdentity)
   }
 });
+// A declarative content script is classic script, not a module, so it cannot
+// be bundled alongside the worker and the popup.
+await build({
+  entryPoints: [resolve(root, "src/lobby-heartbeat.ts")],
+  outdir: output,
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "chrome151",
+  sourcemap: false,
+  minify: true,
+  legalComments: "none"
+});
 await cp(resolve(root, "public"), output, { recursive: true });
 // The API reads this to tell a running worker which bundle is deployed.
 await writeFile(resolve(output, "build-identity.json"),

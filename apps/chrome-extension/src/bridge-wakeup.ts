@@ -1,6 +1,5 @@
-const ALARM_NAME = "fieldline-bridge-wakeup";
-// Shorter than the 30 s alarm period so a hung wake is always released before
-// the next alarm arrives.
+// Shorter than the one-minute alarm period so a hung wake is always released
+// before the next trigger arrives.
 const DEFAULT_WAKE_TIMEOUT_MS = 20_000;
 // Every source going stale within seconds of the others, with no reconnect
 // after, is the failure this guards. Whatever holds the bridge — a latch, a
@@ -9,8 +8,12 @@ const DEFAULT_WAKE_TIMEOUT_MS = 20_000;
 const DEFAULT_REBUILD_AFTER_MS = 180_000;
 
 export interface BridgeWakeupDependencies {
-  readonly createAlarm: (name: string, info: { readonly periodInMinutes: number }) => void;
-  readonly addAlarmListener: (listener: (alarm: { readonly name: string }) => void) => void;
+  /**
+   * Subscribes to the wake triggers, which are installed before this exists.
+   * Owning them here would tie the only way back into a collected worker to
+   * everything constructed ahead of it.
+   */
+  readonly attachWake: (handler: () => void) => void;
   readonly reconcileTabs?: () => Promise<void>;
   readonly ensureConnected: () => Promise<boolean>;
   readonly ensureAttached?: () => Promise<readonly string[] | void>;
@@ -34,16 +37,11 @@ export class BridgeWakeup {
   }
 
   start(): void {
-    // Chrome refuses a period below one minute for a released extension, so a
-    // half-minute alarm is not the safety net it looks like. The bridge socket's
-    // own keepalive is what holds the worker; this alarm is the fallback for
-    // when the worker has already been collected.
-    this.#dependencies.createAlarm(ALARM_NAME, { periodInMinutes: 1 });
-    this.#dependencies.addAlarmListener((alarm) => {
-      if (alarm.name !== ALARM_NAME) return;
-      void this.wakeNow(false);
-    });
+    // The forced wake is requested first so a trigger replayed by attach - the
+    // very alarm or heartbeat that started this worker - coalesces into it
+    // instead of pre-empting it with an unforced wake that skips reattachment.
     void this.wakeNow(true);
+    this.#dependencies.attachWake(() => { void this.wakeNow(false); });
   }
 
   async #rebuildStalledBridge(): Promise<void> {

@@ -148,9 +148,11 @@ describe("background source launch memory", () => {
     harness.storage.session.set.mockClear();
     harness.storage.session.remove.mockClear();
     const response = new Promise<unknown>((resolve) => {
-      const listener = harness.messages.listeners[0];
-      expect(listener).toBeDefined();
-      expect(listener!({ kind: "ENSURE_KSPORT" }, {}, resolve)).toBe(true);
+      // Chrome offers a message to every listener. The wake trigger declines
+      // this one, so exactly one listener may claim it and answer.
+      const claims = harness.messages.listeners.map((listener) =>
+        listener({ kind: "ENSURE_KSPORT" }, {}, resolve));
+      expect(claims.filter((claimed) => claimed === true)).toHaveLength(1);
     });
 
     await expect(response).resolves.toEqual({ ok: true });

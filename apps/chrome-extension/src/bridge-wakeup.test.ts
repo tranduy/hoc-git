@@ -3,26 +3,22 @@ import { BridgeWakeup } from "./bridge-wakeup.js";
 
 describe("BridgeWakeup", () => {
   it("forces attached sources only on worker start and preserves poller cadence on alarms", async () => {
-    let listener: ((alarm: { readonly name: string }) => void) | undefined;
+    let wake: (() => void) | undefined;
     const calls: string[] = [];
     const reconcileTabs = vi.fn(async () => { calls.push("reconcile"); });
     const ensureConnected = vi.fn(async () => { calls.push("connect"); return true; });
     const ensureAttached = vi.fn(async () => { calls.push("attach"); return ["chrome:IM:7"]; });
     const pollNow = vi.fn((_sourceIds?: readonly string[]) => { calls.push("poll"); });
-    const createAlarm = vi.fn();
     new BridgeWakeup({
-      createAlarm,
-      addAlarmListener: (next) => { listener = next; },
+      attachWake: (next) => { wake = next; },
       reconcileTabs,
       ensureConnected,
       ensureAttached,
       pollNow
     }).start();
 
-    expect(createAlarm).toHaveBeenCalledWith("fieldline-bridge-wakeup", { periodInMinutes: 1 });
     await vi.waitFor(() => expect(calls).toEqual(["connect", "reconcile", "attach", "poll"]));
-    listener?.({ name: "unrelated" });
-    listener?.({ name: "fieldline-bridge-wakeup" });
+    wake?.();
     await vi.waitFor(() => expect(calls).toEqual([
       "connect", "reconcile", "attach", "poll", "connect", "reconcile", "attach", "poll"
     ]));
@@ -37,8 +33,7 @@ describe("BridgeWakeup", () => {
     const ensureAttached = vi.fn(async () => ["chrome:IM:7"]);
     const pollNow = vi.fn();
     const wakeup = new BridgeWakeup({
-      createAlarm: vi.fn(),
-      addAlarmListener: vi.fn(),
+      attachWake: vi.fn(),
       reconcileTabs,
       ensureConnected,
       ensureAttached,
@@ -56,7 +51,7 @@ describe("BridgeWakeup", () => {
   it("keeps waking on later alarms after a wake hangs forever", async () => {
     vi.useFakeTimers();
     try {
-      let listener: ((alarm: { readonly name: string }) => void) | undefined;
+      let wake: (() => void) | undefined;
       // A chrome.debugger command against an unresponsive tab never settles.
       // Without a bound, the in-flight latch is held for the life of the
       // service worker and every later alarm becomes a silent no-op, so the
@@ -64,8 +59,7 @@ describe("BridgeWakeup", () => {
       const ensureConnected = vi.fn(async () => true);
       const ensureAttached = vi.fn(() => new Promise<string[]>(() => undefined));
       const wakeup = new BridgeWakeup({
-        createAlarm: vi.fn(),
-        addAlarmListener: (next) => { listener = next; },
+        attachWake: (next) => { wake = next; },
         ensureConnected,
         ensureAttached,
         pollNow: vi.fn()
@@ -76,7 +70,7 @@ describe("BridgeWakeup", () => {
       expect(ensureConnected).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(30_000);
-      listener?.({ name: "fieldline-bridge-wakeup" });
+      wake?.();
       await vi.advanceTimersByTimeAsync(1);
 
       expect(ensureConnected).toHaveBeenCalledTimes(2);
@@ -94,8 +88,7 @@ describe("bridge rebuild watchdog", () => {
     const rebuilds: number[] = [];
     let contactAgeMs = 10_000;
     const wakeup = new BridgeWakeup({
-      createAlarm: vi.fn(),
-      addAlarmListener: vi.fn(),
+      attachWake: vi.fn(),
       ensureConnected: vi.fn(async () => true),
       pollNow: vi.fn(),
       bridgeContactAgeMs: () => contactAgeMs,
@@ -114,8 +107,7 @@ describe("bridge rebuild watchdog", () => {
   it("never rebuilds while the bridge is still in contact", async () => {
     const rebuilds: number[] = [];
     const wakeup = new BridgeWakeup({
-      createAlarm: vi.fn(),
-      addAlarmListener: vi.fn(),
+      attachWake: vi.fn(),
       ensureConnected: vi.fn(async () => true),
       pollNow: vi.fn(),
       bridgeContactAgeMs: () => 179_999,
@@ -135,8 +127,7 @@ describe("watchdog on a bridge that does not exist", () => {
     // watchdog skip exactly the case it exists for.
     const rebuilds: number[] = [];
     const wakeup = new BridgeWakeup({
-      createAlarm: vi.fn(),
-      addAlarmListener: vi.fn(),
+      attachWake: vi.fn(),
       ensureConnected: vi.fn(async () => true),
       pollNow: vi.fn(),
       bridgeContactAgeMs: () => Number.POSITIVE_INFINITY,
