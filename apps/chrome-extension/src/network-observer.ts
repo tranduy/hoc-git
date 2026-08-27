@@ -952,6 +952,7 @@ export class NetworkObserver {
   // counts them all: two events with none observed says the type is not what is
   // expected, and nothing said what it was.
   readonly #targetTypesSeen = new Map<string, Map<string, number>>();
+  readonly #socketPathsSeen = new Map<string, Map<string, number>>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
@@ -1339,7 +1340,7 @@ export class NetworkObserver {
       "Runtime.evaluate", { expression: TSPORT_CATALOG_SHAPE_EXPRESSION, returnByValue: true }))
       .catch(() => null);
     const value = nestedValue(evaluation, "result", "value");
-    if (typeof value !== "string" || value.length === 0 || value.length > 600) return;
+    if (typeof value !== "string" || value.length === 0 || value.length > 900) return;
     this.#lastCatalogShape.set(source.sourceId, value.replace(/[^ -~]/gu, ""));
   }
 
@@ -2910,6 +2911,8 @@ export class NetworkObserver {
         catalogShape: `${this.#lastCaptureExit.get(source.sourceId) ?? "NONE"} ` +
           `targets[${[...(this.#targetTypesSeen.get(source.sourceId) ?? new Map())]
             .map(([type, count]) => `${type}:${count}`).join(",")}] ` +
+          `sockets[${[...(this.#socketPathsSeen.get(source.sourceId) ?? new Map())]
+            .map(([path, count]) => `${path}:${count}`).join(",")}] ` +
           (this.#lastCatalogShape.get(source.sourceId) ?? "") })
     });
     // The day list is what the other books can be compared against, and nothing
@@ -2942,6 +2945,20 @@ export class NetworkObserver {
     const params = isRecord(rawParams) ? rawParams : {};
     if (method === "Network.webSocketCreated" && (source.lobby === "KSPORT" || source.lobby === "TSPORT")) {
       this.#wsAttachDiagnostic(source).webSocketCreated += 1;
+      // APSPORT forwards every frame it receives and all of them are heartbeats,
+      // so either the football socket was never opened or it was opened and
+      // stays silent. Those need opposite fixes and the frame counts cannot
+      // tell them apart. Path shape only - the query string, which carries the
+      // session, is never read.
+      if (typeof params.url === "string") {
+        try {
+          const path = new URL(params.url).pathname
+            .replace(/[0-9]{4,}/gu, "#").slice(0, 40);
+          const seen = this.#socketPathsSeen.get(source.sourceId) ?? new Map<string, number>();
+          if (seen.size < 8 || seen.has(path)) seen.set(path, (seen.get(path) ?? 0) + 1);
+          this.#socketPathsSeen.set(source.sourceId, seen);
+        } catch { /* a url we cannot parse tells us nothing */ }
+      }
     }
     if (method === "Target.attachedToTarget") {
       const childSessionId = typeof params.sessionId === "string" ? params.sessionId : null;

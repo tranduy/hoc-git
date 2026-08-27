@@ -170,7 +170,7 @@ function snapshotRejections(value: unknown): string {
 
 /** Counts and class names the capture reported. Printable ASCII only. */
 function catalogShape(value: unknown): string {
-  return typeof value === "string" && /^[ -~]{0,600}$/u.test(value) ? value : "";
+  return typeof value === "string" && /^[ -~]{0,900}$/u.test(value) ? value : "";
 }
 
 function tabLabels(value: unknown): string {
