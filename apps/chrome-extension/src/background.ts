@@ -17,6 +17,7 @@ import { SourceTabRecovery } from "./source-tab-recovery.js";
 import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
 import { retryImBootstrapRefresh } from "./im-bootstrap-refresh.js";
 import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
+import { bootstrapCatalogSources } from "./bootstrap-catalog-refresh.js";
 import { SabaSnapshotStorage } from "./saba-snapshot-storage.js";
 import { SourceLaunchMemory } from "./source-launch-memory.js";
 
@@ -269,6 +270,12 @@ setInterval(() => {
   }
 }, 10_000);
 
+async function refreshBootstrapCatalogs(): Promise<void> {
+  for (const source of bootstrapCatalogSources(registry.list())) {
+    await observer.refreshCatalog(source).catch(() => undefined);
+  }
+}
+
 async function configureBridge(force = false): Promise<boolean> {
   if (!force && bridge !== null) return true;
   if (configureInFlight !== null) return configureInFlight;
@@ -311,7 +318,16 @@ async function configureBridgeOnce(): Promise<boolean> {
       // A reconnect must resume from new page traffic. Replaying every cached
       // provider payload floods a fresh API process with stale multi-megabyte
       // baselines and can exhaust its heap before live frames are accepted.
-      onOpen: () => undefined,
+      //
+      // Asking the page for a current baseline is not that replay, and some
+      // books need it: a fresh API process starts with no catalog while the
+      // worker, the tab and the provider socket all stay alive, so a book that
+      // publishes its full list only when the page bootstraps is never sent one
+      // again. Measured 2026-08-27: after an API restart SABA fell from 86
+      // events with 19 upcoming to 68 with 4, and stayed there - its whole
+      // pre-match list gone, which is most of what another book can be
+      // compared against.
+      onOpen: () => { void refreshBootstrapCatalogs(); },
       onSnapshotRequest: async (sourceId) => recoverSourceSnapshot(sourceId, false),
       onSourceResync: async (sourceId) => recoverSourceSnapshot(sourceId, true),
       ...(typeof __CHROME_EXTENSION_BUILD_IDENTITY__ === "string" &&
