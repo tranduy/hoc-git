@@ -155,7 +155,13 @@ function parseOuter(body: string): { sport: number; type: string; event: JsonRec
   try {
     const outer = record(JSON.parse(body));
     if (outer === null) return noteRefusal("outer-not-an-object");
-    if (outer.s !== 1) return noteRefusal(`outer-s-${typeof outer.s}`);
+    if (outer.s !== 1) {
+      // The envelope no longer carries s at all, and the reason alone cannot
+      // say what replaced it. Field names are structure, not content, so the
+      // keys are safe to keep where a value would not be.
+      return noteRefusal(`outer-keys-${Object.keys(outer).sort().slice(0, 8)
+        .map((key) => key.replace(/[^\w]/gu, "").slice(0, 10)).join("-") || "none"}`);
+    }
     if (outer.t !== "eu") return noteRefusal(`outer-t-${String(outer.t).slice(0, 12)}`);
     if (typeof outer.d !== "string") return noteRefusal(`outer-d-${typeof outer.d}`);
     const event = record(JSON.parse(outer.d));
