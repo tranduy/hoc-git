@@ -254,6 +254,18 @@ export class ChromeCatalogDataPlane {
           (update.reason === "PROVIDER_STREAM_GAP" || update.reason === "SCHEMA_CHANGED")) ||
           (envelope.transport === "WS_STATE" && update.reason === "PROVIDER_STREAM_CLOSED"));
       if (shadowsSabaDomAuthority) {
+        // Shadowing is right: a socket event must not throw away a DOM catalog
+        // that is still good. But it also meant nothing was told that SABA's
+        // stream had gone, and its adapter refuses every frame after a close
+        // until one carries a fresh baseline - 367 refusals against 11 accepted
+        // in one window, the catalog republished about every hundred seconds
+        // while the feed is judged on seventy-five. Recovery then started only
+        // once the feed had already aged out.
+        //
+        // Asking for a fresh baseline is not invalidating: the catalog and its
+        // freshness are untouched, and a stale price is never presented as
+        // current. Only the wait gets shorter.
+        this.#onSourceRecoveryNeeded?.(update.invalidateAccountId);
         return this.#reject(envelope, `SABA_SOCKET_INVALIDATION_SHADOWED_BY_DOM:${route.adapter.id}`);
       }
       if (admission.disposition === "CANDIDATE") {
