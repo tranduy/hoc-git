@@ -57,6 +57,15 @@ const SABA_TODAY_CAPTURE_INTERVAL_MS = 600_000;
 // dozens. It retains records per fixture, so the day's subscription adds to
 // what the live view already established rather than replacing it.
 const TSPORT_TODAY_CAPTURE_INTERVAL_MS = 600_000;
+// The DOM sweep is what gives APSPORT a generation and tells the adapter which
+// fixtures the page is showing. The poller only ran it inside a short bootstrap
+// window, so once that closed the sweep stopped for good: measured 2026-08-27,
+// DOM_SNAPSHOT sat at zero with 2940 socket frames received and one decoded,
+// the feed stuck in hard recovery with no generation at all.
+const TSPORT_CATALOG_SWEEP_INTERVAL_MS = 30_000;
+// A fresh socket baseline tears down a working stream, so it stays rare even
+// when the sweep beneath it runs often.
+const TSPORT_SOCKET_BASELINE_FLOOR_MS = 300_000;
 // Selected by label, so both lobbies that read their catalog from the page can
 // share one expression.
 const TODAY_TAB_EXPRESSION = timeTabExpression([...TODAY_TAB_LABELS], true);
@@ -926,6 +935,8 @@ export class NetworkObserver {
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
   readonly #sabaTodayCaptureAtMs = new Map<string, number>();
   readonly #tsportTodayCaptureAtMs = new Map<string, number>();
+  readonly #tsportSweepAtMs = new Map<string, number>();
+  readonly #tsportSocketBaselineAtMs = new Map<string, number>();
   // The attach diagnostic is rebuilt whenever a source generation rolls, which
   // erased what the tab selector had just seen before it could be read. The
   // labels are the whole point of the report, so keep the last ones per source.
@@ -1277,6 +1288,29 @@ export class NetworkObserver {
     } finally {
       await this.#selectTimeTab(source, LIVE_TAB_EXPRESSION);
     }
+  }
+
+  /**
+   * Keeps APSPORT's DOM sweep running. It is the only thing that establishes a
+   * generation and names the fixtures the page is showing, and hanging it off
+   * the poller's bootstrap window meant it stopped once that window closed.
+   * The sweep itself is cheap; the socket baseline it can trigger is not, so
+   * that keeps its own far longer floor.
+   */
+  async #sweepTsportCatalog(source: ObservedSource): Promise<void> {
+    const nowMs = this.#now();
+    const lastSweepAtMs = this.#tsportSweepAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY;
+    if (nowMs - lastSweepAtMs < TSPORT_CATALOG_SWEEP_INTERVAL_MS) return;
+    this.#tsportSweepAtMs.set(source.sourceId, nowMs);
+    const previousSweep = this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0;
+    await this.#capturePublicCatalogSnapshot(source, "tsport.invalid",
+      TSPORT_PUBLIC_CATALOG_EXPRESSION, false, true);
+    if ((this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0) <= previousSweep) return;
+    const lastBaselineAtMs = this.#tsportSocketBaselineAtMs.get(source.sourceId) ??
+      Number.NEGATIVE_INFINITY;
+    if (nowMs - lastBaselineAtMs < TSPORT_SOCKET_BASELINE_FLOOR_MS) return;
+    this.#tsportSocketBaselineAtMs.set(source.sourceId, nowMs);
+    await this.#requestFreshSocketBaseline(source, isTsportEventSocket);
   }
 
   /** Reads what the APSPORT capture sees at each gate. Its expression returns
@@ -2856,6 +2890,7 @@ export class NetworkObserver {
     // ten-minute floor, so it is a no-op almost every time.
     if (source.lobby === "SABA") void this.#captureSabaTodayBaseline(source).catch(() => undefined);
     else if (source.lobby === "TSPORT") {
+      void this.#sweepTsportCatalog(source).catch(() => undefined);
       void this.#captureTsportTodayBaseline(source).catch(() => undefined);
       void this.#recordTsportCatalogShape(source).catch(() => undefined);
     }
