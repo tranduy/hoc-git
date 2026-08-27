@@ -208,8 +208,14 @@ export class ChromeCatalogDataPlane {
       // gate against 8 that reached its decoder, and the endpoint alone could
       // not say whether the router had failed to recognise them or was still
       // waiting to trust them.
+      // The reason alone is not enough: an adapter that matches exact provider
+      // paths goes silent when the provider renames one, and then the path is
+      // the fix. Carry both, since only one field reaches the report.
+      const shortReason = reason === "ADAPTER_FINGERPRINT_UNMATCHED" ? "unmatched"
+        : reason === "ADAPTER_CONFIRMATION_PENDING" ? "pending"
+        : reason.toLowerCase().replace(/[^a-z0-9]+/gu, "-").slice(0, 20);
       this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs,
-        `/route/${reason.toLowerCase().replace(/[^a-z0-9]+/gu, "-").slice(0, 40)}`);
+        `/route-${shortReason}${envelope.request.pathnameClass}`.slice(0, 63));
       return this.#reject(envelope, reason);
     }
     const update = route.adapter.decode(assembled).at(-1);
