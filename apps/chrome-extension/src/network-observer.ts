@@ -945,6 +945,7 @@ export class NetworkObserver {
   // labels are the whole point of the report, so keep the last ones per source.
   readonly #lastTabLabels = new Map<string, string>();
   readonly #lastCatalogShape = new Map<string, string>();
+  readonly #lastCaptureExit = new Map<string, string>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
@@ -1315,6 +1316,13 @@ export class NetworkObserver {
     if (nowMs - lastBaselineAtMs < TSPORT_SOCKET_BASELINE_FLOOR_MS) return;
     this.#tsportSocketBaselineAtMs.set(source.sourceId, nowMs);
     await this.#requestFreshSocketBaseline(source, isTsportEventSocket);
+  }
+
+  /** Names the gate a capture left through. Every one of them returns the same
+   *  silence, which is why three fixes to how often the sweep runs changed
+   *  nothing that could be seen from outside. */
+  #noteCaptureExit(source: ObservedSource, reason: string): void {
+    this.#lastCaptureExit.set(source.sourceId, reason);
   }
 
   /** Reads what the APSPORT capture sees at each gate. Its expression returns
@@ -2885,7 +2893,8 @@ export class NetworkObserver {
         baselineTabPeriods: diagnostic.baselineTabPeriods,
         baselineTabLabels: diagnostic.baselineTabLabels.length > 0
           ? diagnostic.baselineTabLabels : this.#lastTabLabels.get(source.sourceId) ?? "",
-        catalogShape: this.#lastCatalogShape.get(source.sourceId) ?? "" })
+        catalogShape: `${this.#lastCaptureExit.get(source.sourceId) ?? "NONE"} ` +
+          (this.#lastCatalogShape.get(source.sourceId) ?? "") })
     });
     // The day list is what the other books can be compared against, and nothing
     // else runs often enough to fetch it: the poller refreshes SABA's catalog
@@ -3699,7 +3708,7 @@ export class NetworkObserver {
           }));
           values.push(...frameValues.filter((value) => value !== null));
         }
-        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) { this.#noteCaptureExit(source, "GENERATION_STALE"); return; }
         const frameCaptures = values.map(({ frameKey, frameId, loaderId, documentKey, value }) => {
           const evaluated = readEvaluationRecords(value);
           const sweepMarker = evaluated.find((item) => isRecord(item) && "__fieldlineSweep" in item);
@@ -3721,7 +3730,7 @@ export class NetworkObserver {
         const hasCatalog = frameCaptures.some((capture) => capture.hasCatalog);
         const eligibleFrames = hasCatalog ? frameCaptures.filter((capture) =>
           capture.hasCatalog || (source.lobby === "CMD" && capture.sweep?.sweepComplete === true)) : frameCaptures;
-        if (eligibleFrames.length === 0) return;
+        if (eligibleFrames.length === 0) { this.#noteCaptureExit(source, "NO_ELIGIBLE_FRAME"); return; }
         const tsportFrames = source.lobby === "TSPORT"
           ? eligibleFrames.filter((capture) => capture.sweep?.sweepComplete === true)
           : [];
@@ -3729,7 +3738,7 @@ export class NetworkObserver {
         // merge multiple frames or erase its frame/loader-bound sweep metadata.
         // An ambiguous multi-frame result fails closed until a later scan finds
         // the single football document.
-        if (source.lobby === "TSPORT" && tsportFrames.length !== 1) return;
+        if (source.lobby === "TSPORT" && tsportFrames.length !== 1) { this.#noteCaptureExit(source, "TSPORT_FRAME_COUNT"); return; }
         const emissionCandidates = source.lobby === "CMD" ? eligibleFrames
           : source.lobby === "TSPORT" ? tsportFrames
           : [{ frameKey: "aggregate", frameId: null, loaderId: null,

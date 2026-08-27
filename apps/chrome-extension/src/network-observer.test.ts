@@ -3002,7 +3002,7 @@ describe("NetworkObserver", () => {
         baselineLive: 0, baselineToday: 0, baselineTabSelections: 0,
         baselineTabStatus: "NONE", baselineTabTargets: 0, baselineTabStep: "NONE",
         baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0, baselineTabLabels: "",
-        catalogShape: "" },
+        catalogShape: "NONE " },
       { kind: "WS_ATTACH", sourceGeneration: 0, webSocketCreated: 0, webSockets: 0,
         ksportTargets: 0, attachedTargets: 0,
         framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
@@ -3016,7 +3016,7 @@ describe("NetworkObserver", () => {
         baselineLive: 0, baselineToday: 0, baselineTabSelections: 0,
         baselineTabStatus: "NONE", baselineTabTargets: 0, baselineTabStep: "NONE",
         baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0, baselineTabLabels: "",
-        catalogShape: "" }
+        catalogShape: "NONE " }
     ]);
   });
 
