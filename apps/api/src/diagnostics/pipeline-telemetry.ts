@@ -1,5 +1,6 @@
 import type { CatalogSourceStatus, ChromeBridgeEnvelope, ProviderQuote } from "@tool-chenh/contracts";
 import type { StoredCatalogRevision } from "../catalog/catalog-revision-store.js";
+import { tsportContentRefusals } from "../chrome-bridge/tsport-ws-adapter.js";
 import {
   CHROME_BRIDGE_PROVIDER_ACCOUNT_IDS,
   chromeBridgeProviderAccountIdForLobby,
@@ -396,6 +397,10 @@ export class PipelineTelemetry {
       { hop: "HOP4_ADAPTER", ok: state.lastDecodedAtMs !== null &&
         nowMs - state.lastDecodedAtMs <= PIPELINE_TELEMETRY_LIMITS.windowMs, detail: {
         decoded: sums.decoded, ignored: sums.ignored, rejectReasons: sums.adapterRejectReasons,
+        // Why frames that reached an adapter were not recognised as its
+        // provider's records. Shape names only; no frame value is kept.
+        contentRefusals: [...tsportContentRefusals.entries()]
+          .map(([reason, count]) => `${reason}:${count}`).join(" "),
         lastDecodedAgeMs: age(nowMs, state.lastDecodedAtMs), forcedUnlocks: state.forcedUnlocks,
         ignoredEndpoints: [...state.ignoredEndpoints.entries()]
           .sort((left, right) => right[1] - left[1]).slice(0, 6)

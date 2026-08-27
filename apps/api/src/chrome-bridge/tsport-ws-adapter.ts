@@ -134,14 +134,34 @@ function scalar(value: unknown): string | null {
   return typeof value === "string" || typeof value === "number" ? String(value) : null;
 }
 
+/**
+ * Why a frame is not a TSPORT football record, counted by shape.
+ *
+ * Measured 2026-08-27: with the socket path corrected APSPORT's frames reach
+ * this adapter and none decodes. Both checks below refuse in silence, and the
+ * envelope and the record can fail for six different reasons between them.
+ * Field names and type words only - no value from a frame is ever kept.
+ */
+export const tsportContentRefusals = new Map<string, number>();
+
+function noteRefusal(reason: string): null {
+  if (tsportContentRefusals.size < 12 || tsportContentRefusals.has(reason)) {
+    tsportContentRefusals.set(reason, (tsportContentRefusals.get(reason) ?? 0) + 1);
+  }
+  return null;
+}
+
 function parseOuter(body: string): { sport: number; type: string; event: JsonRecord } | null {
   try {
     const outer = record(JSON.parse(body));
-    if (outer === null || outer.s !== 1 || outer.t !== "eu" || typeof outer.d !== "string") return null;
+    if (outer === null) return noteRefusal("outer-not-an-object");
+    if (outer.s !== 1) return noteRefusal(`outer-s-${typeof outer.s}`);
+    if (outer.t !== "eu") return noteRefusal(`outer-t-${String(outer.t).slice(0, 12)}`);
+    if (typeof outer.d !== "string") return noteRefusal(`outer-d-${typeof outer.d}`);
     const event = record(JSON.parse(outer.d));
-    return event === null ? null : { sport: 1, type: "eu", event };
+    return event === null ? noteRefusal("inner-not-an-object") : { sport: 1, type: "eu", event };
   } catch {
-    return null;
+    return noteRefusal("outer-unparsable");
   }
 }
 
@@ -162,8 +182,11 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
   const home = text(event["5"]);
   const away = text(event["22"]);
   const leagueName = text(event["53"]);
-  if (eventId === null || home === null || away === null || home === away || leagueName === null ||
-    event["10"] !== "Active" || !Array.isArray(event["50"])) return null;
+  if (eventId === null) return noteRefusal("record-no-id");
+  if (home === null || away === null || home === away) return noteRefusal("record-no-teams");
+  if (leagueName === null) return noteRefusal("record-no-league");
+  if (event["10"] !== "Active") return noteRefusal(`record-state-${String(event["10"]).slice(0, 12)}`);
+  if (!Array.isArray(event["50"])) return noteRefusal("record-no-markets");
 
   const markets: SbobetCatalogInputRecord["markets"][number][] = [];
   for (const rawGroup of event["50"]) {
