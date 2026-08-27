@@ -113,6 +113,7 @@ interface AccountState {
     readonly stompFrames: number;
     readonly stompMessages: number;
     readonly stompPartitionRejected: number;
+    readonly snapshotRejections: string;
     readonly stompPendingChars: number;
     readonly stompCommandFragments: number;
     readonly stompFragments: number;
@@ -159,6 +160,11 @@ const tabSteps = new Set(["NONE", "group", "scope", "tab"]);
 
 /** UI period-tab labels only: lowercase letters, digits, spaces and separators,
  *  bounded in length. Anything else is discarded rather than reported. */
+/** Reason names with counts, e.g. "EVENT_TEAMS:12|LEAGUE_SHAPE:3". Shape only. */
+function snapshotRejections(value: unknown): string {
+  return typeof value === "string" && /^[A-Z_:0-9|]{0,208}$/u.test(value) ? value : "";
+}
+
 function tabLabels(value: unknown): string {
   return typeof value === "string" && /^[a-z0-9 |]{0,208}$/u.test(value) ? value : "";
 }
@@ -435,6 +441,7 @@ export class PipelineTelemetry {
         sockjsOpen?: unknown; sockjsHeartbeat?: unknown; sockjsArray?: unknown;
         sockjsClose?: unknown; sockjsOther?: unknown; decoderFailCode?: unknown;
         stompFrames?: unknown; stompMessages?: unknown; stompPartitionRejected?: unknown;
+        snapshotRejections?: unknown;
         stompPendingChars?: unknown; stompCommandFragments?: unknown; stompFragments?: unknown;
         destLiveLike?: unknown; destTodayLike?: unknown; destSportsLike?: unknown;
         subSportLike?: unknown; targetsTotal?: unknown; targetsIframe?: unknown;
@@ -481,6 +488,7 @@ export class PipelineTelemetry {
           stompFrames: boundedCounter(value.stompFrames),
           stompMessages: boundedCounter(value.stompMessages),
           stompPartitionRejected: boundedCounter(value.stompPartitionRejected),
+          snapshotRejections: snapshotRejections(value.snapshotRejections),
           stompPendingChars: boundedCounter(value.stompPendingChars),
           stompCommandFragments: boundedCounter(value.stompCommandFragments),
           stompFragments: boundedCounter(value.stompFragments),

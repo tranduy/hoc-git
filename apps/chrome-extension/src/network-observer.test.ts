@@ -2989,7 +2989,7 @@ describe("NetworkObserver", () => {
         framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
         framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
         sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
-        stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0,
+        stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0, snapshotRejections: "",
         stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
         destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
         // Three targets are offered, all three are iframes, two are on the
@@ -3005,7 +3005,7 @@ describe("NetworkObserver", () => {
         framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
         framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
         sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
-        stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0,
+        stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0, snapshotRejections: "",
         stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
         destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
         targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,

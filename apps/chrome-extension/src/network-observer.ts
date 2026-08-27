@@ -227,6 +227,8 @@ interface WsAttachDiagnosticState {
   stompFrames: number;
   stompMessages: number;
   stompPartitionRejected: number;
+  /** Which predicate refused a partition payload as a full snapshot, with counts. */
+  snapshotRejections: string;
   stompPendingChars: number;
   stompCommandFragments: number;
   stompFragments: number;
@@ -2337,7 +2339,7 @@ export class NetworkObserver {
       framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
       framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
       sockjsClose: 0, sockjsOther: 0, decoderFailCode: "NONE",
-      stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0,
+      stompFrames: 0, stompMessages: 0, stompPartitionRejected: 0, snapshotRejections: "",
       stompPendingChars: 0, stompCommandFragments: 0, stompFragments: 0,
       destLiveLike: 0, destTodayLike: 0, destSportsLike: 0, subSportLike: 0,
       targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
@@ -2744,6 +2746,7 @@ export class NetworkObserver {
         sockjsOther: diagnostic.sockjsOther, decoderFailCode: diagnostic.decoderFailCode,
         stompFrames: diagnostic.stompFrames, stompMessages: diagnostic.stompMessages,
         stompPartitionRejected: diagnostic.stompPartitionRejected,
+        snapshotRejections: diagnostic.snapshotRejections,
         stompPendingChars: diagnostic.stompPendingChars,
         stompCommandFragments: diagnostic.stompCommandFragments,
         stompFragments: diagnostic.stompFragments, destLiveLike: diagnostic.destLiveLike,
@@ -3204,6 +3207,7 @@ export class NetworkObserver {
         frameDiagnostic.destTodayLike = shape.destTodayLike;
         frameDiagnostic.destSportsLike = shape.destSportsLike;
         frameDiagnostic.subSportLike = shape.subSportLike;
+        frameDiagnostic.snapshotRejections = shape.snapshotRejections;
         const baseline = ksportRecovery.currentBaselineState;
         frameDiagnostic.baselineLive = baseline.live ? 1 : 0;
         frameDiagnostic.baselineToday = baseline.today ? 1 : 0;

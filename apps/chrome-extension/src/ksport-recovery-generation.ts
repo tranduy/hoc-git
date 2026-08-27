@@ -13,8 +13,12 @@ export interface AttributedKsportFrame {
   readonly recoveryGeneration: number;
 }
 
+type SnapshotRejection = "NONE" | "NOT_ARRAY" | "LEAGUE_SHAPE" | "EVENT_ID" |
+  "EVENT_TEAMS" | "EVENT_MARKETS" | "NO_DECODABLE_MARKET";
+
 interface ProviderReceipt {
   readonly partition: CatalogPartition;
+  readonly snapshotRejection: SnapshotRejection;
   readonly order: number | null;
   readonly full: boolean;
   readonly catalogEvidence: boolean;
@@ -62,6 +66,7 @@ export class KsportRecoveryGenerationTracker {
   #destTodayLike = 0;
   #destSportsLike = 0;
   #subSportLike = 0;
+  readonly #snapshotRejections = new Map<SnapshotRejection, number>();
   #failReason: "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" | "PENDING_OVERFLOW" |
     "SENT_PENDING_OVERFLOW" | "SUBSCRIBE_STRADDLE" | "ATTEMPT_UNAVAILABLE" |
     "DELTA_BUFFER_FULL" | "EVIDENCE_VERSION_EXHAUSTED" | "OTHER" = "NONE";
@@ -87,12 +92,15 @@ export class KsportRecoveryGenerationTracker {
     readonly partitionRejected: number; readonly pendingChars: number;
     readonly commandFragments: number; readonly fragments: number;
     readonly destLiveLike: number; readonly destTodayLike: number;
-    readonly destSportsLike: number; readonly subSportLike: number } {
+    readonly destSportsLike: number; readonly subSportLike: number;
+    readonly snapshotRejections: string } {
     return { stompFrames: this.#stompFrames, stompMessages: this.#stompMessages,
       partitionRejected: this.#partitionRejected, pendingChars: this.#pendingStomp.length,
       commandFragments: this.#commandFragments, fragments: this.#fragments,
       destLiveLike: this.#destLiveLike, destTodayLike: this.#destTodayLike,
-      destSportsLike: this.#destSportsLike, subSportLike: this.#subSportLike };
+      destSportsLike: this.#destSportsLike, subSportLike: this.#subSportLike,
+      snapshotRejections: [...this.#snapshotRejections.entries()]
+        .map(([reason, count]) => `${reason}:${count}`).join("|") };
   }
   /** Why the decoder latched, so the fault is named rather than inferred. */
   get failReason(): "NONE" | "PAYLOAD_TOO_LONG" | "ENVELOPE_INVALID" | "PENDING_OVERFLOW" |
@@ -212,6 +220,10 @@ export class KsportRecoveryGenerationTracker {
             if (/subscription:\s*subSport/u.test(header)) this.#subSportLike += 1;
           }
           continue;
+        }
+        if (receipt.snapshotRejection !== "NONE") {
+          this.#snapshotRejections.set(receipt.snapshotRejection,
+            (this.#snapshotRejections.get(receipt.snapshotRejection) ?? 0) + 1);
         }
         this.#pendingReceipts.push(receipt);
       }
@@ -466,9 +478,10 @@ function providerReceipt(frame: string): ProviderReceipt | null {
     typeof record.body !== "string") return null;
   let body: unknown;
   try { body = JSON.parse(record.body) as unknown; } catch { return null; }
-  const full = isFullPartitionSnapshot(body);
+  const snapshotRejection = fullPartitionSnapshotRejection(body);
+  const full = snapshotRejection === "NONE";
   const catalogMarketKeys = full ? [] : decodableKsportCatalogMarketKeys(body);
-  return { partition, order: receiptSequence(header["message-id"]), full,
+  return { partition, snapshotRejection, order: receiptSequence(header["message-id"]), full,
     catalogEvidence: full || catalogMarketKeys.length > 0, catalogMarketKeys };
 }
 
@@ -513,27 +526,48 @@ function receiptSequence(messageId?: string): number | null {
   return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
-function isFullPartitionSnapshot(body: unknown): boolean {
-  if (!Array.isArray(body)) return false;
+/**
+ * Why a partition payload is not a full snapshot, so a shape that changed on the
+ * provider's side is named instead of inferred. Every predicate here is
+ * all-or-nothing by design - a baseline missing a market is not a baseline - so
+ * knowing which one refused is the difference between a fix and a guess. Names a
+ * shape only; no destination, header or body value is ever recorded.
+ */
+function fullPartitionSnapshotRejection(body: unknown): SnapshotRejection {
+  if (!Array.isArray(body)) return "NOT_ARRAY";
   let eventCount = 0;
   let decodableMarkets = 0;
+  let rejection: SnapshotRejection = "NONE";
+  const refuse = (reason: SnapshotRejection): false => {
+    if (rejection === "NONE") rejection = reason;
+    return false;
+  };
   const valid = body.every((value) => {
     const league = asRecord(value);
     if (league === null || typeof league["1"] !== "string" || league["1"].trim() === "" ||
-      !Array.isArray(league["2"])) return false;
+      !Array.isArray(league["2"])) return refuse("LEAGUE_SHAPE");
     return league["2"].every((candidate) => {
       const event = asRecord(candidate);
       const eventId = event?.["8"];
       const markets = event === null ? null : asRecord(event["7"]);
       if (event !== null) eventCount += 1;
       if (markets !== null && hasDecodableKsportMarket(markets)) decodableMarkets += 1;
-      return event !== null && (typeof eventId === "string" || typeof eventId === "number") &&
-        /^\d+$/u.test(String(eventId)) && typeof event["2"] === "string" && event["2"].trim() !== "" &&
-        typeof event["3"] === "string" && event["3"].trim() !== "" && event["2"].trim() !== event["3"].trim() &&
-        markets !== null;
+      if (event === null) return refuse("LEAGUE_SHAPE");
+      if (!(typeof eventId === "string" || typeof eventId === "number") ||
+        !/^\d+$/u.test(String(eventId))) return refuse("EVENT_ID");
+      if (typeof event["2"] !== "string" || event["2"].trim() === "" ||
+        typeof event["3"] !== "string" || event["3"].trim() === "" ||
+        event["2"].trim() === event["3"].trim()) return refuse("EVENT_TEAMS");
+      if (markets === null) return refuse("EVENT_MARKETS");
+      return true;
     });
   });
-  return valid && (eventCount === 0 || decodableMarkets > 0);
+  if (!valid) return rejection;
+  return eventCount === 0 || decodableMarkets > 0 ? "NONE" : "NO_DECODABLE_MARKET";
+}
+
+function isFullPartitionSnapshot(body: unknown): boolean {
+  return fullPartitionSnapshotRejection(body) === "NONE";
 }
 
 const KSPORT_SUPPORTED_MARKET_GROUPS = new Set([
