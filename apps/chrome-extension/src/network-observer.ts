@@ -2093,7 +2093,14 @@ export class NetworkObserver {
           awaitPromise: false
         })
       ).catch(() => ({}));
-      if (nestedValue(footballSelection, "result", "value", "status") === "football-selected") return;
+      const footballStatus = nestedValue(footballSelection, "result", "value", "status");
+      // Every outcome of this click looks the same from outside, and the page
+      // has been seen publishing nothing but its jackpot topic - which is what
+      // the promotional football group opens. Whether the real group was found,
+      // was already active, or is not on the page decides the next fix.
+      this.#lastCaptureExit.set(source.sourceId,
+        `FOOTBALL_${typeof footballStatus === "string" ? footballStatus : "NO_ANSWER"}`);
+      if (footballStatus === "football-selected") return;
       // A retained in-memory STOMP baseline can be hours old after the local
       // API restarts. Prefer a new same-tab getEvent generation and use
       // retained frames only as a fail-safe when the provider request is
