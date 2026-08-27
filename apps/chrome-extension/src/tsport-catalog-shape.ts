@@ -46,7 +46,31 @@ export const TSPORT_CATALOG_SHAPE_EXPRESSION = `(() => {
       .filter((value) => value.length > 0 && value.length < 32).slice(0, 4).join('.');
     return (element.tagName || '').toLowerCase() + (classes.length > 0 ? '.' + classes : '');
   };
+  // What each row offers the capture. Every one of these is required, and a
+  // row missing any of them is dropped without a word, so an empty sweep and a
+  // page whose class names moved look identical from outside.
+  let withEventId = 0;
+  let withLeague = 0;
+  let withTwoTeams = 0;
+  let withStatus = 0;
+  for (const row of rows) {
+    try {
+      const favorite = row.querySelector('.match-favorite');
+      const favoriteId = String(favorite && favorite.id || '');
+      const eventId = /eventId-[^-]+-\\d+-([0-9]+)$/u.test(favoriteId) ||
+        row.getAttribute('data-event-id') || row.getAttribute('data-eventid') ||
+        /([0-9]{4,})$/u.test(String(row.id || ''));
+      if (eventId) withEventId += 1;
+      if (row.querySelector('.league-name')) withLeague += 1;
+      if (row.querySelectorAll('.match__team-name').length >= 2) withTwoTeams += 1;
+      if (row.querySelector('.match__status, .match__time, .match-time')) withStatus += 1;
+    } catch { /* a row that cannot be read counts as offering nothing */ }
+  }
   return JSON.stringify({
+    withEventId,
+    withLeague,
+    withTwoTeams,
+    withStatus,
     roots: roots.length,
     rootsHidden: hidden,
     rootLoaded: roots.length === 1 ? String(roots[0].getAttribute('data-loaded')) : '',

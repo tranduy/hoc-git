@@ -1325,7 +1325,7 @@ export class NetworkObserver {
       "Runtime.evaluate", { expression: TSPORT_CATALOG_SHAPE_EXPRESSION, returnByValue: true }))
       .catch(() => null);
     const value = nestedValue(evaluation, "result", "value");
-    if (typeof value !== "string" || value.length === 0 || value.length > 400) return;
+    if (typeof value !== "string" || value.length === 0 || value.length > 600) return;
     this.#lastCatalogShape.set(source.sourceId, value.replace(/[^ -~]/gu, ""));
   }
 
