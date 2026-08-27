@@ -9,13 +9,14 @@ const KICKOFF_MS = OBSERVED_AT_MS + 5 * 3_600_000;
 function catalogOf(provider: "SABA" | "BTI", overrides: Partial<ProviderEvent>,
   odds: readonly [string, string]): LiveCatalogResponse {
   const id = `${provider}-1`;
-  const event: ProviderEvent = {
+  const base: ProviderEvent = {
     provider, category: "FOOTBALL", providerEventId: id, competition: "La Liga",
     seasonStage: null, startAtUtcMs: KICKOFF_MS, participantA: "Celta Vigo",
     participantB: "Osasuna", eventScope: "REGULATION", bestOf: null, isLive: false,
     rematchCandidate: false, fixtureDiscriminator: null, isVirtual: false,
-    sportVariant: "FOOTBALL", liveState: null, ...overrides
+    sportVariant: "FOOTBALL", liveState: null
   };
+  const event = { ...base, ...overrides } as ProviderEvent;
   const market: ProviderMarket = { provider, category: "FOOTBALL", providerEventId: id,
     providerMarketId: `${id}-m`, marketType: "FT_TOTAL", scope: "FULL_TIME", line: "2.5",
     settlementProfile: "football-regulation-including-added-time", status: "OPEN" };
