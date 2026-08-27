@@ -163,10 +163,18 @@ describe("normalizeSabaFootballRecords", () => {
         oddsstatus: "running", odds1a: -0.68, odds2a: 0.52, hdp1: 0, hdp2: 0.5 }
     ], options);
 
+    // The team names lose their suffix - these are the same two teams - but the
+    // competition keeps its own. Folding these books back into the fixture's
+    // competition put three entries with one name, one pair of teams and one
+    // kickoff in front of a rival price, which could not say which of them it
+    // belonged to and withheld all three, the main match included. Corner books
+    // in two different books still meet through the usual competition linking.
     expect(normalized.events.map(({ competition, participantA, participantB }) =>
       ({ competition, participantA, participantB }))).toEqual([
-        { competition: "RUSSIA CUP", participantA: "CSKA Moscow", participantB: "FK Akron Togliatti" },
-        { competition: "RUSSIA CUP", participantA: "CSKA Moscow", participantB: "FK Akron Togliatti" }
+        { competition: "RUSSIA CUP - CORNERS", participantA: "CSKA Moscow",
+          participantB: "FK Akron Togliatti" },
+        { competition: "RUSSIA CUP - BOOKING", participantA: "CSKA Moscow",
+          participantB: "FK Akron Togliatti" }
       ]);
     expect(normalized.markets.map(({ marketType, settlementProfile }) =>
       ({ marketType, settlementProfile }))).toEqual([
@@ -192,6 +200,59 @@ describe("normalizeSabaFootballRecords", () => {
     expect(normalized.diagnostics).toEqual([
       "SABA_FOOTBALL_EVENT_UNSUPPORTED", "SABA_FOOTBALL_EVENT_UNSUPPORTED"
     ]);
+  });
+});
+
+describe("SABA live claims lose to its own scheduled kickoff", () => {
+  const liveStamp = Math.floor(options.observedAtMs / 1_000) - 1_320;
+  const scheduled = Math.floor(options.observedAtMs / 1_000) + 47_040;
+
+  it("refuses a live claim for a fixture the same snapshot schedules for later", () => {
+    // The live group stamps every fixture with the moment the snapshot was
+    // built, so "kickoff has passed" is trivially true. The day's list carries
+    // the same fixture with a real kickoff hours away, and a fixture that
+    // starts later is not running now.
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "Spain Primera Laliga", sporttype: 1 },
+      { type: "m", matchid: 10, leagueid: 1, hteamnameen: "Celta Vigo", ateamnameen: "Osasuna",
+        kickofftime: liveStamp, eventstatus: "running", marketid: "L", sporttype: 1 },
+      { type: "m", matchid: 11, leagueid: 1, hteamnameen: "Celta Vigo", ateamnameen: "Osasuna",
+        kickofftime: scheduled, eventstatus: "running", marketid: "T", sporttype: 1 }
+    ], options);
+
+    expect(normalized.events).toEqual([
+      expect.objectContaining({ providerEventId: "10", isLive: false,
+        startAtUtcMs: scheduled * 1_000 }),
+      expect.objectContaining({ providerEventId: "11", isLive: false,
+        startAtUtcMs: scheduled * 1_000 })
+    ]);
+  });
+
+  it("still reports a running fixture the snapshot does not schedule for later", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 12, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: liveStamp, eventstatus: "running", marketid: "L", sporttype: 1 }
+    ], options);
+
+    expect(normalized.events).toEqual([expect.objectContaining({
+      providerEventId: "12", isLive: true, startAtUtcMs: liveStamp * 1_000
+    })]);
+  });
+
+  it("does not let a kickoff moments away contradict a live claim", () => {
+    const nearlyNow = Math.floor(options.observedAtMs / 1_000) + 60;
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 13, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: liveStamp, eventstatus: "running", marketid: "L", sporttype: 1 },
+      { type: "m", matchid: 14, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: nearlyNow, eventstatus: "running", marketid: "T", sporttype: 1 }
+    ], options);
+
+    expect(normalized.events[0]).toEqual(expect.objectContaining({
+      providerEventId: "13", isLive: true
+    }));
   });
 });
 
