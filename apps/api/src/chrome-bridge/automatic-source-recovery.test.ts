@@ -49,6 +49,7 @@ function setup(now: () => number = () => 2_000, browserRefreshEnabled = true) {
     browserRefreshEnabled,
     withLatestFabetLaunch,
     baselineTimeoutMs: 50,
+    reloadBaselineTimeoutMs: 50,
     now,
     onError,
     onStateChange
@@ -408,6 +409,51 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.waitForFreshBaseline).toHaveBeenNthCalledWith(
       2, APSPORT, 2_000, 50, expect.any(AbortSignal)
     );
+  });
+
+  it("gives a reloaded tab far longer to answer than an in-page lobby snapshot", async () => {
+    // A snapshot is answered inside the page in seconds; a reload restarts the
+    // page, its session and its whole catalog sweep. Sharing one deadline
+    // declared every reload a failure, and the next hard stage reloaded the tab
+    // again before the sweep could finish - the five-event APSPORT catalog.
+    const waitForFreshBaseline = vi.fn(async (accountId: string) =>
+      snapshot(accountId, { state: "LIVE", reason: null, sourceId: "chrome:TSPORT:9",
+        sourceEpoch: "observer-a:0", activeGeneration: "generation-2",
+        lastCompleteBaselineAtMs: 2_001 }));
+    const recovery = new AutomaticSourceRecovery({
+      controlPlane: { requestLobbySnapshot: vi.fn(() => 1), reloadSource: vi.fn(() => 1),
+        reloadRecoverySource: vi.fn(() => 1), ensureLobby: vi.fn(() => 1), restoreLobby: vi.fn(() => 1) },
+      feedRegistry: {
+        snapshot: vi.fn(() => snapshot(APSPORT, { sourceId: "chrome:TSPORT:9",
+          sourceEpoch: "observer-a:0", activeGeneration: "generation-1" })),
+        subscribe: vi.fn(() => () => undefined),
+        waitForFreshBaseline
+      },
+      refreshFabetLaunches: vi.fn(async () => undefined),
+      withLatestFabetLaunch: async (_provider, _category, consume) => consume("https://x.test/fresh"),
+      baselineTimeoutMs: 10_000,
+      reloadBaselineTimeoutMs: 90_000,
+      now: () => 2_000
+    });
+
+    const result = await recovery.recover(request(APSPORT, "HARD"));
+
+    expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(
+      APSPORT, 2_000, 90_000, expect.any(AbortSignal)
+    );
+  });
+
+  it("refuses a reload deadline that is not a positive duration", () => {
+    expect(() => new AutomaticSourceRecovery({
+      controlPlane: { requestLobbySnapshot: vi.fn(() => 1), ensureLobby: vi.fn(() => 1),
+        restoreLobby: vi.fn(() => 1) },
+      feedRegistry: { snapshot: vi.fn(() => snapshot(APSPORT)), subscribe: vi.fn(() => () => undefined),
+        waitForFreshBaseline: vi.fn(async () => snapshot(APSPORT)) },
+      refreshFabetLaunches: vi.fn(async () => undefined),
+      withLatestFabetLaunch: async (_provider, _category, consume) => consume("https://x.test/fresh"),
+      reloadBaselineTimeoutMs: 0
+    })).toThrow("RECOVERY_OPTIONS_INVALID");
   });
 
   it("falls back to a fresh TSPORT launch when the targeted reload baseline times out", async () => {

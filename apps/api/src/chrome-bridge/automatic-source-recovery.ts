@@ -25,6 +25,13 @@ interface AutomaticSourceRecoveryOptions {
   readonly withLatestFabetLaunch: <T>(provider: FabetProvider, category: "FOOTBALL",
     consume: (url: string) => Promise<T>, minAcquiredAtMs: number, signal?: AbortSignal) => Promise<T>;
   readonly baselineTimeoutMs?: number;
+  /**
+   * How long a reloaded provider tab is given to publish a complete baseline.
+   * Separate from baselineTimeoutMs because a lobby snapshot is an in-page
+   * action that answers in seconds, while a reload restarts the page, its
+   * session and its whole catalog sweep.
+   */
+  readonly reloadBaselineTimeoutMs?: number;
   readonly now?: () => number;
   readonly isRecoverySuppressed?: (accountId: string) => boolean;
   readonly onError?: (accountId: string, error: unknown) => void;
@@ -89,6 +96,7 @@ interface RecoveryBackoffState {
 export class AutomaticSourceRecovery {
   readonly #options: AutomaticSourceRecoveryOptions;
   readonly #baselineTimeoutMs: number;
+  readonly #reloadBaselineTimeoutMs: number;
   readonly #now: () => number;
   readonly #inflight = new Map<string, Promise<RecoveryResult>>();
   readonly #backoff = new Map<string, RecoveryBackoffState>();
@@ -100,11 +108,20 @@ export class AutomaticSourceRecovery {
 
   constructor(options: AutomaticSourceRecoveryOptions) {
     const baselineTimeoutMs = options.baselineTimeoutMs ?? 10_000;
-    if (!Number.isFinite(baselineTimeoutMs) || baselineTimeoutMs <= 0) {
+    // Measured 2026-08-27: after the stack redeployed at 03:02 UTC the reloaded
+    // provider tabs published their first complete baselines at 03:04:28. Ten
+    // seconds - the lobby-snapshot deadline this used to share - expires while
+    // the page is still loading, so every reload was declared a failure and the
+    // next hard stage reloaded the tab again, destroying the sweep before it
+    // could finish. That loop is what leaves APSPORT reporting five events.
+    const reloadBaselineTimeoutMs = options.reloadBaselineTimeoutMs ?? 90_000;
+    if (!Number.isFinite(baselineTimeoutMs) || baselineTimeoutMs <= 0 ||
+      !Number.isFinite(reloadBaselineTimeoutMs) || reloadBaselineTimeoutMs <= 0) {
       throw new Error("RECOVERY_OPTIONS_INVALID");
     }
     this.#options = options;
     this.#baselineTimeoutMs = baselineTimeoutMs;
+    this.#reloadBaselineTimeoutMs = reloadBaselineTimeoutMs;
     this.#now = options.now ?? Date.now;
     this.#disposeSignal = new Promise((resolve) => {
       this.#signalDispose = () => { resolve(DISPOSED); };
@@ -248,7 +265,7 @@ export class AutomaticSourceRecovery {
 
   async #confirmReplacement(request: ProviderRecoveryRequest, prior: ProviderFeedSnapshot,
     actionStartedAtMs: number): Promise<RecoveryResult> {
-    const deadlineAtMs = actionStartedAtMs + this.#baselineTimeoutMs;
+    const deadlineAtMs = actionStartedAtMs + this.#reloadBaselineTimeoutMs;
     let afterMs = actionStartedAtMs;
     while (true) {
       const remainingMs = deadlineAtMs - this.#now();
