@@ -1309,7 +1309,8 @@ export class NetworkObserver {
 
   async start(source: ObservedSource): Promise<void> {
     if (this.#startedTabs.has(source.tabId)) return;
-    if (source.lobby === "KSPORT" || source.lobby === "TSPORT") this.#wsAttachDiagnostic(source);
+    if (source.lobby === "KSPORT" || source.lobby === "TSPORT" ||
+      source.lobby === "SABA") this.#wsAttachDiagnostic(source);
     if (source.lobby === "SABA" || source.lobby === "CMD" || source.lobby === "KSPORT") {
       // Runtime is sticky across MV3 workers. Reset the root domain before
       // reattaching child targets. SABA needs its OOPIF context replayed, while
@@ -2758,7 +2759,11 @@ export class NetworkObserver {
 
   async heartbeat(source: ObservedSource, hostname: string): Promise<void> {
     if (!/^[a-z0-9.-]+$/iu.test(hostname)) return;
-    const diagnostic = source.lobby === "KSPORT" || source.lobby === "TSPORT"
+    // SABA now visits its day list too, and without this its selector could
+    // only be judged by whether the fixtures appeared - not by whether it
+    // found the tab at all.
+    const diagnostic = source.lobby === "KSPORT" || source.lobby === "TSPORT" ||
+      source.lobby === "SABA"
       ? this.#wsAttachDiagnostic(source) : null;
     const webSockets = diagnostic === null ? 0 : [...this.#webSockets.values()].filter((socket) =>
       socket.source.sourceId === source.sourceId && socket.sourceGeneration === diagnostic.sourceGeneration).length;
