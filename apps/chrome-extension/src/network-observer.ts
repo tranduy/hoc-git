@@ -4,6 +4,7 @@ import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { LIVE_TAB_LABELS, TODAY_TAB_LABELS, timeTabExpression } from "./time-tab-selector.js";
+import { TSPORT_CATALOG_SHAPE_EXPRESSION } from "./tsport-catalog-shape.js";
 import { buildTsportSelectionPriceExpression } from "./tsport-selection-price.js";
 import { buildImExactSelectionPriceExpression } from "./im-selection-price.js";
 import { redactNetworkBody, redactNetworkEnvelope } from "./redactor.js";
@@ -272,6 +273,9 @@ interface WsAttachDiagnosticState {
   baselineTabScopes: number;
   baselineTabPeriods: number;
   baselineTabLabels: string;
+  /** What the APSPORT capture sees at each gate, so an empty catalog names its
+   *  reason instead of being silent. Counts and class names only. */
+  catalogShape: string;
 }
 
 interface PreexistingSocketReconnectState {
@@ -926,6 +930,7 @@ export class NetworkObserver {
   // erased what the tab selector had just seen before it could be read. The
   // labels are the whole point of the report, so keep the last ones per source.
   readonly #lastTabLabels = new Map<string, string>();
+  readonly #lastCatalogShape = new Map<string, string>();
   readonly #requestPartitions = new Map<string, ImProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
@@ -1272,6 +1277,18 @@ export class NetworkObserver {
     } finally {
       await this.#selectTimeTab(source, LIVE_TAB_EXPRESSION);
     }
+  }
+
+  /** Reads what the APSPORT capture sees at each gate. Its expression returns
+   *  an empty catalog on every failure alike, so without this a missing root,
+   *  a duplicated one and a root with no rows under it are indistinguishable. */
+  async #recordTsportCatalogShape(source: ObservedSource): Promise<void> {
+    const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+      "Runtime.evaluate", { expression: TSPORT_CATALOG_SHAPE_EXPRESSION, returnByValue: true }))
+      .catch(() => null);
+    const value = nestedValue(evaluation, "result", "value");
+    if (typeof value !== "string" || value.length === 0 || value.length > 400) return;
+    this.#lastCatalogShape.set(source.sourceId, value.replace(/[^ -~]/gu, ""));
   }
 
   async #selectTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
@@ -2409,7 +2426,8 @@ export class NetworkObserver {
       targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
       baselineLive: 0, baselineToday: 0, baselineTabSelections: 0,
       baselineTabStatus: "NONE", baselineTabTargets: 0, baselineTabStep: "NONE",
-      baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0, baselineTabLabels: ""
+      baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0, baselineTabLabels: "",
+      catalogShape: ""
     };
     this.#wsAttachDiagnostics.set(source.sourceId, created);
     return created;
@@ -2828,7 +2846,8 @@ export class NetworkObserver {
         baselineTabGroups: diagnostic.baselineTabGroups, baselineTabScopes: diagnostic.baselineTabScopes,
         baselineTabPeriods: diagnostic.baselineTabPeriods,
         baselineTabLabels: diagnostic.baselineTabLabels.length > 0
-          ? diagnostic.baselineTabLabels : this.#lastTabLabels.get(source.sourceId) ?? "" })
+          ? diagnostic.baselineTabLabels : this.#lastTabLabels.get(source.sourceId) ?? "",
+        catalogShape: this.#lastCatalogShape.get(source.sourceId) ?? "" })
     });
     // The day list is what the other books can be compared against, and nothing
     // else runs often enough to fetch it: the poller refreshes SABA's catalog
@@ -2836,7 +2855,10 @@ export class NetworkObserver {
     // runs every ten seconds for every attached tab, and the visit keeps its own
     // ten-minute floor, so it is a no-op almost every time.
     if (source.lobby === "SABA") void this.#captureSabaTodayBaseline(source).catch(() => undefined);
-    else if (source.lobby === "TSPORT") void this.#captureTsportTodayBaseline(source).catch(() => undefined);
+    else if (source.lobby === "TSPORT") {
+      void this.#captureTsportTodayBaseline(source).catch(() => undefined);
+      void this.#recordTsportCatalogShape(source).catch(() => undefined);
+    }
   }
 
   async emitWorkHealth(source: ObservedSource, health: {

@@ -134,6 +134,7 @@ interface AccountState {
     readonly baselineTabScopes: number;
     readonly baselineTabPeriods: number;
     readonly baselineTabLabels: string;
+    readonly catalogShape: string;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -163,6 +164,11 @@ const tabSteps = new Set(["NONE", "group", "scope", "tab"]);
 /** Reason names with counts, e.g. "EVENT_TEAMS:12|LEAGUE_SHAPE:3". Shape only. */
 function snapshotRejections(value: unknown): string {
   return typeof value === "string" && /^[A-Z_:0-9|]{0,208}$/u.test(value) ? value : "";
+}
+
+/** Counts and class names the capture reported. Printable ASCII only. */
+function catalogShape(value: unknown): string {
+  return typeof value === "string" && /^[ -~]{0,400}$/u.test(value) ? value : "";
 }
 
 function tabLabels(value: unknown): string {
@@ -448,7 +454,8 @@ export class PipelineTelemetry {
         autoAttachEvents?: unknown; baselineLive?: unknown; baselineToday?: unknown;
         baselineTabSelections?: unknown; baselineTabStatus?: unknown;
         baselineTabTargets?: unknown; baselineTabStep?: unknown; baselineTabGroups?: unknown;
-        baselineTabScopes?: unknown; baselineTabPeriods?: unknown; baselineTabLabels?: unknown };
+        baselineTabScopes?: unknown; baselineTabPeriods?: unknown; baselineTabLabels?: unknown;
+        catalogShape?: unknown };
       if (Array.isArray((value as { results?: unknown }).results)) {
         for (const entry of (value as { results: readonly unknown[] }).results) {
           if (typeof entry !== "string" || !refreshOutcomes.has(entry)) continue;
@@ -508,7 +515,8 @@ export class PipelineTelemetry {
           baselineTabGroups: boundedCounter(value.baselineTabGroups),
           baselineTabScopes: boundedCounter(value.baselineTabScopes),
           baselineTabPeriods: boundedCounter(value.baselineTabPeriods),
-          baselineTabLabels: tabLabels(value.baselineTabLabels)
+          baselineTabLabels: tabLabels(value.baselineTabLabels),
+          catalogShape: catalogShape(value.catalogShape)
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }
