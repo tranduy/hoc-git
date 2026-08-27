@@ -112,6 +112,32 @@ describe("TabRegistry", () => {
     expect(closed).toEqual([]);
   });
 
+  it("never closes a book that only looks like a duplicate because its host rotated", async () => {
+    // SABA's host pattern is a superset of SBOBET's, so an SBOBET domain that is
+    // not yet in the known list reads as SABA. Both tabs then land in one lobby
+    // group, and closing the loser destroys a logged-in book that nothing
+    // reopens - which is how SABA and SBOBET were lost overnight.
+    const attached: number[] = [];
+    const closed: number[] = [];
+    const registry = new TabRegistry({
+      attach: async (tabId) => { attached.push(tabId); },
+      detach: async () => undefined
+    }, {
+      load: async () => ({}),
+      save: async () => undefined
+    }, {
+      closeTab: async (tabId) => { closed.push(tabId); }
+    });
+
+    await registry.restore([
+      { id: 4, url: "https://c0z0oa.bpd3a3fn.com/sports", title: "SABA" },
+      { id: 5, url: "https://c0z0ob.bpzzzz9.com/sports", title: "SBOBET" }
+    ]);
+
+    expect(attached).toHaveLength(1);
+    expect(closed).toEqual([]);
+  });
+
   it("restores an opaque K-Sports shell so CDP can validate its sportsbook OOPIF", async () => {
     const attach = vi.fn(async () => undefined);
     const registry = new TabRegistry(

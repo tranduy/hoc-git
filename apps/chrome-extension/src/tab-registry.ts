@@ -155,10 +155,20 @@ export class TabRegistry {
         }
       }
       if (activeTabId === null) continue;
+      const activeHostname = recognizeLobbyTab(
+        candidates.find((tab) => tab.id === activeTabId) ?? {})?.hostname ?? null;
       for (const duplicate of candidates) {
         if (duplicate.id === undefined || duplicate.id === activeTabId) continue;
         this.#attached.delete(duplicate.id);
         this.#preferred.delete(duplicate.id);
+        // Two tabs on the same host are one book opened twice, and the spare is
+        // safe to close. Two tabs whose hosts merely resolve to the same lobby
+        // label are not: SABA's host pattern is a superset of SBOBET's, so a
+        // rotated SBOBET domain reads as SABA and the "duplicate" closed here
+        // is a different, authenticated book that nothing will reopen. Leaving
+        // it open costs one idle tab; closing it costs that book for hours.
+        if (activeHostname === null ||
+          recognizeLobbyTab(duplicate)?.hostname !== activeHostname) continue;
         await this.#lifecycle?.closeTab(duplicate.id).catch(() => undefined);
       }
     }
