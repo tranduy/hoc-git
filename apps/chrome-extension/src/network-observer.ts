@@ -1324,7 +1324,7 @@ export class NetworkObserver {
           .filter((value): value is string => typeof value === "string")
           .map((value) => value.replace(/[^a-z0-9 ]+/gu, "").slice(0, 24))
           .filter((value) => value.length > 0)
-          .slice(0, 8)
+          .slice(0, 18)
           .join("|");
         if (seen.length > 0) this.#lastTabLabels.set(source.sourceId, seen);
         diagnostic.baselineTabLabels = seen;

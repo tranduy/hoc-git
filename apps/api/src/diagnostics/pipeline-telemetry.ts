@@ -166,7 +166,7 @@ function snapshotRejections(value: unknown): string {
 }
 
 function tabLabels(value: unknown): string {
-  return typeof value === "string" && /^[a-z0-9 |]{0,208}$/u.test(value) ? value : "";
+  return typeof value === "string" && /^[a-z0-9 |]{0,420}$/u.test(value) ? value : "";
 }
 
 function tabStep(value: unknown): string {

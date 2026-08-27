@@ -27,7 +27,7 @@ export function timeTabExpression(labels: readonly string[], force = false): str
       if (node.children.length > 2) continue;
       const text = normalize(node.textContent);
       if (text.length === 0 || text.length > 24) continue;
-      if (seen.length < 12 && !seen.includes(text)) seen.push(text);
+      if (seen.length < 24 && !seen.includes(text)) seen.push(text);
       if (match === null && wanted.includes(text)) match = node;
     }
     if (match === null) return { status: 'time-tab-not-found', labels: seen, nodes: nodes.length };
