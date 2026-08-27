@@ -52,4 +52,24 @@ describe("TSPORT_PUBLIC_CATALOG_EXPRESSION", () => {
       } }
     ]);
   });
+
+  it("reads the rows where they are when the football root is not the list", () => {
+    // Measured 2026-08-27: the element carrying data-sport-id="1" held one row
+    // while the page showed eighteen, and the sweep returned a single fixture
+    // out of the 554 the lobby's own menu counted.
+    const strayRoot = root("1", "block");
+    const rows = [match("111"), match("222"), match("333")];
+    const document = {
+      querySelectorAll: (selector: string) => selector === ".match" ? rows : [strayRoot]
+    };
+    const evaluate = new Function("document", "getComputedStyle",
+      `return ${TSPORT_PUBLIC_CATALOG_EXPRESSION}`) as
+      (document: unknown, getComputedStyle: (element: unknown) => unknown) => string;
+    const records = JSON.parse(evaluate(document, (element: unknown) =>
+      (element as { readonly __computedStyle: unknown }).__computedStyle)) as Array<
+        { readonly eventId?: string }>;
+
+    expect(records.filter((record) => record.eventId !== undefined).map((record) => record.eventId))
+      .toEqual(["111", "222", "333"]);
+  });
 });

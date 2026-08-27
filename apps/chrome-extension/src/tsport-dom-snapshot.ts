@@ -53,7 +53,21 @@ export const TSPORT_PUBLIC_CATALOG_EXPRESSION = `(() => {
     footballRoot.querySelector('[aria-busy="true"], [data-loading="true"]') !== null) {
     return JSON.stringify([]);
   }
-  const candidates = [...footballRoot.querySelectorAll(".match")];
+  // Measured 2026-08-27: the element carrying data-sport-id="1" held one row
+  // while the page showed eighteen, and .match-list and .football-match-list did
+  // not exist at all. The gate above passed on that single element and the sweep
+  // returned one fixture out of the 554 the lobby's own menu counted, with no
+  // way to tell that from an empty page. The rows themselves are the evidence:
+  // when the root holds fewer of them than the document does, the root is not
+  // the list and the rows are read where they actually are. Their own checks -
+  // an event id, a league, two distinct teams, a usable market - still decide
+  // what is accepted, so widening where they are looked for cannot admit a row
+  // that would have been refused.
+  const rootCandidates = [...footballRoot.querySelectorAll(".match")];
+  const documentCandidates = [...document.querySelectorAll(".match")]
+    .filter((node) => !footballRoots.includes(node));
+  const candidates = rootCandidates.length >= documentCandidates.length
+    ? rootCandidates : documentCandidates;
   const records = [];
   let invalidCandidates = 0;
   for (const node of candidates) {
