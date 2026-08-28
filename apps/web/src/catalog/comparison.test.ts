@@ -819,6 +819,34 @@ describe("competition identity learned from shared fixtures", () => {
     expect([...paired[0]!.providers].sort()).toEqual(["SABA", "SBOBET"]);
   });
 
+  it("counts a fixture two books spell differently as evidence of one competition", () => {
+    // Learning used to demand participants matching to the character while
+    // pairing accepted far less, so a league whose fixtures every book spells
+    // its own way could never link and none of them paired. Neither fixture
+    // here is spelled the same twice; both are ones pairing would accept.
+    const left = liveCatalog("SABA", "France Ligue 2",
+      [["Nancy", "Dunkerque"], ["Clermont", "Sochaux"]]);
+    const right = liveCatalog("SBOBET", "Giai hang Nhi Phap",
+      [["AS Nancy Lorraine", "USL Dunkerque"], ["Clermont Foot", "Sochaux Montbeliard"]]);
+
+    const paired = buildComparisonEvents([left, right]).filter((entry) => entry.providers.length > 1);
+
+    expect(paired).toHaveLength(2);
+    expect([...paired[0]!.providers].sort()).toEqual(["SABA", "SBOBET"]);
+  });
+
+  it("reads a Vietnamese competition alias written with a plain d", () => {
+    // NFKD leaves the d-with-stroke alone, so every alias for a Vietnamese
+    // competition had to carry a character the alias list is not written with,
+    // and the two that did not could never match anything they were added for.
+    const left = liveCatalog("SABA", "GERMANY-BUNDESLIGA I", [["Bayern Munchen", "VfB Stuttgart"]]);
+    const right = liveCatalog("SBOBET", "Giải Vô địch Quốc gia Đức", [["Bayern Munchen", "VfB Stuttgart"]]);
+
+    const paired = buildComparisonEvents([left, right]).filter((entry) => entry.providers.length > 1);
+
+    expect(paired).toHaveLength(1);
+  });
+
   it("refuses to link two competitions that share only one fixture", () => {
     const left = liveCatalog("SABA", "Japan Emperor Cup",
       [["Kashima Antlers", "Urawa Reds"], ["Gamba Osaka", "Vissel Kobe"]]);

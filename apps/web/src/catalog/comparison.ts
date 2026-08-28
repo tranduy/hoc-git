@@ -122,11 +122,117 @@ const footballCompetitionAliases = new Map<string, string>([
   ["ecuador cup", "ecuador-cup"],
   ["ecuador serie b", "ecuador-primera-b"],
   ["giai hang nhi quoc gia ecuador", "ecuador-primera-b"],
-  ["ecuador primera b", "ecuador-primera-b"]
+  ["ecuador primera b", "ecuador-primera-b"],
+  // Competitions two books both priced on 2026-08-28 and could not link, each
+  // holding a single fixture in the window - one is never proof, so the pair
+  // waited on a second that a 24-hour horizon rarely offers. Verified by hand
+  // against the fixture both books were showing. Names carrying a region, a
+  // stage or a side product are deliberately absent: Germany Regional League
+  // Northeast against a bare Giai Khu vuc Duc would fold Bavaria and Southwest
+  // in with it, and English Premier League - Injury Time Awarded would price
+  // added-time goals against match odds.
+  ["english premier league", "england-premier-league"],
+  ["giai bong da ngoai hang anh", "england-premier-league"],
+  ["giai ngoai hang anh", "england-premier-league"],
+  ["english league championship", "england-championship"],
+  ["england league championship", "england-championship"],
+  ["giai vo dich anh", "england-championship"],
+  ["giai vo dich bong da anh", "england-championship"],
+  ["france ligue 2", "france-ligue-2"],
+  ["giai hang nhi phap", "france-ligue-2"],
+  ["germany bundesliga i", "germany-bundesliga"],
+  ["giai vo dich quoc gia duc", "germany-bundesliga"],
+  ["giai bong da vo dich quoc gia duc", "germany-bundesliga"],
+  ["germany bundesliga 2", "germany-bundesliga-2"],
+  ["giai hang nhi duc", "germany-bundesliga-2"],
+  ["germany 3rd liga", "germany-3-liga"],
+  ["giai hang ba duc", "germany-3-liga"],
+  ["germany regional league bavaria", "germany-regionalliga-bavaria"],
+  ["germany regionalliga bavaria", "germany-regionalliga-bavaria"],
+  ["germany regional league southwest", "germany-regionalliga-southwest"],
+  ["germany regionalliga southwest", "germany-regionalliga-southwest"],
+  ["germany women bundesliga", "germany-women-bundesliga"],
+  ["germany women bundesliga 1", "germany-women-bundesliga"],
+  ["italy serie a", "italy-serie-a"],
+  ["giai vo dich quoc gia y serie a", "italy-serie-a"],
+  ["giai serie a y", "italy-serie-a"],
+  ["italy serie b", "italy-serie-b"],
+  ["giai hang nhi y serie b", "italy-serie-b"],
+  ["giai serie b y", "italy-serie-b"],
+  ["italy serie c", "italy-serie-c"],
+  ["giai hang ba y serie c", "italy-serie-c"],
+  ["spain segunda division", "spain-segunda"],
+  ["giai hang nhi tay ban nha", "spain-segunda"],
+  ["giai segunda tay ban nha", "spain-segunda"],
+  ["spain la liga 2", "spain-segunda"],
+  ["netherlands eredivisie", "netherlands-eredivisie"],
+  ["ha lan eredivisie", "netherlands-eredivisie"],
+  ["giai vo dich quoc gia ha lan", "netherlands-eredivisie"],
+  ["portugal primeira liga", "portugal-primeira-liga"],
+  ["giai vo dich quoc gia bo dao nha", "portugal-primeira-liga"],
+  ["giai dau bo dao nha primeira liga", "portugal-primeira-liga"],
+  ["ukraine premier league", "ukraine-premier-league"],
+  ["giai vo dich quoc gia ukraina", "ukraine-premier-league"],
+  ["malaysia super league", "malaysia-super-league"],
+  ["giai vo dich quoc gia malaysia", "malaysia-super-league"],
+  ["giai vo dich bong da malaysia", "malaysia-super-league"],
+  ["hong kong premier league", "hong-kong-premier-league"],
+  ["giai bong da ngoai hang hong kong", "hong-kong-premier-league"],
+  ["argentina liga profesional", "argentina-liga-profesional"],
+  ["giai vo dich quoc gia argentina", "argentina-liga-profesional"],
+  ["argentina primera b nacional", "argentina-primera-b-nacional"],
+  ["giai hang nhi argentina", "argentina-primera-b-nacional"],
+  ["bahrain premier league", "bahrain-premier-league"],
+  ["giai vo dich quoc gia bahrain", "bahrain-premier-league"],
+  ["bulgaria first professional league", "bulgaria-first-league"],
+  ["bulgaria first professional football league", "bulgaria-first-league"],
+  ["canadian premier league", "canada-premier-league"],
+  ["canada premier league", "canada-premier-league"],
+  ["giai vo dich quoc gia canada", "canada-premier-league"],
+  ["chile primera division", "chile-primera-division"],
+  ["giai vo dich quoc gia chile hang nhat", "chile-primera-division"],
+  ["denmark super league", "denmark-superliga"],
+  ["dan mach super league", "denmark-superliga"],
+  ["ecuador serie a", "ecuador-serie-a"],
+  ["giai vo dich quoc gia ecuador", "ecuador-serie-a"],
+  ["egyptian premier league", "egypt-premier-league"],
+  ["giai ngoai hang ai cap", "egypt-premier-league"],
+  ["costa rica primera division", "costa-rica-primera-division"],
+  ["giai ngoai hang costa rica", "costa-rica-primera-division"],
+  ["hungary nb i", "hungary-nb-i"],
+  ["giai hungary nb i", "hungary-nb-i"],
+  ["iceland 1st division", "iceland-first-division"],
+  ["giai hang nhat iceland", "iceland-first-division"],
+  ["kosovo super liga", "kosovo-superliga"],
+  ["kosovo superliga", "kosovo-superliga"],
+  ["north macedonia 1st league", "north-macedonia-first-league"],
+  ["republic of north macedonia first football league", "north-macedonia-first-league"],
+  ["paraguay primera division", "paraguay-primera-division"],
+  ["giai vo dich chuyen nghiep paraguay", "paraguay-primera-division"],
+  ["peru liga 1", "peru-liga-1"],
+  ["giai vo dich quoc gia peru", "peru-liga-1"],
+  ["poland 2nd division", "poland-second-division"],
+  ["giai hang nhi ba lan", "poland-second-division"],
+  ["slovenia prva liga", "slovenia-prvaliga"],
+  ["slovenia prvaliga", "slovenia-prvaliga"],
+  ["swiss challenge league", "switzerland-challenge-league"],
+  ["switzerland challenge league", "switzerland-challenge-league"],
+  ["finland ykkosliiga", "finland-ykkosliiga"],
+  ["giai hang nhat phan lan", "finland-ykkosliiga"],
+  ["cup quoc gia israel", "israel-state-cup"],
+  ["cup israel", "israel-state-cup"]
 ]);
 
 function competitionIdentity(value: string): string {
+  // The Vietnamese d-with-stroke survives NFKD, which decomposes accents but
+  // leaves alone a letter that was never a composition. Every alias for a
+  // Vietnamese competition therefore had to be spelled with a character no
+  // keyboard here produces, and the two written without it - giai vo dich quoc
+  // gia tay ban nha la liga and giai vo dich cup uc - could never match a
+  // thing. participantIdentity has folded it since it was written; this is that
+  // same fold, so an alias can be typed the way it reads.
   const normalized = decodeHtmlEntities(value).normalize("NFKD").replace(/\p{M}+/gu, "").toLocaleLowerCase("en")
+    .replace(/đ/gu, "d")
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/gu, " ");
   return footballCompetitionAliases.get(normalized) ?? normalized;
 }
@@ -140,14 +246,81 @@ function competitionIdentity(value: string): string {
  */
 const SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS = 2;
 
+/** How far two books may disagree on a kickoff and still mean one fixture. */
+const FOOTBALL_KICKOFF_TOLERANCE_MS = 120_000;
+
 function linkedCompetitionIdentity(value: string, links?: ReadonlyMap<string, string>): string {
   const identity = competitionIdentity(value);
   return links?.get(identity) ?? identity;
 }
 
-function fixturePairKey(event: ProviderEvent): string {
-  return [participantIdentity(event.category, event.participantA),
-    participantIdentity(event.category, event.participantB)].sort().join("~");
+/**
+ * Fixtures a competition holds, kept whole rather than folded into one key.
+ *
+ * The evidence that two books mean the same competition used to be fixtures
+ * whose participants matched to the character, while pairing those same
+ * fixtures accepts the far looser rule footballParticipantSimilarity applies -
+ * one book writing Lille where another writes Lille OSC, or Nancy for AS Nancy
+ * Lorraine, pairs happily but counted for nothing here. That made learning
+ * stricter than the thing it exists to enable, and the two deadlocked: a
+ * pre-match fixture is only paired once its competition is linked, and the
+ * competition only linked once two fixtures had matched under a rule most of
+ * them fail.
+ *
+ * Measured 2026-08-28 against the live stack: 270 fixture pairs that two books
+ * both held, agreed on to the kickoff and named with the same teams were
+ * dropped, every one because its competition never linked. France Ligue 2
+ * against Giai hang Nhi Phap is the shape of it - three fixtures in common,
+ * one of them spelled identically, so the whole league was lost.
+ */
+interface LearnedFixture {
+  readonly participantA: string;
+  readonly participantB: string;
+  readonly startAtUtcMs: number;
+  readonly isLive: boolean;
+}
+
+/**
+ * Whether one fixture is the other, judged the way pairing judges it.
+ *
+ * Kickoff is checked here and was not checked at all before, so two
+ * competitions that merely shared team names - a league and a cup a week apart
+ * - counted as evidence of being the same competition. Pre-match fixtures now
+ * have to agree on kickoff as closely as a pair of them would to be compared
+ * at all. A running fixture reports observation time rather than kickoff, so
+ * there the participants stand alone, exactly as compatibleEventOrientation
+ * has it.
+ */
+function learnedFixturesMatch(left: LearnedFixture, right: LearnedFixture): boolean {
+  if (left.isLive !== right.isLive) return false;
+  if (!left.isLive &&
+    Math.abs(left.startAtUtcMs - right.startAtUtcMs) > FOOTBALL_KICKOFF_TOLERANCE_MS) return false;
+  return footballOrientationScore(left.participantA, left.participantB,
+    right.participantA, right.participantB) !== null ||
+    footballOrientationScore(left.participantA, left.participantB,
+      right.participantB, right.participantA) !== null;
+}
+
+/**
+ * The buckets a fixture could be matched in.
+ *
+ * Comparing every fixture against every other across six books is work the
+ * shape of the rule makes unnecessary: a match only scores when the shorter
+ * side's meaningful tokens are all present in the longer, so any two fixtures
+ * that match share at least one token from each participant. Indexing on those
+ * token pairs - sorted, because a match may be the two sides swapped - keeps
+ * the comparison to fixtures that could actually be the same one.
+ */
+function fixtureBlockKeys(fixture: LearnedFixture): readonly string[] {
+  const left = footballParticipantFingerprint(fixture.participantA).meaningful;
+  const right = footballParticipantFingerprint(fixture.participantB).meaningful;
+  const keys: string[] = [];
+  for (const leftToken of left) {
+    for (const rightToken of right) {
+      keys.push(leftToken < rightToken ? `${leftToken}~${rightToken}` : `${rightToken}~${leftToken}`);
+    }
+  }
+  return keys;
 }
 
 /**
@@ -174,7 +347,8 @@ function competitionMarketFamily(marketTypes: Iterable<string>): "GOALS" | "CORN
 
 function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[]): ReadonlyMap<string, string> {
   const fixturesByBookCompetition = new Map<string, { readonly identity: string;
-    readonly fixtures: Map<string, number>; readonly marketTypes: string[] }>();
+    readonly provider: ProviderId; readonly fixtures: LearnedFixture[];
+    readonly marketTypes: string[] }>();
   for (const catalog of catalogs) {
     const marketsByEvent = new Map<string, string[]>();
     for (const market of catalog.markets) {
@@ -188,10 +362,33 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[]): Readon
       if (identity.length === 0) continue;
       const key = `${catalog.provider} ${identity}`;
       const entry = fixturesByBookCompetition.get(key) ??
-        { identity, fixtures: new Map<string, number>(), marketTypes: [] };
-      entry.fixtures.set(fixturePairKey(event), event.startAtUtcMs);
+        { identity, provider: catalog.provider, fixtures: [], marketTypes: [] };
+      entry.fixtures.push({ participantA: event.participantA, participantB: event.participantB,
+        startAtUtcMs: event.startAtUtcMs, isLive: event.isLive });
       entry.marketTypes.push(...(marketsByEvent.get(event.providerEventId) ?? []));
       fixturesByBookCompetition.set(key, entry);
+    }
+  }
+  // How many of its own fixtures each pair of book-competitions holds in
+  // common. Counting the left side's fixtures rather than the matches keeps one
+  // fixture that matches two entries on the far side from reading as two.
+  const sharedFixtures = new Map<string, Set<number>>();
+  const pairKey = (left: string, right: string): string =>
+    left < right ? `${left} ${right}` : `${right} ${left}`;
+  const blocks = new Map<string, { key: string; index: number; fixture: LearnedFixture }[]>();
+  for (const [key, entry] of fixturesByBookCompetition) {
+    for (const [index, fixture] of entry.fixtures.entries()) {
+      for (const block of fixtureBlockKeys(fixture)) {
+        const bucket = blocks.get(block) ?? blocks.set(block, []).get(block)!;
+        for (const other of bucket) {
+          if (fixturesByBookCompetition.get(other.key)?.provider === entry.provider) continue;
+          if (!learnedFixturesMatch(fixture, other.fixture)) continue;
+          const pair = pairKey(key, other.key);
+          (sharedFixtures.get(pair) ?? sharedFixtures.set(pair, new Set()).get(pair)!)
+            .add(key < other.key ? index : other.index);
+        }
+        bucket.push({ key, index, fixture });
+      }
     }
   }
   const familyByKey = new Map<string, "GOALS" | "CORNERS" | "CARDS">();
@@ -220,12 +417,7 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[]): Readon
       if (leftKey.split(" ")[0] === rightKey.split(" ")[0]) continue;
       if (leftEntry.identity === rightEntry.identity) continue;
       if (familyByKey.get(leftKey) !== familyByKey.get(rightKey)) continue;
-      let shared = 0;
-      for (const fixture of leftEntry.fixtures.keys()) {
-        if (!rightEntry.fixtures.has(fixture)) continue;
-        shared += 1;
-        if (shared >= SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS) break;
-      }
+      const shared = sharedFixtures.get(pairKey(leftKey, rightKey))?.size ?? 0;
       if (shared >= SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS) {
         union(leftEntry.identity, rightEntry.identity);
       }
@@ -456,7 +648,7 @@ function compatibleEventOrientation(left: ProviderEvent, right: ProviderEvent,
   }
   if (left.isLive && left.category === "FOOTBALL" &&
     !hasIndependentFootballLiveIdentity(left, right, participantMatch.orientation, links)) return null;
-  const kickoffToleranceMs = left.category === "LOL" ? 30 * 60_000 : 120_000;
+  const kickoffToleranceMs = left.category === "LOL" ? 30 * 60_000 : FOOTBALL_KICKOFF_TOLERANCE_MS;
   if (!left.isLive && Math.abs(left.startAtUtcMs - right.startAtUtcMs) > kickoffToleranceMs) return null;
   if (left.category === "LOL" && eventSemanticKey(left) !==
     eventSemanticKey(participantMatch.orientation === "SWAPPED" ? swapLolEvent(right) : right)) return null;
