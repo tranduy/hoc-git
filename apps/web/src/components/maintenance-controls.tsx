@@ -61,7 +61,7 @@ export function MaintenanceControls({ api = defaultApi }: { readonly api?: Maint
 
   const notifications = status?.notifications ?? [];
   return <>
-    <div className="maintenance-top-actions" ref={notificationLayer}>
+    <div className="maintenance-inline-actions" ref={notificationLayer}>
       <button aria-busy={running} aria-label="Reset sàn" className="maintenance-restart-button"
         disabled={running} onClick={() => void run()} title="Kiểm tra và khôi phục tất cả nguồn" type="button">
         <RestartIcon /><span>{running ? "Đang reset…" : "Reset sàn"}</span>

@@ -206,10 +206,11 @@ test("top profitable exact tickets stay read-only and open the exact row", async
   });
 
   await page.goto("/lol-live");
-  await expect(page.getByRole("heading", { name: "LoL Live Price Gaps" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Football Live Price Gaps" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "LoL is temporarily disabled" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "LoL Live Price Gaps" })).toHaveCount(0);
   await page.goto("/football-live");
-  await expect(page.getByRole("heading", { name: "Football Live Price Gaps" })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Books to compare" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Football Live Price Gaps" })).toHaveCount(0);
   await expect(page.getByText("Alpha United vs Beta City", { exact: true })).toBeVisible();
   const row = page.getByRole("row", { name: /Ticket FT_AH/u });
   await expect(row).toHaveClass(/ranked-ticket-row--neutral/u);

@@ -23,7 +23,8 @@ describe("Football-only application shell", () => {
 
   it("routes the root directly to Football and renders no permanent navigation menu", async () => {
     render(<App initialSnapshot={snapshot} />);
-    expect(screen.getByRole("heading", { name: "Football Live Price Gaps" })).toBeTruthy();
+    expect(screen.getByRole("group", { name: "Books to compare" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Football Live Price Gaps" })).toBeNull();
     expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
     await waitFor(() => expect(window.location.pathname).toBe("/football-live"));
   });

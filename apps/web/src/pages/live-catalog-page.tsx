@@ -27,7 +27,7 @@ import { roiTone } from "../watch/roi-tone.js";
 import { useNotificationSound } from "../watch/use-notification-sound.js";
 import { ProfitAlertTracker, type ProfitAlert } from "../watch/profit-alert-tracker.js";
 import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
-import { loadSoundEnabled, saveSoundEnabled } from "../watch/sound-settings.js";
+import { loadSoundVolume, saveSoundVolume } from "../watch/sound-settings.js";
 import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from "../watch/stable-scroll-anchor.js";
 import { TicketPreflightCoordinator, type VerifiedTicketEvidence } from "../watch/ticket-preflight-coordinator.js";
 import { ProviderTicketApi, type ProviderTicketApiLike, type ProviderTicketIdentity } from "../api/provider-ticket.js";
@@ -500,7 +500,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [signals, setSignals] = useState<readonly LagSignal[]>([]);
   const [movements, setMovements] = useState<readonly ObservedPriceMovement[]>([]);
   const [verifiedTickets, setVerifiedTickets] = useState<ReadonlyMap<string, VerifiedTicketEvidence>>(new Map());
-  const [busy, setBusy] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [pinnedEvent, setPinnedEvent] = useState<ComparisonEvent | null>(null);
   const [pinnedEventIdentity, setPinnedEventIdentity] = useState<PinnedEventIdentity | null>(null);
@@ -513,7 +512,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [baseStakeInput, setBaseStakeInput] = useState(baseStake);
   const [stakeError, setStakeError] = useState<string | null>(null);
   const [openProviderTicketEnabled, setOpenProviderTicketEnabled] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(() => loadSoundEnabled(window.localStorage));
+  const [soundVolume, setSoundVolume] = useState(() => loadSoundVolume(window.localStorage));
   const baseStakeRef = useRef(baseStake);
   baseStakeRef.current = baseStake;
   const signalTracker = useRef(new LagSignalTracker());
@@ -529,7 +528,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const accountsRef = useRef<readonly AccountStatus[]>([]);
   const sourcesRef = useRef<readonly CatalogSourceStatus[]>([]);
   const catalogRefreshesInFlight = useRef(new Set<string>());
-  const foregroundLoadsInFlight = useRef(0);
   const retryAfterMs = useRef(new Map<string, number>());
   const comparisonWorkerRef = useRef<ComparisonWorkerClient | null>(null);
   const revisionCoordinatorRef = useRef<CatalogRevisionCoordinator | null>(null);
@@ -671,10 +669,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       .sort((left, right) => catalogReadPriority(left) - catalogReadPriority(right));
     if (requestedIds.length === 0) return;
     for (const id of requestedIds) catalogRefreshesInFlight.current.add(id);
-    if (foreground) {
-      foregroundLoadsInFlight.current += 1;
-      setBusy(true);
-    }
     try {
       const results = await Promise.allSettled(requestedIds.map((id) => (async () => {
         const requestedSource = sourcesRef.current.find((source) => source.id === id);
@@ -764,10 +758,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       } else comparisonWorkerRef.current?.reset(nextCatalogs, [...nextStale]);
     } finally {
       for (const id of requestedIds) catalogRefreshesInFlight.current.delete(id);
-      if (foreground) {
-        foregroundLoadsInFlight.current = Math.max(0, foregroundLoadsInFlight.current - 1);
-        setBusy(foregroundLoadsInFlight.current > 0);
-      }
     }
   }, [catalogSourceApi, readCatalog]);
 
@@ -1009,9 +999,6 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   })();
 
   return <>
-    <header className="page-header page-header--compact"><p className="eyebrow">{category === "FOOTBALL" ? "Football" : "League of Legends"} · live gaps</p>
-      <h1>{category === "FOOTBALL" ? "Football Live Price Gaps" : "LoL Live Price Gaps"}</h1>
-    </header>
     <section className="catalog-toolbar" aria-label="Catalog controls">
       <ProviderSelector accounts={categorySources} eventCounts={eventCounts} loaded={accountsLoaded}
         manualRecover={(provider) => { void sourceRecoveryCoordinatorRef.current?.manual(provider); }}
@@ -1026,12 +1013,13 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
           onClick={() => changeCategory("LOL")} type="button">LoL</button></div>}
         <MaintenanceControls />
-        <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true, category)} type="button">
-          {busy ? "Loading…" : "Compare selected books"}</button>
-        <button aria-label={`Âm thanh: ${soundEnabled ? "Bật" : "Tắt"}`} aria-pressed={soundEnabled}
-          className="sound-toggle" onClick={() => setSoundEnabled((current) => {
-            const next = !current; saveSoundEnabled(window.localStorage, next); return next;
-          })} type="button">{soundEnabled ? "🔊 Âm thanh: Bật" : "🔇 Âm thanh: Tắt"}</button>
+        <label className="sound-volume"><span>{soundVolume === 0 ? "🔇" : "🔊"} Âm lượng <b>{soundVolume}%</b></span>
+          <input aria-label="Âm lượng thông báo" max="100" min="0" step="5" type="range" value={soundVolume}
+            onChange={(event) => {
+              const next = Number(event.currentTarget.value);
+              saveSoundVolume(window.localStorage, next); setSoundVolume(next);
+            }} />
+        </label>
         <section aria-label="Cấu hình tiền cược" className="stake-panel stake-panel--compact">
           <label className="stake-config">Tiền cơ bản (VND)<input aria-label="Base stake for every match (VND)"
             inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
@@ -1044,7 +1032,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         </section>
       </section>
     </section>
-    <ProfitToastStack alerts={profitAlerts} enabled={soundEnabled} sound={notificationSound} />
+    <ProfitToastStack alerts={profitAlerts} enabled={soundVolume > 0} sound={notificationSound}
+      volume={soundVolume / 100} />
     <section aria-label="Live comparison workspace" className={selectedDetail === null ?
       "catalog-workspace catalog-workspace--stable" :
       "catalog-workspace catalog-workspace--stable catalog-workspace--selected"}>

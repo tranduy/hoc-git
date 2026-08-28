@@ -198,7 +198,7 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .catalog-market-details > summary { width: max-content; padding: 8px 10px; cursor: pointer; color: var(--muted); }
 .catalog-workspace { display: grid; width: 100%; grid-template-columns: minmax(430px, 40fr) minmax(620px, 60fr); gap: 10px; align-items: start; }
 .catalog-workspace--stable { height: clamp(500px, calc(100dvh - 190px), 760px); overflow: hidden; }
-.maintenance-top-actions { position: fixed; z-index: 80; top: 12px; right: 12px; display: flex; align-items: center; gap: 8px; }
+.maintenance-inline-actions { position: relative; z-index: 5; display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 .maintenance-restart-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 145px; height: 42px; background: #172432; box-shadow: 0 8px 24px #0007; }
 .maintenance-restart-icon { width: 19px; height: 19px; flex: 0 0 19px; }
 .maintenance-bell { position: relative; min-width: 42px; }
@@ -231,7 +231,6 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .maintenance-progress-card b { margin-top: 10px; color: #55e3ad; font-size: 1.05rem; }
 @keyframes maintenance-spin { to { transform: rotate(360deg); } }
 @media (max-width: 520px) {
-  .maintenance-top-actions { top: 8px; right: 8px; }
   .maintenance-restart-button { min-width: 42px; }
   .maintenance-restart-button > span { display: none; }
   .maintenance-popover { width: min(390px, calc(100vw - 16px)); }
@@ -598,7 +597,7 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
   min-width: 0;
   min-height: 68px;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid #3b4b5d;
@@ -623,6 +622,25 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
   max-width: 330px;
   flex: 1 1 260px;
   padding-left: 2px;
+}
+.catalog-toolbar__actions .sound-volume {
+  display: grid;
+  flex: 0 1 220px;
+  gap: 5px;
+  margin-left: auto;
+  color: #dceaf4;
+  font-size: .72rem;
+  font-weight: 750;
+}
+.catalog-toolbar__actions .sound-volume span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.catalog-toolbar__actions .sound-volume input {
+  width: 100%;
+  accent-color: #38bdf8;
+  cursor: pointer;
 }
 .catalog-toolbar__actions .stake-panel--compact .stake-config input {
   border-color: #4a6075;

@@ -35,6 +35,7 @@ function browserContext(): ToneContext {
 export class NotificationSound {
   private unlocked = false;
   private pending = false;
+  private pendingVolume = 1;
   private disposed = false;
   private context: ToneContext | null = null;
   private resumePromise: Promise<unknown> | null = null;
@@ -51,7 +52,7 @@ export class NotificationSound {
       }
       if (this.pending) {
         this.pending = false;
-        void this.ring();
+        void this.ring(this.pendingVolume);
       }
     } catch {
       // Audio is optional and must never interrupt catalog monitoring.
@@ -63,16 +64,19 @@ export class NotificationSound {
     window.addEventListener("keydown", this.unlock);
   }
 
-  async play(): Promise<void> {
+  async play(volume = 1): Promise<void> {
     if (this.disposed) return;
+    const normalizedVolume = Math.min(1, Math.max(0, Number.isFinite(volume) ? volume : 1));
+    if (normalizedVolume === 0) return;
     if (!this.unlocked) {
       this.pending = true;
+      this.pendingVolume = normalizedVolume;
       return;
     }
-    await this.ring();
+    await this.ring(normalizedVolume);
   }
 
-  private async ring(): Promise<void> {
+  private async ring(volume: number): Promise<void> {
     try {
       this.context ??= this.createContext();
       if (this.context.state === "suspended" && this.resumePromise === null) {
@@ -90,7 +94,7 @@ export class NotificationSound {
         gain.connect(context.destination);
         const startsAt = Math.round((context.currentTime + offset) * 1_000) / 1_000;
         gain.gain.setValueAtTime(0.0001, startsAt);
-        gain.gain.exponentialRampToValueAtTime(0.12, startsAt + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.12 * volume, startsAt + 0.015);
         gain.gain.exponentialRampToValueAtTime(0.0001, startsAt + 0.15);
         oscillator.start(startsAt);
         oscillator.stop(startsAt + 0.16);

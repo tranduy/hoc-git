@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { NotificationSound } from "./notification-sound.js";
 
 export interface AlertSound {
-  play(): Promise<void> | void;
+  play(volume?: number): Promise<void> | void;
   dispose(): void;
 }
 
@@ -11,10 +11,12 @@ const createNotificationSound = (): AlertSound => new NotificationSound();
 export function useNotificationSound(factory: () => AlertSound = createNotificationSound): Pick<AlertSound, "play"> {
   const active = useRef<AlertSound | null>(null);
   const pending = useRef(false);
+  const pendingVolume = useRef<number | undefined>(undefined);
   const facade = useRef<Pick<AlertSound, "play">>({
-    play: () => {
-      if (active.current !== null) return active.current.play();
+    play: (volume) => {
+      if (active.current !== null) return active.current.play(volume);
       pending.current = true;
+      pendingVolume.current = volume;
     }
   });
 
@@ -23,7 +25,8 @@ export function useNotificationSound(factory: () => AlertSound = createNotificat
     active.current = sound;
     if (pending.current) {
       pending.current = false;
-      void sound.play();
+      void sound.play(pendingVolume.current);
+      pendingVolume.current = undefined;
     }
     return () => {
       if (active.current === sound) active.current = null;

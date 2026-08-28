@@ -53,6 +53,23 @@ describe("NotificationSound", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("scales the alert gain to the requested volume and stays silent at zero", async () => {
+    const start = vi.fn();
+    const exponentialRampToValueAtTime = vi.fn();
+    const create = vi.fn(() => ({ state: "running", resume: vi.fn(), currentTime: 1,
+      createGain: () => ({ gain: { setValueAtTime: vi.fn(), exponentialRampToValueAtTime }, connect: vi.fn() }),
+      destination: {}, createOscillator: () => ({ type: "sine" as OscillatorType, frequency: { value: 0 },
+        connect: vi.fn(), start, stop: vi.fn() }) }));
+    const sound = new NotificationSound(create);
+
+    window.dispatchEvent(new Event("pointerdown"));
+    await sound.play(0.25);
+    expect(exponentialRampToValueAtTime).toHaveBeenNthCalledWith(1, 0.03, 1.015);
+    await sound.play(0);
+    expect(start).toHaveBeenCalledTimes(8);
+    sound.dispose();
+  });
+
   it("plays a queued alert on the first user gesture when Chrome blocked autoplay at page load", async () => {
     const start = vi.fn();
     const resume = vi.fn(async () => undefined);

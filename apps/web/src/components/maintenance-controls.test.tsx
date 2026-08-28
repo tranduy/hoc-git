@@ -11,13 +11,13 @@ const status: MaintenanceStatus = { running: false, scheduledHour: 3, lastStarte
 afterEach(cleanup);
 
 describe("MaintenanceControls", () => {
-  it("keeps restart and notification controls in a fixed top action layer", async () => {
+  it("keeps restart and notification controls in an inline toolbar group", async () => {
     render(<MaintenanceControls api={{ status: async () => status, refreshAll: async () => status }} />);
     const bell = await screen.findByRole("button", { name: /thông báo hệ thống/i });
     const refresh = screen.getByRole("button", { name: "Reset sàn" });
 
-    expect(bell.closest(".maintenance-top-actions")).toBeTruthy();
-    expect(refresh.closest(".maintenance-top-actions")).toBeTruthy();
+    expect(bell.closest(".maintenance-inline-actions")).toBeTruthy();
+    expect(refresh.closest(".maintenance-inline-actions")).toBeTruthy();
     expect(refresh.querySelector(".maintenance-restart-icon")).toBeTruthy();
     expect(refresh.getAttribute("title")).toBe("Kiểm tra và khôi phục tất cả nguồn");
   });

@@ -11,7 +11,7 @@ import type { ProviderTicketApiLike, ProviderTicketIdentity } from "../api/provi
 import type { ProviderSourceRecoveryApiLike } from "../api/provider-source-recovery.js";
 import { filterAccountBackedSignals, LiveCatalogPage, selectBettingAccount } from "./live-catalog-page.js";
 import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
-import { SOUND_ENABLED_STORAGE_KEY } from "../watch/sound-settings.js";
+import { SOUND_VOLUME_STORAGE_KEY } from "../watch/sound-settings.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
 
 const account: AccountStatus = {
@@ -81,19 +81,18 @@ describe("LiveCatalogPage", () => {
     expect((prematch as HTMLInputElement).checked).toBe(false);
     expect(window.localStorage.getItem("tool-chenh.live-catalog.event-phase.v1")).toBe("LIVE");
   });
-  it("keeps the notification sound toggle in browser storage", async () => {
+  it("keeps the notification volume slider in browser storage", async () => {
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={catalogApi} />);
-    const toggle = await screen.findByRole("button", { name: "Âm thanh: Bật" });
-    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    const slider = await screen.findByRole("slider", { name: "Âm lượng thông báo" });
+    expect((slider as HTMLInputElement).value).toBe("100");
 
-    fireEvent.click(toggle);
-    expect(toggle.textContent).toContain("Âm thanh: Tắt");
-    expect(toggle.getAttribute("aria-pressed")).toBe("false");
-    expect(window.localStorage.getItem(SOUND_ENABLED_STORAGE_KEY)).toBe("false");
+    fireEvent.change(slider, { target: { value: "35" } });
+    expect((slider as HTMLInputElement).value).toBe("35");
+    expect(window.localStorage.getItem(SOUND_VOLUME_STORAGE_KEY)).toBe("35");
 
     cleanup();
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={catalogApi} />);
-    expect(await screen.findByRole("button", { name: "Âm thanh: Tắt" })).toBeTruthy();
+    expect((await screen.findByRole("slider", { name: "Âm lượng thông báo" }) as HTMLInputElement).value).toBe("35");
   });
 
   it("keeps diagnostics compact without empty monitoring panels", async () => {
@@ -101,7 +100,8 @@ describe("LiveCatalogPage", () => {
 
     const workspace = await screen.findByRole("region", { name: "Live comparison workspace" });
     const stake = screen.getByRole("region", { name: "Cấu hình tiền cược" });
-    expect(screen.getByRole("heading", { level: 1 }).closest(".page-header")?.classList.contains("page-header--compact")).toBe(true);
+    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+    expect(document.querySelector(".page-header")).toBeNull();
     expect(screen.queryByText("Monitoring exact two-book prices")).toBeNull();
     expect(screen.queryByRole("region", { name: "Recent observed price movements" })).toBeNull();
     expect(stake.classList.contains("stake-panel--compact")).toBe(true);
@@ -119,7 +119,9 @@ describe("LiveCatalogPage", () => {
     expect(toolbar.firstElementChild).toBe(providers);
     expect(providers.nextElementSibling).toBe(phases);
     expect(phases?.nextElementSibling).toBe(actions);
-    expect(within(actions).getByRole("button", { name: "Load live catalog" })).toBeTruthy();
+    expect(within(actions).getByRole("button", { name: "Reset sàn" })).toBeTruthy();
+    expect(within(actions).getByRole("button", { name: /Thông báo hệ thống/u })).toBeTruthy();
+    expect(within(actions).queryByRole("button", { name: "Load live catalog" })).toBeNull();
     expect(within(actions).getByRole("region", { name: /Cấu hình tiền cược/u })).toBeTruthy();
   });
 
@@ -1298,8 +1300,6 @@ describe("LiveCatalogPage", () => {
 
   it("exposes a single-provider price row as observation but never as an arbitrage", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Load live catalog" }));
-
     expect(await screen.findByRole("region", { name: "Live comparison workspace" })).toBeTruthy();
     expect(screen.getByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(screen.queryByText(/arbitrage verified/iu)).toBeNull();
@@ -1336,7 +1336,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
     fireEvent.click(await screen.findByRole("button", { name: "LoL" }));
     expect(screen.getByLabelText("SABA unavailable")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Load live catalog" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Load live catalog" })).toBeNull();
   });
 
   it("keeps a Football catalog error out of the fixed workspace when switching to LoL", async () => {
@@ -1495,7 +1495,7 @@ describe("LiveCatalogPage", () => {
 
     render(<LiveCatalogPage fixedCategory="FOOTBALL"
       accountApi={{ ...accountApi, refresh }} catalogApi={{ read: async () => pendingCatalog }} />);
-    await screen.findByText("Football Live Price Gaps");
+    await screen.findByRole("group", { name: "Books to compare" });
     await new Promise((resolve) => window.setTimeout(resolve, 25));
     expect(refresh).not.toHaveBeenCalled();
 
@@ -1833,6 +1833,6 @@ describe("LiveCatalogPage", () => {
 
     expect(await screen.findByText("No exact two-book comparison is currently available")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Observe Alpha vs Beta" })).toBeNull();
-    expect((screen.getByLabelText("Load live catalog") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByLabelText("Load live catalog")).toBeNull();
   });
 });
