@@ -142,6 +142,44 @@ describe("CmdHttpCatalogAdapter", () => {
       events: [{ providerEventId: "25299763", participantA: "Virtus Verona", participantB: "Calcio Schio" }] });
   });
 
+  it("keeps a response's other prices when one market closes inside it", () => {
+    // A book closes a market the moment it repositions, and says so with -999.
+    // Read as a schema fault, that discarded the whole response, so every other
+    // fixture in it kept the price it already had - which is what the ticket's
+    // own recheck kept reporting as CMD showing 0.84 against a page on 0.78.
+    const adapter = new CmdHttpCatalogAdapter();
+    const row = publicFullRow();
+    Object.assign(row, { 12: 2.5, 42: 0.9, 43: -0.98, 16: 1.5, 46: 0.85, 47: -0.93 });
+    adapter.decode(envelope({ ...fullResponse, t: 900, data: [], today: [row], f: [] }, 1));
+
+    const update = adapter.decode(envelope({ t: 901, a: true, data: [
+      [25_299_763, 1, 45, -999, -999, 1, 1, "S"],
+      [25_299_763, 1, 35, 0.8, -0.98, 1, 1, "S"]
+    ] }, 2, 3)).at(-1);
+    const catalog = update?.value as { markets: Array<{ marketType: string }>;
+      quotes: Array<{ marketType: string; rawOdds: string }> };
+
+    expect(update).toMatchObject({ evidenceMode: "DELTA" });
+    expect(catalog.quotes.filter((quote) => quote.marketType === "FT_TOTAL").map((quote) => quote.rawOdds))
+      .toEqual(["0.8", "-0.98"]);
+    expect(catalog.markets.filter((market) => market.marketType === "FH_TOTAL")).toEqual([]);
+  });
+
+  it("keeps a response's prices when it also carries a fixture this source never held", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    const row = publicFullRow();
+    Object.assign(row, { 12: 2.5, 42: 0.9, 43: -0.98 });
+    adapter.decode(envelope({ ...fullResponse, t: 900, data: [], today: [row], f: [] }, 1));
+
+    const update = adapter.decode(envelope({ t: 901, a: true, data: [
+      [99_999_999, 1, 35, 0.5, -0.6, 1, 1, "S"],
+      [25_299_763, 1, 35, 0.8, -0.98, 1, 1, "S"]
+    ] }, 2, 3)).at(-1);
+
+    expect((update?.value as { quotes: Array<{ rawOdds: string }> }).quotes.map((quote) => quote.rawOdds))
+      .toEqual(["0.8", "-0.98"]);
+  });
+
   it("rejects a late odds generation instead of rolling back the current baseline", () => {
     const adapter = new CmdHttpCatalogAdapter();
     adapter.decode(envelope(fullResponse, 1));

@@ -300,12 +300,16 @@ function retainPendingDeltaData(data: readonly unknown[][]): readonly unknown[][
     if (delta.length < 4 || delta[1] !== 1 || typeof delta[2] !== "number") return null;
     const eventId = providerId(delta[0]);
     const command = deltaCommands.get(delta[2]);
-    if (eventId === null || command === undefined) return null;
+    if (eventId === null) return null;
+    // An operation this source cannot characterize is held back on its own;
+    // dropping the batch around it loses the ones it can.
+    if (command === undefined) continue;
     if (command.kind === "LINE") {
-      if (finiteLine(delta[3]) === null) return null;
+      if (finiteLine(delta[3]) === null && !closedMarketValue(delta[3])) return null;
       retained.push([eventId, 1, delta[2], delta[3]]);
     } else {
-      if (delta.length < 5 || finiteOdd(delta[3]) === null || finiteOdd(delta[4]) === null) return null;
+      const usable = (value: unknown): boolean => finiteOdd(value) !== null || closedMarketValue(value);
+      if (delta.length < 5 || !usable(delta[3]) || !usable(delta[4])) return null;
       retained.push([eventId, 1, delta[2], delta[3], delta[4]]);
     }
   }
@@ -326,6 +330,27 @@ function publicText(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
   const text = value.replace(/\s+/gu, " ").trim();
   return text.length > 0 && text.length <= max ? text : null;
+}
+
+/**
+ * The value a row carries where a market is not on offer.
+ *
+ * A book closes a market the moment it repositions - every goal, every card -
+ * and says so with this. finiteOdd refuses it, being a reader of prices, and
+ * the delta carrying it was read as a schema fault: the whole response was
+ * discarded, so every other fixture's price in it stayed at what it had been.
+ *
+ * Measured 2026-08-29 through the ticket's own recheck: CMD showed 0.84 where
+ * its page had moved to 0.78, and SABA a price stamped at sequence 9 against a
+ * catalog then past 700. A price that a book has left behind, shown as current,
+ * is what an impossible edge is made of.
+ *
+ * Written through rather than skipped, because a market being gone is the fact
+ * of the moment: decodeRecord drops a market whose odds read this way, so the
+ * fixture loses that line instead of keeping the price it last had.
+ */
+function closedMarketValue(value: unknown): boolean {
+  return value === -999 || value === "-999";
 }
 
 function finiteOdd(value: unknown): string | null {
@@ -390,17 +415,23 @@ function applyDelta(rows: Map<string, RetainedRow>, delta: readonly unknown[],
   // Unknown commands are ordered authenticated evidence, but they are not a
   // schema error and must not prevent characterized siblings from applying.
   if (command === undefined) return "IGNORED";
+  // A response carries the whole page, and the page holds fixtures this source
+  // never retained. One of those is not a schema error either, and treating it
+  // as one discarded every price beside it in the same response.
   const retained = rows.get(eventId);
-  if (retained === undefined) return "INVALID";
+  if (retained === undefined) return "IGNORED";
   const next = [...retained.row];
   const positions = marketPositions[command.betType];
   if (command.kind === "LINE") {
-    if (finiteLine(delta[3]) === null) return "INVALID";
+    if (finiteLine(delta[3]) === null && !closedMarketValue(delta[3])) return "INVALID";
     next[positions.line] = delta[3];
   } else {
-    if (delta.length < 5 || finiteOdd(delta[3]) === null || finiteOdd(delta[4]) === null) return "INVALID";
-    next[positions.home] = delta[3];
-    next[positions.away] = delta[4];
+    if (delta.length < 5) return "INVALID";
+    const [home, away] = [delta[3], delta[4]];
+    const usable = (value: unknown): boolean => finiteOdd(value) !== null || closedMarketValue(value);
+    if (!usable(home) || !usable(away)) return "INVALID";
+    next[positions.home] = home;
+    next[positions.away] = away;
   }
   rows.set(eventId, { row: next, observedAtMs: envelope.observedAtMs,
     receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
