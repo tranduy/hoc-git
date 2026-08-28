@@ -108,6 +108,29 @@ nguyên (0, 1, 2…). Khoảng một phần ba kèo chấp của CMD rơi vào �
 "sửa"**: kèo chấp nguyên có thể hoà vốn hoàn tiền, mà bộ tính ROI chưa mô hình
 hoá hoàn tiền — tính vào là ra ROI sai.
 
+## Nối tên giải — tích luỹ qua nhiều ngày (commit `38421d5`)
+
+Luật vẫn là **2 trận khác nhau** mới nối hai tên giải — đó là thứ giữ cho một
+cúp không gộp vào một giải khi chúng chung đúng một trận. Chỗ sửa: hai trận đó
+**không cần cùng có mặt một lúc**.
+
+Đo 2026-08-29: 104/124 cặp giải có trận chung chỉ có **đúng một** trận, vì cửa
+sổ 24 giờ thường chỉ chứa một trận mỗi giải còn vòng sau cách vài ngày.
+
+- Bằng chứng đếm theo **trận khác nhau**, không phải số lần thấy. Một giải xuất
+  hiện nghìn lần với cùng một trận vẫn là một trận, vẫn không nối (có test chạy
+  50 lần chụp liên tiếp).
+- Chỉ nhớ **trận chưa đá** — trận đang đá báo thời điểm quan sát chứ không phải
+  giờ bóng nên không tự định danh lại được, và nó cũng không cần vì trận live
+  ghép được mà không cần nối tên giải.
+- Cặp đã chứng minh **sống qua lần tải lại trang**, lưu ở `localStorage`
+  (`comparisonCompetitionLinksV1`), nạp lại qua lệnh `RESET` của worker.
+
+**Kỳ vọng thực tế:** nạp lại 4,5 giờ ảnh chụp của một tối chỉ thêm **4 dòng** —
+vì trong một buổi chiều các trận trên bảng gần như không đổi. Lợi ích cộng dồn
+theo **ngày**, khi các giải đá vòng tiếp theo. Không có lưu trữ bền thì cơ chế
+này vô dụng, nên hai phần phải đi cùng nhau.
+
 ## VIỆC GẤP NHẤT — chưa làm
 
 **Bảng đang xếp vé ROI dương dựng từ dữ liệu cũ lên đầu.** Đo được: 4 vé dương
