@@ -131,6 +131,46 @@ vì trong một buổi chiều các trận trên bảng gần như không đổi
 theo **ngày**, khi các giải đá vòng tiếp theo. Không có lưu trữ bền thì cơ chế
 này vô dụng, nên hai phần phải đi cùng nhau.
 
+## Giá không cập nhật khi sàn đổi giá — CMD đã xong
+
+**Mô-típ: một dòng hỏng vứt cả lô.** `cmd-http-adapter.ts` áp delta theo lô; chỉ
+một dòng trả `INVALID` là `return []` — toàn bộ thay đổi giá của các trận khác
+trong cùng phản hồi mất sạch, `state.rows` giữ nguyên giá cũ. Sàn đã đổi giá, danh
+mục thì không.
+
+Hai dòng gây ra chuyện đó liên tục:
+
+- **`-999` là mã CMD dùng khi khoá kèo.** `finiteOdd` từ chối mọi `|x| > 1` nên
+  mỗi lần CMD khoá một kèo (mỗi bàn thắng, mỗi lần dời mức chấp) là vứt cả lô.
+- **Delta cho trận mình không giữ** (trang có nhiều môn khác) cũng thành `INVALID`.
+
+Đã sửa (`b0a5f6e`): `-999` **ghi thẳng vào hàng** để `decodeRecord` bỏ kèo đó đi
+(kèo biến mất thay vì giữ giá cũ); delta cho trận không giữ thì bỏ qua riêng nó.
+Lỗi cấu trúc thật vẫn vứt cả lô.
+
+**Đo sau khi sửa — giá đổi trong 30 giây:**
+
+| sàn | giá đổi | giữ nguyên | % |
+|---|---|---|---|
+| CMD | 149 | 343 | **30,3%** ✅ |
+| BTI | 195 | 451 | 30,2% ✅ |
+| SBOBET | 81 | 375 | 17,8% ✅ |
+| IM | 19 | 8.653 | **0,2%** ⚠ |
+| APSPORT | 0 | 2.828 | **0,0%** ❌ (vẫn báo FRESH) |
+| SABA | 0 | 1.660 | 0% (báo STALE, đúng) |
+
+## Cách đo lại nhanh
+
+`.run/dem-bti-thehe.mts` — chụp hai lần cách 30 giây, đếm `rawOdds` đổi theo
+`providerSelectionId`. Đây là phép đo trực tiếp nhất cho câu "sàn có cập nhật
+không".
+
+`%LOCALAPPDATA%\tool-chenh\logs\realtime-ticket-checks.jsonl` — mọi lần bấm
+"Kiểm tra giá thật", có `verificationStatus` (MATCH / MISMATCH / NOT_FOUND) kèm
+`directMethod`. **Lưu ý:** `NOT_FOUND` của APSPORT/SABA phần lớn là **đầu đọc
+DOM không thấy dòng** (trang chỉ dựng phần đang nhìn), không phải giá sai. Chỉ
+`NOT_FOUND` của sàn dùng `IN_PAGE_FETCH` mới là bằng chứng kèo đã biến mất thật.
+
 ## VIỆC GẤP NHẤT — chưa làm
 
 **Bảng đang xếp vé ROI dương dựng từ dữ liệu cũ lên đầu.** Đo được: 4 vé dương
