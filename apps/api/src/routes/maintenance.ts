@@ -1,8 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import type { SessionRefreshControl } from "../session-maintenance.js";
 
-const refreshableProviders = new Set(["SABA", "IM", "SBOBET", "APSPORT", "BTI"] as const);
-export type RefreshableProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
+const refreshableProviders = new Set(["SABA", "IM", "SBOBET", "APSPORT", "BTI", "CMD"] as const);
+export type RefreshableProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI" | "CMD";
+
+const PROVIDER_REFRESH_COOLDOWN_MS = 60_000;
 
 interface MaintenanceRouteOptions {
   readonly refreshProvider?: (provider: RefreshableProvider) => Promise<number>;
@@ -10,6 +12,7 @@ interface MaintenanceRouteOptions {
 
 export function registerMaintenanceRoutes(app: FastifyInstance, maintenance: SessionRefreshControl,
   options: MaintenanceRouteOptions = {}): void {
+  const lastProviderRefreshAtMs = new Map<RefreshableProvider, number>();
   app.addHook("preHandler", async (request, reply) => {
     if (!request.url.startsWith("/api/maintenance")) return;
     const ip = request.ip.replace(/^::ffff:/u, "");
@@ -28,7 +31,16 @@ export function registerMaintenanceRoutes(app: FastifyInstance, maintenance: Ses
       if (options.refreshProvider === undefined) {
         return reply.code(503).send({ error: "PROVIDER_REFRESH_UNAVAILABLE" });
       }
-      const requested = await options.refreshProvider(provider as RefreshableProvider);
+      const refreshableProvider = provider as RefreshableProvider;
+      const nowMs = Date.now();
+      const retryAfterMs = Math.max(0, (lastProviderRefreshAtMs.get(refreshableProvider) ??
+        Number.NEGATIVE_INFINITY) + PROVIDER_REFRESH_COOLDOWN_MS - nowMs);
+      if (retryAfterMs > 0) {
+        return reply.header("retry-after", String(Math.ceil(retryAfterMs / 1_000))).code(429)
+          .send({ error: "PROVIDER_REFRESH_COOLDOWN", retryAfterMs });
+      }
+      lastProviderRefreshAtMs.set(refreshableProvider, nowMs);
+      const requested = await options.refreshProvider(refreshableProvider);
       return reply.code(202).send({ provider, requested });
     });
 }

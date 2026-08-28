@@ -19,7 +19,8 @@ export interface ChromeBridgeRouteOptions {
   readonly controlPlane?: ChromeBridgeControlPlane;
   readonly now?: () => number;
   readonly currentFeed?: (sourceId: string) => ProviderFeedSnapshot | null;
-  readonly waitForFreshBaseline?: (sourceId: string, afterMs: number) => Promise<ProviderFeedSnapshot>;
+  readonly waitForFreshBaseline?: (sourceId: string, afterMs: number,
+    timeoutMs?: number) => Promise<ProviderFeedSnapshot>;
   /**
    * Chrome collects an extension service worker after roughly thirty seconds
    * without activity, and receiving a WebSocket message resets that timer. This
@@ -38,7 +39,8 @@ const FocusSelectionBodySchema = z.strictObject({
 });
 
 const SnapshotRequestBodySchema = z.strictObject({
-  sourceId: z.string().trim().min(1).max(128).regex(/^chrome:[A-Z]+:[0-9]+$/u)
+  sourceId: z.string().trim().min(1).max(128).regex(/^chrome:[A-Z]+:[0-9]+$/u),
+  timeoutMs: z.number().int().min(1_000).max(90_000).optional()
 });
 
 interface WritableBridgeSocket {
@@ -70,7 +72,9 @@ export function registerChromeBridgeRoute(
       return reply.code(202).send({ sourceId: parsed.data.sourceId, requested });
     }
     try {
-      const baseline = await options.waitForFreshBaseline(parsed.data.sourceId, requestedAtMs);
+      const baseline = parsed.data.timeoutMs === undefined
+        ? await options.waitForFreshBaseline(parsed.data.sourceId, requestedAtMs)
+        : await options.waitForFreshBaseline(parsed.data.sourceId, requestedAtMs, parsed.data.timeoutMs);
       if (baseline.state !== "LIVE" || baseline.sourceId !== parsed.data.sourceId ||
         baseline.activeGeneration === null || baseline.lastCompleteBaselineAtMs === null ||
         baseline.lastCompleteBaselineAtMs <= requestedAtMs ||

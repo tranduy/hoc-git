@@ -34,15 +34,27 @@ import { ProviderTicketApi, type ProviderTicketApiLike, type ProviderTicketIdent
 import type { TicketReportApiLike } from "../api/ticket-report.js";
 import { CatalogRevisionCoordinator } from "../catalog/catalog-revision-coordinator.js";
 import { ComparisonWorkerClient, type HydratedComparisonWorkerOutput } from "../catalog/comparison-worker-client.js";
+import { ProviderSourceRecoveryApi, type ProviderSourceRecoveryApiLike } from "../api/provider-source-recovery.js";
+import { ProviderSourceRecoveryCoordinator, type ProviderAutomaticRecoveryTiming, type ProviderRecoverySnapshot,
+  type RecoverableProvider } from "../watch/provider-source-recovery.js";
 
 const defaultAccountApi = new AccountApi();
 const defaultCatalogApi = new CatalogApi();
 const defaultProviderTicketApi = new ProviderTicketApi();
+const defaultProviderSourceRecoveryApi = new ProviderSourceRecoveryApi();
 const comparisonProviders: readonly ProviderId[] = PROVIDER_DISPLAY_ORDER.filter((provider) => provider !== "FABET");
+const recoverableProviders = comparisonProviders as readonly RecoverableProvider[];
+const idleRecoverySnapshot: ProviderRecoverySnapshot = {
+  phase: "IDLE", countdownKind: null, countdownSeconds: 0, automaticAttemptsRemaining: 1,
+  manualRetryAfterSeconds: 0, lastError: null
+};
 const catalogFailureGraceMs = 5_000;
 const executableProfileMaxAgeMs = 30_000;
 const catalogCategoryStorageKey = "tool-chenh.live-catalog.category.v1";
 const eventPhaseStorageKey = "tool-chenh.live-catalog.event-phase.v1";
+const recoveryAllowanceStoragePrefix = "tool-chenh.provider-source-recovery.auto.v1";
+const recoveryTimingStoragePrefix = "tool-chenh.provider-source-recovery.timing.v2";
+const recoveryManualDeadlineStoragePrefix = "tool-chenh.provider-source-recovery.manual.v1";
 type CatalogCategory = "FOOTBALL" | "LOL";
 
 /**
@@ -72,6 +84,59 @@ function catalogRevision(catalog: LiveCatalogResponse): string {
 
 function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
   return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function loadRecoveryAllowance(storage: Storage, provider: RecoverableProvider): 0 | 1 {
+  try { return storage.getItem(`${recoveryAllowanceStoragePrefix}.${provider}`) === "0" ? 0 : 1; }
+  catch { return 1; }
+}
+
+function saveRecoveryAllowance(storage: Storage, provider: RecoverableProvider, remaining: 0 | 1): void {
+  try { storage.setItem(`${recoveryAllowanceStoragePrefix}.${provider}`, String(remaining)); }
+  catch { /* Browser storage is optional; the in-memory guard remains active. */ }
+}
+
+function loadRecoveryTiming(storage: Storage,
+  provider: RecoverableProvider): ProviderAutomaticRecoveryTiming | null {
+  try {
+    const raw = storage.getItem(`${recoveryTimingStoragePrefix}.${provider}`);
+    if (raw === null) return null;
+    const value = JSON.parse(raw) as Partial<ProviderAutomaticRecoveryTiming>;
+    return typeof value.verificationDeadlineMs === "number" && Number.isFinite(value.verificationDeadlineMs) &&
+      value.verificationDeadlineMs >= 0 && typeof value.retryAtMs === "number" && Number.isFinite(value.retryAtMs) &&
+      value.retryAtMs >= 0
+      ? { verificationDeadlineMs: value.verificationDeadlineMs, retryAtMs: value.retryAtMs } : null;
+  } catch { return null; }
+}
+
+function saveRecoveryTiming(storage: Storage, provider: RecoverableProvider,
+  timing: ProviderAutomaticRecoveryTiming | null): void {
+  try {
+    const key = `${recoveryTimingStoragePrefix}.${provider}`;
+    if (timing === null) storage.removeItem(key);
+    else storage.setItem(key, JSON.stringify(timing));
+  } catch { /* Browser storage is optional; the in-memory lifecycle remains active. */ }
+}
+
+function loadRecoveryManualDeadline(storage: Storage, provider: RecoverableProvider): number {
+  try {
+    const value = Number(storage.getItem(`${recoveryManualDeadlineStoragePrefix}.${provider}`));
+    return Number.isFinite(value) && value >= 0 ? value : 0;
+  } catch { return 0; }
+}
+
+function saveRecoveryManualDeadline(storage: Storage, provider: RecoverableProvider, deadlineMs: number): void {
+  try { storage.setItem(`${recoveryManualDeadlineStoragePrefix}.${provider}`, String(deadlineMs)); }
+  catch { /* Browser storage is optional; the server also enforces this deadline. */ }
+}
+
+function storedRecoverySnapshot(storage: Storage, provider: RecoverableProvider,
+  nowMs: number): ProviderRecoverySnapshot {
+  const retryAtMs = loadRecoveryManualDeadline(storage, provider);
+  return retryAtMs <= nowMs ? idleRecoverySnapshot : {
+    ...idleRecoverySnapshot,
+    manualRetryAfterSeconds: Math.ceil((retryAtMs - nowMs) / 1_000)
+  };
 }
 
 function catalogReadPriority(id: string): number {
@@ -205,33 +270,77 @@ function matchCountLabel(count: number): string {
   return `${count} ${count === 1 ? "match" : "matches"}`;
 }
 
-function ProviderSelector({ accounts, eventCounts, loaded, selected, toggle }: {
+function formatRecoveryDuration(seconds: number | null): string {
+  const safeSeconds = Math.max(0, Math.ceil(seconds ?? 0));
+  const minutes = Math.floor(safeSeconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(safeSeconds % 60).padStart(2, "0")}`;
+}
+
+function ProviderReloadIcon({ provider, spinning }: {
+  readonly provider: RecoverableProvider;
+  readonly spinning: boolean;
+}) {
+  return <svg aria-hidden="true"
+    className={`provider-recovery-icon${spinning ? " provider-recovery-icon--spinning" : ""}`}
+    data-testid={`provider-reload-icon-${provider}`} viewBox="0 0 24 24">
+    <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" />
+  </svg>;
+}
+
+function ProviderSelector({ accounts, eventCounts, loaded, selected, toggle,
+  recoveryByProvider, manualRecover }: {
   readonly accounts: readonly CatalogSourceStatus[];
   readonly eventCounts: ReadonlyMap<string, number>;
   readonly loaded: boolean;
   readonly selected: ReadonlySet<string>;
   readonly toggle: (id: string) => void;
+  readonly recoveryByProvider?: ReadonlyMap<RecoverableProvider, ProviderRecoverySnapshot>;
+  readonly manualRecover?: (provider: RecoverableProvider) => void;
 }) {
-  return <fieldset className="provider-selector"><legend>Books to compare</legend>{comparisonProviders.flatMap((provider) => {
+  return <fieldset className="provider-selector provider-selector--grid"><legend>Books to compare</legend>{comparisonProviders.map((provider) => {
     const providerAccounts = accounts.filter((account) => account.provider === provider);
-    if (providerAccounts.length === 0) return [<label className="provider-selector__unavailable" key={provider}>
-      <input aria-label={`${provider} ${loaded ? "unavailable" : "loading"}`} disabled type="checkbox" />
-      <ProviderBrand compact provider={provider} /><span className="provider-selector__match-count">(0 matches)</span>
-      <small>{loaded ? "not connected" : "loading source…"}</small></label>];
     const activeAccounts = providerAccounts.filter((account) => account.sessionState === "ACTIVE");
-    if (activeAccounts.length === 0) {
-      const detail = providerAccounts.some((account) => account.reason === "EXPIRED") ? "nguồn hết hạn"
-        : providerAccounts.some((account) => account.reason === "SCHEMA_CHANGED") ? "lỗi schema nguồn"
-        : "nguồn không hoạt động";
-      const count = providerAccounts.reduce((total, account) => total + (eventCounts.get(account.id) ?? 0), 0);
-      return [<label className="provider-selector__unavailable" key={provider}>
-        <input aria-label={`${provider} ${detail}`} disabled type="checkbox" />
-        <ProviderBrand compact provider={provider} /><span className="provider-selector__match-count">({matchCountLabel(count)})</span>
-        <small>{detail}</small></label>];
-    }
-    return activeAccounts.map((account) => <label key={account.id}><input checked={selected.has(account.id)}
-      onChange={() => toggle(account.id)} type="checkbox" /><ProviderBrand compact label={account.alias} provider={account.provider} />
-      <span className="provider-selector__match-count">({matchCountLabel(eventCounts.get(account.id) ?? 0)})</span></label>);
+    const activeAccount = activeAccounts[0];
+    const detail = providerAccounts.length === 0 ? (loaded ? "not connected" : "loading source…")
+      : providerAccounts.some((account) => account.reason === "EXPIRED") ? "nguồn hết hạn"
+      : providerAccounts.some((account) => account.reason === "SCHEMA_CHANGED") ? "lỗi schema nguồn"
+      : "nguồn không hoạt động";
+    const availabilityLabel = providerAccounts.length === 0 ? (loaded ? "unavailable" : "loading") : detail;
+    const count = providerAccounts.reduce((total, account) => total + (eventCounts.get(account.id) ?? 0), 0);
+    const recoverableProvider = provider as RecoverableProvider;
+    const recovery = recoveryByProvider?.get(recoverableProvider);
+    const reloading = recovery?.phase === "RECOVERING" || recovery?.phase === "WAITING";
+    const cooldown = recovery?.manualRetryAfterSeconds ?? 0;
+    const buttonText = reloading ? "\u0110ang reload\u2026" : cooldown > 0 ? `Reload sau ${cooldown}s` : "Reload";
+    const recoveryStatus = recovery?.phase === "COUNTDOWN" && recovery.countdownKind === "INITIAL"
+      ? `T\u1ef1 reload sau ${formatRecoveryDuration(recovery.countdownSeconds)}`
+      : recovery?.phase === "COUNTDOWN" && recovery.countdownKind === "RETRY"
+        ? `Th\u1eed l\u1ea1i sau ${formatRecoveryDuration(recovery.countdownSeconds)}`
+        : recovery?.phase === "RECOVERING" || recovery?.phase === "WAITING"
+          ? `\u0110ang ph\u1ee5c h\u1ed3i \u00b7 ${formatRecoveryDuration(recovery.countdownSeconds)}` : null;
+    return <div className={`provider-selector__item${activeAccount === undefined
+      ? " provider-selector__item--unavailable" : " provider-selector__item--active"}`} key={provider}>
+      {activeAccount === undefined ? <label className="provider-selector__unavailable">
+        <input aria-label={`${provider} ${availabilityLabel}`} checked={false} disabled readOnly type="checkbox" />
+        <ProviderBrand compact provider={provider} />
+        <span className="provider-selector__match-count">({matchCountLabel(count)})</span>
+        <small>{detail}</small>
+      </label> : <label><input checked={selected.has(activeAccount.id)}
+        onChange={() => toggle(activeAccount.id)} type="checkbox" />
+        <ProviderBrand compact label={activeAccount.alias} provider={activeAccount.provider} />
+        <span className="provider-selector__match-count">({matchCountLabel(count)})</span>
+      </label>}
+      <button aria-label={reloading ? `\u0110ang reload ${provider}` : `Reload ${provider}`}
+        className={`provider-recovery-button${reloading ? " provider-recovery-button--reloading" : ""}`}
+        disabled={!loaded || reloading || cooldown > 0}
+        onClick={() => manualRecover?.(recoverableProvider)}
+        title={recovery?.lastError ?? (cooldown > 0 ? `Reload sau ${cooldown}s` : `Reload ${provider}`)} type="button">
+        <ProviderReloadIcon provider={recoverableProvider} spinning={reloading} /><span>{buttonText}</span>
+      </button>
+      <small aria-hidden={recoveryStatus === null ? "true" : undefined}
+        className={`provider-recovery-status${recoveryStatus === null ? " provider-recovery-status--empty" : ""}`}
+        role={recoveryStatus === null ? undefined : "status"}>{recoveryStatus ?? "\u00a0"}</small>
+    </div>;
   })}</fieldset>;
 }
 
@@ -367,12 +476,14 @@ function LagSignalToast({ signal }: { readonly signal: LagSignal | null }) {
 
 export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = defaultCatalogApi,
   catalogSourceApi, providerPreflightApi = defaultProviderPreflightApi,
-  providerTicketApi = defaultProviderTicketApi, ticketReportApi, fixedCategory, catalogRealtime }: {
+  providerTicketApi = defaultProviderTicketApi, providerSourceRecoveryApi = defaultProviderSourceRecoveryApi,
+  ticketReportApi, fixedCategory, catalogRealtime }: {
   readonly accountApi?: AccountApiLike;
   readonly catalogApi?: CatalogApiLike;
   readonly catalogSourceApi?: CatalogSourceApiLike;
   readonly providerPreflightApi?: ProviderPreflightApiLike;
   readonly providerTicketApi?: ProviderTicketApiLike;
+  readonly providerSourceRecoveryApi?: ProviderSourceRecoveryApiLike;
   readonly ticketReportApi?: TicketReportApiLike;
   readonly fixedCategory?: CatalogCategory;
   readonly catalogRealtime?: CatalogRealtimeFeed;
@@ -397,6 +508,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     new URLSearchParams(window.location.search).get("ticket"));
   const [profitAlerts, setProfitAlerts] = useState<readonly ProfitAlert[]>([]);
   const [nowMs, setNowMs] = useState(Date.now());
+  const [, setRecoveryRevision] = useState(0);
   const [baseStake, setBaseStake] = useState(() => loadBaseStake(window.localStorage));
   const [baseStakeInput, setBaseStakeInput] = useState(baseStake);
   const [stakeError, setStakeError] = useState<string | null>(null);
@@ -421,6 +533,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const retryAfterMs = useRef(new Map<string, number>());
   const comparisonWorkerRef = useRef<ComparisonWorkerClient | null>(null);
   const revisionCoordinatorRef = useRef<CatalogRevisionCoordinator | null>(null);
+  const providerSourceRecoveryApiRef = useRef(providerSourceRecoveryApi);
+  providerSourceRecoveryApiRef.current = providerSourceRecoveryApi;
+  const sourceRecoveryCoordinatorRef = useRef<ProviderSourceRecoveryCoordinator | null>(null);
   const latestPreflightGeneration = useRef(0);
   const requested = useRef({ account: new URLSearchParams(window.location.search).get("account"),
     event: new URLSearchParams(window.location.search).get("event"),
@@ -428,6 +543,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const autoLoaded = useRef(false);
   const sourcesInitialized = useRef(false);
   const categorySources = useMemo(() => sources.filter((source) => source.category === category), [sources, category]);
+  const recoveryByProvider = new Map(recoverableProviders.map((provider) =>
+    [provider, sourceRecoveryCoordinatorRef.current?.snapshot(provider) ??
+      storedRecoverySnapshot(window.localStorage, provider, Date.now())] as const));
   const categorySelectedIds = useMemo(() => categorySources.filter((source) => selectedIds.has(source.id))
     .map((source) => source.id), [categorySources, selectedIds]);
 
@@ -522,6 +640,26 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     return () => {
       if (revisionCoordinatorRef.current === coordinator) revisionCoordinatorRef.current = null;
       coordinator.stop();
+    };
+  }, []);
+
+  useEffect(() => {
+    const coordinator = new ProviderSourceRecoveryCoordinator({
+      recover: (provider, mode) => providerSourceRecoveryApiRef.current.recover(provider, mode),
+      onChange: () => setRecoveryRevision((revision) => revision + 1),
+      loadAutomaticAttemptsRemaining: (provider) => loadRecoveryAllowance(window.localStorage, provider),
+      saveAutomaticAttemptsRemaining: (provider, remaining) =>
+        saveRecoveryAllowance(window.localStorage, provider, remaining),
+      loadAutomaticTiming: (provider) => loadRecoveryTiming(window.localStorage, provider),
+      saveAutomaticTiming: (provider, timing) => saveRecoveryTiming(window.localStorage, provider, timing),
+      loadManualRetryAtMs: (provider) => loadRecoveryManualDeadline(window.localStorage, provider),
+      saveManualRetryAtMs: (provider, deadlineMs) =>
+        saveRecoveryManualDeadline(window.localStorage, provider, deadlineMs)
+    });
+    sourceRecoveryCoordinatorRef.current = coordinator;
+    return () => {
+      if (sourceRecoveryCoordinatorRef.current === coordinator) sourceRecoveryCoordinatorRef.current = null;
+      coordinator.dispose();
     };
   }, []);
 
@@ -639,6 +777,10 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     let accountRetryTimer: number | undefined;
     const activateSources = (nextSources: readonly CatalogSourceStatus[]): void => {
       if (cancelled) return;
+      if (catalogSourceApi !== undefined) {
+        sourceRecoveryCoordinatorRef.current?.update(nextSources.filter((source) =>
+          source.category === "FOOTBALL"));
+      }
       const previousSources = sourcesRef.current;
       sourcesRef.current = nextSources;
       setSources(nextSources); setAccountsLoaded(true);
@@ -871,39 +1013,42 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       <h1>{category === "FOOTBALL" ? "Football Live Price Gaps" : "LoL Live Price Gaps"}</h1>
     </header>
     <section className="catalog-toolbar" aria-label="Catalog controls">
-      {fixedCategory === undefined && <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
-        onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
-        onClick={() => changeCategory("LOL")} type="button">LoL</button></div>}
+      <ProviderSelector accounts={categorySources} eventCounts={eventCounts} loaded={accountsLoaded}
+        manualRecover={(provider) => { void sourceRecoveryCoordinatorRef.current?.manual(provider); }}
+        recoveryByProvider={recoveryByProvider} selected={selectedIds} toggle={toggle} />
       <fieldset className="event-phase-filter" aria-label="Thời điểm trận">
         <legend>Trận</legend>
         <label><input checked={eventPhases.has("LIVE")} onChange={() => toggleEventPhase("LIVE")} type="checkbox" /> Live</label>
         <label><input checked={eventPhases.has("PREMATCH")} onChange={() => toggleEventPhase("PREMATCH")} type="checkbox" /> Pre-match</label>
       </fieldset>
-      <ProviderSelector accounts={categorySources} eventCounts={eventCounts} loaded={accountsLoaded}
-        selected={selectedIds} toggle={toggle} />
-      <MaintenanceControls />
-      <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true, category)} type="button">
-        {busy ? "Loading…" : "Compare selected books"}</button>
-      <button aria-label={`Âm thanh: ${soundEnabled ? "Bật" : "Tắt"}`} aria-pressed={soundEnabled}
-        className="sound-toggle" onClick={() => setSoundEnabled((current) => {
-          const next = !current; saveSoundEnabled(window.localStorage, next); return next;
-        })} type="button">{soundEnabled ? "🔊 Âm thanh: Bật" : "🔇 Âm thanh: Tắt"}</button>
-      <section aria-label="Cấu hình tiền cược" className="stake-panel stake-panel--compact">
-        <label className="stake-config">Tiền cơ bản (VND)<input aria-label="Base stake for every match (VND)"
-          inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
-            const value = event.currentTarget.value; setBaseStakeInput(value);
-            if (saveBaseStake(window.localStorage, value)) {
-              invalidateVerifiedTickets(); setBaseStake(value); setStakeError(null);
-            }
-            else setStakeError("Số tiền tối thiểu 30.000 VND và phải chia hết cho 1.000 VND.");
-          }} />{stakeError !== null && <small role="alert">{stakeError}</small>}</label>
+      <section aria-label="Catalog actions" className="catalog-toolbar__actions">
+        {fixedCategory === undefined && <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
+          onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
+          onClick={() => changeCategory("LOL")} type="button">LoL</button></div>}
+        <MaintenanceControls />
+        <button aria-label="Load live catalog" disabled={busy || categorySelectedIds.length === 0} onClick={() => void loadIds(categorySelectedIds, true, category)} type="button">
+          {busy ? "Loading…" : "Compare selected books"}</button>
+        <button aria-label={`Âm thanh: ${soundEnabled ? "Bật" : "Tắt"}`} aria-pressed={soundEnabled}
+          className="sound-toggle" onClick={() => setSoundEnabled((current) => {
+            const next = !current; saveSoundEnabled(window.localStorage, next); return next;
+          })} type="button">{soundEnabled ? "🔊 Âm thanh: Bật" : "🔇 Âm thanh: Tắt"}</button>
+        <section aria-label="Cấu hình tiền cược" className="stake-panel stake-panel--compact">
+          <label className="stake-config">Tiền cơ bản (VND)<input aria-label="Base stake for every match (VND)"
+            inputMode="numeric" min="30000" step="1000" type="number" value={baseStakeInput} onChange={(event) => {
+              const value = event.currentTarget.value; setBaseStakeInput(value);
+              if (saveBaseStake(window.localStorage, value)) {
+                invalidateVerifiedTickets(); setBaseStake(value); setStakeError(null);
+              }
+              else setStakeError("Số tiền tối thiểu 30.000 VND và phải chia hết cho 1.000 VND.");
+            }} />{stakeError !== null && <small role="alert">{stakeError}</small>}</label>
+        </section>
       </section>
     </section>
     <ProfitToastStack alerts={profitAlerts} enabled={soundEnabled} sound={notificationSound} />
     <section aria-label="Live comparison workspace" className={selectedDetail === null ?
       "catalog-workspace catalog-workspace--stable" :
       "catalog-workspace catalog-workspace--stable catalog-workspace--selected"}>
-      <div className="catalog-workspace__list catalog-workspace__list--locked" onScroll={(event) => {
+      <div className="catalog-workspace__list catalog-workspace__list--locked app-scrollbar" onScroll={(event) => {
         matchListAnchorRef.current = captureScrollAnchor(event.currentTarget);
       }} ref={matchListRef}><div className="catalog-workspace__list-heading">
         <h2>Exact two-book matches</h2>
@@ -948,7 +1093,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
           </div></header>
         </article>;
       })}</div></div>
-      <aside aria-label="Selected match detail" className="catalog-workspace__detail">{selectedDetail ??
+      <aside aria-label="Selected match detail" className="catalog-workspace__detail app-scrollbar">{selectedDetail ??
         (rankedEvents[0] === undefined ? <div className="catalog-workspace__empty"><h2>Waiting for an exact pair</h2>
           <p>The balance panel appears only after the same event, market, line and opposing outcomes exist at two books.</p></div>
           : <SelectedTicketBalance ranked={rankedEvents[0]} />)}</aside>

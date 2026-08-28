@@ -37,6 +37,25 @@ describe("maintenance routes", () => {
     await app.close();
   });
 
+  it("accepts CMD as a targeted provider and rate-limits repeated manual refresh clicks", async () => {
+    const refreshProvider = vi.fn(async () => 1);
+    const app = Fastify();
+    registerMaintenanceRoutes(app, new SessionRefreshControl({ refresh: async () => undefined }), {
+      refreshProvider
+    });
+
+    const first = await app.inject({ method: "POST", url: "/api/maintenance/refresh-provider/CMD" });
+    const repeated = await app.inject({ method: "POST", url: "/api/maintenance/refresh-provider/CMD" });
+
+    expect(first.statusCode).toBe(202);
+    expect(first.json()).toEqual({ provider: "CMD", requested: 1 });
+    expect(repeated.statusCode).toBe(429);
+    expect(repeated.json()).toMatchObject({ error: "PROVIDER_REFRESH_COOLDOWN" });
+    expect(repeated.json().retryAfterMs).toBeGreaterThan(59_000);
+    expect(refreshProvider).toHaveBeenCalledExactlyOnceWith("CMD");
+    await app.close();
+  });
+
   it("rejects an unknown targeted provider", async () => {
     const app = Fastify();
     registerMaintenanceRoutes(app, new SessionRefreshControl({ refresh: async () => undefined }), {

@@ -144,13 +144,14 @@ interface TargetedProviderRefreshOptions {
   readonly now?: () => number;
   readonly baselineTimeoutMs?: number;
   readonly restore?: (lobby: ChromeLobbyId) => number;
-  readonly deliver: (provider: RefreshableProvider, beforeDelivery: () => void) => Promise<number>;
+  readonly deliver: (provider: Exclude<RefreshableProvider, "CMD">,
+    beforeDelivery: () => void) => Promise<number>;
   readonly waitForFreshBaseline: (accountId: string, afterMs: number,
     timeoutMs: number) => Promise<ProviderFeedSnapshot>;
 }
 
 const TARGETED_PROVIDER_LOBBIES = {
-  SABA: "SABA", IM: "IM", SBOBET: "KSPORT", APSPORT: "TSPORT", BTI: "BTI"
+  SABA: "SABA", IM: "IM", SBOBET: "KSPORT", APSPORT: "TSPORT", BTI: "BTI", CMD: "CMD"
 } as const satisfies Record<RefreshableProvider, ChromeLobbyId>;
 const RESTORE_FIRST_PROVIDERS = new Set<RefreshableProvider>(["SABA", "APSPORT"]);
 
@@ -177,6 +178,14 @@ export function createTargetedProviderRefresh(options: TargetedProviderRefreshOp
       const lobby = TARGETED_PROVIDER_LOBBIES[provider];
       acquire(accountId);
       try {
+        if (provider === "CMD") {
+          if (options.restore === undefined) throw new Error("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
+          const restoreStartedAtMs = now();
+          const restored = options.restore("CMD");
+          if (restored <= 0) throw new Error("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
+          await confirmTargetedBaseline(options, accountId, "CMD", restoreStartedAtMs, deadlineAtMs, now);
+          return restored;
+        }
         if (RESTORE_FIRST_PROVIDERS.has(provider) && options.restore !== undefined) {
           const restoreStartedAtMs = now();
           let restored = 0;
@@ -640,10 +649,11 @@ export async function startServer(env: Readonly<Record<string, string | undefine
           const identity = chromeBridgeSourceIdentity(sourceId);
           return identity === null ? null : providerFeeds.snapshot(identity.accountId);
         } }),
-        ...(providerFeeds === null ? {} : { waitForFreshBaseline: async (sourceId: string, afterMs: number) => {
+        ...(providerFeeds === null ? {} : { waitForFreshBaseline: async (sourceId: string, afterMs: number,
+          timeoutMs = 90_000) => {
           const identity = chromeBridgeSourceIdentity(sourceId);
           if (identity === null) throw new Error("SOURCE_NOT_ATTACHED");
-          return providerFeeds.waitForFreshBaseline(identity.accountId, afterMs, 90_000);
+          return providerFeeds.waitForFreshBaseline(identity.accountId, afterMs, timeoutMs);
         } }),
         installationKey: chromeBridgeKey,
         openProviderTicket: isOpenProviderTicketEnabled(env.ENABLE_OPEN_PROVIDER_TICKET)

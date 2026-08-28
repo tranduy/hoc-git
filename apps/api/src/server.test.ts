@@ -11,7 +11,8 @@ import * as serverModule from "./server.js";
 const SABA = "catalog-source:SABA:FOOTBALL";
 const sabaPolicy = providerFeedPolicies.get(SABA)!;
 const APSPORT = "catalog-source:APSPORT:FOOTBALL";
-type TestRefreshableProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI";
+const CMD = "catalog-source:CMD:FOOTBALL";
+type TestRefreshableProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI" | "CMD";
 
 function recoveryRequest(accountId = SABA): ProviderRecoveryRequest {
   return { accountId, stage: "SOFT", attempt: 1, requestedAtMs: 1_000 };
@@ -228,6 +229,20 @@ describe("targeted manual provider refresh ownership", () => {
     expect(restore).toHaveBeenCalledExactlyOnceWith(lobby);
     expect(deliver).not.toHaveBeenCalled();
     expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(accountId, 1_000, 2_500);
+  });
+
+  it("restores CMD without trying to acquire a Fabet launch and confirms only a new baseline", async () => {
+    const restore = vi.fn(() => 1);
+    const deliver = vi.fn(async () => 1);
+    const waitForFreshBaseline = vi.fn(async () => liveSnapshot(CMD, 1_001, "chrome:CMD:7"));
+    const manual = factory({ now: () => 1_000, baselineTimeoutMs: 5_000,
+      restore, deliver, waitForFreshBaseline });
+
+    await expect(manual.refresh("CMD")).resolves.toBe(1);
+
+    expect(restore).toHaveBeenCalledExactlyOnceWith("CMD");
+    expect(deliver).not.toHaveBeenCalled();
+    expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(CMD, 1_000, 5_000);
   });
 
   it("falls back to a fresh SABA launch with its own delivery-bound cutoff when restore is undelivered",

@@ -23,6 +23,7 @@ import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent, buil
   collectApsportCatalog, collectApsportEventDetail, type ApsportCatalogBatch,
   type ApsportCatalogPageRequest, type ApsportRequestTemplate, type CollectApsportCatalogOptions,
   type CollectApsportEventDetailOptions } from "./apsport-catalog-refresh.js";
+import type { ApsportPageHealth } from "./apsport-page-recovery.js";
 
 const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
@@ -157,6 +158,7 @@ export interface NetworkObserverDependencies {
   readonly workScheduler?: ProviderWorkScheduler;
   readonly collectApsportCatalog?: (options: CollectApsportCatalogOptions) => Promise<void>;
   readonly collectApsportEventDetail?: (options: CollectApsportEventDetailOptions) => Promise<Record<string, unknown> | null>;
+  readonly onApsportPageHealth?: (health: ApsportPageHealth) => void;
 }
 
 type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
@@ -957,6 +959,7 @@ export class NetworkObserver {
   readonly #workScheduler: ProviderWorkScheduler;
   readonly #collectApsportCatalog: NonNullable<NetworkObserverDependencies["collectApsportCatalog"]>;
   readonly #collectApsportEventDetail: NonNullable<NetworkObserverDependencies["collectApsportEventDetail"]>;
+  readonly #onApsportPageHealth: NetworkObserverDependencies["onApsportPageHealth"];
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
   readonly #tabGenerations = new Map<number, number>();
@@ -1006,7 +1009,7 @@ export class NetworkObserver {
   readonly #apsportLastRefreshStartedAtMs = new Map<string, number>();
   readonly #apsportRefreshesInFlight = new Set<string>();
   readonly #apsportActiveCatalogs = new Map<string, { readonly generation: string;
-    readonly prematchWindowHours: number }>();
+    readonly prematchWindowHours: number; readonly rosterCount: number }>();
   readonly #apsportEventDetailTimers = new Map<string, { readonly sourceId: string;
     readonly timer: ReturnType<typeof setTimeout> }>();
   readonly #apsportEventDetailLastAtMs = new Map<string, number>();
@@ -1083,6 +1086,7 @@ export class NetworkObserver {
     this.#workScheduler = dependencies.workScheduler ?? new ProviderWorkScheduler();
     this.#collectApsportCatalog = dependencies.collectApsportCatalog ?? collectApsportCatalog;
     this.#collectApsportEventDetail = dependencies.collectApsportEventDetail ?? collectApsportEventDetail;
+    this.#onApsportPageHealth = dependencies.onApsportPageHealth;
     if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
       throw new Error("OBSERVER_SESSION_ID_INVALID");
     }
@@ -1354,6 +1358,14 @@ export class NetworkObserver {
     const value = nestedValue(evaluation, "result", "value");
     if (typeof value !== "string" || value.length === 0 || value.length > 900) return;
     this.#lastCatalogShape.set(source.sourceId, value.replace(/[^ -~]/gu, ""));
+    const active = this.#apsportActiveCatalogs.get(source.sourceId);
+    if (active === undefined || this.#onApsportPageHealth === undefined) return;
+    try {
+      const shape: unknown = JSON.parse(value);
+      if (!isRecord(shape) || !Number.isSafeInteger(shape.matchRows) || Number(shape.matchRows) < 0) return;
+      this.#onApsportPageHealth({ sourceId: source.sourceId, tabId: source.tabId,
+        rosterCount: active.rosterCount, matchRows: Number(shape.matchRows) });
+    } catch { /* A malformed shape is diagnostic-only and cannot trigger recovery. */ }
   }
 
   async #selectTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
@@ -2488,7 +2500,8 @@ export class NetworkObserver {
         isCurrent: templateIsCurrent, onRoster: async (batch) => {
           await emitBatch(batch);
           if (templateIsCurrent() && batch.complete) this.#apsportActiveCatalogs.set(source.sourceId,
-            { generation: batch.generation, prematchWindowHours: batch.prematchWindowHours });
+            { generation: batch.generation, prematchWindowHours: batch.prematchWindowHours,
+              rosterCount: batch.records.length });
         }, onDetail: emitBatch,
         detailBatchSize: 5, detailDelayMs: APSPORT_DETAIL_DELAY_MS });
       if (templateIsCurrent()) this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_DONE");
@@ -3294,7 +3307,7 @@ export class NetworkObserver {
     // a heartbeat must not start the old virtualized-DOM sweep or reconnect a
     // working provider socket.
     if (source.lobby === "TSPORT") {
-      void this.#recordTsportCatalogShape(source).catch(() => undefined);
+      await this.#recordTsportCatalogShape(source).catch(() => undefined);
     }
   }
 

@@ -533,7 +533,7 @@ describe("Chrome bridge route", () => {
 
     const recovery = nextMessage(socket);
     const response = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
-      payload: { sourceId: "chrome:CMD:7" } });
+      payload: { sourceId: "chrome:CMD:7", timeoutMs: 10_000 } });
     expect(response.statusCode).toBe(202);
     expect(response.json()).toEqual({ sourceId: "chrome:CMD:7", requested: 1 });
     await expect(recovery).resolves.toEqual({ version: 1, kind: "REQUEST_SNAPSHOT",
@@ -573,12 +573,12 @@ describe("Chrome bridge route", () => {
     const recovery = nextMessage(socket);
 
     const response = await app.inject({ method: "POST", url: "/api/chrome-bridge/request-snapshot",
-      payload: { sourceId: "chrome:CMD:7" } });
+      payload: { sourceId: "chrome:CMD:7", timeoutMs: 10_000 } });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ sourceId: "chrome:CMD:7", requested: 1, baseline: {
       sourceEpoch: "observer:2", activeGeneration: "cmd:200", lastCompleteBaselineAtMs: 2_004
     } });
-    expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith("chrome:CMD:7", 2_000);
+    expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith("chrome:CMD:7", 2_000, 10_000);
     await expect(recovery).resolves.toMatchObject({ kind: "REQUEST_SNAPSHOT", sourceId: "chrome:CMD:7" });
     socket.terminate();
     await app.close();

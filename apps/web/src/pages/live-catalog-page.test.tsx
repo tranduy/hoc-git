@@ -8,6 +8,7 @@ import type { CatalogApiLike, LiveCatalogResponse } from "../api/catalog.js";
 import type { CatalogSourceApiLike } from "../api/catalog-sources.js";
 import type { ProviderPreflightApiLike } from "../api/provider-preflight.js";
 import type { ProviderTicketApiLike, ProviderTicketIdentity } from "../api/provider-ticket.js";
+import type { ProviderSourceRecoveryApiLike } from "../api/provider-source-recovery.js";
 import { filterAccountBackedSignals, LiveCatalogPage, selectBettingAccount } from "./live-catalog-page.js";
 import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
 import { SOUND_ENABLED_STORAGE_KEY } from "../watch/sound-settings.js";
@@ -107,12 +108,29 @@ describe("LiveCatalogPage", () => {
     expect(workspace).toBeTruthy();
   });
 
+  it("places the full-width provider selector above one grouped controls row", async () => {
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={catalogApi} />);
+
+    const toolbar = await screen.findByRole("region", { name: "Catalog controls" });
+    const providers = screen.getByRole("group", { name: "Books to compare" });
+    const phases = toolbar.querySelector(".event-phase-filter");
+    const actions = screen.getByRole("region", { name: "Catalog actions" });
+
+    expect(toolbar.firstElementChild).toBe(providers);
+    expect(providers.nextElementSibling).toBe(phases);
+    expect(phases?.nextElementSibling).toBe(actions);
+    expect(within(actions).getByRole("button", { name: "Load live catalog" })).toBeTruthy();
+    expect(within(actions).getByRole("region", { name: /Cấu hình tiền cược/u })).toBeTruthy();
+  });
+
   it("uses a fixed-height workspace when no exact pair is available", async () => {
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={catalogApi} />);
 
     const workspace = await screen.findByRole("region", { name: "Live comparison workspace" });
     expect(workspace.classList.contains("catalog-workspace--stable")).toBe(true);
     expect(workspace.querySelector(".catalog-workspace__list--locked")).toBeTruthy();
+    expect(workspace.querySelector(".catalog-workspace__list.app-scrollbar")).toBeTruthy();
+    expect(workspace.querySelector(".catalog-workspace__detail.app-scrollbar")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Observe Alpha vs Beta" })).toBeNull();
   });
 
@@ -122,6 +140,43 @@ describe("LiveCatalogPage", () => {
     await screen.findByRole("img", { name: "CMD logo" });
     expect(screen.getAllByRole("img", { name: "CMD logo" }).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("CMD main")).toBeTruthy();
+  });
+
+  it("shows six evenly grouped provider reload controls and animates the active provider being reloaded", async () => {
+    const active: CatalogSourceStatus = {
+      id: "catalog-source:CMD:FOOTBALL", alias: "CMD", provider: "CMD", category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+    };
+    let finish!: () => void;
+    const recoveryRequest = new Promise<void>((resolve) => { finish = resolve; });
+    const recover = vi.fn<ProviderSourceRecoveryApiLike["recover"]>(() => recoveryRequest);
+    const providerTicketApi: ProviderTicketApiLike = {
+      features: async () => ({ openProviderTicket: false }), focus: async () => undefined
+    };
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [active] }}
+      catalogApi={{ read: async () => ({ ...catalog, accountId: active.id }) }}
+      providerSourceRecoveryApi={{ recover }} providerTicketApi={providerTicketApi} />);
+
+    const selector = await screen.findByRole("group", { name: "Books to compare" });
+    expect(selector.querySelectorAll(".provider-selector__item")).toHaveLength(6);
+    expect(selector.querySelectorAll(".provider-recovery-status")).toHaveLength(6);
+    expect(selector.querySelectorAll(".provider-recovery-status--empty")).toHaveLength(6);
+    for (const provider of ["SABA", "IM", "SBOBET", "CMD", "APSPORT", "BTI"] as const) {
+      expect(screen.getByRole("button", { name: `Reload ${provider}` })).toBeTruthy();
+      expect(screen.getByTestId(`provider-reload-icon-${provider}`)).toBeTruthy();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload CMD" }));
+    expect(recover).toHaveBeenCalledExactlyOnceWith("CMD", "MANUAL");
+    expect(await screen.findByRole("button", { name: "\u0110ang reload CMD" })).toBeTruthy();
+    expect(screen.getByTestId("provider-reload-icon-CMD").classList
+      .contains("provider-recovery-icon--spinning")).toBe(true);
+
+    finish();
+    await act(async () => { await recoveryRequest; });
+    expect(await screen.findByRole("button", { name: "Reload CMD" })).toBeTruthy();
   });
 
   it("loads source catalogs without waiting for the slower account/profile list", async () => {
@@ -1588,6 +1643,148 @@ describe("LiveCatalogPage", () => {
     expect(await screen.findByTestId("provider-brand-SABA")).toBeTruthy();
     expect(screen.queryByLabelText("SABA nguồn hết hạn")).toBeNull();
     expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts down three seconds and performs only one automatic source recovery per outage", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const inactive: CatalogSourceStatus = {
+      id: "catalog-source:CMD:FOOTBALL", alias: "CMD", provider: "CMD", category: "FOOTBALL",
+      sessionState: "ACTION_REQUIRED", sessionSource: "FABET_LOGIN", acquiredAtMs: 100,
+      reason: "PROVIDER_VALIDATION_FAILED"
+    };
+    const recover = vi.fn<ProviderSourceRecoveryApiLike["recover"]>(async () => undefined);
+    const providerTicketApi: ProviderTicketApiLike = {
+      features: async () => ({ openProviderTicket: false }), focus: async () => undefined
+    };
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [inactive] }} catalogApi={catalogApi}
+      providerSourceRecoveryApi={{ recover }} providerTicketApi={providerTicketApi} />);
+
+    expect(await screen.findByText("T\u1ef1 reload sau 00:03")).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(recover).toHaveBeenCalledExactlyOnceWith("CMD", "AUTO");
+    expect(await screen.findByText("\u0110ang ph\u1ee5c h\u1ed3i \u00b7 01:30")).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps automatic source recovery armed through the StrictMode effect replay", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const inactive: CatalogSourceStatus = {
+      id: "catalog-source:CMD:FOOTBALL", alias: "CMD", provider: "CMD", category: "FOOTBALL",
+      sessionState: "ACTION_REQUIRED", sessionSource: "FABET_LOGIN", acquiredAtMs: 100,
+      reason: "PROVIDER_VALIDATION_FAILED"
+    };
+    const recover = vi.fn<ProviderSourceRecoveryApiLike["recover"]>(async () => undefined);
+    const providerTicketApi: ProviderTicketApiLike = {
+      features: async () => ({ openProviderTicket: false }), focus: async () => undefined
+    };
+
+    render(<StrictMode><LiveCatalogPage fixedCategory="FOOTBALL"
+      accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [inactive] }} catalogApi={catalogApi}
+      providerSourceRecoveryApi={{ recover }} providerTicketApi={providerTicketApi} /></StrictMode>);
+
+    expect(await screen.findByText("T\u1ef1 reload sau 00:03")).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(recover).toHaveBeenCalledExactlyOnceWith("CMD", "AUTO");
+  });
+
+  it("does not repeat a consumed automatic recovery after the page remounts", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const inactive: CatalogSourceStatus = {
+      id: "catalog-source:CMD:FOOTBALL", alias: "CMD", provider: "CMD", category: "FOOTBALL",
+      sessionState: "ACTION_REQUIRED", sessionSource: "FABET_LOGIN", acquiredAtMs: 100,
+      reason: "PROVIDER_VALIDATION_FAILED"
+    };
+    const recover = vi.fn<ProviderSourceRecoveryApiLike["recover"]>(async () => undefined);
+    const providerTicketApi: ProviderTicketApiLike = {
+      features: async () => ({ openProviderTicket: false }), focus: async () => undefined
+    };
+    const props = {
+      fixedCategory: "FOOTBALL" as const,
+      accountApi: { ...accountApi, list: async () => [] },
+      catalogSourceApi: { list: async () => [inactive] }, catalogApi,
+      providerSourceRecoveryApi: { recover }, providerTicketApi
+    };
+
+    const first = render(<LiveCatalogPage {...props} />);
+    expect(await screen.findByText("T\u1ef1 reload sau 00:03")).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(recover).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    render(<LiveCatalogPage {...props} />);
+    expect(await screen.findByRole("button", { name: "Reload CMD" })).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a manual reload after automatic failure and disables repeated clicks for one minute", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const inactive: CatalogSourceStatus = {
+      id: "catalog-source:BTI:FOOTBALL", alias: "BTI", provider: "BTI", category: "FOOTBALL",
+      sessionState: "ACTION_REQUIRED", sessionSource: "FABET_LOGIN", acquiredAtMs: 100,
+      reason: "PROVIDER_VALIDATION_FAILED"
+    };
+    const recover = vi.fn<ProviderSourceRecoveryApiLike["recover"]>()
+      .mockRejectedValueOnce(new Error("auto baseline timeout"))
+      .mockRejectedValueOnce(new Error("manual baseline timeout"));
+    const providerTicketApi: ProviderTicketApiLike = {
+      features: async () => ({ openProviderTicket: false }), focus: async () => undefined
+    };
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [inactive] }} catalogApi={catalogApi}
+      providerSourceRecoveryApi={{ recover }} providerTicketApi={providerTicketApi} />);
+
+    expect(await screen.findByText("T\u1ef1 reload sau 00:03")).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    const reload = await screen.findByRole("button", { name: "Reload BTI" });
+    expect((reload as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => { fireEvent.click(reload); });
+
+    expect(recover).toHaveBeenNthCalledWith(2, "BTI", "MANUAL");
+    const coolingDown = await screen.findByRole("button", { name: "Reload BTI" });
+    expect((coolingDown as HTMLButtonElement).disabled).toBe(true);
+    expect(coolingDown.textContent).toBe("Reload sau 60s");
+    fireEvent.click(coolingDown);
+    expect(recover).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the manual reload disabled after a page remount during its cooldown", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const inactive: CatalogSourceStatus = {
+      id: "catalog-source:BTI:FOOTBALL", alias: "BTI", provider: "BTI", category: "FOOTBALL",
+      sessionState: "ACTION_REQUIRED", sessionSource: "FABET_LOGIN", acquiredAtMs: 100,
+      reason: "PROVIDER_VALIDATION_FAILED"
+    };
+    const recover = vi.fn<ProviderSourceRecoveryApiLike["recover"]>()
+      .mockRejectedValue(new Error("provider unavailable"));
+    const providerTicketApi: ProviderTicketApiLike = {
+      features: async () => ({ openProviderTicket: false }), focus: async () => undefined
+    };
+    const props = {
+      fixedCategory: "FOOTBALL" as const,
+      accountApi: { ...accountApi, list: async () => [] },
+      catalogSourceApi: { list: async () => [inactive] }, catalogApi,
+      providerSourceRecoveryApi: { recover }, providerTicketApi
+    };
+
+    const first = render(<LiveCatalogPage {...props} />);
+    expect(await screen.findByText("T\u1ef1 reload sau 00:03")).toBeTruthy();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    await act(async () => { fireEvent.click(await screen.findByRole("button", { name: "Reload BTI" })); });
+    expect(recover).toHaveBeenCalledTimes(2);
+    first.unmount();
+
+    render(<LiveCatalogPage {...props} />);
+    const coolingDown = await screen.findByRole("button", { name: "Reload BTI" });
+    expect((coolingDown as HTMLButtonElement).disabled).toBe(true);
+    expect(coolingDown.textContent).toBe("Reload sau 60s");
+    fireEvent.click(coolingDown);
+    expect(recover).toHaveBeenCalledTimes(2);
   });
 
   it("retries account discovery after the API is temporarily unavailable during page load", async () => {

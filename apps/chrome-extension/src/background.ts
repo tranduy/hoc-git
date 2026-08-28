@@ -22,6 +22,7 @@ import { SabaSnapshotStorage } from "./saba-snapshot-storage.js";
 import { SourceLaunchMemory } from "./source-launch-memory.js";
 import { extensionLobbyScope, lobbyIsInExtensionScope } from "./extension-lobby-scope.js";
 import { runDebuggerEventTask } from "./debugger-event-task.js";
+import { ApsportPageRecoveryWatchdog } from "./apsport-page-recovery.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 declare const __CHROME_EXTENSION_BUILD_IDENTITY__: string;
@@ -88,12 +89,28 @@ const sabaSnapshotStorage = new SabaSnapshotStorage({
   set: async (items) => chrome.storage.local.set(items),
   remove: async (key) => chrome.storage.local.remove(key)
 }, sabaWsSnapshotsStorageKey);
-const observer = new NetworkObserver({
+let observer!: NetworkObserver;
+const apsportPageRecovery = new ApsportPageRecoveryWatchdog({
+  reload: async (tabId) => {
+    const attached = registry.list().find((source) => source.lobby === "TSPORT" && source.tabId === tabId);
+    if (attached === undefined) return;
+    const sourceId = `chrome:TSPORT:${tabId}`;
+    observer.beginSourceEpoch(sourceId);
+    observer.resetApsportRefreshCooldown(sourceId);
+    await chrome.tabs.reload(tabId, { bypassCache: true });
+  }
+});
+observer = new NetworkObserver({
   sendCommand: async (tabId, method, params, sessionId) => chrome.debugger.sendCommand(
     sessionId === undefined ? { tabId } : { tabId, sessionId }, method, params),
   loadSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.load(sourceId),
   saveSabaWsSnapshots: (snapshots) => sabaSnapshotStorage.save(snapshots),
   clearSabaWsSnapshots: (sourceId) => sabaSnapshotStorage.clear(sourceId),
+  onApsportPageHealth: (health) => {
+    void apsportPageRecovery.observe(health).catch((error) => {
+      console.warn("APSPORT empty-page recovery failed", error);
+    });
+  },
   recoverImBaseline: async (source) => {
     // Obtain both signed GetSE partitions inside the current authenticated IM
     // page. Reloading changes source state and can discard the first partition.

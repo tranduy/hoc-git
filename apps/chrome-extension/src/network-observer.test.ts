@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
+import { TSPORT_CATALOG_SHAPE_EXPRESSION } from "./tsport-catalog-shape.js";
 import { ksportTimeTabExpressionForTest } from "./network-observer.js";
 import { BTI_CATALOG_REFRESH_EXPRESSION, CMD_CATALOG_DISCOVERY_EXPRESSION,
   CMD_FULL_BASELINE_EXPRESSION, IM_CATALOG_DISCOVERY_EXPRESSION, KEEP_ACTIVE_EXPRESSION,
@@ -88,6 +89,43 @@ describe("NetworkObserver", () => {
     expect(JSON.stringify(forwarded)).not.toMatch(/Bearer private|must-not-be-copied/iu);
     expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
       String(params?.expression).includes("fieldlineTsport"))).toHaveLength(0);
+  });
+
+  it("reports an empty APSPORT page only when a completed API roster proves matches exist", async () => {
+    const healthSamples: unknown[] = [];
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === TSPORT_CATALOG_SHAPE_EXPRESSION) {
+        return { result: { value: JSON.stringify({ matchRows: 0 }) } };
+      }
+      return {};
+    });
+    const records = [{ "2": "event-1" }, { "2": "event-2" }];
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      onApsportPageHealth: (health: unknown) => { healthSamples.push(health); },
+      collectApsportCatalog: async (options) => {
+        await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+          complete: true, prematchWindowHours: 24, records });
+      } });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://spbui.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+        postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+    await observer.refreshCatalog(apsport, { prematchWindowHours: 24 });
+
+    await observer.heartbeat(apsport, "pacific.agenate.com");
+
+    expect(healthSamples).toEqual([{
+      sourceId: "chrome:TSPORT:7", tabId: 7, rosterCount: 2, matchRows: 0
+    }]);
   });
 
   it("refetches the exact APSPORT event detail after an eu socket frame", async () => {
