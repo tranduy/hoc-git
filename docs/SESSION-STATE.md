@@ -46,7 +46,24 @@ Bài học chung: **extension khoẻ không có nghĩa dữ liệu đang chảy.
 extension, đo `listSources` và tuổi khung của từng sàn; nếu mọi sàn dừng trong cùng
 vài giây thì lỗi nằm ở chỗ dùng chung, không phải ở từng sàn.
 
-## CMD — dấu mức chấp hiệp 1, chưa dứt điểm
+## CMD — dấu mức chấp hiệp 1 (ĐÃ XONG, commit `4e2b528`)
+
+**Mỗi hiệp có trường riêng chỉ bên cho chấp.** `row[24]` là của kèo cả trận,
+`row[64]` là của kèo hiệp 1. Adapter trước đây đọc `row[24]` cho cả hai.
+
+Đo trên 732 hàng bắt được 2026-08-28: hai trường lệch nhau ở 54 hàng, và ở đúng
+**4 hàng** có kèo chấp hiệp 1 thật — Atlante v Club Leon, Eintracht Braunschweig
+v Hertha Berlin, FC Voluntari v Otelul Galati, ZKS Kluczevia v SKS Unia
+Swarzedz. `row[64]` đúng cả 4. Chấm theo thang giá của chính từng trận (giá chủ
+nhà phải giảm khi mức chấp chủ nhà tăng): `row[64]` đúng 44/44 cho hiệp 1,
+`row[24]` đúng 40/44; ngược lại cả trận thì `row[24]` đúng 87/94 còn `row[64]`
+74/94.
+
+Cách bắt được: bật `CHROME_BRIDGE_CAPTURE=1 CHROME_BRIDGE_CAPTURE_LOBBIES=CMD`,
+payload ghi vào `%LOCALAPPDATA%\tool-chenh\chrome-bridge-captures`. **Nhớ đọc cả
+`data` lẫn `today`** khi ghép mảnh — bỏ `today` là mất phần lớn trận.
+
+## Ghi chú cũ về CMD (giữ để tra cứu)
 
 Nguồn thật của danh mục CMD **không phải DOM** mà là
 `/Member/BetsView/BetLight/DataOdds.ashx`, giải mã ở
