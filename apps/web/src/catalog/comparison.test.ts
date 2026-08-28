@@ -299,6 +299,47 @@ describe("catalog comparison", () => {
     expect(buildComparisonEvents([namedSaba, namedSbobet])).toHaveLength(2);
   });
 
+  it.each([
+    ["FC Machida Zelvia", "Iwate Grulla Morioka", "FC Machida Zelvia", "Grulla Morioka"],
+    ["RB Omiya Ardija", "V-Varen Nagasaki", "Omiya Ardija", "V-Varen Nagasaki"],
+    ["AEK Athens", "Levski Sofia", "AEK Athens", "PFC Levski Sofia"],
+    ["Golden Arrows", "Kaizer Chiefs", "Lamontville Golden Arrows FC", "Kaizer Chiefs"],
+    ["Preston North End", "Bradford City", "Preston", "Bradford"]
+  ])("matches conservative provider-native football aliases for %s vs %s", (leftA, leftB, rightA, rightB) => {
+    const saba = handicapCatalog("SABA", "saba-provider-name", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-provider-name", "-0.5", ["0.78", "-0.86"]);
+    const left = { ...saba, events: [{ ...saba.events[0]!, participantA: leftA, participantB: leftB }] };
+    const right = { ...sbobet, events: [{ ...sbobet.events[0]!, participantA: rightA, participantB: rightB }] };
+
+    expect(buildComparisonEvents([left, right]).filter((entry) => entry.providers.length === 2)).toHaveLength(1);
+  });
+
+  it("does not merge a fantasy composite with a real football fixture", () => {
+    const saba = handicapCatalog("SABA", "saba-fantasy", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-real", "-0.5", ["0.78", "-0.86"]);
+    const fantasy = { ...saba, events: [{ ...saba.events[0]!, competition: "FANTASY MATCH",
+      participantA: "Burnley + Strommen IF", participantB: "Arsenal + Raufoss IL" }] };
+    const real = { ...sbobet, events: [{ ...sbobet.events[0]!, competition: "FANTASY MATCH",
+      participantA: "Strommen IF", participantB: "Raufoss IL" }] };
+
+    expect(buildComparisonEvents([fantasy, real]).filter((entry) => entry.providers.length === 2)).toEqual([]);
+  });
+
+  it("matches Vietnamese and English women qualifiers plus localized competition names", () => {
+    const saba = handicapCatalog("SABA", "saba-women", "-0.5", ["0.82", "-0.90"]);
+    const sbobet = handicapCatalog("SBOBET", "sbo-women", "-0.5", ["0.78", "-0.86"]);
+    const english = { ...saba, events: [{ ...saba.events[0]!,
+      competition: "New Zealand - NRFL Premier Division Women",
+      participantA: "Auckland United [W]", participantB: "Fencibles United [W]" }] };
+    const vietnamese = { ...sbobet, events: [{ ...sbobet.events[0]!,
+      competition: "NEW ZEALAND NRFL WOMEN PREMIERSHIP",
+      participantA: "Auckland United (Nữ)", participantB: "Fencibles United (Nữ)" }] };
+
+    const matched = buildComparisonEvents([english, vietnamese]).filter((entry) => entry.providers.length === 2);
+    expect(matched).toHaveLength(1);
+    expect(matched[0]?.rows).toHaveLength(1);
+  });
+
   it("fails closed when one provider has duplicate same-team fixtures at the same kickoff", () => {
     const saba = handicapCatalog("SABA", "saba-one", "-0.5", ["0.82", "-0.90"]);
     const sbobet = handicapCatalog("SBOBET", "sbo-one", "-0.5", ["0.78", "-0.86"]);
@@ -412,6 +453,12 @@ describe("catalog comparison", () => {
     expect(result[0]?.observedRows[0]?.line).toBe("-0.5");
     expect(result[0]?.observedRows[0]?.cells[1]?.quotes.map((quote) => [quote.selection, quote.rawOdds])).toEqual([
       ["AWAY", "0.78"], ["HOME", "-0.86"]
+    ]);
+    const sourceCell = result[0]?.observedRows[0]?.cells.find((cell) => cell.provider === "SBOBET");
+    expect(sourceCell?.sourceEvent).toMatchObject({ participantA: "Molde", participantB: "Kristiansund BK" });
+    expect(sourceCell?.sourceMarket?.line).toBe("0.5");
+    expect(sourceCell?.sourceQuotes?.map((quote) => [quote.providerSelectionId, quote.selection, quote.line])).toEqual([
+      ["sbo-event-HOME", "HOME", "0.5"], ["sbo-event-AWAY", "AWAY", "0.5"]
     ]);
   });
 

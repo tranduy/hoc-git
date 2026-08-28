@@ -157,7 +157,7 @@ describe("CmdSnapshotPoller", () => {
     );
   });
 
-  it("retries a new TSPORT catalog bootstrap twice before returning to steady DOM capture", async () => {
+  it("refreshes the TSPORT API catalog every minute without returning to DOM capture", async () => {
     let now = 1_000;
     const capture = vi.fn(async () => undefined);
     const refreshCatalog = vi.fn(async () => undefined);
@@ -182,27 +182,26 @@ describe("CmdSnapshotPoller", () => {
     now = 11_000;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(refreshCatalog).toHaveBeenCalledTimes(2);
+    expect(refreshCatalog).toHaveBeenCalledTimes(1);
     expect(capture).not.toHaveBeenCalled();
 
     now = 21_000;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(refreshCatalog).toHaveBeenCalledTimes(3);
+    expect(refreshCatalog).toHaveBeenCalledTimes(1);
     expect(capture).not.toHaveBeenCalled();
 
     now = 31_000;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(refreshCatalog).toHaveBeenCalledTimes(3);
-    expect(capture).toHaveBeenCalledExactlyOnceWith(
-      { lobby: "TSPORT", sourceId: "chrome:TSPORT:11", tabId: 11 }, "pacific.agenate.com"
-    );
+    expect(refreshCatalog).toHaveBeenCalledTimes(1);
+    expect(capture).not.toHaveBeenCalled();
 
     now = 61_000;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(refreshCatalog).toHaveBeenCalledTimes(3);
+    expect(refreshCatalog).toHaveBeenCalledTimes(2);
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it("does not overlap a hung TSPORT bootstrap refresh with DOM capture or another refresh", async () => {
@@ -251,20 +250,12 @@ describe("CmdSnapshotPoller", () => {
     expect(refreshCatalog).toHaveBeenLastCalledWith({ lobby: "TSPORT", sourceId, tabId: 11 });
     expect(capture).not.toHaveBeenCalled();
 
-    now = 11_001;
-    poller.pollNow();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    now = 21_001;
-    poller.pollNow();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    now = 31_001;
+    now = 61_001;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(refreshCatalog).toHaveBeenCalledTimes(4);
-    expect(capture).toHaveBeenCalledExactlyOnceWith(
-      { lobby: "TSPORT", sourceId, tabId: 11 }, "pacific.agenate.com"
-    );
+    expect(refreshCatalog).toHaveBeenCalledTimes(3);
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it("forces an explicitly reattached same-ID source despite recent cadence and in-flight attribution", async () => {
@@ -311,7 +302,7 @@ describe("CmdSnapshotPoller", () => {
     expect(capture).toHaveBeenCalledTimes(2);
   });
 
-  it("does not DOM-poll websocket-authoritative SABA while polling CMD/TSPORT once per tab", async () => {
+  it("DOM-polls only CMD and never the websocket/API-authoritative SABA or TSPORT tabs", async () => {
     let callback: (() => void) | undefined;
     let scheduledDelayMs: number | undefined;
     let now = 1_000;
@@ -334,11 +325,11 @@ describe("CmdSnapshotPoller", () => {
     callback?.();
     callback?.();
     await Promise.resolve();
-    expect(capture).toHaveBeenCalledTimes(2);
+    expect(capture).toHaveBeenCalledTimes(1);
     expect(capture).toHaveBeenCalledWith(
       { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 }, "cgnew.fts368.com"
     );
-    expect(capture).toHaveBeenCalledWith(
+    expect(capture).not.toHaveBeenCalledWith(
       { lobby: "TSPORT", sourceId: "chrome:TSPORT:11", tabId: 11 }, "pacific.agenate.com"
     );
     expect(capture).not.toHaveBeenCalledWith(
@@ -348,11 +339,11 @@ describe("CmdSnapshotPoller", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     callback?.();
     await Promise.resolve();
-    expect(capture).toHaveBeenCalledTimes(2);
+    expect(capture).toHaveBeenCalledTimes(1);
     now = 11_000;
     callback?.();
     await Promise.resolve();
-    expect(capture).toHaveBeenCalledTimes(4);
+    expect(capture).toHaveBeenCalledTimes(2);
   });
 
   it("does not replay cached provider snapshots during periodic live polling", async () => {
@@ -454,19 +445,19 @@ describe("CmdSnapshotPoller", () => {
     callback?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(maintain).toHaveBeenCalledTimes(3);
-    expect(capture).toHaveBeenCalledTimes(2);
+    expect(capture).toHaveBeenCalledTimes(1);
 
     now = 3_000;
     callback?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(maintain).toHaveBeenCalledTimes(3);
-    expect(capture).toHaveBeenCalledTimes(2);
+    expect(capture).toHaveBeenCalledTimes(1);
 
     now = 11_000;
     callback?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(maintain).toHaveBeenCalledTimes(5);
-    expect(capture).toHaveBeenCalledTimes(2);
+    expect(capture).toHaveBeenCalledTimes(1);
     expect(maintain.mock.calls.slice(3).map(([source]) => source)).toEqual([
       expect.objectContaining({ lobby: "CMD", tabId: 9 }),
       expect.objectContaining({ lobby: "TSPORT", tabId: 11 })
@@ -475,10 +466,10 @@ describe("CmdSnapshotPoller", () => {
     now = 13_000;
     callback?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(capture).toHaveBeenCalledTimes(4);
+    expect(capture).toHaveBeenCalledTimes(2);
   });
 
-  it("does not rescan complete CMD and TSPORT DOM catalogs on every two-second heartbeat", async () => {
+  it("never scans TSPORT DOM and keeps CMD DOM capture on its ten-second cadence", async () => {
     let now = 1_000;
     const capture = vi.fn(async () => undefined);
     const poller = new CmdSnapshotPoller({
@@ -492,17 +483,17 @@ describe("CmdSnapshotPoller", () => {
 
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(capture).toHaveBeenCalledTimes(2);
+    expect(capture).toHaveBeenCalledTimes(1);
 
     now = 3_000;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(capture).toHaveBeenCalledTimes(2);
+    expect(capture).toHaveBeenCalledTimes(1);
 
     now = 11_000;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(capture).toHaveBeenCalledTimes(4);
+    expect(capture).toHaveBeenCalledTimes(2);
   });
 
   it("backs off a failed DOM capture instead of retrying heavy work every heartbeat", async () => {
@@ -511,7 +502,7 @@ describe("CmdSnapshotPoller", () => {
       .mockRejectedValueOnce(new Error("capture-failed"))
       .mockResolvedValue(undefined);
     const poller = new CmdSnapshotPoller({
-      list: () => [{ lobby: "TSPORT", tabId: 11, hostname: "pacific.agenate.com", state: "ATTACHED" }],
+      list: () => [{ lobby: "CMD", tabId: 11, hostname: "cgnew.fts368.com", state: "ATTACHED" }],
       capture, now: () => now
     });
 
@@ -559,11 +550,8 @@ describe("CmdSnapshotPoller", () => {
     expect(maintain).toHaveBeenLastCalledWith(
       { lobby: "TSPORT", sourceId: "chrome:TSPORT:9", tabId: 9 }
     );
-    expect(capture).toHaveBeenLastCalledWith(
-      { lobby: "TSPORT", sourceId: "chrome:TSPORT:9", tabId: 9 }, "pacific.agenate.com"
-    );
     expect(maintain).toHaveBeenCalledTimes(2);
-    expect(capture).toHaveBeenCalledTimes(2);
+    expect(capture).toHaveBeenCalledTimes(1);
 
     release?.();
     await new Promise((resolve) => setTimeout(resolve, 0));

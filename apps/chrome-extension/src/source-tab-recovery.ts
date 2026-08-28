@@ -106,7 +106,19 @@ export class SourceTabRecovery {
       await this.#waitForLobby(navigated, lobby);
     } catch (error) {
       if (pending.id !== undefined) this.#options.onBootstrapFailure?.(pending.id);
-      if (pending.id !== undefined) await this.#options.remove?.(pending.id).catch(() => undefined);
+      let keepRecoverableKsportTab = false;
+      if (lobby === "KSPORT" && pending.id !== undefined && this.#options.get !== undefined) {
+        try {
+          // Baseline readiness can legitimately outlive the bounded launch
+          // confirmation. Keep an attached, visibly valid sportsbook shell so
+          // background recovery can finish; blank, Volta and provider-error
+          // tabs still fail the structural readiness check and are removed.
+          keepRecoverableKsportTab = isReadyLobbyTab(await this.#options.get(pending.id), lobby);
+        } catch { /* a tab that cannot be read is not safe to retain */ }
+      }
+      if (pending.id !== undefined && !keepRecoverableKsportTab) {
+        await this.#options.remove?.(pending.id).catch(() => undefined);
+      }
       throw error;
     }
   }

@@ -26,6 +26,7 @@ import type { SessionRefreshControl } from "./session-maintenance.js";
 import type { CatalogRevisionStore } from "./catalog/catalog-revision-store.js";
 import { registerCmdHiddenMarketProbeRoute, type CmdHiddenMarketProbeLike } from "./routes/cmd-hidden-market-probe.js";
 import { registerDiagnosticRoutes, type PipelineDiagnosticsLike } from "./routes/diagnostics.js";
+import { CHROME_BRIDGE_MAX_ENVELOPE_BYTES } from "@tool-chenh/contracts";
 
 export interface AppOptions {
   readonly buildIdentity?: string;
@@ -61,7 +62,7 @@ export interface AppOptions {
 
 const defaultViteOrigin = "http://127.0.0.1:4311";
 const defaultHeartbeatIntervalMs = 15_000;
-const defaultMaxBufferedBytes = 1024 * 1024;
+const defaultMaxBufferedBytes = CHROME_BRIDGE_MAX_ENVELOPE_BYTES;
 const cloudflareDashboardOrigin = "https://live.babiesbo.uk";
 const logLevels = new Set(["fatal", "error", "warn", "info", "debug", "trace", "silent"]);
 

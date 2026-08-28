@@ -771,8 +771,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const rankedByEvent = new Map(rankedEvents.map((item) => [item.event.key, item]));
   // This workspace is an exact cross-book comparison list. Never pad it with
   // one-book observations: those rows cannot be balanced across two providers.
-  const displayTicketItems = useMemo(() => topRankedTicketItems(rankedEvents,
-    Math.max(1, rankedEvents.reduce((total, item) => total + item.tickets.length, 0))), [rankedEvents]);
+  const displayTicketItems = useMemo(() => topRankedTicketItems(rankedEvents, 50), [rankedEvents]);
   const crossBookEventCount = displayTicketItems.length;
   useLayoutEffect(() => {
     const list = matchListRef.current;

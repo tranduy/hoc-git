@@ -335,7 +335,7 @@ describe("five-provider shared runtime wiring", () => {
       .map((envelope) => envelope.payload.body)).toEqual([firstPayload]);
   });
 
-  it("captures TSPORT coverage without running unsupported socket recovery after an epoch bump", async () => {
+  it("does not fall back to TSPORT DOM coverage after an epoch bump without an API template", async () => {
     const forwarded: ChromeBridgeEnvelope[] = [];
     const snapshot = JSON.stringify([
       { eventId: "event-1" },
@@ -362,14 +362,7 @@ describe("five-provider shared runtime wiring", () => {
       url: "wss://spws.agenate.com/ln/en/s/1/mg/0/tr/0" }, "tsport-owner");
     await observer.refreshCatalog(source);
 
-    const domEnvelope = forwarded.find((envelope) => envelope.transport === "DOM_SNAPSHOT");
-    expect(JSON.parse(domEnvelope?.payload.body ?? "null")).toMatchObject({
-      sweepId: "tsport-sweep-1",
-      sweepComplete: true,
-      sweepFrameKey: "top",
-      sweepDocumentKey: expect.stringMatching(/^cmd-document:[a-z0-9]+:[a-z0-9]+$/u),
-      records: [{ eventId: "event-1" }]
-    });
+    expect(forwarded.find((envelope) => envelope.transport === "DOM_SNAPSHOT")).toBeUndefined();
     expect(sendCommand.mock.calls.some(([, method]) => method === "Network.closeWebSocket")).toBe(false);
     expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects" ||
       method === "Runtime.callFunctionOn")).toBe(false);

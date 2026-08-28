@@ -13,6 +13,7 @@ import { providerFeedPolicies } from "./provider-feed-policies.js";
 const SBOBET = "catalog-source:SBOBET:FOOTBALL";
 const SABA = "catalog-source:SABA:FOOTBALL";
 const CMD = "catalog-source:CMD:FOOTBALL";
+const APSPORT = "catalog-source:APSPORT:FOOTBALL";
 
 const record = { sportId: "1", leagueId: "league-1", leagueName: "League", matchId: "event-1",
   timeText: "08/17 02:30AM", teamNames: ["Alpha", "Beta"], groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
@@ -223,6 +224,36 @@ function replayedEnvelope(envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope 
   return { ...envelope, request: { ...envelope.request, replayed: true } };
 }
 
+function apsportRawEvent(eventId: number, firstPrice = "0.83") {
+  return { "2": eventId, "5": `AP Home ${eventId}`, "6": true, "10": "Active",
+    "11": "2026-08-28T01:00:00Z", "22": `AP Away ${eventId}`, "25": 1, "26": 0,
+    "53": "AP League", "50": [{ "3": 3, "9": [{
+      "0": `${eventId}-over`, "2": `${eventId}-under`, "6": `${eventId}-total`, "7": "2.5",
+      "8": { "2": firstPrice }, "9": { "2": "-0.91" }
+    }], "10": "Active" }] };
+}
+
+function apsportApiEnvelope(sequence: number, records: readonly unknown[],
+  phase: "ROSTER" | "DETAIL" = "ROSTER"): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence,
+    receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
+    request: { hostname: "pacific.agenate.com", pathnameClass: "/__fieldline_apsport_catalog_refresh__",
+      resourceType: "Fetch", method: "POST", observerRequestId: `observer-a:request:${sequence}`,
+      requestFrameKey: "http-frame:apsport-main", requestDocumentKey: "http-document:apsport-main" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, generation: "apsport:7:1",
+      phase, complete: true, prematchWindowHours: 24, records }) } };
+}
+
+function apsportWsEnvelope(sequence: number, rawEvent: unknown): ChromeBridgeEnvelope {
+  return { version: 1, kind: "NETWORK", lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence,
+    receivedMonotonicMs: 50 + sequence, transport: "WS_FRAME",
+    request: { hostname: "spws.agenate.com", pathnameClass: "/ln/en/lm",
+      resourceType: "WebSocket", streamId: "apsport-football" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ s: 1, t: "eu", d: JSON.stringify(rawEvent) }) } };
+}
+
 const activeSbobet: CatalogSourceStatus = { id: SBOBET, alias: "K-Sports · SBOBET", provider: "SBOBET",
   category: "FOOTBALL", sessionState: "ACTIVE", acquiredAtMs: 900, reason: null };
 const activeSaba: CatalogSourceStatus = { id: SABA, alias: "SABA", provider: "SABA", category: "FOOTBALL",
@@ -255,6 +286,28 @@ class RejectingPromotionFeedRegistry extends ProviderFeedRegistry {
 afterEach(() => vi.restoreAllMocks());
 
 describe("ChromeCatalogDataPlane", () => {
+  it("publishes an APSPORT API baseline and applies a later socket price without DOM authority", async () => {
+    let now = 1_500;
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => now, publish });
+
+    expect(plane.ingest(apsportApiEnvelope(1, [apsportRawEvent(501)]))).toBe(true);
+    expect((await plane.read(APSPORT)).quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "501", rawOdds: "0.83" })
+    ]));
+
+    expect(plane.ingest(apsportWsEnvelope(2, apsportRawEvent(501, "0.66")))).toBe(true);
+    expect((await plane.read(APSPORT)).quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "501", rawOdds: "0.66", sequence: 2 })
+    ]));
+    now = 60_500;
+    expect(plane.ingest({ ...apsportWsEnvelope(3, apsportRawEvent(501, "0.66")),
+      observedAtMs: now })).toBe(false);
+    expect(publish).toHaveBeenCalledTimes(2);
+    now = 61_100;
+    await expect(plane.read(APSPORT)).resolves.toMatchObject({ provider: "APSPORT" });
+  });
+
   it("promotes a late-attached SABA candidate from two stable complete DOM generations", async () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const feeds = new ProviderFeedRegistry({ now: () => 100_002 });

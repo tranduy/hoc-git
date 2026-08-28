@@ -13,6 +13,7 @@ export interface BridgeControlSocket {
 export interface ChromeBridgeControlPlaneOptions {
   readonly activeSourceIds?: () => ReadonlySet<string>;
   readonly authorityCoordinator?: ProviderAuthorityCoordinator;
+  readonly apsportPrematchWindowHours?: number;
 }
 
 interface AttachedSource {
@@ -37,10 +38,17 @@ export class ChromeBridgeControlPlane {
   #installationSocket: BridgeControlSocket | null = null;
   readonly #activeSourceIds: (() => ReadonlySet<string>) | null;
   readonly #authorityCoordinator: ProviderAuthorityCoordinator | null;
+  readonly #apsportPrematchWindowHours: number | null;
 
   constructor(options: ChromeBridgeControlPlaneOptions = {}) {
     this.#activeSourceIds = options.activeSourceIds ?? null;
     this.#authorityCoordinator = options.authorityCoordinator ?? null;
+    const apsportPrematchWindowHours = options.apsportPrematchWindowHours;
+    if (apsportPrematchWindowHours !== undefined && (!Number.isSafeInteger(apsportPrematchWindowHours) ||
+      apsportPrematchWindowHours < 1 || apsportPrematchWindowHours > 48)) {
+      throw new Error("APSPORT_PREMATCH_WINDOW_HOURS_INVALID");
+    }
+    this.#apsportPrematchWindowHours = apsportPrematchWindowHours ?? null;
     this.#authorityCoordinator?.subscribe((transition) => {
       this.#reconcileAuthoritySlot(transition.accountId);
     });
@@ -84,8 +92,7 @@ export class ChromeBridgeControlPlane {
     if (authority.candidateToken !== token || candidate?.candidateToken !== token || candidate.socket.readyState !== 1) {
       return 0;
     }
-    const control: ChromeBridgeControlMessage = { version: 1, kind: "REQUEST_SNAPSHOT",
-      sourceId: candidate.sourceId };
+    const control = this.#snapshotControl(candidate.sourceId, candidate.lobby);
     candidate.socket.send(JSON.stringify(control));
     return 1;
   }
@@ -126,7 +133,7 @@ export class ChromeBridgeControlPlane {
     let requested = 0;
     for (const { sourceId, lobby: attachedLobby, socket } of this.#attachedSources()) {
       if (socket.readyState !== 1 || attachedLobby !== lobby) continue;
-      const control: ChromeBridgeControlMessage = { version: 1, kind: "REQUEST_SNAPSHOT", sourceId };
+      const control = this.#snapshotControl(sourceId, attachedLobby);
       socket.send(JSON.stringify(control));
       requested += 1;
     }
@@ -136,7 +143,9 @@ export class ChromeBridgeControlPlane {
   requestSourceSnapshot(sourceId: string): number {
     const socket = this.#exactSocket(sourceId);
     if (socket === undefined || socket.readyState !== 1) return 0;
-    const control: ChromeBridgeControlMessage = { version: 1, kind: "REQUEST_SNAPSHOT", sourceId };
+    const identity = chromeBridgeSourceIdentity(sourceId);
+    if (identity === null) return 0;
+    const control = this.#snapshotControl(sourceId, identity.lobby);
     socket.send(JSON.stringify(control));
     return 1;
   }
@@ -295,9 +304,11 @@ export class ChromeBridgeControlPlane {
 
   #broadcast(kind: "REQUEST_SNAPSHOT" | "RELOAD_SOURCE"): number {
     let requested = 0;
-    for (const { sourceId, socket } of this.#attachedSources()) {
+    for (const { sourceId, lobby, socket } of this.#attachedSources()) {
       if (socket.readyState !== 1) continue;
-      const control: ChromeBridgeControlMessage = { version: 1, kind, sourceId };
+      const control: ChromeBridgeControlMessage = kind === "REQUEST_SNAPSHOT"
+        ? this.#snapshotControl(sourceId, lobby)
+        : { version: 1, kind, sourceId };
       socket.send(JSON.stringify(control));
       requested += 1;
     }
@@ -320,6 +331,13 @@ export class ChromeBridgeControlPlane {
         .flatMap((slot) => slot.active === null ? [] : [slot.active]);
     }
     return [...this.#sourcesByAccount.values()];
+  }
+
+  #snapshotControl(sourceId: string, lobby: ChromeLobbyId): ChromeBridgeControlMessage {
+    return { version: 1, kind: "REQUEST_SNAPSHOT", sourceId,
+      ...(lobby === "TSPORT" && this.#apsportPrematchWindowHours !== null
+        ? { prematchWindowHours: this.#apsportPrematchWindowHours }
+        : {}) };
   }
 
   #exactSocket(sourceId: string): BridgeControlSocket | undefined {

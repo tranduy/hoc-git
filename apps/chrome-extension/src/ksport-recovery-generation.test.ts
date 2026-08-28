@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
 
 function receipt(partition: "live" | "today", order: number, full: boolean,
-  wrap: "none" | "object" | "nested" = "none"): string {
+  wrap: "none" | "object" | "nested" | "deep" | "encoded" = "none"): string {
   const subscription = partition === "live" ? "subSportBookLive" : "subSportBookToday";
   const path = partition === "live" ? "1_1/live" : "1_11/today";
   const providerBody = full
@@ -11,6 +11,8 @@ function receipt(partition: "live" | "today", order: number, full: boolean,
     : [{ "8": `${order}`, "7": {} }];
   const wrapped = wrap === "object" ? { data: providerBody }
     : wrap === "nested" ? { result: { leagues: providerBody } }
+    : wrap === "deep" ? { data: { result: { leagues: providerBody } } }
+    : wrap === "encoded" ? JSON.stringify({ data: providerBody })
     : providerBody;
   const wrapper = JSON.stringify({ statusCode: "OK", statusCodeValue: 200,
     body: JSON.stringify(wrapped) });
@@ -88,6 +90,33 @@ describe("KsportRecoveryGenerationTracker", () => {
     expect(tracker.currentBaselineState).toEqual({ live: true, today: false, complete: false });
     tracker.push(receipt("today", 104, true, "nested"));
     expect(tracker.currentBaselineState).toEqual({ live: true, today: true, complete: true });
+  });
+
+  it("completes a baseline whose league array is nested three wrapper objects deep", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+
+    tracker.push(receipt("live", 100, true, "deep"));
+    expect(tracker.currentBaselineState).toEqual({ live: true, today: false, complete: false });
+  });
+
+  it("completes a baseline whose provider body is JSON encoded twice", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+
+    tracker.push(receipt("live", 100, true, "encoded"));
+    expect(tracker.currentBaselineState).toEqual({ live: true, today: false, complete: false });
+  });
+
+  it("completes a baseline whose league and event collections are object maps", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    const payload = receiptWithProviderBody("live", 100, {
+      leagueKey: { "1": "live league", "2": {
+        eventKey: { "8": "100", "2": "Home", "3": "Away",
+          "7": { "3": ["2.5 0.91*100h -0.99*100a 1000001"] } }
+      } }
+    });
+
+    tracker.push(payload);
+    expect(tracker.currentBaselineState).toEqual({ live: true, today: false, complete: false });
   });
 
   it("refuses a wrapper whose nested array is not a league array", () => {
@@ -261,6 +290,22 @@ describe("KsportRecoveryGenerationTracker", () => {
     // decoder for the life of the socket, which is what left SBOBET dark.
     const retry = tracker.observeSent(subscribe("live"));
     expect(retry).toBe(3);
+    expect(tracker.failed).toBe(false);
+  });
+
+  it("attributes receipts after retrying the same partition before the initial pair completes", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+
+    expect(tracker.observeSent(subscribe("today"))).toBe(1);
+    expect(tracker.push(receipt("today", 104, true))).toEqual([
+      { payload: receipt("today", 104, true), recoveryGeneration: 1 }
+    ]);
+    expect(tracker.observeSent(subscribe("today"))).toBe(2);
+
+    const replacement = receipt("today", 204, true);
+    expect(tracker.push(replacement)).toEqual([
+      { payload: replacement, recoveryGeneration: 2 }
+    ]);
     expect(tracker.failed).toBe(false);
   });
 
@@ -497,6 +542,17 @@ describe("catalog receipts survive a renamed subscription and topic path", () =>
     const jackpot = `MESSAGE\ndestination:/topic/jackpot/live/feed\n` +
       `subscription:subJackpot\nmessage-id:socket-9\n\n${wrapper}\u0000`;
     expect(tracker.push(`a${JSON.stringify([jackpot])}`)).toEqual([]);
+    expect(tracker.failed).toBe(false);
+  });
+
+  it("refuses the menu counter even when it reuses a sportsbook subscription id", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    const wrapper = JSON.stringify({ statusCode: "OK", statusCodeValue: 200,
+      body: JSON.stringify({ "1": { "0": 12, "1": 7 }, "2": { "0": 3 } }) });
+    const counter = `MESSAGE\ndestination:/topic/menu/live/count\n` +
+      `subscription:subSportBookLive\nmessage-id:socket-10\n\n${wrapper}\u0000`;
+
+    expect(tracker.push(`a${JSON.stringify([counter])}`)).toEqual([]);
     expect(tracker.failed).toBe(false);
   });
 });

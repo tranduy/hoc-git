@@ -235,7 +235,8 @@ describe("Fastify snapshot API", () => {
       port: 4310,
       viteOrigin: "http://127.0.0.1:4311",
       dataMode: "LIVE",
-      fixtureReplaySpeed: 1
+      fixtureReplaySpeed: 1,
+      apsportPrematchWindowHours: 24
     });
     expect(resolveServerConfig({
       API_HOST: "localhost",
@@ -248,7 +249,8 @@ describe("Fastify snapshot API", () => {
       port: 5310,
       viteOrigin: "http://localhost:5311",
       dataMode: "FIXTURE",
-      fixtureReplaySpeed: 2
+      fixtureReplaySpeed: 2,
+      apsportPrematchWindowHours: 24
     });
     expect(resolveServerConfig({ VITE_ORIGIN: "https://live.babiesbo.uk" }).viteOrigin)
       .toBe("https://live.babiesbo.uk");
@@ -257,8 +259,8 @@ describe("Fastify snapshot API", () => {
     expect(() => resolveServerConfig({ FIXTURE_MODE: "true" })).toThrow("FIXTURE_MODE must be 1 or unset");
   });
 
-  it("runs automatic session recovery by default with an explicit kill switch", () => {
-    expect(shouldRunLegacySessionMaintenance({})).toBe(true);
+  it("keeps visible Playwright session maintenance opt-in", () => {
+    expect(shouldRunLegacySessionMaintenance({})).toBe(false);
     expect(shouldRunLegacySessionMaintenance({ SESSION_MAINTENANCE_ENABLED: "0" })).toBe(false);
     expect(shouldRunLegacySessionMaintenance({ SESSION_MAINTENANCE_ENABLED: "1" })).toBe(true);
     expect(() => shouldRunLegacySessionMaintenance({ SESSION_MAINTENANCE_ENABLED: "yes" }))

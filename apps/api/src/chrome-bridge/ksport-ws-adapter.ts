@@ -129,7 +129,15 @@ function httpGeneration(envelope: ChromeBridgeEnvelope): {
 }
 
 function isFullPartitionSnapshot(body: unknown): boolean {
-  return Array.isArray(body) && body.every((value) => {
+  if (!Array.isArray(body)) return false;
+  // getEvent returns either the league array directly or one additional
+  // array per provider date group. Accept exactly those two documented wire
+  // shapes; mixed/deeper wrappers and error objects remain fail-closed.
+  const leagues: readonly unknown[] = body.every((value) => Array.isArray(value))
+    ? body.flat(1) : body;
+  if (body.some((value) => Array.isArray(value)) &&
+    !body.every((value) => Array.isArray(value))) return false;
+  return leagues.every((value) => {
     const league = record(value);
     if (league === null || typeof league["1"] !== "string" || league["1"].trim() === "" ||
       !Array.isArray(league["2"])) return false;

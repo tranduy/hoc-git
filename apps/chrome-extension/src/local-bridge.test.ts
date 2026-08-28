@@ -259,15 +259,30 @@ describe("LocalBridge", () => {
     socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
       sourceId: "chrome:SABA:7" }) });
 
-    expect(onSnapshotRequest).toHaveBeenCalledWith("chrome:SABA:7");
+    expect(onSnapshotRequest).toHaveBeenCalledWith({
+      sourceId: "chrome:SABA:7", prematchWindowHours: undefined
+    });
     expect(bridge.pendingSequences()).toEqual([0]);
+  });
+
+  it("forwards APSPORT's bounded prematch window with the snapshot request", () => {
+    const socket = new FakeSocket();
+    const onSnapshotRequest = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSnapshotRequest });
+    bridge.connect();
+    socket.open();
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT",
+      sourceId: "chrome:TSPORT:7", prematchWindowHours: 24 }) });
+
+    expect(onSnapshotRequest).toHaveBeenCalledWith({ sourceId: "chrome:TSPORT:7", prematchWindowHours: 24 });
   });
 
   it("does not let one blocked snapshot recovery delay another provider", async () => {
     const socket = new FakeSocket();
     let releaseFirst: (() => void) | undefined;
     const started: string[] = [];
-    const onSnapshotRequest = vi.fn(async (sourceId: string) => {
+    const onSnapshotRequest = vi.fn(async (request: { readonly sourceId: string }) => {
+      const sourceId = request.sourceId;
       started.push(sourceId);
       if (sourceId === "chrome:SABA:7") {
         await new Promise<void>((resolve) => { releaseFirst = resolve; });

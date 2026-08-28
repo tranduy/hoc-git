@@ -28,6 +28,7 @@ export class TabRegistry {
   readonly #lifecycle: TabRegistryLifecyclePort | null;
   readonly #attached = new Map<number, AttachedLobbyTab>();
   readonly #preferred = new Map<number, ChromeLobbyId>();
+  readonly #attachInFlight = new Map<number, Promise<AttachedLobbyTab>>();
 
   constructor(port: DebuggerAttachmentPort, store: TabPreferenceStore | null = null,
     lifecycle: TabRegistryLifecyclePort | null = null) {
@@ -53,12 +54,37 @@ export class TabRegistry {
   }
 
   async #attachCandidate(candidate: NonNullable<ReturnType<typeof recognizeLobbyTab>>): Promise<AttachedLobbyTab> {
+    const current = this.#attachInFlight.get(candidate.tabId);
+    if (current !== undefined) return current;
+    const operation = this.#attachCandidateOnce(candidate).finally(() => {
+      if (this.#attachInFlight.get(candidate.tabId) === operation) {
+        this.#attachInFlight.delete(candidate.tabId);
+      }
+    });
+    this.#attachInFlight.set(candidate.tabId, operation);
+    return operation;
+  }
+
+  async #attachCandidateOnce(candidate: NonNullable<ReturnType<typeof recognizeLobbyTab>>): Promise<AttachedLobbyTab> {
     this.#preferred.set(candidate.tabId, candidate.lobby);
     await this.#persist();
     const existing = this.#attached.get(candidate.tabId);
     if (existing?.lobby === candidate.lobby) return existing;
     if (existing) await this.#port.detach(candidate.tabId);
-    await this.#port.attach(candidate.tabId);
+    try {
+      await this.#port.attach(candidate.tabId);
+    } catch (attachError) {
+      try {
+        // MV3 restarts can leave Chrome holding this extension's prior debugger
+        // session after the in-memory registry has vanished. Detach succeeds
+        // only for a session owned by this extension; DevTools/another
+        // extension therefore fail closed and retain their target.
+        await this.#port.detach(candidate.tabId);
+      } catch {
+        throw attachError;
+      }
+      await this.#port.attach(candidate.tabId);
+    }
     const attached: AttachedLobbyTab = {
       lobby: candidate.lobby,
       tabId: candidate.tabId,
@@ -137,21 +163,9 @@ export class TabRegistry {
           await this.attachSelected(tab);
           activeTabId = tab.id ?? null;
           break;
-        } catch (error) {
-          if (tab.id !== undefined && isExistingDebuggerAttachment(error)) {
-            try {
-              // An MV3 worker restart clears this in-memory registry while
-              // Chrome can retain the extension's debugger attachment. Reclaim
-              // that orphaned session instead of leaving every source detached.
-              await this.#port.detach(tab.id);
-              await this.attachSelected(tab);
-              activeTabId = tab.id;
-              break;
-            } catch {
-              // A DevTools-owned target is not ours to reclaim. Try the next
-              // current tab for this lobby before leaving the source offline.
-            }
-          }
+        } catch {
+          // A DevTools-owned target is not ours to reclaim. Try the next
+          // current tab for this lobby before leaving the source offline.
         }
       }
       if (activeTabId === null) continue;
@@ -190,8 +204,4 @@ function tabRestoreQuality(lobby: ChromeLobbyId, tab: TabDescriptor): number {
   if (/sportsbook/iu.test(title)) return 2;
   if (/something went wrong/iu.test(title) || /^zenandfe\.com(?:\/|\?|$)/iu.test(title)) return -1;
   return 0;
-}
-
-function isExistingDebuggerAttachment(error: unknown): boolean {
-  return error instanceof Error && /another debugger is already attached/iu.test(error.message);
 }

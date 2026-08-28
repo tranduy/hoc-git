@@ -374,6 +374,28 @@ describe("SourceTabRecovery", () => {
     expect(checks).toBe(80);
   });
 
+  it("keeps a valid K-Sports sportsbook tab when only its baseline readiness times out", async () => {
+    const remove = vi.fn(async () => undefined);
+    const onBootstrapFailure = vi.fn();
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [], query: async () => [],
+      create: async () => ({ id: 10, url: "about:blank" }),
+      attach: async () => undefined,
+      update: async (_tabId, url) => ({ id: 10, url, title: "Sportsbook" }),
+      remove,
+      get: async () => ({ id: 10, url: "https://zenandfe.com/sports", title: "Sportsbook" }),
+      validateReady: async () => false,
+      onBootstrapFailure,
+      delay: async () => undefined
+    });
+
+    await expect(recovery.ensure("KSPORT", "https://zenandfe.com/?token=fresh"))
+      .rejects.toThrow("SOURCE_TAB_RECOVERY_FAILED");
+
+    expect(onBootstrapFailure).toHaveBeenCalledWith(10);
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it("closes the existing source before opening and cleans a failed replacement", async () => {
     const removed: number[] = [];
     const recovery = new SourceTabRecovery({

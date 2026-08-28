@@ -46,6 +46,7 @@ export interface ServerConfig {
   readonly viteOrigin: string;
   readonly dataMode: DataMode;
   readonly fixtureReplaySpeed: number;
+  readonly apsportPrematchWindowHours: number;
 }
 
 interface RecoverySweepRegistry {
@@ -262,7 +263,10 @@ export function shouldRunLegacySessionMaintenance(
   env: Readonly<Record<string, string | undefined>>
 ): boolean {
   const value = env.SESSION_MAINTENANCE_ENABLED?.trim();
-  if (value === undefined || value === "") return true;
+  // This path launches a visible persistent Playwright browser. Chrome-bridge
+  // snapshots are the normal recovery mechanism, so legacy browser renewal
+  // must be an explicit operator action instead of a background default.
+  if (value === undefined || value === "") return false;
   if (value === "0") return false;
   if (value === "1") return true;
   throw new Error("SESSION_MAINTENANCE_ENABLED must be 0, 1 or unset");
@@ -330,13 +334,26 @@ function dataMode(value: string | undefined): DataMode {
   throw new Error("FIXTURE_MODE must be 1 or unset");
 }
 
+export function resolveApsportPrematchWindowHours(
+  env: Readonly<Record<string, string | undefined>>
+): number {
+  const raw = env.APSPORT_PREMATCH_WINDOW_HOURS;
+  if (raw === undefined) return 24;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 48) {
+    throw new Error("APSPORT_PREMATCH_WINDOW_HOURS must be an integer between 1 and 48");
+  }
+  return value;
+}
+
 export function resolveServerConfig(env: Readonly<Record<string, string | undefined>>): ServerConfig {
   return {
     host: loopbackHost(env.API_HOST),
     port: portNumber(env.API_PORT),
     viteOrigin: validateViteOrigin(env.VITE_ORIGIN ?? "http://127.0.0.1:4311"),
     dataMode: dataMode(env.FIXTURE_MODE),
-    fixtureReplaySpeed: positiveNumber(env.FIXTURE_REPLAY_SPEED, 1, "FIXTURE_REPLAY_SPEED")
+    fixtureReplaySpeed: positiveNumber(env.FIXTURE_REPLAY_SPEED, 1, "FIXTURE_REPLAY_SPEED"),
+    apsportPrematchWindowHours: resolveApsportPrematchWindowHours(env)
   };
 }
 
@@ -449,7 +466,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     ? new ChromeBridgeRegistry({ authorityCoordinator: providerAuthorityCoordinator,
       onRejected: (accountId, reason) => pipelineTelemetry.recordEnvelopeRejected(accountId, reason) }) : null;
   const chromeBridgeControlPlane = chromeBridgeRegistry ? new ChromeBridgeControlPlane({
-    authorityCoordinator: chromeBridgeRegistry.authorityCoordinator
+    authorityCoordinator: chromeBridgeRegistry.authorityCoordinator,
+    apsportPrematchWindowHours: config.apsportPrematchWindowHours
   }) : null;
   const providerFeeds = chromeBridgeRegistry ? new ProviderFeedRegistry() : null;
   providerFeeds?.subscribe((snapshot) => pipelineTelemetry.recordFeed(snapshot));

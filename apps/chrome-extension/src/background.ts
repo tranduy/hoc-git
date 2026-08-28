@@ -20,9 +20,17 @@ import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
 import { bootstrapCatalogSources } from "./bootstrap-catalog-refresh.js";
 import { SabaSnapshotStorage } from "./saba-snapshot-storage.js";
 import { SourceLaunchMemory } from "./source-launch-memory.js";
+import { extensionLobbyScope, lobbyIsInExtensionScope } from "./extension-lobby-scope.js";
+import { runDebuggerEventTask } from "./debugger-event-task.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 declare const __CHROME_EXTENSION_BUILD_IDENTITY__: string;
+
+const runtimeLobbyScope = extensionLobbyScope(chrome.runtime.getManifest().name);
+
+function lobbyIsAllowed(lobby: ChromeLobbyId): boolean {
+  return lobbyIsInExtensionScope(lobby, runtimeLobbyScope);
+}
 
 // First, before anything else this module builds. An alarm registered at the
 // end of a long initialisation is only as reliable as every constructor ahead
@@ -113,7 +121,9 @@ const snapshotPoller = new CmdSnapshotPoller({
 });
 snapshotPoller.start();
 
-async function recoverSourceSnapshot(sourceId: string, beginEpoch: boolean): Promise<void> {
+async function recoverSourceSnapshot(request: { readonly sourceId: string;
+  readonly prematchWindowHours?: number | undefined }, beginEpoch: boolean): Promise<void> {
+  const { sourceId } = request;
   const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
   if (!attached) return;
   if (beginEpoch) observer.beginSourceEpoch(sourceId);
@@ -127,7 +137,7 @@ async function recoverSourceSnapshot(sourceId: string, beginEpoch: boolean): Pro
     }, source.hostname),
     refresh: async (source) => observer.refreshCatalog({
       lobby: source.lobby, sourceId, tabId: source.tabId
-    }),
+    }, { prematchWindowHours: request.prematchWindowHours ?? 24 }),
     reload: async (tabId) => chrome.tabs.reload(tabId)
   });
 }
@@ -139,12 +149,15 @@ const tabBootstrapper = new TabBootstrapper({
 });
 
 async function attachRecoveredTab(tab: TabDescriptor): Promise<void> {
+  const recognized = recognizeLobbyTab(tab);
+  if (recognized === null || !lobbyIsAllowed(recognized.lobby)) throw new Error("LOBBY_OUT_OF_SCOPE");
   await rememberRecognizedUrl(tab);
   const attached = await registry.attachSelected(tab);
   await startAttachedSource(attached);
 }
 
 async function startAttachedSource(attached: { readonly lobby: ChromeLobbyId; readonly tabId: number }): Promise<void> {
+  if (!lobbyIsAllowed(attached.lobby)) throw new Error("LOBBY_OUT_OF_SCOPE");
   const source: ObservedSource = {
     lobby: attached.lobby,
     tabId: attached.tabId,
@@ -207,6 +220,7 @@ const sourceTabRecovery = new SourceTabRecovery({
   get: async (tabId) => chrome.tabs.get(tabId),
   attach: attachRecoveredTab,
   attachBootstrap: async (tab, lobby) => {
+    if (!lobbyIsAllowed(lobby)) throw new Error("LOBBY_OUT_OF_SCOPE");
     rememberRecognizedUrl(tab);
     const attached = await registry.attachBootstrap(tab, lobby);
     await startAttachedSource(attached);
@@ -327,9 +341,20 @@ async function configureBridgeOnce(): Promise<boolean> {
       // events with 19 upcoming to 68 with 4, and stayed there - its whole
       // pre-match list gone, which is most of what another book can be
       // compared against.
-      onOpen: () => { void refreshBootstrapCatalogs(); },
-      onSnapshotRequest: async (sourceId) => recoverSourceSnapshot(sourceId, false),
-      onSourceResync: async (sourceId) => recoverSourceSnapshot(sourceId, true),
+      onOpen: () => {
+        // A new loopback API process needs one current APSPORT baseline even
+        // when the provider's normal one-minute cooldown has not elapsed. Once
+        // that first request starts, the observer coalesces recovery retries and
+        // the normal poller onto the same generation.
+        for (const attached of registry.list()) {
+          if (attached.lobby === "TSPORT") {
+            observer.resetApsportRefreshCooldown(`chrome:${attached.lobby}:${attached.tabId}`);
+          }
+        }
+        void refreshBootstrapCatalogs();
+      },
+      onSnapshotRequest: async (request) => recoverSourceSnapshot(request, false),
+      onSourceResync: async (sourceId) => recoverSourceSnapshot({ sourceId, prematchWindowHours: 24 }, true),
       ...(typeof __CHROME_EXTENSION_BUILD_IDENTITY__ === "string" &&
         __CHROME_EXTENSION_BUILD_IDENTITY__.length > 0
         ? { buildIdentity: __CHROME_EXTENSION_BUILD_IDENTITY__ }
@@ -351,8 +376,14 @@ async function configureBridgeOnce(): Promise<boolean> {
           recognized?.lobby !== attached.lobby) throw new Error("UNTRUSTED_LAUNCH_URL");
         await chrome.tabs.update(attached.tabId, { url });
       },
-      onSourceEnsure: async (lobby, url) => sourceTabRecovery.ensure(lobby, url),
-      onSourceRestore: async (lobby) => sourceTabRecovery.restore(lobby),
+      onSourceEnsure: async (lobby, url) => {
+        if (!lobbyIsAllowed(lobby)) return;
+        await sourceTabRecovery.ensure(lobby, url);
+      },
+      onSourceRestore: async (lobby) => {
+        if (!lobbyIsAllowed(lobby)) return;
+        await sourceTabRecovery.restore(lobby);
+      },
       onFocusSelection: async (request) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === request.sourceId);
         if (!attached) throw new Error("SOURCE_NOT_ATTACHED");
@@ -406,7 +437,10 @@ async function restorePreferredTabsOnce(): Promise<void> {
 
 async function reconcilePreferredTabs(): Promise<void> {
   await legacySourceLaunchUrlsPurge;
-  const tabs = await chrome.tabs.query({});
+  const tabs = (await chrome.tabs.query({})).filter((tab) => {
+    const recognized = recognizeLobbyTab(tab);
+    return recognized !== null && lobbyIsAllowed(recognized.lobby);
+  });
   await Promise.all(tabs.map(async (tab) => rememberRecognizedUrl(tab)));
   await registry.restore(tabs);
 }
@@ -460,7 +494,10 @@ function sourceForTab(tabId: number): ObservedSource | null {
 // script leaves the authenticated page exactly as it is.
 async function installLobbyHeartbeat(): Promise<void> {
   await injectHeartbeatIntoOpenLobbies({
-    listTabs: () => chrome.tabs.query({}),
+    listTabs: async () => (await chrome.tabs.query({})).filter((tab) => {
+      const recognized = recognizeLobbyTab(tab);
+      return recognized !== null && lobbyIsAllowed(recognized.lobby);
+    }),
     inject: async (tabId) => {
       await chrome.scripting.executeScript({ target: { tabId }, files: [HEARTBEAT_SCRIPT] });
     }
@@ -495,12 +532,15 @@ chrome.debugger.onDetach.addListener((debuggee) => {
 chrome.debugger.onEvent.addListener((debuggee, method, params) => {
   if (debuggee.tabId === undefined) return;
   const source = sourceForTab(debuggee.tabId);
-  if (source) void observer.handleEvent(source, method, params, debuggee.sessionId);
+  if (source) runDebuggerEventTask(observer.handleEvent(source, method, params, debuggee.sessionId),
+    (error) => console.warn("Fieldline debugger event failed",
+      error instanceof Error ? error.name : "UNKNOWN"));
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.url || changeInfo.status === "loading") {
     const descriptor = { id: tabId, url: tab.url, title: tab.title };
     const recognized = recognizeLobbyTab(descriptor);
+    if (recognized !== null && !lobbyIsAllowed(recognized.lobby)) return;
     // Reset attaches the debugger while the replacement tab is still blank so
     // no one-time provider bootstrap response can be missed. Chrome may emit a
     // delayed about:blank loading event after that attachment; it is an
@@ -532,7 +572,8 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     const request = message as Record<string, unknown>;
     if (request.kind === "STATUS") {
       const tabs = await chrome.tabs.query({});
-      const candidates = tabs.map(recognizeLobbyTab).filter((value) => value !== null);
+      const candidates = tabs.map(recognizeLobbyTab)
+        .filter((value) => value !== null && lobbyIsAllowed(value.lobby));
       return sendResponse({ ok: true, configured: bridge !== null, candidates, attached: registry.list() });
     }
     if (request.kind === "SAVE_KEY" && typeof request.installationKey === "string") {
@@ -541,6 +582,10 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     }
     if (request.kind === "ATTACH_TAB" && Number.isSafeInteger(request.tabId)) {
       const tab = await chrome.tabs.get(request.tabId as number);
+      const recognized = recognizeLobbyTab(tab);
+      if (recognized === null || !lobbyIsAllowed(recognized.lobby)) {
+        return sendResponse({ ok: false, reason: "LOBBY_OUT_OF_SCOPE" });
+      }
       rememberRecognizedUrl(tab);
       const attached = await registry.attachSelected(tab);
       const source: ObservedSource = {
@@ -562,7 +607,8 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       const tabs = await chrome.tabs.query({});
       const attached = [];
       for (const tab of tabs) {
-        if (recognizeLobbyTab(tab) === null) continue;
+        const recognized = recognizeLobbyTab(tab);
+        if (recognized === null || !lobbyIsAllowed(recognized.lobby)) continue;
         try {
           rememberRecognizedUrl(tab);
           const entry = await registry.attachSelected(tab);

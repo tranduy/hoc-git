@@ -83,6 +83,7 @@ const ACTIONABLE_REASONS = new Set([
   "PORTAL_VALIDATION_FAILED", "PROVIDER_SCHEMA_CHANGED"
 ]);
 const DISPOSED = Symbol("RECOVERY_DISPOSED");
+const SBOBET_SAME_TAB_RECOVERY = Symbol("SBOBET_SAME_TAB_RECOVERY");
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 300_000;
 /**
@@ -98,6 +99,12 @@ const MAX_BACKOFF_MS = 300_000;
  * managed to start.
  */
 const MIN_SOURCE_RELOAD_INTERVAL_MS = 300_000;
+// KSPORT owns a safe same-tab recovery path in the extension: it re-selects
+// the real Football group, requests a paired live + today HTTP baseline, and
+// reconnects only the catalog socket when needed. A recent tab heartbeat means
+// that path is still reachable. Replacing the whole tab in that state destroys
+// the very subscriptions recovery is waiting for and creates a relaunch loop.
+const SBOBET_SAME_TAB_RECOVERY_MAX_HEARTBEAT_AGE_MS = 60_000;
 
 interface RecoveryBackoffState {
   readonly consecutiveFailures: number;
@@ -202,11 +209,33 @@ export class AutomaticSourceRecovery {
     if (this.#disposed) return stopped(request.accountId, "HARD");
     if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
     try {
+      const current = this.#options.feedRegistry.snapshot(request.accountId);
+      const actionStartedAtMs = this.#now();
+      if (source.provider === "SBOBET") {
+        const delivered = this.#options.controlPlane.requestLobbySnapshot(source.hardLobby);
+        if (delivered > 0 && hasRecentSbobetTab(current, actionStartedAtMs)) {
+          return this.#confirmAfter(request.accountId, "HARD", actionStartedAtMs,
+            this.#reloadBaselineTimeoutMs);
+        }
+        if (delivered > 0) {
+          const confirmation = await this.#confirmAfter(request.accountId, "HARD", actionStartedAtMs);
+          if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
+            return confirmation;
+          }
+          const retryStartedAtMs = this.#now();
+          if (hasRecentSbobetTab(this.#options.feedRegistry.snapshot(request.accountId),
+            retryStartedAtMs)) {
+            if (this.#options.controlPlane.requestLobbySnapshot(source.hardLobby) > 0) {
+              return this.#confirmAfter(request.accountId, "HARD", retryStartedAtMs,
+                this.#reloadBaselineTimeoutMs);
+            }
+          }
+        }
+      }
       if (WEBSOCKET_PROVIDERS.has(source.provider) &&
         (this.#options.controlPlane.reloadSource !== undefined ||
           this.#options.controlPlane.reloadRecoverySource !== undefined)) {
-        const prior = this.#options.feedRegistry.snapshot(request.accountId);
-        const actionStartedAtMs = this.#now();
+        const prior = current;
         let delivered = 0;
         const lastReloadAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
         const reloadAllowed = actionStartedAtMs - lastReloadAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS;
@@ -218,7 +247,7 @@ export class AutomaticSourceRecovery {
             if (delivered > 0) this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
           } catch { /* send failure is undelivered; fall through to a fresh launch */ }
         }
-        if (reloadAllowed && delivered <= 0 &&
+        if (source.provider !== "SBOBET" && reloadAllowed && delivered <= 0 &&
           this.#options.controlPlane.reloadRecoverySource !== undefined) {
           try {
             delivered = this.#options.controlPlane.reloadRecoverySource(request.accountId, source.hardLobby);
@@ -260,19 +289,37 @@ export class AutomaticSourceRecovery {
         const refresh = await this.#whileActive(this.#options.refreshFabetLaunches(this.#abortController.signal));
         if (refresh === DISPOSED) return stopped(request.accountId, "HARD");
         if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
-        const targetedDelivery = await this.#whileActive(refreshBridgeProviderSources({
-          controlPlane: this.#options.controlPlane,
-          withLatestFabetLaunch: this.#options.withLatestFabetLaunch,
-          minAcquiredAtMs: recoveryStartedAtMs,
-          signal: this.#abortController.signal,
-          providers: [source.provider],
-          restoreCmd: false,
-          beforeDelivery: () => {
-            if (this.#disposed) throw new Error("RECOVERY_DISPOSED");
-            if (this.#suppressed(request.accountId)) throw new Error("RECOVERY_SUPPRESSED");
-            confirmationAfterMs = this.#now();
+        let targetedDelivery: number | typeof DISPOSED;
+        try {
+          targetedDelivery = await this.#whileActive(refreshBridgeProviderSources({
+            controlPlane: this.#options.controlPlane,
+            withLatestFabetLaunch: this.#options.withLatestFabetLaunch,
+            minAcquiredAtMs: recoveryStartedAtMs,
+            signal: this.#abortController.signal,
+            providers: [source.provider],
+            restoreCmd: false,
+            beforeDelivery: () => {
+              if (this.#disposed) throw new Error("RECOVERY_DISPOSED");
+              if (this.#suppressed(request.accountId)) throw new Error("RECOVERY_SUPPRESSED");
+              confirmationAfterMs = this.#now();
+              // Launch-token discovery can take long enough for the existing
+              // authenticated KSPORT tab to attach in the meantime. Recheck at
+              // the last mutation boundary; replacing it here destroys the
+              // live baseline before the today partition can arrive.
+              if (source.provider === "SBOBET" && hasRecentSbobetTab(
+                this.#options.feedRegistry.snapshot(request.accountId), confirmationAfterMs
+              ) && this.#options.controlPlane.requestLobbySnapshot(source.hardLobby) > 0) {
+                throw SBOBET_SAME_TAB_RECOVERY;
+              }
+            }
+          }));
+        } catch (error) {
+          if (error === SBOBET_SAME_TAB_RECOVERY) {
+            return this.#confirmAfter(request.accountId, "HARD", confirmationAfterMs,
+              this.#reloadBaselineTimeoutMs);
           }
-        }));
+          throw error;
+        }
         if (targetedDelivery === DISPOSED) return stopped(request.accountId, "HARD");
         delivered = targetedDelivery;
       }
@@ -328,10 +375,11 @@ export class AutomaticSourceRecovery {
     return this.#confirmAfter(request.accountId, stage, request.requestedAtMs);
   }
 
-  async #confirmAfter(accountId: string, stage: RecoveryStage, afterMs: number): Promise<RecoveryResult> {
+  async #confirmAfter(accountId: string, stage: RecoveryStage, afterMs: number,
+    timeoutMs = this.#baselineTimeoutMs): Promise<RecoveryResult> {
     try {
       const baseline = await this.#whileActive(this.#options.feedRegistry.waitForFreshBaseline(
-        accountId, afterMs, this.#baselineTimeoutMs, this.#abortController.signal
+        accountId, afterMs, timeoutMs, this.#abortController.signal
       ));
       if (baseline === DISPOSED) return stopped(accountId, stage);
       if (!isBaselineAfter(baseline, accountId, afterMs)) {
@@ -409,6 +457,11 @@ function softLobby(snapshot: ProviderFeedSnapshot, source: RecoverySource): Chro
 function isBaselineAfter(snapshot: ProviderFeedSnapshot, accountId: string, afterMs: number): boolean {
   return snapshot.accountId === accountId && snapshot.state === "LIVE" &&
     snapshot.lastCompleteBaselineAtMs !== null && snapshot.lastCompleteBaselineAtMs > afterMs;
+}
+
+function hasRecentSbobetTab(snapshot: ProviderFeedSnapshot, nowMs: number): boolean {
+  return snapshot.sourceId !== null && snapshot.tabReachableAtMs !== null &&
+    nowMs - snapshot.tabReachableAtMs <= SBOBET_SAME_TAB_RECOVERY_MAX_HEARTBEAT_AGE_MS;
 }
 
 function matchesRecoverySource(sourceId: string, accountId: string, lobby: ChromeLobbyId): boolean {

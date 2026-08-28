@@ -247,6 +247,37 @@ describe("LiveCatalogPage", () => {
     expect(cards[0]!.className).toMatch(/catalog-event--roi-/u);
   });
 
+  it("renders only the 50 highest-ROI cards when more exact tickets exist", async () => {
+    const source = (provider: "SABA" | "SBOBET"): CatalogSourceStatus => ({
+      id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+    });
+    const lines = Array.from({ length: 51 }, (_, index) => `-${index + 0.5}`);
+    const providerCatalog = (provider: "SABA" | "SBOBET"): LiveCatalogResponse => {
+      const providerEventId = `${provider}-event`;
+      return { ...catalog, accountId: `catalog-source:${provider}:FOOTBALL`, provider,
+        events: [{ ...event, provider, providerEventId }],
+        markets: lines.map((line) => ({ ...market, provider, providerEventId,
+          providerMarketId: `${provider}-${line}`, line })),
+        quotes: lines.flatMap((line, lineIndex) => (["HOME", "AWAY"] as const).map((selection, quoteIndex) => ({
+          ...quotes[quoteIndex]!, provider, providerEventId, providerMarketId: `${provider}-${line}`,
+          providerSelectionId: `${provider}-${line}-${selection}`, line,
+          rawOdds: (provider === "SABA") === (selection === "HOME")
+            ? (2 + (lineIndex + 1) / 100).toFixed(2)
+            : "1.1"
+        }))) };
+    };
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [source("SABA"), source("SBOBET")] }}
+      catalogApi={{ read: async (id) => providerCatalog(id.includes("SABA") ? "SABA" : "SBOBET") }} />);
+
+    await vi.waitFor(() => expect(screen.getAllByRole("button", { name: "Compare Alpha vs Beta" })).toHaveLength(50));
+    const cards = screen.getAllByRole("button", { name: "Compare Alpha vs Beta" });
+    expect(within(cards[0]!).getByText("ROI 25.50%")).toBeTruthy();
+    expect(within(cards[49]!).getByText("ROI 1.00%")).toBeTruthy();
+    expect(screen.queryByText("ROI 0.50%")).toBeNull();
+  });
+
   it("shows provider buttons only after the profitable match is opened in detail", async () => {
     const source = (provider: "SABA" | "CMD"): CatalogSourceStatus => ({
       id: `catalog-source:${provider}:FOOTBALL`, alias: provider, provider, category: "FOOTBALL",

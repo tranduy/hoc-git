@@ -78,7 +78,7 @@ function expectedRecord(id: number, firstPrice = "0.11", secondPrice = "-0.22") 
 }
 
 const event = (id: number, home: string, firstPrice = "0.83", secondPrice = "-0.91") => ({
-  "2": id, "5": home, "10": "Active", "11": "2026-08-16T02:00:00Z", "19": 1_399_000,
+  "2": id, "5": home, "6": true, "10": "Active", "11": "2026-08-16T02:00:00Z", "19": 1_399_000,
   "22": "Away " + id, "25": 1, "26": 2, "53": "League",
   "50": [
     { "3": 3, "9": [{ "0": id + "-over", "2": id + "-under", "6": id + "-total", "7": "2.5",
@@ -92,10 +92,30 @@ const event = (id: number, home: string, firstPrice = "0.83", secondPrice = "-0.
   ]
 });
 
+function apiEnvelope(
+  records: readonly unknown[],
+  sequence = 1,
+  phase: "ROSTER" | "DETAIL" = "ROSTER",
+  complete = true,
+  generation = "apsport:7:1",
+  prematchWindowHours = 24
+): ChromeBridgeEnvelope {
+  return {
+    version: 1, kind: "NETWORK", lobby: "TSPORT", sourceId: SOURCE_ID, tabId: 7,
+    sourceEpoch: DEFAULT_SOURCE_EPOCH,
+    sequence, observedAtMs: Date.UTC(2026, 7, 16, 3), receivedMonotonicMs: sequence * 10 + 40,
+    transport: "HTTP_RESPONSE",
+    request: { hostname: "pacific.agenate.com",
+      pathnameClass: "/__fieldline_apsport_catalog_refresh__", resourceType: "Fetch" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, generation, phase, complete,
+      prematchWindowHours, records }) }
+  };
+}
+
 type AuthorityUpdate = {
   readonly authoritativeBaseline?: true;
   readonly evidenceMode?: "BASELINE" | "DELTA";
-  readonly provenance?: "WS";
+  readonly provenance?: "WS" | "AUTHENTICATED_HTTP";
   readonly generation?: string;
   readonly value: {
     readonly accountId: string;
@@ -106,6 +126,8 @@ type AuthorityUpdate = {
       readonly providerEventId: string;
       readonly providerMarketId: string;
       readonly rawOdds: string;
+      readonly isLive: boolean;
+      readonly status: string;
       readonly receivedMonotonicMs: number;
       readonly sequence: number | null;
     }>;
@@ -124,6 +146,117 @@ function beginFreshStream(
 }
 
 describe("TsportWsCatalogAdapter", () => {
+  it("uses a complete APSPORT API roster as authority without any DOM proof", () => {
+    const adapter = new TsportWsCatalogAdapter();
+
+    const update = adapter.decode(apiEnvelope([event(101, "API Home")]))[0] as AuthorityUpdate;
+
+    expect(update).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE",
+      generation: "apsport:7:1", provenance: "AUTHENTICATED_HTTP" });
+    expect(update.value).toMatchObject({ accountId: "catalog-source:APSPORT:FOOTBALL",
+      provider: "APSPORT", events: [expect.objectContaining({ providerEventId: "101", isLive: true })] });
+    expect(update.value.markets).toHaveLength(4);
+    expect(update.value.quotes).toHaveLength(8);
+  });
+
+  it("adds supported hidden markets from event-detail batches without treating collapsed UI state as locked", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const roster = event(102, "Hidden Home");
+    const detail = event(102, "Hidden Home");
+    detail["50"].push({ "3": 80, "9": [{
+      "0": "102-sh-over", "2": "102-sh-under", "6": "102-sh-total", "7": "1.5",
+      "8": { "2": "0.75" }, "9": { "2": "-0.85" }
+    }], "10": "Active" });
+    adapter.decode(apiEnvelope([roster]));
+
+    const update = adapter.decode(apiEnvelope([detail], 2, "DETAIL"))[0] as AuthorityUpdate;
+
+    expect(update).toMatchObject({ evidenceMode: "DELTA", generation: "apsport:7:1",
+      provenance: "AUTHENTICATED_HTTP" });
+    expect(update.value.markets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "102", providerMarketId: "102-sh-total",
+        marketType: "SH_TOTAL" })
+    ]));
+    expect(update.value.quotes.filter((quote) => quote.providerMarketId === "102-sh-total"))
+      .toEqual([expect.objectContaining({ status: "OPEN" }), expect.objectContaining({ status: "OPEN" })]);
+  });
+
+  it("keeps API prematch events and quotes in prematch phase inside the configured window", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const prematch = { ...event(103, "Prematch Home"), "6": false, "11": "2026-08-16T04:00:00Z" };
+
+    const update = adapter.decode(apiEnvelope([prematch]))[0] as AuthorityUpdate;
+
+    expect(update.value.events).toEqual([
+      expect.objectContaining({ providerEventId: "103", isLive: false, liveState: null })
+    ]);
+    expect(update.value.quotes.every((quote) => quote.isLive === false)).toBe(true);
+  });
+
+  it("accepts APSPORT's status-sparse prematch records when open market groups prove activity", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const statusSparse = { ...event(107, "Sparse Home"), "6": false,
+      "10": undefined, "11": "2026-08-16T04:00:00Z" };
+
+    const update = adapter.decode(apiEnvelope([statusSparse]))[0] as AuthorityUpdate;
+
+    expect(update.value.events).toEqual([
+      expect.objectContaining({ providerEventId: "107", isLive: false })
+    ]);
+    expect(update.value.markets).toHaveLength(4);
+  });
+
+  it("enforces the API prematch window again at the adapter boundary", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const outside = { ...event(104, "Outside Home"), "6": false, "11": "2026-08-17T04:00:01Z" };
+
+    const update = adapter.decode(apiEnvelope([outside]))[0] as AuthorityUpdate;
+
+    expect(update).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE" });
+    expect(update.value).toMatchObject({ events: [], markets: [], quotes: [] });
+  });
+
+  it("keeps multiple proven APSPORT football sockets alive and invalidates only after the last one closes", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(apiEnvelope([event(105, "Socket Home")]));
+    adapter.decode(stateEnvelope("OPEN", "football-a", 2));
+    adapter.decode(stateEnvelope("OPEN", "football-b", 3));
+    expect(adapter.decode(envelope(event(105, "Socket Home", "0.71"), 4, "football-a"))).toHaveLength(1);
+    expect(adapter.decode(envelope(event(105, "Socket Home", "0.72"), 5, "football-b"))).toHaveLength(1);
+
+    expect(adapter.decode(stateEnvelope("CLOSED", "football-a", 6))).toEqual([]);
+    expect(adapter.decode(stateEnvelope("CLOSED", "football-b", 7))).toEqual([
+      expect.objectContaining({ invalidateAccountId: "catalog-source:APSPORT:FOOTBALL",
+        reason: "PROVIDER_STREAM_CLOSED" })
+    ]);
+  });
+
+  it("suppresses duplicate socket events but retains hidden detail markets on a real price delta", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const roster = event(106, "Realtime Home");
+    const detail = event(106, "Realtime Home");
+    detail["50"].push({ "3": 80, "9": [{
+      "0": "106-sh-over", "2": "106-sh-under", "6": "106-sh-total", "7": "1.5",
+      "8": { "2": "0.75" }, "9": { "2": "-0.85" }
+    }], "10": "Active" });
+    adapter.decode(apiEnvelope([roster]));
+    adapter.decode(apiEnvelope([detail], 2, "DETAIL"));
+    adapter.decode(stateEnvelope("OPEN", "football-a", 3));
+    const realtime = event(106, "Realtime Home", "0.66", "-0.76");
+    realtime["50"] = [realtime["50"][0]!];
+
+    const changed = adapter.decode(envelope(realtime, 4, "football-a"))[0] as AuthorityUpdate;
+
+    expect(changed).toMatchObject({ evidenceMode: "DELTA", generation: "apsport:7:1", provenance: "WS" });
+    expect(changed.value.markets).toHaveLength(5);
+    expect(changed.value.markets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: "106-sh-total" })
+    ]));
+    expect(adapter.decode(envelope(realtime, 5, "football-a"))).toEqual([
+      expect.objectContaining({ transportAlive: true, sourceId: "chrome:TSPORT:7", sequence: 5 })
+    ]);
+  });
+
   it("does not publish a complete DOM capture as an authoritative catalog", () => {
     const adapter = new TsportWsCatalogAdapter();
 

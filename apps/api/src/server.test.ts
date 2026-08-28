@@ -5,7 +5,7 @@ import { providerFeedPolicies } from "./chrome-bridge/provider-feed-policies.js"
 import type { ProviderFeedSnapshot, ProviderRecoveryRequest } from "./chrome-bridge/provider-feed-types.js";
 import { PipelineTelemetry } from "./diagnostics/pipeline-telemetry.js";
 import { localWarpAuthEnabled, readExtensionBuildIdentity, startExtensionReloadSweep,
-  startProviderRecoverySweep } from "./server.js";
+  resolveApsportPrematchWindowHours, startProviderRecoverySweep } from "./server.js";
 import * as serverModule from "./server.js";
 
 const SABA = "catalog-source:SABA:FOOTBALL";
@@ -44,6 +44,18 @@ describe("localWarpAuthEnabled", () => {
     expect(localWarpAuthEnabled(undefined)).toBe(false);
     expect(localWarpAuthEnabled("0")).toBe(false);
     expect(localWarpAuthEnabled("1")).toBe(true);
+  });
+});
+
+describe("resolveApsportPrematchWindowHours", () => {
+  it("defaults to 24 hours and accepts only integer hours from 1 through 48", () => {
+    expect(resolveApsportPrematchWindowHours({})).toBe(24);
+    expect(resolveApsportPrematchWindowHours({ APSPORT_PREMATCH_WINDOW_HOURS: "1" })).toBe(1);
+    expect(resolveApsportPrematchWindowHours({ APSPORT_PREMATCH_WINDOW_HOURS: "48" })).toBe(48);
+    for (const value of ["0", "49", "1.5", "abc", ""]) {
+      expect(() => resolveApsportPrematchWindowHours({ APSPORT_PREMATCH_WINDOW_HOURS: value }))
+        .toThrow("APSPORT_PREMATCH_WINDOW_HOURS must be an integer between 1 and 48");
+    }
   });
 });
 

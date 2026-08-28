@@ -115,10 +115,28 @@ describe("AutomaticSourceRecovery", () => {
     const result = await context.recovery.recover(request(SBOBET));
 
     expect(result).toEqual({ accountId: SBOBET, stage: "HARD", outcome: "RECOVERED", reason: null });
-    expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("KSPORT");
+    expect(context.requestLobbySnapshot).toHaveBeenCalledTimes(2);
+    expect(context.requestLobbySnapshot).toHaveBeenNthCalledWith(1, "KSPORT");
+    expect(context.requestLobbySnapshot).toHaveBeenNthCalledWith(2, "KSPORT");
     expect(context.refreshFabetLaunches).toHaveBeenCalledOnce();
     expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith("KSPORT", "https://sbobet.provider.test/fresh");
     expect(context.restoreLobby).not.toHaveBeenCalled();
+  });
+
+  it("waits for an attaching KSPORT baseline before refreshing its launch portal", async () => {
+    const context = setup();
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SBOBET));
+    context.waitForFreshBaseline.mockResolvedValue(snapshot(SBOBET, {
+      state: "LIVE", reason: null, sourceId: "chrome:KSPORT:9", sourceEpoch: "observer-a:0",
+      activeGeneration: "generation-1", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    await expect(context.recovery.recover(request(SBOBET, "HARD"))).resolves.toEqual({
+      accountId: SBOBET, stage: "HARD", outcome: "RECOVERED", reason: null
+    });
+    expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("KSPORT");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
   });
 
   it("does not launch a private browser during automatic recovery when browser refresh is disabled", async () => {
@@ -129,13 +147,13 @@ describe("AutomaticSourceRecovery", () => {
 
     expect(result).toEqual({ accountId: SBOBET, stage: "HARD", outcome: "ACTION_REQUIRED",
       reason: "BROWSER_REFRESH_DISABLED" });
+    expect(context.reloadRecoverySource).not.toHaveBeenCalled();
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
     expect(context.ensureLobby).not.toHaveBeenCalled();
   });
 
   it.each([
     [SABA, "SABA"],
-    [SBOBET, "KSPORT"],
     [APSPORT, "TSPORT"]
   ] as const)("reloads a candidate-only %s authority before requesting a fresh launch",
     async (accountId, lobby) => {
@@ -197,7 +215,7 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
   });
 
-  it.each([SABA, SBOBET, APSPORT] as const)(
+  it.each([SABA, APSPORT] as const)(
     "still rebuilds the %s tab when browser refresh is disabled", async (accountId) => {
     // The live stack runs with SESSION_MAINTENANCE_ENABLED=0, so the Fabet
     // relaunch path is closed. Reloading the existing source is the only
@@ -477,6 +495,55 @@ describe("AutomaticSourceRecovery", () => {
     clock += 300_000;
     await context.recovery.recover(request(APSPORT, "HARD"));
     expect(context.reloadSource).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a reachable SBOBET tab on same-tab recovery when its baseline is late", async () => {
+    // A current KSPORT heartbeat means Chrome and the authenticated page are
+    // alive. Replacing that tab here destroys the SockJS/STOMP subscriptions
+    // before the live + today pair can finish and creates an endless reload
+    // loop. The extension's snapshot path already owns the safe in-page
+    // football selection, paired HTTP fallback, and socket recovery.
+    const clock = 1_000_000;
+    const context = setup(() => clock);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SBOBET, {
+      state: "HARD_RECOVERY", recoveryStage: "HARD", sourceId: "chrome:KSPORT:9",
+      sourceEpoch: "observer-a:0", tabReachableAtMs: clock - 5_000
+    }));
+    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+
+    await expect(context.recovery.recover(request(SBOBET, "HARD"))).resolves.toEqual({
+      accountId: SBOBET, stage: "HARD", outcome: "DELIVERED", reason: "BASELINE_TIMEOUT"
+    });
+    expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("KSPORT");
+    expect(context.reloadSource).not.toHaveBeenCalled();
+    expect(context.reloadRecoverySource).not.toHaveBeenCalled();
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+  });
+
+  it("rechecks SBOBET reachability immediately before a delayed hard relaunch", async () => {
+    const clock = 1_000_000;
+    const context = setup(() => clock);
+    context.feedRegistry.snapshot
+      .mockReturnValueOnce(snapshot(SBOBET))
+      .mockReturnValueOnce(snapshot(SBOBET, {
+        state: "HARD_RECOVERY", recoveryStage: "HARD", sourceId: "chrome:KSPORT:9",
+        sourceEpoch: "observer-a:0", tabReachableAtMs: clock - 1_000
+      }));
+    context.requestLobbySnapshot.mockReturnValueOnce(0).mockReturnValueOnce(1);
+    context.waitForFreshBaseline.mockResolvedValue(snapshot(SBOBET, {
+      state: "LIVE", reason: null, sourceId: "chrome:KSPORT:9", sourceEpoch: "observer-a:0",
+      activeGeneration: "generation-1", lastCompleteBaselineAtMs: clock + 1
+    }));
+
+    await expect(context.recovery.recover(request(SBOBET, "HARD"))).resolves.toEqual({
+      accountId: SBOBET, stage: "HARD", outcome: "RECOVERED", reason: null
+    });
+    expect(context.feedRegistry.snapshot).toHaveBeenCalledTimes(2);
+    expect(context.requestLobbySnapshot).toHaveBeenCalledTimes(2);
+    expect(context.requestLobbySnapshot).toHaveBeenNthCalledWith(1, "KSPORT");
+    expect(context.requestLobbySnapshot).toHaveBeenNthCalledWith(2, "KSPORT");
+    expect(context.ensureLobby).not.toHaveBeenCalled();
   });
 
   it("falls back to a fresh TSPORT launch when the targeted reload baseline times out", async () => {

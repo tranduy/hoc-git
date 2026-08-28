@@ -14,6 +14,23 @@ function proof(cursor: bigint): CatalogCommitProof {
 }
 
 describe("ChromeBridgeControlPlane", () => {
+  it("sends the configured prematch window only to APSPORT snapshot requests", () => {
+    const plane = new ChromeBridgeControlPlane({ apsportPrematchWindowHours: 24 });
+    const apsportSocket = { send: vi.fn(), readyState: 1 };
+    const sabaSocket = { send: vi.fn(), readyState: 1 };
+    plane.attach("chrome:TSPORT:7", apsportSocket);
+    plane.attach("chrome:SABA:8", sabaSocket);
+
+    expect(plane.requestSourceSnapshot("chrome:TSPORT:7")).toBe(1);
+    expect(apsportSocket.send).toHaveBeenCalledWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:TSPORT:7", prematchWindowHours: 24
+    }));
+    expect(plane.requestSourceSnapshot("chrome:SABA:8")).toBe(1);
+    expect(sabaSocket.send).toHaveBeenCalledWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:8"
+    }));
+  });
+
   it("keeps routine control on active authority and explicitly addresses one candidate bootstrap", () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });

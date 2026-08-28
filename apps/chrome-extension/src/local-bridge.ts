@@ -43,7 +43,8 @@ export interface LocalBridgeOptions {
   readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
   readonly clearTimer?: (handle: unknown) => void;
   readonly onOpen?: () => void | Promise<void>;
-  readonly onSnapshotRequest?: (sourceId: string) => void | Promise<void>;
+  readonly onSnapshotRequest?: (request: Omit<Extract<ChromeBridgeControlMessage,
+    { readonly kind: "REQUEST_SNAPSHOT" }>, "version" | "kind">) => void | Promise<void>;
   readonly onSourceResync?: (sourceId: string) => void | Promise<void>;
   readonly onSourceReload?: (sourceId: string) => void | Promise<void>;
   /** Identity of the bundle this worker is running, injected at build time. */
@@ -70,7 +71,7 @@ export class LocalBridge {
   readonly #setTimer: (callback: () => void, delayMs: number) => unknown;
   readonly #clearTimer: (handle: unknown) => void;
   readonly #onOpen: () => void | Promise<void>;
-  readonly #onSnapshotRequest: (sourceId: string) => void | Promise<void>;
+  readonly #onSnapshotRequest: NonNullable<LocalBridgeOptions["onSnapshotRequest"]>;
   readonly #onSourceResync: (sourceId: string) => void | Promise<void>;
   readonly #onSourceReload: (sourceId: string) => void | Promise<void>;
   readonly #buildIdentity: string | null;
@@ -111,7 +112,8 @@ export class LocalBridge {
     this.#clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
     this.#onOpen = options.onOpen ?? (() => undefined);
     this.#onSnapshotRequest = options.onSnapshotRequest ?? (() => undefined);
-    this.#onSourceResync = options.onSourceResync ?? this.#onSnapshotRequest;
+    this.#onSourceResync = options.onSourceResync ??
+      ((sourceId) => this.#onSnapshotRequest({ sourceId, prematchWindowHours: undefined }));
     this.#onSourceReload = options.onSourceReload ?? (() => undefined);
     this.#buildIdentity = options.buildIdentity ?? null;
     this.#onExtensionReload = options.onExtensionReload ?? null;
@@ -319,7 +321,8 @@ export class LocalBridge {
       if (!parsed.success) return;
       this.#lastServerContactAtMs = this.#now();
       if (parsed.data.kind === "REQUEST_SNAPSHOT") {
-        this.#enqueueSnapshotRecovery(parsed.data.sourceId);
+        const { sourceId, prematchWindowHours } = parsed.data;
+        this.#enqueueSnapshotRecovery({ sourceId, prematchWindowHours });
         return;
       }
       if (parsed.data.kind === "RELOAD_EXTENSION") {
@@ -423,9 +426,9 @@ export class LocalBridge {
     this.#sourceRecoveryTail = settled;
   }
 
-  #enqueueSnapshotRecovery(sourceId: string): void {
-    void this.#recoveryScheduler.run(sourceId, async () => {
-      try { await this.#onSnapshotRequest(sourceId); }
+  #enqueueSnapshotRecovery(request: Parameters<NonNullable<LocalBridgeOptions["onSnapshotRequest"]>>[0]): void {
+    void this.#recoveryScheduler.run(request.sourceId, async () => {
+      try { await this.#onSnapshotRequest(request); }
       catch { /* one snapshot failure must not block the next provider */ }
     }).catch(() => undefined);
   }

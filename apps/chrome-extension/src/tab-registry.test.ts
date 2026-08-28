@@ -17,6 +17,32 @@ describe("TabRegistry", () => {
     expect(JSON.stringify(registry.list())).not.toContain("secret");
   });
 
+  it("coalesces concurrent attachment attempts for the same tab", async () => {
+    let releaseAttach: (() => void) | undefined;
+    const attachStarted = new Promise<void>((resolve) => { releaseAttach = resolve; });
+    let finishAttach: (() => void) | undefined;
+    const attachBlocked = new Promise<void>((resolve) => { finishAttach = resolve; });
+    const attach = vi.fn(async () => {
+      releaseAttach?.();
+      await attachBlocked;
+    });
+    const detach = vi.fn(async () => undefined);
+    const registry = new TabRegistry({ attach, detach });
+    const tab = { id: 21, url: "https://zenandfe.com/?token=opaque", title: "Sportsbook" };
+
+    const first = registry.attachSelected(tab);
+    await attachStarted;
+    const second = registry.attachSelected(tab);
+    finishAttach?.();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      expect.objectContaining({ lobby: "KSPORT", tabId: 21 }),
+      expect.objectContaining({ lobby: "KSPORT", tabId: 21 })
+    ]);
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(detach).not.toHaveBeenCalled();
+  });
+
   it("never attaches an unmatched tab", async () => {
     const { registry, attach } = createRegistry();
     await expect(registry.attachSelected({ id: 7, url: "https://example.test/" })).rejects.toThrow("TAB_NOT_RECOGNIZED");
@@ -190,6 +216,41 @@ describe("TabRegistry", () => {
     await expect(registry.restore([
       { id: 7, url: "https://imsports.directsb.net/live" }
     ])).resolves.toMatchObject([{ lobby: "IM", tabId: 7 }]);
+    expect(detach).toHaveBeenCalledWith(7);
+    expect(attach).toHaveBeenCalledTimes(2);
+  });
+
+  it("reclaims an orphaned debugger attachment without depending on the browser error language", async () => {
+    let attachAttempts = 0;
+    const attach = vi.fn(async () => {
+      attachAttempts++;
+      if (attachAttempts === 1) throw new Error("TAB_DEBUGGER_ATTACH_FAILED");
+    });
+    const detach = vi.fn(async () => undefined);
+    const registry = new TabRegistry(
+      { attach, detach },
+      { load: async () => ({ "7": "KSPORT" }), save: vi.fn(async () => undefined) }
+    );
+
+    await expect(registry.restore([{
+      id: 7, url: "https://zenandfe.com/?token=opaque", title: "Sportsbook"
+    }])).resolves.toMatchObject([{ lobby: "KSPORT", tabId: 7 }]);
+    expect(detach).toHaveBeenCalledWith(7);
+    expect(attach).toHaveBeenCalledTimes(2);
+  });
+
+  it("reclaims an orphaned debugger attachment during an explicit tab attach", async () => {
+    let attachAttempts = 0;
+    const attach = vi.fn(async () => {
+      attachAttempts++;
+      if (attachAttempts === 1) throw new Error("TAB_DEBUGGER_ATTACH_FAILED");
+    });
+    const detach = vi.fn(async () => undefined);
+    const registry = new TabRegistry({ attach, detach });
+
+    await expect(registry.attachSelected({
+      id: 7, url: "https://zenandfe.com/?token=opaque", title: "Sportsbook"
+    })).resolves.toMatchObject({ lobby: "KSPORT", tabId: 7 });
     expect(detach).toHaveBeenCalledWith(7);
     expect(attach).toHaveBeenCalledTimes(2);
   });

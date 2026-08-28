@@ -1,8 +1,7 @@
 import type { AttachedLobbyTab } from "./tab-registry.js";
 import type { ObservedSource } from "./network-observer.js";
 
-const TSPORT_BOOTSTRAP_REFRESH_INTERVAL_MS = 10_000;
-const TSPORT_BOOTSTRAP_REFRESH_ATTEMPTS = 3;
+const TSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
 const WORK_HEALTH_EMIT_INTERVAL_MS = 5_000;
 const MIN_WORK_TIMEOUT_MS = 30_000;
 
@@ -64,7 +63,6 @@ export class CmdSnapshotPoller {
   readonly #lastFastMaintenanceAtMs = new Map<number, number>();
   readonly #lastDomCaptureAtMs = new Map<string, number>();
   readonly #lastCatalogRefreshAtMs = new Map<number, number>();
-  readonly #tsportBootstrapRefreshAttempts = new Map<string, number>();
   readonly #maintenanceInFlight = new Map<number, symbol>();
   readonly #catalogRefreshInFlight = new Map<number, symbol>();
   readonly #activeWork = new Map<string, ActiveWork>();
@@ -124,7 +122,6 @@ export class CmdSnapshotPoller {
       this.#clearGuard("maintenance", tab.tabId, this.#maintenanceInFlight);
       this.#clearGuard("catalog", tab.tabId, this.#catalogRefreshInFlight);
       this.#clearGuard("capture", tab.tabId, this.#inFlight);
-      if (tab.lobby === "TSPORT") this.#tsportBootstrapRefreshAttempts.set(sourceId, 0);
     }
     for (const tabId of this.#lastFastMaintenanceAtMs.keys()) {
       if (!currentTabIds.has(tabId)) this.#lastFastMaintenanceAtMs.delete(tabId);
@@ -150,15 +147,11 @@ export class CmdSnapshotPoller {
       this.#clearGuard("maintenance", tab.tabId, this.#maintenanceInFlight);
       this.#clearGuard("catalog", tab.tabId, this.#catalogRefreshInFlight);
       this.#clearGuard("capture", tab.tabId, this.#inFlight);
-      if (tab.lobby === "TSPORT") this.#tsportBootstrapRefreshAttempts.set(sourceId, 0);
     }
     this.#lastPolledSourceIds.clear();
     for (const sourceId of currentSourceIds) this.#lastPolledSourceIds.add(sourceId);
     for (const sourceId of this.#lastDomCaptureAtMs.keys()) {
       if (!this.#lastPolledSourceIds.has(sourceId)) this.#lastDomCaptureAtMs.delete(sourceId);
-    }
-    for (const sourceId of this.#tsportBootstrapRefreshAttempts.keys()) {
-      if (!this.#lastPolledSourceIds.has(sourceId)) this.#tsportBootstrapRefreshAttempts.delete(sourceId);
     }
     if (this.#dependencies.maintain !== undefined &&
       (this.#lastMaintenanceAtMs === null || now - this.#lastMaintenanceAtMs >= 60_000)) {
@@ -207,19 +200,16 @@ export class CmdSnapshotPoller {
       // path requests (maintain() deliberately skips it). Without a periodic
       // refresh the provider delivers exactly one baseline per bridge
       // reconnect and then never updates, so schedule it here on its own
-      // slower cadence. TSPORT gets one bounded bootstrap window because its
-      // refresh result is intentionally void: three spaced attempts tolerate
-      // an initially busy document without reconnecting a healthy socket
-      // forever. Steady snapshots then stay on the DOM cadence below.
-      const tsportBootstrapAttempts = this.#tsportBootstrapRefreshAttempts.get(sourceId);
+      // slower cadence. APSPORT/TSPORT's API roster renews the authoritative
+      // generation, while its rate-limited detail walk keeps hidden markets
+      // current. Keep it periodic and never fall back to the virtualized DOM.
       const catalogRefreshIntervalMs = tab.lobby === "IM"
         ? this.#dependencies.imDiscoveryIntervalMs ?? 15_000
         : tab.lobby === "CMD" ? 5_000
         : tab.lobby === "BTI" ? 4_000
         : tab.lobby === "KSPORT" ? 2_000
-        : tab.lobby === "TSPORT" && tsportBootstrapAttempts !== undefined &&
-            tsportBootstrapAttempts < TSPORT_BOOTSTRAP_REFRESH_ATTEMPTS
-          ? tsportBootstrapAttempts === 0 ? 0 : TSPORT_BOOTSTRAP_REFRESH_INTERVAL_MS
+        : tab.lobby === "TSPORT"
+          ? TSPORT_CATALOG_REFRESH_INTERVAL_MS
           : null;
       const refreshCatalog = tab.lobby === "CMD"
         ? this.#dependencies.recoverCmdCatalog ?? this.#dependencies.refreshCatalog
@@ -231,19 +221,17 @@ export class CmdSnapshotPoller {
         refreshedTabIds.add(tab.tabId);
         if (tab.lobby === "TSPORT") {
           this.#lastDomCaptureAtMs.set(sourceId, now);
-          this.#tsportBootstrapRefreshAttempts.set(sourceId, (tsportBootstrapAttempts ?? 0) + 1);
         }
         const workItem: PollerWorkItem = tab.lobby === "CMD" && this.#dependencies.recoverCmdCatalog !== undefined
           ? "recoverCmdCatalog" : "refreshCatalog";
         this.#startWork("catalog", tab.tabId, this.#catalogRefreshInFlight, source, workItem,
           catalogRefreshIntervalMs, () => refreshCatalog(source), now);
       }
-      if ((tab.lobby !== "CMD" && tab.lobby !== "TSPORT") ||
+      if (tab.lobby !== "CMD" ||
         this.#guardBlocked("capture", tab.tabId, this.#inFlight, now) ||
-        (tab.lobby === "TSPORT" && this.#guardBlocked("catalog", tab.tabId, this.#catalogRefreshInFlight, now)) ||
         (maintainedTabIds.has(tab.tabId) && !newSourceIds.has(sourceId) &&
           !forcedSourceIds.has(sourceId)) ||
-        ((tab.lobby === "CMD" || tab.lobby === "TSPORT") && refreshedTabIds.has(tab.tabId))) continue;
+        refreshedTabIds.has(tab.tabId)) continue;
       const domCaptureIntervalMs = this.#dependencies.cmdDiscoveryIntervalMs ?? 10_000;
       if (now - (this.#lastDomCaptureAtMs.get(sourceId) ?? Number.NEGATIVE_INFINITY) <
         domCaptureIntervalMs) continue;

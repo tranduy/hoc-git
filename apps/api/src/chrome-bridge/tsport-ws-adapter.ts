@@ -18,6 +18,20 @@ interface RetainedRecord {
   readonly sequence: number;
 }
 
+interface ApsportApiState {
+  readonly sourceEpoch: string;
+  readonly generation: string;
+  readonly generationOrder: readonly [number, number];
+  readonly prematchWindowHours: number;
+  readonly rosterEventIds: Set<string>;
+  readonly rosterRecords: Map<string, RetainedRecord>;
+  readonly detailRecords: Map<string, RetainedRecord>;
+  readonly socketRecords: Map<string, RetainedRecord>;
+  readonly openStreams: Set<string>;
+  readonly footballStreams: Set<string>;
+  baselineEmitted: boolean;
+}
+
 interface TsportStreamGeneration {
   readonly streamId: string;
   readonly sourceEpoch: string;
@@ -66,6 +80,14 @@ const marketTypeByGroup: Readonly<Record<string, TsportTwoWayMarketType>> = {
 };
 
 const boundedText = (max: number) => z.string().trim().min(1).max(max);
+const apsportCatalogBatchSchema = z.object({
+  schemaVersion: z.literal(1),
+  generation: boundedText(128),
+  phase: z.enum(["ROSTER", "DETAIL"]),
+  complete: z.boolean(),
+  prematchWindowHours: z.number().int().min(1).max(48),
+  records: z.array(z.record(z.string(), z.unknown())).max(5_000)
+}).strict();
 // DOM coverage must use the same virtual-football identity boundary as the
 // normalizer. Otherwise a fresh socket can deliver every raw expected event
 // while the normalized catalog can never contain the virtual identities.
@@ -134,6 +156,58 @@ function scalar(value: unknown): string | null {
   return typeof value === "string" || typeof value === "number" ? String(value) : null;
 }
 
+function apsportGeneration(value: string): { readonly order: readonly [number, number] } | null {
+  const match = /^apsport:(\d+):(\d+)$/u.exec(value);
+  if (match === null) return null;
+  const tabId = Number(match[1]);
+  const ordinal = Number(match[2]);
+  return Number.isSafeInteger(tabId) && Number.isSafeInteger(ordinal)
+    ? { order: [tabId, ordinal] }
+    : null;
+}
+
+function compareGeneration(left: readonly [number, number], right: readonly [number, number]): number {
+  return left[0] - right[0] || left[1] - right[1];
+}
+
+function apsportRawEventId(event: JsonRecord): string | null {
+  const id = scalar(event["2"]);
+  return id !== null && id.trim() !== "" && id.length <= 128 ? id : null;
+}
+
+function activeApsportApiEvent(event: JsonRecord): boolean {
+  if (event["10"] === "Active") return true;
+  if (event["10"] !== undefined && event["10"] !== null && event["10"] !== "") return false;
+  return Array.isArray(event["50"]) && event["50"].some((candidate) => {
+    const group = record(candidate);
+    return group !== null && group["10"] === "Active" && marketTypeByGroup[String(group["3"])] !== undefined &&
+      Array.isArray(group["9"]) && group["9"].length > 0;
+  });
+}
+
+function eligibleApsportApiEvent(event: JsonRecord, nowMs: number, prematchWindowHours: number): boolean {
+  if (apsportRawEventId(event) === null || !activeApsportApiEvent(event)) return false;
+  const home = text(event["5"]);
+  const away = text(event["22"]);
+  const league = text(event["53"]);
+  if (home === null || away === null || league === null ||
+    isVirtualFootballIdentity(undefined, league, [home, away])) return false;
+  if (event["6"] === true) return true;
+  if (typeof event["11"] !== "string") return false;
+  const startAtMs = Date.parse(event["11"]);
+  if (!Number.isFinite(startAtMs)) return false;
+  return startAtMs >= nowMs && startAtMs <= nowMs + prematchWindowHours * 60 * 60 * 1_000;
+}
+
+function retainedRecord(record: SbobetCatalogInputRecord, envelope: ChromeBridgeEnvelope): RetainedRecord {
+  return { record, seenAtMs: envelope.observedAtMs,
+    receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence };
+}
+
+function sameRecord(left: SbobetCatalogInputRecord | undefined, right: SbobetCatalogInputRecord): boolean {
+  return left !== undefined && JSON.stringify(left) === JSON.stringify(right);
+}
+
 /**
  * Why a frame is not a TSPORT football record, counted by shape.
  *
@@ -197,7 +271,7 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
   if (eventId === null) return noteRefusal("record-no-id");
   if (home === null || away === null || home === away) return noteRefusal("record-no-teams");
   if (leagueName === null) return noteRefusal("record-no-league");
-  if (event["10"] !== "Active") return noteRefusal(`record-state-${String(event["10"]).slice(0, 12)}`);
+  if (!activeApsportApiEvent(event)) return noteRefusal(`record-state-${String(event["10"]).slice(0, 12)}`);
   if (!Array.isArray(event["50"])) return noteRefusal("record-no-markets");
 
   const markets: SbobetCatalogInputRecord["markets"][number][] = [];
@@ -236,7 +310,8 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
   const scoreText = Number.isSafeInteger(scoreHome) && scoreHome >= 0 && Number.isSafeInteger(scoreAway) && scoreAway >= 0
     ? `${scoreHome} - ${scoreAway}` : null;
   const startAtUtcMs = typeof event["11"] === "string" ? Date.parse(event["11"]) : Number.NaN;
-  return { eventId, leagueName, timeText: "LIVE", scoreText,
+  const isLive = event["6"] === true;
+  return { eventId, leagueName, timeText: isLive ? "LIVE" : "PREMATCH", scoreText: isLive ? scoreText : null,
     ...(Number.isFinite(startAtUtcMs) ? { startAtUtcMs } : {}), teamNames: [home, away], markets };
 }
 
@@ -250,6 +325,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #sourceEpochFences = new Map<string, SourceEpochFence>();
   readonly #seenStreamIds = new Map<string, Set<string>>();
   readonly #lastOpenSequences = new Map<string, number>();
+  readonly #apiSources = new Map<string, ApsportApiState>();
   readonly #parsed = new WeakMap<ChromeBridgeEnvelope, JsonRecord | null>();
   readonly #assembler = new CmdSnapshotAssembler();
   resetSource(sourceId: string): void {
@@ -257,6 +333,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     this.#currentStreams.delete(sourceId);
     this.#domSweepStates.delete(sourceId);
     this.#sourceEpochFences.delete(sourceId);
+    this.#apiSources.delete(sourceId);
     this.#assembler.resetSource(sourceId);
     for (const key of this.#seenStreamIds.keys()) {
       if (key.startsWith(`${sourceId}|`)) this.#seenStreamIds.delete(key);
@@ -332,6 +409,9 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
 
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "TSPORT" || envelope.payload.encoding !== "UTF8") return false;
+    if (envelope.transport === "HTTP_RESPONSE") return envelope.request.resourceType === "Fetch" &&
+      envelope.request.pathnameClass === "/__fieldline_apsport_catalog_refresh__" &&
+      (envelope.request.hostname === "agenate.com" || envelope.request.hostname.endsWith(".agenate.com"));
     if (envelope.transport === "DOM_SNAPSHOT") return envelope.request.resourceType === "DOM" &&
       envelope.request.pathnameClass === "/__fieldline_dom_snapshot__";
     if ((envelope.transport !== "WS_FRAME" && envelope.transport !== "WS_STATE") ||
@@ -352,6 +432,126 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     const parsed = parseOuter(envelope.payload.body)?.event ?? null;
     this.#parsed.set(envelope, parsed);
     return parsed !== null && extractTsportFootballRecord(parsed) !== null;
+  }
+
+  #apiCatalogUpdate(
+    envelope: ChromeBridgeEnvelope,
+    state: ApsportApiState,
+    evidenceMode: "BASELINE" | "DELTA",
+    provenance: "WS" | "AUTHENTICATED_HTTP"
+  ): DecodedCatalogUpdate {
+    const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => normalizeSbobetCatalog([entry.record], {
+      observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
+      sequence: entry.sequence, provider: "APSPORT",
+      settlementProfile: "football-regulation-including-added-time"
+    });
+    const retainedEntries = [...state.rosterRecords.values(), ...state.detailRecords.values(),
+      ...state.socketRecords.values()];
+    retainedEntries.sort((left, right) => left.sequence - right.sequence ||
+      left.receivedMonotonicMs - right.receivedMonotonicMs || left.seenAtMs - right.seenAtMs);
+    const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
+      observedAtMs: envelope.observedAtMs, parts: retainedEntries.map(normalizeEntry) });
+    return {
+      sourceId: envelope.sourceId,
+      sequence: envelope.sequence,
+      observedAtMs: envelope.observedAtMs,
+      value: catalog,
+      evidenceMode,
+      provenance,
+      generation: state.generation,
+      providerTimestampMs: null,
+      ...(evidenceMode === "BASELINE" ? { authoritativeBaseline: true as const } : {})
+    };
+  }
+
+  #decodeApiBatch(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
+    let raw: unknown;
+    try { raw = JSON.parse(envelope.payload.body); } catch { return []; }
+    const batch = apsportCatalogBatchSchema.safeParse(raw);
+    if (!batch.success) return [];
+    const parsedGeneration = apsportGeneration(batch.data.generation);
+    if (parsedGeneration === null || parsedGeneration.order[0] !== envelope.tabId ||
+      !this.#acceptDomSourceEpoch(envelope.sourceId, sourceEpoch(envelope))) return [];
+    const current = this.#apiSources.get(envelope.sourceId);
+    if (batch.data.phase === "ROSTER") {
+      if (!batch.data.complete || (current !== undefined && current.sourceEpoch === sourceEpoch(envelope) &&
+        compareGeneration(parsedGeneration.order, current.generationOrder) <= 0)) return [];
+      const rosterEventIds = new Set<string>();
+      const rosterRecords = new Map<string, RetainedRecord>();
+      for (const rawEvent of batch.data.records) {
+        if (!eligibleApsportApiEvent(rawEvent, envelope.observedAtMs, batch.data.prematchWindowHours)) continue;
+        const eventId = apsportRawEventId(rawEvent)!;
+        rosterEventIds.add(eventId);
+        const extracted = extractTsportFootballRecord(rawEvent);
+        if (extracted !== null) rosterRecords.set(eventId, retainedRecord(extracted, envelope));
+      }
+      const sameEpoch = current?.sourceEpoch === sourceEpoch(envelope);
+      const retainEligible = (input: ReadonlyMap<string, RetainedRecord>): Map<string, RetainedRecord> =>
+        new Map([...input].filter(([eventId]) => rosterEventIds.has(eventId)));
+      const state: ApsportApiState = {
+        sourceEpoch: sourceEpoch(envelope), generation: batch.data.generation,
+        generationOrder: parsedGeneration.order, prematchWindowHours: batch.data.prematchWindowHours,
+        rosterEventIds, rosterRecords,
+        detailRecords: sameEpoch ? retainEligible(current!.detailRecords) : new Map(),
+        socketRecords: sameEpoch ? retainEligible(current!.socketRecords) : new Map(),
+        openStreams: sameEpoch ? new Set(current!.openStreams) : new Set(),
+        footballStreams: sameEpoch ? new Set(current!.footballStreams) : new Set(),
+        baselineEmitted: true
+      };
+      this.#apiSources.set(envelope.sourceId, state);
+      return [this.#apiCatalogUpdate(envelope, state, "BASELINE", "AUTHENTICATED_HTTP")];
+    }
+    if (current === undefined || current.sourceEpoch !== sourceEpoch(envelope) ||
+      current.generation !== batch.data.generation ||
+      current.prematchWindowHours !== batch.data.prematchWindowHours) return [];
+    let changed = false;
+    for (const rawEvent of batch.data.records) {
+      if (!eligibleApsportApiEvent(rawEvent, envelope.observedAtMs, batch.data.prematchWindowHours)) continue;
+      const eventId = apsportRawEventId(rawEvent)!;
+      if (!current.rosterEventIds.has(eventId)) continue;
+      const extracted = extractTsportFootballRecord(rawEvent);
+      const previous = current.detailRecords.get(eventId)?.record;
+      if (extracted === null) {
+        if (current.detailRecords.delete(eventId)) changed = true;
+        continue;
+      }
+      if (!sameRecord(previous, extracted)) changed = true;
+      current.detailRecords.set(eventId, retainedRecord(extracted, envelope));
+    }
+    if (!changed) return [];
+    return [this.#apiCatalogUpdate(envelope, current, "DELTA", "AUTHENTICATED_HTTP")];
+  }
+
+  #decodeApiSocketState(envelope: ChromeBridgeEnvelope, state: ApsportApiState,
+    streamId: string): readonly DecodedCatalogUpdate[] {
+    if (state.sourceEpoch !== sourceEpoch(envelope)) return [];
+    const lifecycle = websocketLifecycleState(envelope);
+    if (lifecycle === null) return [];
+    if (lifecycle === "OPEN") {
+      state.openStreams.add(streamId);
+      return [];
+    }
+    state.openStreams.delete(streamId);
+    const wasFootball = state.footballStreams.delete(streamId);
+    if (!wasFootball || state.footballStreams.size > 0 || !state.baselineEmitted) return [];
+    return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+      observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
+      reason: "PROVIDER_STREAM_CLOSED" }];
+  }
+
+  #decodeApiSocketFrame(envelope: ChromeBridgeEnvelope, state: ApsportApiState,
+    streamId: string): readonly DecodedCatalogUpdate[] {
+    if (state.sourceEpoch !== sourceEpoch(envelope)) return [];
+    const event = this.#parsed.get(envelope);
+    const incoming = event === null || event === undefined ? null : extractTsportFootballRecord(event);
+    if (incoming === null || !state.rosterEventIds.has(incoming.eventId)) return [];
+    state.openStreams.add(streamId);
+    state.footballStreams.add(streamId);
+    const previous = state.socketRecords.get(incoming.eventId)?.record;
+    if (sameRecord(previous, incoming)) return [{ sourceId: envelope.sourceId,
+      sequence: envelope.sequence, observedAtMs: envelope.observedAtMs, transportAlive: true }];
+    state.socketRecords.set(incoming.eventId, retainedRecord(incoming, envelope));
+    return [this.#apiCatalogUpdate(envelope, state, "DELTA", "WS")];
   }
 
   #catalogUpdate(
@@ -398,6 +598,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
     if (envelope.request.replayed === true) return [];
+    if (envelope.transport === "HTTP_RESPONSE") return this.#decodeApiBatch(envelope);
     if (envelope.transport === "DOM_SNAPSHOT") {
       const envelopeSourceEpoch = sourceEpoch(envelope);
       let raw: unknown;
@@ -507,6 +708,12 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
 
     const streamId = envelope.request.streamId;
     if (streamId === undefined) return this.#ignore("no-stream-id");
+    const apiState = this.#apiSources.get(envelope.sourceId);
+    if (apiState !== undefined) {
+      return envelope.transport === "WS_STATE"
+        ? this.#decodeApiSocketState(envelope, apiState, streamId)
+        : this.#decodeApiSocketFrame(envelope, apiState, streamId);
+    }
     if (envelope.transport === "WS_STATE") {
       const lifecycle = websocketLifecycleState(envelope);
       if (lifecycle === null) return this.#ignore("not-a-lifecycle-frame");

@@ -20,7 +20,7 @@ const validEnvelope = {
 
 async function appWithRoute(openProviderTicket = true, recoveryOptions: Record<string, unknown> = {}) {
   const app = Fastify({ logger: false });
-  await app.register(websocket, { options: { maxPayload: 262_144 } });
+  await app.register(websocket, { options: { maxPayload: 2 * 1024 * 1024 } });
   const registry = new ChromeBridgeRegistry();
   const controlPlane = new ChromeBridgeControlPlane({ authorityCoordinator: registry.authorityCoordinator });
   const routeOptions = {
@@ -58,6 +58,25 @@ describe("Chrome bridge route", () => {
     socket.send(JSON.stringify(validEnvelope));
     await expect(received).resolves.toMatchObject({ kind: "ACK", sourceId: "chrome:SABA:7", sequence: 0 });
     expect(registry.listSources()).toHaveLength(1);
+    socket.terminate();
+    await app.close();
+  });
+
+  it("accepts a contract-sized provider body after JSON escaping expands the wire envelope", async () => {
+    const { app } = await appWithRoute();
+    const socket = await app.injectWS("/api/chrome-bridge", {
+      headers: { origin: "chrome-extension://test-id", "sec-websocket-protocol": "tool-chenh.v1, local-key" },
+      socket: loopbackSocket
+    });
+    const body = "\"".repeat(150_000);
+    const serialized = JSON.stringify({ ...validEnvelope, payload: { encoding: "UTF8", body } });
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(256 * 1024);
+    expect(Buffer.byteLength(serialized, "utf8")).toBeGreaterThan(256 * 1024);
+
+    const received = nextMessage(socket);
+    socket.send(serialized);
+
+    await expect(received).resolves.toMatchObject({ kind: "ACK", sourceId: "chrome:SABA:7", sequence: 0 });
     socket.terminate();
     await app.close();
   });

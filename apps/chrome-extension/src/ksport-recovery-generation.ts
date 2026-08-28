@@ -379,6 +379,9 @@ export class KsportRecoveryGenerationTracker {
     retry.generation += 1;
     retry.complete = false;
     retry.fullPartitions.clear();
+    retry.attemptFloors.clear();
+    retry.attemptFloors.set("live", retry.highWatermarks.get("live") ?? 0);
+    retry.attemptFloors.set("today", retry.highWatermarks.get("today") ?? 0);
     retry.attemptPartitions.clear();
     retry.attemptPartitions.add(partition);
     this.#state = retry;
@@ -526,15 +529,21 @@ function headers(value: string): Readonly<Record<string, string>> {
 }
 
 function receiptPartition(destination?: string, subscription?: string): CatalogPartition | null {
+  // KSPORT reuses subSport* ids for non-catalog streams such as
+  // /topic/menu/live/count. Those payloads are integer menu counters, not
+  // event/market evidence, and must never replace the canonical event socket.
+  // Both the original and renamed catalog topics retain an explicit /event/
+  // segment, so require it before considering the period/subscription signals.
+  if (!/\/event(?:\/|$)/u.test(destination ?? "")) return null;
   if (subscription === "subSportBookLive" || /\/1_1\/live\//u.test(destination ?? "")) return "live";
   if (subscription === "subSportBookToday" || subscription === "subSportHotMatch" ||
     /\/sports\/1_\d+\/today\//u.test(destination ?? "")) return "today";
   // Measured 2026-08-26: the provider renamed the subscription ids and dropped
   // the /sports/ segment from the topic path, so every catalog receipt was
   // refused and the book went dark. A frame carrying BOTH a sportsbook
-  // subscription id AND a live/today topic segment is a catalog receipt. Two
-  // independent signals are required on purpose: the jackpot stream that shares
-  // this socket's host carries neither, and one signal alone would admit it.
+  // subscription id, an event topic, AND a live/today segment is a catalog
+  // receipt. The event segment excludes menu/count and jackpot streams that
+  // share this socket host and can reuse a sportsbook-looking subscription id.
   if (/^subSport/u.test(subscription ?? "")) {
     if (/\/live\//u.test(destination ?? "")) return "live";
     if (/\/today\//u.test(destination ?? "")) return "today";
@@ -576,16 +585,43 @@ function fullPartitionSnapshotRejection(payload: unknown): SnapshotRejection {
  * holds some other array cannot pass as a baseline.
  */
 function snapshotArrays(payload: unknown): readonly unknown[] {
-  if (Array.isArray(payload)) return [payload];
-  const record = asRecord(payload);
-  if (record === null) return [payload];
   const candidates: unknown[] = [];
-  for (const value of Object.values(record)) {
-    if (Array.isArray(value)) candidates.push(value);
-    else {
-      const nested = asRecord(value);
-      if (nested === null) continue;
-      for (const inner of Object.values(nested)) if (Array.isArray(inner)) candidates.push(inner);
+  const pending: Array<{ readonly value: unknown; readonly depth: number }> = [
+    { value: payload, depth: 0 }
+  ];
+  let inspected = 0;
+  while (pending.length > 0 && candidates.length < 64 && inspected < 256) {
+    const current = pending.shift()!;
+    inspected += 1;
+    if (typeof current.value === "string" && current.depth < 6 &&
+      current.value.length <= 4_000_000) {
+      const encoded = current.value.trim();
+      if ((encoded.startsWith("[") && encoded.endsWith("]")) ||
+        (encoded.startsWith("{") && encoded.endsWith("}"))) {
+        try {
+          pending.push({ value: JSON.parse(encoded) as unknown, depth: current.depth + 1 });
+        } catch { /* A non-JSON provider string cannot contain a snapshot. */ }
+      }
+      continue;
+    }
+    if (Array.isArray(current.value)) {
+      candidates.push(current.value);
+      if (current.depth >= 6) continue;
+      for (const value of current.value) {
+        if (Array.isArray(value) || asRecord(value) !== null) {
+          pending.push({ value, depth: current.depth + 1 });
+        }
+      }
+      continue;
+    }
+    const record = asRecord(current.value);
+    if (record === null || current.depth >= 6) continue;
+    const values = Object.values(record);
+    if (values.length > 0) candidates.push(values);
+    for (const value of values) {
+      if (Array.isArray(value) || asRecord(value) !== null) {
+        pending.push({ value, depth: current.depth + 1 });
+      }
     }
   }
   return candidates.length > 0 ? candidates : [payload];
@@ -602,9 +638,10 @@ function leagueArrayRejection(body: unknown): SnapshotRejection {
   };
   const valid = body.every((value) => {
     const league = asRecord(value);
+    const events = league === null ? null : collectionValues(league["2"]);
     if (league === null || typeof league["1"] !== "string" || league["1"].trim() === "" ||
-      !Array.isArray(league["2"])) return refuse("LEAGUE_SHAPE");
-    return league["2"].every((candidate) => {
+      events === null) return refuse("LEAGUE_SHAPE");
+    return events.every((candidate) => {
       const event = asRecord(candidate);
       const eventId = event?.["8"];
       const markets = event === null ? null : asRecord(event["7"]);
@@ -624,7 +661,13 @@ function leagueArrayRejection(body: unknown): SnapshotRejection {
   return eventCount === 0 || decodableMarkets > 0 ? "NONE" : "NO_DECODABLE_MARKET";
 }
 
-function isFullPartitionSnapshot(body: unknown): boolean {
+function collectionValues(value: unknown): readonly unknown[] | null {
+  if (Array.isArray(value)) return value;
+  const record = asRecord(value);
+  return record === null ? null : Object.values(record);
+}
+
+export function isFullKsportPartitionSnapshot(body: unknown): boolean {
   return fullPartitionSnapshotRejection(body) === "NONE";
 }
 

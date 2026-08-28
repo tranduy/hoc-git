@@ -1,6 +1,12 @@
 import { z } from "zod";
 
 export const CHROME_BRIDGE_MAX_PAYLOAD_BYTES = 256 * 1024;
+// JSON string escaping can expand a contract-valid payload byte up to six
+// wire bytes (for example U+0000 becomes six ASCII bytes). The WebSocket
+// transport must accept the largest envelope the schema accepts, plus bounded
+// request metadata.
+export const CHROME_BRIDGE_MAX_ENVELOPE_BYTES =
+  CHROME_BRIDGE_MAX_PAYLOAD_BYTES * 6 + 16 * 1024;
 
 const SafeIntegerSchema = z.number().int().safe().nonnegative();
 const PositiveSafeIntegerSchema = z.number().int().safe().positive();
@@ -173,7 +179,8 @@ const AckMessageSchema = z.strictObject({
 const SnapshotRequestMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("REQUEST_SNAPSHOT"),
-  sourceId: SourceIdSchema
+  sourceId: SourceIdSchema,
+  prematchWindowHours: z.number().int().min(1).max(48).optional()
 });
 
 // Reloading the extension restarts only its service worker; provider tabs keep

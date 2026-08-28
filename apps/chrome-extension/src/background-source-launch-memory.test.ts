@@ -42,6 +42,7 @@ function createChromeHarness(signedUrl: string) {
         sessionId?: string) => void>().api
     },
     runtime: {
+      getManifest: vi.fn(() => ({ name: "Fieldline Chrome Feed" })),
       onInstalled: chromeEvent<(details: { readonly reason: string }) => void>().api,
       onStartup: chromeEvent<() => void>().api,
       onMessage: messages.api

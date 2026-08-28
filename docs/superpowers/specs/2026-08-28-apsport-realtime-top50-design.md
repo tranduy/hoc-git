@@ -117,26 +117,22 @@ fields decide whether a market or selection is open.
 
 ## Global Top 50
 
-The existing ranking currently reduces each comparison row to one best plan
-before global sorting. That loses valid bookmaker-pair tickets when three or
-more providers share the same event, market and line.
+Keep the existing comparison, bookmaker-pair selection, ticket identity,
+detail and preflight behavior unchanged. This requirement controls only the
+number of cards rendered in the left `Exact two-book matches` list.
 
-For every exact comparison row, enumerate every valid pair of opposite
-outcomes from two different selected providers. Build one observation plan per
-exact pair and give it a stable identity containing the row identity and plan
-fingerprint. Preserve that identity when opening detail and requesting exact
-provider preflight.
-
-Flatten tickets from all visible events, then sort globally by:
+Flatten the cards already produced for all visible events, then sort globally
+by:
 
 1. ROI descending;
 2. worst-case profit descending;
 3. immediate movement magnitude descending;
 4. kickoff, event identity and ticket identity for deterministic ties.
 
-Deduplicate only the same exact event/row/plan identity. Apply `slice(0, 50)`
-once, after flattening every event and bookmaker pair. Never impose a per-event
-or per-bookmaker-pair quota before the global cut.
+Deduplicate only the same existing card identity. Apply `slice(0, 50)` once,
+after the global sort. The current page must not pass the total ticket count as
+the limit because doing so renders the entire list. Do not enumerate additional
+bookmaker combinations or change match pairing as part of this limit.
 
 ## Failure and Security Behavior
 
@@ -165,11 +161,10 @@ Automated tests must prove:
 - one socket close does not invalidate a source with other live streams;
 - an identical repeated `eu` event produces no catalog revision;
 - main, corner and card identities remain separate;
-- all exact bookmaker-pair plans are ranked globally by ROI;
-- exactly 50 tickets survive and ticket 51 is excluded only after the global
-  sort;
-- selecting a repeated row with a different bookmaker pair preserves the exact
-  plan identity used by detail and preflight.
+- with 51 existing cards, exactly the 50 highest-ROI cards render and the
+  lowest-ROI card is excluded after the global sort;
+- the existing card, match-pairing, detail and preflight identities do not
+  change.
 
 Run targeted API, extension and web tests first, followed by workspace
 typecheck, build and the relevant integration suite. Live verification measures

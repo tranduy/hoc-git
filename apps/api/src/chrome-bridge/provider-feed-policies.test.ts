@@ -37,11 +37,19 @@ describe("provider feed policies measured 2026-08-25", () => {
       { provider: "SBOBET", beforeExpectedMs: 10_000, beforeBaselineMs: 60_000,
         afterExpectedMs: 10_000, afterBaselineMs: 60_000 },
       { provider: "APSPORT", beforeExpectedMs: 5_000, beforeBaselineMs: 30_000,
-        afterExpectedMs: 60_000, afterBaselineMs: 120_000 },
+        afterExpectedMs: 90_000, afterBaselineMs: 120_000 },
       { provider: "BTI", beforeExpectedMs: 10_000, beforeBaselineMs: 30_000,
         afterExpectedMs: 45_000, afterBaselineMs: 90_000 }
     ]);
     console.log("B4_POLICY_TABLE", JSON.stringify(table));
+  });
+
+  it("keeps APSPORT available while the next one-minute roster is in flight", () => {
+    const policy = providerFeedPolicies.get("catalog-source:APSPORT:FOOTBALL")!;
+    expect(policy.expectedEvidenceCadenceMs).toBe(90_000);
+    expect(policy.catalogFreshnessMs).toBe(90_000);
+    expect(policy.softRecoveryAfterMs).toBe(90_000);
+    expect(policy.hardRecoveryAfterMs).toBe(120_000);
   });
 
   it("never lets a tab-reloading hard stage fire while a baseline is still valid", () => {

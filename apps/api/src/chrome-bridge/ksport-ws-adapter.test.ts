@@ -550,6 +550,35 @@ describe("KsportWsCatalogAdapter", () => {
       .toEqual([expect.objectContaining({ providerEventId: "2" })]);
   });
 
+  it("accepts the provider's date-group wrapper around complete HTTP league lists", () => {
+    const event = { "0": "2026-08-20T16:00:00Z", "2": "Wrapped Home", "3": "Wrapped Away",
+      "7": { "3": ["2.5 0.92*56434230030002005h -0.98*56434230030002005a 5643423181025"] },
+      "8": 5643423 };
+    const adapter = new KsportWsCatalogAdapter();
+
+    expect(adapter.decode(httpEnvelope([[{ "1": "Live", "2": [event] }]],
+      "live", 1, 10))).toEqual([]);
+    const committed = adapter.decode(httpEnvelope([[{ "1": "Today", "2": [] }]],
+      "today", 1, 11));
+
+    expect(committed).toEqual([expect.objectContaining({
+      authoritativeBaseline: true,
+      provenance: "AUTHENTICATED_HTTP",
+      generation: "worker-a:0:ksport-http:8:1"
+    })]);
+    expect((committed[0]!.value as { events: Array<{ providerEventId: string }> }).events)
+      .toEqual([expect.objectContaining({ providerEventId: "5643423" })]);
+  });
+
+  it("rejects a provider error object inside an HTTP partition pair", () => {
+    const adapter = new KsportWsCatalogAdapter();
+    const error = { status: "error", errorCode: 500, message: "request failed", values: null };
+
+    expect(adapter.decode(httpEnvelope(error, "live", 1, 10))).toEqual([]);
+    expect(adapter.decode(httpEnvelope([[{ "1": "Today", "2": [] }]],
+      "today", 1, 11))).toEqual([]);
+  });
+
   it("does not promote a nonempty HTTP partition whose event markets decode to zero", () => {
     const adapter = new KsportWsCatalogAdapter();
     const undecodable = { "0": "2026-08-20T16:00:00Z", "2": "Home", "3": "Away",

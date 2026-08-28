@@ -17,7 +17,8 @@ import { buildCmdHiddenMarketProbeExpression, summarizeCmdHiddenProtocolFrame,
   type CmdHiddenDomProbeResult, type CmdHiddenProtocolEvidence } from "./cmd-hidden-market-probe.js";
 import { CmdRecoveryState, type CmdRecoveryDocument, type CmdRecoverySession } from "./cmd-recovery-state.js";
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
-import { KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
+import { isFullKsportPartitionSnapshot,
+  KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
 import { apsportPageResponseFromEvaluation, buildApsportPageRequestExpression,
   collectApsportCatalog, type ApsportCatalogBatch, type ApsportCatalogPageRequest,
   type ApsportRequestTemplate, type CollectApsportCatalogOptions } from "./apsport-catalog-refresh.js";
@@ -28,10 +29,15 @@ const KSPORT_BASELINE_FALLBACK_DELAY_MS = 2_000;
 const PREEXISTING_SOCKET_GRACE_MS = 8_000;
 const PREEXISTING_SOCKET_MAX_ATTEMPTS = 5;
 const KSPORT_HTTP_RECONCILE_INTERVAL_MS = 4_000;
+const KSPORT_NATIVE_HTTP_CAPTURE_WINDOW_MS = 60_000;
 const KSPORT_IGNORED_SOCKETS_PER_SOURCE = 64;
 // Long enough that a failed reconnect cannot become a per-frame storm, short
 // enough that a provider is never dark for more than a minute.
 const KSPORT_ORPHAN_FRAME_RETRY_MS = 30_000;
+// Socket.IO keeps emitting orphan frames after an MV3 worker restart. Repeated
+// reconnects visibly cycle the legacy SBO sportsbook, so a failed recovery is
+// retried at most once per minute for the current source epoch.
+const SBO_ORPHAN_FRAME_RETRY_MS = 60_000;
 // Long enough that a click cannot become a storm, short enough that a missing
 // partition is retried well inside the feed's baseline lease.
 const KSPORT_BASELINE_REQUEST_RETRY_MS = 45_000;
@@ -49,17 +55,9 @@ const KSPORT_QUIET_WINDOW_MS = 180_000;
 const KSPORT_HEARTBEAT_FORWARD_INTERVAL_MS = 5_000;
 const KSPORT_TRANSPORT_HEARTBEAT_MAX_CHARS = 256;
 const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
-// The DOM sweep is what gives APSPORT a generation and tells the adapter which
-// fixtures the page is showing. The poller only ran it inside a short bootstrap
-// window, so once that closed the sweep stopped for good: measured 2026-08-27,
-// DOM_SNAPSHOT sat at zero with 2940 socket frames received and one decoded,
-// the feed stuck in hard recovery with no generation at all.
-const TSPORT_CATALOG_SWEEP_INTERVAL_MS = 30_000;
-// A fresh socket baseline tears down a working stream, so it stays rare even
-// when the sweep beneath it runs often.
-const TSPORT_SOCKET_BASELINE_FLOOR_MS = 300_000;
 const APSPORT_PAGE_REQUEST_TIMEOUT_MS = 30_000;
 const APSPORT_DETAIL_DELAY_MS = 500;
+const APSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
 const APSPORT_BOOTSTRAP_EXPRESSION = `(() => {
   try {
     const fieldlineApsportBootstrap = true;
@@ -429,10 +427,6 @@ export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
 // with 24 period tabs present, none matching the Vietnamese label alone.
 const KSPORT_TODAY_BASELINE_EXPRESSION = ksportTimeTabExpression(["hom nay", "today"]);
 const KSPORT_LIVE_BASELINE_EXPRESSION = ksportTimeTabExpression(["truc tiep", "live"]);
-// Used only when a partition is still missing: the tab may already be selected,
-// and then nothing short of re-selecting it makes the page resend its table.
-const KSPORT_TODAY_FORCE_EXPRESSION = ksportTimeTabExpression(["hom nay", "today"], true);
-const KSPORT_LIVE_FORCE_EXPRESSION = ksportTimeTabExpression(["truc tiep", "live"], true);
 
 export function ksportTimeTabExpressionForTest(labels: readonly string[], force = false): string {
   return ksportTimeTabExpression(labels, force);
@@ -475,21 +469,33 @@ function ksportTimeTabExpression(labels: readonly string[], force = false): stri
       return { status: 'time-tab-not-found', step: 'tab', labels: seen, ...shape };
     }
     if (tab.classList.contains('active-period')) {
-      if (!${JSON.stringify(force)}) return { status: 'time-tab-active' };
+      if (!${JSON.stringify(force)}) return { status: 'time-tab-active', step: 'tab', ...shape };
       // An already-selected tab produces no click, so the page never re-emits
       // its table and the feed never gets a complete baseline. Move to a
       // sibling period and come back, letting the page's own SPA rebuild the
       // subscription. Only period tabs are touched; no odds cell is involved.
       const sibling = [...scope.querySelectorAll('.sport-menu-tab .period-item')]
         .find((candidate) => candidate !== tab);
-      if (!sibling) return { status: 'time-tab-active' };
+      if (!sibling) return { status: 'time-tab-active', step: 'tab', ...shape };
       sibling.click();
       setTimeout(() => { try { tab.click(); } catch (error) { void error; } }, 400);
-      return { status: 'time-tab-reselected' };
+      return { status: 'time-tab-reselected', step: 'tab', ...shape };
     }
     tab.click();
-    return { status: 'time-tab-selected' };
+    return { status: 'time-tab-selected', step: 'tab', ...shape };
   })()`;
+}
+
+interface KsportNativeHttpPart {
+  readonly url: string;
+  readonly body: string;
+}
+
+interface KsportNativeHttpCapture {
+  readonly sourceGeneration: number;
+  readonly tabGeneration: number;
+  expiresAtMs: number;
+  readonly parts: Map<"live" | "today", KsportNativeHttpPart>;
 }
 
 export const KEEP_ACTIVE_EXPRESSION = `(() => {
@@ -960,8 +966,6 @@ export class NetworkObserver {
   readonly #socketBaselineRecoveries = new Map<string, { readonly token: symbol;
     readonly operation: Promise<void> }>();
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
-  readonly #tsportSweepAtMs = new Map<string, number>();
-  readonly #tsportSocketBaselineAtMs = new Map<string, number>();
   // The attach diagnostic is rebuilt whenever a source generation rolls, which
   // erased what the tab selector had just seen before it could be read. The
   // labels are the whole point of the report, so keep the last ones per source.
@@ -973,7 +977,7 @@ export class NetworkObserver {
   // expected, and nothing said what it was.
   readonly #targetTypesSeen = new Map<string, Map<string, number>>();
   readonly #socketPathsSeen = new Map<string, Map<string, number>>();
-  readonly #requestPartitions = new Map<string, ImProviderPartition>();
+  readonly #requestPartitions = new Map<string, ProviderPartition>();
   readonly #requestStreamIds = new Map<string, string>();
   readonly #requestFunctionCodes = new Map<string, number>();
   readonly #requestGenerations = new Map<string, number>();
@@ -992,9 +996,9 @@ export class NetworkObserver {
   readonly #httpSnapshots = new Map<string, ReplayableHttpSnapshot[]>();
   readonly #tsportSnapshots = new Map<string, Map<string, ReplayableWsEvent>>();
   readonly #tsportRequestUrls = new Map<string, string[]>();
-  readonly #tsportCompletedSweepOrdinals = new Map<string, number>();
   readonly #apsportRequestTemplates = new Map<string, BoundApsportRequestTemplate>();
   readonly #apsportRefreshOrdinals = new Map<string, number>();
+  readonly #apsportLastRefreshStartedAtMs = new Map<string, number>();
   readonly #apsportRefreshesInFlight = new Set<string>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
@@ -1032,18 +1036,21 @@ export class NetworkObserver {
   readonly #ksportBaselineRequests = new Map<string, { readonly streamId: string;
     readonly recoveryGeneration: number; readonly requested: Map<"live" | "today", number>;
     attempts: number }>();
-  readonly #ksportLiveRestored = new Set<string>();
   // Periodic KSPORT maintenance must stay non-destructive while the sportsbook
   // STOMP socket is alive. These clocks gate the heavier recovery paths.
   readonly #ksportCatalogFrameAtMs = new Map<string, number>();
   readonly #ksportHeartbeatForwardAtMs = new Map<string, number>();
   readonly #ksportBaselineAttemptAtMs = new Map<string, number>();
+  readonly #ksportPeriodSelectionAtMs = new Map<string, number>();
   readonly #ksportMaintenanceRecoveryAtMs = new Map<string, number>();
   readonly #ksportHttpFallbackModes = new Map<string, KsportHttpFallbackMode>();
   readonly #ksportOrphanFrameRecoveryAtMs = new Map<string, number>();
+  readonly #ksportNativeHttpCaptures = new Map<string, KsportNativeHttpCapture>();
   readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
+  readonly #sboOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
-    readonly headers: Readonly<Record<string, string>> }>();
+    readonly headers: Readonly<Record<string, string>>; readonly method: "GET" | "POST";
+    readonly hasPostData: boolean }>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
 
   constructor(dependencies: NetworkObserverDependencies) {
@@ -1145,7 +1152,6 @@ export class NetworkObserver {
     }
     this.#activeKsportStreams.set(sourceId, socket.streamId);
     this.#ksportBaselineRequests.delete(sourceId);
-    this.#ksportLiveRestored.delete(sourceId);
     this.#ksportBaselineAttemptAtMs.delete(sourceId);
     this.#ksportMaintenanceRecoveryAtMs.delete(sourceId);
     this.#ksportHeartbeatForwardAtMs.delete(sourceId);
@@ -1257,14 +1263,18 @@ export class NetworkObserver {
     if (state.live && state.today) {
       this.#ksportBaselineRequests.delete(source.sourceId);
       this.#ksportBaselineAttemptAtMs.delete(source.sourceId);
-      if (!this.#ksportLiveRestored.has(source.sourceId)) {
-        if (await this.#selectTimeTab(source, KSPORT_LIVE_BASELINE_EXPRESSION)) {
-          this.#ksportLiveRestored.add(source.sourceId);
-        }
-      }
+      // The provider starts a new subscription generation whenever a period
+      // tab is selected. Moving the UI back to Live after both partitions had
+      // completed therefore erased the just-proven baseline. Leave the page on
+      // the period that completed the pair; realtime updates do not depend on
+      // which period is visually selected.
       return true;
     }
     if (activeStream === undefined) return false;
+    const nowMs = this.#now();
+    const lastPeriodSelectionAtMs = this.#ksportPeriodSelectionAtMs.get(source.sourceId);
+    if (lastPeriodSelectionAtMs !== undefined &&
+      nowMs - lastPeriodSelectionAtMs < KSPORT_BASELINE_REQUEST_RETRY_MS) return false;
     const recoveryGeneration = tracker?.currentGeneration ?? frames?.[0]?.recoveryGeneration ?? 0;
     let requests = this.#ksportBaselineRequests.get(source.sourceId);
     if (requests === undefined || requests.streamId !== activeStream ||
@@ -1272,43 +1282,46 @@ export class NetworkObserver {
       requests = { streamId: activeStream, recoveryGeneration, requested: new Map(), attempts: 0 };
       this.#ksportBaselineRequests.set(source.sourceId, requests);
     }
-    const missing = !state.live ? "live" : "today";
+    const noPartitionBaseline = !state.live && !state.today;
+    // When the worker attaches after the provider socket, the currently active
+    // period has already sent its initial table. Move to the opposite period
+    // first and let that one finish before returning. The old force expression
+    // clicked a sibling and clicked back 400 ms later, creating overlapping
+    // SUBSCRIBEs; the provider answered those overlaps with error receipts and
+    // no catalog. Alternate one ordinary provider tab selection per bounded
+    // attempt until the first partition proves which side is current.
+    const missing = noPartitionBaseline
+      ? requests.attempts % 2 === 0 ? "today" : "live"
+      : !state.live ? "live" : "today";
     // Asking exactly once per generation left the partition permanently missing
     // whenever that single click did not produce a snapshot, and without both
     // partitions the feed can never be promoted. Retry on a bounded interval.
-    const nowMs = this.#now();
+    if (noPartitionBaseline && requests.attempts > 0) {
+      const lastRequestAtMs = Math.max(...requests.requested.values());
+      if (nowMs - lastRequestAtMs < KSPORT_BASELINE_REQUEST_RETRY_MS) return false;
+    }
     const requestedAtMs = requests.requested.get(missing);
     if (requestedAtMs !== undefined && nowMs - requestedAtMs < KSPORT_BASELINE_REQUEST_RETRY_MS) return false;
     if (requests.attempts >= KSPORT_BASELINE_REQUESTS_PER_GENERATION) return false;
     requests.attempts += 1;
     requests.requested.set(missing, nowMs);
-    const selected = await this.#selectTimeTab(source,
-      missing === "live" ? KSPORT_LIVE_FORCE_EXPRESSION : KSPORT_TODAY_FORCE_EXPRESSION);
+    let selected = await this.#selectTimeTab(source,
+      missing === "live" ? KSPORT_LIVE_BASELINE_EXPRESSION : KSPORT_TODAY_BASELINE_EXPRESSION);
+    if (selected && noPartitionBaseline &&
+      this.#wsAttachDiagnostic(source).baselineTabStatus === "time-tab-active" &&
+      requests.attempts < KSPORT_BASELINE_REQUESTS_PER_GENERATION) {
+      // `active` means the selector made no click. If the observer attached
+      // after that period's initial snapshot, waiting cannot create a baseline.
+      // Select the opposite period once: this still produces only one real DOM
+      // click and avoids the provider's overlapping-subscription failure mode.
+      const opposite = missing === "live" ? "today" : "live";
+      requests.attempts += 1;
+      requests.requested.set(opposite, this.#now());
+      selected = await this.#selectTimeTab(source,
+        opposite === "live" ? KSPORT_LIVE_BASELINE_EXPRESSION : KSPORT_TODAY_BASELINE_EXPRESSION);
+    }
     if (!selected) this.#ksportBaselineAttemptAtMs.set(source.sourceId, this.#now());
     return false;
-  }
-
-  /**
-   * Keeps APSPORT's DOM sweep running. It is the only thing that establishes a
-   * generation and names the fixtures the page is showing, and hanging it off
-   * the poller's bootstrap window meant it stopped once that window closed.
-   * The sweep itself is cheap; the socket baseline it can trigger is not, so
-   * that keeps its own far longer floor.
-   */
-  async #sweepTsportCatalog(source: ObservedSource): Promise<void> {
-    const nowMs = this.#now();
-    const lastSweepAtMs = this.#tsportSweepAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY;
-    if (nowMs - lastSweepAtMs < TSPORT_CATALOG_SWEEP_INTERVAL_MS) return;
-    this.#tsportSweepAtMs.set(source.sourceId, nowMs);
-    const previousSweep = this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0;
-    await this.#capturePublicCatalogSnapshot(source, "tsport.invalid",
-      TSPORT_PUBLIC_CATALOG_EXPRESSION, false, true);
-    if ((this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0) <= previousSweep) return;
-    const lastBaselineAtMs = this.#tsportSocketBaselineAtMs.get(source.sourceId) ??
-      Number.NEGATIVE_INFINITY;
-    if (nowMs - lastBaselineAtMs < TSPORT_SOCKET_BASELINE_FLOOR_MS) return;
-    this.#tsportSocketBaselineAtMs.set(source.sourceId, nowMs);
-    await this.#requestFreshSocketBaseline(source, isTsportEventSocket);
   }
 
   /** Names the gate a capture left through. Every one of them returns the same
@@ -1331,6 +1344,7 @@ export class NetworkObserver {
   }
 
   async #selectTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
+    this.#armKsportNativeHttpCapture(source);
     const diagnostic = this.#wsAttachDiagnostic(source);
     diagnostic.baselineTabSelections += 1;
     const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> = [];
@@ -1387,21 +1401,57 @@ export class NetworkObserver {
       }
       if (typeof status === "string") diagnostic.baselineTabStatus = status;
       else if (evaluation === null) diagnostic.baselineTabStatus = "EVALUATE_FAILED";
-      if (status === "time-tab-selected" || status === "time-tab-active" ||
-        status === "time-tab-reselected") return true;
+      if (status === "time-tab-selected" || status === "time-tab-reselected") {
+        // A period click commonly replaces the provider socket and resets its
+        // stream-scoped request tracker. Keep this source-level clock across
+        // those replacements so maintenance cannot alternate the UI every few
+        // seconds while each new subscription is still starting.
+        this.#ksportPeriodSelectionAtMs.set(source.sourceId, this.#now());
+        return true;
+      }
+      if (status === "time-tab-active") return true;
     }
     return false;
+  }
+
+  #armKsportNativeHttpCapture(source: ObservedSource): void {
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const existing = this.#ksportNativeHttpCaptures.get(source.sourceId);
+    if (existing !== undefined && existing.sourceGeneration === sourceGeneration &&
+      existing.tabGeneration === tabGeneration) {
+      existing.expiresAtMs = this.#now() + KSPORT_NATIVE_HTTP_CAPTURE_WINDOW_MS;
+      return;
+    }
+    this.#ksportNativeHttpCaptures.set(source.sourceId, { sourceGeneration, tabGeneration,
+      expiresAtMs: this.#now() + KSPORT_NATIVE_HTTP_CAPTURE_WINDOW_MS,
+      parts: new Map<"live" | "today", KsportNativeHttpPart>() });
+  }
+
+  #currentKsportNativeHttpCapture(source: ObservedSource): KsportNativeHttpCapture | null {
+    const capture = this.#ksportNativeHttpCaptures.get(source.sourceId);
+    if (capture === undefined) return null;
+    if (capture.expiresAtMs < this.#now() ||
+      !this.#isSourceGenerationCurrent(source.sourceId, capture.sourceGeneration) ||
+      this.#captureTabGeneration(source.tabId) !== capture.tabGeneration) {
+      this.#ksportNativeHttpCaptures.delete(source.sourceId);
+      return null;
+    }
+    return capture;
   }
 
   async start(source: ObservedSource): Promise<void> {
     if (this.#startedTabs.has(source.tabId)) return;
     if (source.lobby === "KSPORT" || source.lobby === "TSPORT" ||
       source.lobby === "SABA") this.#wsAttachDiagnostic(source);
-    if (source.lobby === "SABA" || source.lobby === "CMD" || source.lobby === "KSPORT") {
+    if (source.lobby === "SABA" || source.lobby === "CMD" || source.lobby === "KSPORT" ||
+      source.lobby === "TSPORT") {
       // Runtime is sticky across MV3 workers. Reset the root domain before
       // reattaching child targets. SABA needs its OOPIF context replayed, while
-      // CMD and KSPORT can keep their provider frames in the root target and
-      // need those existing same-process main-world contexts replayed as well.
+      // CMD, KSPORT and TSPORT can keep their provider frames in the root
+      // target and need those existing same-process main-world contexts
+      // replayed as well. TSPORT needs that context to bootstrap its safe,
+      // cookie-bound API template without reloading the provider page.
       await this.#withFrameCommandTimeout(
         this.#sendCommand(source.tabId, "Runtime.disable", {})
       );
@@ -1431,7 +1481,8 @@ export class NetworkObserver {
     if (source.lobby === "KSPORT") {
       await this.#discoverExistingKsportChildTargets(source);
     }
-    if (source.lobby !== "SABA" && source.lobby !== "CMD" && source.lobby !== "KSPORT") {
+    if (source.lobby !== "SABA" && source.lobby !== "CMD" && source.lobby !== "KSPORT" &&
+      source.lobby !== "TSPORT") {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.enable", {}));
     }
     await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
@@ -1449,6 +1500,10 @@ export class NetworkObserver {
       await this.#sendCommand(source.tabId, "Network.disable", {}).catch(() => ({}));
     }
     this.releaseTab(source.tabId);
+  }
+
+  resetApsportRefreshCooldown(sourceId: string): void {
+    this.#apsportLastRefreshStartedAtMs.delete(sourceId);
   }
 
   beginSourceEpoch(sourceId: string): string {
@@ -1471,9 +1526,9 @@ export class NetworkObserver {
     this.#ksportSnapshotOrdinals.delete(sourceId);
     this.#tsportSnapshots.delete(sourceId);
     this.#tsportRequestUrls.delete(sourceId);
-    this.#tsportCompletedSweepOrdinals.delete(sourceId);
     this.#apsportRequestTemplates.delete(sourceId);
     this.#apsportRefreshOrdinals.delete(sourceId);
+    this.#apsportLastRefreshStartedAtMs.delete(sourceId);
     this.#clearCatalogWsSnapshots(sourceId);
     this.#activeKsportStreams.delete(sourceId);
     this.#ksportAuthorityTransitions.delete(sourceId);
@@ -1498,14 +1553,15 @@ export class NetworkObserver {
     this.#ksportDiagnosticAtMs.delete(sourceId);
     this.#ksportRefreshesInFlight.delete(sourceId);
     this.#ksportBaselineRequests.delete(sourceId);
-    this.#ksportLiveRestored.delete(sourceId);
     this.#ksportCatalogFrameAtMs.delete(sourceId);
     this.#ksportHeartbeatForwardAtMs.delete(sourceId);
     this.#ksportBaselineAttemptAtMs.delete(sourceId);
     this.#ksportMaintenanceRecoveryAtMs.delete(sourceId);
     this.#ksportHttpFallbackModes.delete(sourceId);
     this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
+    this.#ksportNativeHttpCaptures.delete(sourceId);
     this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
+    this.#sboOrphanFrameRecoveryAtMs.delete(sourceId);
     this.#cmdCapturesInFlight.delete(sourceId);
     this.#imLastRecoveryAtMs.delete(sourceId);
     this.#catalogRefreshes.delete(sourceId);
@@ -1565,6 +1621,7 @@ export class NetworkObserver {
     for (const sourceId of this.#apsportRequestTemplates.keys()) remember(sourceId);
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
+    for (const sourceId of this.#ksportNativeHttpCaptures.keys()) remember(sourceId);
     for (const sourceId of this.#publicSourceEpochs.keys()) remember(sourceId);
     for (const sourceId of this.#sourceGenerations.keys()) remember(sourceId);
     for (const sourceId of this.#activeWorkGenerations.keys()) remember(sourceId);
@@ -1588,6 +1645,7 @@ export class NetworkObserver {
       this.#tsportRequestUrls.delete(sourceId);
       this.#apsportRequestTemplates.delete(sourceId);
       this.#apsportRefreshOrdinals.delete(sourceId);
+      this.#apsportLastRefreshStartedAtMs.delete(sourceId);
       this.#clearCatalogWsSnapshots(sourceId);
       this.#activeKsportStreams.delete(sourceId);
       this.#ksportAuthorityTransitions.delete(sourceId);
@@ -1610,12 +1668,14 @@ export class NetworkObserver {
       this.#ksportDiagnosticAtMs.delete(sourceId);
       this.#ksportRefreshesInFlight.delete(sourceId);
       this.#ksportBaselineRequests.delete(sourceId);
-      this.#ksportLiveRestored.delete(sourceId);
+      this.#ksportNativeHttpCaptures.delete(sourceId);
       this.#ksportCatalogFrameAtMs.delete(sourceId);
       this.#ksportBaselineAttemptAtMs.delete(sourceId);
+      this.#ksportPeriodSelectionAtMs.delete(sourceId);
       this.#ksportMaintenanceRecoveryAtMs.delete(sourceId);
       this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
+      this.#sboOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#socketBaselineRecoveries.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
@@ -1650,14 +1710,23 @@ export class NetworkObserver {
   }
 
   async maintain(source: ObservedSource): Promise<void> {
-    await this.#runPeriodicDomWork(source.sourceId, async () => {
+    const pulsePage = async (): Promise<void> => {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Emulation.setFocusEmulationEnabled", { enabled: true })).catch(() => ({}));
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Page.setWebLifecycleState", { state: "active" })).catch(() => ({}));
+    };
+    // APSPORT's 60-second roster/detail request intentionally owns the provider
+    // lane for tens of seconds. Its keep-alive pulse must not queue behind that
+    // work and inherit the poller's shorter maintenance timeout.
+    if (source.lobby === "TSPORT") {
+      await pulsePage();
+      return;
+    }
+    await this.#runPeriodicDomWork(source.sourceId, async () => {
+      await pulsePage();
       const expression = source.lobby === "CMD" ? CMD_CATALOG_DISCOVERY_EXPRESSION :
-          source.lobby === "TSPORT" ? TSPORT_CATALOG_DISCOVERY_EXPRESSION :
-            source.lobby === "KSPORT" ? KSPORT_FOOTBALL_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
+        source.lobby === "KSPORT" ? KSPORT_FOOTBALL_DISCOVERY_EXPRESSION : KEEP_ACTIVE_EXPRESSION;
       if (source.lobby === "IM" || source.lobby === "SABA") {
         // IM's baseline is large and two-part. Request it only from the explicit
         // recovery path below; running the same fetch here can consume the
@@ -1665,7 +1734,7 @@ export class NetworkObserver {
         // debugger body. SABA is WebSocket-authoritative; walking every DOM node
         // and clicking expansion controls only burns renderer CPU and cannot
         // replace its reset/done baseline. Focus/lifecycle commands above are
-        // enough to keep both providers active.
+        // enough to keep these providers active.
         return;
       }
       const frameTree = await this.#withFrameCommandTimeout(
@@ -1797,7 +1866,12 @@ export class NetworkObserver {
         return;
       }
       if (nowMs - lastAttemptAtMs < KSPORT_BASELINE_FALLBACK_DELAY_MS) return;
-      await this.#refreshKsportHttpFallback(source, nowMs);
+      const refreshed = await this.#refreshKsportHttpFallback(source, nowMs);
+      // A captured getEvent URL is tied to transient page state and can stop
+      // producing a usable paired baseline. Once the provider-tab retry clock
+      // permits it, ask the page to issue fresh native Live/Today requests so
+      // their successful response bodies can replace the stale template.
+      if (!refreshed) await this.#ensureCompleteKsportBaseline(source);
       return;
     }
     await this.#refreshKsportHttpFallback(source, nowMs);
@@ -1805,15 +1879,15 @@ export class NetworkObserver {
   }
 
   async #refreshKsportHttpFallback(source: ObservedSource, nowMs: number,
-    mode?: KsportHttpFallbackMode): Promise<void> {
+    mode?: KsportHttpFallbackMode): Promise<boolean> {
     const lastRecoveryAtMs = this.#ksportMaintenanceRecoveryAtMs.get(source.sourceId);
     if (lastRecoveryAtMs !== undefined &&
-      nowMs - lastRecoveryAtMs < KSPORT_HTTP_RECONCILE_INTERVAL_MS) return;
+      nowMs - lastRecoveryAtMs < KSPORT_HTTP_RECONCILE_INTERVAL_MS) return false;
     this.#ksportMaintenanceRecoveryAtMs.set(source.sourceId, nowMs);
     this.#ksportRefreshesInFlight.add(source.sourceId);
     try {
       const refreshed = await this.#requestFreshKsportHttpBaseline(source);
-      if (!refreshed) return;
+      if (!refreshed) return false;
       if (mode === undefined) {
         const active = this.#activeKsportSocket(source.sourceId)?.[1];
         this.#ksportHttpFallbackModes.set(source.sourceId, {
@@ -1821,6 +1895,7 @@ export class NetworkObserver {
           recoveryGeneration: active?.ksportRecovery?.currentGeneration ?? null
         });
       }
+      return true;
     } finally {
       this.#ksportRefreshesInFlight.delete(source.sourceId);
     }
@@ -2107,6 +2182,18 @@ export class NetworkObserver {
         this.#ksportRefreshesInFlight.delete(source.sourceId);
       }
       if (await this.#replayCatalogWsSnapshots(source.sourceId)) return;
+      // A KSPORT socket becomes canonical only after the page itself sends a
+      // football live/today SUBSCRIBE. Closing that socket here used to race
+      // the provider's first full receipts: the explicit same-tab recovery
+      // selected Football, then immediately heap-closed the newly subscribed
+      // socket and only the unrelated jackpot stream came back. Keep the
+      // provider-owned socket open and ask its structural period control for
+      // the missing partition instead. The periodic quiet-socket path remains
+      // independently bounded for genuinely dead transports.
+      if (this.#activeKsportSocket(source.sourceId) !== undefined) {
+        await this.#ensureCompleteKsportBaseline(source);
+        return;
+      }
       await this.#requestFreshSocketBaseline(source, isKsportCatalogSocket);
       return;
     }
@@ -2227,6 +2314,14 @@ export class NetworkObserver {
       return;
     }
     if (template.sourceGeneration !== sourceGeneration || template.tabGeneration !== tabGeneration) return;
+    const refreshStartedAtMs = this.#now();
+    const previousRefreshAtMs = this.#apsportLastRefreshStartedAtMs.get(source.sourceId);
+    if (previousRefreshAtMs !== undefined &&
+      refreshStartedAtMs - previousRefreshAtMs < APSPORT_CATALOG_REFRESH_INTERVAL_MS) {
+      this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_COALESCED");
+      return;
+    }
+    this.#apsportLastRefreshStartedAtMs.set(source.sourceId, refreshStartedAtMs);
     const ordinal = (this.#apsportRefreshOrdinals.get(source.sourceId) ?? 0) + 1;
     this.#apsportRefreshOrdinals.set(source.sourceId, ordinal);
     const generation = `apsport:${source.tabId}:${ordinal}`;
@@ -2262,7 +2357,7 @@ export class NetworkObserver {
     this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_START");
     this.#apsportRefreshesInFlight.add(source.sourceId);
     try {
-      await this.#collectApsportCatalog({ generation, nowMs: this.#now(), prematchWindowHours,
+      await this.#collectApsportCatalog({ generation, nowMs: refreshStartedAtMs, prematchWindowHours,
         template: { origin: template.origin, headers: template.headers, body: template.body }, request,
         sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
         isCurrent: templateIsCurrent, onRoster: emitBatch, onDetail: emitBatch,
@@ -2484,7 +2579,7 @@ export class NetworkObserver {
   }
 
   async #observeChildTarget(source: ObservedSource, sessionId: string, targetId?: string,
-    watchPreexistingSocket = false): Promise<void> {
+    watchPreexistingSocket = false, targetType: "iframe" | "worker" = "iframe"): Promise<void> {
     const observedSessions = this.#observedChildSessions.get(source.sourceId) ?? new Set<string>();
     if (observedSessions.has(sessionId)) return;
     observedSessions.add(sessionId);
@@ -2496,12 +2591,17 @@ export class NetworkObserver {
         maxPostDataSize: 0
       }, sessionId));
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.enable", {}, sessionId));
-      await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Target.setAutoAttach", {
-        autoAttach: true, waitForDebuggerOnStart: true, flatten: true
-      }, sessionId));
-      await this.#withFrameCommandTimeout(
-        this.#sendCommand(source.tabId, "Runtime.runIfWaitingForDebugger", {}, sessionId)
-      );
+      // Dedicated workers cannot own nested targets. Some Chromium builds
+      // reject Target.setAutoAttach in that session before Network/Runtime is
+      // committed, which used to discard the real KSPORT socket worker.
+      if (targetType !== "worker") {
+        await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Target.setAutoAttach", {
+          autoAttach: true, waitForDebuggerOnStart: true, flatten: true
+        }, sessionId));
+        await this.#withFrameCommandTimeout(
+          this.#sendCommand(source.tabId, "Runtime.runIfWaitingForDebugger", {}, sessionId)
+        );
+      }
     } catch (error) {
       observedSessions.delete(sessionId);
       if (observedSessions.size === 0) this.#observedChildSessions.delete(source.sourceId);
@@ -2744,7 +2844,7 @@ export class NetworkObserver {
       const performanceUrls = [...performance.getEntriesByType("resource")].map((entry) => entry.name)
         .filter((value) => { try { const url = new URL(value); return url.protocol === "https:" &&
           url.username === "" && url.password === "" && isProviderHost(url.hostname) &&
-          url.pathname === "/api/v2/getEvent"; } catch { return false; } });
+          url.pathname === "/api/v2/getEvent" && !url.searchParams.has("eventId"); } catch { return false; } });
       const templateUrl = capturedUrl || performanceUrls.at(-1);
       if (!templateUrl) return { status: marker + "-template-missing", page: location.origin + location.pathname };
       const base = new URL(templateUrl);
@@ -2753,13 +2853,17 @@ export class NetworkObserver {
         return { status: marker + "-url-invalid" };
       }
       const headers = ${JSON.stringify(template?.headers ?? {})};
+      const method = ${JSON.stringify(template?.method ?? "GET")};
+      const hasPostData = ${JSON.stringify(template?.hasPostData ?? false)};
+      const rangeCarrier = base.searchParams.has("timeRange") ? "URL" : hasPostData ? "BODY" : "NONE";
       const responses = [];
       const exactUrls = new Map();
       for (const value of [capturedUrl, ...performanceUrls]) {
         if (!value) continue;
         const candidate = new URL(value);
         if (candidate.protocol !== "https:" || candidate.username !== "" || candidate.password !== "" ||
-          !isProviderHost(candidate.hostname) || candidate.pathname !== "/api/v2/getEvent") continue;
+          !isProviderHost(candidate.hostname) || candidate.pathname !== "/api/v2/getEvent" ||
+          candidate.searchParams.has("eventId")) continue;
         const observedRange = candidate.searchParams.get("timeRange");
         if (observedRange && ["live", "today"].includes(observedRange.toLowerCase())) {
           exactUrls.set(observedRange.toLowerCase(), candidate.href);
@@ -2770,10 +2874,12 @@ export class NetworkObserver {
         ? value[0].toUpperCase() + value.slice(1) : value;
       for (const timeRange of ["live", "today"]) {
         const url = new URL(exactUrls.get(timeRange) || templateUrl);
+        url.searchParams.delete("eventId");
         if (!exactUrls.has(timeRange)) url.searchParams.set("timeRange", providerRangeStyle(timeRange));
         const response = await fetch(url.href, { method: "GET", headers, credentials: "include", cache: "no-store" });
         if (!response.ok) {
-          const controls = [...document.querySelectorAll('.sport-menu-container *, button, a, [role="button"], [data-sport]')]
+          const controls = typeof document === "undefined" ? [] :
+            [...document.querySelectorAll('.sport-menu-container *, button, a, [role="button"], [data-sport]')]
             .map((node) => ({ tag: node.tagName,
               text: String(node.textContent || '').trim().replace(/\\s+/gu, ' ').slice(0, 80),
               className: String(node.className || '').slice(0, 120), id: String(node.id || '').slice(0, 80),
@@ -2782,14 +2888,17 @@ export class NetworkObserver {
             .filter((item) => item.className || item.id || item.role || item.sport)
             .slice(0, 120);
           return { status: marker + "-failed", timeRange, code: response.status,
-            page: location.origin + location.pathname, controls };
+            page: location.origin + location.pathname, controls, method, rangeCarrier, hasPostData };
         }
         responses.push({ timeRange, url: url.href, body: await response.text() });
       }
       return { status: "catalog-requested", marker, origin: base.origin, responses };
     })()`;
     const attempts: Array<{ readonly target: "CONTEXT" | "SESSION" | "ROOT";
-      readonly status: string; readonly page?: string; readonly controls?: unknown }> = [];
+      readonly status: string; readonly page?: string; readonly controls?: unknown;
+      readonly timeRange?: "live" | "today"; readonly code?: number;
+      readonly method?: "GET" | "POST"; readonly rangeCarrier?: "URL" | "BODY" | "NONE";
+      readonly hasPostData?: boolean }> = [];
     for (const target of targets) {
       if (!attemptIsCurrent()) return false;
       const frameTree = await this.#withFrameCommandTimeout(target.sessionId === undefined
@@ -2818,7 +2927,17 @@ export class NetworkObserver {
         ? "CONTEXT" : "ROOT", status: isRecord(value) && typeof value.status === "string"
           ? value.status.slice(0, 96) : evaluation === null ? "CDP_TIMEOUT_OR_ERROR" : "NO_RESULT",
         ...(isRecord(value) && typeof value.page === "string" ? { page: value.page.slice(0, 256) } : {}),
-        ...(isRecord(value) && Array.isArray(value.controls) ? { controls: value.controls.slice(0, 12) } : {}) });
+        ...(isRecord(value) && Array.isArray(value.controls) ? { controls: value.controls.slice(0, 12) } : {}),
+        ...(isRecord(value) && (value.timeRange === "live" || value.timeRange === "today")
+          ? { timeRange: value.timeRange } : {}),
+        ...(isRecord(value) && typeof value.code === "number" && Number.isInteger(value.code) &&
+          value.code >= 100 && value.code <= 599 ? { code: value.code } : {}),
+        ...(isRecord(value) && (value.method === "GET" || value.method === "POST")
+          ? { method: value.method } : {}),
+        ...(isRecord(value) && (value.rangeCarrier === "URL" || value.rangeCarrier === "BODY" ||
+          value.rangeCarrier === "NONE") ? { rangeCarrier: value.rangeCarrier } : {}),
+        ...(isRecord(value) && typeof value.hasPostData === "boolean"
+          ? { hasPostData: value.hasPostData } : {}) });
       if (!isRecord(value) || value.status !== "catalog-requested" || !Array.isArray(value.responses) ||
         value.responses.length !== 2 || typeof value.origin !== "string") continue;
       let responseOrigin: string;
@@ -2864,6 +2983,49 @@ export class NetworkObserver {
       });
     }
     return false;
+  }
+
+  async #acceptKsportNativeHttpPart(pending: PendingRequest, body: string): Promise<void> {
+    const partition = pending.providerPartition === "KSPORT_LIVE" ? "live" :
+      pending.providerPartition === "KSPORT_TODAY" ? "today" : null;
+    if (partition === null || body.length > 12 * 1024 * 1024) return;
+    let snapshot: unknown;
+    try { snapshot = JSON.parse(body) as unknown; } catch { return; }
+    if (!isFullKsportPartitionSnapshot(snapshot)) return;
+    const capture = this.#currentKsportNativeHttpCapture(pending.source);
+    if (capture === null || capture.sourceGeneration !== pending.sourceGeneration ||
+      capture.tabGeneration !== pending.tabGeneration) return;
+    capture.parts.set(partition, { url: pending.url, body });
+    if (!capture.parts.has("live") || !capture.parts.has("today")) return;
+    this.#ksportNativeHttpCaptures.delete(pending.source.sourceId);
+    if (!this.#isPendingCurrent(pending)) return;
+
+    const frameTree = await this.#withFrameCommandTimeout(
+      this.#sendCommand(pending.source.tabId, "Page.getFrameTree")
+    ).catch(() => ({}));
+    const verifiedDocument = verifiedDocumentForDescriptor(collectFrameDescriptors(frameTree)[0]);
+    if (verifiedDocument === undefined || !this.#isPendingCurrent(pending)) return;
+    const sequenceBeforeBoundary = this.#sequences.get(pending.source.sourceId) ?? 0;
+    await this.#emit(pending.source, "https://sb21.net/__fieldline_ksport_http_recovery_start__",
+      "Diagnostic", "TAB_STATE", { encoding: "UTF8",
+        body: '{"kind":"KSPORT_HTTP_NATIVE_RECOVERY_START"}' });
+    if ((this.#sequences.get(pending.source.sourceId) ?? 0) !== sequenceBeforeBoundary + 1 ||
+      !this.#isPendingCurrent(pending)) return;
+    const ordinal = (this.#ksportSnapshotOrdinals.get(pending.source.sourceId) ?? 0) + 1;
+    this.#ksportSnapshotOrdinals.set(pending.source.sourceId, ordinal);
+    const generation = `ksport-http:${pending.source.tabId}:${ordinal}`;
+    for (const nativePartition of ["live", "today"] as const) {
+      if (!this.#isPendingCurrent(pending)) return;
+      const part = capture.parts.get(nativePartition)!;
+      await this.ingestHttpResponse(pending.source, part.url, "Fetch", part.body, {
+        method: "GET", streamId: generation,
+        providerPartition: nativePartition === "live" ? "KSPORT_LIVE" : "KSPORT_TODAY",
+        providerContentIntent: "FOOTBALL_FULL_CATALOG",
+        requestStartSequence: sequenceBeforeBoundary,
+        verifiedDocument
+      });
+    }
+    this.#ksportMaintenanceRecoveryAtMs.set(pending.source.sourceId, this.#now());
   }
 
   async #ingestBtiRefreshEvaluation(source: ObservedSource, evaluation: unknown,
@@ -2998,19 +3160,11 @@ export class NetworkObserver {
             .map(([path, count]) => `${path}:${count}`).join(",")}] ` +
           (this.#lastCatalogShape.get(source.sourceId) ?? "") })
     });
-    // The day list is what the other books can be compared against, and nothing
-    // else runs often enough to fetch it: the poller refreshes SABA's catalog
-    // never and APSPORT's only inside a short bootstrap window. This heartbeat
-    // runs every ten seconds for every attached tab, and the visit keeps its own
-    // ten-minute floor, so it is a no-op almost every time.
-    // The day-list visit is not called here any more. It selects a tab by its
-    // label alone, and a lobby carries that same label in more than one place:
-    // SABA's Asian Games section has its own "som | hom nay | truc tiep" strip,
-    // and the visit clicked that one, leaving the page on an empty section. A
-    // page showing nothing subscribes to nothing, which is the whole reason its
-    // socket then carried no football at all.
+    // Keep only a small read-only shape diagnostic for APSPORT. Its periodic
+    // authenticated API roster/detail collector owns the catalog generation;
+    // a heartbeat must not start the old virtualized-DOM sweep or reconnect a
+    // working provider socket.
     if (source.lobby === "TSPORT") {
-      void this.#sweepTsportCatalog(source).catch(() => undefined);
       void this.#recordTsportCatalogShape(source).catch(() => undefined);
     }
   }
@@ -3057,9 +3211,12 @@ export class NetworkObserver {
         seen.set(type, (seen.get(type) ?? 0) + 1);
         this.#targetTypesSeen.set(source.sourceId, seen);
       }
-      if (childSessionId !== null && targetInfo?.type === "iframe") {
+      const observeChild = targetInfo?.type === "iframe" ||
+        (source.lobby === "KSPORT" && targetInfo?.type === "worker");
+      if (childSessionId !== null && observeChild) {
         const targetId = typeof targetInfo.targetId === "string" ? targetInfo.targetId : undefined;
-        await this.#observeChildTarget(source, childSessionId, targetId, true);
+        await this.#observeChildTarget(source, childSessionId, targetId, true,
+          targetInfo.type === "worker" ? "worker" : "iframe");
       }
       return;
     }
@@ -3176,7 +3333,9 @@ export class NetworkObserver {
       } else this.#requestFunctionCodes.delete(key);
       this.#correlateCmdRecoveryRequest(source, key, sessionId, params.frameId, params.loaderId,
         this.#requestFunctionCodes.get(key));
-      const partition = request === null ? null : imPartitionFromRequest(source, request);
+      const partition = request === null ? null : imPartitionFromRequest(source, request) ??
+        (this.#currentKsportNativeHttpCapture(source) === null
+          ? null : ksportPartitionFromRequest(source, request));
       if (partition === null) this.#requestPartitions.delete(key);
       else this.#requestPartitions.set(key, partition);
       const requestHeaders = request !== null && isRecord(request.headers) ? request.headers : {};
@@ -3192,12 +3351,15 @@ export class NetworkObserver {
         try {
           const url = new URL(request.url);
           if (url.protocol === "https:" && url.username === "" && url.password === "" &&
-            isKsportProviderHost(url.hostname) && url.pathname === "/api/v2/getEvent") {
+            isKsportProviderHost(url.hostname) && url.pathname === "/api/v2/getEvent" &&
+            !url.searchParams.has("eventId")) {
             const rawHeaders = isRecord(request.headers) ? request.headers : {};
             const headers = Object.fromEntries(Object.entries(rawHeaders).flatMap(([name, value]) =>
               /^(?:cookie|host|content-length|accept-encoding|connection|origin|referer|user-agent|sec-|:)/iu.test(name) ||
                 (typeof value !== "string" && typeof value !== "number") ? [] : [[name, String(value)]]));
-            const template = { url: request.url, headers };
+            const method: "GET" | "POST" = requestMethod === "POST" ? "POST" : "GET";
+            const template = { url: request.url, headers, method,
+              hasPostData: typeof request.postData === "string" && request.postData.length > 0 };
             this.#sbobetEventRequests.set(source.sourceId, template);
           }
         } catch { /* Ignore malformed provider URLs. */ }
@@ -3311,7 +3473,6 @@ export class NetworkObserver {
         if (ownsAuthority && (socket.ksportRecovery.currentGeneration !== previousGeneration ||
           (!wasFailed && socket.ksportRecovery.failed))) {
           this.#ksportBaselineRequests.delete(socket.source.sourceId);
-          this.#ksportLiveRestored.delete(socket.source.sourceId);
           this.#ksportBaselineAttemptAtMs.delete(socket.source.sourceId);
           if (this.#activeKsportStreams.get(socket.source.sourceId) === socket.streamId) {
             await this.#scheduleSabaWsSnapshotClear(socket.source.sourceId);
@@ -3387,7 +3548,13 @@ export class NetworkObserver {
               (url) => /\/socket\.io\/?$/u.test(url.pathname));
           }
         } else if (source.lobby === "SBO") {
-          await this.#scheduleFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+          const nowMs = this.#now();
+          const lastAttemptAtMs = this.#sboOrphanFrameRecoveryAtMs.get(source.sourceId);
+          if (lastAttemptAtMs === undefined || nowMs - lastAttemptAtMs >= SBO_ORPHAN_FRAME_RETRY_MS) {
+            this.#sboOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
+            await this.#scheduleFreshSocketBaseline(source,
+              (url) => /\/socket\.io\/?$/u.test(url.pathname));
+          }
         } else if (source.lobby === "KSPORT") {
           const payload = isRecord(params.response) && typeof params.response.payloadData === "string"
             ? params.response.payloadData : "";
@@ -3554,7 +3721,8 @@ export class NetworkObserver {
       const providerFunctionCode = this.#requestFunctionCodes.get(key);
       const requestIdentity = this.#requestIdentities.get(key);
       if (requestIdentity === undefined) return;
-      if (!isProviderCatalogHttpResponse(source, response.url, streamId, providerFunctionCode)) {
+      if (!isProviderCatalogHttpResponse(source, response.url, streamId, providerFunctionCode,
+        providerPartition)) {
         this.#cmdRecoveryRequests.delete(key);
         this.#pending.delete(key);
         this.#requestPartitions.delete(key);
@@ -3625,6 +3793,11 @@ export class NetworkObserver {
           return;
         }
         const safeBody = redactNetworkBody(response.body);
+        if (pending.source.lobby === "KSPORT" &&
+          (pending.providerPartition === "KSPORT_LIVE" || pending.providerPartition === "KSPORT_TODAY")) {
+          await this.#acceptKsportNativeHttpPart(pending, safeBody);
+          return;
+        }
         await this.#recoverMissingImBaseline(pending);
         if (!this.#isPendingCurrent(pending)) return;
         if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
@@ -3898,14 +4071,6 @@ export class NetworkObserver {
         // market cannot be misclassified as a dead data source.
         if (!forceGeneration && previous === semanticBody && nowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0)
           < CATALOG_REFRESH_INTERVAL_MS) {
-          // An explicit TSPORT refresh still observed a current-document,
-          // completed proof even when its catalog was semantically unchanged.
-          // Record that observation so the caller can request a fresh exact
-          // event socket without emitting duplicate DOM catalog bytes.
-          if (source.lobby === "TSPORT") {
-            this.#tsportCompletedSweepOrdinals.set(source.sourceId,
-              (this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0) + 1);
-          }
           return;
         }
         for (const group of emissionGroups) {
@@ -3923,10 +4088,6 @@ export class NetworkObserver {
           }
         }
         if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
-        if (source.lobby === "TSPORT") {
-          this.#tsportCompletedSweepOrdinals.set(source.sourceId,
-            (this.#tsportCompletedSweepOrdinals.get(source.sourceId) ?? 0) + 1);
-        }
         this.#cmdLastBodies.set(source.sourceId, semanticBody);
         this.#cmdLastSentAtMs.set(source.sourceId, nowMs);
         if (isReplayableCmdCatalog(records)) {
@@ -4847,6 +5008,18 @@ function imPartitionFromRequest(source: ObservedSource,
   }
 }
 
+function ksportPartitionFromRequest(source: ObservedSource,
+  request: Record<string, unknown>): KsportProviderPartition | null {
+  if (source.lobby !== "KSPORT" || request.method !== "GET" || typeof request.url !== "string") return null;
+  try {
+    const url = new URL(request.url);
+    if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
+      !isKsportProviderHost(url.hostname) || url.pathname !== "/api/v2/getEvent") return null;
+    const timeRange = url.searchParams.get("timeRange")?.toLowerCase();
+    return timeRange === "live" ? "KSPORT_LIVE" : timeRange === "today" ? "KSPORT_TODAY" : null;
+  } catch { return null; }
+}
+
 function pendingRequestMetadata(pending: PendingRequest): EmissionRequestMetadata {
   return {
     method: pending.method,
@@ -4953,7 +5126,8 @@ function isProviderCatalogWebSocket(source: ObservedSource, _value: string): boo
 }
 
 function isProviderCatalogHttpResponse(source: ObservedSource, value: string,
-  streamId: string | undefined, providerFunctionCode: number | undefined): boolean {
+  streamId: string | undefined, providerFunctionCode: number | undefined,
+  providerPartition?: ProviderPartition): boolean {
   let url: URL;
   try { url = new URL(value); } catch { return false; }
   if (url.protocol !== "https:" || url.username !== "" || url.password !== "") return false;
@@ -4967,10 +5141,11 @@ function isProviderCatalogHttpResponse(source: ObservedSource, value: string,
       (url.pathname === "/api/EventV6/GetSE" || url.pathname === "/api/EventV6/GetSEDelta");
   }
   if (source.lobby === "KSPORT") {
-    // Page-native getEvent traffic is retained only as an in-memory request
-    // template. It has no atomic generation/cutoff pair and must never cross
-    // the bridge as authority. Direct paired recovery uses ingestHttpResponse.
-    return false;
+    // Only a request that was admitted during the bounded recovery-tab window
+    // reaches this branch. The response body is held locally until both native
+    // partitions exist, then re-emitted as one atomic generation.
+    return isKsportProviderHost(url.hostname) && url.pathname === "/api/v2/getEvent" &&
+      (providerPartition === "KSPORT_LIVE" || providerPartition === "KSPORT_TODAY");
   }
   if (source.lobby === "BTI") {
     const detailId = url.pathname.slice("/api/eventpage/events/".length);

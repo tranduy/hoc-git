@@ -215,6 +215,12 @@ describe("ChromeBridgeControlMessageSchema", () => {
     expect(schema.safeParse({ version: 1, kind: "ACK", sourceId: "chrome:SABA:42", sequence: 7,
       token: "super-secret" }).success).toBe(false);
     expect(schema.safeParse({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:IM:42" }).success).toBe(true);
+    expect(schema.safeParse({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:TSPORT:42",
+      prematchWindowHours: 24 }).success).toBe(true);
+    for (const prematchWindowHours of [0, 49, 1.5]) {
+      expect(schema.safeParse({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:TSPORT:42",
+        prematchWindowHours }).success).toBe(false);
+    }
     expect(schema.safeParse({ version: 1, kind: "RELOAD_SOURCE", sourceId: "chrome:SABA:7" }).success).toBe(true);
     expect(schema.safeParse({ version: 1, kind: "NAVIGATE_SOURCE", sourceId: "chrome:SABA:7",
       url: "https://c0z0ob.bpd3a3fn.com/sports?token=opaque" }).success).toBe(true);

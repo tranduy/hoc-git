@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import { ChromeBridgeEnvelopeSchema, type ChromeBridgeControlMessage } from "@tool-chenh/contracts";
+import { CHROME_BRIDGE_MAX_ENVELOPE_BYTES, ChromeBridgeEnvelopeSchema,
+  type ChromeBridgeControlMessage } from "@tool-chenh/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { RawData } from "ws";
 import { z } from "zod";
@@ -8,7 +9,7 @@ import type { ChromeBridgeControlPlane } from "./chrome-bridge-control-plane.js"
 import { chromeBridgeSourceIdentity, type ChromeBridgeProviderAccountId } from "./chrome-bridge-account.js";
 import type { ProviderFeedSnapshot } from "./provider-feed-types.js";
 
-const MAX_FRAME_BYTES = 256 * 1024;
+const MAX_FRAME_BYTES = CHROME_BRIDGE_MAX_ENVELOPE_BYTES;
 const DEFAULT_KEEPALIVE_INTERVAL_MS = 20_000;
 
 export interface ChromeBridgeRouteOptions {
