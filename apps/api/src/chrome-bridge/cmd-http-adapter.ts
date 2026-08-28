@@ -1,5 +1,6 @@
 import { normalizeObservedFootballCatalog, type CmdCatalogInputRecord } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
+import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 
@@ -397,6 +398,45 @@ function applyDelta(rows: Map<string, RetainedRow>, delta: readonly unknown[],
   return "APPLIED";
 }
 
+/**
+ * Handicaps whose side the feed cannot justify.
+ *
+ * A row carries the handicap as a magnitude - 0.25, never -0.25 - and row 24 is
+ * the only thing that says which team lays it, shared by the full-time market
+ * and the first-half one alike. Where a fixture's halves sit on opposite sides
+ * that single flag cannot be right for both, and the half it gets wrong is
+ * published as the mirror of the line the book is really offering.
+ *
+ * Measured 2026-08-28: CMD priced Atlante v Club Leon's first half at 1.54/2.52
+ * while SBOBET and IM both had 2.54/1.51 and 2.47/1.56 at that line, and CMD's
+ * own full-time market agreed with them. Paired against another book the
+ * mirrored side reads as a 16.46% edge - both legs backing the same outcome -
+ * and a mistake shaped like that goes straight to the top of a table ranked by
+ * return.
+ *
+ * A book never offers one line twice at two prices, so a fixture holding two
+ * markets of one kind at one line is proof that a side was assigned wrongly. It
+ * does not say which, so neither is published. This does not catch a fixture
+ * whose only market of its kind is the mirrored one; that needs evidence from
+ * the row itself, which the live payloads observed so far do not distinguish.
+ */
+function withJustifiedHandicaps(catalog: ObservedProviderCatalog): ObservedProviderCatalog {
+  const byLine = new Map<string, string[]>();
+  for (const market of catalog.markets) {
+    if (!market.marketType.endsWith("_AH")) continue;
+    const key = `${market.providerEventId} ${market.marketType} ${market.line ?? ""}`;
+    (byLine.get(key) ?? byLine.set(key, []).get(key)!).push(market.providerMarketId);
+  }
+  const contradicted = new Set<string>();
+  for (const ids of byLine.values()) {
+    if (ids.length > 1) for (const id of ids) contradicted.add(id);
+  }
+  if (contradicted.size === 0) return catalog;
+  return { ...catalog,
+    markets: catalog.markets.filter((market) => !contradicted.has(market.providerMarketId)),
+    quotes: catalog.quotes.filter((quote) => !contradicted.has(quote.providerMarketId)) };
+}
+
 function materialize(rows: Map<string, RetainedRow>, observedAtMs: number) {
   const parts: NormalizedCatalogPart[] = [];
   for (const retained of rows.values()) {
@@ -407,6 +447,6 @@ function materialize(rows: Map<string, RetainedRow>, observedAtMs: number) {
       timezoneOffsetMinutes: 480, sequence: retained.sequence
     }));
   }
-  return mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "CMD", observedAtMs, parts,
-    collapseDuplicateEvents: true });
+  return withJustifiedHandicaps(mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "CMD",
+    observedAtMs, parts, collapseDuplicateEvents: true }));
 }

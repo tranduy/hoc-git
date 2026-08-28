@@ -35,7 +35,48 @@ function envelope(body: unknown, sequence: number, providerFunctionCode = 1): Ch
   return value as ChromeBridgeEnvelope;
 }
 
+// One fixture's first-half handicap, as two of the rows CMD publishes for it.
+// The magnitude is all a row carries; row 24 is the only thing saying who lays
+// it, and it is shared with the full-time market, so a fixture whose halves sit
+// on opposite sides gets one of them mirrored.
+function firstHalfHandicapRow(eventId: number, home: number, away: number): unknown[] {
+  const row = Array<unknown>(91).fill(null);
+  Object.assign(row, {
+    0: eventId, 3: 108007, 10: -999, 12: -999, 14: 0.25, 16: -999, 24: 0, 25: 1,
+    37: "GERMANY BUNDESLIGA 2", 38: "Eintracht Braunschweig", 39: "Hertha Berlin",
+    40: -999, 41: -999, 42: -999, 43: -999, 44: home, 45: away, 46: -999, 47: -999,
+    53: "1H 4", 56: "08/23", 79: 0
+  });
+  return row;
+}
+
 describe("CmdHttpCatalogAdapter", () => {
+  it("withholds a fixture's handicap when one line arrives at two prices", () => {
+    // Measured 2026-08-28: CMD carried Eintracht Braunschweig v Hertha Berlin's
+    // first half twice at the same line, 1.62/2.35 against 2.69/1.47, which are
+    // the two sides of a line and its mirror. A book offers one line once, so
+    // one of the two was assigned to the wrong team - the payload does not say
+    // which, and priced against another book the mirrored one reads as a large
+    // edge with both legs backing the same outcome.
+    const adapter = new CmdHttpCatalogAdapter();
+    const update = adapter.decode(envelope({ ...fullResponse, data: [],
+      today: [firstHalfHandicapRow(25_307_846, 0.62, -0.74),
+        firstHalfHandicapRow(25_329_282, -0.59, 0.47)] }, 1)).at(-1);
+
+    expect(update?.value?.markets.filter((market) => market.marketType === "FH_AH")).toEqual([]);
+    expect(update?.value?.quotes.filter((quote) => quote.marketType === "FH_AH")).toEqual([]);
+  });
+
+  it("keeps a fixture's handicap ladder when the lines differ", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    const second = firstHalfHandicapRow(25_329_282, -0.59, 0.47);
+    second[14] = 0.5;
+    const update = adapter.decode(envelope({ ...fullResponse, data: [],
+      today: [firstHalfHandicapRow(25_307_846, 0.62, -0.74), second] }, 1)).at(-1);
+
+    expect(update?.value?.markets.filter((market) => market.marketType === "FH_AH")).toHaveLength(2);
+  });
+
   it("accepts the current decimal-string cursor and bounded alternating metadata row", () => {
     const adapter = new CmdHttpCatalogAdapter();
     const metadata = Array.from({ length: 64 }, (_, index) => [index + 1, `league-${index + 1}`]).flat();
