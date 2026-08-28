@@ -23,6 +23,19 @@ describe("ProviderSourceRecoveryApi", () => {
     }));
   });
 
+  it("does not navigate SBOBET when its automatic in-page snapshot has no fresh baseline", async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(json({ sources: [{ lobby: "KSPORT", sourceId: "chrome:KSPORT:9", tabId: 9,
+        state: "LIVE", lastSequence: 10, lastAcceptedAtMs: 2_000, reason: null,
+        authorityDisposition: "CANDIDATE" }] }))
+      .mockResolvedValueOnce(json({ sourceId: "chrome:KSPORT:9", requested: 1 }, 202));
+
+    await expect(new ProviderSourceRecoveryApi(fetcher).recover("SBOBET", "AUTO"))
+      .rejects.toThrow("FRESH_BASELINE_NOT_CONFIRMED");
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("falls back to a targeted hard refresh when the in-page snapshot has no fresh baseline", async () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(json({ sources: [{ lobby: "CMD", sourceId: "chrome:CMD:7", tabId: 7,

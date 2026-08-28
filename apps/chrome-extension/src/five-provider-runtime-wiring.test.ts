@@ -238,7 +238,7 @@ describe("five-provider shared runtime wiring", () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>,
       _sessionId?: string) => {
       if (method === "Runtime.evaluate" && params?.expression ===
-        "window.WebSocket && window.WebSocket.prototype") return { result: { objectId: "prototype" } };
+        "globalThis.WebSocket && globalThis.WebSocket.prototype") return { result: { objectId: "prototype" } };
       if (method === "Runtime.evaluate") return { result: { value: "1787555000000" } };
       if (method === "Runtime.queryObjects") return { objects: { objectId: "instances" } };
       if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };

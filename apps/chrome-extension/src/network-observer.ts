@@ -43,6 +43,7 @@ const SBO_ORPHAN_FRAME_RETRY_MS = 60_000;
 // Long enough that a click cannot become a storm, short enough that a missing
 // partition is retried well inside the feed's baseline lease.
 const KSPORT_BASELINE_REQUEST_RETRY_MS = 45_000;
+const KSPORT_NATIVE_HTTP_RECOVERY_RETRY_MS = 8_000;
 // Re-selecting a period tab drives the provider's own SPA. Measured 35 toggles
 // in eight minutes before this cap, which is churn on a page the operator is
 // also using. Bounded per attempt generation; a genuinely new generation gets a
@@ -104,6 +105,22 @@ function isKsportCatalogSocket(url: URL): boolean {
 function isKsportProviderHost(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
   return normalized === "sb21.net" || normalized.endsWith(".sb21.net");
+}
+
+function isKsportEventApiHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return isKsportProviderHost(normalized) || normalized === "zenandfe.com" ||
+    normalized === "prod20091.fxf774.com";
+}
+
+function isKsportChildTargetUrl(rawUrl: string, targetType: string): boolean {
+  if (targetType !== "iframe" && targetType !== "worker") return false;
+  try {
+    let url = new URL(rawUrl);
+    if (targetType === "worker" && url.protocol === "blob:") url = new URL(url.pathname);
+    return url.protocol === "https:" && url.username === "" && url.password === "" &&
+      (isKsportProviderHost(url.hostname) || url.hostname.toLowerCase() === "zenandfe.com");
+  } catch { return false; }
 }
 
 function isKsportTransportHeartbeat(payload: string): boolean {
@@ -185,6 +202,7 @@ interface PendingRequest {
   readonly sourceGeneration: number;
   readonly tabGeneration: number;
   readonly sessionId?: string;
+  readonly targetId?: string;
   readonly url: string;
   readonly resourceType: string;
   readonly method: ChromeBridgeHttpMethod;
@@ -346,6 +364,10 @@ export interface DirectHttpRequestMetadata {
     readonly loaderId: string;
     readonly sessionId?: string;
   };
+  readonly verifiedTarget?: {
+    readonly targetId: string;
+    readonly sessionId: string;
+  };
 }
 
 interface ActiveCmdHiddenProbe {
@@ -433,6 +455,8 @@ export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
 // with 24 period tabs present, none matching the Vietnamese label alone.
 const KSPORT_TODAY_BASELINE_EXPRESSION = ksportTimeTabExpression(["hom nay", "today"]);
 const KSPORT_LIVE_BASELINE_EXPRESSION = ksportTimeTabExpression(["truc tiep", "live"]);
+const KSPORT_TODAY_NATIVE_HTTP_EXPRESSION = ksportTimeTabExpression(["hom nay", "today"], true);
+const KSPORT_LIVE_NATIVE_HTTP_EXPRESSION = ksportTimeTabExpression(["truc tiep", "live"], true);
 
 export function ksportTimeTabExpressionForTest(labels: readonly string[], force = false): string {
   return ksportTimeTabExpression(labels, force);
@@ -1061,6 +1085,7 @@ export class NetworkObserver {
   readonly #ksportHttpFallbackModes = new Map<string, KsportHttpFallbackMode>();
   readonly #ksportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #ksportNativeHttpCaptures = new Map<string, KsportNativeHttpCapture>();
+  readonly #ksportNativeHttpRecoveryAtMs = new Map<string, number>();
   readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sboOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
@@ -1107,8 +1132,12 @@ export class NetworkObserver {
     const activeStream = this.#activeKsportStreams.get(sourceId);
     if (activeStream === undefined) return false;
     const tracker = this.#ksportRecoveryForStream(sourceId, activeStream);
-    if (tracker !== undefined) return tracker.currentBaselineState.complete;
     const frames = this.#catalogWsSnapshots.get(sourceId)?.get(activeStream);
+    if (tracker !== undefined) {
+      if (!tracker.currentBaselineState.complete || frames === undefined) return false;
+      return ksportFramesContainCompleteBaseline(frames.filter((frame) =>
+        frame.recoveryGeneration === tracker.currentGeneration));
+    }
     return frames !== undefined && ksportFramesContainCompleteBaseline(frames);
   }
 
@@ -1274,9 +1303,10 @@ export class NetworkObserver {
       ? undefined : this.#catalogWsSnapshots.get(source.sourceId)?.get(activeStream);
     const tracker = activeStream === undefined
       ? undefined : this.#ksportRecoveryForStream(source.sourceId, activeStream);
+    const retainedFrames = tracker === undefined ? frames ?? [] : (frames ?? []).filter((frame) =>
+      frame.recoveryGeneration === tracker.currentGeneration);
     const state = activeStream === undefined ? { live: false, today: false }
-      : tracker?.currentBaselineState ??
-        ksportBaselineState(frames ?? []);
+      : ksportBaselineState(retainedFrames);
     if (state.live && state.today) {
       this.#ksportBaselineRequests.delete(source.sourceId);
       this.#ksportBaselineAttemptAtMs.delete(source.sourceId);
@@ -1599,6 +1629,7 @@ export class NetworkObserver {
     this.#ksportHttpFallbackModes.delete(sourceId);
     this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
     this.#ksportNativeHttpCaptures.delete(sourceId);
+    this.#ksportNativeHttpRecoveryAtMs.delete(sourceId);
     this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
     this.#sboOrphanFrameRecoveryAtMs.delete(sourceId);
     this.#cmdCapturesInFlight.delete(sourceId);
@@ -1708,6 +1739,7 @@ export class NetworkObserver {
       this.#ksportRefreshesInFlight.delete(sourceId);
       this.#ksportBaselineRequests.delete(sourceId);
       this.#ksportNativeHttpCaptures.delete(sourceId);
+      this.#ksportNativeHttpRecoveryAtMs.delete(sourceId);
       this.#ksportCatalogFrameAtMs.delete(sourceId);
       this.#ksportBaselineAttemptAtMs.delete(sourceId);
       this.#ksportPeriodSelectionAtMs.delete(sourceId);
@@ -1913,7 +1945,8 @@ export class NetworkObserver {
       if (!refreshed) await this.#ensureCompleteKsportBaseline(source);
       return;
     }
-    await this.#refreshKsportHttpFallback(source, nowMs);
+    const refreshed = await this.#refreshKsportHttpFallback(source, nowMs);
+    if (!refreshed) await this.#requestFreshKsportNativeHttpBaseline(source);
     await this.#requestFreshSocketBaseline(source, isKsportCatalogSocket);
   }
 
@@ -2233,6 +2266,7 @@ export class NetworkObserver {
         await this.#ensureCompleteKsportBaseline(source);
         return;
       }
+      if (await this.#requestFreshKsportNativeHttpBaseline(source)) return;
       await this.#requestFreshSocketBaseline(source, isKsportCatalogSocket);
       return;
     }
@@ -2575,7 +2609,7 @@ export class NetworkObserver {
     const group = `fieldline-ksport-tracker-recovery-${socket.source.tabId}-${socket.streamId}`;
     try {
       const prototype = await this.#withFrameCommandTimeout(sendToOwner("Runtime.evaluate", {
-        expression: "window.WebSocket && window.WebSocket.prototype",
+        expression: "globalThis.WebSocket && globalThis.WebSocket.prototype",
         objectGroup: group, returnByValue: false
       })).catch(() => null);
       if (!ownsSocket()) return;
@@ -2636,11 +2670,16 @@ export class NetworkObserver {
       targets.push({ ...(active.sessionId === undefined ? {} : { sessionId: active.sessionId }) });
     }
     if (source.lobby === "KSPORT") {
-      for (const sessionId of this.#ksportAttachedTargetSessions.get(source.sourceId)?.values() ?? []) {
-        if (!targets.some((target) => target.contextId === undefined && target.sessionId === sessionId)) {
-          targets.push({ sessionId });
-        }
-      }
+      // KSPORT currently owns its catalog socket in a dedicated worker. Heap
+      // discovery in a page context can be slow enough to consume the entire
+      // bounded recovery window, so address attached socket targets before any
+      // root/iframe main worlds. Keep those worlds as fallbacks for older UI
+      // versions where the socket was page-owned.
+      const attachedSocketTargets = [...(this.#ksportAttachedTargetSessions.get(source.sourceId)?.values() ?? [])]
+        .filter((sessionId) => !targets.some((target) =>
+          target.contextId === undefined && target.sessionId === sessionId))
+        .map((sessionId) => ({ sessionId }));
+      targets.unshift(...attachedSocketTargets);
     }
     const socketIo = source.lobby === "SABA" || source.lobby === "SBO";
     const strategies = socketIo ? [{
@@ -2661,10 +2700,10 @@ export class NetworkObserver {
         socket.close(4000, "fieldline-baseline-recovery"); count += 1;
       } catch {} } return count; }`
     }] : [{
-      prototypeExpression: "window.WebSocket && window.WebSocket.prototype",
+      prototypeExpression: "globalThis.WebSocket && globalThis.WebSocket.prototype",
       reconnect: `function() { let count = 0; for (const socket of this) { try {
         if (!socket || socket.readyState !== 1) continue;
-        const url = new URL(socket.url, location.href);
+        const url = new URL(socket.url, globalThis.location?.href || socket.url);
         if (!/\\/sport\\//u.test(url.pathname)) continue;
         socket.close(4000, "fieldline-baseline-recovery"); count += 1;
       } catch {} } return count; }`
@@ -2764,33 +2803,23 @@ export class NetworkObserver {
     ).catch(() => ({}));
     const infos = isRecord(discovered) && Array.isArray(discovered.targetInfos)
       ? discovered.targetInfos : [];
-    const matchingTargets = infos.slice(0, 32).filter((info) => {
-      if (!isRecord(info) || info.type !== "iframe" || typeof info.targetId !== "string" ||
-        typeof info.url !== "string") return false;
-      try {
-        const url = new URL(info.url);
-        return url.protocol === "https:" && url.username === "" && url.password === "" &&
-          isKsportProviderHost(url.hostname);
-      } catch { return false; }
-    });
+    const matchingTargets = infos.slice(0, 32).filter((info) => isRecord(info) &&
+      typeof info.type === "string" && typeof info.targetId === "string" &&
+      typeof info.url === "string" && isKsportChildTargetUrl(info.url, info.type));
     const diagnostic = this.#wsAttachDiagnostic(source);
     diagnostic.ksportTargets = matchingTargets.length;
     diagnostic.targetsTotal = infos.length;
     diagnostic.targetsIframe = infos.filter((info) => isRecord(info) && info.type === "iframe").length;
     for (const info of infos.slice(0, 32)) {
-      if (!isRecord(info) || info.type !== "iframe" || typeof info.targetId !== "string" ||
-        typeof info.url !== "string" ||
+      if (!isRecord(info) || typeof info.type !== "string" || typeof info.targetId !== "string" ||
+        typeof info.url !== "string" || !isKsportChildTargetUrl(info.url, info.type) ||
         this.#ksportAttachedTargetSessions.get(source.sourceId)?.has(info.targetId) === true) continue;
-      try {
-        const url = new URL(info.url);
-        if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
-          !isKsportProviderHost(url.hostname)) continue;
-      } catch { continue; }
       const attached = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Target.attachToTarget", { targetId: info.targetId, flatten: true })).catch(() => ({}));
       const childSessionId = nestedValue(attached, "sessionId");
       if (typeof childSessionId !== "string") continue;
-      await this.#observeChildTarget(source, childSessionId, info.targetId, true).catch(() => undefined);
+      await this.#observeChildTarget(source, childSessionId, info.targetId, true,
+        info.type === "worker" ? "worker" : "iframe").catch(() => undefined);
     }
     diagnostic.attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId)?.size ?? 0;
   }
@@ -2879,22 +2908,57 @@ export class NetworkObserver {
 
   async #requestFreshKsportHttpBaseline(source: ObservedSource): Promise<boolean> {
     const activeEntry = this.#activeKsportSocket(source.sourceId);
-    if (activeEntry === undefined) return this.#requestFreshKsportHttpBaselineAfterDrain(source);
-    const [key, socket] = activeEntry;
-    const prior = socket.ksportFrameTail ?? Promise.resolve();
     let refreshed = false;
-    const operation = prior.catch(() => undefined).then(async () => {
-      const ownsSocket = this.#webSockets.get(key) === socket && socket.closing !== true &&
-        this.#activeKsportStreams.get(source.sourceId) === socket.streamId &&
-        this.#isSourceGenerationCurrent(source.sourceId, socket.sourceGeneration);
-      if (!ownsSocket) return;
-      const catalogAuthorityGeneration = socket.ksportRecovery?.catalogAuthorityGeneration ?? 0;
-      refreshed = await this.#requestFreshKsportHttpBaselineAfterDrain(source,
-        { key, socket, catalogAuthorityGeneration });
-    });
-    socket.ksportFrameTail = operation;
-    await operation;
+    if (activeEntry === undefined) {
+      refreshed = await this.#requestFreshKsportHttpBaselineAfterDrain(source);
+    } else {
+      const [key, socket] = activeEntry;
+      const prior = socket.ksportFrameTail ?? Promise.resolve();
+      const operation = prior.catch(() => undefined).then(async () => {
+        const ownsSocket = this.#webSockets.get(key) === socket && socket.closing !== true &&
+          this.#activeKsportStreams.get(source.sourceId) === socket.streamId &&
+          this.#isSourceGenerationCurrent(source.sourceId, socket.sourceGeneration);
+        if (!ownsSocket) return;
+        const catalogAuthorityGeneration = socket.ksportRecovery?.catalogAuthorityGeneration ?? 0;
+        refreshed = await this.#requestFreshKsportHttpBaselineAfterDrain(source,
+          { key, socket, catalogAuthorityGeneration });
+      });
+      socket.ksportFrameTail = operation;
+      await operation;
+    }
     return refreshed;
+  }
+
+  async #requestFreshKsportNativeHttpBaseline(source: ObservedSource): Promise<boolean> {
+    // After an MV3 worker reload, Resource Timing still exposes the list URL
+    // but not the authenticated headers used by the provider SPA. Re-fetching
+    // that URL directly returns 500. Only when there is no catalog socket or
+    // retained baseline, let the page issue its own two period requests and
+    // capture those responses instead; this changes no tab, URL or lifecycle
+    // state and is rate-limited independently of maintenance.
+    const nowMs = this.#now();
+    const lastAttemptAtMs = this.#ksportNativeHttpRecoveryAtMs.get(source.sourceId);
+    if (lastAttemptAtMs !== undefined &&
+      nowMs - lastAttemptAtMs < KSPORT_NATIVE_HTTP_RECOVERY_RETRY_MS) return false;
+    this.#ksportNativeHttpRecoveryAtMs.set(source.sourceId, nowMs);
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const ordinalBefore = this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0;
+    this.#armKsportNativeHttpCapture(source);
+    const todaySelected = await this.#selectTimeTab(source, KSPORT_TODAY_NATIVE_HTTP_EXPRESSION);
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 600));
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return false;
+    const liveSelected = await this.#selectTimeTab(source, KSPORT_LIVE_NATIVE_HTTP_EXPRESSION);
+    if (!todaySelected && !liveSelected) return false;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return false;
+      if ((this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) > ordinalBefore) {
+        this.#lastCatalogShape.set(source.sourceId, "http[NATIVE:catalog-requested]");
+        return true;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
+    return (this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) > ordinalBefore;
   }
 
   async #requestFreshKsportHttpBaselineAfterDrain(source: ObservedSource, fence?: {
@@ -2909,7 +2973,7 @@ export class NetworkObserver {
       try { templateUrl = new URL(template.url); } catch { return false; }
       if (templateUrl.protocol !== "https:" || templateUrl.pathname !== "/api/v2/getEvent" ||
         templateUrl.username !== "" || templateUrl.password !== "" ||
-        !isKsportProviderHost(templateUrl.hostname)) return false;
+        !isKsportEventApiHost(templateUrl.hostname)) return false;
     }
     const owner = fence?.socket;
     const targetSocket = owner ?? [...this.#webSockets.values()].find((socket) => {
@@ -2932,7 +2996,7 @@ export class NetworkObserver {
             fence.catalogAuthorityGeneration);
     const knownContexts = [...(this.#mainWorldContexts.get(source.tabId)?.entries() ?? [])];
     const targets: Array<{ readonly contextId?: number; readonly sessionId?: string;
-      readonly frameId?: string }> = knownContexts.map(
+      readonly frameId?: string; readonly targetId?: string }> = knownContexts.map(
       ([frameId, binding]) => ({ contextId: binding.contextId, frameId,
         ...(binding.sessionId === undefined ? {} : { sessionId: binding.sessionId }) }));
     if (targets.length === 0 && targetSocket !== undefined) targets.push({
@@ -2963,35 +3027,44 @@ export class NetworkObserver {
       const infos = isRecord(discovered) && Array.isArray(discovered.targetInfos)
         ? discovered.targetInfos : [];
       for (const info of infos.slice(0, 32)) {
-        if (!isRecord(info) || info.type !== "iframe" || typeof info.targetId !== "string" ||
-          typeof info.url !== "string") continue;
-        try {
-          const url = new URL(info.url);
-          if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
-            !isKsportProviderHost(url.hostname)) continue;
-        } catch { continue; }
+        if (!isRecord(info) || typeof info.type !== "string" || typeof info.targetId !== "string" ||
+          typeof info.url !== "string" || !isKsportChildTargetUrl(info.url, info.type)) continue;
         const attached = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
           "Target.attachToTarget", { targetId: info.targetId, flatten: true })).catch(() => ({}));
         const sessionId = nestedValue(attached, "sessionId");
         if (typeof sessionId !== "string") continue;
         attachedTargets.set(info.targetId, sessionId);
-        await this.#observeChildTarget(source, sessionId, info.targetId).catch(() => undefined);
+        await this.#observeChildTarget(source, sessionId, info.targetId, true,
+          info.type === "worker" ? "worker" : "iframe").catch(() => undefined);
       }
     }
-    for (const sessionId of attachedTargets.values()) targets.push({ sessionId });
+    const attachedSocketTargets = [...attachedTargets.entries()].map(([targetId, sessionId]) =>
+      ({ targetId, sessionId }));
+    targets.unshift(...attachedSocketTargets);
     const expression = `(async () => {
       const marker = "fieldline-ksport-catalog-refresh";
-      const isProviderHost = (hostname) => hostname === "sb21.net" || hostname.endsWith(".sb21.net");
+      const executionSurface = typeof document === "undefined" ? "WORKER" : "DOCUMENT";
+      const executionOrigin = new URL(location.href).origin;
+      const isProviderHost = (hostname) => hostname === "sb21.net" || hostname.endsWith(".sb21.net") ||
+        hostname === "zenandfe.com" || hostname === "prod20091.fxf774.com";
+      const isProviderUrl = (url) => isProviderHost(url.hostname) || url.origin === executionOrigin;
       const capturedUrl = ${JSON.stringify(templateUrl?.href ?? null)};
       const performanceUrls = [...performance.getEntriesByType("resource")].map((entry) => entry.name)
         .filter((value) => { try { const url = new URL(value); return url.protocol === "https:" &&
-          url.username === "" && url.password === "" && isProviderHost(url.hostname) &&
+          url.username === "" && url.password === "" && isProviderUrl(url) &&
           url.pathname === "/api/v2/getEvent" && !url.searchParams.has("eventId"); } catch { return false; } });
-      const templateUrl = capturedUrl || performanceUrls.at(-1);
+      const sameOriginFallback = executionSurface === "WORKER" && (() => {
+        try {
+          const origin = new URL(executionOrigin);
+          return origin.protocol === "https:" && origin.username === "" && origin.password === "" &&
+            isProviderHost(origin.hostname) ? new URL("/api/v2/getEvent", executionOrigin).href : null;
+        } catch { return null; }
+      })();
+      const templateUrl = capturedUrl || performanceUrls.at(-1) || sameOriginFallback;
       if (!templateUrl) return { status: marker + "-template-missing", page: location.origin + location.pathname };
       const base = new URL(templateUrl);
       if (base.protocol !== "https:" || base.username !== "" || base.password !== "" ||
-        !isProviderHost(base.hostname) || base.pathname !== "/api/v2/getEvent") {
+        !isProviderUrl(base) || base.pathname !== "/api/v2/getEvent") {
         return { status: marker + "-url-invalid" };
       }
       const headers = ${JSON.stringify(template?.headers ?? {})};
@@ -3004,7 +3077,7 @@ export class NetworkObserver {
         if (!value) continue;
         const candidate = new URL(value);
         if (candidate.protocol !== "https:" || candidate.username !== "" || candidate.password !== "" ||
-          !isProviderHost(candidate.hostname) || candidate.pathname !== "/api/v2/getEvent" ||
+          !isProviderUrl(candidate) || candidate.pathname !== "/api/v2/getEvent" ||
           candidate.searchParams.has("eventId")) continue;
         const observedRange = candidate.searchParams.get("timeRange");
         if (observedRange && ["live", "today"].includes(observedRange.toLowerCase())) {
@@ -3034,7 +3107,8 @@ export class NetworkObserver {
         }
         responses.push({ timeRange, url: url.href, body: await response.text() });
       }
-      return { status: "catalog-requested", marker, origin: base.origin, responses };
+      return { status: "catalog-requested", marker, executionSurface, executionOrigin,
+        origin: base.origin, responses };
     })()`;
     const attempts: Array<{ readonly target: "CONTEXT" | "SESSION" | "ROOT";
       readonly status: string; readonly page?: string; readonly controls?: unknown;
@@ -3082,11 +3156,14 @@ export class NetworkObserver {
           ? { hasPostData: value.hasPostData } : {}) });
       if (!isRecord(value) || value.status !== "catalog-requested" || !Array.isArray(value.responses) ||
         value.responses.length !== 2 || typeof value.origin !== "string") continue;
+      const workerOwnsOrigin = value.executionSurface === "WORKER" && target.targetId !== undefined &&
+        target.sessionId !== undefined && typeof value.executionOrigin === "string";
       let responseOrigin: string;
       try {
         const origin = new URL(value.origin);
         if (origin.protocol !== "https:" || origin.username !== "" || origin.password !== "" ||
-          !isKsportProviderHost(origin.hostname)) continue;
+          (!isKsportEventApiHost(origin.hostname) && (!workerOwnsOrigin ||
+            new URL(value.executionOrigin as string).origin !== origin.origin))) continue;
         responseOrigin = origin.origin;
       } catch { continue; }
       const accepted = new Map<"live" | "today", { readonly url: string; readonly body: string }>();
@@ -3101,7 +3178,12 @@ export class NetworkObserver {
         } catch { continue; }
         accepted.set(candidate.timeRange, { url: candidate.url, body: candidate.body });
       }
-      if (accepted.size !== 2 || verifiedDocument === undefined) continue;
+      const verifiedTarget = value.executionSurface === "WORKER" && target.targetId !== undefined &&
+        target.sessionId !== undefined ? { targetId: target.targetId, sessionId: target.sessionId } : undefined;
+      if (accepted.size !== 2 || (verifiedDocument === undefined && verifiedTarget === undefined)) continue;
+      if (verifiedTarget !== undefined &&
+        this.#ksportAttachedTargetSessions.get(source.sourceId)?.get(verifiedTarget.targetId) !==
+          verifiedTarget.sessionId) continue;
       if (!attemptIsCurrent()) return false;
       const ordinal = (this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) + 1;
       this.#ksportSnapshotOrdinals.set(source.sourceId, ordinal);
@@ -3113,11 +3195,14 @@ export class NetworkObserver {
           { method: "GET", streamId: generation,
             providerPartition: partition === "live" ? "KSPORT_LIVE" : "KSPORT_TODAY",
             providerContentIntent: "FOOTBALL_FULL_CATALOG", requestStartSequence,
-            ...(verifiedDocument === undefined ? {} : { verifiedDocument }) });
+            ...(verifiedDocument === undefined ? { verifiedTarget: verifiedTarget! } : { verifiedDocument }) });
       }
       return true;
     }
     const nowMs = this.#now();
+    this.#lastCatalogShape.set(source.sourceId, `http[${attempts.map((attempt) =>
+      `${attempt.target}:${attempt.status}${attempt.code === undefined ? "" : `:${attempt.code}`}`)
+      .join(",").slice(0, 360)}]`);
     if (nowMs - (this.#ksportDiagnosticAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) >= 10_000) {
       this.#ksportDiagnosticAtMs.set(source.sourceId, nowMs);
       await this.#emit(source, "https://sb21.net/__fieldline_ksport_refresh__", "Diagnostic", "TAB_STATE", {
@@ -3488,12 +3573,13 @@ export class NetworkObserver {
       } else {
         this.#requestStreamIds.delete(key);
       }
-      if (source.lobby === "KSPORT" && !this.#ksportRefreshesInFlight.has(source.sourceId) &&
+      if (source.lobby === "KSPORT" && (!this.#ksportRefreshesInFlight.has(source.sourceId) ||
+        this.#currentKsportNativeHttpCapture(source) !== null) &&
         request !== null && typeof request.url === "string") {
         try {
           const url = new URL(request.url);
           if (url.protocol === "https:" && url.username === "" && url.password === "" &&
-            isKsportProviderHost(url.hostname) && url.pathname === "/api/v2/getEvent" &&
+            isKsportEventApiHost(url.hostname) && url.pathname === "/api/v2/getEvent" &&
             !url.searchParams.has("eventId")) {
             const rawHeaders = isRecord(request.headers) ? request.headers : {};
             const headers = Object.fromEntries(Object.entries(rawHeaders).flatMap(([name, value]) =>
@@ -4032,12 +4118,17 @@ export class NetworkObserver {
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const tabGeneration = this.#captureTabGeneration(source.tabId);
     const verifiedDocument = requestMetadata.verifiedDocument;
-    const requestDocument = verifiedDocument === undefined ? null : requestDocumentBinding(
+    const verifiedTarget = requestMetadata.verifiedTarget;
+    const requestDocument = verifiedDocument !== undefined ? requestDocumentBinding(
       this.#observerSessionId, source.tabId, sourceGeneration, verifiedDocument.sessionId,
-      verifiedDocument.frameId, verifiedDocument.loaderId);
+      verifiedDocument.frameId, verifiedDocument.loaderId) : verifiedTarget !== undefined
+      ? requestTargetBinding(this.#observerSessionId, source.tabId, sourceGeneration,
+          verifiedTarget.sessionId, verifiedTarget.targetId)
+      : null;
     const pending: PendingRequest = { source, sourceGeneration, tabGeneration, url, resourceType, method,
       ...requestIdentity,
-      ...(verifiedDocument?.sessionId === undefined ? {} : { sessionId: verifiedDocument.sessionId }),
+      ...(verifiedDocument?.sessionId !== undefined ? { sessionId: verifiedDocument.sessionId }
+        : verifiedTarget !== undefined ? { sessionId: verifiedTarget.sessionId, targetId: verifiedTarget.targetId } : {}),
       ...(requestDocument === null ? {} : requestDocument),
       ...(requestMetadata.providerPartition === undefined ? {} : { providerPartition: requestMetadata.providerPartition }),
       ...(requestMetadata.providerContentIntent === undefined ? {} :
@@ -5085,6 +5176,12 @@ export class NetworkObserver {
   }
 
   async #requestDocumentIsCurrent(pending: PendingRequest): Promise<boolean> {
+    if (pending.targetId !== undefined) {
+      return pending.source.lobby === "KSPORT" && pending.sessionId !== undefined &&
+        pending.requestFrameKey !== undefined && pending.requestDocumentKey !== undefined &&
+        this.#isPendingCurrent(pending) &&
+        this.#ksportAttachedTargetSessions.get(pending.source.sourceId)?.get(pending.targetId) === pending.sessionId;
+    }
     if (pending.frameId === undefined || pending.loaderId === undefined ||
       pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return false;
     const frameTree = await (pending.sessionId === undefined
@@ -5164,7 +5261,7 @@ function ksportPartitionFromRequest(source: ObservedSource,
   try {
     const url = new URL(request.url);
     if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
-      !isKsportProviderHost(url.hostname) || url.pathname !== "/api/v2/getEvent") return null;
+      !isKsportEventApiHost(url.hostname) || url.pathname !== "/api/v2/getEvent") return null;
     const timeRange = url.searchParams.get("timeRange")?.toLowerCase();
     return timeRange === "live" ? "KSPORT_LIVE" : timeRange === "today" ? "KSPORT_TODAY" : null;
   } catch { return null; }
@@ -5294,7 +5391,7 @@ function isProviderCatalogHttpResponse(source: ObservedSource, value: string,
     // Only a request that was admitted during the bounded recovery-tab window
     // reaches this branch. The response body is held locally until both native
     // partitions exist, then re-emitted as one atomic generation.
-    return isKsportProviderHost(url.hostname) && url.pathname === "/api/v2/getEvent" &&
+    return isKsportEventApiHost(url.hostname) && url.pathname === "/api/v2/getEvent" &&
       (providerPartition === "KSPORT_LIVE" || providerPartition === "KSPORT_TODAY");
   }
   if (source.lobby === "BTI") {
@@ -5568,6 +5665,19 @@ function requestDocumentBinding(observerSessionId: string, tabId: number, source
     requestFrameKey: opaqueRequestKey("http-frame", [observerSessionId, tabId, session, rawFrameId]),
     requestDocumentKey: opaqueRequestKey("http-document",
       [observerSessionId, tabId, sourceGeneration, session, rawFrameId, rawLoaderId])
+  };
+}
+
+function requestTargetBinding(observerSessionId: string, tabId: number, sourceGeneration: number,
+  sessionId: string, targetId: string): {
+    readonly requestFrameKey: string;
+    readonly requestDocumentKey: string;
+  } | null {
+  if (sessionId.length === 0 || sessionId.length > 256 || targetId.length === 0 || targetId.length > 256) return null;
+  return {
+    requestFrameKey: opaqueRequestKey("http-frame", [observerSessionId, tabId, sessionId, targetId]),
+    requestDocumentKey: opaqueRequestKey("http-document",
+      [observerSessionId, tabId, sourceGeneration, sessionId, targetId])
   };
 }
 

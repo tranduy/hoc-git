@@ -15,7 +15,8 @@ export class ProviderSourceRecoveryApi implements ProviderSourceRecoveryApiLike 
     if (mode === "MANUAL") return this.#hardRefresh(provider);
     try {
       await this.#requestFreshSnapshot(provider);
-    } catch {
+    } catch (error) {
+      if (provider === "SBOBET") throw error;
       await this.#hardRefresh(provider);
     }
   }
