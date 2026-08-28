@@ -2,7 +2,7 @@ import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/c
 import { describe, expect, it } from "vitest";
 import type { ComparisonCell, ComparisonEvent, ComparisonRow, ObservedTicketRow } from "../catalog/comparison.js";
 import type { FixedBaseStakePlan, FixedBaseStakePolicy } from "./fixed-base-stake.js";
-import { eventEdgeSummary, rankTicketsForEvent, sortRankedEvents, topRankedTicketItems,
+import { eventEdgeSummary, nextRankingDeadlineMs, rankTicketsForEvent, sortRankedEvents, topRankedTicketItems,
   type RankedEvent } from "./ranked-tickets.js";
 import type { VerifiedTicketEvidence } from "./ticket-preflight-coordinator.js";
 
@@ -57,6 +57,50 @@ function comparisonEvent(): ComparisonEvent {
   return { key: "event-key", event: providerEvent, providers: ["SABA", "SBOBET"], catalogs: [],
     providerEventIds: { SABA: "event-a", SBOBET: "event-b" }, observedRows: [observedOnly], rows, bestMargin: 0.25 };
 }
+
+describe("nextRankingDeadlineMs", () => {
+  const apCatalog = (observedAtMs: number, isLive: boolean) => ({
+    dataMode: "LIVE" as const, accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT" as const,
+    category: "FOOTBALL" as const, comparisonState: "AWAITING_SECOND_PROVIDER" as const, observedAtMs,
+    snapshotState: "FRESH" as const, rejectedMarketCount: 0, events: [], markets: [],
+    quotes: cell("APSPORT", "-0.5", { isLive, receivedMonotonicMs: 5 }).quotes
+  });
+
+  it("wakes when an APSPORT quote stops being fresh, not once a second", () => {
+    // Ranking reads the clock only through deadlines like this one, so the
+    // answer between them is the answer it already produced.
+    const event = { ...comparisonEvent(), event: { ...providerEvent, isLive: true },
+      catalogs: [apCatalog(10_000, true)] };
+
+    expect(nextRankingDeadlineMs({ events: [event], verified: new Map(), nowMs: 10_000 }))
+      .toBe(15_000);
+    expect(nextRankingDeadlineMs({ events: [event], verified: new Map(), nowMs: 15_001 }))
+      .toBeNull();
+  });
+
+  it("gives a fixture that has not kicked off the longer pre-match window", () => {
+    const event = { ...comparisonEvent(), event: { ...providerEvent, isLive: true },
+      catalogs: [apCatalog(10_000, false)] };
+
+    expect(nextRankingDeadlineMs({ events: [event], verified: new Map(), nowMs: 10_000 }))
+      .toBe(25_000);
+  });
+
+  it("wakes for a kickoff and a verified ticket's expiry, earliest first", () => {
+    const event = { ...comparisonEvent(), catalogs: [] };
+
+    expect(nextRankingDeadlineMs({ events: [event], verified: new Map(), nowMs })).toBe(20_000);
+    expect(nextRankingDeadlineMs({ events: [event],
+      verified: new Map([["k", evidence("event-key", "row-1", "1000", "0.01", 12_000)]]), nowMs }))
+      .toBe(12_000);
+  });
+
+  it("reports nothing ahead for a board no APSPORT price and no kickoff can move", () => {
+    const event = { ...comparisonEvent(), event: { ...providerEvent, isLive: true }, catalogs: [] };
+
+    expect(nextRankingDeadlineMs({ events: [event], verified: new Map(), nowMs })).toBeNull();
+  });
+});
 
 describe("rankTicketsForEvent", () => {
   it("globally ranks up to 25 real two-book tickets instead of collapsing them by event", () => {

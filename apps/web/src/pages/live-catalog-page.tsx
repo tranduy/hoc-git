@@ -21,8 +21,8 @@ import { buildObservedFixedBaseStakeEstimate,
   type FixedBaseStakePolicy } from "../watch/fixed-base-stake.js";
 import { LagSignalTracker, type LagSignal } from "../watch/lag-signal-tracker.js";
 import { PriceMovementTracker, type ObservedPriceMovement } from "../watch/price-movement-tracker.js";
-import { eventEdgeSummary, rankedEvent, sortRankedEvents, ticketEdgeSummary, topRankedTicketItems,
-  type RankedEvent } from "../watch/ranked-tickets.js";
+import { eventEdgeSummary, nextRankingDeadlineMs, rankedEvent, sortRankedEvents, ticketEdgeSummary,
+  topRankedTicketItems, type RankedEvent } from "../watch/ranked-tickets.js";
 import { roiTone } from "../watch/roi-tone.js";
 import { useNotificationSound } from "../watch/use-notification-sound.js";
 import { ProfitAlertTracker, type ProfitAlert } from "../watch/profit-alert-tracker.js";
@@ -507,6 +507,11 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     new URLSearchParams(window.location.search).get("ticket"));
   const [profitAlerts, setProfitAlerts] = useState<readonly ProfitAlert[]>([]);
   const [nowMs, setNowMs] = useState(Date.now());
+  // The clock ranking reads, which is the same clock a second later unless a
+  // quote's freshness, a verified ticket or a kickoff has turned over in
+  // between. Kept apart from the one above, which ticks every second so the
+  // countdowns move and would otherwise drag every fixture's ranking with it.
+  const [rankingNowMs, setRankingNowMs] = useState(Date.now());
   const [, setRecoveryRevision] = useState(0);
   const [baseStake, setBaseStake] = useState(() => loadBaseStake(window.localStorage));
   const [baseStakeInput, setBaseStakeInput] = useState(baseStake);
@@ -867,6 +872,11 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     }
   }, [catalogRealtime?.revision]);
 
+  // Fresh data is the one thing that moves ranking without a deadline passing,
+  // and it has to carry the clock with it: freshness is measured from now back
+  // to the catalog, so ranking a newly arrived catalog against a clock left
+  // behind by the previous one would read every quote in it as older than it is.
+  useEffect(() => { setRankingNowMs(Date.now()); }, [comparisonEvents, verifiedTickets, movements]);
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
@@ -886,20 +896,28 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     item.event.category === category && !(item.event.category === "FOOTBALL" && item.event.isVirtual !== false) &&
     item.catalogs.every((catalog) => !staleAccountIds.has(catalog.accountId))),
   [comparisonEvents, category, staleAccountIds]);
-  const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, nowMs) &&
-    matchesEventPhase(item.event, eventPhases)), [events, eventPhases, nowMs]);
+  const visibleEvents = useMemo(() => events.filter((item) => isVisibleEvent(item.event, rankingNowMs) &&
+    matchesEventPhase(item.event, eventPhases)), [events, eventPhases, rankingNowMs]);
+  useEffect(() => {
+    const deadlineMs = nextRankingDeadlineMs({ events: visibleEvents, verified: verifiedTickets,
+      nowMs: rankingNowMs });
+    if (deadlineMs === null) return;
+    const timer = window.setTimeout(() => setRankingNowMs(Date.now()),
+      Math.max(16, deadlineMs - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [rankingNowMs, verifiedTickets, visibleEvents]);
   const selectedProviderIds = useMemo(() => new Set<ProviderId>(categorySources.filter((source) =>
     selectedIds.has(source.id)).map((source) => source.provider)),
   [categorySources, selectedIds]);
   const rankedEvents = useMemo(() => {
     const sorted = sortRankedEvents(visibleEvents.filter((item) => item.rows.length > 0)
       .map((item) => rankedEvent({ event: item, verified: verifiedTickets, movements,
-        selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake), nowMs,
-        limit: item.rows.length }))
+        selectedProviders: selectedProviderIds, observationPolicy: observedStakePolicy(baseStake),
+        nowMs: rankingNowMs, limit: item.rows.length }))
       .filter((item) => eventEdgeSummary(item) !== null));
     const seen = new Set<string>();
     return sorted.filter((item) => seen.has(item.event.key) ? false : (seen.add(item.event.key), true));
-  }, [baseStake, movements, nowMs, selectedProviderIds, verifiedTickets, visibleEvents]);
+  }, [baseStake, movements, rankingNowMs, selectedProviderIds, verifiedTickets, visibleEvents]);
   const rankedByEvent = new Map(rankedEvents.map((item) => [item.event.key, item]));
   // This workspace is an exact cross-book comparison list. Never pad it with
   // one-book observations: those rows cannot be balanced across two providers.

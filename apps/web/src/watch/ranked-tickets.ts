@@ -139,6 +139,63 @@ function priceGaps(row: ComparisonRow, selectedProviders: ReadonlySet<ProviderId
   }));
 }
 
+/**
+ * The next instant at which ranking could reach a different answer.
+ *
+ * Ranking was recomputed once a second because the page's clock ticks once a
+ * second, and with 654 fixtures on screen that measured 668ms of work per tick
+ * - two thirds of a core, spent almost entirely on arriving at the answer it
+ * already had. Nothing here actually varies continuously with the clock: a
+ * quote's freshness, a verified ticket's expiry and a fixture's kickoff each
+ * turn over at one computable moment and hold their answer either side of it.
+ *
+ * Waking at those moments is the same computation, not a cheaper approximation
+ * of it. Coarsening the clock instead would be the cheaper approximation, and
+ * it would let an APSPORT quote sit past the deadline that exists to keep a
+ * stale price out of a ticket.
+ *
+ * Returns null when nothing ahead can change, which is the case for a board of
+ * fixtures none of which APSPORT prices.
+ */
+export function nextRankingDeadlineMs(input: {
+  readonly events: readonly ComparisonEvent[];
+  readonly verified: ReadonlyMap<string, VerifiedTicketEvidence>;
+  readonly nowMs: number;
+}): number | null {
+  let earliest: number | null = null;
+  const consider = (atMs: number): void => {
+    if (!Number.isFinite(atMs) || atMs <= input.nowMs) return;
+    if (earliest === null || atMs < earliest) earliest = atMs;
+  };
+  const measured = new Set<ComparisonEvent["catalogs"][number]>();
+  for (const event of input.events) {
+    // A fixture that has not started leaves the board when its kickoff passes.
+    if (!event.event.isLive) consider(event.event.startAtUtcMs);
+    for (const catalog of event.catalogs) {
+      if (catalog.provider !== "APSPORT" || catalog.snapshotState === "STALE" ||
+        measured.has(catalog)) continue;
+      measured.add(catalog);
+      const newestByEvent = new Map<string, number>();
+      for (const quote of catalog.quotes) {
+        const newest = newestByEvent.get(quote.providerEventId);
+        if (newest === undefined || quote.receivedMonotonicMs > newest) {
+          newestByEvent.set(quote.providerEventId, quote.receivedMonotonicMs);
+        }
+      }
+      for (const quote of catalog.quotes) {
+        // The same arithmetic isFreshApsportQuote applies, solved for the clock:
+        // it stops being fresh once nowMs passes observedAt + limit - offset.
+        const offsetMs = Math.max(0, (newestByEvent.get(quote.providerEventId) ??
+          quote.receivedMonotonicMs) - quote.receivedMonotonicMs);
+        consider(catalog.observedAtMs + (quote.isLive
+          ? APSPORT_LIVE_QUOTE_MAX_AGE_MS : APSPORT_PREMATCH_QUOTE_MAX_AGE_MS) - offsetMs);
+      }
+    }
+  }
+  for (const evidence of input.verified.values()) consider(evidence.expiresAtMs);
+  return earliest;
+}
+
 export function rankTicketsForEvent(input: {
   readonly event: ComparisonEvent;
   readonly verified: ReadonlyMap<string, VerifiedTicketEvidence>;
