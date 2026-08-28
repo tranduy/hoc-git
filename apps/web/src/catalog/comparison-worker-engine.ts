@@ -1,6 +1,6 @@
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import { buildComparisonEvents, exactTwoWayOutcomeDomain, isFocusedTwoWayTicket,
-  type ComparisonEvent } from "./comparison.js";
+import { buildComparisonEvents, createCompetitionLinkMemory, exactTwoWayOutcomeDomain,
+  isFocusedTwoWayTicket, type ComparisonEvent } from "./comparison.js";
 import type { ComparisonProjection, ComparisonWorkerCommand, ComparisonWorkerOutput } from "./comparison-worker-protocol.js";
 
 function project(event: ComparisonEvent): ComparisonProjection {
@@ -12,9 +12,16 @@ export class ComparisonWorkerEngine {
   readonly #catalogs = new Map<string, LiveCatalogResponse>();
   readonly #displayCatalogs = new Map<string, LiveCatalogResponse>();
   readonly #stale = new Set<string>();
+  // Which competitions two books have been seen to agree on, kept across
+  // commands. A 24-hour window shows most leagues one fixture at a time, so the
+  // second fixture that proves two names mean one competition usually arrives
+  // in a later snapshot rather than beside the first.
+  readonly #competitionMemory = createCompetitionLinkMemory();
+  #confirmedCount = 0;
 
   apply(command: ComparisonWorkerCommand): ComparisonWorkerOutput {
     if (command.type === "RESET") {
+      this.#competitionMemory.seed(command.competitionLinks ?? []);
       this.#catalogs.clear();
       this.#displayCatalogs.clear();
       this.#stale.clear();
@@ -39,9 +46,17 @@ export class ComparisonWorkerEngine {
       this.#stale.delete(command.accountId);
     }
     const catalogs = [...this.#catalogs.values()];
-    return { generation: command.generation,
-      displayEvents: buildComparisonEvents([...this.#displayCatalogs.values()]).map(project),
-      freshEvents: buildComparisonEvents(catalogs.filter((catalog) => !this.#stale.has(catalog.accountId))).map(project) };
+    const output = { generation: command.generation,
+      displayEvents: buildComparisonEvents([...this.#displayCatalogs.values()],
+        this.#competitionMemory).map(project),
+      freshEvents: buildComparisonEvents(catalogs.filter((catalog) =>
+        !this.#stale.has(catalog.accountId)), this.#competitionMemory).map(project) };
+    // Sent only when the proven set grows, because it rides on every catalog
+    // update and most of them prove nothing new.
+    const confirmed = this.#competitionMemory.confirmed();
+    if (confirmed.length === this.#confirmedCount) return output;
+    this.#confirmedCount = confirmed.length;
+    return { ...output, competitionLinks: confirmed };
   }
 }
 

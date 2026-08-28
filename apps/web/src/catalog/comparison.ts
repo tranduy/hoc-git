@@ -345,7 +345,89 @@ function competitionMarketFamily(marketTypes: Iterable<string>): "GOALS" | "CORN
   return "GOALS";
 }
 
-function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[]): ReadonlyMap<string, string> {
+/**
+ * Fixtures two books have been seen to share, kept between snapshots.
+ *
+ * Two competitions are the same when more than one fixture agrees, and that
+ * rule is why a book naming its Emperor Cup differently from its rival's Some
+ * Other Cup does not fold into it on the one fixture they share. What the rule
+ * did not need was for both fixtures to be on the board at once: measured
+ * 2026-08-29, 104 of the 124 competition pairs with any fixture in common had
+ * exactly one, because a 24-hour window usually holds one match per league, and
+ * every one of those leagues stayed unlinked with the fixture both books were
+ * pricing sitting between them.
+ *
+ * Counting distinct fixtures rather than sightings is what keeps the rule
+ * intact: a league seen a thousand times with the same single fixture is still
+ * one fixture and still does not link. Two entries per pair is all that is ever
+ * needed, so that is all that is kept.
+ */
+export interface CompetitionLinkMemory {
+  /** Records a fixture for a pair and returns how many distinct ones it holds. */
+  record(pairKey: string, fixtureKey: string, atMs: number): number;
+  /**
+   * Restores pairs a previous session proved. A league's second fixture is
+   * usually a match day away, so evidence that only lives as long as a page is
+   * evidence that never arrives: measured over four and a half hours of
+   * snapshots it linked four rows, because the fixtures on the board barely
+   * turn over in an afternoon.
+   */
+  seed(pairKeys: Iterable<string>): void;
+  /** Pairs that have reached the threshold, for a later session to seed with. */
+  confirmed(): readonly string[];
+}
+
+const MAX_REMEMBERED_COMPETITION_PAIRS = 4_000;
+
+export function createCompetitionLinkMemory(
+  maxPairs = MAX_REMEMBERED_COMPETITION_PAIRS
+): CompetitionLinkMemory {
+  const pairs = new Map<string, { readonly fixtures: Set<string>; lastSeenAtMs: number }>();
+  // A seeded pair is one an earlier session already proved, so it carries the
+  // threshold rather than a fixture it can no longer name.
+  const seeded = new Set<string>();
+  return {
+    seed(pairKeys) { for (const pairKey of pairKeys) seeded.add(pairKey); },
+    confirmed() {
+      const reached = [...pairs].filter(([, entry]) =>
+        entry.fixtures.size >= SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS).map(([pairKey]) => pairKey);
+      return [...new Set([...seeded, ...reached])];
+    },
+    record(pairKey, fixtureKey, atMs) {
+      if (seeded.has(pairKey)) return SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS;
+      const entry = pairs.get(pairKey) ?? { fixtures: new Set<string>(), lastSeenAtMs: atMs };
+      entry.lastSeenAtMs = atMs;
+      // Two is the threshold, so a third fixture would only cost memory.
+      if (entry.fixtures.size < SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS) {
+        entry.fixtures.add(fixtureKey);
+      }
+      pairs.delete(pairKey);
+      pairs.set(pairKey, entry);
+      if (pairs.size > maxPairs) {
+        // Insertion order is recency here, so the front of the map is the pair
+        // longest unseen.
+        for (const oldest of pairs.keys()) { pairs.delete(oldest); break; }
+      }
+      return entry.fixtures.size;
+    }
+  };
+}
+
+/**
+ * What identifies a fixture across snapshots: who is playing and when. A
+ * running fixture reports the moment it was observed rather than its kickoff,
+ * so it drifts and cannot name itself twice - and it does not need to, because
+ * a live fixture pairs on its own evidence without its competition being linked.
+ */
+function rememberedFixtureKey(fixture: LearnedFixture): string | null {
+  if (fixture.isLive || !Number.isFinite(fixture.startAtUtcMs)) return null;
+  return [participantIdentity("FOOTBALL", fixture.participantA),
+    participantIdentity("FOOTBALL", fixture.participantB)].sort()
+    .concat(String(Math.round(fixture.startAtUtcMs / FOOTBALL_KICKOFF_TOLERANCE_MS))).join("|");
+}
+
+function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
+  memory?: CompetitionLinkMemory): ReadonlyMap<string, string> {
   const fixturesByBookCompetition = new Map<string, { readonly identity: string;
     readonly provider: ProviderId; readonly fixtures: LearnedFixture[];
     readonly marketTypes: string[] }>();
@@ -372,7 +454,10 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[]): Readon
   // How many of its own fixtures each pair of book-competitions holds in
   // common. Counting the left side's fixtures rather than the matches keeps one
   // fixture that matches two entries on the far side from reading as two.
+  const observedAtMs = catalogs.reduce((latest, catalog) =>
+    Math.max(latest, catalog.observedAtMs), 0);
   const sharedFixtures = new Map<string, Set<number>>();
+  const rememberedCounts = new Map<string, number>();
   const pairKey = (left: string, right: string): string =>
     left < right ? `${left} ${right}` : `${right} ${left}`;
   const blocks = new Map<string, { key: string; index: number; fixture: LearnedFixture }[]>();
@@ -386,6 +471,11 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[]): Readon
           const pair = pairKey(key, other.key);
           (sharedFixtures.get(pair) ?? sharedFixtures.set(pair, new Set()).get(pair)!)
             .add(key < other.key ? index : other.index);
+          const remembered = rememberedFixtureKey(fixture);
+          if (memory !== undefined && remembered !== null) {
+            rememberedCounts.set(pair, Math.max(rememberedCounts.get(pair) ?? 0,
+              memory.record(pair, remembered, observedAtMs)));
+          }
         }
         bucket.push({ key, index, fixture });
       }
@@ -417,7 +507,11 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[]): Readon
       if (leftKey.split(" ")[0] === rightKey.split(" ")[0]) continue;
       if (leftEntry.identity === rightEntry.identity) continue;
       if (familyByKey.get(leftKey) !== familyByKey.get(rightKey)) continue;
-      const shared = sharedFixtures.get(pairKey(leftKey, rightKey))?.size ?? 0;
+      // A pair the memory has watched agree on two fixtures is carrying the
+      // same evidence as two sitting on one board, gathered over more than one
+      // glance because that is how a 24-hour window shows a league its season.
+      const pair = pairKey(leftKey, rightKey);
+      const shared = Math.max(sharedFixtures.get(pair)?.size ?? 0, rememberedCounts.get(pair) ?? 0);
       if (shared >= SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS) {
         union(leftEntry.identity, rightEntry.identity);
       }
@@ -944,7 +1038,8 @@ function withScheduledPhase(
   });
 }
 
-export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]): readonly ComparisonEvent[] {
+export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
+  competitionMemory?: CompetitionLinkMemory): readonly ComparisonEvent[] {
   const orderedCatalogs = sortProviderItems(withScheduledPhase(catalogs), (catalog) => catalog.provider,
     (left, right) => left.accountId.localeCompare(right.accountId));
   const catalogIndexes = new Map<LiveCatalogResponse, {
@@ -966,7 +1061,7 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[]):
     }
     catalogIndexes.set(catalog, { marketsByEvent, quotesByMarket });
   }
-  const competitionLinks = learnCompetitionLinks(orderedCatalogs);
+  const competitionLinks = learnCompetitionLinks(orderedCatalogs, competitionMemory);
   // A book listing one fixture twice cannot say which entry a rival's price
   // belongs to, so both are withheld. Its own competition string is what tells
   // a repeat apart from a separate product: SABA carries Celta Vigo v Osasuna

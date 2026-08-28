@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
-import { buildComparisonEvents, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
+import { buildComparisonEvents, createCompetitionLinkMemory, estimatedLiveStartAtMs, formatCountdown, formatMatchClock,
   isVisibleEvent, matchesEventPhase, selectionHandicapLine, selectionLabel, decimalOdds } from "./comparison.js";
 
 const event = (provider: "SABA" | "SBOBET", id: string): ProviderEvent => ({
@@ -845,6 +845,55 @@ describe("competition identity learned from shared fixtures", () => {
     const paired = buildComparisonEvents([left, right]).filter((entry) => entry.providers.length > 1);
 
     expect(paired).toHaveLength(1);
+  });
+
+  const scheduledCatalog = (provider: "SABA" | "SBOBET", competition: string,
+    fixtures: readonly (readonly [string, string, number])[]): LiveCatalogResponse => {
+    const base = liveCatalog(provider, competition, fixtures.map(([a, b]) => [a, b] as const));
+    return { ...base,
+      events: base.events.map((event, index) => ({ ...event, isLive: false,
+        startAtUtcMs: fixtures[index]![2], liveState: null })),
+      quotes: base.quotes.map((quote) => ({ ...quote, isLive: false })) };
+  };
+
+  it("links two competitions on fixtures a 24-hour window shows one at a time", () => {
+    // A league's second fixture is usually not on the board beside its first,
+    // so demanding both at once left 104 of 124 competition pairs unlinked with
+    // the fixture both books were pricing sitting between them.
+    const memory = createCompetitionLinkMemory();
+    const friday = (competition: string, provider: "SABA" | "SBOBET") =>
+      scheduledCatalog(provider, competition, [["Kashima Antlers", "Urawa Reds", 2_000_000]]);
+    const saturday = (competition: string, provider: "SABA" | "SBOBET") =>
+      scheduledCatalog(provider, competition, [["Gamba Osaka", "Vissel Kobe", 90_000_000]]);
+
+    const first = buildComparisonEvents([friday("Japan Emperor Cup", "SABA"),
+      friday("Cup Thien Hoang Nhat Ban", "SBOBET")], memory);
+    const second = buildComparisonEvents([saturday("Japan Emperor Cup", "SABA"),
+      saturday("Cup Thien Hoang Nhat Ban", "SBOBET")], memory);
+
+    expect(first.filter((entry) => entry.providers.length > 1)).toHaveLength(0);
+    expect(second.filter((entry) => entry.providers.length > 1)).toHaveLength(1);
+    // The control: the same second board on its own is one fixture again, and
+    // one fixture has never been enough.
+    expect(buildComparisonEvents([saturday("Japan Emperor Cup", "SABA"),
+      saturday("Cup Thien Hoang Nhat Ban", "SBOBET")])
+      .filter((entry) => entry.providers.length > 1)).toHaveLength(0);
+  });
+
+  it("counts the one fixture two competitions share once, however often it is seen", () => {
+    // The rule that keeps a league out of a cup is two distinct fixtures, and
+    // the same fixture arriving in every snapshot is still one of them.
+    const memory = createCompetitionLinkMemory();
+    const board = () => [scheduledCatalog("SABA", "Japan Emperor Cup",
+      [["Kashima Antlers", "Urawa Reds", 2_000_000]]),
+    scheduledCatalog("SBOBET", "Some Other Cup", [["Kashima Antlers", "Urawa Reds", 2_000_000]])];
+
+    let paired = 0;
+    for (let snapshot = 0; snapshot < 50; snapshot += 1) {
+      paired = buildComparisonEvents(board(), memory).filter((entry) => entry.providers.length > 1).length;
+    }
+
+    expect(paired).toBe(0);
   });
 
   it("refuses to link two competitions that share only one fixture", () => {
