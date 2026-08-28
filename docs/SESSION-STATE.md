@@ -19,6 +19,33 @@ có nghĩa là **số dòng ghép chéo giữa các sàn**, không phải số t
 | SABA | **hỏng** | 50 phút cũ. Tab rơi sang `ErrorPage?Game=DepositLogin&ErrCode=SPA-1008` → **phiên đăng nhập hỏng, cần đăng nhập lại** |
 | SBOBET | **hỏng** | 62 phút cũ, `decoded=0`. Khung CÓ về trên `/sport/{id}/{token}/websocket` nhưng không giải mã được |
 
+## Lỗi đã tìm ra 2026-08-28 chiều — một sàn im giết cả sáu
+
+Đây là lý do các sàn "rụng vào ra" suốt hai ngày, và là lý do mọi con số "5/6 sàn
+chạy" đều sụp ngay sau khi đo.
+
+Sáu sàn quan sát qua **một socket chung**. Trong `chrome-bridge-registry.ts`,
+`#retireSources` xử lý một sàn im quá `retireAfterMs` (5 phút) bằng cách ném **cả
+socket** vào `#revokedConnections`. `ingestDetailed` từ chối mọi khung tới trên một
+socket đã thu hồi, và `WeakSet` đó không bao giờ được xoá. Nên một sàn chết là cả
+sáu chết vĩnh viễn — trong khi socket vẫn mở, nên extension không thấy gì hỏng để
+sửa, và API không còn source nào để gửi lobby snapshot.
+
+Số đo lúc 17:58:11 ngày 2026-08-28: SABA (phiên đăng nhập đã hỏng) gửi khung cuối
+lúc 17:29:05; CMD, IM, SBOBET, APSPORT, BTI đều dừng trong khoảng 17:34:02–17:34:05
+— cách đúng 297–300 giây, bằng `retireAfterMs = 300_000`. 24 phút sau mọi số thứ tự
+khung vẫn đứng im, `listSources` rỗng, còn kết nối Chrome thì mở liên tục từ
+17:25:26 và chưa từng đứt.
+
+**Đã sửa** (commit `b835cd9`): thu hồi theo **(socket, tài khoản)** thay vì theo
+socket. Một sàn bị thu hồi vẫn phải chứng minh connection mới mới giành lại được
+quyền — giữ nguyên ý đồ cũ — nhưng không nói thay cho sàn nó không sở hữu.
+`releaseConnection` vẫn thu hồi tất cả, vì ở đó socket đứt thật.
+
+Bài học chung: **extension khoẻ không có nghĩa dữ liệu đang chảy.** Trước khi nghi
+extension, đo `listSources` và tuổi khung của từng sàn; nếu mọi sàn dừng trong cùng
+vài giây thì lỗi nằm ở chỗ dùng chung, không phải ở từng sàn.
+
 ## VIỆC GẤP NHẤT — chưa làm
 
 **Bảng đang xếp vé ROI dương dựng từ dữ liệu cũ lên đầu.** Đo được: 4 vé dương
