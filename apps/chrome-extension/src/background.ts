@@ -232,6 +232,10 @@ const sourceTabRecovery = new SourceTabRecovery({
     if (!tab) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
     return tab;
   },
+  reload: async (tabId) => {
+    await chrome.tabs.reload(tabId);
+    return chrome.tabs.get(tabId);
+  },
   create: async (url, active) => chrome.tabs.create({ url, active }),
   remove: async (tabId) => chrome.tabs.remove(tabId),
   get: async (tabId) => chrome.tabs.get(tabId),

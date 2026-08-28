@@ -10,6 +10,7 @@ interface SourceTabRecoveryOptions {
   readonly listAttached: () => readonly AttachedSource[];
   readonly query: () => Promise<readonly TabDescriptor[]>;
   readonly update: (tabId: number, url: string) => Promise<TabDescriptor>;
+  readonly reload?: (tabId: number) => Promise<TabDescriptor>;
   readonly create: (url: string, active: boolean) => Promise<TabDescriptor>;
   readonly remove?: (tabId: number) => Promise<void>;
   readonly attach: (tab: TabDescriptor) => Promise<void>;
@@ -46,21 +47,16 @@ export class SourceTabRecovery {
     const launchUrl = lobby === "KSPORT" ? ksportFootballLaunchUrl(url) : url;
 
     const currentTabs = await this.#options.query();
-    const oldTabIds = new Set<number>();
-    for (const source of this.#options.listAttached()) {
-      if (source.lobby === lobby) oldTabIds.add(source.tabId);
-    }
-    for (const tab of currentTabs) {
-      if (tab.id !== undefined && recognizeLobbyTab(tab)?.lobby === lobby) oldTabIds.add(tab.id);
-    }
-    if (oldTabIds.size > 0 && this.#options.remove === undefined) {
-      throw new Error("SOURCE_TAB_CLEANUP_UNAVAILABLE");
+    const attachedTabIds = new Set(this.#options.listAttached()
+      .filter((source) => source.lobby === lobby).map((source) => source.tabId));
+    const recognizedTabs = currentTabs.filter((tab) => tab.id !== undefined &&
+      recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby);
+    const existing = recognizedTabs.find((tab) => attachedTabIds.has(tab.id!)) ?? recognizedTabs[0];
+    if (existing?.id !== undefined) {
+      await this.#reuse(existing, lobby, launchUrl, false);
+      return;
     }
 
-    // A hard reset must release every old provider renderer before allocating
-    // its replacement. This keeps repeated resets from accumulating Chrome
-    // processes and prevents old/new feeds from publishing concurrently.
-    await Promise.all([...oldTabIds].map(async (tabId) => this.#options.remove!(tabId)));
     if (lobby === "KSPORT" && this.#options.usePortalLaunch !== false &&
       this.#options.launchFromPortal !== undefined) {
       // K-Sports launches a short-lived bootstrap tab that can close itself
@@ -74,11 +70,10 @@ export class SourceTabRecovery {
         if (!(error instanceof Error) || !isRecoverableKsportPortalFailure(error.message)) throw error;
         const leakedPortalTabs = new Set<number>();
         for (const source of this.#options.listAttached()) {
-          if (source.lobby === "KSPORT" && !oldTabIds.has(source.tabId)) leakedPortalTabs.add(source.tabId);
+          if (source.lobby === "KSPORT") leakedPortalTabs.add(source.tabId);
         }
         for (const tab of await this.#options.query()) {
-          if (tab.id !== undefined && !oldTabIds.has(tab.id) &&
-            recognizeLobbyTab(tab)?.lobby === "KSPORT") leakedPortalTabs.add(tab.id);
+          if (tab.id !== undefined && recognizeLobbyTab(tab)?.lobby === "KSPORT") leakedPortalTabs.add(tab.id);
         }
         if (leakedPortalTabs.size > 0 && this.#options.remove === undefined) {
           throw new Error("SOURCE_TAB_CLEANUP_UNAVAILABLE");
@@ -125,9 +120,10 @@ export class SourceTabRecovery {
 
   async restore(lobby: ChromeLobbyId): Promise<void> {
     const currentTabs = await this.#options.query();
-    const existing = currentTabs.find((tab) => recognizeLobbyTab(tab)?.lobby === lobby);
-    if (existing) {
-      await this.ensure(lobby, existing.url!);
+    const existing = currentTabs.find((tab) => tab.id !== undefined &&
+      recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby);
+    if (existing?.id !== undefined && existing.url !== undefined) {
+      await this.#reuse(existing, lobby, existing.url, true);
       return;
     }
     if (this.#options.listAttached().some((source) => source.lobby === lobby)) return;
@@ -156,6 +152,21 @@ export class SourceTabRecovery {
       return;
     }
     throw new Error(`SOURCE_RESTORE_UNAVAILABLE:${lobby}`);
+  }
+
+  async #reuse(tab: TabDescriptor, lobby: ChromeLobbyId, url: string, reload: boolean): Promise<void> {
+    if (tab.id === undefined) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
+    this.#options.onBootstrapStart?.(tab.id);
+    try {
+      await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))({ ...tab, url }, lobby);
+      const navigated = reload && this.#options.reload !== undefined
+        ? await this.#options.reload(tab.id)
+        : await this.#options.update(tab.id, url);
+      await this.#waitForLobby(navigated, lobby);
+    } catch (error) {
+      this.#options.onBootstrapFailure?.(tab.id);
+      throw error;
+    }
   }
 
   async #waitForLobby(tab: TabDescriptor, lobby: ChromeLobbyId): Promise<TabDescriptor> {

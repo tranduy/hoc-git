@@ -158,9 +158,11 @@ describe("background source launch memory", () => {
 
     await expect(response).resolves.toEqual({ ok: true });
 
-    expect(harness.api.tabs.update).toHaveBeenCalledWith(8, {
+    expect(harness.api.tabs.update).toHaveBeenCalledWith(7, {
       url: expect.stringContaining("token=one-time-secret")
     });
+    expect(harness.api.tabs.create).not.toHaveBeenCalled();
+    expect(harness.api.tabs.remove).not.toHaveBeenCalled();
     expect(harness.storage.session.get).not.toHaveBeenCalled();
     expect(harness.storage.session.set).not.toHaveBeenCalled();
     expect(harness.storage.session.remove).not.toHaveBeenCalled();
