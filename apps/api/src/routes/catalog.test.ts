@@ -1,3 +1,4 @@
+import { withinComparisonHorizon } from "./catalog.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../app.js";
@@ -568,5 +569,48 @@ describe("provider catalog route", () => {
     expect(metrics.metrics).toEqual([expect.objectContaining({
       accountId: "account-1", state: "SCHEMA_ERROR", schemaErrorCount: 1, failureCount: 1
     })]);
+  });
+});
+
+describe("withinComparisonHorizon", () => {
+  const catalog = (events: ReadonlyArray<{ id: string; startAtUtcMs?: number; isLive?: boolean }>) => ({
+    dataMode: "LIVE" as const, accountId: "account-1", provider: "IM" as const,
+    category: "FOOTBALL" as const, comparisonState: "AWAITING_SECOND_PROVIDER" as const,
+    observedAtMs: 1_000_000_000, rejectedMarketCount: 0,
+    events: events.map((event) => ({ providerEventId: event.id,
+      startAtUtcMs: event.startAtUtcMs, isLive: event.isLive ?? false })),
+    markets: events.map((event) => ({ providerEventId: event.id, providerMarketId: `${event.id}-m` })),
+    quotes: events.map((event) => ({ providerEventId: event.id, providerMarketId: `${event.id}-m` }))
+  } as unknown as ObservedProviderCatalog);
+
+  it("drops fixtures the comparison will never show, and their prices with them", () => {
+    // IM publishes two days ahead where the others publish one: 351 of its 513
+    // fixtures sat beyond the horizon, parsed and held for nothing.
+    const day = 86_400_000;
+    const kept = withinComparisonHorizon(catalog([
+      { id: "soon", startAtUtcMs: 1_000_000_000 + 3_600_000 },
+      { id: "edge", startAtUtcMs: 1_000_000_000 + day },
+      { id: "far", startAtUtcMs: 1_000_000_000 + 2 * day }
+    ]));
+
+    expect(kept.events.map((event) => event.providerEventId)).toEqual(["soon", "edge"]);
+    expect(kept.markets.map((market) => market.providerEventId)).toEqual(["soon", "edge"]);
+    expect(kept.quotes.map((quote) => quote.providerEventId)).toEqual(["soon", "edge"]);
+  });
+
+  it("keeps a running fixture and one whose start time is unknown", () => {
+    // Neither can be said to be beyond the horizon.
+    const kept = withinComparisonHorizon(catalog([
+      { id: "live", startAtUtcMs: 1_000_000_000 + 10 * 86_400_000, isLive: true },
+      { id: "undated" }
+    ]));
+
+    expect(kept.events.map((event) => event.providerEventId)).toEqual(["live", "undated"]);
+  });
+
+  it("returns the same catalog when nothing is beyond the horizon", () => {
+    const source = catalog([{ id: "soon", startAtUtcMs: 1_000_000_000 }]);
+
+    expect(withinComparisonHorizon(source)).toBe(source);
   });
 });

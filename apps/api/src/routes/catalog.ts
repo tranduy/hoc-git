@@ -26,6 +26,37 @@ export interface CatalogObserverLike {
 
 const paramsSchema = z.strictObject({ accountId: z.string().trim().min(1).max(128) });
 
+/**
+ * A fixture the comparison will never show is still parsed, held in memory and
+ * run through the comparison worker for every recomputation. IM publishes two
+ * days ahead where the other books publish one: measured 2026-08-28, 351 of its
+ * 513 fixtures sat beyond the display horizon, and 66 of the 162 inside it were
+ * the only ones another book also carried. Sending the rest costs bandwidth,
+ * parse time and worker time for something no one can see.
+ *
+ * The margin above the display horizon is deliberate: the page decides what to
+ * show, and a fixture an hour outside the window must not be dropped here just
+ * because the two clocks disagree.
+ */
+const COMPARISON_HORIZON_MS = 86_400_000;
+const HORIZON_MARGIN_MS = 3_600_000;
+
+export function withinComparisonHorizon(catalog: ObservedProviderCatalog): ObservedProviderCatalog {
+  // Measured against the snapshot's own clock, not the wall clock: the horizon
+  // then means the same thing whenever the response is read, and a cached
+  // revision cannot lose fixtures merely because it was served a minute later.
+  const limitMs = catalog.observedAtMs + COMPARISON_HORIZON_MS + HORIZON_MARGIN_MS;
+  // A fixture whose start time is unknown cannot be said to be beyond the
+  // horizon, and a running one has no start time left to compare.
+  const events = catalog.events.filter((event) => event.isLive ||
+    !Number.isFinite(event.startAtUtcMs) || event.startAtUtcMs <= limitMs);
+  if (events.length === catalog.events.length) return catalog;
+  const kept = new Set(events.map((event) => event.providerEventId));
+  return { ...catalog, events,
+    markets: catalog.markets.filter((market) => kept.has(market.providerEventId)),
+    quotes: catalog.quotes.filter((quote) => kept.has(quote.providerEventId)) };
+}
+
 export function registerCatalogRoutes(
   app: FastifyInstance,
   reader: CatalogReaderLike,
@@ -95,7 +126,7 @@ export function registerCatalogRoutes(
   const forAccount = (
     catalog: ObservedProviderCatalog, accountId: string, snapshotState: "FRESH" | "STALE"
   ): ObservedProviderCatalog & { readonly snapshotState: "FRESH" | "STALE" } => ({
-    ...catalog, accountId, snapshotState
+    ...withinComparisonHorizon(catalog), accountId, snapshotState
   });
 
   const publishInBackground = (catalog: ObservedProviderCatalog): void => {
