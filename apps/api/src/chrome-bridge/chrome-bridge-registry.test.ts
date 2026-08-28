@@ -246,6 +246,42 @@ describe("ChromeBridgeRegistry", () => {
     })]);
   });
 
+  it("retires one silent book without silencing the others sharing its socket", () => {
+    // Every book observes through one bridge socket. Retiring a source used to
+    // revoke that socket, so one book with an expired provider session took the
+    // whole feed down with it and no reconnect could bring it back: the socket
+    // stayed open, so the extension saw nothing to repair. Measured 2026-08-28,
+    // SABA went quiet at 17:29:05 and the five healthy books all stopped at
+    // 17:34:02, one retireAfterMs later.
+    let now = 1_000;
+    const registry = new ChromeBridgeRegistry({ now: () => now, retireAfterMs: 100 });
+    const sharedConnection = {};
+    const cmd = (sequence: number): ChromeBridgeEnvelope => ({
+      ...envelope(sequence, "chrome:CMD:9"), lobby: "CMD", tabId: 9
+    });
+
+    expect(registry.ingest({ ...envelope(0), sourceEpoch: "observer-a:0" }, sharedConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.ingest({ ...cmd(0), sourceEpoch: "observer-c:0" }, sharedConnection))
+      .toMatchObject({ kind: "ACK" });
+
+    // CMD keeps beating while SABA stays quiet, so only SABA reaches its deadline.
+    now = 1_060;
+    expect(registry.ingest({ ...cmd(1), sourceEpoch: "observer-c:0" }, sharedConnection))
+      .toMatchObject({ kind: "ACK" });
+    now = 1_120;
+    expect(registry.ingest({ ...cmd(2), sourceEpoch: "observer-c:0" }, sharedConnection))
+      .toMatchObject({ kind: "ACK" });
+    expect(registry.listSources()).toEqual([expect.objectContaining({ sourceId: "chrome:CMD:9" })]);
+
+    // SABA alone still has to prove a newer connection to reclaim its account.
+    expect(registry.ingest({ ...envelope(0, "chrome:SABA:8"), tabId: 8,
+      sourceEpoch: "observer-a:1" }, sharedConnection))
+      .toMatchObject({ kind: "REJECT", reason: "OUT_OF_ORDER" });
+    expect(registry.ingest({ ...cmd(3), sourceEpoch: "observer-c:0" }, sharedConnection))
+      .toMatchObject({ kind: "ACK" });
+  });
+
   it("requires a newer connection generation after an explicit connection release", () => {
     const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
     const releasedConnection = {};
