@@ -15,11 +15,11 @@ function catalog(observedAtMs: number, accountId = "catalog-source:SABA:FOOTBALL
 }
 
 function pricedCatalog(observedAtMs: number, receivedMonotonicMs: number,
-  sequence: number): ObservedProviderCatalog {
+  sequence: number, provider: "SABA" | "APSPORT" = "SABA"): ObservedProviderCatalog {
   return {
-    ...catalog(observedAtMs),
+    ...catalog(observedAtMs, `catalog-source:${provider}:FOOTBALL`), provider,
     quotes: [{
-      provider: "SABA", category: "FOOTBALL", providerEventId: "event-1",
+      provider, category: "FOOTBALL", providerEventId: "event-1",
       providerMarketId: "market-1", providerSelectionId: "selection-1",
       marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "OVER", line: "2.5",
       rawOdds: "0.95", rawFormat: "MALAY", status: "OPEN", isLive: true,
@@ -92,6 +92,27 @@ describe("CatalogRevisionStore", () => {
     expect(renewed.catalog.quotes[0]).toMatchObject({ receivedMonotonicMs: 20, sequence: 2 });
     expect(renewed.freshUntilMs).toBe(130);
     expect(seen).toHaveLength(1);
+  });
+
+  it("broadcasts APSPORT receipt confirmations so per-quote freshness reaches clients", () => {
+    let now = 100;
+    const store = new CatalogRevisionStore({ now: () => now });
+    stores.push(store);
+    const seen: CatalogRevisionEntry[] = [];
+    store.subscribe((entry) => seen.push(entry));
+    const first = store.publish("catalog-source:APSPORT:FOOTBALL", pricedCatalog(100, 10, 1, "APSPORT"), {
+      snapshotState: "FRESH", freshnessMs: 20
+    });
+
+    now = 110;
+    const confirmed = store.publish("catalog-source:APSPORT:FOOTBALL", pricedCatalog(110, 20, 2, "APSPORT"), {
+      snapshotState: "FRESH", freshnessMs: 20
+    });
+
+    expect(confirmed.revision).not.toBe(first.revision);
+    expect(confirmed.sequence).toBe(first.sequence + 1);
+    expect(seen).toHaveLength(2);
+    expect(confirmed.catalog.quotes[0]).toMatchObject({ receivedMonotonicMs: 20, sequence: 2 });
   });
 
   it("keeps one latest catalog per account and returns a sorted baseline", () => {

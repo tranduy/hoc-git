@@ -1,4 +1,4 @@
-import type { ProviderId } from "@tool-chenh/contracts";
+import type { ProviderId, ProviderQuote } from "@tool-chenh/contracts";
 import { Decimal } from "@tool-chenh/core";
 import { decimalOdds, type ComparisonEvent, type ComparisonRow } from "../catalog/comparison.js";
 import { buildObservedFixedBaseStakeEstimate, type FixedBaseStakePlan,
@@ -40,6 +40,46 @@ export interface EventEdgeSummary {
   readonly marketType: ComparisonRow["marketType"];
   readonly line: string | null;
   readonly state: RankedTicketState;
+}
+
+const APSPORT_LIVE_QUOTE_MAX_AGE_MS = 5_000;
+const APSPORT_PREMATCH_QUOTE_MAX_AGE_MS = 15_000;
+
+function sameQuoteIdentity(left: ProviderQuote, right: ProviderQuote): boolean {
+  return left.providerEventId === right.providerEventId && left.providerMarketId === right.providerMarketId &&
+    left.providerSelectionId === right.providerSelectionId;
+}
+
+function isFreshApsportQuote(event: ComparisonEvent, quote: ProviderQuote, nowMs: number): boolean {
+  if (quote.provider !== "APSPORT") return true;
+  const catalog = event.catalogs.find((candidate) => candidate.provider === "APSPORT" &&
+    candidate.snapshotState !== "STALE" && candidate.quotes.some((current) => sameQuoteIdentity(current, quote)));
+  if (catalog === undefined || catalog.quotes.length === 0) return false;
+  const current = catalog.quotes.find((candidate) => sameQuoteIdentity(candidate, quote));
+  if (current === undefined) return false;
+  const newestReceivedAt = catalog.quotes.filter((candidate) =>
+    candidate.providerEventId === current.providerEventId).reduce((latest, candidate) =>
+    Math.max(latest, candidate.receivedMonotonicMs), current.receivedMonotonicMs);
+  const estimatedAgeMs = Math.max(0, nowMs - catalog.observedAtMs) +
+    Math.max(0, newestReceivedAt - current.receivedMonotonicMs);
+  return estimatedAgeMs <= (current.isLive ? APSPORT_LIVE_QUOTE_MAX_AGE_MS : APSPORT_PREMATCH_QUOTE_MAX_AGE_MS);
+}
+
+function freshnessFilteredRow(event: ComparisonEvent, row: ComparisonRow, nowMs: number): {
+  readonly row: ComparisonRow; readonly rejectedApsportQuote: boolean;
+} {
+  let rejectedApsportQuote = false;
+  const cells = row.cells.map((cell) => {
+    if (cell.provider !== "APSPORT") return cell;
+    const quotes = cell.quotes.filter((quote) => {
+      const fresh = isFreshApsportQuote(event, quote, nowMs);
+      if (!fresh) rejectedApsportQuote = true;
+      return fresh;
+    });
+    const sourceQuotes = cell.sourceQuotes?.filter((quote) => isFreshApsportQuote(event, quote, nowMs));
+    return { ...cell, quotes, ...(sourceQuotes === undefined ? {} : { sourceQuotes }) };
+  });
+  return { row: { ...row, cells }, rejectedApsportQuote };
 }
 
 export function ticketEdgeSummary(ticket: RankedTicket): EventEdgeSummary | null {
@@ -109,20 +149,23 @@ export function rankTicketsForEvent(input: {
   readonly limit?: number;
 }): readonly RankedTicket[] {
   const tickets = input.event.rows.map((row): RankedTicket => {
+    const freshness = freshnessFilteredRow(input.event, row, input.nowMs);
+    const safeRow = freshness.row;
     const verified = input.verified.get(`${input.event.key}::${row.key}`);
     const movementMagnitude = movementFor(input.event.key, row.key, input.movements);
-    const gapsBySelection = priceGaps(row, input.selectedProviders);
+    const gapsBySelection = priceGaps(safeRow, input.selectedProviders);
     if (verified !== undefined && verified.eventKey === input.event.key && verified.rowKey === row.key &&
-      verified.expiresAtMs > input.nowMs) {
+      verified.expiresAtMs > input.nowMs && !freshness.rejectedApsportQuote) {
       const profitable = new Decimal(verified.plan.worstCaseProfit).gte(20_000);
-      return { key: row.key, eventKey: input.event.key, row, plan: verified.plan,
+      return { key: row.key, eventKey: input.event.key, row: safeRow, plan: verified.plan,
         state: profitable ? "VERIFIED_PROFIT" : "VERIFIED_NO_PROFIT",
         reason: profitable ? null : "Verified prices do not reach 20,000 VND guaranteed profit", movementMagnitude,
         gapsBySelection };
     }
-    return { key: row.key, eventKey: input.event.key, row,
-      plan: buildObservedFixedBaseStakeEstimate(row, input.selectedProviders, input.observationPolicy),
-      state: "OBSERVATION", reason: "Provider preflight required", movementMagnitude, gapsBySelection };
+    return { key: row.key, eventKey: input.event.key, row: safeRow,
+      plan: buildObservedFixedBaseStakeEstimate(safeRow, input.selectedProviders, input.observationPolicy),
+      state: "OBSERVATION", reason: freshness.rejectedApsportQuote
+        ? "APSPORT quote freshness not confirmed" : "Provider preflight required", movementMagnitude, gapsBySelection };
   });
 
   return tickets.sort((left, right) => verifiedRank(left.state) - verifiedRank(right.state) ||

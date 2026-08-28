@@ -31,6 +31,7 @@ export interface ApsportCatalogBatch {
   readonly generation: string;
   readonly phase: "ROSTER" | "DETAIL";
   readonly complete: boolean;
+  readonly trigger?: "SWEEP" | "EVENT_CHANGE";
   readonly prematchWindowHours: number;
   readonly records: readonly ApsportRawEvent[];
 }
@@ -49,12 +50,37 @@ export interface CollectApsportCatalogOptions {
   readonly detailDelayMs?: number;
 }
 
+export interface CollectApsportEventDetailOptions {
+  readonly eventId: string;
+  readonly template: ApsportRequestTemplate;
+  readonly request: (request: ApsportCatalogPageRequest) => Promise<ApsportCatalogPageResponse>;
+  readonly sleep: (delayMs: number) => Promise<void>;
+  readonly isCurrent: () => boolean;
+}
+
 const modes = [2, 4, 3] as const;
 const maxDetailAttempts = 5;
 const maximumRetryDelayMs = 60_000;
 const supportedMarketGroupIds = new Set([
   "3", "4", "5", "6", "19", "20", "21", "22", "31", "32", "33", "34", "80", "85"
 ]);
+const marketSemanticsByGroup: Readonly<Record<string, { readonly marketType: string;
+  readonly scope: string; readonly selections: readonly [string, string] }>> = {
+  "3": { marketType: "FT_TOTAL", scope: "FULL_TIME", selections: ["OVER", "UNDER"] },
+  "4": { marketType: "FH_TOTAL", scope: "FIRST_HALF", selections: ["OVER", "UNDER"] },
+  "5": { marketType: "FT_AH", scope: "FULL_TIME", selections: ["HOME", "AWAY"] },
+  "6": { marketType: "FH_AH", scope: "FIRST_HALF", selections: ["HOME", "AWAY"] },
+  "19": { marketType: "CORNER_FT_AH", scope: "FULL_TIME", selections: ["HOME", "AWAY"] },
+  "20": { marketType: "CORNER_FH_AH", scope: "FIRST_HALF", selections: ["HOME", "AWAY"] },
+  "21": { marketType: "CORNER_FT_TOTAL", scope: "FULL_TIME", selections: ["OVER", "UNDER"] },
+  "22": { marketType: "CORNER_FH_TOTAL", scope: "FIRST_HALF", selections: ["OVER", "UNDER"] },
+  "31": { marketType: "CARD_FT_TOTAL", scope: "FULL_TIME", selections: ["OVER", "UNDER"] },
+  "32": { marketType: "CARD_FH_TOTAL", scope: "FIRST_HALF", selections: ["OVER", "UNDER"] },
+  "33": { marketType: "CARD_FT_AH", scope: "FULL_TIME", selections: ["HOME", "AWAY"] },
+  "34": { marketType: "CARD_FH_AH", scope: "FIRST_HALF", selections: ["HOME", "AWAY"] },
+  "80": { marketType: "SH_TOTAL", scope: "SECOND_HALF", selections: ["OVER", "UNDER"] },
+  "85": { marketType: "SH_AH", scope: "SECOND_HALF", selections: ["HOME", "AWAY"] }
+};
 
 function record(value: unknown): ApsportRawEvent | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -106,6 +132,42 @@ export function eligibleApsportFootballEvent(
   if (!Number.isFinite(startAtMs)) return false;
   const cutoffMs = nowMs + prematchWindowHours * 60 * 60 * 1_000;
   return startAtMs >= nowMs && startAtMs <= cutoffMs;
+}
+
+export function apsportSelectionPriceFromEvent(value: ApsportRawEvent, identity: {
+  readonly providerEventId: string; readonly providerMarketId: string;
+  readonly providerSelectionId: string; readonly marketType: string; readonly scope: string;
+  readonly selection: string; readonly line: string | null;
+}): { readonly status: "FOUND"; readonly rawOdds: string } |
+  { readonly status: "NOT_FOUND" | "AMBIGUOUS" } {
+  if (eventId(value) !== identity.providerEventId || !activeEventEvidence(value) ||
+    identity.line === null || !Array.isArray(value["50"])) return { status: "NOT_FOUND" };
+  const requestedLine = Number(identity.line);
+  if (!Number.isFinite(requestedLine)) return { status: "NOT_FOUND" };
+  const matches: string[] = [];
+  for (const candidateGroup of value["50"]) {
+    const group = record(candidateGroup);
+    const semantics = group === null ? undefined : marketSemanticsByGroup[String(group["3"])];
+    if (group === null || group["10"] !== "Active" || semantics === undefined ||
+      semantics.marketType !== identity.marketType || semantics.scope !== identity.scope || !Array.isArray(group["9"])) continue;
+    for (const candidateOdd of group["9"]) {
+      const odd = record(candidateOdd);
+      const line = odd === null ? Number.NaN : Number(scalar(odd["7"]));
+      if (odd === null || scalar(odd["6"]) !== identity.providerMarketId || !Number.isFinite(line) ||
+        Math.abs(line - requestedLine) > 1e-9) continue;
+      const selectionIndex = semantics.selections.indexOf(identity.selection);
+      if (selectionIndex < 0) continue;
+      const selectionKey = selectionIndex === 0 ? "0" : "2";
+      const priceKey = selectionIndex === 0 ? "8" : "9";
+      if (scalar(odd[selectionKey]) !== identity.providerSelectionId) continue;
+      const prices = record(odd[priceKey]);
+      const rawOdds = prices === null ? null : scalar(prices["2"]);
+      if (rawOdds !== null && /^[+-]?\d+(?:\.\d+)?$/u.test(rawOdds) && Number(rawOdds) !== 0) matches.push(rawOdds);
+    }
+  }
+  const unique = [...new Set(matches)];
+  return unique.length === 1 ? { status: "FOUND", rawOdds: unique[0]! }
+    : { status: unique.length > 1 ? "AMBIGUOUS" : "NOT_FOUND" };
 }
 
 export function apsportEventsFromProviderData(value: unknown): ApsportRawEvent[] {
@@ -186,7 +248,8 @@ function endpoint(template: ApsportRequestTemplate, suffix: string): string {
   return `${template.origin}/be-ui/pac/api/v3/${suffix}`;
 }
 
-async function detailResponse(options: CollectApsportCatalogOptions,
+async function detailResponse(options: Pick<CollectApsportEventDetailOptions,
+  "template" | "request" | "sleep" | "isCurrent">,
   rawEvent: ApsportRawEvent): Promise<ApsportCatalogPageResponse | null> {
   const id = eventId(rawEvent);
   if (id === null) return null;
@@ -203,6 +266,16 @@ async function detailResponse(options: CollectApsportCatalogOptions,
     await options.sleep(Math.min(maximumRetryDelayMs, requestedDelay));
   }
   return null;
+}
+
+export async function collectApsportEventDetail(
+  options: CollectApsportEventDetailOptions
+): Promise<ApsportRawEvent | null> {
+  const id = eventId({ "2": options.eventId });
+  if (id === null || !options.isCurrent()) return null;
+  const response = await detailResponse(options, { "2": id });
+  if (response?.status !== 200 || !options.isCurrent()) return null;
+  return apsportEventsFromProviderData(response.data).find((item) => eventId(item) === id) ?? null;
 }
 
 export async function collectApsportCatalog(options: CollectApsportCatalogOptions): Promise<void> {

@@ -19,9 +19,10 @@ import { CmdRecoveryState, type CmdRecoveryDocument, type CmdRecoverySession } f
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
 import { isFullKsportPartitionSnapshot,
   KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
-import { apsportPageResponseFromEvaluation, buildApsportPageRequestExpression,
-  collectApsportCatalog, type ApsportCatalogBatch, type ApsportCatalogPageRequest,
-  type ApsportRequestTemplate, type CollectApsportCatalogOptions } from "./apsport-catalog-refresh.js";
+import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent, buildApsportPageRequestExpression,
+  collectApsportCatalog, collectApsportEventDetail, type ApsportCatalogBatch,
+  type ApsportCatalogPageRequest, type ApsportRequestTemplate, type CollectApsportCatalogOptions,
+  type CollectApsportEventDetailOptions } from "./apsport-catalog-refresh.js";
 
 const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
@@ -58,6 +59,8 @@ const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
 const APSPORT_PAGE_REQUEST_TIMEOUT_MS = 30_000;
 const APSPORT_DETAIL_DELAY_MS = 500;
 const APSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
+const APSPORT_EVENT_DETAIL_DEBOUNCE_MS = 400;
+const APSPORT_EVENT_DETAIL_MIN_INTERVAL_MS = 2_000;
 const APSPORT_BOOTSTRAP_EXPRESSION = `(() => {
   try {
     const fieldlineApsportBootstrap = true;
@@ -153,6 +156,7 @@ export interface NetworkObserverDependencies {
   readonly clearSabaWsSnapshots?: (sourceId: string) => Promise<void>;
   readonly workScheduler?: ProviderWorkScheduler;
   readonly collectApsportCatalog?: (options: CollectApsportCatalogOptions) => Promise<void>;
+  readonly collectApsportEventDetail?: (options: CollectApsportEventDetailOptions) => Promise<Record<string, unknown> | null>;
 }
 
 type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
@@ -952,6 +956,7 @@ export class NetworkObserver {
   readonly #clearSabaWsSnapshots: NonNullable<NetworkObserverDependencies["clearSabaWsSnapshots"]>;
   readonly #workScheduler: ProviderWorkScheduler;
   readonly #collectApsportCatalog: NonNullable<NetworkObserverDependencies["collectApsportCatalog"]>;
+  readonly #collectApsportEventDetail: NonNullable<NetworkObserverDependencies["collectApsportEventDetail"]>;
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
   readonly #tabGenerations = new Map<number, number>();
@@ -1000,6 +1005,13 @@ export class NetworkObserver {
   readonly #apsportRefreshOrdinals = new Map<string, number>();
   readonly #apsportLastRefreshStartedAtMs = new Map<string, number>();
   readonly #apsportRefreshesInFlight = new Set<string>();
+  readonly #apsportActiveCatalogs = new Map<string, { readonly generation: string;
+    readonly prematchWindowHours: number }>();
+  readonly #apsportEventDetailTimers = new Map<string, { readonly sourceId: string;
+    readonly timer: ReturnType<typeof setTimeout> }>();
+  readonly #apsportEventDetailLastAtMs = new Map<string, number>();
+  readonly #apsportEventDetailTails = new Map<string, Promise<void>>();
+  readonly #apsportPageRequestTails = new Map<string, Promise<void>>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
   readonly #activeKsportStreams = new Map<string, string>();
@@ -1070,6 +1082,7 @@ export class NetworkObserver {
     this.#clearSabaWsSnapshots = dependencies.clearSabaWsSnapshots ?? (async () => undefined);
     this.#workScheduler = dependencies.workScheduler ?? new ProviderWorkScheduler();
     this.#collectApsportCatalog = dependencies.collectApsportCatalog ?? collectApsportCatalog;
+    this.#collectApsportEventDetail = dependencies.collectApsportEventDetail ?? collectApsportEventDetail;
     if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
       throw new Error("OBSERVER_SESSION_ID_INVALID");
     }
@@ -1506,6 +1519,19 @@ export class NetworkObserver {
     this.#apsportLastRefreshStartedAtMs.delete(sourceId);
   }
 
+  #clearApsportEventDetails(sourceId: string): void {
+    this.#apsportActiveCatalogs.delete(sourceId);
+    for (const [key, pending] of this.#apsportEventDetailTimers) {
+      if (pending.sourceId !== sourceId) continue;
+      clearTimeout(pending.timer);
+      this.#apsportEventDetailTimers.delete(key);
+    }
+    for (const key of this.#apsportEventDetailLastAtMs.keys()) {
+      if (key.startsWith(`${sourceId}\u0000`)) this.#apsportEventDetailLastAtMs.delete(key);
+    }
+    this.#apsportEventDetailTails.delete(sourceId);
+  }
+
   beginSourceEpoch(sourceId: string): string {
     this.#retireCmdRecovery(sourceId, "DOCUMENT_CHANGED");
     const priorGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
@@ -1529,6 +1555,7 @@ export class NetworkObserver {
     this.#apsportRequestTemplates.delete(sourceId);
     this.#apsportRefreshOrdinals.delete(sourceId);
     this.#apsportLastRefreshStartedAtMs.delete(sourceId);
+    this.#clearApsportEventDetails(sourceId);
     this.#clearCatalogWsSnapshots(sourceId);
     this.#activeKsportStreams.delete(sourceId);
     this.#ksportAuthorityTransitions.delete(sourceId);
@@ -2299,6 +2326,122 @@ export class NetworkObserver {
     return null;
   }
 
+  #apsportTemplateIsCurrent(source: ObservedSource, template: BoundApsportRequestTemplate): boolean {
+    return this.#apsportRequestTemplates.get(source.sourceId) === template &&
+      this.#isSourceGenerationCurrent(source.sourceId, template.sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === template.tabGeneration;
+  }
+
+  async #requestApsportPage(source: ObservedSource, template: BoundApsportRequestTemplate,
+    input: ApsportCatalogPageRequest) {
+    if (!this.#apsportTemplateIsCurrent(source, template)) return { status: 0, data: null };
+    const prior = this.#apsportPageRequestTails.get(source.sourceId) ?? Promise.resolve();
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => { release = resolve; });
+    const tail = prior.catch(() => undefined).then(() => turn);
+    this.#apsportPageRequestTails.set(source.sourceId, tail);
+    await prior.catch(() => undefined);
+    try {
+      if (!this.#apsportTemplateIsCurrent(source, template)) return { status: 0, data: null };
+      this.#lastCaptureExit.set(source.sourceId, `APSPORT_${input.kind}_START`);
+      const binding = this.#mainWorldContexts.get(source.tabId)?.get(template.frameId);
+      if (binding === undefined || binding.sessionId !== template.sessionId) return { status: 0, data: null };
+      let expression: string;
+      try { expression = buildApsportPageRequestExpression(template, input); }
+      catch { return { status: 0, data: null }; }
+      const params = { expression, contextId: binding.contextId, returnByValue: true, awaitPromise: true };
+      const evaluation = await this.#withFrameCommandTimeout(binding.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId),
+      APSPORT_PAGE_REQUEST_TIMEOUT_MS).catch(() => null);
+      const response = apsportPageResponseFromEvaluation(evaluation);
+      this.#lastCaptureExit.set(source.sourceId, `APSPORT_${input.kind}_${response.status}`);
+      return response;
+    } finally {
+      release();
+      if (this.#apsportPageRequestTails.get(source.sourceId) === tail) {
+        this.#apsportPageRequestTails.delete(source.sourceId);
+      }
+    }
+  }
+
+  #scheduleApsportEventDetail(source: ObservedSource, eventId: string): void {
+    if (source.lobby !== "TSPORT" || eventId.trim() === "" || eventId.length > 128 ||
+      !this.#apsportActiveCatalogs.has(source.sourceId) ||
+      !this.#apsportRequestTemplates.has(source.sourceId)) return;
+    const key = `${source.sourceId}\u0000${eventId}`;
+    if (this.#apsportEventDetailTimers.has(key)) return;
+    const nowMs = this.#now();
+    const previousAtMs = this.#apsportEventDetailLastAtMs.get(key);
+    const delayMs = previousAtMs === undefined ? APSPORT_EVENT_DETAIL_DEBOUNCE_MS : Math.max(
+      APSPORT_EVENT_DETAIL_DEBOUNCE_MS,
+      previousAtMs + APSPORT_EVENT_DETAIL_MIN_INTERVAL_MS - nowMs
+    );
+    const timer = setTimeout(() => {
+      this.#apsportEventDetailTimers.delete(key);
+      this.#apsportEventDetailLastAtMs.set(key, this.#now());
+      const prior = this.#apsportEventDetailTails.get(source.sourceId) ?? Promise.resolve();
+      const operation = prior.catch(() => undefined).then(() => this.#refreshApsportEventDetail(source, eventId));
+      this.#apsportEventDetailTails.set(source.sourceId, operation);
+      void operation.finally(() => {
+        if (this.#apsportEventDetailTails.get(source.sourceId) === operation) {
+          this.#apsportEventDetailTails.delete(source.sourceId);
+        }
+      });
+    }, delayMs);
+    this.#apsportEventDetailTimers.set(key, { sourceId: source.sourceId, timer });
+  }
+
+  async #refreshApsportEventDetail(source: ObservedSource, eventId: string): Promise<void> {
+    const active = this.#apsportActiveCatalogs.get(source.sourceId);
+    const template = this.#apsportRequestTemplates.get(source.sourceId);
+    if (active === undefined || template === undefined) return;
+    const isCurrent = (): boolean => this.#apsportActiveCatalogs.get(source.sourceId) === active &&
+      this.#apsportTemplateIsCurrent(source, template);
+    const detailed = await this.#collectApsportEventDetail({ eventId,
+      template: { origin: template.origin, headers: template.headers, body: template.body },
+      request: (input) => this.#requestApsportPage(source, template, input),
+      sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
+    if (detailed === null || !isCurrent()) return;
+    const batch: ApsportCatalogBatch = { schemaVersion: 1, generation: active.generation,
+      phase: "DETAIL", complete: false, trigger: "EVENT_CHANGE",
+      prematchWindowHours: active.prematchWindowHours, records: [detailed] };
+    await this.ingestHttpResponse(source,
+      `${template.origin}/__fieldline_apsport_catalog_refresh__`, "Fetch", JSON.stringify(batch), {
+        method: "POST", verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
+          ...(template.sessionId === undefined ? {} : { sessionId: template.sessionId }) }
+      });
+  }
+
+  async #probeApsportEventDetail(source: ObservedSource,
+    request: SelectionPriceProbeIdentity): Promise<Record<string, unknown> | null> {
+    const template = this.#apsportRequestTemplates.get(source.sourceId);
+    if (template === undefined) return null;
+    const isCurrent = (): boolean => this.#apsportTemplateIsCurrent(source, template);
+    const detailed = await this.#collectApsportEventDetail({ eventId: request.providerEventId,
+      template: { origin: template.origin, headers: template.headers, body: template.body },
+      request: (input) => this.#requestApsportPage(source, template, input),
+      sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
+    if (detailed === null || !isCurrent()) return null;
+    const observedAtMs = this.#now();
+    const active = this.#apsportActiveCatalogs.get(source.sourceId);
+    if (active !== undefined) {
+      const batch: ApsportCatalogBatch = { schemaVersion: 1, generation: active.generation,
+        phase: "DETAIL", complete: false, trigger: "EVENT_CHANGE",
+        prematchWindowHours: active.prematchWindowHours, records: [detailed] };
+      await this.ingestHttpResponse(source,
+        `${template.origin}/__fieldline_apsport_catalog_refresh__`, "Fetch", JSON.stringify(batch), {
+          method: "POST", verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
+            ...(template.sessionId === undefined ? {} : { sessionId: template.sessionId }) }
+        });
+    }
+    const result = apsportSelectionPriceFromEvent(detailed, request);
+    return result.status === "FOUND"
+      ? { ok: true, rawOdds: result.rawOdds, observedAtMs, method: "IN_PAGE_FETCH" }
+      : { ok: false, observedAtMs, method: "IN_PAGE_FETCH",
+        reason: result.status === "AMBIGUOUS" ? "TSPORT_SELECTION_AMBIGUOUS" : "TSPORT_SELECTION_NOT_FOUND" };
+  }
+
   async #refreshApsportCatalog(source: ObservedSource, options: CatalogRefreshOptions): Promise<void> {
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const tabGeneration = this.#captureTabGeneration(source.tabId);
@@ -2325,26 +2468,8 @@ export class NetworkObserver {
     const ordinal = (this.#apsportRefreshOrdinals.get(source.sourceId) ?? 0) + 1;
     this.#apsportRefreshOrdinals.set(source.sourceId, ordinal);
     const generation = `apsport:${source.tabId}:${ordinal}`;
-    const templateIsCurrent = (): boolean => this.#apsportRequestTemplates.get(source.sourceId) === template &&
-      this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
-      this.#captureTabGeneration(source.tabId) === tabGeneration;
-    const request = async (input: ApsportCatalogPageRequest) => {
-      if (!templateIsCurrent()) return { status: 0, data: null };
-      this.#lastCaptureExit.set(source.sourceId, `APSPORT_${input.kind}_START`);
-      const binding = this.#mainWorldContexts.get(source.tabId)?.get(template.frameId);
-      if (binding === undefined || binding.sessionId !== template.sessionId) return { status: 0, data: null };
-      let expression: string;
-      try { expression = buildApsportPageRequestExpression(template, input); }
-      catch { return { status: 0, data: null }; }
-      const params = { expression, contextId: binding.contextId, returnByValue: true, awaitPromise: true };
-      const evaluation = await this.#withFrameCommandTimeout(binding.sessionId === undefined
-        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
-        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId),
-      APSPORT_PAGE_REQUEST_TIMEOUT_MS).catch(() => null);
-      const response = apsportPageResponseFromEvaluation(evaluation);
-      this.#lastCaptureExit.set(source.sourceId, `APSPORT_${input.kind}_${response.status}`);
-      return response;
-    };
+    const templateIsCurrent = (): boolean => this.#apsportTemplateIsCurrent(source, template);
+    const request = (input: ApsportCatalogPageRequest) => this.#requestApsportPage(source, template, input);
     const emitBatch = async (batch: ApsportCatalogBatch): Promise<void> => {
       if (!templateIsCurrent()) return;
       await this.ingestHttpResponse(source,
@@ -2360,7 +2485,11 @@ export class NetworkObserver {
       await this.#collectApsportCatalog({ generation, nowMs: refreshStartedAtMs, prematchWindowHours,
         template: { origin: template.origin, headers: template.headers, body: template.body }, request,
         sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
-        isCurrent: templateIsCurrent, onRoster: emitBatch, onDetail: emitBatch,
+        isCurrent: templateIsCurrent, onRoster: async (batch) => {
+          await emitBatch(batch);
+          if (templateIsCurrent() && batch.complete) this.#apsportActiveCatalogs.set(source.sourceId,
+            { generation: batch.generation, prematchWindowHours: batch.prematchWindowHours });
+        }, onDetail: emitBatch,
         detailBatchSize: 5, detailDelayMs: APSPORT_DETAIL_DELAY_MS });
       if (templateIsCurrent()) this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_DONE");
     } finally {
@@ -4319,6 +4448,9 @@ export class NetworkObserver {
         evaluations = await evaluateFrames(
           buildSbobetSelectionPriceExpression(request, sbobetObservedRequest, "FETCH_ONLY"), true);
       }
+    } else if (source.lobby === "TSPORT") {
+      const direct = await this.#probeApsportEventDetail(source, request);
+      evaluations = direct === null ? await evaluateFrames() : [{ result: { value: direct } }];
     } else {
       evaluations = await evaluateFrames();
     }
@@ -4330,12 +4462,15 @@ export class NetworkObserver {
     const ambiguous = foundCandidates.length > 1 ||
       candidates.some((value) => value.reason === "VISIBLE_PRICE_AMBIGUOUS" ||
         value.reason === "IM_DIRECT_SELECTION_AMBIGUOUS" || value.reason === "SBOBET_SELECTION_AMBIGUOUS" ||
+        value.reason === "TSPORT_SELECTION_AMBIGUOUS" ||
         value.reason === "BTI_EVENT_AMBIGUOUS" || value.reason === "BTI_MARKET_AMBIGUOUS" ||
         value.reason === "BTI_SELECTION_AMBIGUOUS");
     const diagnosticReason = foundCandidates.length > 1 ? "VISIBLE_PRICE_AMBIGUOUS" :
       candidates.find((value) => typeof value.reason === "string")?.reason;
     const observedAtMs = typeof found?.observedAtMs === "number" ? found.observedAtMs : this.#now();
-    const method = found?.method === "IN_PAGE_FETCH" || found?.method === "DOM" ? found.method
+    const reportedMethod = found?.method ?? candidates.find((candidate) => candidate.method === "IN_PAGE_FETCH" ||
+      candidate.method === "DOM")?.method;
+    const method = reportedMethod === "IN_PAGE_FETCH" || reportedMethod === "DOM" ? reportedMethod
       : source.lobby === "BTI" || source.lobby === "KSPORT" ? "IN_PAGE_FETCH" : "DOM";
     await this.#emit(source, `https://${source.lobby.toLocaleLowerCase("en")}.invalid/__fieldline_selection_price_probe__`,
       "DOM", "DOM_SNAPSHOT", { encoding: "UTF8", body: JSON.stringify({ requestId: request.requestId,
@@ -4780,10 +4915,12 @@ export class NetworkObserver {
       if (!isRecord(outer) || outer.s !== 1 || outer.t !== "eu" || typeof outer.d !== "string") return;
       const event: unknown = JSON.parse(outer.d);
       if (!isRecord(event) || (typeof event["2"] !== "number" && typeof event["2"] !== "string")) return;
+      const eventId = String(event["2"]);
       const retained = this.#tsportSnapshots.get(source.sourceId) ?? new Map<string, ReplayableWsEvent>();
-      retained.set(String(event["2"]), { source, url, body, streamId, ...clocks });
+      retained.set(eventId, { source, url, body, streamId, ...clocks });
       while (retained.size > 1_000) retained.delete(retained.keys().next().value as string);
       this.#tsportSnapshots.set(source.sourceId, retained);
+      this.#scheduleApsportEventDetail(source, eventId);
     } catch { /* Non-event frames are not replayable catalog state. */ }
   }
 

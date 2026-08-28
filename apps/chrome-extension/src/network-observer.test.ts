@@ -7,7 +7,8 @@ import { BTI_CATALOG_REFRESH_EXPRESSION, CMD_CATALOG_DISCOVERY_EXPRESSION,
   CMD_FULL_BASELINE_EXPRESSION, IM_CATALOG_DISCOVERY_EXPRESSION, KEEP_ACTIVE_EXPRESSION,
   NetworkObserver, type NetworkObserverDependencies, type PersistedSabaWsSnapshots } from "./network-observer.js";
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
-import type { ApsportCatalogBatch, CollectApsportCatalogOptions } from "./apsport-catalog-refresh.js";
+import type { ApsportCatalogBatch, CollectApsportCatalogOptions,
+  CollectApsportEventDetailOptions } from "./apsport-catalog-refresh.js";
 
 const source = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
 
@@ -87,6 +88,58 @@ describe("NetworkObserver", () => {
     expect(JSON.stringify(forwarded)).not.toMatch(/Bearer private|must-not-be-copied/iu);
     expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
       String(params?.expression).includes("fieldlineTsport"))).toHaveLength(0);
+  });
+
+  it("refetches the exact APSPORT event detail after an eu socket frame", async () => {
+    vi.useFakeTimers();
+    try {
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": true,
+        "10": "Active", "11": null, "22": "Away", "50": [], "53": "League" };
+      const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+        await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+          complete: true, prematchWindowHours: 24, records: [record] });
+      });
+      const collectDetail = vi.fn(async (options: CollectApsportEventDetailOptions) => {
+        expect(options.eventId).toBe("event-42");
+        return record;
+      });
+      const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+        : {});
+      const observer = new NetworkObserver({ sendCommand,
+        forward: async (envelope) => { forwarded.push(envelope); }, collectApsportCatalog: collect,
+        collectApsportEventDetail: collectDetail, now: () => 10_000, monotonicNow: () => 500 });
+      const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+      await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+        context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+      });
+      await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+        requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+        request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+          postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+      });
+      await observer.refreshCatalog(apsport, { prematchWindowHours: 24 });
+      await observer.handleEvent(apsport, "Network.webSocketCreated", {
+        requestId: "ap-socket", url: "wss://spws.agenate.com/ln/en/s/1/mg/0/tr/0"
+      });
+
+      await observer.handleEvent(apsport, "Network.webSocketFrameReceived", {
+        requestId: "ap-socket", response: { opcode: 1,
+          payloadData: JSON.stringify({ s: 1, t: "eu", d: JSON.stringify(record) }) }
+      });
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(collectDetail).toHaveBeenCalledOnce();
+      const targeted = forwarded.map((envelope) => {
+        try { return JSON.parse(envelope.payload.body) as Record<string, unknown>; } catch { return {}; }
+      }).find((body) => body.trigger === "EVENT_CHANGE");
+      expect(targeted).toMatchObject({ phase: "DETAIL", complete: false, trigger: "EVENT_CHANGE",
+        records: [expect.objectContaining({ "2": "event-42" })] });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("bootstraps a cookie-bound APSPORT API template after an extension-worker reload", async () => {
@@ -1235,6 +1288,95 @@ describe("NetworkObserver", () => {
     expect(String(evaluations[0]?.[2]?.expression)).not.toContain(".click(");
     expect(String(evaluations[0]?.[2]?.expression)).toContain("TSPORT_SELECTION_NOT_FOUND");
     expect(evaluations.every(([, , params]) => params?.awaitPromise === true)).toBe(true);
+  });
+
+  it("reads an exact hidden APSPORT price from authenticated event detail before trying DOM", async () => {
+    const detailed = { "1": "league-1", "2": "event-hidden", "5": "Alpha", "6": true,
+      "10": "Active", "11": null, "22": "Beta", "53": "League", "50": [{
+        "3": 80, "10": "Active", "9": [{ "0": "hidden-over", "2": "hidden-under",
+          "6": "hidden-market", "7": "1.5", "8": { "2": "-0.45" }, "9": { "2": "0.35" } }]
+      }] };
+    const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+      await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+        complete: true, prematchWindowHours: 24, records: [detailed] });
+    });
+    const collectDetail = vi.fn(async () => detailed);
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+      : {});
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      collectApsportCatalog: collect, collectApsportEventDetail: collectDetail,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json", lng: "vi" },
+        postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+    await observer.refreshCatalog(apsport, { prematchWindowHours: 24 });
+
+    await observer.probeSelectionPrice(apsport, {
+      requestId: "price-hidden", providerEventId: "event-hidden", providerMarketId: "hidden-market",
+      providerSelectionId: "hidden-under", eventLabel: "Alpha vs Beta", participantA: "Alpha",
+      participantB: "Beta", marketType: "SH_TOTAL", scope: "SECOND_HALF", selection: "UNDER", line: "1.5"
+    });
+
+    expect(collectDetail).toHaveBeenCalledOnce();
+    const resultEnvelope = forwarded.find((envelope) =>
+      envelope.request.pathnameClass === "/__fieldline_selection_price_probe__");
+    expect(JSON.parse(resultEnvelope!.payload.body)).toMatchObject({ requestId: "price-hidden", status: "FOUND",
+      rawOdds: "0.35", method: "IN_PAGE_FETCH" });
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.evaluate")).toBe(false);
+  });
+
+  it("serializes concurrent APSPORT detail probes in the authenticated provider page", async () => {
+    const detailed = { "1": "league-1", "2": "event-hidden", "5": "Alpha", "6": true,
+      "10": "Active", "11": null, "22": "Beta", "53": "League", "50": [{
+        "3": 80, "10": "Active", "9": [{ "0": "hidden-over", "2": "hidden-under",
+          "6": "hidden-market", "7": "1.5", "8": { "2": "-0.45" }, "9": { "2": "0.35" } }]
+      }] };
+    let active = 0;
+    let maximumActive = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method !== "Runtime.evaluate") return {};
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return { result: { value: { status: 200, data: null } } };
+    });
+    const collectDetail = vi.fn(async (options: CollectApsportEventDetailOptions) => {
+      await options.request({ kind: "DETAIL", eventId: options.eventId,
+        url: `https://pacific.agenate.com/be-ui/pac/api/v3/events/${options.eventId}`, body: {} });
+      return detailed;
+    });
+    const observer = new NetworkObserver({ sendCommand, collectApsportEventDetail: collectDetail,
+      forward: async () => undefined });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1 }) }
+    });
+    const identity = { providerEventId: "event-hidden", providerMarketId: "hidden-market",
+      providerSelectionId: "hidden-under", eventLabel: "Alpha vs Beta", participantA: "Alpha",
+      participantB: "Beta", marketType: "SH_TOTAL", scope: "SECOND_HALF", selection: "UNDER", line: "1.5" };
+
+    await Promise.all([
+      observer.probeSelectionPrice(apsport, { ...identity, requestId: "price-one" }),
+      observer.probeSelectionPrice(apsport, { ...identity, requestId: "price-two" })
+    ]);
+
+    expect(collectDetail).toHaveBeenCalledTimes(2);
+    expect(maximumActive).toBe(1);
   });
 
   it("reports TSPORT's fresh same-tab resolver method instead of labelling it as DOM", async () => {

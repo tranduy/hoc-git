@@ -14,15 +14,16 @@ const providerEvent: ProviderEvent = { provider: "SABA", category: "FOOTBALL", p
   eventScope: "REGULATION", bestOf: null, isLive: false, rematchCandidate: false, fixtureDiscriminator: null,
   isVirtual: false, sportVariant: "FOOTBALL", liveState: null };
 
-function cell(provider: "SABA" | "SBOBET", line: string): ComparisonCell {
+function cell(provider: "SABA" | "SBOBET" | "APSPORT", line: string,
+  options: { readonly isLive?: boolean; readonly receivedMonotonicMs?: number } = {}): ComparisonCell {
   const market: ProviderMarket = { provider, category: "FOOTBALL", providerEventId: `${provider}-event`,
     providerMarketId: `${provider}-${line}`, marketType: "FT_AH", scope: "FULL_TIME", line,
     settlementProfile: "football-regulation-including-added-time", status: "OPEN" };
   const quotes: ProviderQuote[] = (["HOME", "AWAY"] as const).map((selection) => ({ provider,
     category: "FOOTBALL", providerEventId: market.providerEventId, providerMarketId: market.providerMarketId,
     providerSelectionId: `${provider}-${line}-${selection}`, marketType: "FT_AH", scope: "FULL_TIME", selection,
-    line, rawOdds: "2.5", rawFormat: "DECIMAL", status: "OPEN", isLive: false,
-    sourceTimestampMs: nowMs, receivedMonotonicMs: 1, sequence: 1 }));
+    line, rawOdds: "2.5", rawFormat: "DECIMAL", status: "OPEN", isLive: options.isLive ?? false,
+    sourceTimestampMs: nowMs, receivedMonotonicMs: options.receivedMonotonicMs ?? 1, sequence: 1 }));
   return { provider, market, quotes };
 }
 
@@ -167,5 +168,36 @@ describe("rankTicketsForEvent", () => {
 
     expect(ranked.find((ticket) => ticket.row.key === "row-1")).toMatchObject({ state: "OBSERVATION",
       reason: "Provider preflight required" });
+  });
+
+  it("fails closed for a stale APSPORT quote and restores it after an exact receipt confirmation", () => {
+    const line = "-0.5";
+    const staleApCell = cell("APSPORT", line, { isLive: true, receivedMonotonicMs: 1 });
+    const freshApCell = cell("APSPORT", line, { isLive: true, receivedMonotonicMs: 6_002 });
+    const sabaCell = cell("SABA", line, { isLive: true, receivedMonotonicMs: 6_002 });
+    const eventWithAp = (apCell: ComparisonCell, heartbeatEventId = apCell.quotes[0]!.providerEventId): ComparisonEvent => ({
+      ...comparisonEvent(), event: { ...providerEvent, isLive: true }, providers: ["SABA", "APSPORT"],
+      providerEventIds: { SABA: "SABA-event", APSPORT: "APSPORT-event" },
+      rows: [{ key: "ap-row", marketType: "FT_AH", scope: "FULL_TIME", line,
+        cells: [sabaCell, apCell], bestBySelection: { HOME: "SABA", AWAY: "APSPORT" },
+        margin: 0.25, crossBook: true }],
+      catalogs: [{ dataMode: "LIVE", accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT",
+        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: nowMs,
+        snapshotState: "FRESH", rejectedMarketCount: 0, events: [], markets: [],
+        quotes: [...apCell.quotes, { ...freshApCell.quotes[0]!, providerEventId: heartbeatEventId,
+          providerMarketId: "another-market", providerSelectionId: "another-selection" }] }]
+    });
+    const input = { verified: new Map<string, VerifiedTicketEvidence>(), movements: [],
+      selectedProviders: new Set(["SABA", "APSPORT"] as const), observationPolicy: policy, nowMs };
+
+    const stale = rankTicketsForEvent({ ...input, event: eventWithAp(staleApCell) });
+    const unrelatedUpdate = rankTicketsForEvent({ ...input,
+      event: eventWithAp(staleApCell, "another-event") });
+    const confirmed = rankTicketsForEvent({ ...input, event: eventWithAp(freshApCell) });
+
+    expect(stale[0]).toMatchObject({ key: "ap-row", plan: null, state: "OBSERVATION" });
+    expect(stale[0]?.row.cells.find((candidate) => candidate.provider === "APSPORT")?.quotes).toEqual([]);
+    expect(unrelatedUpdate[0]?.plan).not.toBeNull();
+    expect(confirmed[0]?.plan).not.toBeNull();
   });
 });

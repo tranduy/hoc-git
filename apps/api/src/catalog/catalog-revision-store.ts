@@ -17,8 +17,10 @@ type Listener = (entry: StoredCatalogRevision) => void;
 
 function revisionFor(catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE"): string {
   const { observedAtMs: _observedAtMs, quotes, ...semanticCatalog } = catalog;
-  const semanticQuotes = quotes.map(({ receivedMonotonicMs: _receivedMonotonicMs,
-    sequence: _sequence, sourceTimestampMs: _sourceTimestampMs, ...quote }) => quote);
+  const semanticQuotes = quotes.map(({ receivedMonotonicMs, sequence,
+    sourceTimestampMs: _sourceTimestampMs, ...quote }) => catalog.provider === "APSPORT"
+    ? { ...quote, receivedMonotonicMs, sequence }
+    : quote);
   return createHash("sha256").update(JSON.stringify({
     catalog: { ...semanticCatalog, quotes: semanticQuotes }, snapshotState
   })).digest("base64url");

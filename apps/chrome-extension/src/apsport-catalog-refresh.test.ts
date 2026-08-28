@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { collectApsportCatalog, eligibleApsportFootballEvent,
+import { apsportSelectionPriceFromEvent, collectApsportCatalog, collectApsportEventDetail, eligibleApsportFootballEvent,
   type ApsportCatalogPageRequest, type ApsportRawEvent } from "./apsport-catalog-refresh.js";
 
 const NOW = Date.parse("2026-08-28T00:00:00.000Z");
@@ -64,6 +64,47 @@ describe("eligibleApsportFootballEvent", () => {
 });
 
 describe("collectApsportCatalog", () => {
+  it("resolves an exact hidden APSPORT selection directly from event detail", () => {
+    const detailed = { ...event("hidden-live", { live: true }), "50": [{ "3": 80, "10": "Active", "9": [{
+      "0": "hidden-over", "2": "hidden-under", "6": "hidden-market", "7": "1.5",
+      "8": { "2": "-0.45" }, "9": { "2": "0.35" }
+    }] }] };
+
+    expect(apsportSelectionPriceFromEvent(detailed, {
+      providerEventId: "hidden-live", providerMarketId: "hidden-market",
+      providerSelectionId: "hidden-under", marketType: "SH_TOTAL", scope: "SECOND_HALF",
+      selection: "UNDER", line: "1.5"
+    })).toEqual({ status: "FOUND", rawOdds: "0.35" });
+    expect(apsportSelectionPriceFromEvent(detailed, {
+      providerEventId: "hidden-live", providerMarketId: "hidden-market",
+      providerSelectionId: "closed-selection", marketType: "SH_TOTAL", scope: "SECOND_HALF",
+      selection: "UNDER", line: "1.5"
+    })).toEqual({ status: "NOT_FOUND" });
+  });
+
+  it("refetches one exact event detail after a realtime event signal", async () => {
+    const requests: ApsportCatalogPageRequest[] = [];
+    const detailed = event("live-42", { live: true });
+
+    const result = await collectApsportEventDetail({
+      eventId: "live-42",
+      template: { origin: "https://pacific.agenate.com", headers: { lng: "vi" }, body: {} },
+      request: async (input) => {
+        requests.push(input);
+        return { status: 200, data: [league("Live", [detailed])] };
+      },
+      sleep: async () => undefined,
+      isCurrent: () => true
+    });
+
+    expect(requests).toEqual([expect.objectContaining({
+      kind: "DETAIL",
+      eventId: "live-42",
+      url: "https://pacific.agenate.com/be-ui/pac/api/v3/events/live-42"
+    })]);
+    expect(result).toEqual(expect.objectContaining({ "2": "live-42" }));
+  });
+
   it("uses the provider's distinct native bodies for event and lazy-league rosters", async () => {
     const requests: ApsportCatalogPageRequest[] = [];
     await collectApsportCatalog({

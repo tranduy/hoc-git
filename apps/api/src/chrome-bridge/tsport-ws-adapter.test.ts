@@ -98,7 +98,8 @@ function apiEnvelope(
   phase: "ROSTER" | "DETAIL" = "ROSTER",
   complete = true,
   generation = "apsport:7:1",
-  prematchWindowHours = 24
+  prematchWindowHours = 24,
+  trigger?: "SWEEP" | "EVENT_CHANGE"
 ): ChromeBridgeEnvelope {
   return {
     version: 1, kind: "NETWORK", lobby: "TSPORT", sourceId: SOURCE_ID, tabId: 7,
@@ -108,7 +109,7 @@ function apiEnvelope(
     request: { hostname: "pacific.agenate.com",
       pathnameClass: "/__fieldline_apsport_catalog_refresh__", resourceType: "Fetch" },
     payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, generation, phase, complete,
-      prematchWindowHours, records }) }
+      ...(trigger === undefined ? {} : { trigger }), prematchWindowHours, records }) }
   };
 }
 
@@ -255,6 +256,91 @@ describe("TsportWsCatalogAdapter", () => {
     expect(adapter.decode(envelope(realtime, 5, "football-a"))).toEqual([
       expect.objectContaining({ transportAlive: true, sourceId: "chrome:TSPORT:7", sequence: 5 })
     ]);
+  });
+
+  it("uses event-change detail as an exact event replacement and removes a closed hidden market", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const roster = event(108, "Realtime Home");
+    const withHidden = event(108, "Realtime Home");
+    withHidden["50"].push({ "3": 80, "9": [{
+      "0": "108-sh-over", "2": "108-sh-under", "6": "108-sh-total", "7": "1.5",
+      "8": { "2": "0.75" }, "9": { "2": "-0.85" }
+    }], "10": "Active" });
+    adapter.decode(apiEnvelope([roster]));
+    adapter.decode(apiEnvelope([withHidden], 2, "DETAIL"));
+    adapter.decode(stateEnvelope("OPEN", "football-a", 3));
+    const partialSocket = event(108, "Realtime Home", "0.66", "-0.76");
+    partialSocket["50"] = [partialSocket["50"][0]!];
+    adapter.decode(envelope(partialSocket, 4, "football-a"));
+    const currentDetail = event(108, "Realtime Home", "0.66", "-0.76");
+
+    const update = adapter.decode(apiEnvelope(
+      [currentDetail], 5, "DETAIL", false, "apsport:7:1", 24, "EVENT_CHANGE"
+    ))[0] as AuthorityUpdate;
+
+    expect((update.value.markets as readonly { readonly providerMarketId?: string }[])
+      .some((market) => market.providerMarketId === "108-sh-total")).toBe(false);
+    expect(update.value.quotes.filter((quote) => quote.providerEventId === "108")
+      .every((quote) => quote.sequence === 5 && quote.receivedMonotonicMs === 90)).toBe(true);
+  });
+
+  it("publishes a receipt-only event-change detail confirmation", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const current = event(109, "Confirmed Home");
+    adapter.decode(apiEnvelope([current]));
+    adapter.decode(apiEnvelope([current], 2, "DETAIL"));
+
+    const update = adapter.decode(apiEnvelope(
+      [current], 3, "DETAIL", false, "apsport:7:1", 24, "EVENT_CHANGE"
+    ))[0] as AuthorityUpdate;
+
+    expect(update).toMatchObject({ evidenceMode: "DELTA", provenance: "AUTHENTICATED_HTTP" });
+    expect(update.value.quotes.every((quote) => quote.sequence === 3 && quote.receivedMonotonicMs === 70)).toBe(true);
+  });
+
+  it("removes the whole APSPORT event when its exact changed detail is no longer active", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const current = event(110, "Closed Home");
+    adapter.decode(apiEnvelope([current]));
+    adapter.decode(apiEnvelope([current], 2, "DETAIL"));
+
+    const update = adapter.decode(apiEnvelope(
+      [{ ...current, "10": "Suspended" }], 3, "DETAIL", false, "apsport:7:1", 24, "EVENT_CHANGE"
+    ))[0] as AuthorityUpdate;
+
+    expect((update.value.events as readonly { readonly providerEventId?: string }[])
+      .some((candidate) => candidate.providerEventId === "110")).toBe(false);
+    expect(update.value.quotes.some((quote) => quote.providerEventId === "110")).toBe(false);
+  });
+
+  it("does not let a delayed sweep overwrite a newer exact APSPORT event refresh", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const old = event(111, "Ordered Home", "0.83", "-0.91");
+    const current = event(111, "Ordered Home", "0.66", "-0.76");
+    adapter.decode(apiEnvelope([old]));
+    const exact = adapter.decode(apiEnvelope(
+      [current], 2, "DETAIL", false, "apsport:7:1", 24, "EVENT_CHANGE"
+    ))[0] as AuthorityUpdate;
+
+    const delayed = adapter.decode(apiEnvelope([old], 3, "DETAIL", false));
+
+    expect(exact.value.quotes.find((quote) => quote.providerMarketId === "111-total")?.rawOdds).toBe("0.66");
+    expect(delayed).toEqual([]);
+  });
+
+  it("adds a newly-live APSPORT event from its exact authenticated detail", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(apiEnvelope([event(111, "Existing Home")]));
+    const newlyLive = event(112, "New Live Home", "0.55", "-0.65");
+
+    const update = adapter.decode(apiEnvelope(
+      [newlyLive], 2, "DETAIL", false, "apsport:7:1", 24, "EVENT_CHANGE"
+    ))[0] as AuthorityUpdate;
+
+    expect((update.value.events as readonly { readonly providerEventId?: string }[])
+      .some((candidate) => candidate.providerEventId === "112")).toBe(true);
+    expect(update.value.quotes.some((quote) => quote.providerEventId === "112" && quote.rawOdds === "0.55"))
+      .toBe(true);
   });
 
   it("does not publish a complete DOM capture as an authoritative catalog", () => {

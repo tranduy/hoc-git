@@ -27,6 +27,7 @@ interface ApsportApiState {
   readonly rosterRecords: Map<string, RetainedRecord>;
   readonly detailRecords: Map<string, RetainedRecord>;
   readonly socketRecords: Map<string, RetainedRecord>;
+  readonly exactEventIds: Set<string>;
   readonly openStreams: Set<string>;
   readonly footballStreams: Set<string>;
   baselineEmitted: boolean;
@@ -85,6 +86,7 @@ const apsportCatalogBatchSchema = z.object({
   generation: boundedText(128),
   phase: z.enum(["ROSTER", "DETAIL"]),
   complete: z.boolean(),
+  trigger: z.enum(["SWEEP", "EVENT_CHANGE"]).optional(),
   prematchWindowHours: z.number().int().min(1).max(48),
   records: z.array(z.record(z.string(), z.unknown())).max(5_000)
 }).strict();
@@ -494,6 +496,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         rosterEventIds, rosterRecords,
         detailRecords: sameEpoch ? retainEligible(current!.detailRecords) : new Map(),
         socketRecords: sameEpoch ? retainEligible(current!.socketRecords) : new Map(),
+        exactEventIds: new Set(),
         openStreams: sameEpoch ? new Set(current!.openStreams) : new Set(),
         footballStreams: sameEpoch ? new Set(current!.footballStreams) : new Set(),
         baselineEmitted: true
@@ -504,18 +507,44 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (current === undefined || current.sourceEpoch !== sourceEpoch(envelope) ||
       current.generation !== batch.data.generation ||
       current.prematchWindowHours !== batch.data.prematchWindowHours) return [];
+    const isExactEventChange = batch.data.trigger === "EVENT_CHANGE";
     let changed = false;
     for (const rawEvent of batch.data.records) {
+      const eventId = apsportRawEventId(rawEvent);
+      if (eventId === null) continue;
+      const wasKnown = current.rosterEventIds.has(eventId);
+      if (!isExactEventChange && (!wasKnown || current.exactEventIds.has(eventId))) continue;
+      if (isExactEventChange &&
+        !eligibleApsportApiEvent(rawEvent, envelope.observedAtMs, batch.data.prematchWindowHours)) {
+        if (!wasKnown) continue;
+        current.exactEventIds.add(eventId);
+        current.rosterEventIds.delete(eventId);
+        current.rosterRecords.delete(eventId);
+        current.detailRecords.delete(eventId);
+        current.socketRecords.delete(eventId);
+        changed = true;
+        continue;
+      }
       if (!eligibleApsportApiEvent(rawEvent, envelope.observedAtMs, batch.data.prematchWindowHours)) continue;
-      const eventId = apsportRawEventId(rawEvent)!;
-      if (!current.rosterEventIds.has(eventId)) continue;
       const extracted = extractTsportFootballRecord(rawEvent);
       const previous = current.detailRecords.get(eventId)?.record;
       if (extracted === null) {
+        if (isExactEventChange && wasKnown) {
+          current.exactEventIds.add(eventId);
+          current.rosterEventIds.delete(eventId);
+          current.rosterRecords.delete(eventId);
+          current.socketRecords.delete(eventId);
+          changed = true;
+        }
         if (current.detailRecords.delete(eventId)) changed = true;
         continue;
       }
-      if (!sameRecord(previous, extracted)) changed = true;
+      if (isExactEventChange) {
+        current.rosterEventIds.add(eventId);
+        current.exactEventIds.add(eventId);
+        current.socketRecords.delete(eventId);
+        changed = true;
+      } else if (!sameRecord(previous, extracted)) changed = true;
       current.detailRecords.set(eventId, retainedRecord(extracted, envelope));
     }
     if (!changed) return [];
