@@ -63,8 +63,23 @@ describe("CmdHttpCatalogAdapter", () => {
       today: [firstHalfHandicapRow(25_307_846, 0.62, -0.74),
         firstHalfHandicapRow(25_329_282, -0.59, 0.47)] }, 1)).at(-1);
 
-    expect(update?.value?.markets.filter((market) => market.marketType === "FH_AH")).toEqual([]);
-    expect(update?.value?.quotes.filter((quote) => quote.marketType === "FH_AH")).toEqual([]);
+    const catalog = update?.value as { markets: Array<{ marketType: string }>;
+      quotes: Array<{ marketType: string }> };
+    expect(catalog.markets.filter((market) => market.marketType === "FH_AH")).toEqual([]);
+    expect(catalog.quotes.filter((quote) => quote.marketType === "FH_AH")).toEqual([]);
+  });
+
+  it("keeps a line a fixture simply lists twice at the same prices", () => {
+    // Repetition says nothing about which team lays the line, and books do
+    // repeat themselves: SABA carries this fixture's first-half handicap twice
+    // over, identical both times. Only two prices for one line are evidence.
+    const adapter = new CmdHttpCatalogAdapter();
+    const update = adapter.decode(envelope({ ...fullResponse, data: [],
+      today: [firstHalfHandicapRow(25_307_846, 0.62, -0.74),
+        firstHalfHandicapRow(25_329_282, 0.62, -0.74)] }, 1)).at(-1);
+
+    expect((update?.value as { markets: Array<{ marketType: string }> })
+      .markets.filter((market) => market.marketType === "FH_AH").length).toBeGreaterThan(0);
   });
 
   it("keeps a fixture's handicap ladder when the lines differ", () => {
@@ -74,7 +89,8 @@ describe("CmdHttpCatalogAdapter", () => {
     const update = adapter.decode(envelope({ ...fullResponse, data: [],
       today: [firstHalfHandicapRow(25_307_846, 0.62, -0.74), second] }, 1)).at(-1);
 
-    expect(update?.value?.markets.filter((market) => market.marketType === "FH_AH")).toHaveLength(2);
+    expect((update?.value as { markets: Array<{ marketType: string }> })
+      .markets.filter((market) => market.marketType === "FH_AH")).toHaveLength(2);
   });
 
   it("accepts the current decimal-string cursor and bounded alternating metadata row", () => {

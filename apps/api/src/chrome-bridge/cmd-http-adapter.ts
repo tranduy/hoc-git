@@ -421,15 +421,25 @@ function applyDelta(rows: Map<string, RetainedRow>, delta: readonly unknown[],
  * the row itself, which the live payloads observed so far do not distinguish.
  */
 function withJustifiedHandicaps(catalog: ObservedProviderCatalog): ObservedProviderCatalog {
-  const byLine = new Map<string, string[]>();
+  const pricesByMarket = new Map<string, string[]>();
+  for (const quote of catalog.quotes) {
+    (pricesByMarket.get(quote.providerMarketId) ??
+      pricesByMarket.set(quote.providerMarketId, []).get(quote.providerMarketId)!)
+      .push(`${quote.selection}=${quote.rawOdds}`);
+  }
+  const byLine = new Map<string, { id: string; prices: string }[]>();
   for (const market of catalog.markets) {
     if (!market.marketType.endsWith("_AH")) continue;
     const key = `${market.providerEventId} ${market.marketType} ${market.line ?? ""}`;
-    (byLine.get(key) ?? byLine.set(key, []).get(key)!).push(market.providerMarketId);
+    (byLine.get(key) ?? byLine.set(key, []).get(key)!).push({ id: market.providerMarketId,
+      prices: [...(pricesByMarket.get(market.providerMarketId) ?? [])].sort().join(" ") });
   }
   const contradicted = new Set<string>();
-  for (const ids of byLine.values()) {
-    if (ids.length > 1) for (const id of ids) contradicted.add(id);
+  for (const entries of byLine.values()) {
+    // A fixture listing one line twice at the same prices is repeating itself,
+    // which says nothing about which team lays it; two prices for one line do.
+    if (new Set(entries.map((entry) => entry.prices)).size < 2) continue;
+    for (const entry of entries) contradicted.add(entry.id);
   }
   if (contradicted.size === 0) return catalog;
   return { ...catalog,
