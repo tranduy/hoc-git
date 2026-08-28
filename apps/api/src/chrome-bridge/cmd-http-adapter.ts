@@ -361,7 +361,16 @@ function decodeRecord(row: readonly unknown[]): CmdCatalogInputRecord | null {
     if (line === null || first === null || second === null) continue;
     const marketId = `${eventId}:${betType}`;
     const handicap = betType === 1 || betType === 7;
-    const lineOwner = row[24] === 1 || row[24] === true ? 0 : 1;
+    // Each half names its own team. Reading row 24 for both published the
+    // first-half line as the mirror of the one the book was offering wherever
+    // the halves disagreed, which is 4 of the 732 rows captured on 2026-08-28 -
+    // and each mirrored side, priced against another book, reads as a large
+    // edge with both legs backing the same outcome. Row 64 called the
+    // first-half side correctly in all 44 rows where a fixture's own ladder
+    // could settle it, row 24 in 40; for the full-time market row 24 leads,
+    // 87 against 74.
+    const owner = betType === 7 ? row[64] : row[24];
+    const lineOwner = owner === 1 || owner === true ? 0 : 1;
     groups.push({ betTypeIds: [String(betType)], labels: [line], odds: [first, second].map((price, index) => ({
       marketOddsId: marketId, priceText: price, status: null, greyedOut: suspended ? "true" : null,
       ...(handicap && index === lineOwner ? { lineText: String(row[positions.line]) } : {})

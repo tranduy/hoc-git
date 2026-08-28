@@ -51,6 +51,26 @@ function firstHalfHandicapRow(eventId: number, home: number, away: number): unkn
 }
 
 describe("CmdHttpCatalogAdapter", () => {
+  it("reads each half's handicap side from its own field", () => {
+    // Atlante v Club Leon, captured 2026-08-28: row 24 says the home team lays
+    // the full-time line and row 64 says it receives the first-half one. Read
+    // row 24 for both and the first half is published as +0.25's mirror, which
+    // is what SBOBET and IM were pricing at 1.45 and 1.50 while CMD showed 1.54.
+    const adapter = new CmdHttpCatalogAdapter();
+    const row = Array<unknown>(91).fill(null);
+    Object.assign(row, {
+      0: 25_323_883, 3: 108_007, 10: 0.25, 12: -999, 14: 0.25, 16: -999, 24: 1, 25: 1, 64: 0,
+      37: "MEXICO PRIMERA DIVISION", 38: "Atlante", 39: "Club Leon",
+      40: -0.85, 41: 0.75, 42: -999, 43: -999, 44: 0.54, 45: -0.66, 46: -999, 47: -999,
+      53: "1H 4", 56: "08/23", 79: 0
+    });
+    const update = adapter.decode(envelope({ ...fullResponse, data: [], today: [row] }, 1)).at(-1);
+    const catalog = update?.value as { markets: Array<{ marketType: string; line: string | null }> };
+
+    expect(catalog.markets.find((market) => market.marketType === "FH_AH")?.line).toBe("0.25");
+    expect(catalog.markets.find((market) => market.marketType === "FT_AH")?.line).toBe("-0.25");
+  });
+
   it("withholds a fixture's handicap when one line arrives at two prices", () => {
     // Measured 2026-08-28: CMD carried Eintracht Braunschweig v Hertha Berlin's
     // first half twice at the same line, 1.62/2.35 against 2.69/1.47, which are
