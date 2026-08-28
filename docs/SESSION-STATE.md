@@ -46,6 +46,51 @@ Bài học chung: **extension khoẻ không có nghĩa dữ liệu đang chảy.
 extension, đo `listSources` và tuổi khung của từng sàn; nếu mọi sàn dừng trong cùng
 vài giây thì lỗi nằm ở chỗ dùng chung, không phải ở từng sàn.
 
+## CMD — dấu mức chấp hiệp 1, chưa dứt điểm
+
+Nguồn thật của danh mục CMD **không phải DOM** mà là
+`/Member/BetsView/BetLight/DataOdds.ashx`, giải mã ở
+`apps/api/src/chrome-bridge/cmd-http-adapter.ts`. Mỗi hàng dài 91 trường, `-999`
+nghĩa là không có kèo.
+
+```
+row[10] mức chấp cả trận   row[40]/[41] giá chủ/khách
+row[14] mức chấp hiệp 1    row[44]/[45] giá chủ/khách
+row[24] BÊN CHO CHẤP  ← dùng chung cho cả hai loại kèo
+```
+
+Mức chấp luôn là **trị tuyệt đối** (`0.25`, không bao giờ `-0.25`); dấu hoàn toàn
+do `row[24]` quyết định. Trận nào hiệp 1 và cả trận nằm ở hai bên khác nhau thì
+một trong hai chắc chắn sai, và nửa sai được phát ra như **ảnh gương** của mức
+chấp thật.
+
+Đo 2026-08-28: CMD ra `Atlante v Club Leon` hiệp 1 là `1.54/2.52` trong khi
+SBOBET `2.54/1.51`, IM `2.47/1.56` cùng mức chấp — và kèo cả trận của chính CMD
+đồng ý với họ. Ghép chéo, nửa bị gương đọc thành **ROI 16,46%**, hai chân vé
+cùng đặt một cửa. 3/348 phép so chấp hiệp 1 giữa các sàn lệch; mọi loại kèo khác
+đúng 1260/1260.
+
+**Đã làm** (`32269b8`, `8c7c962`): giữ lại kèo khi một trận có hai kèo cùng loại
+cùng mức chấp mà **giá khác nhau** — bằng chứng chắc chắn có bên bị gán sai,
+nhưng không biết bên nào nên không phát cái nào. Trùng lặp **cùng giá** thì giữ
+(SABA phát trùng y hệt rất nhiều).
+
+**Chưa xong:** trận chỉ có duy nhất một kèo hiệp 1 thì không có gì để đối chiếu.
+Muốn tìm trường mang bên cho chấp của hiệp 1 phải có payload của **trận chưa đá**
+— mọi payload bắt được tới giờ chỉ có trận đang đá, và ở đó `row[24]` đúng cả
+11/11 hiệp 1 lẫn 14/15 cả trận.
+
+Bật ghi payload: `CHROME_BRIDGE_CAPTURE=1 CHROME_BRIDGE_CAPTURE_LOBBIES=CMD`,
+ghi vào `%LOCALAPPDATA%\tool-chenh\chrome-bridge-captures`. Ghi cho cả 6 sàn sẽ
+làm `replay-harness.test.ts` hết lỗi (hiện thiếu payload 5 sàn).
+
+## Mức chấp nguyên bị loại là CỐ Ý
+
+`isSupportedFootballTwoWayLine` có `quarterUnits % 4 !== 0` — loại mọi mức chấp
+nguyên (0, 1, 2…). Khoảng một phần ba kèo chấp của CMD rơi vào đây. **Đừng
+"sửa"**: kèo chấp nguyên có thể hoà vốn hoàn tiền, mà bộ tính ROI chưa mô hình
+hoá hoàn tiền — tính vào là ra ROI sai.
+
 ## VIỆC GẤP NHẤT — chưa làm
 
 **Bảng đang xếp vé ROI dương dựng từ dữ liệu cũ lên đầu.** Đo được: 4 vé dương
