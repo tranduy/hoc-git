@@ -312,7 +312,9 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
       });
     }
   }
-  if (markets.length === 0) return null;
+  // A frame that carries a score or a clock and no market is ordinary, and
+  // saying so is what keeps it from reading as a fixture nobody carries.
+  if (markets.length === 0) return noteRefusal("record-no-usable-markets");
   const scoreHome = Number(event["25"]);
   const scoreAway = Number(event["26"]);
   const scoreText = Number.isSafeInteger(scoreHome) && scoreHome >= 0 && Number.isSafeInteger(scoreAway) && scoreAway >= 0
@@ -579,7 +581,11 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (state.sourceEpoch !== sourceEpoch(envelope)) return [];
     const event = this.#parsed.get(envelope);
     const incoming = event === null || event === undefined ? null : extractTsportFootballRecord(event);
-    if (incoming === null || !state.rosterEventIds.has(incoming.eventId)) return this.#ignore("socket-event-not-in-roster");
+    // Two different frames were counted under one name, and they call for
+    // opposite fixes: one is a frame this adapter could not read as a football
+    // record at all, the other a fixture the roster does not carry.
+    if (incoming === null) return this.#ignore("socket-record-unusable");
+    if (!state.rosterEventIds.has(incoming.eventId)) return this.#ignore("socket-event-not-in-roster");
     state.openStreams.add(streamId);
     state.footballStreams.add(streamId);
     const previous = state.socketRecords.get(incoming.eventId)?.record;
