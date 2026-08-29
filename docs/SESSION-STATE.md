@@ -3,6 +3,28 @@
 Đọc file này thay cho việc đọc lại lịch sử hội thoại. Mọi số trong đây đều là số đo
 thật, không phải ước lượng.
 
+## SABA — đặt tên xong, và cái tên nói đầu vào sai chứ không phải bộ giải mã
+
+Đã đặt tên 9 lối thoát câm của `saba-ws-adapter.ts` (commit `f4ae6da`) và tách
+năm kết cục mà `decodePublicDomRecords` gộp chung thành một `null` (commit `7b72752`).
+
+Kết quả sau khi triển khai:
+
+```
+4 /ignored/dom-no-record-of-1-matched-schema
+```
+
+Ảnh chụp DOM của SABA chỉ có **1 bản ghi**, và bản ghi đó không khớp lược đồ nào.
+Một trang sổ thể thao đang chạy phải cho ra hàng chục bản ghi. **Một bản ghi lạ là
+hình dạng của trang lỗi hoặc trang đăng nhập**, khớp với ghi chép cũ:
+`ErrorPage?Game=DepositLogin&ErrCode=SPA-1008`.
+
+**Kết luận: SABA không phải lỗi bộ giải mã — tab của nó không ở trang sổ thể thao.**
+Cần người dùng mở lại. Khi tab về đúng trang, đo lại bằng `do-go-keo.mts`; nếu
+vẫn hỏng thì bây giờ báo cáo đã biết nói cửa nào.
+
+---
+
 ## Trạng thái mới nhất — 2026-08-29 tối
 
 **5/6 sàn LIVE.** Đo bằng `npx tsx .run/do-go-keo.mts 60000`, chỉ tính trận đang đá:
