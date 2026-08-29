@@ -976,7 +976,7 @@ describe("NetworkObserver", () => {
       observer.refreshCatalog({ lobby: "BTI", sourceId: "chrome:BTI:healthy", tabId: 9 })
     ]);
 
-    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
     expect(sendCommand.mock.calls.some(([tabId]) => tabId === 9)).toBe(true);
   });
 
@@ -1002,6 +1002,88 @@ describe("NetworkObserver", () => {
     await observer.refreshCatalog({ lobby: "TSPORT", sourceId: "chrome:TSPORT:8", tabId: 8 });
 
     expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.callFunctionOn")).toBe(false);
+  });
+
+  it("reconnects a silently dead SABA socket after 60s without catalog frames, once per minute", async () => {
+    let now = 1_000;
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && params?.expression ===
+        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        return { result: { objectId: "socket-io-prototype" } };
+      }
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => now, monotonicNow: () => now });
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const reconnects = () => sendCommand.mock.calls.filter(([, method, params]) =>
+      method === "Runtime.callFunctionOn" &&
+      String(params?.functionDeclaration).includes("socket.disconnect(); socket.connect()")).length;
+
+    // First poll seeds the silence clock; no reconnect yet.
+    await observer.pollSabaDomChanges(source, "push.example");
+    expect(reconnects()).toBe(0);
+
+    now = 30_000;
+    await observer.pollSabaDomChanges(source, "push.example");
+    expect(reconnects()).toBe(0);
+
+    // A full minute with no decoded catalog frame forces one reconnect.
+    now = 62_000;
+    await observer.pollSabaDomChanges(source, "push.example");
+    expect(reconnects()).toBe(1);
+
+    // Bounded to once per minute.
+    now = 90_000;
+    await observer.pollSabaDomChanges(source, "push.example");
+    expect(reconnects()).toBe(1);
+
+    now = 125_000;
+    await observer.pollSabaDomChanges(source, "push.example");
+    expect(reconnects()).toBe(2);
+  });
+
+  it("does not force a SABA reconnect while catalog frames keep arriving", async () => {
+    let now = 1_000;
+    const sendCommand = vi.fn(async (_tabId: number, _method: string) => ({}));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => now, monotonicNow: () => now });
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const frame = (sequence: number) => observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "saba-ws", response: { opcode: 1,
+        payloadData: `42${JSON.stringify(["m", "b11", [[0, "o", 2, 1, 1, sequence]], sequence])}` } });
+
+    await observer.handleEvent(source, "Network.webSocketCreated", {
+      requestId: "saba-ws", url: "wss://push.example/socket.io/" });
+    await observer.pollSabaDomChanges(source, "push.example");
+    await frame(1);
+    now = 55_000;
+    await frame(2);
+    now = 100_000;
+    await observer.pollSabaDomChanges(source, "push.example");
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
+  });
+
+  it("retains TSPORT event frames from the live-view socket path (p/2, mg/1) for replay", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward,
+      now: () => 1_000, monotonicNow: () => 60 });
+    const source = { lobby: "TSPORT", sourceId: "chrome:TSPORT:9", tabId: 9 } as const;
+    const url = "wss://spws.agenate.com/ln/en/p/2/u/MxcZnFVvGKUOdnHngKzURw==/s/1/mg/1/tr/0";
+    const body = JSON.stringify({ s: 1, t: "eu", tmrg: "0", d: JSON.stringify({ "2": 5659739 }) });
+
+    await observer.handleEvent(source, "Network.webSocketCreated", { requestId: "ts-ws", url });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", { requestId: "ts-ws",
+      response: { opcode: 1, payloadData: body } });
+    forward.mockClear();
+
+    await observer.replaySnapshots(source.sourceId);
+
+    expect(forward.mock.calls.some(([envelope]) => envelope.transport === "WS_FRAME" &&
+      envelope.payload.body === body)).toBe(true);
   });
 
   it("reconnects only SABA Socket.IO after an epoch bump discards its retired baseline", async () => {
@@ -1173,7 +1255,7 @@ describe("NetworkObserver", () => {
 
       expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
         params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
-      expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+      expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
       expect(sendCommand).not.toHaveBeenCalledWith(8, "Page.reload", expect.anything());
   });
 
@@ -5260,7 +5342,7 @@ describe("NetworkObserver", () => {
 
     expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
       typeof params?.expression === "string" && params.expression.includes("fieldline-saba-time-baseline"))).toBe(false);
-    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
   });
 
   it("takes only two bounded SABA DOM snapshots without changing the current provider view", async () => {
@@ -5295,7 +5377,7 @@ describe("NetworkObserver", () => {
     expect(forward.mock.calls.filter(([message]) => message.transport === "DOM_SNAPSHOT")).toHaveLength(2);
     expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
       typeof params?.expression === "string" && params.expression.includes("fieldline-saba-time-baseline"))).toBe(false);
-    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.queryObjects")).toBe(false);
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
   });
 
   it("recovers a missed SABA baseline by reconnecting inside the owning OOPIF", async () => {

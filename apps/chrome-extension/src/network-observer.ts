@@ -142,8 +142,11 @@ function isPotentialKsportCatalogPayload(payload: string): boolean {
 }
 
 function isTsportEventSocket(url: URL): boolean {
+  // The provider's live football view streams on p/2 with market group mg/1;
+  // only the sport segment (s/1 = football) is identity. Locking p/1 + mg/0
+  // silently discarded every frame from a tab opened on the live view.
   return url.protocol === "wss:" && /^spws\.(?:agenate|racern)\.com$/iu.test(url.hostname) &&
-    /^\/ln\/[^/]+\/(?:p\/1\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/0\/tr\/0$/u.test(url.pathname);
+    /^\/ln\/[^/]+\/(?:p\/\d+\/u\/[^/]+(?:\/[^/]+)?\/)?s\/1\/mg\/\d+\/tr\/0$/u.test(url.pathname);
 }
 
 export interface ObservedSource {
@@ -998,6 +1001,8 @@ export class NetworkObserver {
   readonly #socketBaselineRecoveries = new Map<string, { readonly token: symbol;
     readonly operation: Promise<void> }>();
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
+  readonly #sabaCatalogFrameAtMs = new Map<string, number>();
+  readonly #sabaSilentSocketRecoveryAtMs = new Map<string, number>();
   // The attach diagnostic is rebuilt whenever a source generation rolls, which
   // erased what the tab selector had just seen before it could be read. The
   // labels are the whole point of the report, so keep the last ones per source.
@@ -1604,6 +1609,8 @@ export class NetworkObserver {
     this.#socketBaselineRecoveryAtMs.delete(sourceId);
     this.#socketBaselineRecoveries.delete(sourceId);
     this.#sabaDomBootstrapAtMs.delete(sourceId);
+    this.#sabaCatalogFrameAtMs.delete(sourceId);
+    this.#sabaSilentSocketRecoveryAtMs.delete(sourceId);
     this.#sabaDomObserversCleaned.delete(sourceId);
     for (const key of this.#sabaReadySnapshotPartitions) {
       if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
@@ -1729,6 +1736,8 @@ export class NetworkObserver {
       this.#sabaSnapshotLastSavedAtMs.delete(sourceId);
       this.#sabaDocumentMarkers.delete(sourceId);
       this.#sabaDomBootstrapAtMs.delete(sourceId);
+      this.#sabaCatalogFrameAtMs.delete(sourceId);
+      this.#sabaSilentSocketRecoveryAtMs.delete(sourceId);
       this.#sbobetEventRequests.delete(sourceId);
       this.#observedChildSessions.delete(sourceId);
       this.#ksportAttachedTargetSessions.delete(sourceId);
@@ -1844,6 +1853,19 @@ export class NetworkObserver {
   }
 
   async #pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
+    // SABA's Socket.IO connection can die without a close event; the DOM
+    // fallback then only covers the visible viewport. Once the socket has
+    // been silent for a full minute, ask the page to reconnect it (bounded to
+    // once per minute). The silence clock is seeded on the first poll so a
+    // worker restart landing on an already-dead socket still recovers.
+    const silenceNowMs = this.#now();
+    const lastSabaFrameAtMs = this.#sabaCatalogFrameAtMs.get(source.sourceId) ??
+      (this.#sabaCatalogFrameAtMs.set(source.sourceId, silenceNowMs), silenceNowMs);
+    if (silenceNowMs - lastSabaFrameAtMs > 60_000 &&
+      silenceNowMs - (this.#sabaSilentSocketRecoveryAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) > 60_000) {
+      this.#sabaSilentSocketRecoveryAtMs.set(source.sourceId, silenceNowMs);
+      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+    }
     if (this.hasCompleteSabaBaseline(source.sourceId)) {
       if (this.#sabaDomObserversCleaned.has(source.sourceId)) return;
       const evaluations: Array<Promise<unknown>> = [
@@ -4855,6 +4877,7 @@ export class NetworkObserver {
           !Array.isArray(payload[2])) return;
         partition = `${streamId}:${payload[1]}`;
         if (source.lobby === "SABA") {
+          this.#sabaCatalogFrameAtMs.set(source.sourceId, clocks.observedAtMs);
           startsBaseline = payload[2].some((row) => Array.isArray(row) &&
             (row[1] === "reset" || row[1] === "empty"));
           completesBaseline = payload[2].some((row) => Array.isArray(row) && row[1] === "done");
