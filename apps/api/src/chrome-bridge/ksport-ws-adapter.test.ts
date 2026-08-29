@@ -714,19 +714,23 @@ describe("KsportWsCatalogAdapter", () => {
     expect(adapter.decode(socketState("ksport-stream-2", "OPEN", 6, "worker-a:0"))).toEqual([]);
     expect(adapter.decode(socketState("ksport-stream-2", "CLOSED", 7, "worker-a:0"))).toEqual([]);
     expect(adapter.decode(socketState("ksport-stream-3", "OPEN", 8, "worker-a:0"))).toEqual([]);
-    expect(adapter.decode(withRecoveryGeneration(receiptEnvelope(
+    // A league-shaped fragment on a fresh stream is an upsert, not a socket
+    // authority handover: promoting it would shrink the partition to the few
+    // events it happens to carry.
+    const foldUpdates = adapter.decode(withRecoveryGeneration(receiptEnvelope(
       [{ "1": "Live", "2": [event(5643425)] }], "live", 9, 200,
-      "ksport-stream-3", "worker-a:0"), 2))).toEqual([]);
-    expect(adapter.decode(withRecoveryGeneration(receiptEnvelope([], "today", 10, 204,
-      "ksport-stream-3", "worker-a:0"), 2))).toEqual([expect.objectContaining({
-      authoritativeBaseline: true, provenance: "WS",
-      generation: "worker-a:0:ksport-ws:ksport-stream-3:2"
+      "ksport-stream-3", "worker-a:0"), 2));
+    expect(foldUpdates).toEqual([expect.objectContaining({
+      evidenceMode: "DELTA", provenance: "WS", generation: "worker-a:0:ksport-http:8:1"
     })]);
-    expect(adapter.decode(socketState("ksport-stream-3", "CLOSED", 11, "worker-a:0")))
-      .toEqual([expect.objectContaining({
-        invalidateAccountId: "catalog-source:SBOBET:FOOTBALL",
-        reason: "PROVIDER_STREAM_CLOSED"
-      })]);
+    const folded = foldUpdates[0]!.value as { events: Array<{ providerEventId: string }> };
+    expect(folded.events.map((item) => item.providerEventId).sort())
+      .toEqual(["5643423", "5643424", "5643425"]);
+    expect(adapter.decode(withRecoveryGeneration(receiptEnvelope([], "today", 10, 204,
+      "ksport-stream-3", "worker-a:0"), 2))).toEqual([]);
+    // The socket never owned the committed catalog, so its close cannot
+    // invalidate it.
+    expect(adapter.decode(socketState("ksport-stream-3", "CLOSED", 11, "worker-a:0"))).toEqual([]);
   });
 
   it("treats duplicate current OPEN as a no-op after a completed KSPORT baseline", () => {

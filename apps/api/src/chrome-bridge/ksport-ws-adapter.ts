@@ -355,17 +355,20 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       const partition = receiptPartition(receipt);
       if (partition === null) continue;
       const fullSnapshot = isFullPartitionSnapshot(receipt.body);
-      if (source.authority === "HTTP" && (source.httpAuthorityCutoff === null ||
-        envelope.sequence <= source.httpAuthorityCutoff)) continue;
-      if (source.authority === "HTTP" && !fullSnapshot) {
-        // Measured 2026-08-30: the provider full-snapshots only in reply to a
-        // fresh SUBSCRIBE ("today" answers via subSportHotMatch with deltas
-        // only), so a healthy socket can never hand authority over from the
-        // committed HTTP baseline and the catalog froze between baselines.
-        // Deltas observed after that baseline's request fence are coherent
-        // with it; fold them into the HTTP lane instead. This deliberately
-        // leaves wsSequenceHighWatermark alone - advancing it here would
-        // discard every future HTTP baseline via the pending-baseline fence.
+      if (source.authority === "HTTP") {
+        // Measured 2026-08-30: the provider streams per-event updates in the
+        // exact league-array wire shape of a full snapshot (1-2 events per
+        // frame), so "looks like a full snapshot" cannot mean "is one".
+        // Promoting such a fragment to socket authority would replace a whole
+        // partition with a handful of events, and waiting for a genuine full
+        // pair froze the catalog between HTTP baselines. While an HTTP
+        // baseline is committed, fold every receipt observed after that
+        // baseline's request fence into the HTTP lane as an upsert instead.
+        // This deliberately leaves wsSequenceHighWatermark alone - advancing
+        // it here would discard every future HTTP baseline via the
+        // pending-baseline fence.
+        if (source.httpAuthorityCutoff === null ||
+          envelope.sequence <= source.httpAuthorityCutoff) continue;
         appliedHttpLaneDelta = applyHttpLaneDelta(source, receipt, partition, envelope) ||
           appliedHttpLaneDelta;
         continue;
