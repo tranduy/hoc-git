@@ -468,16 +468,16 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
 
   #decodeApiBatch(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     let raw: unknown;
-    try { raw = JSON.parse(envelope.payload.body); } catch { return []; }
+    try { raw = JSON.parse(envelope.payload.body); } catch { return this.#ignore("roster-body-unparsed"); }
     const batch = apsportCatalogBatchSchema.safeParse(raw);
-    if (!batch.success) return [];
+    if (!batch.success) return this.#ignore("roster-shape");
     const parsedGeneration = apsportGeneration(batch.data.generation);
     if (parsedGeneration === null || parsedGeneration.order[0] !== envelope.tabId ||
-      !this.#acceptDomSourceEpoch(envelope.sourceId, sourceEpoch(envelope))) return [];
+      !this.#acceptDomSourceEpoch(envelope.sourceId, sourceEpoch(envelope))) return this.#ignore("roster-generation-or-epoch");
     const current = this.#apiSources.get(envelope.sourceId);
     if (batch.data.phase === "ROSTER") {
       if (!batch.data.complete || (current !== undefined && current.sourceEpoch === sourceEpoch(envelope) &&
-        compareGeneration(parsedGeneration.order, current.generationOrder) <= 0)) return [];
+        compareGeneration(parsedGeneration.order, current.generationOrder) <= 0)) return this.#ignore("roster-incomplete-or-old");
       const rosterEventIds = new Set<string>();
       const rosterRecords = new Map<string, RetainedRecord>();
       for (const rawEvent of batch.data.records) {
@@ -506,7 +506,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     if (current === undefined || current.sourceEpoch !== sourceEpoch(envelope) ||
       current.generation !== batch.data.generation ||
-      current.prematchWindowHours !== batch.data.prematchWindowHours) return [];
+      current.prematchWindowHours !== batch.data.prematchWindowHours) return this.#ignore("delta-generation-mismatch");
     const isExactEventChange = batch.data.trigger === "EVENT_CHANGE";
     let changed = false;
     for (const rawEvent of batch.data.records) {
@@ -547,18 +547,18 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       } else if (!sameRecord(previous, extracted)) changed = true;
       current.detailRecords.set(eventId, retainedRecord(extracted, envelope));
     }
-    if (!changed) return [];
+    if (!changed) return this.#ignore("delta-no-change");
     return [this.#apiCatalogUpdate(envelope, current, "DELTA", "AUTHENTICATED_HTTP")];
   }
 
   #decodeApiSocketState(envelope: ChromeBridgeEnvelope, state: ApsportApiState,
     streamId: string): readonly DecodedCatalogUpdate[] {
-    if (state.sourceEpoch !== sourceEpoch(envelope)) return [];
+    if (state.sourceEpoch !== sourceEpoch(envelope)) return this.#ignore("socket-epoch-mismatch");
     const lifecycle = websocketLifecycleState(envelope);
-    if (lifecycle === null) return [];
+    if (lifecycle === null) return this.#ignore("socket-not-lifecycle");
     if (lifecycle === "OPEN") {
       state.openStreams.add(streamId);
-      return [];
+      return this.#ignore("socket-open");
     }
     state.openStreams.delete(streamId);
     const wasFootball = state.footballStreams.delete(streamId);
@@ -573,7 +573,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (state.sourceEpoch !== sourceEpoch(envelope)) return [];
     const event = this.#parsed.get(envelope);
     const incoming = event === null || event === undefined ? null : extractTsportFootballRecord(event);
-    if (incoming === null || !state.rosterEventIds.has(incoming.eventId)) return [];
+    if (incoming === null || !state.rosterEventIds.has(incoming.eventId)) return this.#ignore("socket-event-not-in-roster");
     state.openStreams.add(streamId);
     state.footballStreams.add(streamId);
     const previous = state.socketRecords.get(incoming.eventId)?.record;
