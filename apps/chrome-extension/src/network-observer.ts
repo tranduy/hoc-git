@@ -2491,8 +2491,18 @@ export class NetworkObserver {
   async #refreshApsportCatalog(source: ObservedSource, options: CatalogRefreshOptions): Promise<void> {
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const tabGeneration = this.#captureTabGeneration(source.tabId);
-    const template = this.#apsportRequestTemplates.get(source.sourceId) ??
-      await this.#bootstrapApsportRequestTemplate(source, sourceGeneration, tabGeneration);
+    // A template belongs to the source and tab generation it was captured in,
+    // and both move on every reconnect. Reusing whatever was cached and then
+    // refusing to act on it left the book with one roster for its whole life:
+    // measured 2026-08-29, APSPORT's source had reached generation 20 while its
+    // catalog still carried generation 1, so no baseline had arrived in four
+    // and a half minutes against a two-minute limit and the feed sat in hard
+    // recovery while its socket delivered evidence every 200ms.
+    const cached = this.#apsportRequestTemplates.get(source.sourceId);
+    const template = cached !== undefined && cached.sourceGeneration === sourceGeneration &&
+      cached.tabGeneration === tabGeneration
+      ? cached
+      : await this.#bootstrapApsportRequestTemplate(source, sourceGeneration, tabGeneration);
     if (template === undefined || template === null) {
       this.#lastCaptureExit.set(source.sourceId, "APSPORT_REQUEST_TEMPLATE_MISSING");
       return;
@@ -2502,7 +2512,13 @@ export class NetworkObserver {
       this.#lastCaptureExit.set(source.sourceId, "APSPORT_PREMATCH_WINDOW_INVALID");
       return;
     }
-    if (template.sourceGeneration !== sourceGeneration || template.tabGeneration !== tabGeneration) return;
+    // Only reachable when a generation moved during the bootstrap above; the
+    // next refresh rebuilds against the newer one. Named because a refresh that
+    // stops here stops the book's whole catalog.
+    if (template.sourceGeneration !== sourceGeneration || template.tabGeneration !== tabGeneration) {
+      this.#lastCaptureExit.set(source.sourceId, "APSPORT_TEMPLATE_GENERATION_STALE");
+      return;
+    }
     const refreshStartedAtMs = this.#now();
     const previousRefreshAtMs = this.#apsportLastRefreshStartedAtMs.get(source.sourceId);
     if (previousRefreshAtMs !== undefined &&
