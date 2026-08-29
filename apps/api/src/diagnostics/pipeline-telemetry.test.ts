@@ -146,7 +146,8 @@ describe("PipelineTelemetry", () => {
       targetsTotal: 0, targetsIframe: 0, autoAttachEvents: 0,
       baselineLive: 0, baselineToday: 0, baselineTabSelections: 0,
       baselineTabStatus: "NONE", baselineTabTargets: 0, baselineTabStep: "NONE",
-      baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0, catalogShape: "", baselineTabLabels: ""
+      baselineTabGroups: 0, baselineTabScopes: 0, baselineTabPeriods: 0, catalogShape: "", baselineTabLabels: "",
+      reconnectAttempts: 0, reconnectOutcomes: ""
     });
   });
 

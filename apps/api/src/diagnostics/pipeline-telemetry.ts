@@ -137,6 +137,8 @@ interface AccountState {
     readonly baselineTabPeriods: number;
     readonly baselineTabLabels: string;
     readonly catalogShape: string;
+    readonly reconnectAttempts: number;
+    readonly reconnectOutcomes: string;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -461,7 +463,7 @@ export class PipelineTelemetry {
         baselineTabSelections?: unknown; baselineTabStatus?: unknown;
         baselineTabTargets?: unknown; baselineTabStep?: unknown; baselineTabGroups?: unknown;
         baselineTabScopes?: unknown; baselineTabPeriods?: unknown; baselineTabLabels?: unknown;
-        catalogShape?: unknown };
+        catalogShape?: unknown; reconnectAttempts?: unknown; reconnectOutcomes?: unknown };
       if (Array.isArray((value as { results?: unknown }).results)) {
         for (const entry of (value as { results: readonly unknown[] }).results) {
           if (typeof entry !== "string" || !refreshOutcomes.has(entry)) continue;
@@ -503,6 +505,8 @@ export class PipelineTelemetry {
           stompPartitionRejected: boundedCounter(value.stompPartitionRejected),
           snapshotRejections: snapshotRejections(value.snapshotRejections),
           destinationShapes: catalogShape(value.destinationShapes),
+          reconnectAttempts: boundedCounter(value.reconnectAttempts),
+          reconnectOutcomes: catalogShape(value.reconnectOutcomes),
           stompPendingChars: boundedCounter(value.stompPendingChars),
           stompCommandFragments: boundedCounter(value.stompCommandFragments),
           stompFragments: boundedCounter(value.stompFragments),

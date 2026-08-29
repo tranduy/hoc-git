@@ -312,6 +312,11 @@ interface WsAttachDiagnosticState {
   destTodayLike: number;
   destSportsLike: number;
   subSportLike: number;
+  // Socket-reconnect probe results per attempt, labelled by target kind, so a
+  // reconnect that silently finds no prototype/instances in the session that
+  // actually owns the socket is visible without a service-worker console.
+  reconnectAttempts: number;
+  reconnectOutcomes: string;
   // Target discovery shape: distinguishes "no child target is visible at all"
   // from "iframes are visible but none is on the provider host".
   targetsTotal: number;
@@ -2746,6 +2751,17 @@ export class NetworkObserver {
         socket.close(4000, "fieldline-baseline-recovery"); count += 1;
       } catch {} } return count; }`
     }];
+    const reconnectDiagnostic = this.#wsAttachDiagnostic(source);
+    reconnectDiagnostic.reconnectAttempts += 1;
+    const noteOutcome = (target: { readonly contextId?: number; readonly sessionId?: string },
+      outcome: string): void => {
+      const label = `${target.sessionId !== undefined ? "session" : target.contextId !== undefined
+        ? "context" : "root"}:${outcome}`;
+      const entries = reconnectDiagnostic.reconnectOutcomes.length === 0 ? []
+        : reconnectDiagnostic.reconnectOutcomes.split(" ");
+      entries.push(label);
+      reconnectDiagnostic.reconnectOutcomes = entries.slice(-12).join(" ");
+    };
     for (const target of targets) {
       const sendToSocketTarget = (method: string, params: Record<string, unknown>): Promise<unknown> =>
         target.sessionId === undefined
@@ -2762,7 +2778,7 @@ export class NetworkObserver {
           }), this.#frameCommandTimeoutMs).catch(() => null);
           if (!isCurrent()) return;
           const prototypeId = nestedValue(prototype, "result", "objectId");
-          if (typeof prototypeId !== "string") continue;
+          if (typeof prototypeId !== "string") { noteOutcome(target, "no-prototype"); continue; }
           if (!isCurrent()) return;
           const queried = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.queryObjects", {
             prototypeObjectId: prototypeId, objectGroup: group
@@ -2771,13 +2787,14 @@ export class NetworkObserver {
             .catch(() => null);
           if (!isCurrent()) return;
           const instancesId = nestedValue(queried, "objects", "objectId");
-          if (typeof instancesId !== "string") continue;
+          if (typeof instancesId !== "string") { noteOutcome(target, "no-instances"); continue; }
           if (!isCurrent()) return;
           const result = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.callFunctionOn", {
             objectId: instancesId, functionDeclaration: strategy.reconnect, returnByValue: true
           })).catch(() => null);
           if (!isCurrent()) return;
           const count = nestedValue(result, "result", "value");
+          noteOutcome(target, `closed-${typeof count === "number" ? count : "err"}`);
           if (typeof count === "number" && count > 0) return;
         }
       } finally {
@@ -2868,6 +2885,7 @@ export class NetworkObserver {
     if (existing !== undefined && existing.sourceGeneration === sourceGeneration) return existing;
     const created: WsAttachDiagnosticState = {
       sourceGeneration, webSocketCreated: 0, ksportTargets: 0, attachedTargets: 0,
+      reconnectAttempts: 0, reconnectOutcomes: "",
       framesReceived: 0, framesOrphan: 0, framesForwarded: 0, ignoredSockets: 0,
       framesBinary: 0, framesNotOwner: 0, framesUnattributed: 0, framesNotActiveStream: 0,
       framesDecoderFailed: 0, sockjsOpen: 0, sockjsHeartbeat: 0, sockjsArray: 0,
