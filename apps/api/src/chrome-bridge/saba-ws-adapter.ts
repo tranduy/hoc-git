@@ -141,11 +141,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   }
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
-    if (!this.fingerprint(envelope)) return [];
+    if (!this.fingerprint(envelope)) return this.#ignore("fingerprint-refused");
     // Replayed provider evidence is display/bootstrap material only. It must
     // not allocate decoders, advance lifecycle high-water marks, or retire the
     // active stream even when this adapter is called outside the data plane.
-    if (envelope.request.replayed === true) return [];
+    if (envelope.request.replayed === true) return this.#ignore("replayed-evidence");
     if (envelope.transport === "DOM_SNAPSHOT") {
       // The DOM is only the visible viewport, never an authoritative baseline.
       // Publishing it before reset/done makes a healthy reconnect look LIVE
@@ -157,7 +157,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       // The DOM remains a separate partition, so hidden socket-only markets
       // stay in the union while overlapping visible prices are refreshed.
       const records = decodePublicDomRecords(this.#assembler, envelope);
-      if (records === null) return [];
+      if (records === null) return this.#ignore("dom-undecodable");
       const usable = records.filter((record) => record.groups.length > 0);
       if (!socketReady) {
         // Some SABA deployments expose the complete current event table in the
@@ -166,16 +166,26 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         // authority; a smaller complete-looking table still needs a second
         // stable generation. Later generations must retain nearly identical
         // coverage, so a scrolling viewport cannot erase the last good catalog.
-        if (usable.length < MIN_STABLE_DOM_EVENTS) return [];
+        // SABA has run on the DOM since its socket decoder stopped covering the
+        // feed, so these three gates are its whole catalog, and every one of
+        // them was silent: 44 snapshots were dropped with only the endpoint to
+        // show for it. The counts say which gate to move and by how much.
+        if (usable.length < MIN_STABLE_DOM_EVENTS) {
+          return this.#ignore(`dom-${usable.length}-events-under-${MIN_STABLE_DOM_EVENTS}`);
+        }
         const identities = new Set(usable.map((record) => record.matchId));
         const previous = this.#domCandidates.get(envelope.sourceId);
         if (!this.#domReadySources.has(envelope.sourceId)) {
           this.#domCandidates.set(envelope.sourceId, identities);
-          if (previous === undefined && usable.length < SINGLE_GENERATION_DOM_EVENTS) return [];
-          if (previous !== undefined && !stableDomCoverage(previous, identities)) return [];
+          if (previous === undefined && usable.length < SINGLE_GENERATION_DOM_EVENTS) {
+            return this.#ignore(`dom-first-generation-${usable.length}-under-${SINGLE_GENERATION_DOM_EVENTS}`);
+          }
+          if (previous !== undefined && !stableDomCoverage(previous, identities)) {
+            return this.#ignore(`dom-coverage-moved-${previous.size}-to-${identities.size}`);
+          }
           this.#domReadySources.add(envelope.sourceId);
         } else if (previous !== undefined && !stableDomCoverage(previous, identities)) {
-          return [];
+          return this.#ignore(`dom-ready-coverage-moved-${previous.size}-to-${identities.size}`);
         }
         this.#domCandidates.set(envelope.sourceId, identities);
       }
@@ -265,7 +275,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       try {
         recoveryFrame = parseSabaSocketFrame(envelope.payload.body);
       } catch {
-        return [];
+        return this.#ignore("recovery-frame-unparsable");
       }
       const recoveryStartsBaseline = recoveryFrame !== null &&
         (recoveryFrame.rows as readonly unknown[]).some((row) => Array.isArray(row) &&
@@ -419,7 +429,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
           invalidateAccountId: ACCOUNT_ID, reason: sequenceGap ? "PROVIDER_STREAM_GAP" : "SCHEMA_CHANGED" }];
       }
-      return [];
+      return this.#ignore("decode-fault-held-behind-watermark");
     }
   }
 

@@ -237,6 +237,38 @@ describe("SabaWsCatalogAdapter", () => {
     expect(adapter.decode(input)).toEqual([]);
   });
 
+  it("says how far short a DOM snapshot fell instead of dropping it in silence", () => {
+    // SABA has run on the DOM since its socket decoder stopped covering the
+    // feed, so these gates are its whole catalog. Forty-four snapshots were
+    // dropped on 2026-08-29 with only the endpoint reported, which cannot say
+    // whether the viewport was small or the coverage had moved.
+    const domSnapshot = (count: number, snapshotId: string): ChromeBridgeEnvelope => ({
+      ...envelope(""), transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2, snapshotId,
+        chunkIndex: 0, chunkCount: 1,
+        records: Array.from({ length: count }, (_, index) => ({
+          sportId: "1", leagueId: String(index + 1), leagueName: `League ${index}`,
+          matchId: String(index + 2), timeText: "1H0'", teamNames: [`Home ${index}`, `Away ${index}`],
+          groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
+            { marketOddsId: String(index + 3), priceText: "0.92", status: null,
+              greyedOut: null, lineText: "0.5" },
+            { marketOddsId: String(index + 3), priceText: "-0.98", status: null, greyedOut: null }
+          ] }]
+        })) }) }
+    });
+
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(domSnapshot(3, "saba:7:snapshot-0101"))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("dom-3-events-under-20");
+
+    // Above the stable minimum but below what one generation may establish
+    // alone: a different gate, and it has to be possible to tell which.
+    const bigger = new SabaWsCatalogAdapter();
+    expect(bigger.decode(domSnapshot(24, "saba:7:snapshot-0102"))).toEqual([]);
+    expect(bigger.takeIgnoreReason()).toBe("dom-first-generation-24-under-50");
+  });
+
   it("does not borrow socket readiness from a different source epoch for DOM fallback", () => {
     const rows = [["f", 0, fields], [0, "reset"],
       encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
