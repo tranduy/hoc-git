@@ -3,6 +3,59 @@
 Đọc file này thay cho việc đọc lại lịch sử hội thoại. Mọi số trong đây đều là số đo
 thật, không phải ước lượng.
 
+## Trạng thái mới nhất — 2026-08-29 tối
+
+**5/6 sàn LIVE.** Đo bằng `npx tsx .run/do-go-keo.mts 60000`, chỉ tính trận đang đá:
+
+| sàn | cửa live | GỠ | đổi giá | tình trạng |
+|---|---|---|---|---|
+| CMD | 750 | 90 (12%) | 528 | ✅ vừa sửa xong |
+| BTI | 868 | 80 (9,2%) | 561 | ✅ |
+| APSPORT | 120 | 120 (100%) | 0 | ✅ LIVE, roster vừa thay toàn bộ |
+| SBOBET | 0 | – | – | LIVE, chưa có trận đang đá để đo |
+| IM | 0 | – | – | LIVE, chưa có trận đang đá để đo |
+| **SABA** | 1294 | **0** | **0** | ❌ HARD_RECOVERY, đứng hoàn toàn |
+
+### CMD — một dòng hỏng vuứt cả baseline (ĐÃ XONG, commit `4eafdb4`)
+
+CMD nằm HARD_RECOVERY với danh mục cũ **84 phút** trong khi 630 phản hồi HTTP
+vẫn về mỗi kỳ đo. Nguyên nhân: mỗi baseline khoảng 1.690 dòng bị vứt sạch chỉ vì
+**một** dòng không giải mã được. Không có baseline thì nguồn không bao giờ được
+nâng từ CANDIDATE lên ACTIVE — `authorityDisposition: NONE` — nên danh mục đứng.
+
+Tìm ra bằng đúng bước 4 của spec: adapter CMD có **13 lối thoát `return []` trần**,
+không cái nào khai lý do. Sau khi đặt tên (commit `43ef281`), báo cáo hiện ngay:
+
+```
+6 /ignored/baseline-row-unusable-of-1690
+6 /ignored/baseline-row-unusable-of-1694
+2 /ignored/baseline-row-unusable-of-1696
+```
+
+Con số kèm theo là thứ quyết định cách sửa: **một** dòng hỏng trên 1.690, không
+phải đổi lược đồ (đổi lược đồ thì cả 1.690 đều hỏng). Nên: bỏ riêng dòng đó, giữ
+ngưỡng một phần hai mươi để vẫn từ chối khi lược đồ thật sự đổi.
+
+Sau khi triển khai: LIVE/FRESH 1s, authority ACTIVE, giải mã 168 (trước 5).
+
+### Bẫy mới mắc 2026-08-29
+
+**`start-live-stack.mjs` báo "already running" thì KHÔNG nạp bản dựng mới.** Đã
+mất 25 phút đo một hệ thống đang chạy đúng code vừa gỡ bỏ. Cách dừng êm đúng:
+
+```bash
+node -e "const fs=require('fs');const s=JSON.parse(fs.readFileSync('.auth/run/live-stack.json','utf8'));fs.writeFileSync('.auth/run/live-stack.shutdown.json',JSON.stringify({version:1,instanceId:s.instanceId,shutdownToken:s.shutdownToken}))"
+```
+
+Kiểm chứng bằng `buildIdentity` trong `.auth/run/live-stack.json` — nó phải đổi.
+
+**`contentRefusals` trong `/api/diag/pipeline` là bộ đếm DÙNG CHUNG**, in y hệt cho
+cả sáu sàn (nó là biến cấp module trong adapter APSPORT). Đừng gán cho sàn đang xem.
+Các trường RIÊNG từng sàn: `decoded`, `ignored`, `rejectReasons`, `lastDecodedAgeMs`,
+`ignoredEndpoints`.
+
+---
+
 ## Mục tiêu
 
 6 sàn chạy realtime, ghép trận giữa các sàn để tìm chênh lệch giá. Thước đo duy nhất
