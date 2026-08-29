@@ -44,6 +44,7 @@ const SBO_ORPHAN_FRAME_RETRY_MS = 60_000;
 // partition is retried well inside the feed's baseline lease.
 const KSPORT_BASELINE_REQUEST_RETRY_MS = 45_000;
 const KSPORT_NATIVE_HTTP_RECOVERY_RETRY_MS = 8_000;
+const KSPORT_BASELINE_LEASE_RENEW_MS = 75_000;
 // Re-selecting a period tab drives the provider's own SPA. Measured 35 toggles
 // in eight minutes before this cap, which is churn on a page the operator is
 // also using. Bounded per attempt generation; a genuinely new generation gets a
@@ -1096,6 +1097,7 @@ export class NetworkObserver {
   readonly #ksportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #ksportNativeHttpCaptures = new Map<string, KsportNativeHttpCapture>();
   readonly #ksportNativeHttpRecoveryAtMs = new Map<string, number>();
+  readonly #ksportBaselineLeaseAtMs = new Map<string, number>();
   readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sboOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
@@ -1947,6 +1949,7 @@ export class NetworkObserver {
       return;
     }
     if (socketAlive && recentlyActive) {
+      await this.#renewKsportBaselineLease(source, nowMs);
       if (this.hasCompleteKsportBaseline(source.sourceId)) {
         this.#ksportBaselineRequests.delete(source.sourceId);
         this.#ksportBaselineAttemptAtMs.delete(source.sourceId);
@@ -2960,6 +2963,28 @@ export class NetworkObserver {
       });
     this.#socketBaselineRecoveries.set(source.sourceId, { token, operation });
     return operation;
+  }
+
+  /**
+   * The API-side KSPORT catalog lease expires 120s after each paired getEvent
+   * baseline, and stall-driven recovery was its only refresher - recovery
+   * backoff then let every cycle freeze the catalog for 30-60s while socket
+   * deltas kept flowing. While the sportsbook socket is healthy, renew the
+   * pair proactively well inside the lease: the captured-template fetch
+   * first, the page's own native period requests when the template fails.
+   */
+  async #renewKsportBaselineLease(source: ObservedSource, nowMs: number): Promise<void> {
+    const lastAtMs = this.#ksportBaselineLeaseAtMs.get(source.sourceId);
+    if (lastAtMs === undefined) {
+      // The attach/recovery path has just produced a baseline; only renew
+      // after a full lease interval of healthy ticks.
+      this.#ksportBaselineLeaseAtMs.set(source.sourceId, nowMs);
+      return;
+    }
+    if (nowMs - lastAtMs < KSPORT_BASELINE_LEASE_RENEW_MS) return;
+    this.#ksportBaselineLeaseAtMs.set(source.sourceId, nowMs);
+    if (await this.#requestFreshKsportHttpBaseline(source)) return;
+    await this.#requestFreshKsportNativeHttpBaseline(source);
   }
 
   async #requestFreshKsportHttpBaseline(source: ObservedSource): Promise<boolean> {
