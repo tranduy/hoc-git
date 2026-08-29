@@ -49,6 +49,16 @@ const idleRecoverySnapshot: ProviderRecoverySnapshot = {
   manualRetryAfterSeconds: 0, lastError: null
 };
 const catalogFailureGraceMs = 5_000;
+// A source that dies stops sending, and a catalog only ever became stale here
+// because a later one arrived saying so. SABA sat at ACTION_REQUIRED with a
+// 432-second-old catalog on 2026-08-29 and its 3,778 prices were still being
+// paired into tickets, because no message ever came to retire them: the book
+// refused to verify a price it was still being credited with offering.
+//
+// The bound is the widest freshness any book is actually held to, so no healthy
+// book is dropped by it, and silence can no longer pass for a live price.
+const comparisonMaxCatalogAgeMs = 120_000;
+const catalogAgeSweepIntervalMs = 15_000;
 const executableProfileMaxAgeMs = 30_000;
 const catalogCategoryStorageKey = "tool-chenh.live-catalog.category.v1";
 const eventPhaseStorageKey = "tool-chenh.live-catalog.event-phase.v1";
@@ -879,6 +889,27 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   useEffect(() => { setRankingNowMs(Date.now()); }, [comparisonEvents, verifiedTickets, movements]);
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  // Retiring by age, on its own clock, because the message that would have
+  // retired these is the one a dead source never sends. It writes into the same
+  // set every reader already consults, so nothing downstream has to learn a
+  // second rule - and it sweeps rather than ticking per second, since crossing
+  // two minutes is not a deadline anything needs to the frame.
+  useEffect(() => {
+    const sweep = (): void => {
+      const nowMs = Date.now();
+      const expired = catalogsRef.current.filter((catalog) =>
+        nowMs - catalog.observedAtMs > comparisonMaxCatalogAgeMs);
+      if (expired.every((catalog) => staleAccountIdsRef.current.has(catalog.accountId))) return;
+      const nextStale = new Set(staleAccountIdsRef.current);
+      for (const catalog of expired) nextStale.add(catalog.accountId);
+      staleAccountIdsRef.current = nextStale;
+      setStaleAccountIds(nextStale);
+      for (const catalog of expired) comparisonWorkerRef.current?.upsert(catalog, true);
+    };
+    const timer = window.setInterval(sweep, catalogAgeSweepIntervalMs);
+    sweep();
     return () => window.clearInterval(timer);
   }, []);
 

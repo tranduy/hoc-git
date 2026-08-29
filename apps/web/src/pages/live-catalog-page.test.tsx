@@ -1269,6 +1269,44 @@ describe("LiveCatalogPage", () => {
     expect(screen.queryByText("PRICE GAP DETECTED")).toBeNull();
   });
 
+  it("retires a catalog the source stopped sending, without a message saying so", async () => {
+    // The case measured on 2026-08-29: SABA at ACTION_REQUIRED, its catalog 432
+    // seconds old, its 3,778 prices still paired into tickets - because a source
+    // that dies stops sending, and staleness only ever arrived inside a later
+    // message. The book was refusing to verify a price it was still credited
+    // with offering.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const sabaAccount: AccountStatus = { ...account, id: "saba-account", alias: "SABA main", provider: "SABA" };
+    const sbobetAccount: AccountStatus = { ...account, id: "sbo-account", alias: "SBOBET main", provider: "SBOBET" };
+    const providerCatalog = (providerAccount: AccountStatus): LiveCatalogResponse => ({
+      ...catalog, accountId: providerAccount.id, provider: providerAccount.provider,
+      // Says fresh, and keeps saying so: exactly what a source leaves behind
+      // when it stops sending.
+      snapshotState: "FRESH", observedAtMs: Date.now(),
+      events: [{ ...event, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event` }],
+      markets: [{ ...market, provider: providerAccount.provider, providerEventId: `${providerAccount.provider}-event`,
+        providerMarketId: `${providerAccount.provider}-market` }],
+      quotes: quotes.map((quote) => ({ ...quote, provider: providerAccount.provider,
+        providerEventId: `${providerAccount.provider}-event`, providerMarketId: `${providerAccount.provider}-market`,
+        providerSelectionId: `${providerAccount.provider}-${quote.selection}` }))
+    });
+    const catalogs = new Map([[sabaAccount.id, providerCatalog(sabaAccount)],
+      [sbobetAccount.id, providerCatalog(sbobetAccount)]]);
+
+    render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }}
+      catalogApi={{ read: async (id) => catalogs.get(id)! }} />);
+
+    // Fresh, so the pair is real and shown.
+    expect(await screen.findByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
+
+    // Now the sources go quiet: the same catalog keeps being served, still
+    // labelled fresh, and simply stops getting newer.
+    await act(async () => vi.advanceTimersByTimeAsync(150_000));
+
+    expect(screen.queryByRole("button", { name: "Compare Alpha vs Beta" })).toBeNull();
+    vi.useRealTimers();
+  });
+
   it("hides a single-book event from the exact comparison list", async () => {
     render(<LiveCatalogPage accountApi={accountApi} catalogApi={catalogApi} />);
 
