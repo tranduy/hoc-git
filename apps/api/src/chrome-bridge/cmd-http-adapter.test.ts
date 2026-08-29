@@ -53,17 +53,39 @@ function firstHalfHandicapRow(eventId: number, home: number, away: number): unkn
 describe("CmdHttpCatalogAdapter", () => {
   it("names the gate it left by when it decodes nothing", () => {
     const adapter = new CmdHttpCatalogAdapter();
-    // A body the fingerprint accepts and the baseline path then refuses: one row
-    // nobody can read. Before this, the adapter dropped the whole batch and said
-    // nothing, so 147 discarded odds frames looked the same as 147 frames that
-    // simply carried no news.
+    // Half the rows unreadable is what a renamed field looks like, and that is
+    // still refused. Before this, the refusal said nothing at all, so 147
+    // discarded odds frames looked the same as 147 that carried no news.
     const unreadable = Array<unknown>(91).fill(null);
     unreadable[0] = 25299763;
     expect(adapter.decode(envelope({ t: 9_000_001, a: true, data: [],
       today: [publicFullRow(), unreadable], f: [] }, 1))).toEqual([]);
-    expect(adapter.takeIgnoreReason()).toBe("baseline-row-unusable-of-2");
+    expect(adapter.takeIgnoreReason()).toBe("baseline-1-rows-unusable-of-2");
     // Reading it clears it, so the next decode cannot inherit a stale reason.
     expect(adapter.takeIgnoreReason()).toBeNull();
+  });
+
+  it("leaves out the one row it cannot read instead of the baseline", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    // The measured shape: one unreadable row among the rest. CMD discarded
+    // fourteen baselines this way and never finished the one that promotes it.
+    const readable = Array.from({ length: 40 }, (_, index) => {
+      const row = publicFullRow();
+      row[0] = 25299763 + index;
+      row[38] = `Home ${index}`;
+      row[39] = `Away ${index}`;
+      return row;
+    });
+    const unreadable = Array<unknown>(91).fill(null);
+    unreadable[0] = 25299999;
+    const update = adapter.decode(envelope({ t: 9_000_002, a: true, data: [],
+      today: [...readable, unreadable], f: [] }, 1)).at(-1);
+    expect(adapter.takeIgnoreReason()).toBeNull();
+    expect(update).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE" });
+    const events = (update?.value as { events: Array<{ providerEventId: string }> }).events;
+    expect(events).toHaveLength(40);
+    // The fixture nobody could price is absent, not carrying a stale price.
+    expect(events.map((event) => event.providerEventId)).not.toContain("25299999");
   });
 
   it("says a delta carried no change rather than going quiet", () => {

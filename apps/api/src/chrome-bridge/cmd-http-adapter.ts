@@ -155,13 +155,24 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
     if (isAtomicFull) {
       if (observation === null) return this.#ignore("baseline-not-bound-to-a-request");
       const candidates = [...root.data, ...root.today!];
-      if (candidates.some((candidate) => !isKnownMetadataRow(candidate) &&
-        (!isFullRow(candidate) || decodeRecord(candidate) === null))) {
-        // One row nobody can read discards every price beside it, and the count
-        // is what says whether that is one broken row or a changed schema.
-        return this.#ignore(`baseline-row-unusable-of-${candidates.length}`);
+      // A row nobody can read is one fixture nobody can price, and the whole
+      // baseline used to go with it. CMD discarded fourteen baselines of about
+      // 1,690 rows each on 2026-08-29, one unreadable row at a time, and stayed
+      // a CANDIDATE with an 84-minute-old catalog - because a baseline is what
+      // promotes it, and it never finished one.
+      //
+      // A changed schema still has to be refused, and the count is what tells
+      // them apart: a renamed field makes every row unreadable at once, while
+      // ordinary provider noise is one row in a thousand. Above a twentieth,
+      // refuse and say so; below it, leave those fixtures out. A fixture missing
+      // from the catalog is one nobody prices, which is the safe direction - the
+      // unsafe one is keeping its old price and calling it current.
+      const unusable = new Set(candidates.filter((candidate) => !isKnownMetadataRow(candidate) &&
+        (!isFullRow(candidate) || decodeRecord(candidate) === null)));
+      if (unusable.size * 20 > candidates.length) {
+        return this.#ignore(`baseline-${unusable.size}-rows-unusable-of-${candidates.length}`);
       }
-      const fullRows = candidates.filter(isFullRow);
+      const fullRows = candidates.filter((candidate) => !unusable.has(candidate) && isFullRow(candidate));
       if (fullRows.length === 0) return this.#ignore("baseline-no-full-rows");
       const rows = new Map<string, RetainedRow>();
       for (const candidate of fullRows) {
