@@ -880,7 +880,9 @@ describe("ChromeCatalogDataPlane", () => {
     const plane = new ChromeCatalogDataPlane({ now: () => now });
     plane.ingest(ksportEnvelope(1, "live", [101]));
     plane.ingest(ksportEnvelope(2, "today", [102]));
-    now = 11_003;
+    // SBOBET now expects evidence once a minute (measured 2026-08-30); the
+    // feed only leaves LIVE after that window passes with nothing decoded.
+    now = 65_003;
 
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
     await expect(plane.overlayStatuses([activeSbobet])).resolves.toMatchObject([{
@@ -909,12 +911,12 @@ describe("ChromeCatalogDataPlane", () => {
     plane.ingest(ksportEnvelope(1, "live", [101]));
     plane.ingest(ksportEnvelope(2, "today", [102]));
 
-    now = 9_000;
+    now = 50_000;
     expect(plane.ingest({ ...ksportEnvelope(3, "today", []), observedAtMs: now,
       payload: { encoding: "UTF8", body: `a${JSON.stringify(["\n"])}` } })).toBe(false);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({ observedAtMs: 1_002 });
 
-    now = 20_001;
+    now = 125_001;
     plane.ingest(tabHeartbeat(ksportEnvelope(4, "today", []), now, 4));
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
@@ -1085,7 +1087,7 @@ describe("ChromeCatalogDataPlane", () => {
       lobby: "SBO", sourceId: "chrome:SBO:9", tabId: 9 };
 
     expect(plane.ingest(sboHeartbeat)).toBe(false);
-    now = 30_000;
+    now = 90_000;
     expect(plane.ingest({ ...sboHeartbeat, observedAtMs: now, sequence: 4 })).toBe(false);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
     await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
@@ -1185,7 +1187,7 @@ describe("ChromeCatalogDataPlane", () => {
     plane.ingest(ksportEnvelope(1, "live", [101]));
     plane.ingest(ksportEnvelope(2, "today", [102]));
 
-    now = 17_004;
+    now = 62_004;
     plane.ingest(tabHeartbeat(ksportEnvelope(3, "today", []), now, 3));
     expect(onSourceRecoveryNeeded).toHaveBeenCalledExactlyOnceWith(SBOBET);
     await plane.overlayStatuses([activeSbobet]);

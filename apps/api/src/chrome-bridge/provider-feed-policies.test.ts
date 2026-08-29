@@ -35,7 +35,7 @@ describe("provider feed policies measured 2026-08-25", () => {
       { provider: "SABA", beforeExpectedMs: 10_000, beforeBaselineMs: 60_000,
         afterExpectedMs: 75_000, afterBaselineMs: 3_600_000 },
       { provider: "SBOBET", beforeExpectedMs: 10_000, beforeBaselineMs: 60_000,
-        afterExpectedMs: 10_000, afterBaselineMs: 60_000 },
+        afterExpectedMs: 60_000, afterBaselineMs: 120_000 },
       { provider: "APSPORT", beforeExpectedMs: 5_000, beforeBaselineMs: 30_000,
         afterExpectedMs: 90_000, afterBaselineMs: 120_000 },
       { provider: "BTI", beforeExpectedMs: 10_000, beforeBaselineMs: 30_000,

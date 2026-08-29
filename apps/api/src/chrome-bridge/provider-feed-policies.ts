@@ -62,8 +62,16 @@ export const providerFeedPolicies = new Map<string, ProviderFeedPolicy>([
   // re-authenticate and re-subscribe before any baseline can land. A 30 s hard
   // window fired again before that finished, which is why sourceGeneration
   // climbed past 26 without one accepted baseline. Reload no sooner than 1.5x
-  // the 60 s baseline lease so an attempt can actually converge.
-  ["catalog-source:SBOBET:FOOTBALL", policy(10_000, 60_000, 15_000, 90_000, ["WS", "AUTHENTICATED_HTTP"])],
+  // the baseline lease so an attempt can actually converge.
+  //
+  // Measured 2026-08-30 on a live tab: this deployment's sportsbook socket
+  // sends no SockJS heartbeats at all, and real odds traffic pauses for up to
+  // ~50 s (observed evidence cadence p50 201 ms, p95 51 s) while quote changes
+  // keep flowing in bursts (292/60 s). A 10 s evidence expectation therefore
+  // dropped a healthy feed out of LIVE on every natural pause and the catalog
+  // showed "no data" most of the time. Expect evidence once a minute, lease
+  // the baseline for two, and reload only after three.
+  ["catalog-source:SBOBET:FOOTBALL", policy(60_000, 120_000, 60_000, 180_000, ["WS", "AUTHENTICATED_HTTP"])],
   ["catalog-source:APSPORT:FOOTBALL", policy(APSPORT_EXPECTED_EVIDENCE_CADENCE_MS, APSPORT_MAX_BASELINE_AGE_MS,
     APSPORT_SOFT_RECOVERY_AFTER_MS, APSPORT_HARD_RECOVERY_AFTER_MS, ["WS", "AUTHENTICATED_HTTP"])],
   ["catalog-source:BTI:FOOTBALL", policy(BTI_EXPECTED_EVIDENCE_CADENCE_MS, BTI_MAX_BASELINE_AGE_MS,
