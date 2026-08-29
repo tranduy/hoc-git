@@ -171,6 +171,44 @@ không".
 DOM không thấy dòng** (trang chỉ dựng phần đang nhìn), không phải giá sai. Chỉ
 `NOT_FOUND` của sàn dùng `IN_PAGE_FETCH` mới là bằng chứng kèo đã biến mất thật.
 
+## APSPORT đứng giá — ĐÃ XONG (2026-08-29)
+
+**Mẫu yêu cầu kẹt thế hệ.** Danh mục APSPORT làm mới qua một request template lấy
+từ trang; template thuộc về thế hệ nguồn/tab lúc lấy, mà **cả hai nhảy sau mỗi
+lần nối lại**. `#refreshApsportCatalog` dùng lại template trong bộ đệm, thấy nó
+cũ hơn thế hệ hiện tại thì **thoát im lặng** — và không gì dọn bộ đệm, nên nó
+thoát mãi mãi. Cả vòng đời tab chỉ có **một lần roster**.
+
+Số đo lúc hỏng:
+
+```
+wsAttach.sourceGeneration = 20      nhung activeGeneration = apsport:...:1
+baselineAgeMs = 281187              tran maxBaselineAgeMs = 120000  -> HARD_RECOVERY
+observedEvidenceCadenceMs p50 = 199ms, 405 mau   <- socket VAN gui deu
+observedAtMs khong doi sau 60 giay  <- 852 tran / 8132 gia dong bang nguyen khoi
+```
+
+Feed đòi baseline mới trong 2 phút; không có thì **ngừng phát danh mục** dù dữ
+liệu vẫn về 5 lần/giây. Đó chính là "nguồn ổn định mà không realtime".
+
+Đã sửa: template lệch thế hệ thì **dựng lại**; lối thoát còn lại khai tên
+`APSPORT_TEMPLATE_GENERATION_STALE`. Sau khi reload extension: baseline không
+quá 23s, 130–300 giá đổi mỗi phút.
+
+**Đây là thay đổi trong extension** — phải `npm run build` ở `apps/chrome-extension`
+rồi **reload extension** ở `chrome://extensions` mới có hiệu lực.
+
+## Hai lỗi cùng họ đã sửa trong ngày
+
+- **CMD**: một dòng delta hỏng vứt cả lô (`-999` là mã khoá kèo mà `finiteOdd` từ
+  chối). Sửa: ghi `-999` xuyên qua để kèo biến mất; delta cho trận không giữ thì
+  bỏ riêng nó.
+- **APSPORT**: khung báo khoá kèo bị vứt, để lại giá cũ. Sửa: khoá đi xuyên qua
+  thành `SUSPENDED`, tầng so sánh và tầng cược đều không định giá.
+
+Mô-típ chung: **một tín hiệu "không có hàng" bị đọc là "lỗi", rồi vứt luôn cả
+thứ đi kèm.** Gặp "sàn đứng giá" thì tìm mô-típ này trước.
+
 ## VIỆC GẤP NHẤT — chưa làm
 
 **Bảng đang xếp vé ROI dương dựng từ dữ liệu cũ lên đầu.** Đo được: 4 vé dương
