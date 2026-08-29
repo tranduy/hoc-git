@@ -145,36 +145,64 @@ Và với sàn hay "về một lần rồi thôi", phải theo dõi **nhiều ph
 
 ---
 
-## 4. Bốn phép đo phải thuộc
+## 4. Thước đo — đọc kỹ mục này trước khi kết luận sàn nào đạt
+
+Realtime không phải "giá có nhúc nhích". Realtime là hai điều, và phải đo riêng:
+
+**A. Kèo đã đóng phải bị GỠ khỏi danh mục.**
+Không phải để lại với giá cũ. Một kèo đã rút mà còn nằm đó là một dòng chênh lệch
+hoàn toàn bịa. Đây là tiêu chí **quan trọng nhất**.
+
+**B. Giá hiển thị phải đúng bằng giá đang treo ở sàn.**
+Không phải "gần đúng", không phải "mới cách đây vài chục giây".
 
 ```bash
-# 1. Gia co doi that khong, tach rieng tran dang da
-npx tsx .run/do-live-som.mts
+# A. Keo dong co bi go khong  <-- PHEP DO CHINH
+npx tsx .run/do-go-keo.mts 60000
 
-# 2. Duong ong hong o chang nao
+# B. Gia hien thi co dung gia that khong: doc lich su nguoi dung bam kiem tra
+#    %LOCALAPPDATA%	ool-chenh\logsealtime-ticket-checks.jsonl
+
+# C. Duong ong hong o chang nao
 curl -s http://127.0.0.1:4310/api/diag/pipeline
 
-# 3. Danh muc co duoc phat lai khong (observedAtMs doi hay dung yen)
-npx tsx .run/soi-ap-rong.mts
-
-# 4. So lan cap nhat va dung luong moi phut
-npx tsx .run/do-nhip-worker.mts
+# D. Phep thu khoi: nguon co dung hinh hoan toan khong
+npx tsx .run/do-live-som.mts
 ```
 
-Và lịch sử kiểm tra giá thật của người dùng — **dữ liệu đối chứng tốt nhất**:
+### Đọc kết quả A
 
-```
-%LOCALAPPDATA%\tool-chenh\logs\realtime-ticket-checks.jsonl
-```
+`do-go-keo.mts` đếm trên **trận đang đá**, trong 60 giây:
 
-Mỗi lần bấm "Kiểm tra giá thật" đều ghi `verificationStatus` (MATCH / MISMATCH /
-NOT_FOUND) kèm `directMethod`.
+| cột | ý nghĩa | ngưỡng |
+|---|---|---|
+| `GO` | cửa cược biến mất khỏi danh mục | **phải > 0** |
+| `dong-con-nam` | đã chuyển SUSPENDED nhưng còn đó | chấp nhận được |
+| `giu nguyen` | cùng giá, cùng trạng thái | > 85% là đáng ngờ |
 
-**Đọc đúng cách:**
-- `MISMATCH` → **luôn là tool sai**, giá trong danh mục khác giá trên sàn
-- `NOT_FOUND` của sàn dùng `IN_PAGE_FETCH` (BTI, IM) → kèo **thật sự** đã biến mất
-- `NOT_FOUND` của sàn đọc DOM (CMD, SABA, APSPORT) → **phần lớn là đầu đọc không
-  thấy dòng**, vì trang chỉ dựng phần đang nhìn thấy. Không phải bằng chứng lỗi.
+**`GO` = 0 trên hàng nghìn cửa đang đá là hỏng, không cần bằng chứng gì thêm.**
+Một sàn live luôn đóng cửa liên tục — mỗi bàn thắng, mỗi thẻ đỏ, mỗi lần treo để
+chỉnh giá. Đo 2026-08-29: APSPORT gỡ 40,4%, BTI 7,3%, CMD 4,8%, SABA **0,0%**.
+
+### Đọc kết quả B
+
+Mỗi lần bấm "Kiểm tra giá thật" ghi `verificationStatus`:
+
+- `MISMATCH` → **luôn là tool sai.** Giá trong danh mục khác giá trên sàn.
+- `NOT_FOUND` → **phải đối chiếu với phép đo A trước khi kết luận.**
+  Sàn có `GO` > 0 thì `NOT_FOUND` thường là đầu đọc không thấy dòng đó trên màn hình.
+  Sàn có `GO` = 0 thì `NOT_FOUND` là **kèo đã đóng mà danh mục vẫn giữ** — đúng
+  cái lỗi đang đi tìm.
+
+### Vì sao KHÔNG lấy "% giá đổi" làm tiêu chí đạt
+
+`do-live-som.mts` chỉ là **phép thử khói**. Nó có hai điểm mù cố hữu:
+
+1. Nó bỏ qua mọi cửa cược **biến mất** (`if (p === undefined) continue`), nên nó
+   không hề đo việc gỡ kèo.
+2. 58% đổi giá vẫn có thể đi kèm 42% đứng im sai.
+
+Dùng nó để bắt nguồn đứng hình **hoàn toàn**, rồi chuyển sang A và B.
 
 ---
 
