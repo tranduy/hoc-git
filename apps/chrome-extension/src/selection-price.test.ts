@@ -550,6 +550,64 @@ describe("visible provider price probe", () => {
     await page.close();
   });
 
+  it("reads CMD's price from the book's own catalog when the page never drew the row", async () => {
+    const page = await browser.newPage();
+    // Nothing rendered: exactly the case that reported VISIBLE_PRICE_NOT_FOUND
+    // while the book was still offering the price.
+    const row = Array<unknown>(91).fill(null);
+    row[0] = 25310330;
+    row[10] = -0.5;
+    row[40] = 0.92;
+    row[41] = -0.98;
+    await page.route("**/Member/BetsView/BetLight/DataOdds.ashx*", async (route) => {
+      await route.fulfill({ contentType: "application/json",
+        body: JSON.stringify({ t: 1, a: true, data: [], today: [row], f: [] }) });
+    });
+    // A relative request needs a real origin to resolve against, and the empty
+    // page is the point: nothing rendered for the DOM reader to find.
+    await page.route("https://cgnew.fts368.com/", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<div></div>" });
+    });
+    await page.goto("https://cgnew.fts368.com/");
+
+    const marketId = "25310330:1";
+    const value = await page.evaluate(buildCmdSelectionPriceExpression({ providerEventId: "25310330",
+      providerMarketId: marketId, providerSelectionId: `${marketId}:away`,
+      eventLabel: "A vs B", participantA: "A", participantB: "B", marketType: "FT_AH",
+      scope: "FULL_TIME", selection: "AWAY", line: "-0.5" }, "FETCH_ONLY")) as
+      { ok: boolean; rawOdds?: string; method?: string };
+
+    expect(value).toEqual(expect.objectContaining({ ok: true, rawOdds: "-0.98", method: "IN_PAGE_FETCH" }));
+    await page.close();
+  });
+
+  it("says CMD is not offering a market rather than reporting a sentinel as a price", async () => {
+    const page = await browser.newPage();
+    const row = Array<unknown>(91).fill(null);
+    row[0] = 25310330;
+    // -999 is CMD's code for a market it has withdrawn, not a price.
+    row[42] = -999;
+    row[43] = -999;
+    await page.route("**/Member/BetsView/BetLight/DataOdds.ashx*", async (route) => {
+      await route.fulfill({ contentType: "application/json",
+        body: JSON.stringify({ t: 1, a: true, data: [row], today: [], f: [] }) });
+    });
+    await page.route("https://cgnew.fts368.com/", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<div></div>" });
+    });
+    await page.goto("https://cgnew.fts368.com/");
+
+    const marketId = "25310330:3";
+    const value = await page.evaluate(buildCmdSelectionPriceExpression({ providerEventId: "25310330",
+      providerMarketId: marketId, providerSelectionId: `${marketId}:over`,
+      eventLabel: "A vs B", participantA: "A", participantB: "B", marketType: "FT_TOTAL",
+      scope: "FULL_TIME", selection: "OVER", line: "2.5" }, "FETCH_ONLY")) as
+      { ok: boolean; reason?: string };
+
+    expect(value).toEqual(expect.objectContaining({ ok: false, reason: "CMD_SELECTION_NOT_ON_OFFER" }));
+    await page.close();
+  });
+
   it("reads SABA's exact visible c-odds after removing only the event namespace", async () => {
     const page = await browser.newPage();
     await page.setContent(`<section class="c-match" data-matchid="132625615">

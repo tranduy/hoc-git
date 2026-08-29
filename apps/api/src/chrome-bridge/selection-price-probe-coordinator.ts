@@ -128,9 +128,13 @@ export class SelectionPriceProbeCoordinator {
       pending.reject(directReadError("VISIBLE_PRICE_NOT_FRESH", method));
     } else if (parsed.data.status !== "FOUND" || parsed.data.rawOdds === null) {
       const reason = parsed.data.reason;
+      // CMD answers from the book's own catalog when the page never drew the
+      // row, so its outcomes join the same two verdicts: the market is not on
+      // offer, or the fixture matched more than once.
       const normalized = reason === "EXACT_SELECTION_NOT_FOUND" ||
-        (/^(?:SBOBET|BTI)_.+_NOT_FOUND$/u.test(reason ?? ""))
-        ? "VISIBLE_PRICE_NOT_FOUND" : /^(?:SBOBET|BTI)_.+_AMBIGUOUS$/u.test(reason ?? "")
+        (/^(?:SBOBET|BTI|CMD)_.+_NOT_FOUND$/u.test(reason ?? "")) ||
+        reason === "CMD_EVENT_NOT_IN_FEED" || reason === "CMD_SELECTION_NOT_ON_OFFER"
+        ? "VISIBLE_PRICE_NOT_FOUND" : /^(?:SBOBET|BTI|CMD)_.+_AMBIGUOUS$/u.test(reason ?? "")
           ? "VISIBLE_PRICE_AMBIGUOUS" : reason;
       pending.reject(directReadError(normalized ??
         (parsed.data.status === "AMBIGUOUS" ? "VISIBLE_PRICE_AMBIGUOUS" : "VISIBLE_PRICE_NOT_FOUND"),

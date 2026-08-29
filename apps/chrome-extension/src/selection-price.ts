@@ -18,10 +18,60 @@ function selectionIndex(identity: SelectionFocusIdentity): number {
   throw new Error("SELECTION_IDENTITY_MISMATCH");
 }
 
+// CMD's row positions, the same ones its decoder reads. A price the page never
+// rendered is still on offer at the book, and reading only the DOM reported it
+// as VISIBLE_PRICE_NOT_FOUND - which reads as "the ticket is gone" when the
+// truth is "the row is not on screen".
+const CMD_MARKET_POSITIONS = "{1:{line:10,home:40,away:41},3:{line:12,home:42,away:43}," +
+  "7:{line:14,home:44,away:45},8:{line:16,home:46,away:47}}";
+
 export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentity): string;
-export function buildCmdSelectionPriceExpression(identity: SelectionPriceProbeIdentity): string;
-export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentity | SelectionPriceProbeIdentity): string {
+export function buildCmdSelectionPriceExpression(identity: SelectionPriceProbeIdentity,
+  mode?: "DOM_ONLY" | "FETCH_ONLY"): string;
+export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentity | SelectionPriceProbeIdentity,
+  mode: "DOM_ONLY" | "FETCH_ONLY" = "DOM_ONLY"): string {
   const input = JSON.stringify({ ...identity, selectionIndex: selectionIndex(identity) });
+  if (mode === "FETCH_ONLY") {
+    return `(async () => {
+    const input = ${input};
+    const positions = ${CMD_MARKET_POSITIONS};
+    const identity = /^(\\d+):([1378])$/u.exec(input.providerMarketId);
+    if (identity === null) return { ok: false, reason: 'CMD_MARKET_ID_UNSUPPORTED', method: 'IN_PAGE_FETCH' };
+    const [, marketEventId, betType] = identity;
+    if (marketEventId !== input.providerEventId) {
+      return { ok: false, reason: 'SELECTION_IDENTITY_MISMATCH', method: 'IN_PAGE_FETCH' };
+    }
+    let payload;
+    try {
+      // Same-origin, credentialed by the page's own session, and read-only: the
+      // provider's own catalog request, asked again now.
+      const response = await fetch('/Member/BetsView/BetLight/DataOdds.ashx?fc=1',
+        { credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) return { ok: false, reason: 'CMD_FETCH_STATUS', method: 'IN_PAGE_FETCH' };
+      payload = await response.json();
+    } catch {
+      return { ok: false, reason: 'CMD_FETCH_FAILED', method: 'IN_PAGE_FETCH' };
+    }
+    if (payload === null || typeof payload !== 'object') {
+      return { ok: false, reason: 'CMD_FETCH_BODY_UNREADABLE', method: 'IN_PAGE_FETCH' };
+    }
+    const rows = [...(Array.isArray(payload.data) ? payload.data : []),
+      ...(Array.isArray(payload.today) ? payload.today : [])];
+    const matches = rows.filter((row) => Array.isArray(row) && String(row[0]) === input.providerEventId);
+    if (matches.length === 0) return { ok: false, reason: 'CMD_EVENT_NOT_IN_FEED', method: 'IN_PAGE_FETCH' };
+    if (matches.length > 1) return { ok: false, reason: 'CMD_EVENT_AMBIGUOUS', method: 'IN_PAGE_FETCH' };
+    const position = positions[betType];
+    const raw = matches[0][input.selectionIndex === 0 ? position.home : position.away];
+    // The decoder's own rule: a price outside this range is the book's code for
+    // a market it is not offering, not a price.
+    const price = Number(raw);
+    if ((typeof raw !== 'number' && typeof raw !== 'string') || raw === '' ||
+      !Number.isFinite(price) || price === 0 || Math.abs(price) > 1) {
+      return { ok: false, reason: 'CMD_SELECTION_NOT_ON_OFFER', method: 'IN_PAGE_FETCH' };
+    }
+    return { ok: true, rawOdds: String(price), observedAtMs: Date.now(), method: 'IN_PAGE_FETCH' };
+  })()`;
+  }
   return `(() => {
     const input = ${input};
     let target = null;

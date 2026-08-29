@@ -4543,16 +4543,20 @@ export class NetworkObserver {
         }
         return results;
       }
+      // Only KSPORT read the candidate expression, so a caller handing this any
+      // other expression got the original one evaluated instead - silently, and
+      // with its promise never awaited.
+      const awaitPromise = source.lobby === "TSPORT" || candidateExpression !== expression;
       return frameIds.length === 0
         ? [await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-          expression, returnByValue: true, awaitPromise: source.lobby === "TSPORT" })).catch(() => ({}))]
+          expression: candidateExpression, returnByValue: true, awaitPromise })).catch(() => ({}))]
         : Promise.all(frameIds.map(async (frameId) => {
           const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Page.createIsolatedWorld", {
             frameId, worldName: "fieldline-selection-price", grantUniveralAccess: false })).catch(() => ({}));
           const contextId = nestedNumber(world, "executionContextId");
           if (contextId === null) return {};
           return this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-            expression, contextId, returnByValue: true, awaitPromise: source.lobby === "TSPORT" })).catch(() => ({}));
+            expression: candidateExpression, contextId, returnByValue: true, awaitPromise })).catch(() => ({}));
         }));
     };
     let evaluations: unknown[];
@@ -4568,6 +4572,19 @@ export class NetworkObserver {
         evaluations = await evaluateFrames(
           buildSbobetSelectionPriceExpression(request, sbobetObservedRequest, "FETCH_ONLY"), true);
       }
+    } else if (source.lobby === "CMD") {
+      // The DOM holds only what the page drew. A fixture the operator has not
+      // scrolled to reported VISIBLE_PRICE_NOT_FOUND, which reads as "this
+      // ticket is gone" when the book is still offering it - the one answer a
+      // price check must never give wrongly. Ask the page for the book's own
+      // catalog when the screen cannot answer.
+      const domEvaluations = await evaluateFrames();
+      const domValues = domEvaluations.map((evaluation) => nestedValue(evaluation, "result", "value"))
+        .filter((value): value is Record<string, unknown> => isRecord(value));
+      evaluations = domValues.some((value) => value.ok === true ||
+        value.reason === "VISIBLE_PRICE_AMBIGUOUS")
+        ? domEvaluations
+        : await evaluateFrames(buildCmdSelectionPriceExpression(request, "FETCH_ONLY"), true);
     } else if (source.lobby === "TSPORT") {
       const direct = await this.#probeApsportEventDetail(source, request);
       evaluations = direct === null ? await evaluateFrames() : [{ result: { value: direct } }];
