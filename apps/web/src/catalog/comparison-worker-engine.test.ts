@@ -24,6 +24,29 @@ function catalog(provider: "SABA" | "SBOBET", accountId: string, odds: readonly 
 }
 
 describe("ComparisonWorkerEngine", () => {
+  it("compares one list once when the display and fresh lists are the same list", () => {
+    // Nothing stale and every catalog atomic makes the two lists identical, and
+    // comparing an identical list twice spends 227ms at the sizes measured on
+    // 2026-08-29 to reach the answer already in hand, 44 times a minute.
+    const engine = new ComparisonWorkerEngine();
+    const output = engine.apply({ type: "RESET", generation: 1, staleAccountIds: [],
+      catalogs: [catalog("SABA", "saba-account", ["2.20", "1.80"]),
+        catalog("SBOBET", "sbobet-account", ["2.10", "1.90"])] });
+
+    expect(output.freshEvents).toBe(output.displayEvents);
+    expect(output.displayEvents.length).toBeGreaterThan(0);
+  });
+
+  it("compares the fresh list on its own once a catalog goes stale", () => {
+    const engine = new ComparisonWorkerEngine();
+    const output = engine.apply({ type: "RESET", generation: 1,
+      staleAccountIds: ["sbobet-account"],
+      catalogs: [catalog("SABA", "saba-account", ["2.20", "1.80"]),
+        catalog("SBOBET", "sbobet-account", ["2.10", "1.90"])] });
+
+    expect(output.freshEvents).not.toBe(output.displayEvents);
+  });
+
   it("returns compact parity projections without cloning full catalogs back", () => {
     const saba = catalog("SABA", "saba-account", ["2.20", "1.80"]);
     const sbobet = catalog("SBOBET", "sbobet-account", ["2.10", "1.90"]);

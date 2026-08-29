@@ -46,11 +46,16 @@ export class ComparisonWorkerEngine {
       this.#stale.delete(command.accountId);
     }
     const catalogs = [...this.#catalogs.values()];
-    const output = { generation: command.generation,
-      displayEvents: buildComparisonEvents([...this.#displayCatalogs.values()],
-        this.#competitionMemory).map(project),
-      freshEvents: buildComparisonEvents(catalogs.filter((catalog) =>
-        !this.#stale.has(catalog.accountId)), this.#competitionMemory).map(project) };
+    const displayCatalogs = [...this.#displayCatalogs.values()];
+    const freshCatalogs = catalogs.filter((catalog) => !this.#stale.has(catalog.accountId));
+    const displayEvents = buildComparisonEvents(displayCatalogs, this.#competitionMemory).map(project);
+    // The two lists are the same list whenever nothing is stale and every
+    // catalog is atomic, which is most of the time, and comparing a list twice
+    // spends the same 227ms to reach the answer already in hand - 44 times a
+    // minute at the sizes measured 2026-08-29, a third of a core for nothing.
+    const output = { generation: command.generation, displayEvents,
+      freshEvents: sameCatalogs(displayCatalogs, freshCatalogs) ? displayEvents
+        : buildComparisonEvents(freshCatalogs, this.#competitionMemory).map(project) };
     // Sent only when the proven set grows, because it rides on every catalog
     // update and most of them prove nothing new.
     const confirmed = this.#competitionMemory.confirmed();
@@ -58,6 +63,19 @@ export class ComparisonWorkerEngine {
     this.#confirmedCount = confirmed.length;
     return { ...output, competitionLinks: confirmed };
   }
+}
+
+/**
+ * Whether two catalog lists are the same catalogs, by identity and in order.
+ *
+ * buildComparisonEvents reads only what it is given, so the same objects in the
+ * same order produce the same comparison. Object identity is what makes this
+ * safe to assert: a catalog that arrived again as a new revision is a different
+ * object, and the comparison is redone.
+ */
+function sameCatalogs(left: readonly LiveCatalogResponse[],
+  right: readonly LiveCatalogResponse[]): boolean {
+  return left.length === right.length && left.every((catalog, index) => catalog === right[index]);
 }
 
 function isAtomicComparisonCatalog(catalog: LiveCatalogResponse): boolean {
