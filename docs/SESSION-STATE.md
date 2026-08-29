@@ -3,6 +3,41 @@
 Đọc file này thay cho việc đọc lại lịch sử hội thoại. Mọi số trong đây đều là số đo
 thật, không phải ước lượng.
 
+## SBOBET realtime — ĐÃ SỬA (2026-08-30 rạng sáng, nhánh feat/realtime-hardening)
+
+**Triệu chứng:** UI sàn (`zenandfe.com`, socket `*.sb21.net`) nhảy giá liên tục nhưng
+catalog chỉ cập nhật theo đợt ~2 phút. Đo qua `/api/diag/pipeline`: tuổi catalog ==
+tuổi baseline chính xác từng ms, `quoteChanges60s=0` giữa hai baseline, dù 1.396
+frame WS về trong 60s.
+
+**Chuỗi nguyên nhân (đo, không đoán):**
+1. Sàn chỉ trả full snapshot khi có SUBSCRIBE mới; topic `today` đi qua
+   `subSportHotMatch` — **không bao giờ** full-snapshot. Adapter yêu cầu cặp full
+   live+today để chuyển authority HTTP→WS, nên không bao giờ chuyển.
+2. Dưới authority HTTP, mọi delta WS bị bỏ qua (gate cũ ở `decode()`), catalog
+   đóng băng cho tới baseline HTTP kế tiếp.
+3. Bẫy thứ hai: 102/102 receipt kèo trong capture là bản cập nhật 1–2 trận nhưng
+   mang **đúng hình dạng mảng league của full snapshot** — không thể phân biệt
+   full/delta bằng hình dạng. Nếu để máy handover WS nhận cặp "full" này, nó sẽ
+   thay cả partition bằng vài trận.
+
+**Sửa (2 commit trong `ksport-ws-adapter.ts`):** khi đang có baseline HTTP, mọi
+receipt WS qua fence `envelope.sequence > httpAuthorityCutoff` được **fold làm
+upsert vào chính baseline HTTP** và phát `evidenceMode: DELTA` với generation HTTP
+(khớp `activeGeneration` nên controller nhận). Không đụng `wsSequenceHighWatermark`
+— đẩy nó sẽ vứt mọi baseline HTTP sau qua fence pending-baseline.
+
+**Kết quả đo 3 phút liên tục:** tuổi catalog giữ 100–200ms trong khi baseline già
+tới 120s; 765–1.182 đổi giá/60s (trước: 0). Chu kỳ còn lại: lease baseline 120s hết
+~10s trước khi cặp getEvent trong trang về → HOP6 chớm SOFT_RECOVERY vài giây mỗi
+~2 phút, catalog vẫn tươi suốt — ngưỡng giữ nguyên, không nới.
+
+**Việc còn mở:** (a) event bị gỡ chỉ biến mất khi baseline thay — delta chỉ upsert,
+trận ma sống tối đa ~2 phút; (b) `expectedEvidenceCadenceMs=60_000` của SBOBET
+được chỉnh hồi thế giới còn hỏng — giờ evidence p50 ~300ms, có thể siết lại sau
+soak; (c) extension vẫn bơm SUBSCRIBE lặp (generation 6→10+) vô ích vì tracker
+không bao giờ thấy baseline WS đủ cặp — vô hại nhưng ồn.
+
 ## SABA — đặt tên xong, và cái tên nói đầu vào sai chứ không phải bộ giải mã
 
 Đã đặt tên 9 lối thoát câm của `saba-ws-adapter.ts` (commit `f4ae6da`) và tách
