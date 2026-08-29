@@ -142,8 +142,18 @@ function sabaDomEnvelope(sequence: number): ChromeBridgeEnvelope {
     request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" } };
 }
 
+// The canonical SBOBET baseline is the paired getEvent HTTP generation; WS
+// receipts can only upsert into it (measured 2026-08-30: socket "snapshots"
+// are per-event fragments in full-snapshot clothing and must never own the
+// catalog). Baseline-establishing tests therefore speak HTTP.
 function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds: readonly number[],
-  sourceEpoch = "worker-a:0", receiptGeneration = Math.floor((sequence + 1) / 2)): ChromeBridgeEnvelope {
+  sourceEpoch = "worker-a:0", generation = Math.floor((sequence + 1) / 2)): ChromeBridgeEnvelope {
+  return ksportHttpEnvelope(sequence, partition, generation, eventIds, "chrome:KSPORT:8", 8, sourceEpoch);
+}
+
+function ksportSocketEnvelope(sequence: number, partition: "live" | "today",
+  eventIds: readonly number[], sourceEpoch = "worker-a:0",
+  receiptGeneration = Math.floor((sequence + 1) / 2)): ChromeBridgeEnvelope {
   const events = eventIds.map((eventId) => ({ "2": `Home ${eventId}`, "3": `Away ${eventId}`, "8": eventId,
     "7": { "3": [`2.5 0.92*${eventId}0030002005h -0.98*${eventId}0030002005a ${eventId}181025`] } }));
   const destination = `/topic/sports/1_1/${partition}/ma/event/vi`;
@@ -155,19 +165,7 @@ function ksportEnvelope(sequence: number, partition: "live" | "today", eventIds:
   return { version: 1, kind: "NETWORK", lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8,
     sourceEpoch, sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
     transport: "WS_FRAME", request: { hostname: "d42.sb21.net", pathnameClass: "/sport/session/websocket",
-      resourceType: "WebSocket", streamId: "ksport-stream-1", recoveryGeneration: receiptGeneration },
-    payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
-}
-
-function ksportDeltaEnvelope(sequence: number, receiptGeneration: number,
-  eventId: number): ChromeBridgeEnvelope {
-  const event = { "2": `Home ${eventId}`, "3": `Away ${eventId}`, "8": eventId,
-    "7": { "3": [`2.5 0.95*${eventId}0030002005h -0.98*${eventId}0030002005a ${eventId}181025`] } };
-  const frame = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n" +
-    `subscription:subSportBookLive\nmessage-id:socket-${receiptGeneration}\n\n` +
-    `${JSON.stringify({ statusCode: "OK", statusCodeValue: 200, body: JSON.stringify(event) })}\0`;
-  const base = ksportEnvelope(sequence, "live", [], "worker-a:0", receiptGeneration);
-  return { ...base, request: { ...base.request, recoveryGeneration: 200 },
+      resourceType: "WebSocket", streamId: "1", recoveryGeneration: receiptGeneration },
     payload: { encoding: "UTF8", body: `a${JSON.stringify([frame])}` } };
 }
 
@@ -186,8 +184,7 @@ function ksportHttpEnvelope(sequence: number, partition: "live" | "today", gener
       streamId: `ksport-http:${tabId}:${generation}`,
       providerPartition: partition === "live" ? "KSPORT_LIVE" : "KSPORT_TODAY",
       providerContentIntent: "FOOTBALL_FULL_CATALOG", requestStartSequence: 0 },
-    payload: { encoding: "UTF8", body: JSON.stringify(partition === "live"
-      ? [{ "1": "League", "2": events }] : []) } };
+    payload: { encoding: "UTF8", body: JSON.stringify([{ "1": "League", "2": events }]) } };
 }
 
 function chunkedNetworkBody(base: ChromeBridgeEnvelope, sequence: number, chunkIndex: number,
@@ -526,11 +523,12 @@ describe("ChromeCatalogDataPlane", () => {
         activeSourceId: coordinator.snapshot(SBOBET).active?.sourceId ?? null, readableEventId });
     });
 
-    const replacement = (envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope => ({ ...envelope,
-      sourceId: "chrome:KSPORT:9", tabId: 9, sourceEpoch: "worker-b:0" });
-    expect(plane.ingest(replacement(ksportEnvelope(3, "live", [202], "worker-b:0", 2)),
+    const replacement = (sequence: number, partition: "live" | "today",
+      eventIds: readonly number[], generation: number): ChromeBridgeEnvelope =>
+      ksportHttpEnvelope(sequence, partition, generation, eventIds, "chrome:KSPORT:9", 9, "worker-b:0");
+    expect(plane.ingest(replacement(3, "live", [202], 2),
       { connectionGeneration: 2 })).toBe(false);
-    expect(plane.ingest(replacement(ksportEnvelope(4, "today", [], "worker-b:0", 2)),
+    expect(plane.ingest(replacement(4, "today", [], 2),
       { connectionGeneration: 2 })).toBe(true);
 
     expect(observed).toEqual([{ state: "LIVE", sourceId: "chrome:KSPORT:9",
@@ -561,11 +559,11 @@ describe("ChromeCatalogDataPlane", () => {
     publish.mockClear();
     feeds.rejectSourceId = "chrome:KSPORT:9";
 
-    const replacement = (envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope => ({ ...envelope,
-      sourceId: "chrome:KSPORT:9", tabId: 9, sourceEpoch: "worker-b:0" });
-    ingest(replacement(ksportEnvelope(3, "live", [202], "worker-b:0", 2)),
-      candidateConnection, candidateSocket);
-    expect(ingest(replacement(ksportEnvelope(4, "today", [], "worker-b:0", 2)),
+    const replacement = (sequence: number, partition: "live" | "today",
+      eventIds: readonly number[]): ChromeBridgeEnvelope =>
+      ksportHttpEnvelope(sequence, partition, 2, eventIds, "chrome:KSPORT:9", 9, "worker-b:0");
+    ingest(replacement(3, "live", [202]), candidateConnection, candidateSocket);
+    expect(ingest(replacement(4, "today", []),
       candidateConnection, candidateSocket).control).toMatchObject({ kind: "ACK" });
 
     expect(coordinator.snapshot(SBOBET)).toMatchObject({
@@ -609,11 +607,11 @@ describe("ChromeCatalogDataPlane", () => {
       }
       return originalDispose.call(this);
     });
-    const replacement = (envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope => ({ ...envelope,
-      sourceId: "chrome:KSPORT:9", tabId: 9, sourceEpoch: "worker-b:0" });
-    plane.ingest(replacement(ksportEnvelope(3, "live", [202], "worker-b:0", 2)),
-      { connectionGeneration: 2 });
-    expect(plane.ingest(replacement(ksportEnvelope(4, "today", [], "worker-b:0", 2)),
+    const replacement = (sequence: number, partition: "live" | "today",
+      eventIds: readonly number[], generation: number): ChromeBridgeEnvelope =>
+      ksportHttpEnvelope(sequence, partition, generation, eventIds, "chrome:KSPORT:9", 9, "worker-b:0");
+    plane.ingest(replacement(3, "live", [202], 2), { connectionGeneration: 2 });
+    expect(plane.ingest(replacement(4, "today", [], 2),
       { connectionGeneration: 2 })).toBe(false);
 
     expect(coordinator.snapshot(SBOBET)).toMatchObject({
@@ -626,9 +624,9 @@ describe("ChromeCatalogDataPlane", () => {
     });
     expect(publish).not.toHaveBeenCalled();
 
-    expect(plane.ingest(replacement(ksportEnvelope(5, "live", [303], "worker-b:0", 3)),
+    expect(plane.ingest(replacement(5, "live", [303], 3),
       { connectionGeneration: 2 })).toBe(false);
-    expect(plane.ingest(replacement(ksportEnvelope(6, "today", [], "worker-b:0", 3)),
+    expect(plane.ingest(replacement(6, "today", [], 3),
       { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "303" })]
@@ -651,10 +649,10 @@ describe("ChromeCatalogDataPlane", () => {
     expect(budget.stats()).toMatchObject({ pendingBodies: 1 });
     expect(coordinator.snapshot(SBOBET).active?.sourceId).toBe("chrome:KSPORT:8");
 
-    expect(plane.ingest({ ...ksportEnvelope(4, "live", [202], "worker-b:0", 2),
-      sourceId: "chrome:KSPORT:9", tabId: 9 }, { connectionGeneration: 2 })).toBe(false);
-    expect(plane.ingest({ ...ksportEnvelope(5, "today", [], "worker-b:0", 2),
-      sourceId: "chrome:KSPORT:9", tabId: 9 }, { connectionGeneration: 2 })).toBe(true);
+    expect(plane.ingest(ksportHttpEnvelope(4, "live", 2, [202], "chrome:KSPORT:9", 9, "worker-b:0"),
+      { connectionGeneration: 2 })).toBe(false);
+    expect(plane.ingest(ksportHttpEnvelope(5, "today", 2, [], "chrome:KSPORT:9", 9, "worker-b:0"),
+      { connectionGeneration: 2 })).toBe(true);
     expect(coordinator.snapshot(SBOBET).active?.sourceId).toBe("chrome:KSPORT:9");
     expect(budget.stats()).toEqual({ pendingBodies: 0, pendingBytes: 0 });
   });
@@ -685,8 +683,8 @@ describe("ChromeCatalogDataPlane", () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, feedRegistry: registry });
 
     expect(plane.ingest(ksportEnvelope(1, "live", [999], "worker-a:0"))).toBe(false);
-    expect(plane.ingest({ ...ksportEnvelope(2, "live", [101, 102], "worker-b:0"),
-      sourceId: "chrome:KSPORT:9", tabId: 9 })).toBe(true);
+    expect(plane.ingest(ksportHttpEnvelope(2, "live", 1, [101, 102],
+      "chrome:KSPORT:9", 9, "worker-b:0"))).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "101" }),
         expect.objectContaining({ providerEventId: "102" })]
@@ -760,20 +758,21 @@ describe("ChromeCatalogDataPlane", () => {
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
     plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100), { connectionGeneration: 1 });
     plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100), { connectionGeneration: 1 });
-    const candidate = (envelope: ChromeBridgeEnvelope): ChromeBridgeEnvelope => ({ ...envelope,
-      sourceId: "chrome:KSPORT:9", tabId: 9, sourceEpoch: "worker-b:0" });
+    const candidate = (sequence: number, partition: "live" | "today",
+      eventIds: readonly number[], generation: number): ChromeBridgeEnvelope =>
+      ksportHttpEnvelope(sequence, partition, generation, eventIds, "chrome:KSPORT:9", 9, "worker-b:0");
 
-    expect(plane.ingest(replayedEnvelope(candidate(ksportEnvelope(3, "live", [999], "worker-b:0", 1))),
+    expect(plane.ingest(replayedEnvelope(candidate(3, "live", [999], 1)),
       { connectionGeneration: 2 })).toBe(false);
-    expect(plane.ingest(replayedEnvelope(candidate(ksportEnvelope(4, "today", [], "worker-b:0", 1))),
+    expect(plane.ingest(replayedEnvelope(candidate(4, "today", [], 1)),
       { connectionGeneration: 2 })).toBe(false);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "101" })]
     });
 
-    expect(plane.ingest(candidate(ksportEnvelope(5, "live", [103], "worker-b:0", 2)),
+    expect(plane.ingest(candidate(5, "live", [103], 2),
       { connectionGeneration: 2 })).toBe(false);
-    expect(plane.ingest(candidate(ksportEnvelope(6, "today", [], "worker-b:0", 2)),
+    expect(plane.ingest(candidate(6, "today", [], 2),
       { connectionGeneration: 2 })).toBe(true);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
       events: [expect.objectContaining({ providerEventId: "103" })]
@@ -925,7 +924,7 @@ describe("ChromeCatalogDataPlane", () => {
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
     plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0"), { connectionGeneration: 1 });
-    plane.ingest(ksportEnvelope(2, "today", [102], "worker-a:0"), { connectionGeneration: 1 });
+    plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0"), { connectionGeneration: 1 });
 
     expect(plane.ingest(tabHeartbeat(ksportEnvelope(3, "today", [], "worker-a:0"),
       1_100, 3, "worker-b:0"), { connectionGeneration: 2 })).toBe(false);
@@ -1106,78 +1105,31 @@ describe("ChromeCatalogDataPlane", () => {
     });
   });
 
-  it("marks a live provider stale immediately when its catalog socket closes", async () => {
+  it("keeps the HTTP-committed catalog live when a sports socket closes", async () => {
+    // Measured 2026-08-30: the SBOBET page rotates /sport sockets freely and
+    // their "snapshots" are fragments, so a socket close is not a catalog
+    // fault. Only baseline expiry or an explicit replacement retires it.
     const publish = vi.fn();
     const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
     plane.ingest(ksportEnvelope(1, "live", [101]));
-    const baseline = ksportEnvelope(2, "today", [102]);
-    plane.ingest(baseline);
-    const closed: ChromeBridgeEnvelope = { ...baseline, sequence: 3, observedAtMs: 1_100,
-      transport: "WS_STATE", payload: { encoding: "UTF8", body: JSON.stringify({ state: "CLOSED" }) } };
+    expect(plane.ingest(ksportEnvelope(2, "today", []))).toBe(true);
+    const socket = ksportSocketEnvelope(3, "live", []);
+    const closed: ChromeBridgeEnvelope = { ...socket, transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: JSON.stringify({ state: "CLOSED" }) } };
 
-    expect(plane.ingest(closed)).toBe(true);
-    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
-    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
-  });
-
-  it("re-baselines KSPORT on a strictly newer stream in the same source epoch after close", async () => {
-    const publish = vi.fn();
-    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
-    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100));
-    expect(plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100))).toBe(true);
-    const lifecycle = (state: "OPEN" | "CLOSED", streamId: string, sequence: number) => ({
-      ...ksportEnvelope(sequence, "live", [], "worker-a:0", 101), transport: "WS_STATE" as const,
-      request: { ...ksportEnvelope(sequence, "live", [], "worker-a:0", 101).request, streamId },
-      payload: { encoding: "UTF8" as const, body: JSON.stringify({ state }) }
-    });
-
-    expect(plane.ingest(lifecycle("CLOSED", "ksport-stream-1", 3))).toBe(true);
-    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
-    expect(plane.ingest(lifecycle("OPEN", "2", 4))).toBe(false);
-    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
-
-    const replacement = (partition: "live" | "today", sequence: number) => {
-      const value = ksportEnvelope(sequence, partition, partition === "live" ? [202] : [],
-        "worker-a:0", 101);
-      return { ...value, request: { ...value.request, streamId: "2" } };
-    };
-    expect(plane.ingest(replacement("live", 5))).toBe(false);
-    expect(plane.ingest(replacement("today", 6))).toBe(true);
+    expect(plane.ingest(closed)).toBe(false);
+    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({
-      events: [expect.objectContaining({ providerEventId: "202" })]
+      events: [expect.objectContaining({ providerEventId: "101" })]
     });
-    expect(plane.ingest(ksportEnvelope(7, "live", [999], "worker-a:0", 102))).toBe(false);
-    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE", "FRESH"]);
-  });
 
-  it("fails closed through 59 seconds after pending-delta loss and ignores heartbeat freshness", async () => {
-    let now = 1_500;
-    const publish = vi.fn();
-    const plane = new ChromeCatalogDataPlane({ now: () => now, publish });
-    plane.ingest(ksportEnvelope(1, "live", [101], "worker-a:0", 100));
-    expect(plane.ingest(ksportEnvelope(2, "today", [], "worker-a:0", 100))).toBe(true);
-    expect(plane.ingest(ksportEnvelope(3, "live", [102], "worker-a:0", 200))).toBe(false);
-    for (let index = 0; index <= 256; index += 1) {
-      plane.ingest(ksportDeltaEnvelope(10 + index, 201 + index, 5_700_000 + index));
-    }
-
-    now = 59_000;
-    const heartbeat = { ...ksportEnvelope(400, "today", [], "worker-a:0", 458), observedAtMs: now,
-      payload: { encoding: "UTF8" as const, body: `a${JSON.stringify(["\n"])}` } };
-    expect(plane.ingest(heartbeat)).toBe(false);
-    await expect(plane.read(SBOBET)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
-    expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH", "STALE"]);
-
-    const replacement = (partition: "live" | "today", sequence: number, observedAtMs: number) => ({
-      ...ksportEnvelope(sequence, partition, partition === "live" ? [202] : [], "worker-a:0", 500),
-      observedAtMs
-    });
-    expect(plane.ingest(replacement("live", 500, 59_001))).toBe(false);
-    now = 59_002;
-    expect(plane.ingest(replacement("today", 501, 59_002))).toBe(true);
-    await expect(plane.read(SBOBET)).resolves.toMatchObject({
-      events: [expect.objectContaining({ providerEventId: "202" })]
-    });
+    // A WS receipt after the baseline folds in as an upsert (here: a second
+    // market group on the same event); it never owns the catalog, so the
+    // feed keeps the HTTP generation.
+    expect(plane.ingest(ksportSocketEnvelope(4, "live", [101]))).toBe(true);
+    const folded = await plane.read(SBOBET);
+    expect(folded.events).toHaveLength(1);
+    expect(folded.markets).toHaveLength(2);
   });
 
   it("requests controller-governed recovery without heartbeat freshness maps", async () => {

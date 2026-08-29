@@ -8,8 +8,6 @@ import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:SBOBET:FOOTBALL";
-const MAX_PENDING_DELTA_RECORDS = 256;
-const MAX_PENDING_DELTA_MARKETS = 2_048;
 
 interface RetainedRecord {
   readonly record: SbobetCatalogInputRecord;
@@ -26,24 +24,12 @@ interface PartitionSnapshot {
   readonly receiptSequence: number;
 }
 
-interface PendingBaseline {
-  readonly generation: string;
-  readonly ordinal: number;
-  readonly receiptFloors: ReadonlyMap<CatalogPartition, number>;
-  readonly partitions: Map<CatalogPartition, PartitionSnapshot>;
-  readonly deltas: Map<CatalogPartition, Map<string, Map<string, RetainedRecord>>>;
-  deltaRecordCount: number;
-  deltaMarketCount: number;
-  fenced: boolean;
-}
-
 interface SocketEpoch {
   activeStreamId: string | null;
   activeStreamOrdinal: number | null;
   streamHighWatermark: number;
   decoder: SbobetStompReceiptDecoder | null;
   committedPartitions: Map<CatalogPartition, PartitionSnapshot>;
-  pendingBaseline: PendingBaseline | null;
   generation: string;
   committedGeneration: number;
   receiptHighWatermarks: Map<CatalogPartition, number>;
@@ -85,14 +71,6 @@ function sourceEpochKey(envelope: ChromeBridgeEnvelope): string {
 function isKsportSocketHost(hostname: string): boolean {
   const canonical = hostname.toLowerCase();
   return canonical === "sb21.net" || canonical.endsWith(".sb21.net");
-}
-
-function wsRecoveryGeneration(envelope: ChromeBridgeEnvelope): number | null {
-  const generation = (envelope.request as ChromeBridgeEnvelope["request"] & {
-    readonly recoveryGeneration?: unknown
-  }).recoveryGeneration;
-  return typeof generation === "number" && Number.isSafeInteger(generation) && generation > 0
-    ? generation : null;
 }
 
 function receiptPartition(receipt: SbobetStompProviderReceipt): CatalogPartition | null {
@@ -283,7 +261,6 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       epoch.pendingBaseline = null;
       source.authority = "HTTP";
       source.httpAuthorityCutoff = committedCutoff;
-      if (source.socket !== null) source.socket.pendingBaseline = null;
       const catalog = catalogFromPartitions(epoch.committedPartitions, envelope.observedAtMs);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
         observedAtMs: envelope.observedAtMs, value: catalog,
@@ -312,8 +289,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       current.activeStreamOrdinal = null;
       current.decoder = null;
       current.committedPartitions = new Map();
-      current.pendingBaseline = null;
-      current.generation = `${sourceEpoch(envelope)}:ksport-ws:${streamId}:closed`;
+        current.generation = `${sourceEpoch(envelope)}:ksport-ws:${streamId}:closed`;
       current.committedGeneration = 0;
       current.authorityLost = true;
       if (source.authority === "HTTP") return [];
@@ -322,195 +298,42 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
     }
     let epoch = source.socket;
-    let retiresAuthority = false;
     if (epoch === null || streamOrdinal > epoch.streamHighWatermark) {
-      retiresAuthority = source.authority === "WS" && epoch !== null && hasCommittedSocketAuthority(epoch);
       epoch = socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal,
         epoch?.receiptHighWatermarks);
       source.socket = epoch;
-      if (retiresAuthority) source.authority = "NONE";
     }
     if (epoch.activeStreamId !== streamId || epoch.activeStreamOrdinal !== streamOrdinal ||
       epoch.decoder === null) return [];
-    const recoveryGeneration = wsRecoveryGeneration(envelope);
-    if (recoveryGeneration === null) return retiresAuthority ? [streamGap(envelope)] : [];
-    if (isSportsbookHeartbeat(envelope.payload.body)) {
-      if (source.authority !== "WS" || epoch.authorityLost || epoch.pendingBaseline !== null ||
-        recoveryGeneration !== epoch.committedGeneration ||
-        !epoch.committedPartitions.has("live") || !epoch.committedPartitions.has("today")) {
-        return retiresAuthority ? [streamGap(envelope)] : [];
-      }
-      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-        observedAtMs: envelope.observedAtMs, transportAlive: true }];
-    }
+    if (isSportsbookHeartbeat(envelope.payload.body)) return [];
     const receipts = epoch.decoder.push(envelope.payload.body);
-    if (receipts.length === 0) return retiresAuthority ? [streamGap(envelope)] : [];
-    let acceptedDelta = false;
-    let completedBaseline = false;
-    let acceptedCatalogEvidence = false;
-    let transportEvidence = false;
-    let invalidated = false;
+    // Measured 2026-08-30 on the live book: per-event updates arrive in the
+    // exact league-array wire shape of a full snapshot (1-2 events per frame),
+    // and the today topic (subSportHotMatch) never sends a genuine full
+    // snapshot at all. A fragment "pair" that completed the old socket
+    // handover replaced the 142-event book with a 62-event one and then froze
+    // it. No WS receipt is trustworthy as a baseline here: the HTTP getEvent
+    // pair is the only catalog authority, and WS receipts only upsert into it
+    // once they are past the committed baseline's request fence.
+    // wsSequenceHighWatermark is deliberately left untouched - advancing it
+    // from socket traffic would discard every future HTTP baseline via the
+    // pending-baseline fence.
     let appliedHttpLaneDelta = false;
     for (const receipt of receipts) {
       const partition = receiptPartition(receipt);
       if (partition === null) continue;
-      const fullSnapshot = isFullPartitionSnapshot(receipt.body);
-      if (source.authority === "HTTP") {
-        // Measured 2026-08-30: the provider streams per-event updates in the
-        // exact league-array wire shape of a full snapshot (1-2 events per
-        // frame), so "looks like a full snapshot" cannot mean "is one".
-        // Promoting such a fragment to socket authority would replace a whole
-        // partition with a handful of events, and waiting for a genuine full
-        // pair froze the catalog between HTTP baselines. While an HTTP
-        // baseline is committed, fold every receipt observed after that
-        // baseline's request fence into the HTTP lane as an upsert instead.
-        // This deliberately leaves wsSequenceHighWatermark alone - advancing
-        // it here would discard every future HTTP baseline via the
-        // pending-baseline fence.
-        if (source.httpAuthorityCutoff === null ||
-          envelope.sequence <= source.httpAuthorityCutoff) continue;
-        appliedHttpLaneDelta = applyHttpLaneDelta(source, receipt, partition, envelope) ||
-          appliedHttpLaneDelta;
-        continue;
-      }
-      const order = receipt.receiptSequence;
-      if (order === null || !Number.isSafeInteger(order) || order <= 0) continue;
-      const bootstrap = bootstrapRecords(receipt.body, partition === "live");
-      const changed = extractSbobetDirectCatalogRecords(receipt.body, bootstrap);
-      if (fullSnapshot && bootstrap.length > 0 && changed.length === 0) continue;
-      if (!fullSnapshot && changed.length === 0) continue;
-      if (fullSnapshot) {
-        if (recoveryGeneration < epoch.committedGeneration) continue;
-        if (recoveryGeneration === epoch.committedGeneration) {
-          if (source.authority !== "WS" || epoch.authorityLost || epoch.pendingBaseline !== null) continue;
-          const committed = epoch.committedPartitions.get(partition);
-          if (committed === undefined || order <= committed.receiptSequence) continue;
-          const records = new Map<string, RetainedRecord>();
-          for (const incoming of changed) records.set(incoming.eventId, retainedRecord(incoming, envelope, order));
-          const unchanged = samePartitionContent(committed.records, records);
-          epoch.committedPartitions.set(partition, {
-            records: unchanged ? committed.records : records,
-            receiptSequence: order
-          });
-          epoch.receiptHighWatermarks.set(partition,
-            Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
-          acceptedCatalogEvidence = true;
-          if (unchanged) transportEvidence = true;
-          else acceptedDelta = true;
-          continue;
-        }
-        if (epoch.pendingBaseline === null || recoveryGeneration > epoch.pendingBaseline.ordinal) {
-          // A full replacement part must be newer than valid evidence for
-          // that partition, including applied deltas retained across a socket
-          // handoff. The other partition has its own independent order.
-          if (order <= (epoch.receiptHighWatermarks.get(partition) ?? 0)) continue;
-          epoch.pendingBaseline = pendingBaseline(
-            `${sourceEpoch(envelope)}:ksport-ws:${streamId}:${recoveryGeneration}`, recoveryGeneration,
-            epoch.receiptHighWatermarks);
-        }
-        if (recoveryGeneration !== epoch.pendingBaseline.ordinal) continue;
-        if (epoch.pendingBaseline.fenced) continue;
-        const prior = epoch.pendingBaseline.partitions.get(partition);
-        if (order <= (epoch.pendingBaseline.receiptFloors.get(partition) ?? 0) ||
-          (prior !== undefined && order <= prior.receiptSequence)) continue;
-        acceptedCatalogEvidence = true;
-        const records = new Map<string, RetainedRecord>();
-        for (const incoming of changed) records.set(incoming.eventId, retainedRecord(incoming, envelope, order));
-        epoch.pendingBaseline.partitions.set(partition, { records, receiptSequence: order });
-        epoch.receiptHighWatermarks.set(partition,
-          Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
-        if (epoch.pendingBaseline.partitions.has("live") && epoch.pendingBaseline.partitions.has("today") &&
-          !epoch.pendingBaseline.fenced) {
-          applyPendingDeltas(epoch.pendingBaseline);
-          epoch.committedPartitions = epoch.pendingBaseline.partitions;
-          epoch.generation = epoch.pendingBaseline.generation;
-          epoch.committedGeneration = epoch.pendingBaseline.ordinal;
-          epoch.pendingBaseline = null;
-          epoch.authorityLost = false;
-          source.authority = "WS";
-          source.httpAuthorityCutoff = null;
-          completedBaseline = true;
-        }
-        continue;
-      }
-      if (recoveryGeneration > epoch.committedGeneration &&
-        (epoch.pendingBaseline === null || recoveryGeneration > epoch.pendingBaseline.ordinal)) {
-        if (order <= (epoch.receiptHighWatermarks.get(partition) ?? 0)) continue;
-        epoch.pendingBaseline = pendingBaseline(
-          `${sourceEpoch(envelope)}:ksport-ws:${streamId}:${recoveryGeneration}`, recoveryGeneration,
-          epoch.receiptHighWatermarks);
-      }
-      if (epoch.pendingBaseline !== null) {
-        const pendingPartition = epoch.pendingBaseline.partitions.get(partition);
-        const partitionEvidence = pendingPartition?.receiptSequence ??
-          epoch.pendingBaseline.receiptFloors.get(partition) ?? 0;
-        if (recoveryGeneration !== epoch.pendingBaseline.ordinal || order <= partitionEvidence) continue;
-        if (epoch.pendingBaseline.fenced) continue;
-        epoch.receiptHighWatermarks.set(partition,
-          Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
-        const bufferResult = bufferPendingDeltas(epoch.pendingBaseline, partition, changed, envelope, order);
-        if (bufferResult !== "NOOP") acceptedCatalogEvidence = true;
-        if (bufferResult === "OVERFLOW") {
-          if (!epoch.authorityLost) invalidated = true;
-          epoch.authorityLost = true;
-          // Loss dominates every later receipt coalesced into this transport
-          // frame. Do not let a same-frame baseline hide the mandatory gap;
-          // recovery starts with a subsequent strictly newer complete pair.
-          break;
-        }
-        continue;
-      }
-      if (recoveryGeneration !== epoch.committedGeneration) continue;
-      const committed = epoch.committedPartitions.get(partition);
-      if (committed === undefined || order <= committed.receiptSequence) continue;
-      acceptedCatalogEvidence = true;
-      epoch.receiptHighWatermarks.set(partition,
-        Math.max(epoch.receiptHighWatermarks.get(partition) ?? 0, order));
-      const records = new Map(committed.records);
-      for (const incoming of changed) {
-        const existing = records.get(incoming.eventId)?.record;
-        records.set(incoming.eventId, retainedRecord(mergeDeltaRecord(existing, incoming), envelope, order));
-      }
-      epoch.committedPartitions.set(partition, { records, receiptSequence: order });
-      acceptedDelta = changed.length > 0 || acceptedDelta;
+      if (source.authority !== "HTTP" || source.httpAuthorityCutoff === null ||
+        envelope.sequence <= source.httpAuthorityCutoff) continue;
+      appliedHttpLaneDelta = applyHttpLaneDelta(source, receipt, partition, envelope) ||
+        appliedHttpLaneDelta;
     }
-    if (acceptedCatalogEvidence) {
-      source.wsSequenceHighWatermark = Math.max(source.wsSequenceHighWatermark, envelope.sequence);
-      if (source.http.pendingBaseline !== null &&
-        envelope.sequence > source.http.pendingBaseline.requestStartSequence) {
-        source.http.pendingBaseline = null;
-      }
-    }
-    if (invalidated) {
-      if (source.authority === "WS") source.authority = "NONE";
-      return [streamGap(envelope)];
-    }
-    if (appliedHttpLaneDelta && !acceptedDelta && !completedBaseline) {
-      const catalog = catalogFromPartitions(source.http.committedPartitions, envelope.observedAtMs);
-      if (catalog.events.length === 0 || catalog.markets.length === 0 ||
-        catalog.quotes.length === 0) return [];
-      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-        observedAtMs: envelope.observedAtMs, value: catalog, evidenceMode: "DELTA",
-        generation: source.http.generation, provenance: "WS" }];
-    }
-    if ((!acceptedDelta && !completedBaseline) || !epoch.committedPartitions.has("live") ||
-      !epoch.committedPartitions.has("today")) {
-      if (transportEvidence && source.authority === "WS" && !epoch.authorityLost &&
-        epoch.committedPartitions.has("live") && epoch.committedPartitions.has("today")) {
-        return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
-          observedAtMs: envelope.observedAtMs, transportAlive: true }];
-      }
-      return retiresAuthority ? [streamGap(envelope)] : [];
-    }
-    const catalog = catalogFromPartitions(epoch.committedPartitions, envelope.observedAtMs);
-    if (!completedBaseline && (catalog.events.length === 0 || catalog.markets.length === 0 ||
-      catalog.quotes.length === 0)) return [];
-    const update: DecodedCatalogUpdate = { sourceId: envelope.sourceId, sequence: envelope.sequence,
-      observedAtMs: envelope.observedAtMs, value: catalog,
-      ...(completedBaseline ? { authoritativeBaseline: true as const, evidenceMode: "BASELINE" as const }
-        : { evidenceMode: "DELTA" as const }),
-      generation: epoch.generation, provenance: "WS" };
-    return [update];
+    if (!appliedHttpLaneDelta) return [];
+    const catalog = catalogFromPartitions(source.http.committedPartitions, envelope.observedAtMs);
+    if (catalog.events.length === 0 || catalog.markets.length === 0 ||
+      catalog.quotes.length === 0) return [];
+    return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+      observedAtMs: envelope.observedAtMs, value: catalog, evidenceMode: "DELTA",
+      generation: source.http.generation, provenance: "WS" }];
   }
 }
 
@@ -539,18 +362,10 @@ function socketEpoch(epoch: string, streamId: string, streamOrdinal: number,
   receiptHighWatermarks: ReadonlyMap<CatalogPartition, number> = new Map()): SocketEpoch {
   return { activeStreamId: streamId, activeStreamOrdinal: streamOrdinal,
     streamHighWatermark: streamOrdinal, decoder: new SbobetStompReceiptDecoder(),
-    committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(), pendingBaseline: null,
+    committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(),
     generation: `${epoch}:ksport-ws:${streamId}:0`, committedGeneration: 0,
     receiptHighWatermarks: new Map(receiptHighWatermarks),
     authorityLost: false };
-}
-
-function pendingBaseline(generation: string, ordinal: number,
-  receiptFloors: ReadonlyMap<CatalogPartition, number> = new Map()): PendingBaseline {
-  return { generation, ordinal, receiptFloors: new Map(receiptFloors),
-    partitions: new Map<CatalogPartition, PartitionSnapshot>(),
-    deltas: new Map<CatalogPartition, Map<string, Map<string, RetainedRecord>>>(),
-    deltaRecordCount: 0, deltaMarketCount: 0, fenced: false };
 }
 
 function catalogFromPartitions(partitions: ReadonlyMap<CatalogPartition, PartitionSnapshot>,
@@ -608,72 +423,6 @@ function mergeDeltaRecord(existing: SbobetCatalogInputRecord | undefined,
   return { ...existing, ...incoming,
     markets: [...new Map([...existing.markets, ...incoming.markets]
       .map((market) => [market.marketId, market])).values()] };
-}
-
-function bufferPendingDeltas(pending: PendingBaseline, partition: CatalogPartition,
-  changed: readonly SbobetCatalogInputRecord[], envelope: ChromeBridgeEnvelope,
-  order: number): "BUFFERED" | "NOOP" | "OVERFLOW" {
-  const records = pending.deltas.get(partition) ?? new Map<string, Map<string, RetainedRecord>>();
-  pending.deltas.set(partition, records);
-  let buffered = false;
-  for (const incoming of changed) {
-    const previous = records.get(incoming.eventId);
-    const acceptedMarkets = incoming.markets.filter((market) => {
-      const prior = previous?.get(market.marketId);
-      return prior === undefined || order > prior.receiptSequence;
-    });
-    if (acceptedMarkets.length === 0) continue;
-    const nextRecordCount = pending.deltaRecordCount + (previous === undefined ? 1 : 0);
-    const nextMarketCount = pending.deltaMarketCount +
-      acceptedMarkets.filter((market) => !previous?.has(market.marketId)).length;
-    if (nextRecordCount > MAX_PENDING_DELTA_RECORDS || nextMarketCount > MAX_PENDING_DELTA_MARKETS) {
-      pending.deltas.clear();
-      pending.deltaRecordCount = 0;
-      pending.deltaMarketCount = 0;
-      pending.fenced = true;
-      return "OVERFLOW";
-    }
-    const markets = previous ?? new Map<string, RetainedRecord>();
-    for (const market of acceptedMarkets) {
-      markets.set(market.marketId, retainedRecord({ ...incoming, markets: [market] }, envelope, order));
-    }
-    buffered = true;
-    records.set(incoming.eventId, markets);
-    pending.deltaRecordCount = nextRecordCount;
-    pending.deltaMarketCount = nextMarketCount;
-  }
-  return buffered ? "BUFFERED" : "NOOP";
-}
-
-function samePartitionContent(left: ReadonlyMap<string, RetainedRecord>,
-  right: ReadonlyMap<string, RetainedRecord>): boolean {
-  if (left.size !== right.size) return false;
-  for (const [eventId, entry] of left) {
-    const candidate = right.get(eventId);
-    if (candidate === undefined || JSON.stringify(entry.record) !== JSON.stringify(candidate.record)) return false;
-  }
-  return true;
-}
-
-function applyPendingDeltas(pending: PendingBaseline): void {
-  for (const [partition, deltas] of pending.deltas) {
-    const baseline = pending.partitions.get(partition);
-    if (baseline === undefined) continue;
-    const records = new Map(baseline.records);
-    let receiptSequence = baseline.receiptSequence;
-    for (const [eventId, markets] of deltas) {
-      const accepted = [...markets.values()]
-        .filter((delta) => delta.receiptSequence > baseline.receiptSequence)
-        .sort((left, right) => left.receiptSequence - right.receiptSequence || left.sequence - right.sequence);
-      if (accepted.length === 0) continue;
-      let record = records.get(eventId)?.record;
-      for (const delta of accepted) record = mergeDeltaRecord(record, delta.record);
-      const latest = accepted.at(-1)!;
-      records.set(eventId, { ...latest, record: record! });
-      receiptSequence = Math.max(receiptSequence, latest.receiptSequence);
-    }
-    pending.partitions.set(partition, { records, receiptSequence });
-  }
 }
 
 function retainNewest(retained: Map<string, RetainedRecord>, eventId: string, incoming: RetainedRecord): void {
