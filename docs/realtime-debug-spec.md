@@ -228,7 +228,7 @@ lỗi** — làm vậy là đá extension ra, tự tạo đúng lỗi đang đi 
 |---|---|---|---|
 | **CMD** | HTTP `DataOdds.ashx` + delta | ✅ 26–79% | dấu line FH_AH sai ở vài trận hiếm (2/732 hàng) |
 | **BTI** | HTTP list + detail | ✅ 24–67% | cửa "đòi đủ mới phát" ở `bti-http-adapter.ts:113` chưa xác minh |
-| **APSPORT** | HTTP roster/detail + socket | ✅ 20–33% | vừa sửa xong, theo dõi thêm |
+| **APSPORT** | HTTP roster/detail + socket | ✅ 20–59% | đã sửa dứt điểm, đo lại cuối ngày vẫn 58,7% |
 | **SABA** | socket + DOM overlay | ⚠ 2,6–21% | thấp hơn hẳn CMD/BTI, **cần soi tiếp** |
 | **SBOBET** | socket.io | ❓ chưa có trận live để đo | |
 | **IM** | HTTP `GetSE` / `GetSEDelta` | ❓ chưa có trận live để đo | |

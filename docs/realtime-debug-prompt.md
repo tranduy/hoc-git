@@ -17,8 +17,16 @@ nghiêm trọng nhất trong hệ thống.
   docs/SESSION-STATE.md         — trạng thái hiện tại và lịch sử đã sửa
   CLAUDE.md                     — ràng buộc không được vi phạm
 
-Làm LẦN LƯỢT TỪNG SÀN theo thứ tự: SABA → SBOBET → IM → BTI → CMD → APSPORT.
-(SABA trước vì đang thấp nhất; CMD và APSPORT vừa sửa xong, chỉ cần xác minh.)
+ĐÃ SỬA XONG, ĐỪNG SỬA LẠI — chỉ chạy bước 2 một lần để xác nhận còn đạt:
+  APSPORT  (sửa 2026-08-29: template lệch thế hệ + trạng thái Suspended)
+  CMD      (sửa 2026-08-29: mã khoá -999 vứt cả lô delta)
+  BTI      (chưa sửa gì, tự nó vẫn đạt)
+Ba sàn này còn đạt thì bỏ qua. Tụt xuống dưới ngưỡng thì mới quay lại,
+và khi đó ĐỌC LẠI mục 2 của spec trước — nhiều khả năng là một biến thể
+khác của cùng mô-típ, không phải lỗi mới.
+
+CẦN SỬA — làm LẦN LƯỢT theo thứ tự: SABA → SBOBET → IM.
+(SABA trước vì đang thấp nhất và có nhiều trận nhất nên đo được ngay.)
 
 Với mỗi sàn, theo đúng mục 9 của spec:
 
@@ -81,6 +89,14 @@ BÁO CÁO: mỗi sàn ghi rõ % giá đổi TRƯỚC và SAU, kèm số đo th�
 ---
 
 ## Ghi chú cho người giao việc
+
+**APSPORT đã xong.** Nó nằm trong danh sách chỉ để xác nhận một lần, không phải
+để sửa lại. Đo lúc vừa sửa: 20–33%. Đo cuối ngày 2026-08-29: **58,7%** — cao
+nhất trong sáu sàn, baseline 13s so với hạn 120s. Hai nguyên nhân đã gỡ: template
+yêu cầu bị khoá vào thế hệ tab cũ (`network-observer.ts`), và trạng thái
+`Suspended` bị coi là không đọc được thay vì là tin "kèo đã rút"
+(`tsport-ws-adapter.ts`).
+
 
 **Vì sao thứ tự là SABA trước:** đo 2026-08-29 cho thấy SABA chỉ 2,6–21% trong
 khi CMD/BTI 24–79% trên cùng khung thời gian. Nó có 50 trận đang đá nên đo được
