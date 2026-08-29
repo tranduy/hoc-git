@@ -284,20 +284,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       source.authority = "HTTP";
       source.httpAuthorityCutoff = committedCutoff;
       if (source.socket !== null) source.socket.pendingBaseline = null;
-      const retained = new Map<string, RetainedRecord>();
-      for (const partition of ["today", "live"] as const) {
-        for (const [eventId, entry] of epoch.committedPartitions.get(partition)!.records) {
-          retainNewest(retained, eventId, entry);
-        }
-      }
-      const parts: NormalizedCatalogPart[] = [];
-      for (const entry of retained.values()) parts.push(normalizeSbobetCatalog([entry.record], {
-        observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
-        sequence: entry.sequence, provider: "SBOBET",
-        settlementProfile: "football-regulation-including-added-time"
-      }));
-      const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET",
-        observedAtMs: envelope.observedAtMs, parts });
+      const catalog = catalogFromPartitions(epoch.committedPartitions, envelope.observedAtMs);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
         observedAtMs: envelope.observedAtMs, value: catalog,
         authoritativeBaseline: true, evidenceMode: "BASELINE",
@@ -363,12 +350,26 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     let acceptedCatalogEvidence = false;
     let transportEvidence = false;
     let invalidated = false;
+    let appliedHttpLaneDelta = false;
     for (const receipt of receipts) {
       const partition = receiptPartition(receipt);
       if (partition === null) continue;
       const fullSnapshot = isFullPartitionSnapshot(receipt.body);
-      if (source.authority === "HTTP" && (!fullSnapshot || source.httpAuthorityCutoff === null ||
+      if (source.authority === "HTTP" && (source.httpAuthorityCutoff === null ||
         envelope.sequence <= source.httpAuthorityCutoff)) continue;
+      if (source.authority === "HTTP" && !fullSnapshot) {
+        // Measured 2026-08-30: the provider full-snapshots only in reply to a
+        // fresh SUBSCRIBE ("today" answers via subSportHotMatch with deltas
+        // only), so a healthy socket can never hand authority over from the
+        // committed HTTP baseline and the catalog froze between baselines.
+        // Deltas observed after that baseline's request fence are coherent
+        // with it; fold them into the HTTP lane instead. This deliberately
+        // leaves wsSequenceHighWatermark alone - advancing it here would
+        // discard every future HTTP baseline via the pending-baseline fence.
+        appliedHttpLaneDelta = applyHttpLaneDelta(source, receipt, partition, envelope) ||
+          appliedHttpLaneDelta;
+        continue;
+      }
       const order = receipt.receiptSequence;
       if (order === null || !Number.isSafeInteger(order) || order <= 0) continue;
       const bootstrap = bootstrapRecords(receipt.body, partition === "live");
@@ -481,6 +482,14 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (source.authority === "WS") source.authority = "NONE";
       return [streamGap(envelope)];
     }
+    if (appliedHttpLaneDelta && !acceptedDelta && !completedBaseline) {
+      const catalog = catalogFromPartitions(source.http.committedPartitions, envelope.observedAtMs);
+      if (catalog.events.length === 0 || catalog.markets.length === 0 ||
+        catalog.quotes.length === 0) return [];
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+        observedAtMs: envelope.observedAtMs, value: catalog, evidenceMode: "DELTA",
+        generation: source.http.generation, provenance: "WS" }];
+    }
     if ((!acceptedDelta && !completedBaseline) || !epoch.committedPartitions.has("live") ||
       !epoch.committedPartitions.has("today")) {
       if (transportEvidence && source.authority === "WS" && !epoch.authorityLost &&
@@ -490,22 +499,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       }
       return retiresAuthority ? [streamGap(envelope)] : [];
     }
-    const retained = new Map<string, RetainedRecord>();
-    for (const partition of ["today", "live"] as const) {
-      for (const [eventId, entry] of epoch.committedPartitions.get(partition)!.records) {
-        retainNewest(retained, eventId, entry);
-      }
-    }
-    const parts: NormalizedCatalogPart[] = [];
-    for (const entry of retained.values()) {
-      parts.push(normalizeSbobetCatalog([entry.record], {
-        observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
-        sequence: entry.sequence, provider: "SBOBET",
-        settlementProfile: "football-regulation-including-added-time"
-      }));
-    }
-    const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET",
-      observedAtMs: envelope.observedAtMs, parts });
+    const catalog = catalogFromPartitions(epoch.committedPartitions, envelope.observedAtMs);
     if (!completedBaseline && (catalog.events.length === 0 || catalog.markets.length === 0 ||
       catalog.quotes.length === 0)) return [];
     const update: DecodedCatalogUpdate = { sourceId: envelope.sourceId, sequence: envelope.sequence,
@@ -554,6 +548,49 @@ function pendingBaseline(generation: string, ordinal: number,
     partitions: new Map<CatalogPartition, PartitionSnapshot>(),
     deltas: new Map<CatalogPartition, Map<string, Map<string, RetainedRecord>>>(),
     deltaRecordCount: 0, deltaMarketCount: 0, fenced: false };
+}
+
+function catalogFromPartitions(partitions: ReadonlyMap<CatalogPartition, PartitionSnapshot>,
+  observedAtMs: number): ReturnType<typeof mergeObservedCatalogParts> {
+  const retained = new Map<string, RetainedRecord>();
+  for (const partition of ["today", "live"] as const) {
+    const snapshot = partitions.get(partition);
+    if (snapshot === undefined) continue;
+    for (const [eventId, entry] of snapshot.records) retainNewest(retained, eventId, entry);
+  }
+  const parts: NormalizedCatalogPart[] = [];
+  for (const entry of retained.values()) {
+    parts.push(normalizeSbobetCatalog([entry.record], {
+      observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
+      sequence: entry.sequence, provider: "SBOBET",
+      settlementProfile: "football-regulation-including-added-time"
+    }));
+  }
+  return mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET", observedAtMs, parts });
+}
+
+/**
+ * Folds one non-full WS receipt into the committed HTTP baseline. The record
+ * fence is the envelope sequence: it is monotonic per source, and the caller
+ * has already required it to be past the baseline's request-start cutoff, so
+ * a delta can never drag the catalog behind the baseline it lands on.
+ */
+function applyHttpLaneDelta(source: SourceEpochState, receipt: SbobetStompProviderReceipt,
+  partition: CatalogPartition, envelope: ChromeBridgeEnvelope): boolean {
+  const bootstrap = bootstrapRecords(receipt.body, partition === "live");
+  const changed = extractSbobetDirectCatalogRecords(receipt.body, bootstrap);
+  if (changed.length === 0) return false;
+  const committed = source.http.committedPartitions.get(partition);
+  if (committed === undefined) return false;
+  const records = new Map(committed.records);
+  for (const incoming of changed) {
+    const existing = records.get(incoming.eventId)?.record;
+    records.set(incoming.eventId,
+      retainedRecord(mergeDeltaRecord(existing, incoming), envelope, envelope.sequence));
+  }
+  source.http.committedPartitions.set(partition,
+    { records, receiptSequence: Math.max(committed.receiptSequence, envelope.sequence) });
+  return true;
 }
 
 function retainedRecord(record: SbobetCatalogInputRecord, envelope: ChromeBridgeEnvelope,

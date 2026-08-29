@@ -682,7 +682,7 @@ describe("KsportWsCatalogAdapter", () => {
     ]);
   });
 
-  it("keeps HTTP authority through old WS delta and lifecycle traffic until a fresh full WS pair completes", () => {
+  it("folds WS deltas into the committed HTTP baseline until a fresh full WS pair completes", () => {
     const event = (id: number, odds = "0.92") => ({ "0": "2026-08-20T16:00:00Z",
       "2": `Home ${id}`, "3": `Away ${id}`, "7": {
         "3": [`2.5 ${odds}*${id}0030002005h -0.98*${id}0030002005a ${id}181025`]
@@ -699,8 +699,18 @@ describe("KsportWsCatalogAdapter", () => {
       authoritativeBaseline: true, provenance: "AUTHENTICATED_HTTP"
     })]);
 
-    expect(adapter.decode(receiptEnvelope(event(5643423, "0.75"), "live", 5, 101,
+    // A delta at or before the baseline's request fence may predate the
+    // snapshot and stays refused.
+    expect(adapter.decode(receiptEnvelope(event(5643423, "0.60"), "live", 2, 99,
       "ksport-stream-1", "worker-a:0"))).toEqual([]);
+    const deltaUpdates = adapter.decode(receiptEnvelope(event(5643423, "0.75"), "live", 5, 101,
+      "ksport-stream-1", "worker-a:0"));
+    expect(deltaUpdates).toEqual([expect.objectContaining({
+      evidenceMode: "DELTA", provenance: "WS", generation: "worker-a:0:ksport-http:8:1"
+    })]);
+    const deltaCatalog = deltaUpdates[0]!.value as { events: Array<{ providerEventId: string }> };
+    expect(deltaCatalog.events.map((item) => item.providerEventId).sort())
+      .toEqual(["5643423", "5643424"]);
     expect(adapter.decode(socketState("ksport-stream-2", "OPEN", 6, "worker-a:0"))).toEqual([]);
     expect(adapter.decode(socketState("ksport-stream-2", "CLOSED", 7, "worker-a:0"))).toEqual([]);
     expect(adapter.decode(socketState("ksport-stream-3", "OPEN", 8, "worker-a:0"))).toEqual([]);
