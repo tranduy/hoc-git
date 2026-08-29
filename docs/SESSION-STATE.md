@@ -32,11 +32,31 @@ tới 120s; 765–1.182 đổi giá/60s (trước: 0). Chu kỳ còn lại: leas
 ~10s trước khi cặp getEvent trong trang về → HOP6 chớm SOFT_RECOVERY vài giây mỗi
 ~2 phút, catalog vẫn tươi suốt — ngưỡng giữ nguyên, không nới.
 
-**Việc còn mở:** (a) event bị gỡ chỉ biến mất khi baseline thay — delta chỉ upsert,
-trận ma sống tối đa ~2 phút; (b) `expectedEvidenceCadenceMs=60_000` của SBOBET
-được chỉnh hồi thế giới còn hỏng — giờ evidence p50 ~300ms, có thể siết lại sau
-soak; (c) extension vẫn bơm SUBSCRIBE lặp (generation 6→10+) vô ích vì tracker
-không bao giờ thấy baseline WS đủ cặp — vô hại nhưng ồn.
+**Diễn biến tiếp (02:27, test sống với người dùng):** trong lúc đổi epoch, trước
+khi baseline HTTP đầu tiên kịp về, một "cặp full" giả (fragment đội lốt) đã chiếm
+quyền WS → **catalog sập 142 → 62 trận rồi đóng băng**. Kết luận cuối: với sàn này
+**không receipt WS nào đáng tin làm baseline**. Đã gỡ toàn bộ máy socket-authority
+khỏi `ksport-ws-adapter.ts` (~1.000 dòng kèm test cũ): chỉ cặp getEvent HTTP làm
+baseline; WS chỉ fold upsert qua fence sequence; socket đóng không invalidate
+catalog nó chưa từng sở hữu. Test adapter viết lại (18), data-plane chuyển sang
+cặp HTTP (53/53).
+
+**Nốt cuối cùng của chuỗi:** baseline chỉ được làm mới khi stall → recovery, mà
+backoff recovery lớn dần (128s → 256s) → mỗi ~2 phút đứng 30–60s. Extension giờ
+**chủ động gia hạn lease mỗi 75s** khi socket khỏe (`#renewKsportBaselineLease`,
+bundle `2390eb51`) — template fetch trước, native period request khi template hỏng.
+
+**Việc còn mở:** (a) delta chỉ upsert — trận bị gỡ và trận MỚI chỉ vào/ra ở
+baseline kế tiếp (coverage guard chặn delta thêm event mới), trễ tối đa ~75s;
+(b) `expectedEvidenceCadenceMs=60_000` của SBOBET chỉnh hồi thế giới còn hỏng —
+giờ evidence p50 ~300ms, có thể siết sau soak; (c) extension vẫn bơm SUBSCRIBE
+lặp vô ích — vô hại nhưng ồn, dọn sau; (d) APSPORT view "Trực tiếp" (mg/1) vẫn
+là gánh nợ cũ: tab trôi sang đó là roster chết (`record-no-usable-markets`,
+`delta-generation-mismatch`) — workaround giữ tab ở "Hôm nay", fix thật ~1-2h.
+
+**IM đêm nay không phải bug:** hai lần "mất data" đều là tab không còn attach
+(0 envelope tới bridge); mở lại tab là tự hồi ~1 phút. Snapshot GetSE bị chunk
+110KB nên trong capture nhìn như thiếu `StatusCode` — bản ráp nằm ở tầng sau.
 
 ## SABA — đặt tên xong, và cái tên nói đầu vào sai chứ không phải bộ giải mã
 
