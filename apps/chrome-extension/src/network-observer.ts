@@ -3836,6 +3836,12 @@ export class NetworkObserver {
           if (lastAttemptAtMs === undefined ||
             nowMs - lastAttemptAtMs >= KSPORT_ORPHAN_FRAME_RETRY_MS) {
             this.#ksportOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
+            // Child-target discovery only ran once inside start(). A sportsbook
+            // OOPIF created after that moment (every tab reload does this) was
+            // never attached, so its socket stayed orphan forever and the
+            // reconnect below could not observe the replacement either.
+            // Re-discover before asking the page to reconnect.
+            await this.#discoverExistingKsportChildTargets(source).catch(() => undefined);
             await this.#scheduleFreshSocketBaseline(source, isKsportCatalogSocket);
           }
         }
