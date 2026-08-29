@@ -298,6 +298,26 @@ describe("TsportWsCatalogAdapter", () => {
     expect(update.value.quotes.every((quote) => quote.sequence === 3 && quote.receivedMonotonicMs === 70)).toBe(true);
   });
 
+  it("stops pricing an APSPORT fixture the socket says the book has paused", () => {
+    // A book pauses a market the moment it repositions, and the frame saying so
+    // was refused as unreadable - so the price it had went on being published
+    // as current. Measured 2026-08-29: 129 of APSPORT's refused frames were
+    // this, each one a price the book had already withdrawn.
+    const adapter = new TsportWsCatalogAdapter();
+    adapter.decode(apiEnvelope([event(120, "Paused Home")]));
+    const priced = adapter.decode(envelope(event(120, "Paused Home", "0.71"), 2))[0] as AuthorityUpdate;
+
+    const paused = adapter.decode(envelope(
+      { ...event(120, "Paused Home", "0.71"), "10": "Suspended" }, 3))[0] as AuthorityUpdate;
+
+    const marketsOf = (update: AuthorityUpdate) => update.value.markets as readonly { readonly providerEventId?: string; readonly status?: string }[];
+    expect(marketsOf(priced).every((market) => market.status === "OPEN")).toBe(true);
+    expect(marketsOf(paused).filter((market) => market.providerEventId === "120").length)
+      .toBeGreaterThan(0);
+    expect(marketsOf(paused).filter((market) => market.providerEventId === "120")
+      .every((market) => market.status === "SUSPENDED")).toBe(true);
+  });
+
   it("removes the whole APSPORT event when its exact changed detail is no longer active", () => {
     const adapter = new TsportWsCatalogAdapter();
     const current = event(110, "Closed Home");

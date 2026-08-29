@@ -273,13 +273,19 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
   if (eventId === null) return noteRefusal("record-no-id");
   if (home === null || away === null || home === away) return noteRefusal("record-no-teams");
   if (leagueName === null) return noteRefusal("record-no-league");
-  if (!activeApsportApiEvent(event)) return noteRefusal(`record-state-${String(event["10"]).slice(0, 12)}`);
   if (!Array.isArray(event["50"])) return noteRefusal("record-no-markets");
 
+  // A book pausing a market is telling us the price is no longer on offer, and
+  // refusing the frame that said so left the price it had standing as current.
+  // That is what an impossible edge is made of, so a pause is carried through
+  // as a locked selection - which the normalizer publishes as SUSPENDED, and
+  // which comparison and staking already decline to price.
+  const eventActive = activeApsportApiEvent(event);
   const markets: SbobetCatalogInputRecord["markets"][number][] = [];
   for (const rawGroup of event["50"]) {
     const group = record(rawGroup);
-    if (group === null || group["10"] !== "Active" || !Array.isArray(group["9"])) continue;
+    if (group === null || !Array.isArray(group["9"])) continue;
+    const locked = !eventActive || group["10"] !== "Active";
     const groupId = scalar(group["3"]);
     const marketType = groupId === null ? null : marketTypeByGroup[groupId] ?? null;
     if (marketType === null) continue;
@@ -299,9 +305,9 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
       markets.push({
         marketId: marketId!, marketType, lineText: line!, selections: [
           { selectionId: firstId!, selection: isHandicap ? "HOME" : "OVER",
-            priceText: firstPrice!, locked: false, ...(isHandicap ? { lineText: line! } : {}) },
+            priceText: firstPrice!, locked, ...(isHandicap ? { lineText: line! } : {}) },
           { selectionId: secondId!, selection: isHandicap ? "AWAY" : "UNDER",
-            priceText: secondPrice!, locked: false, ...(isHandicap ? { lineText: awayLine! } : {}) }
+            priceText: secondPrice!, locked, ...(isHandicap ? { lineText: awayLine! } : {}) }
         ]
       });
     }
