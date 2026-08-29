@@ -49,7 +49,7 @@ export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentit
         { credentials: 'same-origin', cache: 'no-store',
           // Its own deadline, inside the caller's: a request still in flight
           // when the budget ends reports a timeout with no name attached to it.
-          signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(5000) : undefined });
+          signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(2500) : undefined });
       if (!response.ok) return { ok: false, reason: 'CMD_FETCH_STATUS', method: 'IN_PAGE_FETCH' };
       payload = await response.json();
     } catch (error) {

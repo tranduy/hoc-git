@@ -4573,28 +4573,40 @@ export class NetworkObserver {
           buildSbobetSelectionPriceExpression(request, sbobetObservedRequest, "FETCH_ONLY"), true);
       }
     } else if (source.lobby === "CMD") {
-      // The DOM holds only what the page drew. A fixture the operator has not
-      // scrolled to reported VISIBLE_PRICE_NOT_FOUND, which reads as "this
-      // ticket is gone" when the book is still offering it - the one answer a
-      // price check must never give wrongly. Ask the page for the book's own
-      // catalog when the screen cannot answer.
-      const domEvaluations = await evaluateFrames();
-      const domValues = domEvaluations.map((evaluation) => nestedValue(evaluation, "result", "value"))
-        .filter((value): value is Record<string, unknown> => isRecord(value));
-      if (domValues.some((value) => value.ok === true || value.reason === "VISIBLE_PRICE_AMBIGUOUS")) {
-        evaluations = domEvaluations;
-      } else {
-        // One request in the page that owns the session, not a sweep of every
-        // frame: the catalog is large enough that the 2.5 s per-frame budget
-        // expired before it arrived, and sweeping paid that cost once per frame
-        // for a page where only the top one can answer.
-        evaluations = [await this.#withFrameCommandTimeout(
-          this.#sendCommand(source.tabId, "Runtime.evaluate", {
-            expression: buildCmdSelectionPriceExpression(request, "FETCH_ONLY"),
-            returnByValue: true, awaitPromise: true
-          }), 7_000).catch(() => ({ result: { value: { ok: false, method: "IN_PAGE_FETCH",
-          reason: "CMD_FETCH_TIMED_OUT" } } }))];
+      // The DOM holds only what the page drew, so a fixture the operator has not
+      // scrolled to came back VISIBLE_PRICE_NOT_FOUND - which reads as a ticket
+      // that is gone while the book is still offering it. The book's own catalog
+      // request answers for every fixture, so it goes first: running it after a
+      // full frame sweep left the two together over the probe's 10 s budget, and
+      // the result was the same silence reported as a timeout.
+      //
+      // Frames, not just the top one, because the book may be framed and only
+      // its own origin can make this request. Main-world contexts already exist,
+      // so this costs no isolated world per frame, and it stops at the first
+      // frame that answers.
+      const fetchExpression = buildCmdSelectionPriceExpression(request, "FETCH_ONLY");
+      const conclusive = (value: unknown): boolean => isRecord(value) &&
+        (value.ok === true || value.reason === "CMD_EVENT_AMBIGUOUS" ||
+          value.reason === "CMD_SELECTION_NOT_ON_OFFER");
+      const fetchEvaluations: unknown[] = [];
+      const targets: Array<{ contextId?: number; sessionId?: string | undefined }> = [{},
+        ...[...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])]
+          .map((binding) => ({ contextId: binding.contextId, sessionId: binding.sessionId }))];
+      for (const target of targets) {
+        const params = { expression: fetchExpression, returnByValue: true, awaitPromise: true,
+          ...(target.contextId === undefined ? {} : { contextId: target.contextId }) };
+        const result = await this.#withFrameCommandTimeout(target.sessionId === undefined
+          ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+          : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId),
+        3_000).catch(() => ({ result: { value: { ok: false, method: "IN_PAGE_FETCH",
+          reason: "CMD_FETCH_TIMED_OUT" } } }));
+        fetchEvaluations.push(result);
+        if (conclusive(nestedValue(result, "result", "value"))) break;
       }
+      evaluations = fetchEvaluations.some((evaluation) =>
+        conclusive(nestedValue(evaluation, "result", "value")))
+        ? fetchEvaluations
+        : [...fetchEvaluations, ...await evaluateFrames()];
     } else if (source.lobby === "TSPORT") {
       const direct = await this.#probeApsportEventDetail(source, request);
       evaluations = direct === null ? await evaluateFrames() : [{ result: { value: direct } }];
