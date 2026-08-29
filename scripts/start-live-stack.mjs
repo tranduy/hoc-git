@@ -5,7 +5,8 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { waitForFixtureStack } from "./fixture-stack-readiness.mjs";
-import { attachManagedChildFailureHandlers, stopManagedChildren } from "./managed-stack.mjs";
+import { stopManagedChildren } from "./managed-stack.mjs";
+import { createChildSupervisor } from "./child-respawn.mjs";
 import { resolveStackEntries } from "./stack-paths.mjs";
 import { cleanupStaleStack, createManagedStackState, removeStackState, writeStackState } from "./stack-state.mjs";
 import { ensureChromeBridgeKey } from "./chrome-bridge-key.mjs";
@@ -102,6 +103,8 @@ export async function startLiveStack(options = {}) {
   if (environmentSource !== process.env) purgeStackAuthority(process.env);
   const { apiEntry, viteEntry, webRoot } = resolveStackEntries(repositoryRoot);
   const children = [];
+  const supervisors = [];
+  let respawnArmed = false;
   let managedState = null;
   let stopping = false;
   let readingShutdownRequest = false;
@@ -113,6 +116,7 @@ export async function startLiveStack(options = {}) {
   async function shutdown(exitCode) {
     if (shutdownPromise !== null) return shutdownPromise;
     stopping = true;
+    for (const supervisor of supervisors) supervisor.stop();
     if (retentionTimer !== null) dependencies.clearInterval(retentionTimer);
     if (shutdownTimer !== null) dependencies.clearInterval(shutdownTimer);
     shutdownPromise = (async () => {
@@ -203,31 +207,62 @@ export async function startLiveStack(options = {}) {
   };
   purgeStackAuthority(childEnvironment);
 
-  let api;
-  let web;
-  try {
-    api = dependencies.spawn(process.execPath, [...resolveApiNodeArgs(environmentSource), apiEntry], {
+  const spawnApi = () => dependencies.spawn(process.execPath,
+    [...resolveApiNodeArgs(environmentSource), apiEntry], {
       cwd: repositoryRoot,
       env: childEnvironment,
       stdio: ["inherit", "inherit", "inherit", "ipc"],
       windowsHide: true
     });
+  const spawnWeb = () => dependencies.spawn(process.execPath,
+    [viteEntry, "--host", host, "--port", String(webPort), "--strictPort"], {
+      cwd: webRoot,
+      env: childEnvironment,
+      stdio: "inherit",
+      windowsHide: true
+    });
+  // After a respawn the state file still records the dead child's process
+  // identity; republish it for the replacement so restart/cleanup tooling
+  // keeps matching the exact running processes. Fail closed if another
+  // instance changed the state underneath us.
+  async function republishChildIdentity(entry) {
+    if (managedState === null) return;
+    const replacement = await dependencies.inspectProcessIdentity(entry.child.pid);
+    const nextState = dependencies.createManagedStackState({ ...managedState,
+      [entry.name]: replacement });
+    await dependencies.removeStackState(statePath, managedState);
+    await dependencies.writeStackState(statePath, nextState);
+    managedState = nextState;
+  }
+  function supervise(entry, respawn) {
+    const supervisor = createChildSupervisor({
+      name: entry.name,
+      respawn,
+      onRespawned: (respawned) => republishChildIdentity(respawned),
+      onPermanentFailure: (code) => stopping ? undefined : shutdown(code),
+      output: dependencies.stderr,
+      shouldIgnore: () => stopping,
+      isArmed: () => respawnArmed,
+      now: options.dependencies?.now,
+      schedule: options.dependencies?.scheduleRespawn,
+      cancel: options.dependencies?.cancelRespawn
+    });
+    supervisors.push(supervisor);
+    supervisor.attach(entry);
+  }
+
+  let api;
+  let web;
+  try {
+    api = spawnApi();
     const apiChild = { name: "api", child: api, gracefulIpc: true };
     children.push(apiChild);
-    attachManagedChildFailureHandlers([apiChild], (code) => stopping ? undefined : shutdown(code),
-      dependencies.stderr, () => stopping);
+    supervise(apiChild, spawnApi);
 
-    web = dependencies.spawn(process.execPath,
-      [viteEntry, "--host", host, "--port", String(webPort), "--strictPort"], {
-        cwd: webRoot,
-        env: childEnvironment,
-        stdio: "inherit",
-        windowsHide: true
-      });
+    web = spawnWeb();
     const webChild = { name: "web", child: web, gracefulIpc: false };
     children.push(webChild);
-    attachManagedChildFailureHandlers([webChild], (code) => stopping ? undefined : shutdown(code),
-      dependencies.stderr, () => stopping);
+    supervise(webChild, spawnWeb);
   } catch (error) {
     await shutdown(1);
     throw error;
@@ -266,6 +301,7 @@ export async function startLiveStack(options = {}) {
       timeoutMs: 60_000
     });
     dependencies.stdout.write(`[live-stack] ready: http://${host}:${webPort}/football-live\n`);
+    respawnArmed = true;
   } catch (error) {
     dependencies.stderr.write(`[live-stack] ${error instanceof Error ? error.message : String(error)}\n`);
     await shutdown(1);
