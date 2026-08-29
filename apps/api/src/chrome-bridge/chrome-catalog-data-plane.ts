@@ -226,8 +226,13 @@ export class ChromeCatalogDataPlane {
       // quiet on frames it is still receiving.
       const adapter = route.adapter as { takeIgnoreReason?: () => string | null };
       const reason = adapter.takeIgnoreReason?.() ?? null;
+      // Bounded like the routing gate's, because the report keeps only names
+      // short enough to read: a provider path carrying a session token runs
+      // past that limit and was dropped whole, so an adapter going quiet on
+      // frames it still receives said nothing at all. APSPORT ignored 1,554
+      // frames on 2026-08-29 with 25 of them named.
       this.#telemetry?.recordAdapterIgnored(transportAccountId, envelope.observedAtMs,
-        reason === null ? envelope.request.pathnameClass : `/ignored/${reason}`);
+        (reason === null ? envelope.request.pathnameClass : `/ignored/${reason}`).slice(0, 63));
       return this.#reject(envelope, `ADAPTER_DECODE_EMPTY:${route.adapter.id}`);
     }
     this.#telemetry?.recordAdapterDecoded(transportAccountId, update.observedAtMs);

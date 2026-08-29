@@ -635,14 +635,14 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         raw = JSON.parse(envelope.payload.body);
       } catch {
         this.#invalidateDomEvidence(envelope.sourceId, envelopeSourceEpoch);
-        return [];
+        return this.#ignore("dom-body-unparsed");
       }
       const chunk = CmdSnapshotChunkSchema.safeParse(raw);
       if (!chunk.success || chunk.data.sweepId === undefined || chunk.data.sweepComplete === undefined ||
         chunk.data.sweepFrameKey === undefined ||
         chunk.data.sweepDocumentKey === undefined) {
         this.#invalidateDomEvidence(envelope.sourceId, envelopeSourceEpoch);
-        return [];
+        return this.#ignore("dom-chunk-shape");
       }
       const binding = {
         snapshotId: chunk.data.snapshotId,
@@ -667,7 +667,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         this.#domSweepStates.set(envelope.sourceId, sweep);
       } else if (existing.snapshotId !== binding.snapshotId) {
         if (existing.retiredSnapshotIds.has(binding.snapshotId) ||
-          envelope.sequence <= existing.startedAtSequence) return [];
+          envelope.sequence <= existing.startedAtSequence) return this.#ignore("dom-sweep-superseded");
         const retiredSnapshotIds = new Set(existing.retiredSnapshotIds);
         rememberBounded(retiredSnapshotIds, existing.snapshotId, MAX_RETIRED_DOM_SWEEPS);
         const sameSweep = !existing.completed && existing.sweepId === binding.sweepId &&
@@ -682,17 +682,17 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       } else {
         if (existing.completed || existing.sweepId !== binding.sweepId ||
           existing.sweepFrameKey !== binding.sweepFrameKey ||
-          existing.sweepDocumentKey !== binding.sweepDocumentKey) return [];
+          existing.sweepDocumentKey !== binding.sweepDocumentKey) return this.#ignore("dom-sweep-rebound");
         sweep = existing;
       }
       const assembled = this.#assembler.ingest(envelope.sourceId, chunk.data, envelope.observedAtMs,
         sweep.startedAtSequence);
-      if (assembled === null) return [];
+      if (assembled === null) return this.#ignore("dom-chunk-incomplete");
       for (const candidate of assembled) {
         const parsed = domExpectedEventSchema.safeParse(candidate);
         if (!parsed.success) {
           this.#invalidateDomEvidence(envelope.sourceId, envelopeSourceEpoch);
-          return [];
+          return this.#ignore("dom-expected-shape");
         }
         const outsideFootballSocket = isVirtualFootballIdentity(parsed.data.sportId,
           parsed.data.leagueName, parsed.data.teamNames);
@@ -702,10 +702,10 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         }
         if (sweep.eventIds.size > 5_000) {
           this.#invalidateDomEvidence(envelope.sourceId, envelopeSourceEpoch);
-          return [];
+          return this.#ignore("dom-sweep-too-large");
         }
       }
-      if (chunk.data.sweepComplete !== true) return [];
+      if (chunk.data.sweepComplete !== true) return this.#ignore("dom-sweep-not-complete");
       sweep.completed = true;
       const expectedEventIds: ExpectedEventSet = {
         sourceEpoch: sweep.sourceEpoch,
@@ -732,7 +732,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
           }
         }
       }
-      return [];
+      return this.#ignore("dom-no-sweep-outcome");
     }
 
     const streamId = envelope.request.streamId;
@@ -752,7 +752,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         const lastOpenSequence = this.#lastOpenSequences.get(lifecycleKey) ?? -1;
         if (seenStreamIds.has(streamId) || envelope.sequence <= lastOpenSequence) return this.#ignore("stale-open");
         const currentSourceEpoch = sourceEpoch(envelope);
-        if (!this.#acceptDomSourceEpoch(envelope.sourceId, currentSourceEpoch)) return [];
+        if (!this.#acceptDomSourceEpoch(envelope.sourceId, currentSourceEpoch)) return this.#ignore("open-epoch-refused");
         const expectedEventIds = this.#expectedEventIds.get(envelope.sourceId);
         const sweep = this.#domSweepStates.get(envelope.sourceId);
         const retired = this.#currentStreams.get(envelope.sourceId);
@@ -798,7 +798,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       }
       const current = this.#currentStreams.get(envelope.sourceId);
       if (current === undefined || current.streamId !== streamId ||
-        current.sourceEpoch !== sourceEpoch(envelope)) return [];
+        current.sourceEpoch !== sourceEpoch(envelope)) return this.#ignore("stream-changed-mid-baseline");
       this.#currentStreams.delete(envelope.sourceId);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
         invalidateAccountId: ACCOUNT_ID, reason: "PROVIDER_STREAM_CLOSED" }];
@@ -807,7 +807,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     let current = this.#currentStreams.get(envelope.sourceId);
     if (current === undefined) {
       const currentSourceEpoch = sourceEpoch(envelope);
-      if (!this.#acceptDomSourceEpoch(envelope.sourceId, currentSourceEpoch)) return [];
+      if (!this.#acceptDomSourceEpoch(envelope.sourceId, currentSourceEpoch)) return this.#ignore("record-epoch-refused");
       const lifecycleKey = sourceEpochKey(envelope);
       const seenStreamIds = this.#seenStreamIds.get(lifecycleKey) ?? new Set<string>();
       if (seenStreamIds.has(streamId)) return this.#ignore("stream-already-seen");
@@ -833,13 +833,13 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       this.#currentStreams.set(envelope.sourceId, current);
     }
     if (current.streamId !== streamId ||
-      current.sourceEpoch !== sourceEpoch(envelope)) return [];
+      current.sourceEpoch !== sourceEpoch(envelope)) return this.#ignore("stream-changed");
     const event = this.#parsed.get(envelope);
     const incoming = event === null || event === undefined ? null : extractTsportFootballRecord(event);
     if (incoming === null) return this.#ignore("unparsed-record");
     if (isVirtualFootballIdentity(undefined, incoming.leagueName, incoming.teamNames)) {
       if (!current.proofReady || !current.explicitEmptyProof ||
-        current.expectedEventIds.size > 0) return [];
+        current.expectedEventIds.size > 0) return this.#ignore("virtual-without-proof");
       const baselineDue = !current.baselineEmitted || current.lastBaselineAtMs === null ||
         envelope.observedAtMs - current.lastBaselineAtMs >= AUTHORITATIVE_BASELINE_REFRESH_MS;
       if (!baselineDue) return this.#ignore("baseline-not-due");
@@ -857,7 +857,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (seenStreamIds?.size === 0) this.#seenStreamIds.delete(lifecycleKey);
       this.#lastOpenSequences.delete(lifecycleKey);
       this.#currentStreams.delete(envelope.sourceId);
-      return [];
+      return this.#ignore("stream-closed");
     }
     current.records.set(incoming.eventId, {
       record: incoming,
@@ -868,7 +868,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (!current.proofReady) return this.#ignore("proof-not-ready");
     if (!current.baselineEmitted) {
       for (const expectedEventId of current.expectedEventIds) {
-        if (!current.records.has(expectedEventId)) return [];
+        if (!current.records.has(expectedEventId)) return this.#ignore("baseline-awaiting-expected");
       }
     }
     const baselineDue = !current.baselineEmitted || current.lastBaselineAtMs === null ||
