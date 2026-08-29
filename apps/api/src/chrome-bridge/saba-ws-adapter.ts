@@ -156,8 +156,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       // dropping these snapshots made an otherwise healthy catalog expire.
       // The DOM remains a separate partition, so hidden socket-only markets
       // stay in the union while overlapping visible prices are refreshed.
-      const records = decodePublicDomRecords(this.#assembler, envelope);
-      if (records === null) return this.#ignore("dom-undecodable");
+      let domRefusal = "dom-undecodable";
+      const records = decodePublicDomRecords(this.#assembler, envelope,
+        (reason) => { domRefusal = `dom-${reason}`; });
+      if (records === null) return this.#ignore(domRefusal);
       const usable = records.filter((record) => record.groups.length > 0);
       if (!socketReady) {
         // Some SABA deployments expose the complete current event table in the

@@ -237,6 +237,35 @@ describe("SabaWsCatalogAdapter", () => {
     expect(adapter.decode(input)).toEqual([]);
   });
 
+  it("separates a snapshot still awaiting chunks from one nothing could read", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    const chunk = (chunkIndex: number, chunkCount: number): ChromeBridgeEnvelope => ({
+      ...envelope(""), transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: "saba:7:snapshot-0201", chunkIndex, chunkCount,
+        records: [{ sportId: "1", leagueId: "l", leagueName: "League", matchId: "m",
+          timeText: "1H0'", teamNames: ["Home", "Away"], groups: [{ betTypeIds: ["1"],
+            labels: ["0.5"], odds: [
+              { marketOddsId: "o", priceText: "0.92", status: null, greyedOut: null, lineText: "0.5" },
+              { marketOddsId: "o", priceText: "-0.98", status: null, greyedOut: null }
+            ] }] }] }) }
+    });
+    // Half of a two-chunk snapshot is ordinary, and calling it undecodable hid
+    // every real fault behind it.
+    expect(adapter.decode(chunk(0, 2))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("dom-chunk-1-of-2-awaiting-rest");
+
+    // A record shaped like nothing the schema knows is the other outcome, and
+    // the count is what says a field was renamed rather than the table emptied.
+    const unreadable: ChromeBridgeEnvelope = { ...envelope(""), transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: "saba:7:snapshot-0202", chunkIndex: 0, chunkCount: 1,
+        records: [{ nothing: "the schema knows" }, { also: "not it" }] }) } };
+    expect(new SabaWsCatalogAdapter().decode(unreadable)).toEqual([]);
+  });
+
   it("says how far short a DOM snapshot fell instead of dropping it in silence", () => {
     // SABA has run on the DOM since its socket decoder stopped covering the
     // feed, so these gates are its whole catalog. Forty-four snapshots were

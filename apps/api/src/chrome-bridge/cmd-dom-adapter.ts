@@ -29,24 +29,39 @@ const recordSchema = z.strictObject({
   teamNames: z.array(text(160)).min(2).max(4),
   groups: z.array(groupSchema).max(128)
 });
+// Five unrelated outcomes used to leave here as the same `null`, and one of them
+// is not a failure at all: a multi-chunk snapshot whose remaining chunks have
+// not arrived. SABA reported `dom-undecodable` for every snapshot it took on
+// 2026-08-29 and the name could not say which of the five it meant, so `note`
+// carries the shape - names and counts, never values.
 export function decodePublicDomRecords(
   assembler: CmdSnapshotAssembler,
-  envelope: ChromeBridgeEnvelope
+  envelope: ChromeBridgeEnvelope,
+  note?: (reason: string) => void
 ): readonly CmdCatalogInputRecord[] | null {
   let raw: unknown;
-  try { raw = JSON.parse(envelope.payload.body); } catch { return null; }
+  try { raw = JSON.parse(envelope.payload.body); } catch { note?.("body-not-json"); return null; }
   const parsedChunk = CmdSnapshotChunkSchema.safeParse(raw);
-  if (!parsedChunk.success) return null;
+  if (!parsedChunk.success) { note?.("chunk-schema-refused"); return null; }
   const assembled = assembler.ingest(envelope.sourceId, parsedChunk.data,
     envelope.receivedMonotonicMs, envelope.observedAtMs);
-  if (!assembled) return null;
-  if (assembled.length > 5_000) return null;
+  if (!assembled) {
+    note?.(`chunk-${parsedChunk.data.chunkIndex + 1}-of-${parsedChunk.data.chunkCount}-awaiting-rest`);
+    return null;
+  }
+  if (assembled.length > 5_000) { note?.(`assembled-${assembled.length}-over-5000`); return null; }
   if (assembled.length === 0) return [];
   const records = assembled.flatMap((candidate): CmdCatalogInputRecord[] => {
     const parsed = recordSchema.safeParse(candidate);
     return parsed.success ? [parsed.data as CmdCatalogInputRecord] : [];
   });
-  return records.length > 0 ? records : null;
+  if (records.length === 0) {
+    // Every record failing one schema is what a renamed field looks like, and
+    // the count is what separates that from a table that happened to be empty.
+    note?.(`no-record-of-${assembled.length}-matched-schema`);
+    return null;
+  }
+  return records;
 }
 
 export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
