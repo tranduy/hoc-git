@@ -46,11 +46,15 @@ export function buildCmdSelectionPriceExpression(identity: SelectionFocusIdentit
       // Same-origin, credentialed by the page's own session, and read-only: the
       // provider's own catalog request, asked again now.
       const response = await fetch('/Member/BetsView/BetLight/DataOdds.ashx?fc=1',
-        { credentials: 'same-origin', cache: 'no-store' });
+        { credentials: 'same-origin', cache: 'no-store',
+          // Its own deadline, inside the caller's: a request still in flight
+          // when the budget ends reports a timeout with no name attached to it.
+          signal: typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(5000) : undefined });
       if (!response.ok) return { ok: false, reason: 'CMD_FETCH_STATUS', method: 'IN_PAGE_FETCH' };
       payload = await response.json();
-    } catch {
-      return { ok: false, reason: 'CMD_FETCH_FAILED', method: 'IN_PAGE_FETCH' };
+    } catch (error) {
+      return { ok: false, method: 'IN_PAGE_FETCH',
+        reason: String(error && error.name) === 'TimeoutError' ? 'CMD_FETCH_TIMED_OUT' : 'CMD_FETCH_FAILED' };
     }
     if (payload === null || typeof payload !== 'object') {
       return { ok: false, reason: 'CMD_FETCH_BODY_UNREADABLE', method: 'IN_PAGE_FETCH' };

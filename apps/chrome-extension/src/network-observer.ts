@@ -4581,10 +4581,20 @@ export class NetworkObserver {
       const domEvaluations = await evaluateFrames();
       const domValues = domEvaluations.map((evaluation) => nestedValue(evaluation, "result", "value"))
         .filter((value): value is Record<string, unknown> => isRecord(value));
-      evaluations = domValues.some((value) => value.ok === true ||
-        value.reason === "VISIBLE_PRICE_AMBIGUOUS")
-        ? domEvaluations
-        : await evaluateFrames(buildCmdSelectionPriceExpression(request, "FETCH_ONLY"), true);
+      if (domValues.some((value) => value.ok === true || value.reason === "VISIBLE_PRICE_AMBIGUOUS")) {
+        evaluations = domEvaluations;
+      } else {
+        // One request in the page that owns the session, not a sweep of every
+        // frame: the catalog is large enough that the 2.5 s per-frame budget
+        // expired before it arrived, and sweeping paid that cost once per frame
+        // for a page where only the top one can answer.
+        evaluations = [await this.#withFrameCommandTimeout(
+          this.#sendCommand(source.tabId, "Runtime.evaluate", {
+            expression: buildCmdSelectionPriceExpression(request, "FETCH_ONLY"),
+            returnByValue: true, awaitPromise: true
+          }), 7_000).catch(() => ({ result: { value: { ok: false, method: "IN_PAGE_FETCH",
+          reason: "CMD_FETCH_TIMED_OUT" } } }))];
+      }
     } else if (source.lobby === "TSPORT") {
       const direct = await this.#probeApsportEventDetail(source, request);
       evaluations = direct === null ? await evaluateFrames() : [{ result: { value: direct } }];
