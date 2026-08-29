@@ -585,7 +585,12 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     // opposite fixes: one is a frame this adapter could not read as a football
     // record at all, the other a fixture the roster does not carry.
     if (incoming === null) return this.#ignore("socket-record-unusable");
-    if (!state.rosterEventIds.has(incoming.eventId)) return this.#ignore("socket-event-not-in-roster");
+    if (!state.rosterEventIds.has(incoming.eventId)) {
+      // The roster size decides which of two very different faults this is: an
+      // empty roster is a roster that never established, while a full one that
+      // matches nothing is a socket numbering its fixtures another way.
+      return this.#ignore(`socket-not-in-roster-of-${state.rosterEventIds.size}`);
+    }
     state.openStreams.add(streamId);
     state.footballStreams.add(streamId);
     const previous = state.socketRecords.get(incoming.eventId)?.record;
