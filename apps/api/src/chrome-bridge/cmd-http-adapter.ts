@@ -85,6 +85,23 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
 
   resetSource(sourceId: string): void { this.#states.delete(sourceId); }
 
+  // Every exit below returned a bare empty array, so an adapter dropping 147
+  // odds frames in a row said nothing at all about which gate it left by. The
+  // data plane reads this once per decode and reports it where the endpoint
+  // would go.
+  #ignoreReason: string | null = null;
+
+  takeIgnoreReason(): string | null {
+    const reason = this.#ignoreReason;
+    this.#ignoreReason = null;
+    return reason;
+  }
+
+  #ignore(reason: string): readonly DecodedCatalogUpdate[] {
+    this.#ignoreReason = reason;
+    return [];
+  }
+
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "CMD" || envelope.transport !== "HTTP_RESPONSE" ||
       envelope.request.hostname !== HOST || envelope.request.pathnameClass !== PATH ||
@@ -95,9 +112,9 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
   }
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
-    if (!this.fingerprint(envelope)) return [];
+    if (!this.fingerprint(envelope)) return this.#ignore("fingerprint-refused");
     const root = this.#parsedBodies.get(envelope) ?? parseRoot(envelope.payload.body);
-    if (root === null) return [];
+    if (root === null) return this.#ignore("body-unparsable");
     const state = this.#states.get(envelope.sourceId) ?? { rows: null, generation: null,
       providerVersion: null, gap: false, pendingDeltas: [], pendingOperationCount: 0,
       preBaselineIncomplete: false, baselineObservation: null };
@@ -116,7 +133,9 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
       state.baselineObservation.observerSessionId === observation.observerSessionId &&
       observation.observerRequestOrdinal > state.baselineObservation.observerRequestOrdinal;
     if (state.providerVersion !== null && (root.t < state.providerVersion ||
-      (sameProviderVersion && !renewsSameProviderVersion))) return [];
+      (sameProviderVersion && !renewsSameProviderVersion))) {
+      return this.#ignore(root.t < state.providerVersion ? "cursor-older" : "cursor-same-not-renewed");
+    }
     if (!root.a) {
       state.rows = null;
       state.generation = null;
@@ -134,20 +153,24 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
 
     let evidenceMode: "BASELINE" | "DELTA";
     if (isAtomicFull) {
-      if (observation === null) return [];
+      if (observation === null) return this.#ignore("baseline-not-bound-to-a-request");
       const candidates = [...root.data, ...root.today!];
       if (candidates.some((candidate) => !isKnownMetadataRow(candidate) &&
-        (!isFullRow(candidate) || decodeRecord(candidate) === null))) return [];
+        (!isFullRow(candidate) || decodeRecord(candidate) === null))) {
+        // One row nobody can read discards every price beside it, and the count
+        // is what says whether that is one broken row or a changed schema.
+        return this.#ignore(`baseline-row-unusable-of-${candidates.length}`);
+      }
       const fullRows = candidates.filter(isFullRow);
-      if (fullRows.length === 0) return [];
+      if (fullRows.length === 0) return this.#ignore("baseline-no-full-rows");
       const rows = new Map<string, RetainedRow>();
       for (const candidate of fullRows) {
         const eventId = providerId(candidate[0]);
-        if (eventId === null) return [];
+        if (eventId === null) return this.#ignore("baseline-row-without-event-id");
         rows.set(eventId, { row: [...candidate], observedAtMs: envelope.observedAtMs,
           receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       }
-      if (rows.size === 0) return [];
+      if (rows.size === 0) return this.#ignore("baseline-rows-empty");
       const pendingDeltas = state.pendingDeltas.filter((pending) => pending.providerVersion > root.t)
         .sort((first, second) => first.providerVersion - second.providerVersion || first.sequence - second.sequence);
       for (const pending of pendingDeltas) {
@@ -195,25 +218,25 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
           state.pendingOperationCount = 0;
           state.preBaselineIncomplete = true;
           this.#states.set(envelope.sourceId, state);
-          return newlyIncomplete ? [reconciliationRequired(envelope)] : [];
+          return newlyIncomplete ? [reconciliationRequired(envelope)] : this.#ignore("pre-baseline-still-incomplete");
         }
         state.pendingDeltas.push({ providerVersion: root.t, data,
           observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
           sequence: envelope.sequence });
         state.pendingOperationCount += data.length;
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore("delta-held-until-baseline");
       }
       if (isFullFamily || !isDeltaFamily || root.today !== undefined || root.f !== undefined || state.gap) {
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore("delta-family-mismatch");
       }
-      if (state.rows === null || state.generation === null) return [];
+      if (state.rows === null || state.generation === null) return this.#ignore("no-baseline-retained");
       const nextRows = new Map(state.rows);
       let changed = false;
       for (const delta of root.data) {
         const outcome = applyDelta(nextRows, delta, envelope);
-        if (outcome === "INVALID") return [];
+        if (outcome === "INVALID") return this.#ignore(`delta-invalid-of-${root.data.length}`);
         changed = outcome === "APPLIED" || changed;
       }
       state.rows = nextRows;
@@ -221,7 +244,7 @@ export class CmdHttpCatalogAdapter implements ChromeTrafficAdapter {
       this.#states.set(envelope.sourceId, state);
       // Unknown provider commands are deliberately not decoded, but their
       // verified cursor still closes the ordering window against late frames.
-      if (!changed) return [];
+      if (!changed) return this.#ignore("delta-changed-nothing");
       evidenceMode = "DELTA";
     }
     this.#states.set(envelope.sourceId, state);

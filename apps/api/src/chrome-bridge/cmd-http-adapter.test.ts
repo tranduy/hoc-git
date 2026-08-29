@@ -51,6 +51,28 @@ function firstHalfHandicapRow(eventId: number, home: number, away: number): unkn
 }
 
 describe("CmdHttpCatalogAdapter", () => {
+  it("names the gate it left by when it decodes nothing", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    // A body the fingerprint accepts and the baseline path then refuses: one row
+    // nobody can read. Before this, the adapter dropped the whole batch and said
+    // nothing, so 147 discarded odds frames looked the same as 147 frames that
+    // simply carried no news.
+    const unreadable = Array<unknown>(91).fill(null);
+    unreadable[0] = 25299763;
+    expect(adapter.decode(envelope({ t: 9_000_001, a: true, data: [],
+      today: [publicFullRow(), unreadable], f: [] }, 1))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("baseline-row-unusable-of-2");
+    // Reading it clears it, so the next decode cannot inherit a stale reason.
+    expect(adapter.takeIgnoreReason()).toBeNull();
+  });
+
+  it("says a delta carried no change rather than going quiet", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    expect(adapter.decode(envelope(fullResponse, 1))).toHaveLength(1);
+    expect(adapter.decode(envelope({ t: 8_281_248, a: true, data: [] }, 2, 3))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("delta-changed-nothing");
+  });
+
   it("reads each half's handicap side from its own field", () => {
     // Atlante v Club Leon, captured 2026-08-28: row 24 says the home team lays
     // the full-time line and row 64 says it receives the first-half one. Read
