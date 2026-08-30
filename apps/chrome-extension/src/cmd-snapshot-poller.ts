@@ -9,6 +9,12 @@ import type { ObservedSource } from "./network-observer.js";
 // delta-generation-mismatch). The provider renews its own generation once a
 // minute; asking twice per renewal keeps the worst case inside the contract.
 const TSPORT_CATALOG_REFRESH_INTERVAL_MS = 25_000;
+// IM publishes nothing between signed GetSE pairs - measured 2026-08-31, its
+// page issued no GetSEDelta at all over two minutes - so this interval is the
+// book's entire update cadence. At 15 s the catalog's median age was 17.7 s
+// with p95 at 29.9 s, right at the 30 s realtime contract. Halving it puts the
+// whole sawtooth inside the contract with margin.
+const IM_DISCOVERY_INTERVAL_MS = 8_000;
 const WORK_HEALTH_EMIT_INTERVAL_MS = 5_000;
 const MIN_WORK_TIMEOUT_MS = 30_000;
 
@@ -176,7 +182,7 @@ export class CmdSnapshotPoller {
     }
     if (this.#dependencies.maintain !== undefined) {
       for (const tab of tabs) {
-        const intervalMs = tab.lobby === "IM" ? this.#dependencies.imDiscoveryIntervalMs ?? 15_000
+        const intervalMs = tab.lobby === "IM" ? this.#dependencies.imDiscoveryIntervalMs ?? IM_DISCOVERY_INTERVAL_MS
           : tab.lobby === "CMD" || tab.lobby === "TSPORT"
             ? this.#dependencies.cmdDiscoveryIntervalMs ?? 10_000
             : null;
@@ -211,7 +217,7 @@ export class CmdSnapshotPoller {
       // generation, while its rate-limited detail walk keeps hidden markets
       // current. Keep it periodic and never fall back to the virtualized DOM.
       const catalogRefreshIntervalMs = tab.lobby === "IM"
-        ? this.#dependencies.imDiscoveryIntervalMs ?? 15_000
+        ? this.#dependencies.imDiscoveryIntervalMs ?? IM_DISCOVERY_INTERVAL_MS
         : tab.lobby === "CMD" ? 5_000
         : tab.lobby === "BTI" ? 4_000
         : tab.lobby === "KSPORT" ? 2_000

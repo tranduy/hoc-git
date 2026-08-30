@@ -399,7 +399,7 @@ describe("CmdSnapshotPoller", () => {
     expect(maintain).toHaveBeenCalledTimes(4);
   });
 
-  it("reacquires both IM market partitions every fifteen seconds", async () => {
+  it("reacquires both IM market partitions inside the realtime contract", async () => {
     let now = 1_000;
     const maintain = vi.fn(async () => undefined);
     const poller = new CmdSnapshotPoller({
@@ -414,12 +414,14 @@ describe("CmdSnapshotPoller", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(maintain).toHaveBeenCalledTimes(2);
 
-    now = 15_999;
+    now = 8_999;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(maintain).toHaveBeenCalledTimes(2);
 
-    now = 16_000;
+    // IM publishes nothing between GetSE pairs, so this interval is the whole
+    // book's update cadence and has to stay well inside the 30s contract.
+    now = 9_000;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(maintain).toHaveBeenCalledTimes(3);
