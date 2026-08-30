@@ -155,8 +155,11 @@ describe("TsportWsCatalogAdapter", () => {
     const adapter = new TsportWsCatalogAdapter();
     expect(adapter.decode(apiEnvelope([], 1))).toHaveLength(1);
 
+    // The empty baseline covers no fixtures, so a delta that adds one is
+    // rightly refused by the coverage guard: this lane offers the accumulated
+    // set as the baseline it actually is.
     const update = adapter.decode(envelope(event(301, "Live Home"), 2))[0] as AuthorityUpdate;
-    expect(update).toMatchObject({ evidenceMode: "DELTA", provenance: "WS" });
+    expect(update).toMatchObject({ evidenceMode: "BASELINE", provenance: "WS" });
     expect(update.value.events).toHaveLength(1);
     expect(update.value.quotes.length).toBeGreaterThan(0);
 

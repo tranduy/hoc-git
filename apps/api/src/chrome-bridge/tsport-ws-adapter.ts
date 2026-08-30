@@ -622,6 +622,15 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (sameRecord(previous, incoming)) return [{ sourceId: envelope.sourceId,
       sequence: envelope.sequence, observedAtMs: envelope.observedAtMs, transportAlive: true }];
     state.socketRecords.set(incoming.eventId, retainedRecord(incoming, envelope));
+    // While the socket is the roster, each update carries fixtures the empty
+    // baseline never covered, and the coverage guard rightly refuses a delta
+    // that invents events - measured 2026-08-31, that left the book publishing
+    // an empty catalog while frames arrived every 122 ms. The accumulated set
+    // is the whole book this lane knows, so it is offered as the baseline it
+    // actually is, and stays monotonic until a real roster replaces it.
+    if (state.adoptsSocketFixtures) {
+      return [this.#apiCatalogUpdate(envelope, state, "BASELINE", "WS")];
+    }
     return [this.#apiCatalogUpdate(envelope, state, "DELTA", "WS")];
   }
 
