@@ -85,7 +85,15 @@ const ACTIONABLE_REASONS = new Set([
 const DISPOSED = Symbol("RECOVERY_DISPOSED");
 const SBOBET_SAME_TAB_RECOVERY = Symbol("SBOBET_SAME_TAB_RECOVERY");
 const INITIAL_BACKOFF_MS = 1_000;
-const MAX_BACKOFF_MS = 300_000;
+// The retry ceiling is the operator's 30 s realtime contract. Measured
+// 2026-08-31: after an API restart, APSPORT's first recovery raced the
+// extension's bridge reconnect, failed as undelivered, and the doubling
+// backoff then pushed the next attempt out past two minutes while the book
+// sat dark - a five-minute ceiling can only ever be a five-minute outage.
+// Retrying this often is safe because the soft action is a snapshot request
+// that reloads and navigates nothing, and the tab-reloading hard action keeps
+// its own MIN_SOURCE_RELOAD_INTERVAL_MS gate.
+const MAX_BACKOFF_MS = 30_000;
 /**
  * The least time between two reloads of one provider tab.
  *

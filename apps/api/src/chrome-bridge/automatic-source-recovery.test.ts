@@ -60,7 +60,7 @@ function setup(now: () => number = () => 2_000, browserRefreshEnabled = true) {
 }
 
 describe("AutomaticSourceRecovery", () => {
-  it("backs one repeated failure off to at most nine log state changes in five minutes", async () => {
+  it("backs a repeated failure off no further than the 30s realtime contract", async () => {
     let nowMs = 0;
     const context = setup(() => nowMs);
     context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
@@ -69,17 +69,16 @@ describe("AutomaticSourceRecovery", () => {
       await context.recovery.recover(request(CMD, "HARD"));
     }
 
-    expect(context.restoreLobby).toHaveBeenCalledTimes(9);
-    expect(context.onStateChange).toHaveBeenCalledTimes(9);
-    expect(context.onStateChange.mock.calls.map(([status]) => status.nextAttemptInMs))
-      .toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000]);
+    // Doubling still damps a hammering retry loop, but the ceiling is the
+    // contract: a dark book must be asked again within 30s, not five minutes.
+    expect(context.onStateChange.mock.calls.map(([status]) => status.nextAttemptInMs).slice(0, 6))
+      .toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000]);
+    expect(context.onStateChange.mock.calls.every(([status]) =>
+      status.nextAttemptInMs <= 30_000)).toBe(true);
     expect(context.onStateChange.mock.calls.every(([status]) =>
       status.lastFailureCode === "BASELINE_TIMEOUT")).toBe(true);
-
-    nowMs = 511_000;
-    await context.recovery.recover(request(CMD, "HARD"));
-    expect(context.onStateChange).toHaveBeenCalledTimes(10);
-    expect(context.onStateChange.mock.calls.at(-1)?.[0].nextAttemptInMs).toBe(300_000);
+    expect(context.restoreLobby.mock.calls.length)
+      .toBe(context.onStateChange.mock.calls.length);
   });
 
   it("resets exponential backoff after a confirmed recovery", async () => {

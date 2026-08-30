@@ -157,7 +157,7 @@ describe("CmdSnapshotPoller", () => {
     );
   });
 
-  it("refreshes the TSPORT API catalog every minute without returning to DOM capture", async () => {
+  it("refreshes the TSPORT API catalog inside the realtime contract without returning to DOM capture", async () => {
     let now = 1_000;
     const capture = vi.fn(async () => undefined);
     const refreshCatalog = vi.fn(async () => undefined);
@@ -191,16 +191,18 @@ describe("CmdSnapshotPoller", () => {
     expect(refreshCatalog).toHaveBeenCalledTimes(1);
     expect(capture).not.toHaveBeenCalled();
 
-    now = 31_000;
-    poller.pollNow();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(refreshCatalog).toHaveBeenCalledTimes(1);
-    expect(capture).not.toHaveBeenCalled();
-
-    now = 61_000;
+    // The roster is also the worst case for re-establishing the book, so it
+    // renews inside the 30s realtime contract rather than once a minute.
+    now = 26_000;
     poller.pollNow();
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(refreshCatalog).toHaveBeenCalledTimes(2);
+    expect(capture).not.toHaveBeenCalled();
+
+    now = 51_000;
+    poller.pollNow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(refreshCatalog).toHaveBeenCalledTimes(3);
     expect(capture).not.toHaveBeenCalled();
   });
 

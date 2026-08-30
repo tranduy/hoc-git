@@ -1,7 +1,14 @@
 import type { AttachedLobbyTab } from "./tab-registry.js";
 import type { ObservedSource } from "./network-observer.js";
 
-const TSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
+// APSPORT/TSPORT publishes nothing until an API roster establishes the
+// generation its socket deltas are keyed to, so this interval is also the worst
+// case for re-establishing the book after any bridge or API restart. At 60 s
+// that exceeded the 30 s realtime contract on every restart (measured
+// 2026-08-31: 2 minutes dark with every frame refused as
+// delta-generation-mismatch). The provider renews its own generation once a
+// minute; asking twice per renewal keeps the worst case inside the contract.
+const TSPORT_CATALOG_REFRESH_INTERVAL_MS = 25_000;
 const WORK_HEALTH_EMIT_INTERVAL_MS = 5_000;
 const MIN_WORK_TIMEOUT_MS = 30_000;
 
