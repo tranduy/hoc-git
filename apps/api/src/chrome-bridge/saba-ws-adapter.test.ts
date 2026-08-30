@@ -209,6 +209,33 @@ describe("SabaWsCatalogAdapter", () => {
       "3", 8, base + 30_000))).toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
   });
 
+  it("stops holding a decode fault in silence once it outlives the contract", () => {
+    // Measured 2026-08-31: the hold latched on a partition that had never been
+    // ready, so every later frame threw the same fault and was refused without
+    // a word - 438 of them while the catalog aged past 110s and the feed still
+    // read LIVE on DOM evidence.
+    const adapter = new SabaWsCatalogAdapter();
+    const base = 1_786_449_540_000;
+    const at = (input: ChromeBridgeEnvelope, sequence: number,
+      observedAtMs: number): ChromeBridgeEnvelope => ({ ...input, sequence, observedAtMs });
+    const faulting = (sequence: number, observedAtMs: number): ChromeBridgeEnvelope =>
+      at(envelope(`42${JSON.stringify(["m", "b1", [[999, "o"]], `r${sequence}`])}`),
+        sequence, observedAtMs);
+
+    expect(adapter.decode(at({ ...envelope(""), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' } }, 1, base))).toEqual([]);
+    // A fault on a partition that was never ready is held quietly at first -
+    // that hold is what a transient handover needs.
+    expect(adapter.decode(faulting(2, base + 1))).toEqual([]);
+    expect(adapter.decode(faulting(3, base + 2))).toEqual([]);
+    expect(adapter.decode(faulting(4, base + 19_000))).toEqual([]);
+    expect(adapter.decode(faulting(5, base + 23_000))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "SCHEMA_CHANGED"
+    })]);
+    // One report per window, not one per frame.
+    expect(adapter.decode(faulting(6, base + 24_000))).toEqual([]);
+  });
+
   it("latches an invalid current Socket.IO frame as a schema fault", () => {
     const adapter = new SabaWsCatalogAdapter();
     const open: ChromeBridgeEnvelope = { ...envelope(""), transport: "WS_STATE",

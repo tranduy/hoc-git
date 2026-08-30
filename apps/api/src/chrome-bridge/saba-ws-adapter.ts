@@ -106,6 +106,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #authoritativeGenerations = new Map<string, string>();
   readonly #authoritativeBaselineAtMs = new Map<string, number>();
   readonly #baselineStarvedSinceMs = new Map<string, number>();
+  readonly #faultHeldSinceMs = new Map<string, number>();
 
   resetSource(sourceId: string): void {
     for (const key of this.#decoders.keys()) if (key.startsWith(`${sourceId}|`)) this.#decoders.delete(key);
@@ -129,6 +130,9 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     for (const key of this.#baselineStarvedSinceMs.keys()) {
       if (key.startsWith(`${sourceId}|`)) this.#baselineStarvedSinceMs.delete(key);
+    }
+    for (const key of this.#faultHeldSinceMs.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#faultHeldSinceMs.delete(key);
     }
   }
 
@@ -431,6 +435,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
           if (key.startsWith(`${decoderKey}|`) && key !== publishKey) this.#lastWsPublishAtMs.delete(key);
         }
       }
+      this.#faultHeldSinceMs.delete(epochKey);
       return this.#update(envelope, partition, normalized,
         authoritative ? { authoritativeBaseline: true, evidenceMode: "BASELINE", generation, provenance: "WS" }
           : generation !== undefined && this.#streamStates.get(epochKey)?.activeStreamId === streamId &&
@@ -464,7 +469,32 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
           invalidateAccountId: ACCOUNT_ID, reason: sequenceGap ? "PROVIDER_STREAM_GAP" : "SCHEMA_CHANGED" }];
       }
-      return this.#ignore("decode-fault-held-behind-watermark");
+      // Measured 2026-08-31: this hold latched on a partition that had never
+      // been ready, so every later frame threw the same fault and was refused
+      // in silence - 438 of them while the catalog aged past 110s and the feed
+      // still read LIVE on DOM evidence. A hold that outlives the realtime
+      // contract is a fault, not a wait: name it so recovery reconnects the
+      // socket, exactly as a ready partition's fault already does.
+      const heldSinceMs = this.#faultHeldSinceMs.get(epochKey);
+      if (heldSinceMs === undefined) {
+        this.#faultHeldSinceMs.set(epochKey, envelope.observedAtMs);
+        return this.#ignore("decode-fault-held-behind-watermark");
+      }
+      if (envelope.observedAtMs - heldSinceMs < BASELINE_STARVATION_MS) {
+        return this.#ignore("decode-fault-held-behind-watermark");
+      }
+      // Re-arm rather than reporting one gap per frame, so a recovery that does
+      // not land keeps asking on the same bounded window.
+      this.#faultHeldSinceMs.set(epochKey, envelope.observedAtMs);
+      this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
+      stream.activeStreamId = null;
+      stream.activeStreamOrdinal = null;
+      stream.authorizing = false;
+      this.#authoritativeGenerations.delete(epochKey);
+      this.#authoritativeBaselineAtMs.delete(epochKey);
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+        observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
+        reason: sequenceGap ? "PROVIDER_STREAM_GAP" : "SCHEMA_CHANGED" }];
     }
   }
 
