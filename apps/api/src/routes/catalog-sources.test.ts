@@ -26,6 +26,29 @@ describe("catalog source routes", () => {
     await app.close();
   });
 
+  it("waits for the real answer instead of serving rows past the stale bound", async () => {
+    // These rows carry each provider's acquiredAtMs, which the UI reads as
+    // "how old is this book". A cached row that keeps ageing while a refresh
+    // is slow reports a healthy provider as Lagging, so past maxStaleMs the
+    // caller waits for the current answer rather than being told a stale one.
+    const app = Fastify();
+    const row = (acquiredAtMs: number): CatalogSourceStatus => ({
+      id: "catalog-source:SABA:FOOTBALL", alias: "SABA", provider: "SABA", category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs, reason: null
+    });
+    let calls = 0;
+    registerCatalogSourceRoutes(app, {
+      listStatuses: async () => { calls += 1; return [row(calls * 100)]; }
+    }, { cacheTtlMs: 0, maxStaleMs: 0, initialTimeoutMs: 50, refreshTimeoutMs: 50 });
+
+    expect((await app.inject({ method: "GET", url: "/api/catalog/sources" })).json())
+      .toEqual({ sources: [row(100)] });
+    expect((await app.inject({ method: "GET", url: "/api/catalog/sources" })).json())
+      .toEqual({ sources: [row(200)] });
+    expect(calls).toBe(2);
+    await app.close();
+  });
+
   it("serves the last verified source list immediately while a slow refresh runs", async () => {
     const app = Fastify();
     let calls = 0;
