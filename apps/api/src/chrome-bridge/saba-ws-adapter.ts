@@ -13,7 +13,18 @@ const ACCOUNT_ID = "catalog-source:SABA:FOOTBALL";
 const MAX_RETAINED_PART_AGE_MS = 3_600_000;
 // How long the socket lane may refuse frames for want of a reset/empty frame
 // before that refusal is reported as a stream gap instead of silence.
-const BASELINE_STARVATION_MS = 20_000;
+//
+// Measured 2026-08-31 over 27 minutes of live watch: this provider drops and
+// replaces its socket roughly every fourteen minutes, and the replacement
+// streams deltas without ever resending reset, so the whole window is dead
+// time the book spends refusing frames it cannot use. Reporting at 20s made
+// each rotation a ~30s outage. The action this triggers is a snapshot request
+// that reloads and navigates nothing, so it can afford to be prompt; a genuine
+// MV3 handover still reseeds well inside eight seconds.
+const BASELINE_STARVATION_MS = 8_000;
+// A decode fault is likelier to be a transient handover artefact than a dead
+// stream, so it keeps the longer, more patient window.
+const FAULT_HOLD_MS = 20_000;
 const MIN_STABLE_DOM_EVENTS = 20;
 const SINGLE_GENERATION_DOM_EVENTS = 50;
 
@@ -480,7 +491,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         this.#faultHeldSinceMs.set(epochKey, envelope.observedAtMs);
         return this.#ignore("decode-fault-held-behind-watermark");
       }
-      if (envelope.observedAtMs - heldSinceMs < BASELINE_STARVATION_MS) {
+      if (envelope.observedAtMs - heldSinceMs < FAULT_HOLD_MS) {
         return this.#ignore("decode-fault-held-behind-watermark");
       }
       // Re-arm rather than reporting one gap per frame, so a recovery that does

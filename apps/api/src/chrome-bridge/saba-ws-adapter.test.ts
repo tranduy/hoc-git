@@ -197,16 +197,16 @@ describe("SabaWsCatalogAdapter", () => {
       .toEqual([expect.objectContaining({ reason: "PROVIDER_STREAM_CLOSED" })]);
 
     expect(adapter.decode(delta(4, base + 3))).toEqual([]);
-    expect(adapter.decode(delta(5, base + 19_000))).toEqual([]);
-    expect(adapter.decode(delta(6, base + 24_000))).toEqual([expect.objectContaining({
+    expect(adapter.decode(delta(5, base + 7_000))).toEqual([]);
+    expect(adapter.decode(delta(6, base + 12_000))).toEqual([expect.objectContaining({
       invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
     })]);
     // One gap per starvation window, not one per refused frame.
-    expect(adapter.decode(delta(7, base + 25_000))).toEqual([]);
+    expect(adapter.decode(delta(7, base + 13_000))).toEqual([]);
 
     // Recovery reconnects the socket; its reset frame ends the starvation.
     expect(adapter.decode(at(envelope(`42${JSON.stringify(["m", "b1", fullRows, "r8"])}`),
-      "3", 8, base + 30_000))).toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
+      "3", 8, base + 20_000))).toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
   });
 
   it("stops holding a decode fault in silence once it outlives the contract", () => {
