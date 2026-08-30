@@ -10,6 +10,11 @@ const ACCOUNT_ID = "catalog-source:APSPORT:FOOTBALL";
 const MAX_RETIRED_DOM_SWEEPS = 64;
 const MAX_SOURCE_EPOCH_LINEAGES = 16;
 const MAX_PENDING_PRE_PROOF_RECORDS = 5_000;
+// A socket-adopted roster grows one event per unseen fixture and is only pruned
+// when a real ROSTER batch replaces it, so it needs its own bound. The live view
+// carries tens of fixtures; this leaves room for a busy card without letting a
+// misbehaving stream grow the map without end.
+const MAX_SOCKET_ADOPTED_EVENTS = 512;
 const AUTHORITATIVE_BASELINE_REFRESH_MS = 20_000;
 interface RetainedRecord {
   readonly record: SbobetCatalogInputRecord;
@@ -31,6 +36,9 @@ interface ApsportApiState {
   readonly openStreams: Set<string>;
   readonly footballStreams: Set<string>;
   baselineEmitted: boolean;
+  // True while the roster established with no fixtures at all, which is when
+  // the socket's own records are allowed to populate it.
+  adoptsSocketFixtures: boolean;
 }
 
 interface TsportStreamGeneration {
@@ -507,7 +515,8 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         exactEventIds: new Set(),
         openStreams: sameEpoch ? new Set(current!.openStreams) : new Set(),
         footballStreams: sameEpoch ? new Set(current!.footballStreams) : new Set(),
-        baselineEmitted: true
+        baselineEmitted: true,
+        adoptsSocketFixtures: rosterEventIds.size === 0
       };
       this.#apiSources.set(envelope.sourceId, state);
       return [this.#apiCatalogUpdate(envelope, state, "BASELINE", "AUTHENTICATED_HTTP")];
@@ -589,7 +598,23 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       // The roster size decides which of two very different faults this is: an
       // empty roster is a roster that never established, while a full one that
       // matches nothing is a socket numbering its fixtures another way.
-      return this.#ignore(`socket-not-in-roster-of-${state.rosterEventIds.size}`);
+      if (!state.adoptsSocketFixtures) {
+        return this.#ignore(`socket-not-in-roster-of-${state.rosterEventIds.size}`);
+      }
+      // Measured 2026-08-31: with the provider tab on its live view the page
+      // never issues the list request the roster is captured from, so the
+      // roster established empty and every socket frame was refused - 636 of
+      // them while the book sat dark and the operator was told to go move a
+      // browser tab. Those frames carry the whole record (id, teams, league,
+      // priced market groups), so an empty roster adopts them instead.
+      //
+      // This is not the fragment-as-baseline trap: there is no catalog here to
+      // replace, each frame only adds its own event, and the next real ROSTER
+      // batch still replaces the lot wholesale on a higher generation.
+      if (state.socketRecords.size >= MAX_SOCKET_ADOPTED_EVENTS) {
+        return this.#ignore(`socket-adopted-roster-full-${state.socketRecords.size}`);
+      }
+      state.rosterEventIds.add(incoming.eventId);
     }
     state.openStreams.add(streamId);
     state.footballStreams.add(streamId);

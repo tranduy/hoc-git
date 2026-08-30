@@ -147,6 +147,32 @@ function beginFreshStream(
 }
 
 describe("TsportWsCatalogAdapter", () => {
+  it("adopts live socket fixtures when the roster established empty", () => {
+    // Measured 2026-08-31: with the provider tab on its live view the page never
+    // issues the list request the roster is captured from, so the roster arrives
+    // complete and empty and every socket frame was refused while the book sat
+    // dark. Those frames carry the whole record, so an empty roster adopts them.
+    const adapter = new TsportWsCatalogAdapter();
+    expect(adapter.decode(apiEnvelope([], 1))).toHaveLength(1);
+
+    const update = adapter.decode(envelope(event(301, "Live Home"), 2))[0] as AuthorityUpdate;
+    expect(update).toMatchObject({ evidenceMode: "DELTA", provenance: "WS" });
+    expect(update.value.events).toHaveLength(1);
+    expect(update.value.quotes.length).toBeGreaterThan(0);
+
+    const second = adapter.decode(envelope(event(302, "Live Home 2"), 3))[0] as AuthorityUpdate;
+    expect(second.value.events).toHaveLength(2);
+  });
+
+  it("still refuses an unknown fixture once a real roster exists", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    expect(adapter.decode(apiEnvelope([event(101, "API Home")], 1))).toHaveLength(1);
+
+    // A populated roster that matches nothing is a socket numbering its
+    // fixtures another way, and adopting those would invent a second book.
+    expect(adapter.decode(envelope(event(999, "Stranger"), 2))).toEqual([]);
+  });
+
   it("uses a complete APSPORT API roster as authority without any DOM proof", () => {
     const adapter = new TsportWsCatalogAdapter();
 
