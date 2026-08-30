@@ -11,6 +11,9 @@ import { websocketLifecycleState } from "./websocket-lifecycle.js";
 
 const ACCOUNT_ID = "catalog-source:SABA:FOOTBALL";
 const MAX_RETAINED_PART_AGE_MS = 3_600_000;
+// How long the socket lane may refuse frames for want of a reset/empty frame
+// before that refusal is reported as a stream gap instead of silence.
+const BASELINE_STARVATION_MS = 20_000;
 const MIN_STABLE_DOM_EVENTS = 20;
 const SINGLE_GENERATION_DOM_EVENTS = 50;
 
@@ -102,6 +105,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #streamStates = new Map<string, SabaStreamState>();
   readonly #authoritativeGenerations = new Map<string, string>();
   readonly #authoritativeBaselineAtMs = new Map<string, number>();
+  readonly #baselineStarvedSinceMs = new Map<string, number>();
 
   resetSource(sourceId: string): void {
     for (const key of this.#decoders.keys()) if (key.startsWith(`${sourceId}|`)) this.#decoders.delete(key);
@@ -122,6 +126,9 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     for (const key of this.#authoritativeBaselineAtMs.keys()) {
       if (key.startsWith(`${sourceId}|`)) this.#authoritativeBaselineAtMs.delete(key);
+    }
+    for (const key of this.#baselineStarvedSinceMs.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#baselineStarvedSinceMs.delete(key);
     }
   }
 
@@ -282,7 +289,33 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const recoveryStartsBaseline = recoveryFrame !== null &&
         (recoveryFrame.rows as readonly unknown[]).some((row) => Array.isArray(row) &&
           (row[1] === "reset" || row[1] === "empty"));
-      if (!recoveryStartsBaseline) return this.#ignore("recovery-without-baseline");
+      if (!recoveryStartsBaseline) {
+        // Measured 2026-08-31: after the socket lane is dropped, the provider
+        // keeps streaming deltas but only sends reset/empty on a fresh
+        // connection, so these frames are refused forever while DOM snapshots
+        // keep the feed nominally LIVE - the catalog froze for minutes while
+        // the strip claimed a healthy source. Refusals that persist are a
+        // fault, not quiet: declare the stream gap so the controller runs
+        // recovery, which reconnects the socket and yields the reset frame
+        // this branch is waiting for.
+        const starvedSinceMs = this.#baselineStarvedSinceMs.get(epochKey);
+        if (starvedSinceMs === undefined) {
+          this.#baselineStarvedSinceMs.set(epochKey, envelope.observedAtMs);
+          return this.#ignore("recovery-without-baseline");
+        }
+        if (envelope.observedAtMs - starvedSinceMs < BASELINE_STARVATION_MS) {
+          return this.#ignore("recovery-without-baseline");
+        }
+        // Re-arm so a recovery that does not land keeps asking, bounded by the
+        // same window rather than one gap per frame.
+        this.#baselineStarvedSinceMs.set(epochKey, envelope.observedAtMs);
+        this.#authoritativeGenerations.delete(epochKey);
+        this.#authoritativeBaselineAtMs.delete(epochKey);
+        return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+          observedAtMs: envelope.observedAtMs, invalidateAccountId: ACCOUNT_ID,
+          reason: "PROVIDER_STREAM_GAP" }];
+      }
+      this.#baselineStarvedSinceMs.delete(epochKey);
       stream.activeStreamId = streamId;
       stream.activeStreamOrdinal = streamOrdinal;
       stream.highWatermark = streamOrdinal;

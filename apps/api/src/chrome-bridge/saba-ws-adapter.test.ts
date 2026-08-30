@@ -168,6 +168,47 @@ describe("SabaWsCatalogAdapter", () => {
     })]);
   });
 
+  it("reports a stream gap when refused delta frames starve the socket of a baseline", () => {
+    const fullRows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const adapter = new SabaWsCatalogAdapter();
+    const at = (input: ChromeBridgeEnvelope, streamId: string, sequence: number,
+      observedAtMs: number): ChromeBridgeEnvelope =>
+      ({ ...input, sequence, observedAtMs, request: { ...input.request, streamId } });
+    const base = 1_786_449_540_000;
+    const delta = (sequence: number, observedAtMs: number): ChromeBridgeEnvelope => at(envelope(
+      `42${JSON.stringify(["m", "b1", [encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1,
+        parenttypeid: 1, oddsstatus: "running", enable: 1, odds1a: 0.5, odds2a: -0.6,
+        hdp1: 0.5, hdp2: 0 })], `r${sequence}`])}`), "2", sequence, observedAtMs);
+
+    expect(adapter.decode(at({ ...envelope(""), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' } }, "1", 1, base))).toEqual([]);
+    expect(adapter.decode(at(envelope(`42${JSON.stringify(["m", "b1", fullRows, "r2"])}`),
+      "1", 2, base + 1))).toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
+    // The socket dies and the page opens a replacement that only streams
+    // deltas: no reset/empty frame is ever sent on it.
+    expect(adapter.decode(at({ ...envelope(""), transport: "WS_STATE",
+      payload: { encoding: "UTF8", body: '{"state":"CLOSED"}' } }, "1", 3, base + 2)))
+      .toEqual([expect.objectContaining({ reason: "PROVIDER_STREAM_CLOSED" })]);
+
+    expect(adapter.decode(delta(4, base + 3))).toEqual([]);
+    expect(adapter.decode(delta(5, base + 19_000))).toEqual([]);
+    expect(adapter.decode(delta(6, base + 24_000))).toEqual([expect.objectContaining({
+      invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
+    })]);
+    // One gap per starvation window, not one per refused frame.
+    expect(adapter.decode(delta(7, base + 25_000))).toEqual([]);
+
+    // Recovery reconnects the socket; its reset frame ends the starvation.
+    expect(adapter.decode(at(envelope(`42${JSON.stringify(["m", "b1", fullRows, "r8"])}`),
+      "3", 8, base + 30_000))).toEqual([expect.objectContaining({ authoritativeBaseline: true })]);
+  });
+
   it("latches an invalid current Socket.IO frame as a schema fault", () => {
     const adapter = new SabaWsCatalogAdapter();
     const open: ChromeBridgeEnvelope = { ...envelope(""), transport: "WS_STATE",
