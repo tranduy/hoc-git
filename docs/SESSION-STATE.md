@@ -1,5 +1,66 @@
 # Trạng thái làm việc — 2026-08-28
 
+## Hợp đồng realtime 30s (2026-08-31) — luật mới của hệ thống
+
+**Luật do người vận hành đặt:** không sàn nào được quá **30 giây** mà không trả về
+dữ liệu giải mã được. Quá ngưỡng là **lỗi phải chẩn hoặc reconnect**, không phải
+"khoảng lặng" để chờ. Mọi policy, ngưỡng hiển thị và watchdog đều quy về mốc này.
+
+### Đo đầu phiên vs cuối phiên (1 mẫu/giây)
+
+| sàn | p50 trước → sau | p95 trước → sau | % > 15s |
+|---|---|---|---|
+| SBOBET | 5.1 → **1.3s** | 27.9 → **2.8s** | 17% → **0%** |
+| SABA | 5.6 → **3.4s** | 29.2 → **22.9s** | 18% → **11%** |
+| CMD | 6.4 → **3.7s** | 26.8 → **6.4s** | 12% → **0%** |
+| BTI | 7.4 → **3.7s** | 30.3 → **6.5s** | 18% → **0%** |
+| IM | 14.4 → **9.1s** | 29.8 → **18.9s** | 47% → **20%** |
+
+Không sàn nào còn mẫu vượt 30s.
+
+### Năm nguyên nhân tìm được (theo thứ tự ảnh hưởng)
+
+1. **Endpoint FE đọc trả bản cũ** (`cb0b38d`) — nguyên nhân lớn nhất của "Lagging".
+   `/api/catalog/sources` là cache stale-while-revalidate TTL 5s: trả bản cũ rồi
+   mới làm mới. Đối chứng: catalog SBOBET thật tươi **0.0–1.0s** trong khi endpoint
+   báo **0.7–7.0s**, răng cưa chu kỳ 5s; refresh chậm/timeout thì bản cũ già mãi.
+   Nay revalidate 1s, quá 3s thì **chờ câu trả lời thật**.
+2. **Ngưỡng policy mỗi sàn một kiểu** (`b4539b0`) — đều đặt theo cái mà lane hỏng
+   của sàn đó tình cờ làm được (45–90s). Nay tất cả: evidence 30s, soft recovery 30s,
+   hard giữ ≥ 2× hợp đồng (có test chặn).
+3. **Trần backoff recovery 5 phút** (`a041856`) — trần 5 phút chỉ có thể tạo ra sự
+   cố 5 phút. Nay 30s; an toàn vì soft chỉ xin snapshot, hard vẫn có gate riêng.
+4. **SABA đói baseline** (`2c50953`) — socket mới chỉ đẩy delta, không bao giờ gửi
+   lại `reset`; 70 frame bị từ chối trong im lặng, DOM che cho feed trông LIVE.
+   Nay từ chối quá 20s là khai `PROVIDER_STREAM_GAP`. **5,5 phút → ~20s.**
+5. **IM không có delta** (`c02b02f`) — trang IM không phát GetSEDelta nào trong 2
+   phút, nên chu kỳ lấy của extension **chính là** nhịp cập nhật cả sàn. 15s → 8s.
+
+### APSPORT — sửa xong phần hệ thống, tab đang có vấn đề riêng
+
+Ở view "Trực tiếp" (`mg/1`) trang không gọi API danh sách → roster lập ra **rỗng**
+→ `socket-not-in-roster-of-0` 636 lần, sàn tối. Hai bản vá:
+`d6e5b8e` roster rỗng thì chính frame socket lập roster (20/24 bản ghi live có
+market hợp lệ sẵn); `4a23882` phát **BASELINE** thay vì DELTA — vì delta thêm trận
+mới bị coverage guard chặn, khiến catalog vẫn rỗng dù frame về mỗi 122ms. Sau vá:
+**511 trận / 2.333 market, feed LIVE**. Người dùng báo tab APSPORT không F5 được
+(vấn đề của tab, không phải pipeline) → **tạm ngưng chấm điểm sàn này**.
+
+### Bẫy chẩn đoán phải nhớ
+
+`contentRefusals` trong `/api/diag/pipeline` là **bộ đếm dùng chung giữa các sàn** —
+cùng một chuỗi xuất hiện ở IM lẫn SBOBET. Nó đã dẫn sai hướng một lúc
+(`record-no-usable-markets` của APSPORT hoá ra là nhiễu). **Việc còn mở: tách
+contentRefusals theo từng sàn.** Chỉ `ignoredEndpoints` là đáng tin theo sàn.
+
+### Việc còn mở
+
+- Tách `contentRefusals` theo sàn (bẫy ở trên).
+- IM còn ~20% mẫu ở 15–21s; muốn siết nữa thì hạ 8s → 5s, đánh đổi tải API sàn.
+- SABA p95 22.9s — cao nhất trong 5 sàn được chấm, chưa truy nguyên.
+- APSPORT: chờ tab F5 được rồi đo lại.
+
+
 Đọc file này thay cho việc đọc lại lịch sử hội thoại. Mọi số trong đây đều là số đo
 thật, không phải ước lượng.
 
