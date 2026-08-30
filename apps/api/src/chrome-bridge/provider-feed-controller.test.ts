@@ -117,19 +117,19 @@ describe("ProviderFeedController", () => {
     expect(controller.snapshot().state).toBe("SOFT_RECOVERY");
   });
 
-  it("keeps CMD live through runtime sweeps until its current baseline reaches twenty seconds", () => {
+  it("keeps CMD live through runtime sweeps until its current baseline reaches the 30s contract", () => {
     const controller = controllerFor(CMD, 0);
     expect(controller.accept(cmdCatalogEvidence(0, "BASELINE")).publish?.snapshotState).toBe("FRESH");
 
-    for (const nowMs of [15_001, 19_999, 20_000]) {
+    for (const nowMs of [15_001, 29_999, 30_000]) {
       clock.set(nowMs);
       expect(controller.sweep()).toBeNull();
       expect(controller.read()).toMatchObject({ accountId: CMD, observedAtMs: 0 });
       expect(controller.snapshot()).toMatchObject({ state: "LIVE", recoveryStage: "NONE" });
     }
 
-    clock.set(20_001);
-    expect(controller.sweep()).toMatchObject({ accountId: CMD, stage: "SOFT", requestedAtMs: 20_001 });
+    clock.set(30_001);
+    expect(controller.sweep()).toMatchObject({ accountId: CMD, stage: "SOFT", requestedAtMs: 30_001 });
     expect(() => controller.read()).toThrow("PROVIDER_FEED_NOT_LIVE");
   });
 

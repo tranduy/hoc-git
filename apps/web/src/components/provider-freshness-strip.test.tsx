@@ -13,9 +13,11 @@ describe("classifyFreshness", () => {
   it("maps catalog age onto LIVE / SLOW / STALE / NONE", () => {
     const now = 100_000;
     expect(classifyFreshness(source("SABA", 95_000), now).tone).toBe("LIVE");
-    expect(classifyFreshness(source("SABA", 80_000), now).tone).toBe("LIVE");
-    expect(classifyFreshness(source("SABA", 60_000), now).tone).toBe("SLOW");
-    expect(classifyFreshness(source("SABA", 30_000), now).tone).toBe("STALE");
+    expect(classifyFreshness(source("SABA", 85_000), now).tone).toBe("LIVE");
+    expect(classifyFreshness(source("SABA", 75_000), now).tone).toBe("SLOW");
+    // 30 s is the operator contract; anything older is not answering.
+    expect(classifyFreshness(source("SABA", 70_000), now).tone).toBe("SLOW");
+    expect(classifyFreshness(source("SABA", 69_000), now).tone).toBe("STALE");
     expect(classifyFreshness(source("SABA", null, "UNCONFIGURED"), now)).toMatchObject({ tone: "NONE", ageMs: null });
   });
 
@@ -35,7 +37,8 @@ describe("ProviderFreshnessStrip", () => {
     let now = 1_000_000;
     const list = vi.fn(async () => [
       source("SABA", now - 3_000),
-      source("IM", now - 45_000),
+      source("IM", now - 22_000),
+      source("BTI", now - 45_000),
       source("CMD", null, "UNCONFIGURED"),
       { ...source("SABA", now - 1_000), id: "catalog-source:SABA:LOL", category: "LOL" as const }
     ]);
@@ -46,6 +49,8 @@ describe("ProviderFreshnessStrip", () => {
     expect(screen.getByTestId("provider-freshness-SABA").textContent).toContain("Fresh");
     expect(screen.getByTestId("provider-freshness-SABA").textContent).toContain("3s ago");
     expect(screen.getByTestId("provider-freshness-IM").textContent).toContain("Lagging");
+    // Past the 30s contract a book is not answering, not merely slow.
+    expect(screen.getByTestId("provider-freshness-BTI").textContent).toContain("Outdated");
     expect(screen.getByTestId("provider-freshness-CMD").textContent).toContain("No data");
     expect(screen.getByTestId("provider-freshness-CMD").textContent).toContain("no data yet");
     expect(screen.queryByTestId("provider-freshness-LOL")).toBeNull();

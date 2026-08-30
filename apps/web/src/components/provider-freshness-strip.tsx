@@ -18,8 +18,10 @@ export const TONE_LABELS: Readonly<Record<FreshnessTone, string>> = {
   LIVE: "Fresh", SLOW: "Lagging", STALE: "Outdated", NONE: "No data"
 };
 
-export const FRESHNESS_LIVE_MS = 20_000;
-export const FRESHNESS_SLOW_MS = 60_000;
+// The operator contract is 30 s: past that a book is not answering, so the
+// strip must call it out rather than shade it as merely slow.
+export const FRESHNESS_LIVE_MS = 15_000;
+export const FRESHNESS_SLOW_MS = 30_000;
 
 /**
  * Pure classification so the thresholds are testable: LIVE while the data

@@ -8,6 +8,21 @@ function policy(expectedEvidenceCadenceMs: number, maxBaselineAgeMs: number,
     recoveryCooldownMs: 30_000, authoritativeProvenance: new Set(authoritativeProvenance) };
 }
 
+/**
+ * The operator contract, set 2026-08-31: no book may go longer than 30 seconds
+ * without answering with decodable data. Every provider therefore expects
+ * evidence inside this window and starts soft recovery - a lobby snapshot
+ * request, which reloads and navigates nothing - the moment it lapses.
+ *
+ * Measured cadences on live tabs are all far inside it (CMD/SABA/BTI 2-5 s,
+ * SBOBET sub-second once socket receipts fold into the HTTP baseline, IM 15 s
+ * discovery, APSPORT ~6 s socket frames), so a lapse is a fault rather than a
+ * quiet spell. Baseline leases stay provider-specific: a book that bootstraps
+ * once per socket must not be forced to reconnect just to renew a lease, and
+ * the hard stage - which reloads a tab - keeps its own slower windows.
+ */
+const REALTIME_CONTRACT_MS = 30_000;
+
 // Measured 2026-08-25: CMD's effective catalog cadence is the extension's 15 s refresh, used instead of
 // the page's 60 s DataOdds gap because extension refreshes are the runtime evidence source; policy is 3 × 15 s.
 const CMD_EXPECTED_EVIDENCE_CADENCE_MS = 45_000;
@@ -48,16 +63,16 @@ const APSPORT_SOFT_RECOVERY_AFTER_MS = APSPORT_EXPECTED_EVIDENCE_CADENCE_MS;
 const APSPORT_HARD_RECOVERY_AFTER_MS = APSPORT_MAX_BASELINE_AGE_MS;
 
 export const providerFeedPolicies = new Map<string, ProviderFeedPolicy>([
-  ["catalog-source:CMD:FOOTBALL", policy(CMD_EXPECTED_EVIDENCE_CADENCE_MS, CMD_MAX_BASELINE_AGE_MS,
-    20_000, 30_000, ["WS", "AUTHENTICATED_HTTP"])],
-  ["catalog-source:IM:FOOTBALL", policy(IM_EXPECTED_EVIDENCE_CADENCE_MS, IM_MAX_BASELINE_AGE_MS,
-    20_000, 45_000, ["WS", "AUTHENTICATED_HTTP"])],
-  ["catalog-source:SABA:FOOTBALL", policy(SABA_EXPECTED_EVIDENCE_CADENCE_MS, SABA_MAX_BASELINE_AGE_MS,
+  ["catalog-source:CMD:FOOTBALL", policy(REALTIME_CONTRACT_MS, CMD_MAX_BASELINE_AGE_MS,
+    REALTIME_CONTRACT_MS, 60_000, ["WS", "AUTHENTICATED_HTTP"])],
+  ["catalog-source:IM:FOOTBALL", policy(REALTIME_CONTRACT_MS, IM_MAX_BASELINE_AGE_MS,
+    REALTIME_CONTRACT_MS, 60_000, ["WS", "AUTHENTICATED_HTTP"])],
+  ["catalog-source:SABA:FOOTBALL", policy(REALTIME_CONTRACT_MS, SABA_MAX_BASELINE_AGE_MS,
     // Measured 2026-08-26: removing DOM_FALLBACK here is correct per spec 4 but
     // regressed SABA from 90 quote changes/60s to 0, because its socket adapter
     // currently decodes only 16 of 745 frames. DOM stays authoritative until
     // that decoder covers the feed; the fault is in the adapter, not the policy.
-    SABA_SOFT_RECOVERY_AFTER_MS, SABA_HARD_RECOVERY_AFTER_MS, ["WS", "DOM_FALLBACK"])],
+    REALTIME_CONTRACT_MS, SABA_HARD_RECOVERY_AFTER_MS, ["WS", "DOM_FALLBACK"])],
   // SBOBET's hard stage reloads the tab, and its STOMP/SockJS page must reload,
   // re-authenticate and re-subscribe before any baseline can land. A 30 s hard
   // window fired again before that finished, which is why sourceGeneration
@@ -71,9 +86,15 @@ export const providerFeedPolicies = new Map<string, ProviderFeedPolicy>([
   // dropped a healthy feed out of LIVE on every natural pause and the catalog
   // showed "no data" most of the time. Expect evidence once a minute, lease
   // the baseline for two, and reload only after three.
-  ["catalog-source:SBOBET:FOOTBALL", policy(60_000, 120_000, 60_000, 180_000, ["WS", "AUTHENTICATED_HTTP"])],
-  ["catalog-source:APSPORT:FOOTBALL", policy(APSPORT_EXPECTED_EVIDENCE_CADENCE_MS, APSPORT_MAX_BASELINE_AGE_MS,
-    APSPORT_SOFT_RECOVERY_AFTER_MS, APSPORT_HARD_RECOVERY_AFTER_MS, ["WS", "AUTHENTICATED_HTTP"])],
-  ["catalog-source:BTI:FOOTBALL", policy(BTI_EXPECTED_EVIDENCE_CADENCE_MS, BTI_MAX_BASELINE_AGE_MS,
-    15_000, 30_000, ["AUTHENTICATED_HTTP"])]
+  // Measured 2026-08-31 after socket receipts began folding into the HTTP
+  // baseline: catalog age holds at 0-1 s with 300-900 quote changes per minute,
+  // so the old 60 s evidence expectation was covering for a broken lane rather
+  // than a slow provider. The hard stage still reloads no sooner than 1.5x the
+  // baseline lease so a reload can actually converge.
+  ["catalog-source:SBOBET:FOOTBALL", policy(REALTIME_CONTRACT_MS, 120_000,
+    REALTIME_CONTRACT_MS, 180_000, ["WS", "AUTHENTICATED_HTTP"])],
+  ["catalog-source:APSPORT:FOOTBALL", policy(REALTIME_CONTRACT_MS, APSPORT_MAX_BASELINE_AGE_MS,
+    REALTIME_CONTRACT_MS, APSPORT_HARD_RECOVERY_AFTER_MS, ["WS", "AUTHENTICATED_HTTP"])],
+  ["catalog-source:BTI:FOOTBALL", policy(REALTIME_CONTRACT_MS, BTI_MAX_BASELINE_AGE_MS,
+    REALTIME_CONTRACT_MS, 60_000, ["AUTHENTICATED_HTTP"])]
 ]);

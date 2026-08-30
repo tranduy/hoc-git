@@ -910,7 +910,9 @@ describe("ChromeCatalogDataPlane", () => {
     plane.ingest(ksportEnvelope(1, "live", [101]));
     plane.ingest(ksportEnvelope(2, "today", [102]));
 
-    now = 50_000;
+    // Inside the 30 s contract the catalog is still served; a frame the
+    // provider decoder refuses is not evidence and cannot extend it.
+    now = 25_000;
     expect(plane.ingest({ ...ksportEnvelope(3, "today", []), observedAtMs: now,
       payload: { encoding: "UTF8", body: `a${JSON.stringify(["\n"])}` } })).toBe(false);
     await expect(plane.read(SBOBET)).resolves.toMatchObject({ observedAtMs: 1_002 });

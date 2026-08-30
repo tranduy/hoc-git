@@ -2,19 +2,25 @@ import { describe, expect, it } from "vitest";
 import { providerFeedPolicies } from "./provider-feed-policies.js";
 
 const before = {
-  CMD: [20_000, 20_000], IM: [20_000, 25_000], SABA: [10_000, 60_000],
-  SBOBET: [10_000, 60_000], APSPORT: [5_000, 30_000], BTI: [10_000, 30_000]
+  CMD: [45_000, 20_000], IM: [45_000, 20_000], SABA: [75_000, 90_000],
+  SBOBET: [60_000, 60_000], APSPORT: [90_000, 90_000], BTI: [45_000, 15_000]
 } as const;
 
-const effectiveCadenceMs = { CMD: 15_000, IM: 15_000, BTI: 15_000 } as const;
+const REALTIME_CONTRACT_MS = 30_000;
 
-describe("provider feed policies measured 2026-08-25", () => {
-  it("uses three effective cadence intervals, two evidence windows, and a three-minute baseline cap", () => {
-    for (const [provider, cadenceMs] of Object.entries(effectiveCadenceMs)) {
-      const policy = providerFeedPolicies.get(`catalog-source:${provider}:FOOTBALL`)!;
-      expect(policy.expectedEvidenceCadenceMs).toBeGreaterThanOrEqual(3 * cadenceMs);
-      expect(policy.maxBaselineAgeMs).toBeGreaterThanOrEqual(2 * policy.expectedEvidenceCadenceMs);
-      expect(policy.maxBaselineAgeMs).toBeLessThanOrEqual(180_000);
+describe("provider feed policies under the 30s realtime contract (2026-08-31)", () => {
+  it("holds every provider to the same 30s evidence and soft-recovery contract", () => {
+    // The operator rule: no book may go longer than 30 seconds without
+    // answering with decodable data. Waiting longer than the contract before
+    // asking for a snapshot is what let SABA freeze for 5.5 minutes and
+    // APSPORT for 2 minutes while their strips still read ACTIVE.
+    for (const [accountId, policy] of providerFeedPolicies) {
+      expect(policy.expectedEvidenceCadenceMs,
+        `${accountId} must expect evidence within the contract`).toBe(REALTIME_CONTRACT_MS);
+      expect(policy.catalogFreshnessMs,
+        `${accountId} must not serve a catalog older than the contract`).toBe(REALTIME_CONTRACT_MS);
+      expect(policy.softRecoveryAfterMs,
+        `${accountId} must start recovery at the contract`).toBe(REALTIME_CONTRACT_MS);
     }
   });
 
@@ -23,33 +29,36 @@ describe("provider feed policies measured 2026-08-25", () => {
       const policy = providerFeedPolicies.get(`catalog-source:${provider}:FOOTBALL`)!;
       return {
         provider,
-        beforeExpectedMs: previous[0], beforeBaselineMs: previous[1],
-        afterExpectedMs: policy.expectedEvidenceCadenceMs, afterBaselineMs: policy.maxBaselineAgeMs
+        beforeExpectedMs: previous[0], beforeSoftMs: previous[1],
+        afterExpectedMs: policy.expectedEvidenceCadenceMs, afterSoftMs: policy.softRecoveryAfterMs
       };
     });
     expect(table).toEqual([
-      { provider: "CMD", beforeExpectedMs: 20_000, beforeBaselineMs: 20_000,
-        afterExpectedMs: 45_000, afterBaselineMs: 90_000 },
-      { provider: "IM", beforeExpectedMs: 20_000, beforeBaselineMs: 25_000,
-        afterExpectedMs: 45_000, afterBaselineMs: 90_000 },
-      { provider: "SABA", beforeExpectedMs: 10_000, beforeBaselineMs: 60_000,
-        afterExpectedMs: 75_000, afterBaselineMs: 3_600_000 },
-      { provider: "SBOBET", beforeExpectedMs: 10_000, beforeBaselineMs: 60_000,
-        afterExpectedMs: 60_000, afterBaselineMs: 120_000 },
-      { provider: "APSPORT", beforeExpectedMs: 5_000, beforeBaselineMs: 30_000,
-        afterExpectedMs: 90_000, afterBaselineMs: 120_000 },
-      { provider: "BTI", beforeExpectedMs: 10_000, beforeBaselineMs: 30_000,
-        afterExpectedMs: 45_000, afterBaselineMs: 90_000 }
+      { provider: "CMD", beforeExpectedMs: 45_000, beforeSoftMs: 20_000,
+        afterExpectedMs: 30_000, afterSoftMs: 30_000 },
+      { provider: "IM", beforeExpectedMs: 45_000, beforeSoftMs: 20_000,
+        afterExpectedMs: 30_000, afterSoftMs: 30_000 },
+      { provider: "SABA", beforeExpectedMs: 75_000, beforeSoftMs: 90_000,
+        afterExpectedMs: 30_000, afterSoftMs: 30_000 },
+      { provider: "SBOBET", beforeExpectedMs: 60_000, beforeSoftMs: 60_000,
+        afterExpectedMs: 30_000, afterSoftMs: 30_000 },
+      { provider: "APSPORT", beforeExpectedMs: 90_000, beforeSoftMs: 90_000,
+        afterExpectedMs: 30_000, afterSoftMs: 30_000 },
+      { provider: "BTI", beforeExpectedMs: 45_000, beforeSoftMs: 15_000,
+        afterExpectedMs: 30_000, afterSoftMs: 30_000 }
     ]);
     console.log("B4_POLICY_TABLE", JSON.stringify(table));
   });
 
-  it("keeps APSPORT available while the next one-minute roster is in flight", () => {
-    const policy = providerFeedPolicies.get("catalog-source:APSPORT:FOOTBALL")!;
-    expect(policy.expectedEvidenceCadenceMs).toBe(90_000);
-    expect(policy.catalogFreshnessMs).toBe(90_000);
-    expect(policy.softRecoveryAfterMs).toBe(90_000);
-    expect(policy.hardRecoveryAfterMs).toBe(120_000);
+  it("keeps the tab-reloading hard stage well outside the contract", () => {
+    // Soft recovery only asks for a lobby snapshot, so it may fire at the
+    // contract. The hard stage reloads a tab and must stay far enough out that
+    // a reloaded page can converge on a baseline first.
+    for (const [accountId, policy] of providerFeedPolicies) {
+      expect(policy.hardRecoveryAfterMs,
+        `${accountId} hard stage must not fire at the contract`)
+        .toBeGreaterThanOrEqual(2 * REALTIME_CONTRACT_MS);
+    }
   });
 
   it("never lets a tab-reloading hard stage fire while a baseline is still valid", () => {
