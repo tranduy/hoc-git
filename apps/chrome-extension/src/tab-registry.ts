@@ -29,6 +29,7 @@ export class TabRegistry {
   readonly #attached = new Map<number, AttachedLobbyTab>();
   readonly #preferred = new Map<number, ChromeLobbyId>();
   readonly #attachInFlight = new Map<number, Promise<AttachedLobbyTab>>();
+  readonly #removedDuringAttach = new Set<number>();
 
   constructor(port: DebuggerAttachmentPort, store: TabPreferenceStore | null = null,
     lifecycle: TabRegistryLifecyclePort | null = null) {
@@ -56,6 +57,10 @@ export class TabRegistry {
   async #attachCandidate(candidate: NonNullable<ReturnType<typeof recognizeLobbyTab>>): Promise<AttachedLobbyTab> {
     const current = this.#attachInFlight.get(candidate.tabId);
     if (current !== undefined) return current;
+    // A tab id is not reused while the browser is running. Clear an earlier
+    // tombstone only when a new, explicit descriptor starts a fresh attach;
+    // handleRemoved can then mark this exact in-flight generation again.
+    this.#removedDuringAttach.delete(candidate.tabId);
     const operation = this.#attachCandidateOnce(candidate).finally(() => {
       if (this.#attachInFlight.get(candidate.tabId) === operation) {
         this.#attachInFlight.delete(candidate.tabId);
@@ -84,6 +89,10 @@ export class TabRegistry {
         throw attachError;
       }
       await this.#port.attach(candidate.tabId);
+    }
+    if (this.#removedDuringAttach.has(candidate.tabId)) {
+      await this.#port.detach(candidate.tabId).catch(() => undefined);
+      throw new Error("TAB_REMOVED_DURING_ATTACH");
     }
     const attached: AttachedLobbyTab = {
       lobby: candidate.lobby,
@@ -115,6 +124,10 @@ export class TabRegistry {
   }
 
   async handleRemoved(tabId: number): Promise<void> {
+    // Popup launch tabs can close after debugger.attach starts but before the
+    // registry commits the source. Keep a tombstone across that await so the
+    // completed attachment cannot resurrect a tab Chrome already removed.
+    this.#removedDuringAttach.add(tabId);
     if (this.#attached.has(tabId)) {
       try {
         await this.#port.detach(tabId);

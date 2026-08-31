@@ -2,6 +2,79 @@ import { describe, expect, it, vi } from "vitest";
 import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
 
 describe("FabetPortalLauncher", () => {
+  it("never reattaches an unchanged expired SABA tab when Chrome briefly clears its error title", async () => {
+    const expired = "https://c0z0ob.bpd3a3fn.com/(S(expired))/VendorGame/ErrorPage?ErrCode=SPA-1";
+    const remembered = "https://c0z0ob.bpd3a3fn.com/(S(expired))/NewIndex";
+    let updated: ((tabId: number, changeInfo: unknown,
+      tab: { id?: number; url?: string; title?: string }) => void) | null = null;
+    const attachSource = vi.fn(async () => undefined);
+    const launcher = new FabetPortalLauncher({
+      query: async () => [
+        { id: 3, url: "https://fabet.monster/lobby-the-thao", title: "Lobby" },
+        { id: 21, url: expired, title: "SPA-1" }
+      ],
+      update: async (tabId, url) => ({ id: tabId, url, title: "Lobby" }),
+      focusWindow: async () => undefined,
+      attachDebugger: async () => undefined,
+      detachDebugger: async () => undefined,
+      sendCommand: async (_tabId, method, params) => {
+        if (method === "Runtime.evaluate") return { result: { value: { x: 10, y: 20, ready: true } } };
+        if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased" && updated !== null) {
+          updated(21, {}, { id: 21, url: expired, title: "" });
+        }
+        return {};
+      },
+      addCreatedListener: () => undefined,
+      removeCreatedListener: () => undefined,
+      addUpdatedListener: (listener) => { updated = listener; },
+      removeUpdatedListener: () => { updated = null; },
+      attachSource,
+      get: async () => ({ id: 21, url: expired, title: "" }),
+      delay: async () => undefined
+    });
+
+    await expect(launcher.launchSaba(remembered)).rejects.toThrow("FABET_SABA_POPUP_UNAVAILABLE");
+    expect(attachSource).not.toHaveBeenCalled();
+  });
+
+  it("opens C-Sports from Fabet and keeps the fresh server-issued SABA session URL", async () => {
+    let clicked = false;
+    const attached: Array<{ tabId: number; expectedLobby: string | undefined }> = [];
+    const fresh = "https://c0z0oa.bpy6vurb.com/(S(fresh))/NewIndex";
+    const navigations: Array<{ tabId: number; url: string }> = [];
+    const launcher = new FabetPortalLauncher({
+      query: async () => clicked
+        ? [
+            { id: 3, url: "https://fabet.monster/lobby-the-thao", title: "Lobby" },
+            { id: 21, url: fresh, title: "Sports" }
+          ]
+        : [{ id: 3, url: "https://fabet.monster/lobby-the-thao", title: "Lobby" }],
+      update: async (tabId, url) => {
+        navigations.push({ tabId, url });
+        return { id: tabId, url, title: tabId === 21 ? "Sports" : "Lobby" };
+      },
+      focusWindow: async () => undefined,
+      attachDebugger: async () => undefined,
+      detachDebugger: async () => undefined,
+      sendCommand: async (_tabId, method, params) => {
+        if (method === "Runtime.evaluate") return { result: { value: { x: 10, y: 20, ready: true } } };
+        if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased") clicked = true;
+        return {};
+      },
+      addCreatedListener: () => undefined,
+      removeCreatedListener: () => undefined,
+      attachSource: async (tab, expectedLobby) => { attached.push({ tabId: tab.id!, expectedLobby }); },
+      get: async (tabId) => ({ id: tabId, url: fresh, title: "Sports" }),
+      delay: async () => undefined
+    });
+
+    await expect(launcher.launchSaba(
+      "https://c0z0ob.bpd3a3fn.com/(S(expired))/NewIndex"
+    )).resolves.toMatchObject({ id: 21, url: fresh });
+    expect(attached).toEqual([{ tabId: 21, expectedLobby: "SABA" }]);
+    expect(navigations.filter(({ tabId }) => tabId === 21)).toEqual([]);
+  });
+
   it("never attaches the opaque zenandfe/Volta bootstrap tab as K-Sports", async () => {
     let clicked = false;
     const attachSource = vi.fn(async () => undefined);

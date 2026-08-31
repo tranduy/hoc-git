@@ -1,4 +1,6 @@
-import { isReadyKsportSportsbookTab, recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
+import type { ChromeLobbyId } from "@tool-chenh/contracts";
+import { isReadyKsportSportsbookTab, recognizeExpectedLobbyTab, recognizeLobbyTab,
+  type TabDescriptor } from "./lobby-signatures.js";
 
 interface PortalTab extends TabDescriptor {
   readonly windowId?: number | undefined;
@@ -16,20 +18,21 @@ interface FabetPortalLauncherOptions {
   readonly removeCreatedListener: (listener: (tab: PortalTab) => void) => void;
   readonly addUpdatedListener?: (listener: (tabId: number, changeInfo: unknown, tab: PortalTab) => void) => void;
   readonly removeUpdatedListener?: (listener: (tabId: number, changeInfo: unknown, tab: PortalTab) => void) => void;
-  readonly attachSource: (tab: TabDescriptor) => Promise<void>;
+  readonly attachSource: (tab: TabDescriptor, expectedLobby?: ChromeLobbyId) => Promise<void>;
   readonly get: (tabId: number) => Promise<PortalTab>;
   readonly delay?: (delayMs: number) => Promise<void>;
 }
 
-const KSPORT_CONTROL_EXPRESSION = `(() => {
+function portalControlExpression(label: "K SPORTS" | "C SPORTS"): string {
+  return `(() => {
   const normalize = (value) => String(value || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
   for (const close of document.querySelectorAll('#s4-dynamic-popup-modal .icon-close-btn, [class*="modal" i] [class*="close" i]')) {
     if (close.getClientRects().length > 0) close.click();
   }
   const cards = [...document.querySelectorAll('.game-item.lobby')];
-  const exactCards = cards.filter((node) => normalize(node.querySelector('.game-item__name')?.textContent) === 'K SPORTS');
+  const exactCards = cards.filter((node) => normalize(node.querySelector('.game-item__name')?.textContent) === ${JSON.stringify(label)});
   const fallback = [...document.querySelectorAll('[class*="game-item" i], [class*="lobby" i], button, [role="button"]')]
-    .filter((node) => normalize(node.textContent) === 'K SPORTS')
+    .filter((node) => normalize(node.textContent) === ${JSON.stringify(label)})
     .map((node) => node.closest('.game-item.lobby') || node);
   const candidates = [...new Set([...exactCards, ...fallback])];
   for (const card of candidates) {
@@ -48,11 +51,71 @@ const KSPORT_CONTROL_EXPRESSION = `(() => {
   }
   return null;
 })()`;
+}
+
+const KSPORT_CONTROL_EXPRESSION = portalControlExpression("K SPORTS");
+const SABA_CONTROL_EXPRESSION = portalControlExpression("C SPORTS");
 
 export class FabetPortalLauncher {
   readonly #options: FabetPortalLauncherOptions;
 
   constructor(options: FabetPortalLauncherOptions) { this.#options = options; }
+
+  async launchSaba(sourceMarkerUrl?: string): Promise<TabDescriptor> {
+    if (sourceMarkerUrl !== undefined &&
+      recognizeExpectedLobbyTab({ id: 0, url: sourceMarkerUrl }, "SABA")?.lobby !== "SABA") {
+      throw new Error("UNTRUSTED_LAUNCH_URL");
+    }
+    const initialTabs = await this.#options.query();
+    const initialTabIds = new Set(initialTabs.flatMap((tab) => tab.id === undefined ? [] : [tab.id]));
+    const initialUrls = new Map(initialTabs.flatMap((tab) =>
+      tab.id === undefined || tab.url === undefined ? [] : [[tab.id, tab.url] as const]));
+    const portal = initialTabs.find(isFabetPortalTab);
+    if (portal?.id === undefined || !portal.url) throw new Error("FABET_PORTAL_TAB_UNAVAILABLE");
+    const lobbyUrl = new URL("/lobby-the-thao?type=livesports", portal.url).href;
+    const focused = await this.#options.update(portal.id, lobbyUrl, true);
+    if (focused.windowId !== undefined) await this.#options.focusWindow(focused.windowId);
+
+    await this.#options.attachDebugger(portal.id);
+    const descendants: PortalTab[] = [];
+    const descendantIds = new Set<number>([portal.id]);
+    const registerSource = (tab: PortalTab): void => {
+      if (tab.id === undefined || descendantIds.has(tab.id)) return;
+      descendantIds.add(tab.id);
+      descendants.push(tab);
+    };
+    const onCreated = (tab: PortalTab): void => {
+      if (tab.id === undefined || tab.openerTabId === undefined ||
+        !descendantIds.has(tab.openerTabId) || descendantIds.has(tab.id)) return;
+      registerSource(tab);
+    };
+    const onUpdated = (_tabId: number, _changeInfo: unknown, tab: PortalTab): void => {
+      if (tab.id === undefined || recognizeExpectedLobbyTab(tab, "SABA")?.lobby !== "SABA") return;
+      const initialUrl = initialUrls.get(tab.id);
+      if (initialUrl !== undefined && tab.url === initialUrl) return;
+      registerSource(tab);
+    };
+    this.#options.addCreatedListener(onCreated);
+    this.#options.addUpdatedListener?.(onUpdated);
+    try {
+      await this.#options.sendCommand(portal.id, "Runtime.enable", {});
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await this.#clickPortalControl(portal.id, SABA_CONTROL_EXPRESSION,
+          "FABET_SABA_CONTROL_UNAVAILABLE");
+        try {
+          return await this.#waitForSabaDescendant(descendants, initialTabIds);
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      throw lastError ?? new Error("FABET_SABA_POPUP_UNAVAILABLE");
+    } finally {
+      this.#options.removeCreatedListener(onCreated);
+      this.#options.removeUpdatedListener?.(onUpdated);
+      await this.#options.detachDebugger(portal.id).catch(() => undefined);
+    }
+  }
 
   async launchKsport(sourceMarkerUrl: string): Promise<TabDescriptor> {
     if (recognizeLobbyTab({ id: 0, url: sourceMarkerUrl })?.lobby !== "KSPORT") {
@@ -113,11 +176,16 @@ export class FabetPortalLauncher {
   }
 
   async #clickKsportControl(tabId: number): Promise<void> {
+    return this.#clickPortalControl(tabId, KSPORT_CONTROL_EXPRESSION,
+      "FABET_KSPORT_CONTROL_UNAVAILABLE");
+  }
+
+  async #clickPortalControl(tabId: number, expression: string, failureCode: string): Promise<void> {
     const delay = this.#options.delay ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
     await this.#options.sendCommand(tabId, "Page.bringToFront", {});
     for (let attempt = 0; attempt < 40; attempt += 1) {
       const response = await this.#options.sendCommand(tabId, "Runtime.evaluate", {
-        expression: KSPORT_CONTROL_EXPRESSION, returnByValue: true, awaitPromise: false
+        expression, returnByValue: true, awaitPromise: false
       });
       const point = evaluationPoint(response);
       if (point !== null) {
@@ -139,7 +207,32 @@ export class FabetPortalLauncher {
       }
       await delay(250);
     }
-    throw new Error("FABET_KSPORT_CONTROL_UNAVAILABLE");
+    throw new Error(failureCode);
+  }
+
+  async #waitForSabaDescendant(
+    descendants: readonly PortalTab[], initialTabIds: ReadonlySet<number>
+  ): Promise<PortalTab> {
+    const delay = this.#options.delay ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+    const attachedTabIds = new Set<number>();
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const queried = await this.#options.query().catch(() => []);
+      const candidates = [...descendants, ...queried.filter((tab) =>
+        tab.id !== undefined && !initialTabIds.has(tab.id) &&
+        recognizeExpectedLobbyTab(tab, "SABA")?.lobby === "SABA")];
+      const latest = candidates.sort((left, right) => (left.id ?? -1) - (right.id ?? -1)).at(-1);
+      let current: PortalTab | null = null;
+      if (latest?.id !== undefined) current = await this.#options.get(latest.id).catch(() => null);
+      if (current !== null && recognizeExpectedLobbyTab(current, "SABA")?.lobby === "SABA") {
+        if (current.id !== undefined && !attachedTabIds.has(current.id)) {
+          await this.#options.attachSource(current, "SABA");
+          attachedTabIds.add(current.id);
+        }
+        return current;
+      }
+      await delay(250);
+    }
+    throw new Error("FABET_SABA_POPUP_UNAVAILABLE");
   }
 
   async #waitForStableKsportDescendant(

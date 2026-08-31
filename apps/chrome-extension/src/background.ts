@@ -1,7 +1,7 @@
 import type { ChromeLobbyId } from "@tool-chenh/contracts";
 import { LocalBridge, type BridgeSocket } from "./local-bridge.js";
 import { NetworkObserver, type ObservedSource } from "./network-observer.js";
-import { recognizeLobbyTab, shouldPreserveKsportObserver,
+import { recognizeExpectedLobbyTab, recognizeLobbyTab, shouldPreserveKsportObserver,
   type TabDescriptor } from "./lobby-signatures.js";
 import { TabRegistry } from "./tab-registry.js";
 import { resolveInstallationKey } from "./bridge-key.js";
@@ -173,6 +173,14 @@ async function attachRecoveredTab(tab: TabDescriptor): Promise<void> {
   await startAttachedSource(attached);
 }
 
+async function attachRecoveredTabAsExpected(tab: TabDescriptor, lobby: ChromeLobbyId): Promise<void> {
+  const recognized = recognizeExpectedLobbyTab(tab, lobby);
+  if (recognized?.lobby !== lobby || !lobbyIsAllowed(lobby)) throw new Error("LOBBY_OUT_OF_SCOPE");
+  await rememberRecognizedUrl(tab);
+  const attached = await registry.attachBootstrap(tab, lobby);
+  await startAttachedSource(attached);
+}
+
 async function startAttachedSource(attached: { readonly lobby: ChromeLobbyId; readonly tabId: number }): Promise<void> {
   if (!lobbyIsAllowed(attached.lobby)) throw new Error("LOBBY_OUT_OF_SCOPE");
   const source: ObservedSource = {
@@ -220,7 +228,9 @@ const fabetPortalLauncher = new FabetPortalLauncher({
   removeCreatedListener: (listener) => chrome.tabs.onCreated.removeListener(listener),
   addUpdatedListener: (listener) => chrome.tabs.onUpdated.addListener(listener),
   removeUpdatedListener: (listener) => chrome.tabs.onUpdated.removeListener(listener),
-  attachSource: attachRecoveredTab,
+  attachSource: async (tab, expectedLobby) => expectedLobby === undefined
+    ? attachRecoveredTab(tab)
+    : attachRecoveredTabAsExpected(tab, expectedLobby),
   get: async (tabId) => chrome.tabs.get(tabId)
 });
 
@@ -241,10 +251,7 @@ const sourceTabRecovery = new SourceTabRecovery({
   get: async (tabId) => chrome.tabs.get(tabId),
   attach: attachRecoveredTab,
   attachBootstrap: async (tab, lobby) => {
-    if (!lobbyIsAllowed(lobby)) throw new Error("LOBBY_OUT_OF_SCOPE");
-    rememberRecognizedUrl(tab);
-    const attached = await registry.attachBootstrap(tab, lobby);
-    await startAttachedSource(attached);
+    await attachRecoveredTabAsExpected(tab, lobby);
   },
   onBootstrapStart: (tabId) => {
     bootstrappingSourceTabs.add(tabId);
@@ -259,8 +266,12 @@ const sourceTabRecovery = new SourceTabRecovery({
       sourceId: `chrome:KSPORT:${tab.id}` });
   },
   launchFromPortal: async (lobby, sourceMarkerUrl) => {
-    if (lobby !== "KSPORT") throw new Error("FABET_PORTAL_LAUNCH_UNSUPPORTED");
-    return fabetPortalLauncher.launchKsport(sourceMarkerUrl);
+    if (lobby === "KSPORT") {
+      if (sourceMarkerUrl === undefined) throw new Error("FABET_KSPORT_TOKEN_UNAVAILABLE");
+      return fabetPortalLauncher.launchKsport(sourceMarkerUrl);
+    }
+    if (lobby === "SABA") return fabetPortalLauncher.launchSaba(sourceMarkerUrl);
+    throw new Error("FABET_PORTAL_LAUNCH_UNSUPPORTED");
   },
   // The operator supplied a working signed KSPORT launch directly. Consume
   // that URL in the provider tab; do not route this reset through Fabet or a
@@ -541,6 +552,8 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   bootstrappingSourceTabs.delete(tabId);
+  const source = sourceForTab(tabId);
+  if (source !== null) bridge?.releaseSource(source.sourceId);
   observer.releaseTab(tabId);
   void registry.handleRemoved(tabId);
 });

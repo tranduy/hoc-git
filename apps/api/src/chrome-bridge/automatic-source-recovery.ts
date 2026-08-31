@@ -240,7 +240,8 @@ export class AutomaticSourceRecovery {
           }
         }
       }
-      if (WEBSOCKET_PROVIDERS.has(source.provider) &&
+      const oneTimeSabaLaunch = source.provider === "SABA" && this.#options.browserRefreshEnabled === false;
+      if (!oneTimeSabaLaunch && WEBSOCKET_PROVIDERS.has(source.provider) &&
         (this.#options.controlPlane.reloadSource !== undefined ||
           this.#options.controlPlane.reloadRecoverySource !== undefined)) {
         const prior = current;
@@ -264,6 +265,21 @@ export class AutomaticSourceRecovery {
         }
         if (delivered > 0) {
           const confirmation = await this.#confirmReplacement(request, prior, actionStartedAtMs);
+          if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
+            return confirmation;
+          }
+          if (this.#disposed) return stopped(request.accountId, "HARD");
+          if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+        }
+      }
+      if (source.provider === "SABA" && this.#options.browserRefreshEnabled === false) {
+        const restoreStartedAtMs = this.#now();
+        let restored = 0;
+        try { restored = this.#options.controlPlane.restoreLobby("SABA"); }
+        catch { /* an unavailable visible portal falls through to the stable actionable state */ }
+        if (restored > 0) {
+          const confirmation = await this.#confirmAfter(request.accountId, "HARD", restoreStartedAtMs,
+            this.#reloadBaselineTimeoutMs);
           if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
             return confirmation;
           }

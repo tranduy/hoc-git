@@ -43,6 +43,9 @@ describe("lobby tab recognition", () => {
     expect(recognizeLobbyTab({ id: 14,
       url: "https://c0z0ob.bp7xvs95.com/sports?token=fresh",
       title: "SABA Sports" })?.lobby).toBe("SABA");
+    expect(recognizeLobbyTab({ id: 15,
+      url: "https://c0z0ob.bpd3a3fn.com/(S(expired))/VendorGame/ErrorPage?Game=DepositLogin&ErrCode=SPA-1008",
+      title: "" })).toBeNull();
   });
 
   it("preserves only an already-baselined KSPORT observer across an outer-shell transition", () => {

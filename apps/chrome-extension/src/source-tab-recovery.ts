@@ -15,7 +15,7 @@ interface SourceTabRecoveryOptions {
   readonly remove?: (tabId: number) => Promise<void>;
   readonly attach: (tab: TabDescriptor) => Promise<void>;
   readonly attachBootstrap?: (tab: TabDescriptor, lobby: ChromeLobbyId) => Promise<void>;
-  readonly launchFromPortal?: (lobby: ChromeLobbyId, sourceMarkerUrl: string) => Promise<TabDescriptor>;
+  readonly launchFromPortal?: (lobby: ChromeLobbyId, sourceMarkerUrl?: string) => Promise<TabDescriptor>;
   readonly usePortalLaunch?: boolean;
   readonly recentlyClosed?: () => Promise<readonly {
     readonly sessionId?: string;
@@ -119,9 +119,30 @@ export class SourceTabRecovery {
   }
 
   async restore(lobby: ChromeLobbyId): Promise<void> {
+    const remembered = await this.#options.loadRemembered?.(lobby) ?? null;
     const currentTabs = await this.#options.query();
     const existing = currentTabs.find((tab) => tab.id !== undefined &&
       recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby);
+    if (lobby === "SABA" && this.#options.launchFromPortal !== undefined) {
+      if (existing?.id !== undefined && existing.url !== undefined) {
+        // A SABA launch URL is a one-time session entry, but the page it opened
+        // can remain authenticated for hours. A delayed baseline is not proof
+        // that this structurally valid tab is dead: replacing it creates a
+        // short-lived popup that can displace the healthy tab in API authority.
+        // Attach and let the normal same-tab bootstrap/recovery cadence retry;
+        // portal launch is reserved for the case where no SABA tab exists.
+        await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))(existing, lobby);
+        return;
+      }
+      const sourceMarkerUrl = remembered ?? existing?.url;
+      // The portal is the authority that issues SABA's next one-time URL. A
+      // marker is useful for validating an API-delivered launch, but it must
+      // not be required after an MV3 extension reload clears storage.session.
+      await this.#waitForLobby(await this.#options.launchFromPortal(
+        lobby, sourceMarkerUrl ?? undefined
+      ), lobby);
+      return;
+    }
     if (existing?.id !== undefined && existing.url !== undefined) {
       await this.#reuse(existing, lobby, existing.url, true);
       return;
@@ -141,7 +162,6 @@ export class SourceTabRecovery {
       return;
     }
 
-    const remembered = await this.#options.loadRemembered?.(lobby) ?? null;
     if (remembered !== null) {
       await this.ensure(lobby, remembered);
       return;
@@ -177,7 +197,7 @@ export class SourceTabRecovery {
     // KSPORT is only ready after both the live and today STOMP baselines have
     // completed. Switching the sportsbook view to collect the second baseline
     // can legitimately take longer than the generic five-second tab check.
-    const maxAttempts = lobby === "KSPORT" ? 240 : 20;
+    const maxAttempts = lobby === "KSPORT" || lobby === "SABA" ? 240 : 20;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       await delay(250);
       const current = await this.#options.get(tab.id);

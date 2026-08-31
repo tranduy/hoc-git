@@ -86,6 +86,7 @@ export class LocalBridge {
   readonly #queueSpaceWaiters = new Set<() => void>();
   readonly #recoveryScheduler = new ProviderWorkScheduler();
   readonly #sourceEpochs = new Map<string, SourceEpochAdmission>();
+  readonly #releasedSources = new Set<string>();
   #socket: BridgeSocket | null = null;
   #timer: unknown = null;
   #generation = 0;
@@ -147,6 +148,14 @@ export class LocalBridge {
 
   pendingSequences(): number[] {
     return this.#ordered().map((entry) => entry.envelope.sequence);
+  }
+
+  releaseSource(sourceId: string): void {
+    this.#releasedSources.add(sourceId);
+    for (let index = this.#queue.length - 1; index >= 0; index--) {
+      if (this.#queue[index]?.envelope.sourceId === sourceId) this.#removeAt(index);
+    }
+    this.#recoveryScheduler.clear(sourceId);
   }
 
   async enqueue(envelope: ChromeBridgeEnvelope, priority: QueueEntry["priority"] = "QUOTE"): Promise<void> {
@@ -457,6 +466,7 @@ export class LocalBridge {
   }
 
   #admitSourceEpoch(sourceId: string, sourceEpoch: string | null): boolean {
+    if (this.#releasedSources.has(sourceId)) return false;
     const existing = this.#sourceEpochs.get(sourceId);
     if (existing === undefined) {
       this.#sourceEpochs.set(sourceId, { active: sourceEpoch, retired: new Set<string>(), resyncing: false });

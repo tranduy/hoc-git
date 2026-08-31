@@ -214,23 +214,56 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
   });
 
-  it.each([SABA, APSPORT] as const)(
-    "still rebuilds the %s tab when browser refresh is disabled", async (accountId) => {
+  it("still rebuilds the APSPORT tab when browser refresh is disabled", async () => {
     // The live stack runs with SESSION_MAINTENANCE_ENABLED=0, so the Fabet
     // relaunch path is closed. Reloading the existing source is the only
     // recovery a WebSocket provider has, and it must not be skipped.
     const context = setup(() => 2_000, false);
-    context.feedRegistry.snapshot.mockReturnValue(snapshot(accountId));
-    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(accountId, {
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT));
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(APSPORT, {
       state: "LIVE", reason: null, sourceId: "chrome:REPLACEMENT:7", sourceEpoch: "observer-b:0",
       activeGeneration: "generation-1", lastCompleteBaselineAtMs: 2_001
     }));
 
-    const result = await context.recovery.recover(request(accountId, "HARD"));
+    const result = await context.recovery.recover(request(APSPORT, "HARD"));
 
-    expect(result).toEqual({ accountId, stage: "HARD", outcome: "RECOVERED", reason: null });
+    expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
     expect(context.reloadRecoverySource).toHaveBeenCalledTimes(1);
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+  });
+
+  it("never reloads a one-time SABA launch when browser refresh is disabled", async () => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(SABA, {
+      state: "LIVE", reason: null, sourceId: "chrome:SABA:8", sourceEpoch: "observer-b:0",
+      activeGeneration: "generation-2", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    await expect(context.recovery.recover(request(SABA, "HARD"))).resolves.toEqual({
+      accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null
+    });
+    expect(context.reloadSource).not.toHaveBeenCalled();
+    expect(context.reloadRecoverySource).not.toHaveBeenCalled();
+    expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("SABA");
+  });
+
+  it("restores SABA through the visible portal when every bridge source is gone", async () => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA));
+    context.reloadRecoverySource.mockReturnValue(0);
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(SABA, {
+      state: "LIVE", reason: null, sourceId: "chrome:SABA:12", sourceEpoch: "observer-b:0",
+      activeGeneration: "generation-2", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    await expect(context.recovery.recover(request(SABA, "HARD"))).resolves.toEqual({
+      accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null
+    });
+    expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("SABA");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
   });
 
   it("accepts a replacement source id even when its epoch and provider generation collide", async () => {

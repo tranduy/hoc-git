@@ -43,6 +43,29 @@ describe("TabRegistry", () => {
     expect(detach).not.toHaveBeenCalled();
   });
 
+  it("does not resurrect a popup removed while its debugger attachment is in flight", async () => {
+    let attachStarted!: () => void;
+    let finishAttach!: () => void;
+    const started = new Promise<void>((resolve) => { attachStarted = resolve; });
+    const blocked = new Promise<void>((resolve) => { finishAttach = resolve; });
+    const attach = vi.fn(async () => {
+      attachStarted();
+      await blocked;
+    });
+    const detach = vi.fn(async () => undefined);
+    const registry = new TabRegistry({ attach, detach });
+
+    const attaching = registry.attachBootstrap({ id: 22,
+      url: "https://c0z0ob.bpb7jrm5.com/session/NewIndex", title: "Sports" }, "SABA");
+    await started;
+    await registry.handleRemoved(22);
+    finishAttach();
+
+    await expect(attaching).rejects.toThrow("TAB_REMOVED_DURING_ATTACH");
+    expect(registry.list()).toEqual([]);
+    expect(detach).toHaveBeenCalledWith(22);
+  });
+
   it("never attaches an unmatched tab", async () => {
     const { registry, attach } = createRegistry();
     await expect(registry.attachSelected({ id: 7, url: "https://example.test/" })).rejects.toThrow("TAB_NOT_RECOGNIZED");

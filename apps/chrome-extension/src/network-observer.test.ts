@@ -5325,11 +5325,11 @@ describe("NetworkObserver", () => {
     expect(sendCommand).not.toHaveBeenCalledWith(13, "Page.reload", expect.anything());
   });
 
-  it("does not change SABA time filters while requesting a recovery snapshot", async () => {
+  it("selects SABA Hôm Nay before requesting a recovery snapshot", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
         params.expression.includes("fieldline-saba-time-baseline")) {
-        return { result: { value: { status: "requested", clicked: ["truc tiep", "hom nay"] } } };
+        return { result: { value: { status: "today-tab-reselected" } } };
       }
       if (method === "Runtime.evaluate") return { result: { value: "1787250000000.5" } };
       return {};
@@ -5341,11 +5341,53 @@ describe("NetworkObserver", () => {
     await observer.refreshCatalog(saba);
 
     expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
-      typeof params?.expression === "string" && params.expression.includes("fieldline-saba-time-baseline"))).toBe(false);
+      typeof params?.expression === "string" && params.expression.includes("fieldline-saba-time-baseline"))).toBe(true);
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      typeof params?.expression === "string" && params.expression.includes(".menu-item"))).toBe(true);
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      typeof params?.expression === "string" &&
+      params.expression.includes("fieldline-saba-sports-scope") &&
+      params.expression.includes(".c-side-nav__header"))).toBe(true);
+    const sabaBaselineExpression = sendCommand.mock.calls.find(([, method, params]) =>
+      method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+      params.expression.includes("fieldline-saba-time-baseline"))?.[2]?.expression;
+    expect(() => new Function(`return ${String(sabaBaselineExpression)}`)).not.toThrow();
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toBe(false);
     expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
   });
 
-  it("takes only two bounded SABA DOM snapshots without changing the current provider view", async () => {
+  it("discovers SABA Hôm Nay inside a current child frame when no execution context event was observed", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" }, childFrames: [
+        { frame: { id: "sports-frame" } }
+      ] } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 71 };
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("fieldline-saba-time-baseline")) {
+        return params.contextId === 71
+          ? { result: { value: { status: "today-tab-reselected" } } }
+          : { result: { value: { status: "today-tab-unavailable", tabs: 0 } } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+
+    await observer.refreshCatalog(saba);
+
+    expect(sendCommand).toHaveBeenCalledWith(13, "Page.createIsolatedWorld", expect.objectContaining({
+      frameId: "sports-frame", worldName: "fieldline-saba-time-baseline"
+    }));
+    expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.evaluate", expect.objectContaining({
+      contextId: 71, expression: expect.stringContaining("fieldline-saba-time-baseline")
+    }));
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toBe(false);
+  });
+
+  it("takes only two bounded SABA DOM snapshots after checking the current provider view", async () => {
     const records = JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
       sportId: "1", leagueId: "league", leagueName: "League", matchId: `match-${index}`,
       timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
@@ -5376,7 +5418,7 @@ describe("NetworkObserver", () => {
 
     expect(forward.mock.calls.filter(([message]) => message.transport === "DOM_SNAPSHOT")).toHaveLength(2);
     expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
-      typeof params?.expression === "string" && params.expression.includes("fieldline-saba-time-baseline"))).toBe(false);
+      typeof params?.expression === "string" && params.expression.includes("fieldline-saba-time-baseline"))).toBe(true);
     expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
   });
 

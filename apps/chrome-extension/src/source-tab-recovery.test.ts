@@ -502,6 +502,99 @@ describe("SourceTabRecovery", () => {
     expect(attachBootstrap).toHaveBeenCalledWith({ id: 18, url: launch }, "SABA");
   });
 
+  it("restores missing SABA through Fabet instead of replaying its expired session URL", async () => {
+    const stale = "https://c0z0ob.bpd3a3fn.com/(S(expired))/NewIndex";
+    const fresh = "https://c0z0oa.bpy6vurb.com/(S(fresh))/NewIndex";
+    const launchFromPortal = vi.fn(async () => ({ id: 19, url: fresh, title: "Sports" }));
+    const create = vi.fn();
+    const update = vi.fn();
+    const attach = vi.fn();
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [], query: async () => [], create, update, attach,
+      launchFromPortal, recentlyClosed: async () => [],
+      loadRemembered: async () => stale,
+      validateReady: async () => true
+    });
+
+    await expect(recovery.restore("SABA")).resolves.toBeUndefined();
+    expect(launchFromPortal).toHaveBeenCalledExactlyOnceWith("SABA", stale);
+    expect(create).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it("restores SABA from the signed-in portal after extension session memory is cleared", async () => {
+    const fresh = "https://c0z0oa.bpy6vurb.com/(S(fresh))/NewIndex";
+    const launchFromPortal = vi.fn(async () => ({ id: 19, url: fresh, title: "Sports" }));
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [], query: async () => [], create: vi.fn(), update: vi.fn(), attach: vi.fn(),
+      launchFromPortal, recentlyClosed: async () => [], loadRemembered: async () => null,
+      validateReady: async () => true
+    });
+
+    await expect(recovery.restore("SABA")).resolves.toBeUndefined();
+    expect(launchFromPortal).toHaveBeenCalledExactlyOnceWith("SABA", undefined);
+  });
+
+  it("reattaches a healthy visible SABA tab without consuming its one-time URL again", async () => {
+    const stale = "https://c0z0ob.bpd3a3fn.com/(S(stale))/NewIndex";
+    const fresh = "https://c0z0oa.bpy6vurb.com/(S(fresh))/NewIndex";
+    const launchFromPortal = vi.fn(async () => ({ id: 20, url: fresh, title: "Sports" }));
+    const reload = vi.fn(async () => ({ id: 18, url: stale, title: "Sports" }));
+    const update = vi.fn();
+    const attachBootstrap = vi.fn();
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "SABA", tabId: 18 }],
+      query: async () => [{ id: 18, url: stale, title: "Sports" }],
+      create: vi.fn(), update, reload, attach: vi.fn(), attachBootstrap, launchFromPortal,
+      loadRemembered: async () => stale,
+      validateReady: async () => true
+    });
+
+    await expect(recovery.restore("SABA")).resolves.toBeUndefined();
+    expect(attachBootstrap).toHaveBeenCalledExactlyOnceWith({ id: 18, url: stale, title: "Sports" }, "SABA");
+    expect(launchFromPortal).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("keeps a structurally valid visible SABA tab when its baseline is temporarily late", async () => {
+    const stale = "https://c0z0ob.bpd3a3fn.com/(S(stale))/NewIndex";
+    const fresh = "https://c0z0oa.bpy6vurb.com/(S(fresh))/NewIndex";
+    const launchFromPortal = vi.fn(async () => ({ id: 20, url: fresh, title: "Sports" }));
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "SABA", tabId: 18 }],
+      query: async () => [{ id: 18, url: stale, title: "Sports" }],
+      create: vi.fn(), update: vi.fn(), reload: vi.fn(), attach: vi.fn(),
+      attachBootstrap: vi.fn(), launchFromPortal,
+      loadRemembered: async () => stale,
+      get: async () => ({ id: 18, url: stale, title: "Sports" }),
+      validateReady: async (tab) => tab.id === 20,
+      delay: async () => undefined
+    });
+
+    await expect(recovery.restore("SABA")).resolves.toBeUndefined();
+    expect(launchFromPortal).not.toHaveBeenCalled();
+  });
+
+  it("allows a recovered SABA page sixty seconds to publish its complete baseline", async () => {
+    let checks = 0;
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [], query: async () => [], create: vi.fn(), update: vi.fn(), attach: vi.fn(),
+      launchFromPortal: async () => ({
+        id: 20, url: "https://c0z0oa.bpy6vurb.com/(S(fresh))/NewIndex", title: "Sports"
+      }),
+      recentlyClosed: async () => [],
+      loadRemembered: async () => "https://c0z0ob.bpd3a3fn.com/(S(expired))/NewIndex",
+      get: async () => ({ id: 20, url: "https://c0z0oa.bpy6vurb.com/(S(fresh))/NewIndex", title: "Sports" }),
+      validateReady: async () => ++checks >= 21,
+      delay: async () => undefined
+    });
+
+    await expect(recovery.restore("SABA")).resolves.toBeUndefined();
+    expect(checks).toBe(21);
+  });
+
   it("restores and attaches a recently closed source tab", async () => {
     const attach = vi.fn(async () => undefined);
     const restore = vi.fn(async () => ({ id: 10, url: "https://cgnew.fts368.com/live" }));

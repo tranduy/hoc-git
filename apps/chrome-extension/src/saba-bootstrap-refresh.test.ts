@@ -8,8 +8,8 @@ describe("retrySabaBootstrapRefresh", () => {
 
     await retrySabaBootstrapRefresh(refresh, async (delayMs) => { delays.push(delayMs); });
 
-    expect(delays).toEqual([0, 1_000, 5_000]);
-    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(delays).toEqual([0, 1_000, 5_000, 15_000, 30_000]);
+    expect(refresh).toHaveBeenCalledTimes(5);
   });
 
   it("continues after an early main-frame probe cannot see the SABA socket", async () => {
@@ -18,6 +18,6 @@ describe("retrySabaBootstrapRefresh", () => {
       .mockResolvedValue(undefined);
 
     await expect(retrySabaBootstrapRefresh(refresh, async () => undefined)).resolves.toBeUndefined();
-    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(refresh).toHaveBeenCalledTimes(5);
   });
 });

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
+import { providerFeedPolicies } from "./provider-feed-policies.js";
 import { ProviderFeedRegistry } from "./provider-feed-registry.js";
 
 const APSPORT = "catalog-source:APSPORT:FOOTBALL";
@@ -113,7 +114,8 @@ describe("ProviderFeedRegistry", () => {
 
   it("does not publish or resolve an already expired evidence baseline as fresh", async () => {
     vi.useFakeTimers();
-    const registry = new ProviderFeedRegistry({ now: () => 77_000 });
+    const expiredAtMs = 1_001 + providerFeedPolicies.get(SABA)!.expectedEvidenceCadenceMs + 1;
+    const registry = new ProviderFeedRegistry({ now: () => expiredAtMs });
 
     expect(registry.accept(wsBaseline(SABA, 1_001, "reset-old"))).toMatchObject({
       accepted: true, publish: { snapshotState: "STALE" }
@@ -228,7 +230,7 @@ describe("ProviderFeedRegistry", () => {
     const listener = vi.fn();
     registry.subscribe(listener);
 
-    nowMs = 76_001;
+    nowMs = 1_000 + providerFeedPolicies.get(SABA)!.expectedEvidenceCadenceMs + 1;
     expect(() => registry.read(SABA)).toThrow("PROVIDER_FEED_NOT_LIVE");
 
     expect(listener).toHaveBeenCalledTimes(1);

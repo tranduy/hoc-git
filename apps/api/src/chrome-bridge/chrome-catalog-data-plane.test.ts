@@ -1179,25 +1179,25 @@ describe("ChromeCatalogDataPlane", () => {
     expect(registry.snapshot(SABA)).toMatchObject({ state: "STALLED",
       providerTransportAtMs: null, lastAuthoritativeEvidenceAtMs: null, recoveryAttempt: 0 });
 
-    now = 190_003;
+    now = 100_002 + providerFeedPolicies.get(SABA)!.softRecoveryAfterMs + 1;
     await plane.overlayStatuses([activeSaba]);
     expect(onSourceRecoveryNeeded).toHaveBeenCalledExactlyOnceWith(SABA);
     expect(registry.snapshot(SABA)).toMatchObject({ state: "SOFT_RECOVERY",
       recoveryStage: "SOFT", recoveryAttempt: 1 });
 
-    now = 280_003;
+    now = 100_002 + providerFeedPolicies.get(SABA)!.hardRecoveryAfterMs + 1;
     await plane.overlayStatuses([activeSaba]);
     expect(onSourceRecoveryNeeded).toHaveBeenCalledTimes(2);
     expect(registry.snapshot(SABA)).toMatchObject({ state: "HARD_RECOVERY",
       recoveryStage: "HARD", recoveryAttempt: 2 });
 
-    now = 280_009;
-    expect(plane.ingest({ ...sabaPushOpen(6, "2"), observedAtMs: 280_008 })).toBe(false);
-    expect(plane.ingest({ ...sabaPushBaseline(7, "2"), observedAtMs: 280_009 })).toBe(true);
+    now += 6;
+    expect(plane.ingest({ ...sabaPushOpen(6, "2"), observedAtMs: now - 1 })).toBe(false);
+    expect(plane.ingest({ ...sabaPushBaseline(7, "2"), observedAtMs: now })).toBe(true);
     expect(registry.snapshot(SABA)).toMatchObject({ state: "LIVE", reason: null,
       sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0", recoveryStage: "NONE",
       recoveryAttempt: 0, activeGeneration: "worker-a:0:saba:2:7" });
-    await expect(plane.read(SABA)).resolves.toMatchObject({ observedAtMs: 280_009 });
+    await expect(plane.read(SABA)).resolves.toMatchObject({ observedAtMs: now });
   });
 
   it("does not request recovery for a provider with no tab or feed evidence", async () => {

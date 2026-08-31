@@ -85,6 +85,17 @@ describe("LocalBridge", () => {
     expect(socket.sent.map((value) => JSON.parse(value).sequence)).toEqual([0, 1]);
   });
 
+  it("purges a removed tab source and rejects its late in-flight envelopes", async () => {
+    const bridge = new LocalBridge({ socketFactory: () => new FakeSocket(), installationKey: "local-key" });
+    await bridge.enqueue(envelope(1, "{}", "chrome:SABA:7"));
+    await bridge.enqueue(envelope(9, "{}", "chrome:CMD:8"));
+
+    bridge.releaseSource("chrome:SABA:7");
+    await bridge.enqueue(envelope(2, "{}", "chrome:SABA:7", "worker-b:0"));
+
+    expect(bridge.pendingSequences()).toEqual([9]);
+  });
+
   it("removes acknowledged entries and resends only unacknowledged entries after reconnect", () => {
     const sockets = [new FakeSocket(), new FakeSocket()];
     let socketIndex = 0;

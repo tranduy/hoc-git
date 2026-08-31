@@ -435,6 +435,42 @@ const SABA_ODDS_MUTATION_CLEANUP_EXPRESSION = `(() => {
   return true;
 })()`;
 
+const SABA_TODAY_BASELINE_EXPRESSION = `(() => {
+  // fieldline-saba-time-baseline
+  // fieldline-saba-sports-scope
+  const normalize = (value) => String(value || '').normalize('NFD')
+    .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D')
+    .trim().toLowerCase().replace(/\\s+/g, ' ');
+  // SABA currently serves two shells from the same one-time launcher. The
+  // legacy shell repeats the same period controls for Asian Games, US Open,
+  // and general Sports. Only the general Sports group owns the full football
+  // catalog, so never take the first global "Today" match.
+  const legacySections = [...document.querySelectorAll('.c-side-nav.c-side-nav--event')];
+  const sportsSection = legacySections.find((section) => {
+    const header = section.querySelector(':scope > .c-side-nav__header');
+    const label = header?.querySelector('.c-text, .c-side-nav__title') || header;
+    return /^(?:the thao|sports)$/u.test(normalize(label?.textContent));
+  });
+  const legacyTabs = sportsSection ? [...sportsSection.querySelectorAll('.c-side-nav__tab')] : [];
+  const compactTabs = sportsSection ? [] : [...document.querySelectorAll('.menu-item')];
+  const tabs = legacyTabs.length > 0 ? legacyTabs : compactTabs;
+  const matching = tabs.filter((tab) => /^(?:hom nay|today)$/u.test(normalize(tab.textContent)));
+  const today = matching.find((tab) => tab.getClientRects().length > 0) || matching[0];
+  if (!today) return { status: 'today-tab-unavailable', tabs: tabs.length };
+  const active = today.getAttribute('aria-selected') === 'true' ||
+    [...today.classList].some((name) => /^(?:active|current|selected)$/iu.test(name));
+  const hidden = today.getClientRects().length === 0;
+  if (hidden && sportsSection) {
+    const header = sportsSection.querySelector(':scope > .c-side-nav__header');
+    header?.click();
+    setTimeout(() => today.click(), 180);
+    return { status: 'today-tab-selected', scope: 'sports-opened', tabs: tabs.length };
+  }
+  today.click();
+  return { status: active ? 'today-tab-reselected' : 'today-tab-selected',
+    scope: sportsSection ? 'sports' : 'compact', tabs: tabs.length };
+})()`;
+
 export const KSPORT_FOOTBALL_DISCOVERY_EXPRESSION = `(() => {
   const normalize = (value) => String(value || '').normalize('NFD')
     .replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D').trim().toLowerCase().replace(/\\s+/g, ' ');
@@ -1007,6 +1043,7 @@ export class NetworkObserver {
   readonly #socketBaselineRecoveries = new Map<string, { readonly token: symbol;
     readonly operation: Promise<void> }>();
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
+  readonly #sabaTodayBootstrapSelected = new Set<string>();
   readonly #sabaCatalogFrameAtMs = new Map<string, number>();
   readonly #sabaSilentSocketRecoveryAtMs = new Map<string, number>();
   // The attach diagnostic is rebuilt whenever a source generation rolls, which
@@ -1616,6 +1653,7 @@ export class NetworkObserver {
     this.#socketBaselineRecoveryAtMs.delete(sourceId);
     this.#socketBaselineRecoveries.delete(sourceId);
     this.#sabaDomBootstrapAtMs.delete(sourceId);
+    this.#sabaTodayBootstrapSelected.delete(sourceId);
     this.#sabaCatalogFrameAtMs.delete(sourceId);
     this.#sabaSilentSocketRecoveryAtMs.delete(sourceId);
     this.#sabaDomObserversCleaned.delete(sourceId);
@@ -2235,6 +2273,12 @@ export class NetworkObserver {
       return;
     }
     if (source.lobby === "SABA") {
+      // A C-SPORTS schedule launch lands on one live event. Its authenticated
+      // `Hôm Nay` tab issues the provider's complete football reset/done
+      // baseline (measured live: 5 -> 360 events) without navigating or
+      // replaying the one-time launch URL. Attach first, then make this one
+      // ordinary page selection so every baseline frame is observed.
+      if (await this.#selectSabaTodayTab(source) === "selected") return;
       const replayed = await this.#replayCatalogWsSnapshots(source.sourceId);
       if (!replayed) {
         await this.#restoreSabaWsSnapshots(source);
@@ -2360,6 +2404,63 @@ export class NetworkObserver {
         await this.#withFrameCommandTimeout(discoverChildren(), this.#btiCatalogRefreshTimeoutMs);
       } catch { /* A bounded refresh will retry on the next normal cadence. */ }
       finally { discoveryExpired = true; }
+  }
+
+  async #selectSabaTodayTab(source: ObservedSource): Promise<"selected" | "active" | null> {
+    if (this.#sabaTodayBootstrapSelected.has(source.sourceId)) return "active";
+    const diagnostic = this.#wsAttachDiagnostic(source);
+    diagnostic.baselineTabSelections += 1;
+    const targets: Array<{ readonly contextId?: number; readonly sessionId?: string }> = [
+      ...[...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])].map((binding) => ({
+        contextId: binding.contextId,
+        ...(binding.sessionId === undefined ? {} : { sessionId: binding.sessionId })
+      })),
+      {}
+    ];
+    const evaluate = async (target: { readonly contextId?: number; readonly sessionId?: string }) => {
+      const params = { expression: SABA_TODAY_BASELINE_EXPRESSION,
+        ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
+        returnByValue: true, awaitPromise: false };
+      const evaluation = await this.#withFrameCommandTimeout(target.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId)).catch(() => null);
+      const status = nestedValue(evaluation, "result", "value", "status");
+      if (typeof status === "string") diagnostic.baselineTabStatus = status;
+      return status;
+    };
+    const accept = (status: unknown): "selected" | "active" | null => {
+      if (status === "today-tab-selected" || status === "today-tab-reselected") {
+        this.#sabaTodayBootstrapSelected.add(source.sourceId);
+        return "selected";
+      }
+      return status === "today-tab-active" ? "active" : null;
+    };
+    diagnostic.baselineTabTargets = targets.length;
+    for (const target of targets) {
+      const accepted = accept(await evaluate(target));
+      if (accepted !== null) return accepted;
+    }
+    // Runtime.enable normally replays every current main-world context, but a
+    // worker reload can attach after SABA's cross-origin sportsFrame is already
+    // running without receiving that event. Discover the live frame tree and
+    // create a bounded isolated world in each child so the authenticated period
+    // control remains reachable without navigating the one-time launch URL.
+    const frameTree = await this.#withFrameCommandTimeout(
+      this.#sendCommand(source.tabId, "Page.getFrameTree")
+    ).catch(() => null);
+    const childFrameIds = collectFrameIds(frameTree).slice(1);
+    diagnostic.baselineTabTargets += childFrameIds.length;
+    for (const frameId of childFrameIds) {
+      const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+        "Page.createIsolatedWorld", {
+          frameId, worldName: "fieldline-saba-time-baseline", grantUniveralAccess: false
+        })).catch(() => null);
+      const contextId = nestedNumber(world, "executionContextId");
+      if (contextId === null) continue;
+      const accepted = accept(await evaluate({ contextId }));
+      if (accepted !== null) return accepted;
+    }
+    return null;
   }
 
   async #bootstrapApsportRequestTemplate(source: ObservedSource, sourceGeneration: number,

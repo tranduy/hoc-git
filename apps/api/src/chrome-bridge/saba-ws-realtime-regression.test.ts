@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { ChromeCatalogDataPlane } from "./chrome-catalog-data-plane.js";
+import { providerFeedPolicies } from "./provider-feed-policies.js";
 import { SabaWsCatalogAdapter } from "./saba-ws-adapter.js";
+
+const SABA = "catalog-source:SABA:FOOTBALL";
 
 const fields = ["type", "leagueid", "leaguenameen", "sporttype", "matchid", "hteamnameen",
   "ateamnameen", "kickofftime", "marketid", "oddsid", "bettype", "parenttypeid", "oddsstatus",
@@ -319,7 +322,7 @@ describe("SABA websocket realtime regressions", () => {
     ], "r0002", 9_002))).toBe(false);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
 
-    nowMs = 1_786_449_615_003;
+    nowMs = 1_786_449_540_002 + providerFeedPolicies.get(SABA)!.expectedEvidenceCadenceMs + 1;
     await expect(plane.read("catalog-source:SABA:FOOTBALL"))
       .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
@@ -340,7 +343,7 @@ describe("SABA websocket realtime regressions", () => {
       observedAtMs: nowMs, receivedMonotonicMs: 9_002 })).toBe(false);
     expect(publish.mock.calls.map((call) => call[1])).toEqual(["FRESH"]);
 
-    nowMs = 1_786_449_615_003;
+    nowMs = 1_786_449_540_002 + providerFeedPolicies.get(SABA)!.expectedEvidenceCadenceMs + 1;
     await expect(plane.read("catalog-source:SABA:FOOTBALL"))
       .rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
   });
