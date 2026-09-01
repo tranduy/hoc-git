@@ -2429,9 +2429,18 @@ export class NetworkObserver {
       return status;
     };
     const accept = (status: unknown): "selected" | "active" | null => {
-      if (status === "today-tab-selected" || status === "today-tab-reselected") {
+      if (status === "today-tab-selected") {
         this.#sabaTodayBootstrapSelected.add(source.sourceId);
         return "selected";
+      }
+      // Clicking a period tab that is already active is not a page selection
+      // the provider answers with reset/done - it is a no-op the caller must
+      // not mistake for a baseline in flight. Remember that the control was
+      // reached so it is not clicked again, and let the caller fall through to
+      // the socket reconnect that actually reseeds the lane.
+      if (status === "today-tab-reselected") {
+        this.#sabaTodayBootstrapSelected.add(source.sourceId);
+        return "active";
       }
       return status === "today-tab-active" ? "active" : null;
     };

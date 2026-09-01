@@ -5329,7 +5329,7 @@ describe("NetworkObserver", () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
         params.expression.includes("fieldline-saba-time-baseline")) {
-        return { result: { value: { status: "today-tab-reselected" } } };
+        return { result: { value: { status: "today-tab-selected" } } };
       }
       if (method === "Runtime.evaluate") return { result: { value: "1787250000000.5" } };
       return {};
@@ -5357,6 +5357,43 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
   });
 
+  it("falls through to the socket reconnect when SABA Hôm Nay is already active", async () => {
+    // Clicking a period tab that is already active is not a page selection the
+    // provider answers with reset/done. Treating it as one returned early and
+    // skipped the reconnect that actually reseeds the lane, costing the first
+    // recovery of every source one extra starvation window.
+    let selections = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("fieldline-saba-time-baseline")) {
+        selections += 1;
+        return { result: { value: { status: "today-tab-reselected" } } };
+      }
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("window.WebSocket.prototype")) {
+        return { result: { objectId: "native-websocket-prototype" } };
+      }
+      if (method === "Runtime.evaluate") return { result: { value: "1787250000000.5" } };
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "native-websockets" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    let now = 10_000;
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => now, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+
+    await observer.refreshCatalog(saba);
+    expect(selections).toBeGreaterThan(0);
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(true);
+
+    // The control was reached once; a later refresh must not click it again.
+    const before = selections;
+    now = 20_000;
+    await observer.refreshCatalog(saba);
+    expect(selections).toBe(before);
+  });
+
   it("discovers SABA Hôm Nay inside a current child frame when no execution context event was observed", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" }, childFrames: [
@@ -5366,7 +5403,7 @@ describe("NetworkObserver", () => {
       if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
         params.expression.includes("fieldline-saba-time-baseline")) {
         return params.contextId === 71
-          ? { result: { value: { status: "today-tab-reselected" } } }
+          ? { result: { value: { status: "today-tab-selected" } } }
           : { result: { value: { status: "today-tab-unavailable", tabs: 0 } } };
       }
       return {};
