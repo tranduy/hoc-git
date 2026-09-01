@@ -93,6 +93,32 @@ describe("extractImFootballCatalog", () => {
     expect(initial[0]?.markets[0]?.selections.map((item) => item.priceText)).toEqual(["0.67", "-0.79"]);
   });
 
+  it("applies a delta whose changed market has no published line yet by withdrawing only that market", () => {
+    // Measured 2026-09-01: IM emits in-domain markets whose selections lack
+    // `hdp` entirely. Refusing the whole delta for one of them left every
+    // other price in that delta standing as current.
+    const initial = extractImFootballCatalog({ StatusCode: 100, sel: [event] });
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [
+      { ...event.mls[0], ws: event.mls[0]!.ws.map(({ hdp: _line, ...item }) => item) },
+      { ...event.mls[2], ws: event.mls[2]!.ws.map((item) => ({ ...item, o: 0.75 })) }
+    ] }] };
+
+    const merged = mergeImFootballDelta(initial, delta);
+    expect(merged).not.toBe(initial);
+    expect(merged[0]?.markets.map((item) => item.marketId)).toEqual(["11", "12"]);
+    expect(merged[0]?.markets[1]?.selections[0]?.priceText).toBe("0.75");
+  });
+
+  it("excludes a market with no published line from a snapshot without dropping the event", () => {
+    const withLineless = { ...event, mls: [...event.mls,
+      { mi: 13, bti: 2, gp: 1, il: false, ws: [
+        { wsi: 131, si: 3, dih: "3", o: 0.95, ot: 1 },
+        { wsi: 132, si: 4, dih: "3", o: -1.05, ot: 1 }
+      ] }] };
+    expect(extractImFootballCatalog({ StatusCode: 100, sel: [withLineless] })[0]?.markets.map((item) => item.marketId))
+      .toEqual(["10", "11", "12"]);
+  });
+
   it("keeps first-half handicap and total identities separate from full-time", () => {
     const firstHalf = { ...event, mls: [
       { mi: 20, bti: 1, gp: 2, il: false, ws: [

@@ -1,7 +1,7 @@
 import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
-import { extractImFootballCatalog, isValidImFootballDelta, mergeImFootballDelta, normalizeImOdds } from
-  "../providers/im/im-football-catalog-source.js";
+import { extractImFootballCatalog, isLineFieldWellFormed, isValidImFootballDelta, mergeImFootballDelta,
+  normalizeImOdds } from "../providers/im/im-football-catalog-source.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 
@@ -317,15 +317,29 @@ function isClassifiedImMarket(value: unknown): boolean {
   if (value.ws.length !== 2) return false;
   const expectedSelections = Number(value.bti) === 1 ? new Set([1, 2]) : new Set([3, 4]);
   const actualSelections = new Set<number>();
+  let lineAbsent = false;
   for (const selection of value.ws) {
     if (!isRecord(selection) || providerIdentifier(selection.wsi) === null ||
       !expectedSelections.has(Number(selection.si)) || actualSelections.has(Number(selection.si)) ||
-      typeof selection.hdp !== "number" || !Number.isFinite(selection.hdp) || Math.abs(selection.hdp) > 100 ||
+      !isLineFieldWellFormed(selection.hdp) ||
       typeof selection.dih !== "string" || selection.dih.trim() === "" ||
       normalizeImOdds(selection.o) === null) return false;
+    if (selection.hdp === undefined) lineAbsent = true;
     actualSelections.add(Number(selection.si));
   }
+  if (lineAbsent) noteImContentRefusal("market-line-absent");
   return actualSelections.size === 2;
+}
+
+/**
+ * Why a structurally valid IM record was left out of the catalog. Shape names
+ * and counts only. Before this existed one such market rejected the whole
+ * GetSE generation, and IM never established a baseline for the session.
+ */
+export const imContentRefusals = new Map<string, number>();
+
+function noteImContentRefusal(reason: string): void {
+  imContentRefusals.set(reason, (imContentRefusals.get(reason) ?? 0) + 1);
 }
 
 function providerIdentifier(value: unknown): string | null {

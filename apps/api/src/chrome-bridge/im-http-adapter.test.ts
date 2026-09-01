@@ -420,6 +420,49 @@ describe("ImHttpCatalogAdapter", () => {
       "IM_MARKET_2", "im:8:3"))).toHaveLength(1);
   });
 
+  it("keeps a generation whose in-domain market has no published line yet, dropping only that market", () => {
+    // Measured 2026-09-01: IM Market 2 carried 11 markets whose selections had
+    // every field except `hdp`. One such market used to reject the whole
+    // generation and IM never established a baseline for the session.
+    const adapter = new ImHttpCatalogAdapter();
+    const lineless = { ...event, eid: 112516391, mls: [{ mi: 20, bti: 2, gp: 1, ws: [
+      { wsi: 201, si: 3, dih: "2.5", o: 0.9, ot: 1 },
+      { wsi: 202, si: 4, dih: "2.5", o: -0.98, ot: 1 }
+    ] }] };
+    const mixed = { ...event, eid: 112516392, mls: [
+      { mi: 30, bti: 1, gp: 1, ws: [
+        { wsi: 301, si: 1, dih: "+0.5", o: 0.67, ot: 1 },
+        { wsi: 302, si: 2, dih: "-0.5", o: -0.79, ot: 1 }
+      ] },
+      { mi: 31, bti: 2, gp: 1, ws: [
+        { wsi: 311, si: 3, hdp: 2.5, dih: "2.5", o: 0.9, ot: 1 },
+        { wsi: 312, si: 4, hdp: 2.5, dih: "2.5", o: -0.98, ot: 1 }
+      ] }
+    ] };
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [event] }, 1, undefined, "IM_MARKET_1"))).toEqual([]);
+    const published = adapter.decode(envelope({ StatusCode: 100, sel: [lineless, mixed] }, 2, undefined,
+      "IM_MARKET_2"));
+    expect(published).toHaveLength(1);
+    const catalog = published[0]!.value as {
+      events: readonly { providerEventId: string }[]; markets: readonly { providerMarketId: string }[];
+    };
+    expect(catalog.events.map((item) => item.providerEventId).sort()).toEqual(["112516390", "112516392"]);
+    expect(catalog.markets.map((item) => item.providerMarketId).sort()).toEqual(["10", "31"]);
+  });
+
+  it("still rejects a generation whose in-domain market carries a malformed line", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const malformed = { ...event, mls: [{ ...event.mls[0]!, ws: [
+      { ...event.mls[0]!.ws[0]!, hdp: "0.5" }, event.mls[0]!.ws[1]!
+    ] }] };
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [malformed] }, 1, undefined,
+      "IM_MARKET_1", "im:8:2"))).toEqual([]);
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
+      "IM_MARKET_2", "im:8:2"))).toEqual([]);
+  });
+
   it("rejects every later partition after a malformed first partition until the source resets", () => {
     const adapter = new ImHttpCatalogAdapter();
     const malformed = { ...event, mls: [{ ...event.mls[0], ws: [] }] };

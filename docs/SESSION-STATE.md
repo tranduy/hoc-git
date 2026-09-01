@@ -1,5 +1,33 @@
 # Trạng thái làm việc — 2026-08-28
 
+## IM tối liên tục cả phiên — ĐÃ SỬA (2026-09-01 sáng)
+
+**Triệu chứng:** tab IM (`imsports.directsb.net`) sống, envelope về đều (`envAge` 0–5s),
+GetSE về đủ cặp Market 1/Market 2 cùng cutoff, nhưng `decoded=0`, `ignoredEndpoints`
+chỉ có `/api/EventV6/GetSE`, feed kẹt `HARD_RECOVERY` với catalog journal 46 giờ cũ.
+
+**Nguyên nhân (tái hiện bằng replay capture qua adapter dist):** Market 2 có **11 trong
+11 976 market thuộc miền hỗ trợ** (bti∈{1,2}, gp∈{1,2,3}) mà selection **không có khóa
+`hdp`** (còn lại `dih,o,ot,s,si,wsi` nguyên vẹn) — kèo chưa công bố line. `isClassifiedImMarket`
+coi đó là malformed → `classifySnapshot` trả `null` cho **toàn snapshot** → cả generation
+bị `rememberRejected` vĩnh viễn → không bao giờ có baseline. Cùng luật ở `validDeltaMarket`
+làm rớt **cả** GetSEDelta khi một market như vậy xuất hiện — giá cũ của các trận khác trong
+delta đó đứng lại thành giá hiện tại.
+
+**Sửa (`isLineFieldWellFormed`):** `hdp === undefined` là loại trừ có giải thích thuộc miền
+nhà cái, không phải bằng chứng hỏng — `market()` vốn đã bỏ market đó, trận vẫn giữ. `hdp`
+có mặt nhưng không phải số/quá 100 vẫn là malformed. Guard `acceptedCount === 0` sẵn có vẫn
+bắt trường hợp đổi schema toàn cục. Adapter đếm `market-line-absent` vào
+`imContentRefusals`; `HOP4.contentRefusals` giờ chọn counter theo sàn (IM/APSPORT),
+bớt một phần bẫy "counter chung" bên dưới.
+
+**Kết quả:** hot-swap API 11:22:40 → IM `LIVE` 11:23:06, 154 trận / 1 400 market /
+2 800 quote, q60 = 44 ngay vòng đầu.
+
+**Cách tìm:** `im-replay.mjs` (scratchpad) gom chunk `{snapshotId,chunkIndex,...}` từ
+capture, gọi `ImHttpCatalogAdapter.decode` của dist → 0 output với cặp hợp lệ, rồi kiểm
+từng điều kiện của `classifySnapshot`/`isClassifiedImMarket` theo hình dạng.
+
 ## Hợp đồng realtime 30s (2026-08-31) — luật mới của hệ thống
 
 **Luật do người vận hành đặt:** không sàn nào được quá **30 giây** mà không trả về

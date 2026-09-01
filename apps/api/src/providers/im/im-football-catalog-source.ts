@@ -88,11 +88,25 @@ function validDeltaMarket(value: unknown): boolean {
     const selection = record(candidate);
     if (selection === null || identifier(selection.wsi) === null || typeof selection.si !== "number" ||
       !expectedSelections.has(selection.si) || actualSelections.has(selection.si) ||
-      typeof selection.hdp !== "number" || !Number.isFinite(selection.hdp) || Math.abs(selection.hdp) > 100 ||
+      !isLineFieldWellFormed(selection.hdp) ||
       text(selection.dih) === null || normalizeImOdds(selection.o) === null) return false;
     actualSelections.add(selection.si);
   }
   return actualSelections.size === 2;
+}
+
+/**
+ * A selection with no `hdp` key at all is a supported-domain market whose line
+ * the provider has not published yet. Measured 2026-09-01 on imsports GetSE
+ * Market 2: 11 of 11 976 in-domain markets arrived that way, every other
+ * field intact. `market()` already excludes such a market from the catalog
+ * (`supportedLine(undefined)` is false), so the absence is an explained
+ * provider-domain exclusion, not malformed evidence. A present but non-numeric
+ * or absurd line is still malformed.
+ */
+export function isLineFieldWellFormed(value: unknown): boolean {
+  return value === undefined ||
+    (typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 100);
 }
 
 export function isValidImFootballDelta(value: unknown): boolean {
