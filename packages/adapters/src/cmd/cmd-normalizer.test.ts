@@ -4,12 +4,31 @@ import { normalizeCmdCatalog, normalizeObservedFootballCatalog, type CmdCatalogI
 
 describe("normalizeCmdCatalog", () => {
   it("accepts correctly decoded live labels from provider DOM snapshots", () => {
-    for (const timeText of ["TRỰC TIẾP", "TRỰC TIẾP 01:45AM", "LIVE"]) {
+    for (const timeText of ["TRỰC TIẾP", "LIVE", "1H26'"]) {
       const result = normalizeCmdCatalog([{ ...record, timeText }], {
         observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 1, timezoneOffsetMinutes: 480, sequence: 1
       });
       expect(result.events[0]).toMatchObject({ isLive: true });
     }
+  });
+
+  it("reads a stream badge beside a kick-off time as the fixture it precedes", () => {
+    // Read on the SABA lobby 2026-09-01 at 23:26 provider time: of 236 rows, 73
+    // carried "TRỰC TIẾP" next to a kick-off time - seventy of them an AM time,
+    // hours away - and only 17 carried a real clock. "TRỰC TIẾP" there is the
+    // book advertising a stream, and the time is when the match will start.
+    // Published as in-play they became live tickets whose prices never moved,
+    // because the matches had not kicked off.
+    const observedAtMs = 1_788_000_000_000;
+    const options = { observedAtMs, receivedMonotonicMs: 1, timezoneOffsetMinutes: 480, sequence: 1 };
+    const streamed = normalizeCmdCatalog([{ ...record, timeText: "TRỰC TIẾP 01:45AM" }], options);
+
+    expect(streamed.events[0]).toMatchObject({ isLive: false, liveState: null });
+    // The advertised time is the kick-off, read in the provider's own timezone.
+    const providerNow = new Date(observedAtMs + 480 * 60_000);
+    expect(streamed.events[0]?.startAtUtcMs).toBe(Date.UTC(providerNow.getUTCFullYear(),
+      providerNow.getUTCMonth(), providerNow.getUTCDate(), 1, 45) - 480 * 60_000);
+    expect(streamed.quotes.every((quote) => quote.isLive === false)).toBe(true);
   });
   const record = {
     sportId: "1" as const,
