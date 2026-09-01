@@ -34,6 +34,16 @@ const recordSchema = z.strictObject({
 // not arrived. SABA reported `dom-undecodable` for every snapshot it took on
 // 2026-08-29 and the name could not say which of the five it meant, so `note`
 // carries the shape - names and counts, never values.
+/** Which field a record failed on, and how - names and kinds, never values. */
+function schemaComplaint(candidate: unknown): string {
+  const parsed = recordSchema.safeParse(candidate);
+  if (parsed.success) return "schema";
+  const issue = parsed.error.issues[0];
+  if (issue === undefined) return "schema";
+  const path = issue.path.map((step) => typeof step === "number" ? "n" : String(step)).join(".");
+  return `${issue.code}-at-${path === "" ? "root" : path}`.replace(/[^A-Za-z0-9._-]+/gu, "-").slice(0, 40);
+}
+
 export function decodePublicDomRecords(
   assembler: CmdSnapshotAssembler,
   envelope: ChromeBridgeEnvelope,
@@ -58,7 +68,12 @@ export function decodePublicDomRecords(
   if (records.length === 0) {
     // Every record failing one schema is what a renamed field looks like, and
     // the count is what separates that from a table that happened to be empty.
-    note?.(`no-record-of-${assembled.length}-matched-schema`);
+    // Which field it was is the rest of the answer: SABA's whole DOM lane - the
+    // fallback that exists for exactly the socket starvation it is currently
+    // stuck in - refused every snapshot on 2026-09-01 and could only say that
+    // none matched. The schema is strict, so one renamed or added field rejects
+    // the record entire. Shape only: field path and the kind of complaint.
+    note?.(`no-record-of-${assembled.length}-matched-${schemaComplaint(assembled[0])}`);
     return null;
   }
   return records;

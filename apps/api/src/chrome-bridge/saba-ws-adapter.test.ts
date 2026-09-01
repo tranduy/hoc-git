@@ -305,6 +305,23 @@ describe("SabaWsCatalogAdapter", () => {
     expect(adapter.decode(input)).toEqual([]);
   });
 
+  it("names the field a DOM record failed on, not just that none matched", () => {
+    // SABA's DOM lane is the fallback for exactly the socket starvation it was
+    // stuck in on 2026-09-01, and it refused every snapshot while able to say
+    // only that nothing matched. The schema is strict, so one renamed or added
+    // field rejects the record entire - and which field it was is the fix.
+    const adapter = new SabaWsCatalogAdapter();
+    const record = { sportId: "1", leagueId: "l", leagueName: "League", matchId: "m",
+      timeText: "1H0'", teamNames: ["Home", "Away"], groups: [], unexpectedField: "x" };
+    const snapshot: ChromeBridgeEnvelope = { ...envelope(""), transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: "saba:7:snapshot-0301", chunkIndex: 0, chunkCount: 1, records: [record] }) } };
+
+    expect(adapter.decode(snapshot)).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("dom-no-record-of-1-matched-unrecognized_keys-at-root");
+  });
+
   it("separates a snapshot still awaiting chunks from one nothing could read", () => {
     const adapter = new SabaWsCatalogAdapter();
     const chunk = (chunkIndex: number, chunkCount: number): ChromeBridgeEnvelope => ({
