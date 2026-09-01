@@ -155,7 +155,12 @@ function safeProviderError(error: unknown): { readonly status: TicketRealtimeChe
     code === "PREFLIGHT_UNAVAILABLE" || code === "VISIBLE_PRICE_SOURCE_NOT_LIVE" || providerReadFailure) {
     return { status: "SOURCE_UNAVAILABLE", verificationStatus: null, directMethod: method, code };
   }
-  return { status: "ERROR", verificationStatus: null, directMethod: method, code: "PREFLIGHT_UNAVAILABLE" };
+  // The name survived every gate above and was overwritten here by a constant,
+  // which is how a check that failed in three milliseconds still told the
+  // operator only that something was unavailable. Anything that reached this
+  // point already passed the shape check, so it is safe to carry.
+  return { status: "ERROR", verificationStatus: null, directMethod: method,
+    code: shapedName ? candidate : "PREFLIGHT_UNAVAILABLE" };
 }
 
 async function checkLeg(preflight: ProviderPreflightLike, displayed: TicketRealtimeDisplayedLeg,
