@@ -180,8 +180,26 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
       clockMs: Number(stoppageClock[2]) * 60_000
     };
   }
-  if (/^TRỰC TIẾP(?:\s+\d{1,2}:\d{2}(?:AM|PM)?)?$/u.test(normalized) ||
-    normalized === "LIVE" || /^\dH\d+'$/u.test(normalized)) {
+  // "TRỰC TIẾP" beside a kick-off time is the book advertising a stream on a
+  // fixture that has not started - the time is when it will. Read on the SABA
+  // lobby 2026-09-01: of 236 rows, 73 carried "TRỰC TIẾP 11:30PM" and only 17 a
+  // real clock, and every one of the 73 was published as in-play with no period
+  // and no clock. They were then paired as live tickets whose prices never
+  // moved, because the matches had not kicked off.
+  const streamedKickoff = /^TRỰC TIẾP\s+(\d{1,2}):(\d{2})(AM|PM)?$/u.exec(normalized);
+  if (streamedKickoff !== null) {
+    const meridiem = streamedKickoff[3];
+    const rawHour = Number(streamedKickoff[1]);
+    const minute = Number(streamedKickoff[2]);
+    if (rawHour > 23 || minute > 59 || (meridiem !== undefined && (rawHour < 1 || rawHour > 12))) return null;
+    const hour = meridiem === undefined ? rawHour
+      : meridiem === "PM" ? (rawHour % 12) + 12 : rawHour % 12;
+    const providerNow = new Date(options.observedAtMs + options.timezoneOffsetMinutes * 60_000);
+    const timestamp = Date.UTC(providerNow.getUTCFullYear(), providerNow.getUTCMonth(),
+      providerNow.getUTCDate(), hour, minute) - options.timezoneOffsetMinutes * 60_000;
+    return { startAtUtcMs: timestamp, isLive: false, period: null, clockMs: null };
+  }
+  if (normalized === "TRỰC TIẾP" || normalized === "LIVE" || /^\dH\d+'$/u.test(normalized)) {
     const clock = /^(\d)H(\d+)'$/u.exec(normalized);
     return {
       startAtUtcMs: options.observedAtMs,
