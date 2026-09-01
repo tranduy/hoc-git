@@ -126,7 +126,13 @@ function safeProviderError(error: unknown): { readonly status: TicketRealtimeChe
     ? (error as { method: "DOM" | "IN_PAGE_FETCH" }).method : null;
   const providerReadFailure = /^(?:SBOBET_(?:DIRECT|SELECTION)|BTI_(?:DETAIL|EVENT|MARKET|SELECTION|PRICE)|TSPORT_(?:SELECTION|EVENT|PARTICIPANTS|MARKET|OUTCOME|LINE|PRICE)|IM_DIRECT_(?:TOKEN|REQUEST|HTTP))_[A-Z0-9_]+$/u
     .test(candidate);
-  const code = knownProviderErrors.has(candidate) || providerReadFailure ? candidate : "PREFLIGHT_UNAVAILABLE";
+  // A name this list has not met yet still says more than PREFLIGHT_UNAVAILABLE,
+  // which says only that something went wrong somewhere. The check is the shape,
+  // not the membership: bounded, upper snake case, so nothing from a provider
+  // body can arrive here as free text.
+  const shapedName = /^[A-Z][A-Z0-9_]{0,63}$/u.test(candidate);
+  const code = knownProviderErrors.has(candidate) || providerReadFailure || shapedName
+    ? candidate : "PREFLIGHT_UNAVAILABLE";
   if (code === "PREFLIGHT_IDENTITY_MISMATCH") {
     return { status: "IDENTITY_MISMATCH", verificationStatus: "NOT_FOUND", directMethod: method, code };
   }

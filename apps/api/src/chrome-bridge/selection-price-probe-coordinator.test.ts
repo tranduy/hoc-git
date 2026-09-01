@@ -87,6 +87,32 @@ describe("SelectionPriceProbeCoordinator", () => {
     await expect(result).resolves.toEqual({ rawOdds: "0.17", observedAtMs: 1_020, method: "DOM" });
   });
 
+  it("resolves a refusal whose name this list has not met, instead of leaving it to time out", async () => {
+    // Measured 2026-09-01: a probe that refused with SELECTION_IDENTITY_MISMATCH
+    // reached the API - the envelope was counted at HOP3 - and was dropped here
+    // because the reason was not on the allowlist. Nothing resolved, so the
+    // operator was shown TIMEOUT: the one verdict that says nothing about the
+    // ticket. The shape is what has to be checked, not the membership.
+    const coordinator = new SelectionPriceProbeCoordinator({
+      listSources: () => [{ lobby: "TSPORT", sourceId: "chrome:TSPORT:9", tabId: 9, state: "LIVE",
+        lastSequence: 1, lastAcceptedAtMs: 1_000, reason: null }],
+      controlPlane: { probeSelectionPrice: () => true },
+      idFactory: () => "price-2", timeoutMs: 1_000
+    });
+    const result = coordinator.probe({ provider: "APSPORT", providerEventId: "event-1",
+      providerMarketId: "market-1", providerSelectionId: "selection-1", eventLabel: "Alpha vs Beta",
+      participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", selection: "UNDER", line: "2.5", requestedAtMs: 1_010 });
+    const refusal: ChromeBridgeEnvelope = { ...envelope("price-2"),
+      payload: { encoding: "UTF8", body: JSON.stringify({ requestId: "price-2",
+        providerEventId: "event-1", providerMarketId: "market-1", providerSelectionId: "selection-1",
+        status: "NOT_FOUND", rawOdds: null, observedAtMs: 1_020, method: "DOM",
+        reason: "SELECTION_IDENTITY_MISMATCH" }) } };
+
+    expect(coordinator.ingest(refusal)).toBe(true);
+    await expect(result).rejects.toThrow("SELECTION_IDENTITY_MISMATCH");
+  });
+
   it("fails immediately when no matching provider tab is live", async () => {
     const coordinator = new SelectionPriceProbeCoordinator({ listSources: () => [],
       controlPlane: { probeSelectionPrice: vi.fn(() => false) }, timeoutMs: 250 });
