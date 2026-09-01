@@ -212,6 +212,51 @@ describe("ProviderFeedController", () => {
     expect(controller.snapshot()).toMatchObject({ state: "STALLED", reason: "EVIDENCE_CADENCE_EXCEEDED" });
   });
 
+  it("stops calling a book live when it has fixtures in play and nothing new to say", () => {
+    // Measured 2026-09-01: APSPORT reported LIVE with evidence 0s old and no
+    // semantic change for 208s, so recovery - the only thing that reconnects a
+    // source - never ran. A heartbeat proves a socket is connected; it does not
+    // prove a price arrived.
+    const liveFixture = { provider: "SABA" as const, category: "FOOTBALL" as const,
+      providerEventId: "e1", competition: "League", seasonStage: null, startAtUtcMs: 1_000,
+      participantA: "Alpha", participantB: "Beta", eventScope: "REGULATION" as const, bestOf: null,
+      isLive: true, rematchCandidate: false, fixtureDiscriminator: null, isVirtual: false,
+      sportVariant: "FOOTBALL" as const, liveState: null };
+    const controller = controllerFor(SABA, 1_000);
+    controller.accept({ ...wsBaseline(1_000, "worker-a:0", "reset-1"),
+      catalog: catalog({ observedAtMs: 1_000, events: [liveFixture] }) });
+    expect(controller.snapshot()).toMatchObject({ state: "LIVE" });
+
+    // Heartbeats keep arriving, so evidence never lapses - the condition that
+    // used to be the whole of liveness.
+    const silenceMs = policyFor(SABA).maxSemanticSilenceMs;
+    for (let atMs = 1_000; atMs <= 1_000 + silenceMs; atMs += 5_000) {
+      clock.set(atMs);
+      controller.accept({ kind: "TRANSPORT", accountId: SABA, sourceId: "chrome:SABA:7",
+        sourceEpoch: "worker-a:0", atMs, provenance: "WS" });
+    }
+    clock.set(1_000 + silenceMs + 1);
+
+    expect(() => controller.read()).toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(controller.snapshot()).toMatchObject({ state: "STALLED", reason: "SEMANTIC_SILENCE" });
+  });
+
+  it("does not demote a book for being quiet when it has nothing in play", () => {
+    // Nothing to change is not a fault, and demoting for it would be demoting
+    // for the hour of the day.
+    const controller = controllerFor(SABA, 1_000);
+    controller.accept(wsBaseline(1_000, "worker-a:0", "reset-1"));
+    const silenceMs = policyFor(SABA).maxSemanticSilenceMs;
+    for (let atMs = 1_000; atMs <= 1_000 + silenceMs; atMs += 5_000) {
+      clock.set(atMs);
+      controller.accept({ kind: "TRANSPORT", accountId: SABA, sourceId: "chrome:SABA:7",
+        sourceEpoch: "worker-a:0", atMs, provenance: "WS" });
+    }
+    clock.set(1_000 + silenceMs + 1);
+
+    expect(controller.snapshot()).toMatchObject({ state: "LIVE" });
+  });
+
   it("rejects a delta after its complete baseline has expired", () => {
     const controller = controllerFor(SABA, 1_000);
     const expiredAtMs = 1_000 + policyFor(SABA).maxBaselineAgeMs + 1;
