@@ -28,6 +28,27 @@ bớt một phần bẫy "counter chung" bên dưới.
 capture, gọi `ImHttpCatalogAdapter.decode` của dist → 0 output với cặp hợp lệ, rồi kiểm
 từng điều kiện của `classifySnapshot`/`isClassifiedImMarket` theo hình dạng.
 
+## SABA không bao giờ được reconnect socket — ĐÃ SỬA (2026-09-01 trưa)
+
+**Triệu chứng:** sau restart API 11:22, socket SABA tiếp tục đẩy frame nhưng không bao giờ gửi
+lại `reset` → `recovery-without-baseline` lên 1 233, 35 lần `PROVIDER_STREAM_GAP` → soft/hard
+recovery; catalog sống nhờ DOM snapshot rồi rơi hẳn (đứng 7 phút, 11:47–11:54). API đã gửi
+≥ 4 đợt `REQUEST_SNAPSHOT`, nhưng phía extension `baselineTabSelections` = 1 và
+`reconnectAttempts` = 0 suốt 20 phút → **request tới nơi mà không được thực thi**.
+
+**Nguyên nhân:** `LocalBridge.#recoveryScheduler = new ProviderWorkScheduler()` — mặc định
+**3 slot chạy đồng thời dùng chung cho cả 6 sàn**, mỗi sàn chỉ xếp hàng được 1 request, quá thì
+`PROVIDER_WORK_QUEUE_FULL` bị nuốt im. Ba recovery của sàn khác chưa kết thúc (heap query
+KSPORT/APSPORT, resync…) là SABA chết đói vô hạn.
+
+**Sửa (`local-bridge.ts`):** `maxConcurrent = RECOVERY_LANES (8)` để lane theo sàn thật sự
+độc lập; mỗi recovery bị `#boundedRecovery` chặn ở `RECOVERY_OPERATION_TIMEOUT_MS = 90s` —
+hết hạn thì **nhả lane** (thao tác bên dưới vẫn chạy nốt); reject/timeout `console.warn` thay
+vì im. Hai test mới trong `local-bridge.test.ts`.
+
+**Cách nhận ra lần sau:** `HOP3.wsAttach.reconnectAttempts` = 0 trong khi `HOP6.recoveryAttempt`
+tăng và `baselineTabSelections` không tăng — request đang nằm ở scheduler của bridge.
+
 ## Hợp đồng realtime 30s (2026-08-31) — luật mới của hệ thống
 
 **Luật do người vận hành đặt:** không sàn nào được quá **30 giây** mà không trả về

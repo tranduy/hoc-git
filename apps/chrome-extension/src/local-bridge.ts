@@ -6,6 +6,9 @@ import {
 } from "@tool-chenh/contracts";
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
 
+const RECOVERY_LANES = 8;
+const RECOVERY_OPERATION_TIMEOUT_MS = 90_000;
+
 const LOOPBACK_URL = "ws://127.0.0.1:4310/api/chrome-bridge";
 
 export interface BridgeSocket {
@@ -84,7 +87,17 @@ export class LocalBridge {
   readonly #onCmdHiddenMarketProbe: NonNullable<LocalBridgeOptions["onCmdHiddenMarketProbe"]>;
   readonly #queue: QueueEntry[] = [];
   readonly #queueSpaceWaiters = new Set<() => void>();
-  readonly #recoveryScheduler = new ProviderWorkScheduler();
+  // Recovery lanes are per source, but the scheduler's default cap of three
+  // concurrent operations was shared by every provider. Measured 2026-09-01:
+  // with three unfinished recoveries elsewhere, SABA's REQUEST_SNAPSHOT sat
+  // queued for twenty minutes (baselineTabSelections stayed at 1 while the
+  // API sent four attempts) and its socket was never reconnected. One lane
+  // per provider, and no single recovery may hold its lane for longer than
+  // the bound below - the operation keeps running, the lane is released.
+  readonly #recoveryScheduler = new ProviderWorkScheduler({
+    maxConcurrent: RECOVERY_LANES,
+    onRejected: (error) => { console.warn("[fieldline] recovery request dropped", error.sourceId); }
+  });
   readonly #sourceEpochs = new Map<string, SourceEpochAdmission>();
   readonly #releasedSources = new Set<string>();
   #socket: BridgeSocket | null = null;
@@ -437,9 +450,27 @@ export class LocalBridge {
 
   #enqueueSnapshotRecovery(request: Parameters<NonNullable<LocalBridgeOptions["onSnapshotRequest"]>>[0]): void {
     void this.#recoveryScheduler.run(request.sourceId, async () => {
-      try { await this.#onSnapshotRequest(request); }
+      try { await this.#boundedRecovery(request.sourceId, Promise.resolve(this.#onSnapshotRequest(request))); }
       catch { /* one snapshot failure must not block the next provider */ }
     }).catch(() => undefined);
+  }
+
+  async #boundedRecovery(sourceId: string, operation: Promise<void>): Promise<void> {
+    let handle: unknown = null;
+    const expiry = new Promise<void>((_resolve, reject) => {
+      handle = this.#setTimer(() => {
+        console.warn("[fieldline] recovery lane released after timeout", sourceId);
+        reject(new Error("RECOVERY_OPERATION_TIMEOUT"));
+      }, RECOVERY_OPERATION_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([operation, expiry]);
+    } finally {
+      if (handle !== null) this.#clearTimer(handle);
+      // The lane is free once the race settles; a still-pending operation must
+      // not surface as an unhandled rejection later.
+      operation.catch(() => undefined);
+    }
   }
 
   #requestSourceResync(sourceId: string, sourceEpoch: string | null): void {

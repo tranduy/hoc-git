@@ -276,6 +276,47 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([0]);
   });
 
+  it("does not starve one provider's snapshot request behind unfinished recoveries of other providers", () => {
+    // Measured 2026-09-01: the default three shared lanes left SABA's request
+    // queued for twenty minutes while its socket never reconnected.
+    const socket = new FakeSocket();
+    const onSnapshotRequest = vi.fn(() => new Promise<void>(() => undefined));
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSnapshotRequest });
+    bridge.connect();
+    socket.open();
+    for (const sourceId of ["chrome:KSPORT:1", "chrome:TSPORT:2", "chrome:IM:3", "chrome:BTI:4", "chrome:CMD:5"]) {
+      socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId }) });
+    }
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:7" }) });
+
+    expect(onSnapshotRequest).toHaveBeenCalledTimes(6);
+    expect(onSnapshotRequest).toHaveBeenLastCalledWith({ sourceId: "chrome:SABA:7", prematchWindowHours: undefined });
+  });
+
+  it("releases a recovery lane whose operation never settles so the next request for that source runs", async () => {
+    const socket = new FakeSocket();
+    const scheduled: Array<{ callback: () => void; delayMs: number }> = [];
+    const onSnapshotRequest = vi.fn(() => new Promise<void>(() => undefined));
+    const bridge = new LocalBridge({
+      socketFactory: () => socket, installationKey: "local-key", onSnapshotRequest,
+      setTimer: (callback, delayMs) => { scheduled.push({ callback, delayMs }); return scheduled.length; },
+      clearTimer: () => undefined
+    });
+    bridge.connect();
+    socket.open();
+    const request = { version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:7" };
+    socket.onmessage?.({ data: JSON.stringify(request) });
+    socket.onmessage?.({ data: JSON.stringify(request) });
+    expect(onSnapshotRequest).toHaveBeenCalledTimes(1);
+
+    const bound = scheduled.find((entry) => entry.delayMs === 90_000);
+    expect(bound).toBeDefined();
+    bound!.callback();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(onSnapshotRequest).toHaveBeenCalledTimes(2);
+  });
+
   it("forwards APSPORT's bounded prematch window with the snapshot request", () => {
     const socket = new FakeSocket();
     const onSnapshotRequest = vi.fn();
