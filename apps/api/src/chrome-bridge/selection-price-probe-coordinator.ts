@@ -24,7 +24,16 @@ const ResultSchema = z.strictObject({
     "TSPORT_MARKET_NOT_FOUND", "TSPORT_OUTCOME_NOT_FOUND", "TSPORT_LINE_NOT_FOUND", "TSPORT_PRICE_NOT_FOUND",
     "SBOBET_DIRECT_REQUEST_UNAVAILABLE", "SBOBET_DIRECT_REQUEST_INVALID", "SBOBET_DIRECT_REQUEST_FAILED",
     "SBOBET_DIRECT_INVALID_JSON", "SBOBET_SELECTION_NOT_FOUND", "SBOBET_SELECTION_AMBIGUOUS"]),
-  z.string().regex(/^(?:BTI_DETAIL|SBOBET_DIRECT|IM_DIRECT)_HTTP_\d{3}$/u)]).optional()
+  z.string().regex(/^(?:BTI_DETAIL|SBOBET_DIRECT|IM_DIRECT)_HTTP_\d{3}$/u),
+  // A name this list has not met yet is still an answer. Rejecting it failed the
+  // whole result, so the probe resolved nothing and the check reported TIMEOUT -
+  // the one verdict that says nothing about the ticket. Measured 2026-09-01: a
+  // probe that refused with SELECTION_IDENTITY_MISMATCH reached the API and was
+  // dropped here, and the operator was shown a ten-second wait instead.
+  //
+  // The shape is what has to be checked, not the membership: bounded, upper
+  // snake case, no values inside it.
+  z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/u)]).optional()
 });
 
 const providerLobbies: Readonly<Partial<Record<ProviderId, readonly string[]>>> = {
