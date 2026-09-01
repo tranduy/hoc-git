@@ -5394,6 +5394,36 @@ describe("NetworkObserver", () => {
     expect(selections).toBe(before);
   });
 
+  it("still reconnects the SABA socket when the DOM capture before it fails", async () => {
+    // Measured 2026-09-01: reconnectAttempts stayed at 0 through four API
+    // recovery rounds while the socket streamed deltas without a reset. The
+    // DOM generations are evidence priming; their failure must not swallow the
+    // one step that reseeds the lane, and must be named in the diagnostic.
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("fieldline-saba-time-baseline")) {
+        return { result: { value: { status: "today-tab-active" } } };
+      }
+      if (method === "Page.getFrameTree") throw new Error("frame-command-timeout");
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("window.WebSocket.prototype")) {
+        return { result: { objectId: "native-websocket-prototype" } };
+      }
+      if (method === "Runtime.evaluate") throw new Error("Cannot find context with specified id");
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "native-websockets" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      return {};
+    });
+    const forward = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 10_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+
+    await observer.refreshCatalog(saba);
+
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(true);
+    expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.callFunctionOn")).toBe(true);
+  });
+
   it("discovers SABA Hôm Nay inside a current child frame when no execution context event was observed", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" }, childFrames: [

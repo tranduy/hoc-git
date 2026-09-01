@@ -1157,7 +1157,13 @@ export class NetworkObserver {
     this.#loadSabaWsSnapshots = dependencies.loadSabaWsSnapshots ?? (async () => null);
     this.#saveSabaWsSnapshots = dependencies.saveSabaWsSnapshots;
     this.#clearSabaWsSnapshots = dependencies.clearSabaWsSnapshots ?? (async () => undefined);
-    this.#workScheduler = dependencies.workScheduler ?? new ProviderWorkScheduler();
+    // One lane per provider keeps DOM work serialised on its debugger session,
+    // but the default three shared slots and single queue slot let a periodic
+    // SABA DOM poll evict a recovery refresh with a silent QUEUE_FULL
+    // (measured 2026-09-01: zero reconnect attempts across four API recovery
+    // rounds). A refresh must be able to queue behind the one poll in flight.
+    this.#workScheduler = dependencies.workScheduler ??
+      new ProviderWorkScheduler({ maxConcurrent: 8, maxQueuedPerSource: 2 });
     this.#collectApsportCatalog = dependencies.collectApsportCatalog ?? collectApsportCatalog;
     this.#collectApsportEventDetail = dependencies.collectApsportEventDetail ?? collectApsportEventDetail;
     this.#onApsportPageHealth = dependencies.onApsportPageHealth;
@@ -2279,19 +2285,34 @@ export class NetworkObserver {
       // replaying the one-time launch URL. Attach first, then make this one
       // ordinary page selection so every baseline frame is observed.
       if (await this.#selectSabaTodayTab(source) === "selected") return;
-      const replayed = await this.#replayCatalogWsSnapshots(source.sourceId);
-      if (!replayed) {
-        await this.#restoreSabaWsSnapshots(source);
-        await this.#replayCatalogWsSnapshots(source.sourceId);
+      // Measured 2026-09-01: with the socket streaming deltas and never
+      // resending reset, every API recovery request reached this branch and
+      // reconnectAttempts stayed at 0 for twenty minutes. The steps before the
+      // reconnect are evidence priming only; none of them may stop the one
+      // action that actually reseeds the lane, and each failure is named in the
+      // wsAttach diagnostic so the next stall is not silent.
+      try {
+        const replayed = await this.#replayCatalogWsSnapshots(source.sourceId);
+        if (!replayed) {
+          await this.#restoreSabaWsSnapshots(source);
+          await this.#replayCatalogWsSnapshots(source.sourceId);
+        }
+      } catch (error) {
+        this.#noteWsRecoveryOutcome(source, `refresh:replay-${failureLabel(error)}`);
       }
       const nowMs = this.#now();
-      if (nowMs - (this.#sabaDomBootstrapAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) < 4_000) return;
-      this.#sabaDomBootstrapAtMs.set(source.sourceId, nowMs);
-      // Durable frames prime decoder state only. Always follow them with two
-      // bounded current-document DOM generations; neither path is allowed to
-      // establish or renew network authority. A fresh Socket.IO OPEN plus
-      // reset/done remains the only SABA LIVE proof.
-      await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true, true);
+      if (nowMs - (this.#sabaDomBootstrapAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) >= 4_000) {
+        this.#sabaDomBootstrapAtMs.set(source.sourceId, nowMs);
+        // Durable frames prime decoder state only. Always follow them with two
+        // bounded current-document DOM generations; neither path is allowed to
+        // establish or renew network authority. A fresh Socket.IO OPEN plus
+        // reset/done remains the only SABA LIVE proof.
+        try {
+          await this.#capturePublicCatalogSnapshot(source, "saba.invalid", CMD_PUBLIC_CATALOG_EXPRESSION, true, true);
+        } catch (error) {
+          this.#noteWsRecoveryOutcome(source, `refresh:dom-${failureLabel(error)}`);
+        }
+      }
       await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
       return;
     }
@@ -2990,6 +3011,13 @@ export class NetworkObserver {
         info.type === "worker" ? "worker" : "iframe").catch(() => undefined);
     }
     diagnostic.attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId)?.size ?? 0;
+  }
+
+  #noteWsRecoveryOutcome(source: ObservedSource, label: string): void {
+    const diagnostic = this.#wsAttachDiagnostic(source);
+    const entries = diagnostic.reconnectOutcomes.length === 0 ? [] : diagnostic.reconnectOutcomes.split(" ");
+    entries.push(label);
+    diagnostic.reconnectOutcomes = entries.slice(-12).join(" ");
   }
 
   #wsAttachDiagnostic(source: ObservedSource): WsAttachDiagnosticState {
@@ -5704,6 +5732,11 @@ function nestedBoolean(value: unknown, ...keys: string[]): boolean | null {
     current = current[key];
   }
   return typeof current === "boolean" ? current : null;
+}
+
+function failureLabel(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
+  return message.replace(/[^A-Za-z0-9_-]+/gu, "-").slice(0, 40) || "unknown";
 }
 
 function nestedValue(value: unknown, ...keys: string[]): unknown {
