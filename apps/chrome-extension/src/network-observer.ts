@@ -2260,9 +2260,22 @@ export class NetworkObserver {
 
   async refreshCatalog(source: ObservedSource, options: CatalogRefreshOptions = {}): Promise<void> {
     if (source.lobby === "CMD") return this.recoverCmdCatalog(source);
+    // Where a recovery request dies is otherwise invisible from the API side;
+    // these labels ride the wsAttach diagnostic so the next silent stall names
+    // its own step (measured 2026-09-01: SABA reconnectAttempts stayed 0 with
+    // no visible reason across two extension builds).
+    if (source.lobby === "SABA") this.#noteWsRecoveryOutcome(source, "refresh:enter");
     const existing = this.#catalogRefreshes.get(source.sourceId);
-    if (existing !== undefined) return existing;
-    const operation = this.#runPeriodicDomWork(source.sourceId, () => this.#refreshCatalog(source, options)).finally(() => {
+    if (existing !== undefined) {
+      if (source.lobby === "SABA") this.#noteWsRecoveryOutcome(source, "refresh:dedupe");
+      return existing;
+    }
+    const operation = this.#runPeriodicDomWork(source.sourceId, () => this.#refreshCatalog(source, options))
+      .catch((error: unknown) => {
+        if (source.lobby === "SABA") this.#noteWsRecoveryOutcome(source, `refresh:fail-${failureLabel(error)}`);
+        throw error;
+      })
+      .finally(() => {
       if (this.#catalogRefreshes.get(source.sourceId) === operation) this.#catalogRefreshes.delete(source.sourceId);
     });
     this.#catalogRefreshes.set(source.sourceId, operation);
@@ -2284,6 +2297,7 @@ export class NetworkObserver {
       // baseline (measured live: 5 -> 360 events) without navigating or
       // replaying the one-time launch URL. Attach first, then make this one
       // ordinary page selection so every baseline frame is observed.
+      this.#noteWsRecoveryOutcome(source, "refresh:run");
       if (await this.#selectSabaTodayTab(source) === "selected") return;
       // Measured 2026-09-01: with the socket streaming deltas and never
       // resending reset, every API recovery request reached this branch and
