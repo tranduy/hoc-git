@@ -5,8 +5,17 @@ function policy(expectedEvidenceCadenceMs: number, maxBaselineAgeMs: number,
   authoritativeProvenance: readonly FeedProvenance[]): ProviderFeedPolicy {
   return { expectedEvidenceCadenceMs, catalogFreshnessMs: expectedEvidenceCadenceMs,
     maxBaselineAgeMs, softRecoveryAfterMs, hardRecoveryAfterMs,
-    recoveryCooldownMs: 30_000, authoritativeProvenance: new Set(authoritativeProvenance) };
+    recoveryCooldownMs: 30_000, maxSemanticSilenceMs: SEMANTIC_SILENCE_LIMIT_MS,
+    authoritativeProvenance: new Set(authoritativeProvenance) };
 }
+
+// Twice the contract, and only ever applied to a book that has fixtures in play.
+// Measured 2026-09-01 while four books were healthy: CMD 4s, BTI 3s, IM 12s,
+// SBOBET 15s since their last semantic change. APSPORT sat at 208s and SABA at
+// 3,616s, both reporting LIVE. The gap between 15 and 208 is wide enough that
+// this bound separates a book that has gone quiet from one that is simply
+// between price moves.
+const SEMANTIC_SILENCE_LIMIT_MS = 60_000;
 
 /**
  * The operator contract, set 2026-08-31: no book may go longer than 30 seconds

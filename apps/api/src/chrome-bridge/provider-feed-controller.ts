@@ -285,11 +285,31 @@ export class ProviderFeedController {
 
   #livePrerequisitesSatisfied(nowMs: number): boolean {
     return this.#authoritativeCatalog !== null && !this.#baselineExpired(nowMs) &&
-      this.#authorityAgeMs(nowMs) <= this.#policy.expectedEvidenceCadenceMs;
+      this.#authorityAgeMs(nowMs) <= this.#policy.expectedEvidenceCadenceMs &&
+      !this.#semanticallySilent(nowMs);
   }
 
-  #liveFailureReason(nowMs: number): "BASELINE_EXPIRED" | "EVIDENCE_CADENCE_EXCEEDED" {
-    return this.#baselineExpired(nowMs) ? "BASELINE_EXPIRED" : "EVIDENCE_CADENCE_EXCEEDED";
+  /**
+   * Whether a book with fixtures in play has stopped saying anything new.
+   *
+   * Evidence age answers "is the socket connected". Nothing here answered "did
+   * a price arrive", so a heartbeat held a book LIVE while its catalog stood
+   * still - and LIVE is precisely the state recovery never runs from, which
+   * made a quiet book unable to reconnect itself.
+   *
+   * A book with nothing in play has nothing to change, and demoting it for that
+   * would be demoting it for the hour of the day.
+   */
+  #semanticallySilent(nowMs: number): boolean {
+    const catalog = this.#authoritativeCatalog;
+    if (catalog === null || !catalog.events.some((event) => event.isLive)) return false;
+    return nowMs - (this.#lastSemanticChangeAtMs ?? this.#startedAtMs) > this.#policy.maxSemanticSilenceMs;
+  }
+
+  #liveFailureReason(nowMs: number): "BASELINE_EXPIRED" | "EVIDENCE_CADENCE_EXCEEDED" | "SEMANTIC_SILENCE" {
+    if (this.#baselineExpired(nowMs)) return "BASELINE_EXPIRED";
+    return this.#authorityAgeMs(nowMs) > this.#policy.expectedEvidenceCadenceMs
+      ? "EVIDENCE_CADENCE_EXCEEDED" : "SEMANTIC_SILENCE";
   }
 
   #canRequestRecovery(nowMs: number): boolean {

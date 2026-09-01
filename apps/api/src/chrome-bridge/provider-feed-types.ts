@@ -23,6 +23,12 @@ export interface ProviderFeedPolicy {
   readonly softRecoveryAfterMs: number;
   readonly hardRecoveryAfterMs: number;
   readonly recoveryCooldownMs: number;
+  // How long a book with fixtures in play may deliver frames that say nothing.
+  // Evidence proves a socket is connected; it does not prove a price arrived,
+  // and a heartbeat satisfies every other condition here. APSPORT was measured
+  // LIVE on 2026-09-01 with evidence 0s old and no semantic change for 208s -
+  // so recovery, which is the only thing that reconnects a source, never ran.
+  readonly maxSemanticSilenceMs: number;
   readonly authoritativeProvenance: ReadonlySet<FeedProvenance>;
 }
 
