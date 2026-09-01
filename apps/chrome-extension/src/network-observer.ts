@@ -4665,7 +4665,36 @@ export class NetworkObserver {
     return evaluations.some((evaluation) => nestedBoolean(evaluation, "result", "value", "ok") === true);
   }
 
+  /**
+   * A probe that throws answers nothing, and the operator is shown TIMEOUT.
+   *
+   * TIMEOUT is the one verdict that says nothing about the ticket - not that it
+   * is gone, not that it stands - so it hides both. Every failure here becomes
+   * a named refusal instead: the expression builders throw on an identity they
+   * cannot address, and the whole path can fail on a tab that went away
+   * mid-probe. Measured 2026-09-01: SABA and SBOBET between them answered
+   * TIMEOUT on three of seventeen checks and never once said why.
+   */
   async probeSelectionPrice(source: ObservedSource, request: SelectionPriceProbeIdentity & {
+    readonly requestId: string }): Promise<void> {
+    try {
+      await this.#probeSelectionPriceOrThrow(source, request);
+    } catch (error) {
+      const name = error instanceof Error ? error.message : "PROBE_FAILED";
+      const observedAtMs = this.#now();
+      await this.#emit(source,
+        `https://${source.lobby.toLocaleLowerCase("en")}.invalid/__fieldline_selection_price_probe__`,
+        "DOM", "DOM_SNAPSHOT", { encoding: "UTF8", body: JSON.stringify({ requestId: request.requestId,
+          providerEventId: request.providerEventId, providerMarketId: request.providerMarketId,
+          providerSelectionId: request.providerSelectionId, status: "NOT_FOUND", rawOdds: null,
+          observedAtMs, method: "DOM",
+          // Shape only: the failure's own name, bounded, never its message body.
+          reason: /^[A-Z][A-Z0-9_]{0,63}$/u.test(name) ? name : "PROBE_FAILED"
+        }) }, { observedAtMs }).catch(() => undefined);
+    }
+  }
+
+  async #probeSelectionPriceOrThrow(source: ObservedSource, request: SelectionPriceProbeIdentity & {
     readonly requestId: string }): Promise<void> {
     const sbobetObservedRequest = this.#sbobetEventRequests.get(source.sourceId) ?? null;
     const expression = source.lobby === "CMD" ? buildCmdSelectionPriceExpression(request)

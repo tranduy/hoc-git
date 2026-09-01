@@ -1658,6 +1658,32 @@ describe("NetworkObserver", () => {
     expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ status: "FOUND", rawOdds: "0.17" });
   });
 
+  it("names a probe that could not run instead of leaving the check to time out", async () => {
+    // A throw here emitted nothing, so the API waited its ten seconds and told
+    // the operator TIMEOUT - the one verdict that says nothing about whether the
+    // ticket still stands. Measured 2026-09-01: SABA and SBOBET answered TIMEOUT
+    // on three of seventeen checks and never once said why.
+    const sendCommand = vi.fn(async () => ({}));
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, now: () => 1_100,
+      forward: async (envelope) => { forwarded.push(envelope); } });
+
+    await observer.probeSelectionPrice({ lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 },
+      { requestId: "price-unaddressable", providerEventId: "25310330",
+        providerMarketId: "25310330:1",
+        // Neither :home nor :away, so the expression cannot be built at all.
+        providerSelectionId: "25310330:1:sideways",
+        eventLabel: "A vs B", participantA: "A", participantB: "B",
+        marketType: "FT_AH", scope: "FULL_TIME", selection: "HOME", line: "-0.5" });
+
+    const probe = forwarded.find((envelope) =>
+      envelope.request.pathnameClass === "/__fieldline_selection_price_probe__");
+    expect(probe).toBeDefined();
+    expect(JSON.parse(probe!.payload.body)).toMatchObject({
+      requestId: "price-unaddressable", status: "NOT_FOUND", reason: "SELECTION_IDENTITY_MISMATCH"
+    });
+  });
+
   it("checks SBOBET's exact selection across every sportsbook frame", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" },
