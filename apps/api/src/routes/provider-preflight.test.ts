@@ -77,6 +77,34 @@ describe("provider preflight route", () => {
     await app.close();
   });
 
+  it("carries a refusal name the allowlist has not met through to the leg result", async () => {
+    // Measured 2026-09-01: a check that failed in three milliseconds still told
+    // the operator only PREFLIGHT_UNAVAILABLE, because the last branch here
+    // overwrote the name with a constant. Something that says nothing is not
+    // better than TIMEOUT - it is the same silence, arrived at faster.
+    const app = Fastify();
+    registerProviderPreflightRoutes(app, { preflight: async () => {
+      throw new Error("SELECTION_IDENTITY_MISMATCH");
+    } });
+
+    const realtimeRequest = { eventLabel: "Alpha vs Beta", participantA: "Alpha", participantB: "Beta",
+      marketType: "FT_TOTAL", scope: "FULL_TIME", capturedAtMs: 1_000,
+      legs: [{ provider: "SABA", accountId: "account-1", providerEventId: "event-1", providerMarketId: "market-1",
+        providerSelectionId: "selection-1", selection: "OVER", line: "2.5", rawOdds: "1.2", rawFormat: "HK",
+        decimalOdds: "2.2", quoteStatus: "OPEN", providerObservedAtMs: 900, receivedMonotonicMs: 70,
+        sequence: 17, requestedStake: "100000" },
+      { provider: "CMD", accountId: "account-2", providerEventId: "event-2", providerMarketId: "market-2",
+        providerSelectionId: "selection-2", selection: "UNDER", line: "2.5", rawOdds: "1.1", rawFormat: "HK",
+        decimalOdds: "2.1", quoteStatus: "OPEN", providerObservedAtMs: 910, receivedMonotonicMs: 71,
+        sequence: 12, requestedStake: "120000" }] };
+    const response = await app.inject({ method: "POST", url: "/api/preflight/realtime-check",
+      payload: realtimeRequest });
+    const body = JSON.parse(response.body) as { legs: Array<{ status: string; error: string | null }> };
+
+    expect(body.legs[0]).toMatchObject({ status: "ERROR", error: "SELECTION_IDENTITY_MISMATCH" });
+    await app.close();
+  });
+
   it("logs the displayed pair before reading both providers and returns adjacent comparison evidence", async () => {
     const order: string[] = [];
     const journal: unknown[] = [];
