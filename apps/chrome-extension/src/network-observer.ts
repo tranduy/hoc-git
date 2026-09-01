@@ -3608,6 +3608,11 @@ export class NetworkObserver {
         baselineLive: diagnostic.baselineLive, baselineToday: diagnostic.baselineToday,
         baselineTabSelections: diagnostic.baselineTabSelections,
         baselineTabStatus: diagnostic.baselineTabStatus,
+        // These two were tracked and accepted by the API but never sent, so
+        // every recovery looked like it had never tried to reconnect
+        // (measured 2026-09-01: 0 attempts through a five-minute SABA stall).
+        reconnectAttempts: diagnostic.reconnectAttempts,
+        reconnectOutcomes: diagnostic.reconnectOutcomes,
         baselineTabTargets: diagnostic.baselineTabTargets, baselineTabStep: diagnostic.baselineTabStep,
         baselineTabGroups: diagnostic.baselineTabGroups, baselineTabScopes: diagnostic.baselineTabScopes,
         baselineTabPeriods: diagnostic.baselineTabPeriods,
