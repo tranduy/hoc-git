@@ -87,6 +87,11 @@ interface AccountState {
   forcedUnlocks: number;
   /** Endpoints an adapter refused, so a renamed provider path is visible. */
   readonly ignoredEndpoints: Map<string, number>;
+  /** Decoded updates the data plane then refused, by reason. The data plane
+   *  has thirty-one refusal sites and until 2026-09-01 none of them was
+   *  reported anywhere; SABA sat frozen for five minutes with the adapter
+   *  decoding every DOM snapshot and nothing to say why the feed never moved. */
+  readonly ingestRejections: Map<string, number>;
   /** Outcomes an extension-driven catalog refresh reported, already allowlisted
    *  at the source. A provider that lives on those refreshes is otherwise silent
    *  about why one produced nothing. */
@@ -213,7 +218,7 @@ function createState(): AccountState {
     buckets: [], selections: new Map(), sourceId: null, sourceEpoch: null, tabId: null,
     attachedAtMs: null, lastEnvelopeAtMs: null, lastSequence: null, lastDecodedAtMs: null,
     lastEvidenceAtMs: null, lastSemanticChangeAtMs: null, forcedUnlocks: 0,
-    ignoredEndpoints: new Map(), refreshOutcomes: new Map(),
+    ignoredEndpoints: new Map(), refreshOutcomes: new Map(), ingestRejections: new Map(),
     wsAttach: null,
     recovery: { consecutiveFailures: 0, nextAttemptAtMs: null, lastFailureCode: null }
   };
@@ -270,6 +275,15 @@ export class PipelineTelemetry {
     const seen = state.ignoredEndpoints.get(pathnameClass) ?? 0;
     if (seen === 0 && state.ignoredEndpoints.size >= 8) return;
     state.ignoredEndpoints.set(pathnameClass, seen + 1);
+  }
+
+  recordIngestRejected(accountId: ChromeBridgeProviderAccountId, reason: string): void {
+    const state = this.#state(accountId);
+    // Reason shape only: the data plane's own `CODE:adapter-id` label.
+    if (!/^[A-Z_]{3,48}(?::[\w.-]{0,48})?$/u.test(reason)) return;
+    const seen = state.ingestRejections.get(reason) ?? 0;
+    if (seen === 0 && state.ingestRejections.size >= 8) return;
+    state.ingestRejections.set(reason, seen + 1);
   }
 
   recordAdapterRejected(accountId: ChromeBridgeProviderAccountId, reason: AdapterRejectReason,
@@ -409,6 +423,9 @@ export class PipelineTelemetry {
           : tsportContentRefusals).entries()]
           .map(([reason, count]) => `${reason}:${count}`).join(" "),
         lastDecodedAgeMs: age(nowMs, state.lastDecodedAtMs), forcedUnlocks: state.forcedUnlocks,
+        ingestRejections: [...state.ingestRejections.entries()]
+          .sort((left, right) => right[1] - left[1]).slice(0, 8)
+          .map(([reason, count]) => `${reason}:${count}`).join(" "),
         ignoredEndpoints: [...state.ignoredEndpoints.entries()]
           .sort((left, right) => right[1] - left[1]).slice(0, 6)
           .map(([pathnameClass, count]) => ({ pathnameClass, count })),

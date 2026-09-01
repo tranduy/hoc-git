@@ -18,6 +18,7 @@ import { createDailyMaintenanceScheduler, createSessionMaintenanceRunner,
   MaintenanceJournal, SessionRefreshControl } from "./session-maintenance.js";
 import { DurableCatalogStore } from "./catalog/durable-catalog-store.js";
 import { bindGracefulShutdown } from "./process-shutdown.js";
+import { chromeBridgeProviderAccountIdForLobby } from "./chrome-bridge/chrome-bridge-account.js";
 import { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
 import { CaptureStore } from "./chrome-bridge/capture-store.js";
 import { ChromeCatalogDataPlane } from "./chrome-bridge/chrome-catalog-data-plane.js";
@@ -494,7 +495,10 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       catalogRevisions.publish(catalog.accountId, catalog, { snapshotState, freshnessMs });
       catalogPersister.schedule(`catalog-source|${catalog.provider}|${catalog.category}`, catalog);
     }, ...(providerFeeds === null ? {} : { feedRegistry: providerFeeds }),
-    authorityCoordinator: chromeBridgeRegistry.authorityCoordinator, telemetry: pipelineTelemetry })
+    authorityCoordinator: chromeBridgeRegistry.authorityCoordinator, telemetry: pipelineTelemetry,
+    onIngestRejected: (envelope, reason) => {
+      pipelineTelemetry.recordIngestRejected(chromeBridgeProviderAccountIdForLobby(envelope.lobby), reason);
+    } })
     : null;
   if (chromeCatalogDataPlane !== null) {
     await Promise.all(["CMD", "IM", "SABA", "SBOBET", "APSPORT", "BTI"].map(async (provider) => {
