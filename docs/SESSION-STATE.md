@@ -28,6 +28,33 @@ bớt một phần bẫy "counter chung" bên dưới.
 capture, gọi `ImHttpCatalogAdapter.decode` của dist → 0 output với cặp hợp lệ, rồi kiểm
 từng điều kiện của `classifySnapshot`/`isClassifiedImMarket` theo hình dạng.
 
+## SABA đứng 3–7 phút mỗi 10–15 phút — NGUYÊN NHÂN GỐC, ĐÃ SỬA (2026-09-01 13:40)
+
+**Đường tìm (ghi lại vì ba lần trước đoán sai):**
+1. `HOP3.wsAttach.reconnectAttempts`/`reconnectOutcomes` luôn 0/"" → tưởng request recovery
+   không tới extension. **Sai:** heartbeat chưa bao giờ gửi hai trường này (đã sửa, `33d8383`).
+2. Sửa scheduler lane (`5122bc3`) và nhánh refresh SABA (`0626c30`) — đúng nhưng **không phải
+   nút thắt**: sau khi diag sống, `reconnectAttempts` tăng đều, `refresh:enter refresh:run
+   context:closed-1` → extension đóng socket mỗi lần recovery; nhà cái reconnect nhưng **không
+   gửi lại `reset`**, WS mãi `recovery-without-baseline`.
+3. Nối `onIngestRejected` của data-plane vào telemetry (`c34b98f`; 31 cửa `#reject` trước đó
+   **hoàn toàn im**) → lúc stall thấy ngay `CATALOG_COVERAGE_REJECTED:saba-ws-catalog-v1` tăng
+   đúng nhịp DOM.
+
+**Nguyên nhân:** SABA sống bằng baseline DOM (`<epoch>:dom:<seq>`, một generation mỗi 2–4s).
+`CatalogCoverageGuard` không có parser cho dạng này, parser fallback cũng thất bại (đoạn trước
+số cuối kết thúc bằng `dom`) → mỗi generation là **opaque**, set opaque có cap **256**. Sau
+~256 baseline (10–15 phút kể từ epoch/restart API) guard từ chối **mọi** baseline DOM tiếp theo
+→ catalog đứng, recovery vòng lặp vô ích, hết cap 180s → hard → không có gì để làm.
+
+**Sửa (`catalog-coverage-guard.ts`):** `comparableSabaDomGeneration` — lineage `["SABA_DOM",
+epoch]`, order `[seq, 0]`; replay seq cũ vẫn bị từ chối; epoch mới là lineage mới. Test 600
+snapshot liên tiếp.
+
+**Còn mở (thật):** socket SABA sau reconnect không resend `reset` → lane WS chết cho tới khi
+đổi tab/epoch; SABA đang chạy thuần DOM (viewport). Cần cách ép nhà cái gửi `reset` (đổi period
+tab rồi về Hôm Nay?) — chưa đo.
+
 ## SABA không bao giờ được reconnect socket — ĐÃ SỬA (2026-09-01 trưa)
 
 **Triệu chứng:** sau restart API 11:22, socket SABA tiếp tục đẩy frame nhưng không bao giờ gửi

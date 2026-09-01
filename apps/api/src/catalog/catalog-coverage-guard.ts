@@ -117,7 +117,7 @@ interface ComparableAuthoritativeGeneration {
 
 function comparableAuthoritativeGeneration(generation: string): ComparableAuthoritativeGeneration | null {
   const parsers = [comparableCmdGeneration, comparableImGeneration, comparableKsportGeneration,
-    comparableSabaGeneration, comparableTsportGeneration] as const;
+    comparableSabaGeneration, comparableSabaDomGeneration, comparableTsportGeneration] as const;
   for (const parse of parsers) {
     const comparable = parse(generation);
     if (comparable !== null) return comparable;
@@ -170,6 +170,22 @@ function comparableSabaGeneration(generation: string): ComparableAuthoritativeGe
   return { lineage: lineageKey("SABA", match[1]!), order: [streamOrdinal, sequence] };
 }
 
+// SABA's DOM fallback publishes one authoritative generation per accepted
+// snapshot, `<sourceEpoch>:dom:<sequence>`, every few seconds. The fallback
+// parser cannot read it (the segment before the sequence ends in `dom`), so
+// each one landed in the opaque set and, 256 snapshots later, every further
+// DOM baseline was refused as CATALOG_COVERAGE_REJECTED. Measured 2026-09-01:
+// SABA froze for five minutes at a time, ten to fifteen minutes after every
+// fresh epoch, while its socket never resent reset. Sequence order within one
+// source epoch is the lineage that was always intended.
+function comparableSabaDomGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  const match = /^(.+):dom:(0|[1-9]\d*)$/u.exec(generation);
+  if (match === null) return null;
+  const sequence = Number(match[2]);
+  if (!Number.isSafeInteger(sequence)) return null;
+  return { lineage: lineageKey("SABA_DOM", match[1]!), order: [sequence, 0] };
+}
+
 function comparableTsportGeneration(generation: string): ComparableAuthoritativeGeneration | null {
   if (!generation.startsWith('["TSPORT",')) return null;
   let parsed: unknown;
@@ -197,7 +213,7 @@ function comparableFallbackGeneration(generation: string): ComparableAuthoritati
 function hasReservedGenerationSyntax(generation: string): boolean {
   return generation.startsWith("cmd:") || generation.startsWith("im:") ||
     generation.startsWith("ksport-http:") || generation.includes(":ksport-http:") ||
-    generation.includes(":ksport-ws:") || generation.includes(":saba:") ||
+    generation.includes(":ksport-ws:") || generation.includes(":saba:") || generation.includes(":dom:") ||
     generation.startsWith("[") || generation.startsWith("{");
 }
 

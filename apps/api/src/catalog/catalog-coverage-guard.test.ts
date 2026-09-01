@@ -308,6 +308,32 @@ describe("CatalogCoverageGuard", () => {
   });
 });
 
+describe("SABA DOM fallback generations", () => {
+  // Measured 2026-09-01: every `<epoch>:dom:<sequence>` baseline was opaque to
+  // the guard, and after 256 of them every later DOM snapshot was refused,
+  // freezing SABA for minutes at a time while its socket never resent reset.
+  it("keeps accepting hundreds of successive DOM snapshots within one source epoch", () => {
+    const guard = new CatalogCoverageGuard();
+    const ids = Array.from({ length: 110 }, (_, index) => `saba-${index}`);
+    for (let sequence = 1; sequence <= 600; sequence += 1) {
+      expect(guard.accept("SABA", { generation: `22b762de-aaaa:1:dom:${sequence * 3}`,
+        authoritativeBaseline: true, providerEventIds: ids })).toBe(true);
+    }
+  });
+
+  it("still refuses a DOM snapshot that replays an older sequence of the same epoch", () => {
+    const guard = new CatalogCoverageGuard();
+    const ids = Array.from({ length: 110 }, (_, index) => `saba-${index}`);
+    expect(guard.accept("SABA", { generation: "22b762de-aaaa:1:dom:300", authoritativeBaseline: true,
+      providerEventIds: ids })).toBe(true);
+    expect(guard.accept("SABA", { generation: "22b762de-aaaa:1:dom:299", authoritativeBaseline: true,
+      providerEventIds: ids })).toBe(false);
+    // A new source epoch is a new lineage and starts over.
+    expect(guard.accept("SABA", { generation: "22b762de-aaaa:2:dom:5", authoritativeBaseline: true,
+      providerEventIds: ids })).toBe(true);
+  });
+});
+
 describe("an authoritative baseline must not collapse a populated catalog", () => {
   const ids = (count: number, offset = 0): string[] =>
     Array.from({ length: count }, (_, index) => `event-${index + offset}`);
