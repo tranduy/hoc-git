@@ -6,7 +6,7 @@ export interface TabBootstrapperDependencies {
   readonly reload: (tabId: number) => Promise<void>;
 }
 
-export type TabReloadAuthorization = "EXPLICIT_RESET" | "SCHEDULED_MAINTENANCE";
+export type TabReloadAuthorization = "EXPLICIT_RESET";
 
 export class TabBootstrapper {
   readonly #dependencies: TabBootstrapperDependencies;

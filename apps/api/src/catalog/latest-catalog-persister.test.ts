@@ -2,7 +2,18 @@ import { describe, expect, it, vi } from "vitest";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { LatestCatalogPersister } from "./latest-catalog-persister.js";
 
-const catalog = (observedAtMs: number) => ({ observedAtMs } as ObservedProviderCatalog);
+const catalog = (observedAtMs: number) => ({
+  observedAtMs,
+  events: [{}],
+  markets: [{}],
+  quotes: [{}]
+} as unknown as ObservedProviderCatalog);
+const emptyCatalog = (observedAtMs: number) => ({
+  observedAtMs,
+  events: [],
+  markets: [],
+  quotes: []
+} as unknown as ObservedProviderCatalog);
 
 describe("LatestCatalogPersister", () => {
   it("keeps one write in flight and coalesces a burst to the latest catalog", async () => {
@@ -19,5 +30,15 @@ describe("LatestCatalogPersister", () => {
     release?.();
     await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
     expect(save.mock.calls[1]).toEqual(["SABA", catalog(3)]);
+  });
+
+  it("does not replace a restorable catalog with an empty transient snapshot", async () => {
+    const save = vi.fn(async () => undefined);
+    const persister = new LatestCatalogPersister({ save }, { minimumWriteGapMs: 0 });
+
+    persister.schedule("APSPORT", emptyCatalog(2));
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(save).not.toHaveBeenCalled();
   });
 });

@@ -56,7 +56,8 @@ export function recognizeLobbyTab(tab: TabDescriptor): LobbyTabCandidate | null 
         /^pacific\.(?:agenate|racern)\.com$/iu.test(hostname) ? "TSPORT" : undefined);
     if (!lobby) return null;
     const title = tab.title?.trim() ?? "";
-    if (lobby === "SABA" && (isSabaErrorTitle(title) || isSabaErrorUrl(parsed))) {
+    if (lobby === "SABA" && (isSabaErrorTitle(title) || isSabaErrorUrl(parsed) ||
+      isSabaEventDetailUrl(parsed))) {
       return null;
     }
     if (lobby === "KSPORT" && (/\bvolta\b/iu.test(parsed.pathname) ||
@@ -75,7 +76,8 @@ export function recognizeExpectedLobbyTab(
   if (candidate?.lobby === expectedLobby) return candidate;
   if (expectedLobby !== "SABA" || candidate?.lobby !== "SBO" ||
     !/^c0z0o[a-z0-9]+\.(?:bpb7jrm5|bpf7t7s9)\.com$/iu.test(candidate.hostname) ||
-    isSabaErrorTitle(tab.title?.trim() ?? "") || isSabaErrorUrlValue(tab.url)) return null;
+    isSabaErrorTitle(tab.title?.trim() ?? "") || isSabaErrorUrlValue(tab.url) ||
+    isSabaEventDetailUrlValue(tab.url)) return null;
   return { ...candidate, lobby: "SABA" };
 }
 
@@ -98,8 +100,18 @@ function isSabaErrorUrl(url: URL): boolean {
     (url.searchParams.has("ErrCode") && url.searchParams.get("ErrCode")?.trim() !== "");
 }
 
+function isSabaEventDetailUrl(url: URL): boolean {
+  return Boolean(url.searchParams.get("matchid")?.trim());
+}
+
 function isSabaErrorUrlValue(value: string | undefined): boolean {
   if (!value) return false;
   try { return isSabaErrorUrl(new URL(value)); }
+  catch { return false; }
+}
+
+function isSabaEventDetailUrlValue(value: string | undefined): boolean {
+  if (!value) return false;
+  try { return isSabaEventDetailUrl(new URL(value)); }
   catch { return false; }
 }

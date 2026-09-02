@@ -73,11 +73,11 @@ export class MaintenanceJournal {
   }
 }
 
-export type MaintenanceTrigger = "MANUAL" | "SCHEDULED";
+export type MaintenanceTrigger = "MANUAL";
 
 export interface MaintenanceStatus {
   readonly running: boolean;
-  readonly scheduledHour: 3;
+  readonly scheduledHour: null;
   readonly lastStartedAtMs: number | null;
   readonly lastCompletedAtMs: number | null;
   readonly lastResult: "SUCCESS" | "FAILED" | null;
@@ -102,9 +102,7 @@ export class SessionRefreshControl {
   start(trigger: MaintenanceTrigger): MaintenanceStatus {
     if (this.#operation !== null) return this.status();
     this.#lastStartedAtMs = this.#clock.nowMs();
-    this.#journal.record("INFO", trigger === "MANUAL"
-      ? "Đang làm mới session và khởi động lại toàn bộ reader"
-      : "Bắt đầu bảo trì session và reader theo lịch 03:00");
+    this.#journal.record("INFO", "Đang làm mới session và khởi động lại toàn bộ reader");
     const operation = this.#refresh().then(() => {
       this.#lastResult = "SUCCESS";
       this.#journal.record("INFO", "Đã làm mới session và khởi động lại toàn bộ reader");
@@ -120,49 +118,13 @@ export class SessionRefreshControl {
     return this.status();
   }
 
-  async runScheduled(): Promise<void> {
-    this.start("SCHEDULED");
-    await this.#operation;
-  }
-
   status(): MaintenanceStatus {
-    return { running: this.#operation !== null, scheduledHour: 3,
+    return { running: this.#operation !== null, scheduledHour: null,
       lastStartedAtMs: this.#lastStartedAtMs, lastCompletedAtMs: this.#lastCompletedAtMs,
       lastResult: this.#lastResult, notifications: this.#journal.notifications() };
   }
 
   logs(): readonly MaintenanceLogEntry[] { return this.#journal.logs(); }
-}
-
-interface DailySchedulerOptions {
-  readonly now?: () => Date;
-  readonly setTimer?: (callback: () => void, delayMs: number) => unknown;
-  readonly clearTimer?: (timer: unknown) => void;
-  readonly hour?: number;
-}
-
-export function createDailyMaintenanceScheduler(run: () => Promise<void>, options: DailySchedulerOptions = {}) {
-  const now = options.now ?? (() => new Date());
-  const setTimer = options.setTimer ?? ((callback, delayMs) => {
-    const timer = setTimeout(callback, delayMs); timer.unref?.(); return timer;
-  });
-  const clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
-  const hour = options.hour ?? 3;
-  let timer: unknown = null;
-  const schedule = (): void => {
-    const current = now();
-    const next = new Date(current);
-    next.setHours(hour, 0, 0, 0);
-    if (next.getTime() <= current.getTime()) next.setDate(next.getDate() + 1);
-    timer = setTimer(() => {
-      timer = null;
-      void run().finally(schedule);
-    }, next.getTime() - current.getTime());
-  };
-  return {
-    start(): void { if (timer === null) schedule(); },
-    stop(): void { if (timer !== null) { clearTimer(timer); timer = null; } }
-  };
 }
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";

@@ -4,9 +4,11 @@ import type { ProfitAlert } from "../watch/profit-alert-tracker.js";
 import { ProfitToastStack } from "./profit-toast-stack.js";
 
 function alert(index: number): ProfitAlert {
-  return { id: `alert-${index}`, identity: `identity-${index}`, createdAtMs: index,
-    freshness: "FRESH", event: { event: { participantA: `Alpha ${index}`, participantB: `Beta ${index}` } },
-    ticket: { plan: { worstCaseProfit: String(index * 10_000), roi: "0.1" } } } as unknown as ProfitAlert;
+  return { id: `alert-${index}`, identity: `identity-${index}`, observedAtMs: index,
+    competition: "Premier League", matchName: `Alpha ${index} vs Beta ${index}`,
+    marketName: "Chấp toàn trận", line: "-0.5", providers: ["SABA", "BTI"],
+    legs: [{ provider: "SABA", selection: `Alpha ${index}` }, { provider: "BTI", selection: `Beta ${index}` }],
+    roi: "0.1", worstCaseProfit: String(index * 10_000), currency: "VND", freshness: "FRESH" };
 }
 
 afterEach(cleanup);

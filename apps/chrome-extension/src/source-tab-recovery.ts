@@ -1,5 +1,6 @@
 import type { ChromeLobbyId } from "@tool-chenh/contracts";
 import { recognizeExpectedLobbyTab, recognizeLobbyTab, type TabDescriptor } from "./lobby-signatures.js";
+import { providerRenewalUrl } from "./provider-page-lease.js";
 
 interface AttachedSource {
   readonly lobby: ChromeLobbyId;
@@ -41,19 +42,17 @@ export class SourceTabRecovery {
   async ensure(lobby: ChromeLobbyId, url: string): Promise<void> {
     const recognized = recognizeExpectedLobbyTab({ id: 0, url }, lobby);
     if (recognized?.lobby !== lobby) throw new Error("UNTRUSTED_LAUNCH_URL");
-    if (lobby === "KSPORT" && !hasKsportToken(url)) {
-      throw new Error("FABET_KSPORT_TOKEN_UNAVAILABLE");
-    }
     const launchUrl = lobby === "KSPORT" ? ksportFootballLaunchUrl(url) : url;
 
     const currentTabs = await this.#options.query();
     const attachedTabIds = new Set(this.#options.listAttached()
       .filter((source) => source.lobby === lobby).map((source) => source.tabId));
     const recognizedTabs = currentTabs.filter((tab) => tab.id !== undefined &&
-      recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby);
+      isRecoveryTabForLobby(tab, lobby));
     const existing = recognizedTabs.find((tab) => attachedTabIds.has(tab.id!)) ?? recognizedTabs[0];
     if (existing?.id !== undefined) {
       await this.#reuse(existing, lobby, launchUrl, false);
+      await this.#removeRecoveryDuplicates(lobby, recognizedTabs, existing.id);
       return;
     }
 
@@ -121,10 +120,28 @@ export class SourceTabRecovery {
   async restore(lobby: ChromeLobbyId): Promise<void> {
     const remembered = await this.#options.loadRemembered?.(lobby) ?? null;
     const currentTabs = await this.#options.query();
-    const existing = currentTabs.find((tab) => tab.id !== undefined &&
-      recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby);
+    const recoveryTabs = currentTabs.filter((tab) => tab.id !== undefined &&
+      isRecoveryTabForLobby(tab, lobby));
+    const attachedTabIds = new Set(this.#options.listAttached()
+      .filter((source) => source.lobby === lobby).map((source) => source.tabId));
+    const existing = recoveryTabs.find((tab) => attachedTabIds.has(tab.id!)) ?? recoveryTabs[0];
     if (lobby === "SABA" && this.#options.launchFromPortal !== undefined) {
       if (existing?.id !== undefined && existing.url !== undefined) {
+        const lobbyUrl = sabaLobbyUrlFromDetail(existing.url);
+        if (lobbyUrl !== null) {
+          // Event detail is intentionally not a catalog source, but it still
+          // belongs to this authenticated SABA tab. Return that same tab to
+          // its lobby instead of asking Fabet to open another SABA popup.
+          await this.#reuse(existing, lobby, lobbyUrl, false);
+          await this.#removeRecoveryDuplicates(lobby, recoveryTabs, existing.id);
+          return;
+        }
+        if (recognizeExpectedLobbyTab(existing, "SABA") === null) {
+          const renewalUrl = providerRenewalUrl("SABA", existing.url, Date.now());
+          await this.#reuse({ ...existing, title: undefined }, lobby, renewalUrl, false);
+          await this.#removeRecoveryDuplicates(lobby, recoveryTabs, existing.id);
+          return;
+        }
         // A SABA launch URL is a one-time session entry, but the page it opened
         // can remain authenticated for hours. A delayed baseline is not proof
         // that this structurally valid tab is dead: replacing it creates a
@@ -132,6 +149,7 @@ export class SourceTabRecovery {
         // Attach and let the normal same-tab bootstrap/recovery cadence retry;
         // portal launch is reserved for the case where no SABA tab exists.
         await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))(existing, lobby);
+        await this.#removeRecoveryDuplicates(lobby, recoveryTabs, existing.id);
         return;
       }
       const sourceMarkerUrl = remembered ?? existing?.url;
@@ -145,6 +163,7 @@ export class SourceTabRecovery {
     }
     if (existing?.id !== undefined && existing.url !== undefined) {
       await this.#reuse(existing, lobby, existing.url, true);
+      await this.#removeRecoveryDuplicates(lobby, recoveryTabs, existing.id);
       return;
     }
     if (this.#options.listAttached().some((source) => source.lobby === lobby)) return;
@@ -189,6 +208,16 @@ export class SourceTabRecovery {
     }
   }
 
+  async #removeRecoveryDuplicates(
+    lobby: ChromeLobbyId,
+    tabs: readonly TabDescriptor[],
+    keepTabId: number
+  ): Promise<void> {
+    if (lobby !== "SABA" || this.#options.remove === undefined) return;
+    await Promise.all(tabs.filter((tab) => tab.id !== undefined && tab.id !== keepTabId)
+      .map((tab) => this.#options.remove!(tab.id!).catch(() => undefined)));
+  }
+
   async #waitForLobby(tab: TabDescriptor, lobby: ChromeLobbyId): Promise<TabDescriptor> {
     if (await this.#isReady(tab, lobby)) return tab;
     if (tab.id === undefined || !this.#options.get) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
@@ -213,19 +242,41 @@ export class SourceTabRecovery {
 
 }
 
+function isRecoveryTabForLobby(tab: TabDescriptor, lobby: ChromeLobbyId): boolean {
+  if (recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby) return true;
+  if (lobby !== "SABA" || tab.url === undefined) return false;
+  if (isSabaOwnedTab(tab.url)) return true;
+  const lobbyUrl = sabaLobbyUrlFromDetail(tab.url);
+  return lobbyUrl !== null &&
+    recognizeExpectedLobbyTab({ ...tab, url: lobbyUrl }, "SABA")?.lobby === "SABA";
+}
+
+function isSabaOwnedTab(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return /^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/iu.test(hostname) &&
+      !/^c0z0o[a-z0-9]+\.(?:bpb7jrm5|bpf7t7s9)\.com$/iu.test(hostname);
+  } catch {
+    return false;
+  }
+}
+
+function sabaLobbyUrlFromDetail(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!url.searchParams.get("matchid")?.trim()) return null;
+    for (const key of ["matchid", "leaguekey", "scmt", "ssmt"]) url.searchParams.delete(key);
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 function isReadyLobbyTab(tab: TabDescriptor, lobby: ChromeLobbyId): boolean {
   if (recognizeExpectedLobbyTab(tab, lobby)?.lobby !== lobby) return false;
   if (lobby !== "KSPORT") return true;
   const title = tab.title?.trim() ?? "";
   return /sportsbook/iu.test(title) && !/volta|something went wrong/iu.test(title);
-}
-
-function hasKsportToken(value: string): boolean {
-  try {
-    return Boolean(new URL(value).searchParams.get("token")?.trim());
-  } catch {
-    return false;
-  }
 }
 
 function ksportFootballLaunchUrl(value: string): string {

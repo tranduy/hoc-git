@@ -231,14 +231,15 @@ function apsportRawEvent(eventId: number, firstPrice = "0.83") {
 }
 
 function apsportApiEnvelope(sequence: number, records: readonly unknown[],
-  phase: "ROSTER" | "DETAIL" = "ROSTER"): ChromeBridgeEnvelope {
+  phase: "ROSTER" | "DETAIL" = "ROSTER", sourceEpoch = "worker-a:0",
+  generation = "apsport:7:1"): ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7,
-    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence,
+    sourceEpoch, sequence, observedAtMs: 1_000 + sequence,
     receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
     request: { hostname: "pacific.agenate.com", pathnameClass: "/__fieldline_apsport_catalog_refresh__",
       resourceType: "Fetch", method: "POST", observerRequestId: `observer-a:request:${sequence}`,
       requestFrameKey: "http-frame:apsport-main", requestDocumentKey: "http-document:apsport-main" },
-    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, generation: "apsport:7:1",
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, generation,
       phase, complete: true, prematchWindowHours: 24, records }) } };
 }
 
@@ -299,10 +300,47 @@ describe("ChromeCatalogDataPlane", () => {
     ]));
     now = 60_500;
     expect(plane.ingest({ ...apsportWsEnvelope(3, apsportRawEvent(501, "0.66")),
-      observedAtMs: now })).toBe(false);
-    expect(publish).toHaveBeenCalledTimes(2);
+      observedAtMs: now })).toBe(true);
+    expect((await plane.read(APSPORT)).quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "501", rawOdds: "0.66", sequence: 2 })
+    ]));
+    expect(publish).toHaveBeenCalledTimes(3);
     now = 61_100;
     await expect(plane.read(APSPORT)).resolves.toMatchObject({ provider: "APSPORT" });
+  });
+
+  it("keeps only still-listed APSPORT prices while a replacement epoch rebuilds details", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500 });
+    const withHiddenMarket = apsportRawEvent(501, "0.83");
+    withHiddenMarket["50"].push({ "3": 80, "9": [{
+      "0": "501-sh-over", "2": "501-sh-under", "6": "501-sh-total", "7": "1.5",
+      "8": { "2": "0.77" }, "9": { "2": "-0.87" }
+    }], "10": "Active" });
+    expect(plane.ingest(apsportApiEnvelope(1, [
+      withHiddenMarket, apsportRawEvent(502, "0.72")
+    ]), { connectionGeneration: 1 })).toBe(true);
+    const rosterSummary = apsportRawEvent(501, "0.82");
+
+    expect(plane.ingest(apsportApiEnvelope(
+      2, [rosterSummary], "ROSTER", "worker-a:1", "apsport:7:2"
+    ), { connectionGeneration: 1 })).toBe(true);
+
+    const retained = await plane.read(APSPORT);
+    expect(retained.events.map((event) => event.providerEventId)).toEqual(["501"]);
+    expect(retained.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "501", rawOdds: "0.82" }),
+      expect.objectContaining({ providerEventId: "501", providerMarketId: "501-sh-total", rawOdds: "0.77" })
+    ]));
+    expect(retained.quotes.some((quote) => quote.providerEventId === "502")).toBe(false);
+
+    expect(plane.ingest(apsportApiEnvelope(
+      3, [apsportRawEvent(501, "0.44")], "DETAIL", "worker-a:1", "apsport:7:2"
+    ), { connectionGeneration: 1 })).toBe(true);
+    expect((await plane.read(APSPORT)).quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "501", rawOdds: "0.44" })
+    ]));
+    expect((await plane.read(APSPORT)).quotes.some((quote) =>
+      quote.providerMarketId === "501-sh-total")).toBe(false);
   });
 
   it("promotes a late-attached SABA candidate from two stable complete DOM generations", async () => {

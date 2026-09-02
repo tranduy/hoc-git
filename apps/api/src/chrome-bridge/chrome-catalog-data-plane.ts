@@ -291,6 +291,13 @@ export class ChromeCatalogDataPlane {
       return this.#reject(envelope, `CANDIDATE_DOM_FALLBACK:${route.adapter.id}`);
     }
     let catalogBasis = provenance;
+    if (envelope.lobby === "TSPORT" && update.authoritativeEventIds !== undefined) {
+      const retained = this.#catalogs.get(nextCatalog.accountId);
+      if (retained !== undefined) {
+        nextCatalog = overlayApsportRosterCatalog(retained, nextCatalog, update.authoritativeEventIds,
+          update.authoritativeRefreshedEventIds ?? []);
+      }
+    }
     if (envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT") {
       const retained = this.#catalogs.get(nextCatalog.accountId);
       if (retained !== undefined && this.#catalogBases.get(nextCatalog.accountId) === "AUTHENTICATED_HTTP") {
@@ -689,6 +696,40 @@ function overlaySabaDomCatalog(retained: ObservedProviderCatalog,
   return withScheduledPhaseResolved({ ...current,
     rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
     events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()] });
+}
+
+function overlayApsportRosterCatalog(retained: ObservedProviderCatalog,
+  current: ObservedProviderCatalog, authoritativeEventIds: readonly string[],
+  authoritativeRefreshedEventIds: readonly string[]): ObservedProviderCatalog {
+  if (retained.provider !== "APSPORT" || current.provider !== "APSPORT" ||
+    retained.accountId !== current.accountId) return current;
+  const allowed = new Set(authoritativeEventIds);
+  const refreshed = new Set(authoritativeRefreshedEventIds);
+  const events = new Map(retained.events
+    .filter((event) => allowed.has(event.providerEventId))
+    .map((event) => [event.providerEventId, event]));
+  const markets = new Map(retained.markets
+    .filter((market) => allowed.has(market.providerEventId) && !refreshed.has(market.providerEventId))
+    .map((market) => [`${market.providerEventId}|${market.providerMarketId}`, market]));
+  const quotes = new Map(retained.quotes
+    .filter((quote) => allowed.has(quote.providerEventId) && !refreshed.has(quote.providerEventId))
+    .map((quote) => [`${quote.providerEventId}|${quote.providerMarketId}|${quote.providerSelectionId}`, quote]));
+  for (const event of current.events) {
+    if (allowed.has(event.providerEventId)) events.set(event.providerEventId, event);
+  }
+  for (const market of current.markets) {
+    if (allowed.has(market.providerEventId)) {
+      markets.set(`${market.providerEventId}|${market.providerMarketId}`, market);
+    }
+  }
+  for (const quote of current.quotes) {
+    if (allowed.has(quote.providerEventId)) {
+      quotes.set(`${quote.providerEventId}|${quote.providerMarketId}|${quote.providerSelectionId}`, quote);
+    }
+  }
+  return { ...current,
+    rejectedMarketCount: Math.max(retained.rejectedMarketCount, current.rejectedMarketCount),
+    events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()] };
 }
 
 function overlayCmdDomCatalog(retained: ObservedProviderCatalog,

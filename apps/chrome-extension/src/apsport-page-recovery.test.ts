@@ -44,4 +44,19 @@ describe("ApsportPageRecoveryWatchdog", () => {
 
     expect(reload).not.toHaveBeenCalled();
   });
+
+  it("retries after five minutes when a renewal completes but the page stays empty", async () => {
+    let now = 1_000;
+    const reload = vi.fn(async (_tabId: number) => undefined);
+    const watchdog = new ApsportPageRecoveryWatchdog({ reload, now: () => now });
+
+    for (let sample = 0; sample < 3; sample += 1) await watchdog.observe(emptyPage);
+    now += 5 * 60_000 - 1;
+    await watchdog.observe(emptyPage);
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    now += 1;
+    await watchdog.observe(emptyPage);
+    expect(reload).toHaveBeenCalledTimes(2);
+  });
 });

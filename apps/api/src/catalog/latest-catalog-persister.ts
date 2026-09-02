@@ -16,6 +16,10 @@ export class LatestCatalogPersister {
   }
 
   schedule(sourceKey: string, catalog: ObservedProviderCatalog): void {
+    // Empty snapshots cannot be restored by ChromeCatalogDataPlane. Persisting one
+    // would only destroy the last usable restart baseline during a transient
+    // provider rebuild or source-epoch handover.
+    if (catalog.events.length === 0 || catalog.markets.length === 0 || catalog.quotes.length === 0) return;
     this.#pending.set(sourceKey, catalog);
     if (this.#running) return;
     this.#running = true;

@@ -203,13 +203,16 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 .maintenance-restart-icon { width: 19px; height: 19px; flex: 0 0 19px; }
 .maintenance-bell { position: relative; min-width: 42px; }
 .maintenance-bell span { position: absolute; top: -6px; right: -5px; min-width: 17px; height: 17px; border-radius: 9px; background: #ef4444; color: white; font-size: 10px; line-height: 17px; }
-.maintenance-popover { position: absolute; z-index: 40; top: calc(100% + 8px); right: 0; width: min(390px, 90vw); max-height: 420px; overflow-y: auto; padding: 12px; border: 1px solid #415267; border-radius: 8px; background: #111a23; box-shadow: 0 12px 32px #0009; }
+.maintenance-popover { position: absolute; z-index: 40; top: calc(100% + 8px); right: 0; width: min(520px, 90vw); max-height: 520px; overflow-y: auto; padding: 12px; border: 1px solid #415267; border-radius: 8px; background: #111a23; box-shadow: 0 12px 32px #0009; }
 .maintenance-popover header { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .maintenance-popover header small { color: #91a4b7; }
 .maintenance-notice { display: grid; gap: 3px; padding: 8px 0; border-top: 1px solid #283747; }
 .maintenance-notice time { color: #91a4b7; font-size: 11px; }
 .maintenance-notice--error span { color: #fb7185; }
 .maintenance-notice--warn span { color: #fbbf24; }
+.profit-history__item strong { color: var(--text); }
+.profit-history__item span { color: var(--muted); font-size: 12px; }
+.profit-history__item b { color: var(--positive); font-size: 12px; }
 .maintenance-modal-backdrop, .maintenance-fullscreen-progress { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; background: rgb(3 8 14 / 82%); backdrop-filter: blur(5px); }
 .maintenance-modal-backdrop { z-index: 200; }
 .maintenance-confirm-modal { width: min(460px, 100%); padding: 26px; border: 1px solid #4d6074; border-radius: 14px; background: #121c27; box-shadow: 0 24px 80px #000c; text-align: center; }
@@ -233,7 +236,7 @@ main { width: 100%; max-width: none; margin: 0; padding: 18px 22px; }
 @media (max-width: 520px) {
   .maintenance-restart-button { min-width: 42px; }
   .maintenance-restart-button > span { display: none; }
-  .maintenance-popover { width: min(390px, calc(100vw - 16px)); }
+  .maintenance-popover { width: min(520px, calc(100vw - 16px)); }
 }
 .catalog-workspace--selected { grid-template-columns: minmax(430px, 40fr) minmax(620px, 60fr); }
 .catalog-workspace__list, .catalog-workspace__detail { min-width: 0; }

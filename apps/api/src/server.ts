@@ -14,8 +14,7 @@ import { FileTicketReportJournal } from "./routes/ticket-report-journal.js";
 import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
 import { resolveProviderFees } from "./providers/provider-fees.js";
 import { FileBetHistory } from "./history/file-bet-history.js";
-import { createDailyMaintenanceScheduler, createSessionMaintenanceRunner,
-  MaintenanceJournal, SessionRefreshControl } from "./session-maintenance.js";
+import { createSessionMaintenanceRunner, MaintenanceJournal, SessionRefreshControl } from "./session-maintenance.js";
 import { DurableCatalogStore } from "./catalog/durable-catalog-store.js";
 import { bindGracefulShutdown } from "./process-shutdown.js";
 import { ChromeBridgeRegistry } from "./chrome-bridge/chrome-bridge-registry.js";
@@ -526,8 +525,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       chrome: chromeCatalogDataPlane
     });
   const maintenance = new SessionRefreshControl({ refresh: async () => {
-    // Only the explicit Reset button and scheduled 03:00 run enter this path.
-    // They are the sole authority to replace a complete catalog with a much
+    // Only the explicit Reset button enters this path. It is the sole authority
+    // to replace a complete catalog with a much
     // smaller provider baseline after a real day/view transition.
     return refreshCatalogSources({
       legacyRefresh: () => sessionServices.refreshAll(),
@@ -677,8 +676,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     : startExtensionReloadSweep(chromeBridgeControlPlane, readExtensionBuildIdentity());
   if (extensionReload !== null) app.addHook("onClose", async () => { extensionReload.dispose(); });
   await app.listen({ host: config.host, port: config.port });
-  const dailyMaintenance = createDailyMaintenanceScheduler(() => maintenance.runScheduled());
-  dailyMaintenance.start();
   let sessionTimer: ReturnType<typeof setInterval> | null = null;
   if (shouldRunLegacySessionMaintenance(env)) {
     const maintainSessions = createSessionMaintenanceRunner(
@@ -693,7 +690,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     app,
     runtime,
     async stop(): Promise<void> {
-      dailyMaintenance.stop();
       if (sessionTimer !== null) clearInterval(sessionTimer);
       controller.abort();
       await app.close();

@@ -298,17 +298,24 @@ describe("SourceTabRecovery", () => {
     expect(removed).toEqual([11]);
   });
 
-  it("rejects an empty K-Sports token before closing the current source", async () => {
+  it("reuses the exact K-Sports tab with a tokenless public football launch", async () => {
+    vi.setSystemTime(9_000);
     const remove = vi.fn(async () => undefined);
-    const launchFromPortal = vi.fn(async () => ({ id: 11, url: "https://zenandfe.com/?token=", title: "Sportsbook" }));
+    const launchFromPortal = vi.fn(async () => ({ id: 11, url: "https://zenandfe.com/", title: "Sportsbook" }));
+    const create = vi.fn();
+    const update = vi.fn(async (tabId: number, url: string) => ({ id: tabId, url, title: "Sportsbook" }));
     const recovery = new SourceTabRecovery({
       listAttached: () => [{ lobby: "KSPORT", tabId: 7 }],
       query: async () => [{ id: 7, url: "https://zenandfe.com/?token=old", title: "Sportsbook" }],
-      create: vi.fn(), update: vi.fn(), attach: vi.fn(), remove, launchFromPortal
+      create, update, attach: vi.fn(), remove, launchFromPortal,
+      validateReady: async () => true
     });
 
-    await expect(recovery.ensure("KSPORT", "https://zenandfe.com/?token="))
-      .rejects.toThrow("FABET_KSPORT_TOKEN_UNAVAILABLE");
+    await expect(recovery.ensure("KSPORT", "https://zenandfe.com/?agentId=4"))
+      .resolves.toBeUndefined();
+    expect(update).toHaveBeenCalledExactlyOnceWith(7,
+      "https://zenandfe.com/?agentId=4&sportId=1&lng=vi&t=9000");
+    expect(create).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
     expect(launchFromPortal).not.toHaveBeenCalled();
   });
@@ -556,6 +563,94 @@ describe("SourceTabRecovery", () => {
     expect(launchFromPortal).not.toHaveBeenCalled();
     expect(reload).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it("reuses a visible SABA detail tab instead of opening another provider tab", async () => {
+    const detail = "https://c0z0oa.bpy6vurb.com/(S(live))/NewIndex?lang=vn&matchid=132645303&leaguekey=43&scmt=tab02&ssmt=tab02";
+    const lobby = "https://c0z0oa.bpy6vurb.com/(S(live))/NewIndex?lang=vn";
+    const launchFromPortal = vi.fn(async () => ({ id: 20, url: lobby, title: "Sports" }));
+    const update = vi.fn(async (tabId: number, url: string) => ({ id: tabId, url, title: "Sports" }));
+    const create = vi.fn();
+    const attachBootstrap = vi.fn(async () => undefined);
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [],
+      query: async () => [{ id: 18, url: detail, title: "Sports" }],
+      create,
+      update,
+      attach: vi.fn(),
+      attachBootstrap,
+      launchFromPortal,
+      loadRemembered: async () => null,
+      validateReady: async () => true
+    });
+
+    await expect(recovery.restore("SABA")).resolves.toBeUndefined();
+
+    expect(update).toHaveBeenCalledExactlyOnceWith(18, lobby);
+    expect(attachBootstrap).toHaveBeenCalledExactlyOnceWith({ id: 18, url: lobby, title: "Sports" }, "SABA");
+    expect(launchFromPortal).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("keeps the attached SABA tab and removes duplicate SABA tabs during recovery", async () => {
+    const detail = "https://c0z0oa.bpy6vurb.com/(S(live))/NewIndex?lang=vn&matchid=132645303&leaguekey=43";
+    const lobby = "https://c0z0oa.bpy6vurb.com/(S(live))/NewIndex?lang=vn";
+    const remove = vi.fn(async (_tabId: number) => undefined);
+    const update = vi.fn(async (tabId: number, url: string) => ({ id: tabId, url, title: "Sports" }));
+    const launchFromPortal = vi.fn(async () => ({ id: 20, url: lobby, title: "Sports" }));
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "SABA", tabId: 18 }],
+      query: async () => [
+        { id: 19, url: lobby, title: "Sports" },
+        { id: 18, url: detail, title: "Sports" },
+        { id: 21, url: detail, title: "Sports" }
+      ],
+      create: vi.fn(),
+      update,
+      remove,
+      attach: vi.fn(),
+      attachBootstrap: vi.fn(async () => undefined),
+      launchFromPortal,
+      loadRemembered: async () => null,
+      validateReady: async () => true
+    });
+
+    await recovery.restore("SABA");
+
+    expect(update).toHaveBeenCalledExactlyOnceWith(18, lobby);
+    expect(remove.mock.calls.map(([tabId]) => tabId).sort()).toEqual([19, 21]);
+    expect(launchFromPortal).not.toHaveBeenCalled();
+  });
+
+  it("renews an existing SABA error tab through tokenless NewIndex instead of reloading the expired URL", async () => {
+    const failed = "https://c0z0ob.bpd3a3fn.com/(S(expired))/VendorGame/ErrorPage?Game=DepositLogin&ErrCode=SPA-1008";
+    const renewal = "https://c0z0ob.bpd3a3fn.com/NewIndex";
+    const recovered = "https://c0z0ob.bpd3a3fn.com/(S(live))/NewIndex?lang=vn";
+    const update = vi.fn(async () => ({ id: 18, url: recovered, title: "Sports" }));
+    const reload = vi.fn(async () => ({ id: 18, url: failed, title: "SPA-1008 - Authentication failed" }));
+    const attachBootstrap = vi.fn(async () => undefined);
+    const launchFromPortal = vi.fn(async () => ({ id: 20, url: recovered, title: "Sports" }));
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [],
+      query: async () => [{ id: 18, url: failed, title: "SPA-1008 - Authentication failed" }],
+      create: vi.fn(),
+      update,
+      reload,
+      remove: vi.fn(async () => undefined),
+      attach: vi.fn(),
+      attachBootstrap,
+      launchFromPortal,
+      loadRemembered: async () => null,
+      validateReady: async () => true
+    });
+
+    await recovery.restore("SABA");
+
+    expect(update).toHaveBeenCalledExactlyOnceWith(18, renewal);
+    expect(attachBootstrap).toHaveBeenCalledExactlyOnceWith({ id: 18, url: renewal,
+      title: undefined }, "SABA");
+    expect(reload).not.toHaveBeenCalled();
+    expect(launchFromPortal).not.toHaveBeenCalled();
   });
 
   it("keeps a structurally valid visible SABA tab when its baseline is temporarily late", async () => {

@@ -16,6 +16,7 @@ const MAX_PENDING_PRE_PROOF_RECORDS = 5_000;
 // misbehaving stream grow the map without end.
 const MAX_SOCKET_ADOPTED_EVENTS = 512;
 const AUTHORITATIVE_BASELINE_REFRESH_MS = 20_000;
+const APSPORT_CATALOG_RECEIPT_INTERVAL_MS = 10_000;
 interface RetainedRecord {
   readonly record: SbobetCatalogInputRecord;
   readonly seenAtMs: number;
@@ -36,6 +37,7 @@ interface ApsportApiState {
   readonly openStreams: Set<string>;
   readonly footballStreams: Set<string>;
   baselineEmitted: boolean;
+  lastCatalogReceiptAtMs: number;
   // True while the roster established with no fixtures at all, which is when
   // the socket's own records are allowed to populate it.
   adoptsSocketFixtures: boolean;
@@ -458,6 +460,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     evidenceMode: "BASELINE" | "DELTA",
     provenance: "WS" | "AUTHENTICATED_HTTP"
   ): DecodedCatalogUpdate {
+    state.lastCatalogReceiptAtMs = envelope.observedAtMs;
     const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => normalizeSbobetCatalog([entry.record], {
       observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
       sequence: entry.sequence, provider: "APSPORT",
@@ -478,6 +481,8 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       provenance,
       generation: state.generation,
       providerTimestampMs: null,
+      authoritativeEventIds: [...state.rosterEventIds],
+      authoritativeRefreshedEventIds: [...state.detailRecords.keys()],
       ...(evidenceMode === "BASELINE" ? { authoritativeBaseline: true as const } : {})
     };
   }
@@ -516,6 +521,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         openStreams: sameEpoch ? new Set(current!.openStreams) : new Set(),
         footballStreams: sameEpoch ? new Set(current!.footballStreams) : new Set(),
         baselineEmitted: true,
+        lastCatalogReceiptAtMs: envelope.observedAtMs,
         adoptsSocketFixtures: rosterEventIds.size === 0
       };
       this.#apiSources.set(envelope.sourceId, state);
@@ -619,8 +625,13 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     state.openStreams.add(streamId);
     state.footballStreams.add(streamId);
     const previous = state.socketRecords.get(incoming.eventId)?.record;
-    if (sameRecord(previous, incoming)) return [{ sourceId: envelope.sourceId,
-      sequence: envelope.sequence, observedAtMs: envelope.observedAtMs, transportAlive: true }];
+    if (sameRecord(previous, incoming)) {
+      if (envelope.observedAtMs - state.lastCatalogReceiptAtMs >= APSPORT_CATALOG_RECEIPT_INTERVAL_MS) {
+        return [this.#apiCatalogUpdate(envelope, state, "DELTA", "WS")];
+      }
+      return [{ sourceId: envelope.sourceId,
+        sequence: envelope.sequence, observedAtMs: envelope.observedAtMs, transportAlive: true }];
+    }
     state.socketRecords.set(incoming.eventId, retainedRecord(incoming, envelope));
     // While the socket is the roster, each update carries fixtures the empty
     // baseline never covered, and the coverage guard rightly refuses a delta

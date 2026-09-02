@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { MaintenanceApi, type MaintenanceStatus } from "../api/maintenance.js";
+import type { ProfitAlert } from "../watch/profit-alert-tracker.js";
 
 interface MaintenanceApiLike {
   status(): Promise<MaintenanceStatus>;
@@ -7,6 +8,7 @@ interface MaintenanceApiLike {
 }
 
 const defaultApi = new MaintenanceApi();
+const money = new Intl.NumberFormat("vi-VN", { maximumFractionDigits: 0 });
 
 function RestartIcon() {
   return <svg aria-hidden="true" className="maintenance-restart-icon" viewBox="0 0 24 24">
@@ -15,10 +17,12 @@ function RestartIcon() {
   </svg>;
 }
 
-export function MaintenanceControls({ api = defaultApi }: { readonly api?: MaintenanceApiLike }) {
+export function MaintenanceControls({ api = defaultApi, profitAlerts = [] }: {
+  readonly api?: MaintenanceApiLike;
+  readonly profitAlerts?: readonly ProfitAlert[];
+}) {
   const [status, setStatus] = useState<MaintenanceStatus | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [progress, setProgress] = useState(0);
   const notificationLayer = useRef<HTMLDivElement>(null);
@@ -27,8 +31,8 @@ export function MaintenanceControls({ api = defaultApi }: { readonly api?: Maint
   useEffect(() => {
     let active = true;
     const refresh = (): void => { void api.status().then((value) => {
-      if (active) { setStatus(value); setError(null); }
-    }).catch(() => { if (active) setError("Không đọc được trạng thái bảo trì"); }); };
+      if (active) setStatus(value);
+    }).catch(() => undefined); };
     refresh();
     const timer = window.setInterval(refresh, status?.running === true ? 1_000 : 10_000);
     return () => { active = false; window.clearInterval(timer); };
@@ -54,29 +58,32 @@ export function MaintenanceControls({ api = defaultApi }: { readonly api?: Maint
 
   const run = async (): Promise<void> => {
     setStarting(true);
-    try { setStatus(await api.refreshAll()); setError(null); }
-    catch { setError("Không thể bắt đầu làm mới các sảnh"); }
+    try { setStatus(await api.refreshAll()); }
+    catch { /* reset failures are not notification history */ }
     finally { setStarting(false); }
   };
 
-  const notifications = status?.notifications ?? [];
+  const notifications = profitAlerts.slice(0, 100);
   return <>
     <div className="maintenance-inline-actions" ref={notificationLayer}>
       <button aria-busy={running} aria-label="Reset sàn" className="maintenance-restart-button"
         disabled={running} onClick={() => void run()} title="Kiểm tra và khôi phục tất cả nguồn" type="button">
         <RestartIcon /><span>{running ? "Đang reset…" : "Reset sàn"}</span>
       </button>
-      <button aria-expanded={notificationsOpen} aria-label={`Thông báo hệ thống (${notifications.length})`}
+      <button aria-expanded={notificationsOpen} aria-label={`Kèo profit (${notifications.length})`}
         className="maintenance-bell" onClick={() => setNotificationsOpen((value) => !value)} type="button">
         🔔{notifications.length > 0 && <span>{notifications.length}</span>}
       </button>
-      {notificationsOpen && <aside className="maintenance-popover" aria-label="10 thông báo hệ thống gần nhất">
-        <header><strong>Thông báo hệ thống</strong><small>Tự chạy mỗi ngày lúc 03:00</small></header>
-        {notifications.length === 0 ? <p>Chưa có thông báo.</p> : notifications.map((item) =>
-          <div className={`maintenance-notice maintenance-notice--${item.level.toLowerCase()}`} key={item.id}>
-            <time>{new Date(item.atMs).toLocaleString("vi-VN")}</time><span>{item.message}</span>
-          </div>)}
-        {error !== null && <p role="alert">{error}</p>}
+      {notificationsOpen && <aside className="maintenance-popover profit-history" aria-label="100 kèo profit gần nhất">
+        <header><strong>Kèo profit trên 5%</strong><small>{notifications.length}/100 kèo</small></header>
+        {notifications.length === 0 ? <p>Chưa có kèo profit trên 5%.</p> : notifications.map((item) =>
+          <article className="maintenance-notice profit-history__item" key={item.id}>
+            <time>{new Date(item.observedAtMs).toLocaleString("vi-VN")}</time>
+            <strong>{item.matchName}</strong>
+            <span>{item.marketName}{item.line === null ? "" : ` · Line ${item.line}`}</span>
+            <span>{item.legs.map((leg) => `${leg.provider}: ${leg.selection}`).join(" ↔ ")}</span>
+            <b>ROI {(Number(item.roi) * 100).toFixed(2)}% · {money.format(Number(item.worstCaseProfit))} {item.currency}</b>
+          </article>)}
       </aside>}
     </div>
 

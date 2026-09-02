@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDailyMaintenanceScheduler, createSessionMaintenanceRunner, MaintenanceJournal,
+import { createSessionMaintenanceRunner, MaintenanceJournal,
   runSessionMaintenance, SessionRefreshControl } from "./session-maintenance.js";
 
 describe("runSessionMaintenance", () => {
@@ -43,6 +43,12 @@ describe("MaintenanceJournal", () => {
 });
 
 describe("SessionRefreshControl", () => {
+  it("reports that no automatic daily reset is scheduled", () => {
+    const control = new SessionRefreshControl({ refresh: async () => undefined });
+
+    expect(control.status().scheduledHour).toBeNull();
+  });
+
   it("keeps the concrete failed source names in the operator notification", async () => {
     const journal = new MaintenanceJournal({ nowMs: () => 1_000 });
     const control = new SessionRefreshControl({
@@ -53,24 +59,5 @@ describe("SessionRefreshControl", () => {
     await vi.waitFor(() => expect(control.status().running).toBe(false));
 
     expect(control.status().notifications[0]?.message).toContain("SABA,BTI");
-  });
-});
-
-describe("createDailyMaintenanceScheduler", () => {
-  it("runs once at the next local 03:00 and schedules the following day", async () => {
-    const scheduled: Array<{ callback: () => void; delay: number }> = [];
-    const run = vi.fn(async () => undefined);
-    const scheduler = createDailyMaintenanceScheduler(run, {
-      now: () => new Date(2026, 7, 17, 2, 30, 0),
-      setTimer: (callback, delay) => { scheduled.push({ callback, delay }); return 1; },
-      clearTimer: vi.fn()
-    });
-
-    scheduler.start();
-    expect(scheduled[0]?.delay).toBe(30 * 60 * 1_000);
-    scheduled[0]?.callback();
-    await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
-    expect(scheduled).toHaveLength(2);
-    scheduler.stop();
   });
 });

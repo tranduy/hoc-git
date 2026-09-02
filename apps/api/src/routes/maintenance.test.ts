@@ -12,7 +12,7 @@ describe("maintenance routes", () => {
 
     const started = await app.inject({ method: "POST", url: "/api/maintenance/refresh-all" });
     expect(started.statusCode).toBe(202);
-    expect(started.json()).toMatchObject({ running: true, scheduledHour: 3 });
+    expect(started.json()).toMatchObject({ running: true, scheduledHour: null });
     expect(refresh).toHaveBeenCalledOnce();
     expect((await app.inject({ method: "GET", url: "/api/maintenance" })).statusCode).toBe(200);
 

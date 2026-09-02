@@ -185,4 +185,22 @@ describe("background source launch memory", () => {
 
     expect(start.mock.calls.map(([source]) => source.tabId)).toEqual([7, 8]);
   });
+
+  it("renews an attached BTI lease in the exact tab without creating a replacement", async () => {
+    const harness = createChromeHarness("https://prod20091.fxf774.com/old?operatorToken=secret");
+    vi.stubGlobal("chrome", harness.api);
+    mockNetworkObserver();
+
+    await import("./background.js");
+    await settleWorkerStart(harness.storage);
+    harness.api.tabs.update.mockClear();
+    harness.api.tabs.create.mockClear();
+
+    await vi.advanceTimersByTimeAsync(1_340_000);
+
+    expect(harness.api.tabs.update).toHaveBeenCalledWith(7, {
+      url: "https://prod20091.fxf774.com/vi/asian-view/today/B%C3%B3ng-%C4%91%C3%A1?operatorToken=logout"
+    });
+    expect(harness.api.tabs.create).not.toHaveBeenCalled();
+  });
 });

@@ -12,6 +12,8 @@ export type DecodedCatalogUpdate = {
   readonly provenance?: FeedProvenance;
   readonly providerTimestampMs?: number | null;
   readonly completeSweepEvidence?: boolean;
+  readonly authoritativeEventIds?: readonly string[];
+  readonly authoritativeRefreshedEventIds?: readonly string[];
   readonly invalidateAccountId?: never;
   readonly reason?: never;
   readonly transportAlive?: never;
@@ -26,6 +28,8 @@ export type DecodedCatalogUpdate = {
   readonly generation?: never;
   readonly provenance?: never;
   readonly providerTimestampMs?: never;
+  readonly authoritativeEventIds?: never;
+  readonly authoritativeRefreshedEventIds?: never;
   readonly transportAlive?: never;
 } | {
   readonly sourceId: string;
@@ -38,6 +42,8 @@ export type DecodedCatalogUpdate = {
   readonly generation?: never;
   readonly provenance?: never;
   readonly providerTimestampMs?: never;
+  readonly authoritativeEventIds?: never;
+  readonly authoritativeRefreshedEventIds?: never;
   readonly invalidateAccountId?: never;
   readonly reason?: never;
 };

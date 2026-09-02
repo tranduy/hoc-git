@@ -26,7 +26,8 @@ import { eventEdgeSummary, nextRankingDeadlineMs, rankedEvent, sortRankedEvents,
   topRankedTicketItems, type RankedEvent } from "../watch/ranked-tickets.js";
 import { roiTone } from "../watch/roi-tone.js";
 import { useNotificationSound } from "../watch/use-notification-sound.js";
-import { ProfitAlertTracker, type ProfitAlert } from "../watch/profit-alert-tracker.js";
+import { loadProfitAlerts, ProfitAlertTracker, saveProfitAlerts,
+  type ProfitAlert } from "../watch/profit-alert-tracker.js";
 import { loadBaseStake, saveBaseStake } from "../watch/stake-settings.js";
 import { loadSoundVolume, saveSoundVolume } from "../watch/sound-settings.js";
 import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from "../watch/stable-scroll-anchor.js";
@@ -522,7 +523,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const [pinnedEventIdentity, setPinnedEventIdentity] = useState<PinnedEventIdentity | null>(null);
   const [highlightTicketKey, setHighlightTicketKey] = useState<string | null>(() =>
     new URLSearchParams(window.location.search).get("ticket"));
-  const [profitAlerts, setProfitAlerts] = useState<readonly ProfitAlert[]>([]);
+  const [profitHistory, setProfitHistory] = useState<readonly ProfitAlert[]>(() =>
+    loadProfitAlerts(window.localStorage));
+  const [profitSoundAlerts, setProfitSoundAlerts] = useState<readonly ProfitAlert[]>([]);
   const [nowMs, setNowMs] = useState(Date.now());
   // The clock ranking reads, which is the same clock a second later unless a
   // quote's freshness, a verified ticket or a kickoff has turned over in
@@ -540,7 +543,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const signalTracker = useRef(new LagSignalTracker());
   const movementTracker = useRef(new PriceMovementTracker());
   const preflightCoordinator = useRef(new TicketPreflightCoordinator(providerPreflightApi));
-  const profitAlertTracker = useRef(new ProfitAlertTracker());
+  const profitAlertTracker = useRef<ProfitAlertTracker | null>(null);
+  if (profitAlertTracker.current === null) profitAlertTracker.current = new ProfitAlertTracker(profitHistory);
   const notificationSound = useNotificationSound();
   const catalogsRef = useRef<readonly LiveCatalogResponse[]>([]);
   const matchListRef = useRef<HTMLDivElement>(null);
@@ -969,8 +973,14 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   });
   useEffect(() => {
     const freshAccountIds = new Set(freshCatalogs.map((catalog) => catalog.accountId));
-    const emitted = profitAlertTracker.current.update(rankedEvents, Date.now(), freshAccountIds);
-    if (emitted.length > 0) setProfitAlerts((current) => [...current, ...emitted].slice(-20));
+    const update = profitAlertTracker.current!.update(rankedEvents, Date.now(), freshAccountIds);
+    if (update.changed) {
+      setProfitHistory(update.history);
+      saveProfitAlerts(window.localStorage, update.history);
+    }
+    if (update.added.length > 0) {
+      setProfitSoundAlerts((current) => [...current, ...update.added].slice(-20));
+    }
   }, [freshCatalogs, rankedEvents]);
   useEffect(() => {
     if (requested.current.event === null || events.length === 0 || selectedKey !== null) return;
@@ -1069,7 +1079,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         {fixedCategory === undefined && <div className="category-switch" role="group" aria-label="Category"><button aria-pressed={category === "FOOTBALL"}
           onClick={() => changeCategory("FOOTBALL")} type="button">Football</button><button aria-pressed={category === "LOL"}
           onClick={() => changeCategory("LOL")} type="button">LoL</button></div>}
-        <MaintenanceControls />
+        <MaintenanceControls profitAlerts={profitHistory} />
         <label className="sound-volume"><span>{soundVolume === 0 ? "🔇" : "🔊"} Âm lượng <b>{soundVolume}%</b></span>
           <input aria-label="Âm lượng thông báo" max="100" min="0" step="5" type="range" value={soundVolume}
             onChange={(event) => {
@@ -1089,7 +1099,7 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
         </section>
       </section>
     </section>
-    <ProfitToastStack alerts={profitAlerts} enabled={soundVolume > 0} sound={notificationSound}
+    <ProfitToastStack alerts={profitSoundAlerts} enabled={soundVolume > 0} sound={notificationSound}
       volume={soundVolume / 100} />
     <section aria-label="Live comparison workspace" className={selectedDetail === null ?
       "catalog-workspace catalog-workspace--stable" :

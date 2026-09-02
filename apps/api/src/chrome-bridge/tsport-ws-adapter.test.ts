@@ -287,6 +287,26 @@ describe("TsportWsCatalogAdapter", () => {
     ]);
   });
 
+  it("renews a quiet APSPORT catalog inside the realtime contract from a decoded duplicate", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const current = event(113, "Quiet Home");
+    adapter.decode(apiEnvelope([current], 1));
+    adapter.decode(envelope(current, 2));
+    const baselineAtMs = envelope(current, 2).observedAtMs;
+
+    expect(adapter.decode({ ...envelope(current, 3), observedAtMs: baselineAtMs + 9_999 })).toEqual([
+      expect.objectContaining({ transportAlive: true, sequence: 3 })
+    ]);
+    const receipt = adapter.decode({
+      ...envelope(current, 4), observedAtMs: baselineAtMs + 10_001
+    })[0] as AuthorityUpdate;
+
+    expect(receipt).toMatchObject({ evidenceMode: "DELTA", provenance: "WS", observedAtMs: baselineAtMs + 10_001 });
+    expect(receipt.value.quotes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "113", rawOdds: "0.83", sequence: 2 })
+    ]));
+  });
+
   it("uses event-change detail as an exact event replacement and removes a closed hidden market", () => {
     const adapter = new TsportWsCatalogAdapter();
     const roster = event(108, "Realtime Home");

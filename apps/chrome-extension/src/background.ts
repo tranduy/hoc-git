@@ -23,6 +23,10 @@ import { SourceLaunchMemory } from "./source-launch-memory.js";
 import { extensionLobbyScope, lobbyIsInExtensionScope } from "./extension-lobby-scope.js";
 import { runDebuggerEventTask } from "./debugger-event-task.js";
 import { ApsportPageRecoveryWatchdog } from "./apsport-page-recovery.js";
+import { CmdPageKeepalive, SourceActivityGuard, parseCmdPageKeepaliveState,
+  reloadExactCmdTab } from "./cmd-page-keepalive.js";
+import { ProviderPageLeaseCoordinator, isRenewableLobby, parseProviderPageLeaseState,
+  renewExactProviderTab } from "./provider-page-lease.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 declare const __CHROME_EXTENSION_BUILD_IDENTITY__: string;
@@ -50,8 +54,11 @@ let bridge: LocalBridge | null = null;
 let configureInFlight: Promise<boolean> | null = null;
 let restoreInFlight: Promise<void> | null = null;
 const legacySourceLaunchUrlsKey = "sourceLaunchUrls";
+const cmdPageKeepaliveStorageKey = "cmdPageKeepaliveV1";
+const providerPageLeaseStorageKey = "providerPageLeaseV1";
 const sourceLaunchMemory = new SourceLaunchMemory();
 const bootstrappingSourceTabs = new Set<number>();
+const cmdPageActivity = new SourceActivityGuard();
 
 // Earlier versions persisted signed provider launches. Purge that opaque
 // legacy value without reading it; this worker rebuilds memory only from open
@@ -90,14 +97,13 @@ const sabaSnapshotStorage = new SabaSnapshotStorage({
   remove: async (key) => chrome.storage.local.remove(key)
 }, sabaWsSnapshotsStorageKey);
 let observer!: NetworkObserver;
+let providerPageLeaseCoordinator!: ProviderPageLeaseCoordinator;
 const apsportPageRecovery = new ApsportPageRecoveryWatchdog({
   reload: async (tabId) => {
     const attached = registry.list().find((source) => source.lobby === "TSPORT" && source.tabId === tabId);
     if (attached === undefined) return;
-    const sourceId = `chrome:TSPORT:${tabId}`;
-    observer.beginSourceEpoch(sourceId);
-    observer.resetApsportRefreshCooldown(sourceId);
-    await chrome.tabs.reload(tabId, { bypassCache: true });
+    await providerPageLeaseCoordinator.renewNow({ lobby: "TSPORT",
+      sourceId: `chrome:TSPORT:${tabId}`, tabId });
   }
 });
 observer = new NetworkObserver({
@@ -301,11 +307,66 @@ const sourceTabRecovery = new SourceTabRecovery({
     : null
 });
 
+providerPageLeaseCoordinator = new ProviderPageLeaseCoordinator({
+  listAttached: () => registry.list().flatMap((entry) => isRenewableLobby(entry.lobby)
+    ? [{ lobby: entry.lobby, sourceId: `chrome:${entry.lobby}:${entry.tabId}`, tabId: entry.tabId }]
+    : []),
+  isLoading: async (tabId) => (await chrome.tabs.get(tabId)).status === "loading",
+  loadState: async () => {
+    const stored = await chrome.storage.local.get(providerPageLeaseStorageKey);
+    return parseProviderPageLeaseState(stored[providerPageLeaseStorageKey]);
+  },
+  saveState: async (state) => {
+    await chrome.storage.local.set({ [providerPageLeaseStorageKey]: state });
+  },
+  renew: (source) => renewExactProviderTab(source, {
+    isAttached: (candidate) => registry.list().some((entry) => entry.lobby === candidate.lobby &&
+      entry.tabId === candidate.tabId && candidate.sourceId === `chrome:${entry.lobby}:${entry.tabId}`),
+    get: async (tabId) => chrome.tabs.get(tabId),
+    attachBootstrap: (tab, lobby) => attachRecoveredTabAsExpected(tab, lobby),
+    beginSourceEpoch: (sourceId) => {
+      observer.beginSourceEpoch(sourceId);
+      if (sourceId.startsWith("chrome:TSPORT:")) observer.resetApsportRefreshCooldown(sourceId);
+    },
+    update: async (tabId, url) => {
+      const tab = await chrome.tabs.update(tabId, { url });
+      if (!tab) throw new Error("PROVIDER_PAGE_RENEWAL_FAILED");
+      return tab;
+    }
+  })
+});
+
+const cmdPageKeepalive = new CmdPageKeepalive({
+  listAttached: () => registry.list().flatMap((entry) => entry.lobby === "CMD"
+    ? [{ lobby: "CMD" as const, sourceId: `chrome:CMD:${entry.tabId}`, tabId: entry.tabId }]
+    : []),
+  isBusy: (sourceId) => cmdPageActivity.isBusy(sourceId),
+  tryRunExclusive: (sourceId, operation) => cmdPageActivity.tryRunExclusive(sourceId, operation),
+  runExclusive: (sourceId, operation) => cmdPageActivity.runExclusive(sourceId, operation),
+  isLoading: async (tabId) => (await chrome.tabs.get(tabId)).status === "loading",
+  loadState: async () => {
+    const stored = await chrome.storage.local.get(cmdPageKeepaliveStorageKey);
+    return parseCmdPageKeepaliveState(stored[cmdPageKeepaliveStorageKey]);
+  },
+  saveState: async (state) => {
+    await chrome.storage.local.set({ [cmdPageKeepaliveStorageKey]: state });
+  },
+  reload: (source) => reloadExactCmdTab(source, {
+    isAttached: (candidate) => registry.list().some((entry) => entry.lobby === "CMD" &&
+      entry.tabId === candidate.tabId && candidate.sourceId === `chrome:CMD:${entry.tabId}`),
+    get: async (tabId) => chrome.tabs.get(tabId),
+    isExpected: (tab) => recognizeExpectedLobbyTab(tab, "CMD")?.lobby === "CMD",
+    attachBootstrap: (tab) => attachRecoveredTabAsExpected(tab, "CMD"),
+    reload: async (tabId) => { await chrome.tabs.reload(tabId); }
+  })
+});
+
 setInterval(() => {
   // Chrome can throttle a short standalone MV3 interval. Reuse this proven
   // heartbeat wake-up so catalog refresh/capture cannot silently stop while
   // tab heartbeats continue to look healthy.
   snapshotPoller.pollNow();
+  void cmdPageKeepalive.tick().catch(() => undefined).then(() => providerPageLeaseCoordinator.tick());
   for (const attached of registry.list()) {
     void sourceTabKeepAlive.pulse(attached.tabId).catch(() => undefined);
     void observer.heartbeat({
@@ -397,7 +458,16 @@ async function configureBridgeOnce(): Promise<boolean> {
       onExtensionReload: () => { chrome.runtime.reload(); },
       onSourceReload: async (sourceId) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
-        if (attached) await chrome.tabs.reload(attached.tabId);
+        if (attached) {
+          if (attached.lobby === "CMD") {
+            await cmdPageKeepalive.reloadNow({ lobby: "CMD", sourceId, tabId: attached.tabId });
+          } else if (isRenewableLobby(attached.lobby)) {
+            await providerPageLeaseCoordinator.renewNow({ lobby: attached.lobby, sourceId,
+              tabId: attached.tabId });
+          } else {
+            await chrome.tabs.reload(attached.tabId);
+          }
+        }
       },
       onSourceNavigate: async (sourceId, url) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === sourceId);
@@ -414,32 +484,47 @@ async function configureBridgeOnce(): Promise<boolean> {
       },
       onSourceRestore: async (lobby) => {
         if (!lobbyIsAllowed(lobby)) return;
+        if (lobby === "CMD") {
+          const attached = registry.list().find((entry) => entry.lobby === "CMD");
+          if (attached !== undefined) {
+            await cmdPageKeepalive.reloadNow({
+              lobby: "CMD", sourceId: `chrome:CMD:${attached.tabId}`, tabId: attached.tabId
+            });
+            return;
+          }
+        }
         await sourceTabRecovery.restore(lobby);
+        if (lobby === "CMD") await cmdPageKeepalive.markCompleted();
       },
       onFocusSelection: async (request) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === request.sourceId);
         if (!attached) throw new Error("SOURCE_NOT_ATTACHED");
-        const tab = await chrome.tabs.get(attached.tabId);
-        if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
-        await chrome.tabs.update(attached.tabId, { active: true });
-        const focused = await observer.focusSelection({ lobby: attached.lobby, sourceId: request.sourceId,
-          tabId: attached.tabId }, request);
-        // Every action always opens the correct attached provider tab. CMD and
-        // providers exposing an exact DOM identity also scroll/highlight the
-        // selection; an opaque network-only ID remains read-only and unclicked.
-        if (!focused && attached.lobby === "CMD") throw new Error("EXACT_SELECTION_NOT_FOUND");
+        const operation = async (): Promise<void> => {
+          const tab = await chrome.tabs.get(attached.tabId);
+          if (tab.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true });
+          await chrome.tabs.update(attached.tabId, { active: true });
+          const focused = await observer.focusSelection({ lobby: attached.lobby, sourceId: request.sourceId,
+            tabId: attached.tabId }, request);
+          // Every action always opens the correct attached provider tab. CMD and
+          // providers exposing an exact DOM identity also scroll/highlight the
+          // selection; an opaque network-only ID remains read-only and unclicked.
+          if (!focused && attached.lobby === "CMD") throw new Error("EXACT_SELECTION_NOT_FOUND");
+        };
+        await (attached.lobby === "CMD" ? cmdPageActivity.run(request.sourceId, operation) : operation());
       },
       onSelectionPriceProbe: async (request) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === request.sourceId);
         if (!attached) throw new Error("SOURCE_NOT_ATTACHED");
-        await observer.probeSelectionPrice({ lobby: attached.lobby, sourceId: request.sourceId,
+        const operation = () => observer.probeSelectionPrice({ lobby: attached.lobby, sourceId: request.sourceId,
           tabId: attached.tabId }, request);
+        await (attached.lobby === "CMD" ? cmdPageActivity.run(request.sourceId, operation) : operation());
       },
       onCmdHiddenMarketProbe: async (request) => {
         const attached = registry.list().find((entry) => `chrome:${entry.lobby}:${entry.tabId}` === request.sourceId);
         if (!attached || attached.lobby !== "CMD") throw new Error("SOURCE_NOT_ATTACHED");
-        await observer.probeCmdHiddenMarkets({ lobby: "CMD", sourceId: request.sourceId,
-          tabId: attached.tabId }, { requestId: request.requestId, providerEventId: request.providerEventId });
+        await cmdPageActivity.run(request.sourceId, () => observer.probeCmdHiddenMarkets({
+          lobby: "CMD", sourceId: request.sourceId, tabId: attached.tabId
+        }, { requestId: request.requestId, providerEventId: request.providerEventId }));
       }
     })
     : null;
@@ -510,7 +595,10 @@ const bridgeWakeup = new BridgeWakeup({
     await configureBridge(true);
   },
   ensureAttached: reattachPreferredTabs,
-  pollNow: (sourceIds) => snapshotPoller.pollNow(sourceIds)
+  pollNow: (sourceIds) => {
+    snapshotPoller.pollNow(sourceIds);
+    void cmdPageKeepalive.tick();
+  }
 });
 bridgeWakeup.start();
 

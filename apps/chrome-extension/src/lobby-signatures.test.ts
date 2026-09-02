@@ -48,6 +48,15 @@ describe("lobby tab recognition", () => {
       title: "" })).toBeNull();
   });
 
+  it("does not recognize a SABA event-detail page as the catalog source", () => {
+    const detail = { id: 16,
+      url: "https://c0z0oa.bpy6vurb.com/(S(session))/NewIndex?lang=vn&matchid=132645303&leaguekey=43&scmt=tab02&ssmt=tab02",
+      title: "Sports" };
+
+    expect(recognizeLobbyTab(detail)).toBeNull();
+    expect(recognizeExpectedLobbyTab(detail, "SABA")).toBeNull();
+  });
+
   it("preserves only an already-baselined KSPORT observer across an outer-shell transition", () => {
     expect(shouldPreserveKsportObserver("KSPORT", true)).toBe(true);
     expect(shouldPreserveKsportObserver("KSPORT", false)).toBe(false);
