@@ -221,7 +221,14 @@ export class SourceTabRecovery {
         // recovery fails, enter the public tokenless URL so SABA mints a new
         // session on this same tab.
         this.#options.beginSourceEpoch?.(`chrome:${lobby}:${tab.id}`);
-        navigated = await this.#options.update(tab.id, deadSessionFallbackUrl);
+        // beginSourceEpoch retires every frame/session binding from the dead
+        // document. Re-arm CDP before navigation so the replacement document's
+        // first socket and roster requests cannot race past the observer.
+        await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))(
+          { ...tab, url: deadSessionFallbackUrl }, lobby);
+        navigated = sameUrl(tab.url, deadSessionFallbackUrl) && this.#options.reload !== undefined
+          ? await this.#options.reload(tab.id, lobby)
+          : await this.#options.update(tab.id, deadSessionFallbackUrl);
       } else {
         navigated = reload && this.#options.reload !== undefined
           ? await this.#options.reload(tab.id, lobby)
@@ -308,6 +315,12 @@ function sabaExistingSessionRecovery(value: string): { readonly url: string; rea
   } catch {
     return null;
   }
+}
+
+function sameUrl(left: string | undefined, right: string): boolean {
+  if (left === undefined) return false;
+  try { return new URL(left).href === new URL(right).href; }
+  catch { return false; }
 }
 
 function isReadyLobbyTab(tab: TabDescriptor, lobby: ChromeLobbyId): boolean {

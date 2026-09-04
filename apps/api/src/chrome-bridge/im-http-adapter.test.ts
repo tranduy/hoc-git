@@ -425,6 +425,7 @@ describe("ImHttpCatalogAdapter", () => {
       "IM_MARKET_1", "im:8:2"))).toEqual([]);
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [malformed] }, 2, undefined,
       "IM_MARKET_2", "im:8:2"))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("snapshot-classification-invalid");
     expect(adapter.decode(envelope({ StatusCode: 100, sel: [] }, 3, undefined,
       "IM_MARKET_2", "im:8:2"))).toEqual([]);
 

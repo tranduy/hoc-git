@@ -64,7 +64,7 @@ describe("createChromeCatalogOverlay", () => {
       snapshotFreshnessMaxAgeMsFor?: (accountId: string) => number;
     }).snapshotFreshnessMaxAgeMsFor;
 
-    expect(freshnessFor?.("catalog-source:SABA:FOOTBALL")).toBe(30_000);
+    expect(freshnessFor?.("catalog-source:SABA:FOOTBALL")).toBe(150_000);
     expect(freshnessFor?.("catalog-source:BTI:FOOTBALL")).toBe(30_000);
   });
 });

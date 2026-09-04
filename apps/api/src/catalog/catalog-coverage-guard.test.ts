@@ -387,4 +387,19 @@ describe("an authoritative baseline must not collapse a populated catalog", () =
     expect(guard.allows("saba", { generation: "gen-2", authoritativeBaseline: true,
       providerEventIds: ids(100, 500) })).toBe(true);
   });
+
+  it("holds APSPORT when an intermittent roster loses more than ten percent of its events", () => {
+    const guard = new CatalogCoverageGuard();
+    guard.commit("catalog-source:APSPORT:FOOTBALL", { generation: '["TSPORT","worker-a:0","api","1",1]',
+      authoritativeBaseline: true, providerEventIds: ids(638) });
+
+    expect(guard.allows("catalog-source:APSPORT:FOOTBALL", {
+      generation: '["TSPORT","worker-a:0","api","2",2]', authoritativeBaseline: true,
+      providerEventIds: ids(558)
+    })).toBe(false);
+    expect(guard.allows("catalog-source:APSPORT:FOOTBALL", {
+      generation: '["TSPORT","worker-a:0","api","3",3]', authoritativeBaseline: true,
+      providerEventIds: ids(580)
+    })).toBe(true);
+  });
 });

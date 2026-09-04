@@ -763,17 +763,24 @@ describe("SourceTabRecovery", () => {
 
   it("abandons a dead SABA session path and mints a new direct session when no baseline returns", async () => {
     const deadSession = "https://c0z0oa.bpd3a3fn.com/(S(dead))/NewIndex?lang=vn";
+    const operations: string[] = [];
     let current = { id: 18, url: deadSession, title: "Sports" };
     const update = vi.fn(async (tabId: number, url: string) => {
+      operations.push(`update:${url}`);
       current = { id: tabId, url, title: "Sports" };
       return current;
     });
     const reload = vi.fn(async () => current);
-    const beginSourceEpoch = vi.fn();
+    const beginSourceEpoch = vi.fn((sourceId: string) => { operations.push(`epoch:${sourceId}`); });
+    const attachBootstrap = vi.fn(async (tab: {
+      readonly id?: number | undefined; readonly url?: string | undefined
+    }) => {
+      operations.push(`attach:${tab.url}`);
+    });
     const recovery = new SourceTabRecovery({
       listAttached: () => [{ lobby: "SABA", tabId: 18 }],
       query: async () => [current], create: vi.fn(), update, reload, attach: vi.fn(),
-      attachBootstrap: vi.fn(async () => undefined), loadRemembered: async () => deadSession,
+      attachBootstrap, loadRemembered: async () => deadSession,
       get: async () => current,
       validateReady: async (tab) => tab.url === SABA_DIRECT_LOBBY_URL,
       delay: async () => undefined, beginSourceEpoch
@@ -784,6 +791,50 @@ describe("SourceTabRecovery", () => {
     expect(reload).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledExactlyOnceWith(18, SABA_DIRECT_LOBBY_URL);
     expect(beginSourceEpoch).toHaveBeenCalledTimes(2);
+    expect(operations).toEqual([
+      "epoch:chrome:SABA:18",
+      `attach:${deadSession}`,
+      "epoch:chrome:SABA:18",
+      `attach:${SABA_DIRECT_LOBBY_URL}`,
+      `update:${SABA_DIRECT_LOBBY_URL}`
+    ]);
+  });
+
+  it("reloads an already-direct SABA URL after rearming instead of issuing a no-op navigation", async () => {
+    const operations: string[] = [];
+    let ready = false;
+    const current = { id: 18, url: SABA_DIRECT_LOBBY_URL, title: "Sports" };
+    const update = vi.fn(async (tabId: number, url: string) => {
+      operations.push(`update:${url}`);
+      return { id: tabId, url, title: "Sports" };
+    });
+    const reload = vi.fn(async (tabId: number) => {
+      operations.push(`reload:${tabId}`);
+      ready = true;
+      return current;
+    });
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "SABA", tabId: 18 }],
+      query: async () => [current], create: vi.fn(), update, reload, attach: vi.fn(),
+      attachBootstrap: async (tab) => { operations.push(`attach:${tab.url}`); },
+      loadRemembered: async () => SABA_DIRECT_LOBBY_URL,
+      get: async () => current,
+      validateReady: async () => ready,
+      delay: async () => undefined,
+      beginSourceEpoch: (sourceId) => { operations.push(`epoch:${sourceId}`); }
+    });
+
+    await expect(recovery.restore("SABA")).resolves.toBeUndefined();
+
+    expect(update).not.toHaveBeenCalled();
+    expect(reload).toHaveBeenCalledExactlyOnceWith(18, "SABA");
+    expect(operations).toEqual([
+      "epoch:chrome:SABA:18",
+      `attach:${SABA_DIRECT_LOBBY_URL}`,
+      "epoch:chrome:SABA:18",
+      `attach:${SABA_DIRECT_LOBBY_URL}`,
+      "reload:18"
+    ]);
   });
 
   it("allows a recovered SABA page sixty seconds to publish its complete baseline", async () => {

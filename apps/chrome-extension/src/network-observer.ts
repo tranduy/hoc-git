@@ -42,6 +42,11 @@ const KSPORT_ORPHAN_FRAME_RETRY_MS = 30_000;
 // worker. One exact-tab renewal recreates every sport socket under CDP; pace a
 // failed renewal so high-frequency orphan frames cannot cause reload churn.
 const APSPORT_ORPHAN_FRAME_RETRY_MS = 30_000;
+// A provider-owned socket from the retiring APSPORT document can emit a few
+// final frames while the replacement page is already building its authenticated
+// roster. Treating that overlap as a fresh failure immediately navigates the tab
+// again and prevents the roster request from ever completing.
+const APSPORT_NAVIGATION_SETTLE_GRACE_MS = 60_000;
 // Socket.IO keeps emitting orphan frames after an MV3 worker restart. Repeated
 // reconnects visibly cycle the legacy SBO sportsbook, so a failed recovery is
 // retried at most once per minute for the current source epoch.
@@ -65,6 +70,10 @@ const KSPORT_QUIET_WINDOW_MS = 180_000;
 const KSPORT_HEARTBEAT_FORWARD_INTERVAL_MS = 5_000;
 const KSPORT_TRANSPORT_HEARTBEAT_MAX_CHARS = 256;
 const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
+// The API revokes realtime authority after 30 seconds without catalog evidence.
+// Start the lightweight DOM renewal and socket recovery with enough margin for
+// CDP evaluation and bridge delivery instead of waiting until the book is stale.
+const SABA_SOCKET_SILENCE_RECOVERY_MS = 20_000;
 const APSPORT_PAGE_REQUEST_TIMEOUT_MS = 30_000;
 const APSPORT_DETAIL_DELAY_MS = 500;
 const APSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
@@ -401,6 +410,8 @@ export interface DirectHttpRequestMetadata {
     readonly targetId: string;
     readonly sessionId: string;
   };
+  /** The caller just completed the fetch in the still-bound page context. */
+  readonly currentDocumentConfirmed?: true;
 }
 
 interface ActiveCmdHiddenProbe {
@@ -849,8 +860,24 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
     const token = new URLSearchParams(location.search).get('to' + 'ken') ||
       sessionStorage.getItem('to' + 'ken');
     if (!token) return { status: 'token-unavailable', responses: [] };
-    const responses = [];
-    for (const Market of [1, 2]) {
+    const compactBody = (body) => {
+      let parsed;
+      try { parsed = JSON.parse(body); } catch { return body; }
+      if (!parsed || parsed.StatusCode !== 100 || !Array.isArray(parsed.sel)) return body;
+      const selections = (items) => Array.isArray(items) ? items.map((item) => ({
+        wsi: item?.wsi, si: item?.si, hdp: item?.hdp, dih: item?.dih, o: item?.o
+      })) : items;
+      const markets = (items) => Array.isArray(items) ? items
+        .filter((item) => item && (Number(item.bti) === 1 || Number(item.bti) === 2) &&
+          (Number(item.gp) === 1 || Number(item.gp) === 2 || Number(item.gp) === 3))
+        .map((item) => ({ mi: item.mi, bti: item.bti, gp: item.gp, ws: selections(item.ws) })) : items;
+      return JSON.stringify({ StatusCode: parsed.StatusCode, sel: parsed.sel.map((item) => ({
+        eid: item?.eid, edt: item?.edt, htn: item?.htn, atn: item?.atn, cn: item?.cn,
+        isrbt: item?.isrbt, iscyb: item?.iscyb, hs: item?.hs, as: item?.as, rbt: item?.rbt,
+        mls: markets(item?.mls)
+      })) });
+    };
+    const responses = await Promise.all([1, 2].map(async (Market) => {
       const signature = String(await sign(path));
       const response = await fetch(path, {
         method: 'POST', credentials: 'omit', cache: 'no-store', signal: controller.signal,
@@ -862,8 +889,8 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
         },
         body: JSON.stringify({ ...common, Market })
       });
-      responses.push({ market: Market, body: await response.text() });
-    }
+      return { market: Market, body: compactBody(await response.text()) };
+    }));
     return { status: 'catalog-requested', responses };
     } catch (error) {
       if (controller.signal.aborted) return { status: 'request-timeout', responses: [] };
@@ -1491,7 +1518,9 @@ export class NetworkObserver {
   readonly #sabaDomBootstrapAtMs = new Map<string, number>();
   readonly #sabaTodayBootstrapSelected = new Set<string>();
   readonly #sabaCatalogFrameAtMs = new Map<string, number>();
+  readonly #sabaBaselineMissingSinceMs = new Map<string, number>();
   readonly #sabaSilentSocketRecoveryAtMs = new Map<string, number>();
+  readonly #sabaSilentSocketRecoveries = new Map<string, Promise<void>>();
   // The attach diagnostic is rebuilt whenever a source generation rolls, which
   // erased what the tab selector had just seen before it could be read. The
   // labels are the whole point of the report, so keep the last ones per source.
@@ -1590,6 +1619,8 @@ export class NetworkObserver {
   readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sboOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #apsportOrphanFrameRecoveryAtMs = new Map<string, number>();
+  readonly #apsportNavigationStartedAtMs = new Map<string, number>();
+  readonly #apsportRosterOnlyRefreshes = new Map<string, Promise<void>>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
     readonly headers: Readonly<Record<string, string>>; readonly method: "GET" | "POST";
     readonly hasPostData: boolean }>();
@@ -2093,10 +2124,19 @@ export class NetworkObserver {
   async resetSabaSocketWorker(source: ObservedSource): Promise<number> {
     if (source.lobby !== "SABA") return 0;
     await this.#discoverExistingSabaChildTargets(source).catch(() => undefined);
+    const discovered = await this.#withFrameCommandTimeout(
+      this.#sendCommand(source.tabId, "Target.getTargets")
+    ).catch(() => ({}));
+    const workerTargets = isRecord(discovered) && Array.isArray(discovered.targetInfos)
+      ? discovered.targetInfos.filter((info) => isRecord(info) && typeof info.targetId === "string" &&
+          typeof info.type === "string" && typeof info.url === "string" &&
+          (info.type === "worker" || info.type === "shared_worker") &&
+          isSabaChildTargetUrl(info.url, info.type))
+      : [];
     const targets = this.#sabaAttachedTargetSessions.get(source.sourceId);
-    if (targets === undefined) return 0;
     let terminated = 0;
-    for (const [targetId, target] of [...targets]) {
+    const closedTargetIds = new Set<string>();
+    for (const [targetId, target] of [...(targets ?? new Map())]) {
       if (target.targetType !== "worker") continue;
       try {
         await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
@@ -2109,10 +2149,25 @@ export class NetworkObserver {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Target.closeTarget", {
         targetId
       })).catch(() => undefined);
-      targets.delete(targetId);
+      closedTargetIds.add(targetId);
+      targets?.delete(targetId);
       this.#observedChildSessions.get(source.sourceId)?.delete(target.sessionId);
     }
-    if (targets.size === 0) this.#sabaAttachedTargetSessions.delete(source.sourceId);
+    // Shared/dedicated workers can survive a page reload while their prior CDP
+    // child session cannot be reattached. Target.closeTarget still addresses
+    // that exact provider-owned worker safely and is the only way to force its
+    // long-lived Socket.IO connection to be recreated under current observation.
+    for (const info of workerTargets) {
+      const targetId = String(info.targetId);
+      if (closedTargetIds.has(targetId)) continue;
+      const closed = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+        "Target.closeTarget", { targetId })).then(() => true, () => false);
+      if (closed) {
+        closedTargetIds.add(targetId);
+        terminated += 1;
+      }
+    }
+    if (targets === undefined || targets.size === 0) this.#sabaAttachedTargetSessions.delete(source.sourceId);
     return terminated;
   }
 
@@ -2173,7 +2228,9 @@ export class NetworkObserver {
     this.#sabaDomBootstrapAtMs.delete(sourceId);
     this.#sabaTodayBootstrapSelected.delete(sourceId);
     this.#sabaCatalogFrameAtMs.delete(sourceId);
+    this.#sabaBaselineMissingSinceMs.delete(sourceId);
     this.#sabaSilentSocketRecoveryAtMs.delete(sourceId);
+    this.#sabaSilentSocketRecoveries.delete(sourceId);
     this.#sabaDomObserversCleaned.delete(sourceId);
     for (const key of this.#sabaReadySnapshotPartitions) {
       if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
@@ -2206,6 +2263,7 @@ export class NetworkObserver {
     this.#cmdCapturesInFlight.delete(sourceId);
     this.#imLastRecoveryAtMs.delete(sourceId);
     this.#catalogRefreshes.delete(sourceId);
+    this.#apsportRosterOnlyRefreshes.delete(sourceId);
     this.#sabaDomPolls.delete(sourceId);
     this.#ksportMaintenances.delete(sourceId);
     this.#ksportBaselineChecks.delete(sourceId);
@@ -2244,6 +2302,22 @@ export class NetworkObserver {
     }
     void this.#scheduleSabaWsSnapshotClear(sourceId);
     return `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(sourceId, generation)}`;
+  }
+
+  prepareSourceNavigation(sourceId: string): string {
+    const sourceEpoch = this.beginSourceEpoch(sourceId);
+    if (sourceId.startsWith("chrome:TSPORT:")) {
+      this.#apsportNavigationStartedAtMs.set(sourceId, this.#now());
+    }
+    const tabId = Number(sourceId.slice(sourceId.lastIndexOf(":") + 1));
+    if (Number.isSafeInteger(tabId)) {
+      // Navigation recovery calls start() before mutating the tab. Re-arm
+      // Network and child-target auto-attach at that point; otherwise a new
+      // SABA socket can be born unobserved and every later frame is orphaned.
+      this.#startedTabs.delete(tabId);
+      this.#mainWorldContexts.delete(tabId);
+    }
+    return sourceEpoch;
   }
 
   beginBridgeSourceEpoch(sourceId: string): string {
@@ -2341,7 +2415,9 @@ export class NetworkObserver {
       this.#sabaDocumentMarkers.delete(sourceId);
       this.#sabaDomBootstrapAtMs.delete(sourceId);
       this.#sabaCatalogFrameAtMs.delete(sourceId);
+      this.#sabaBaselineMissingSinceMs.delete(sourceId);
       this.#sabaSilentSocketRecoveryAtMs.delete(sourceId);
+      this.#sabaSilentSocketRecoveries.delete(sourceId);
       this.#sbobetEventRequests.delete(sourceId);
       this.#observedChildSessions.delete(sourceId);
       this.#ksportAttachedTargetSessions.delete(sourceId);
@@ -2362,10 +2438,12 @@ export class NetworkObserver {
       this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#sboOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#apsportOrphanFrameRecoveryAtMs.delete(sourceId);
+      this.#apsportNavigationStartedAtMs.delete(sourceId);
       this.#socketBaselineRecoveries.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
       this.#catalogRefreshes.delete(sourceId);
+      this.#apsportRosterOnlyRefreshes.delete(sourceId);
       this.#sabaDomPolls.delete(sourceId);
       this.#ksportMaintenances.delete(sourceId);
       this.#ksportBaselineChecks.delete(sourceId);
@@ -2460,19 +2538,23 @@ export class NetworkObserver {
 
   async #pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
     // SABA's Socket.IO connection can die without a close event; the DOM
-    // fallback then only covers the visible viewport. Once the socket has
-    // been silent for a full minute, ask the page to reconnect it (bounded to
-    // once per minute). The silence clock is seeded on the first poll so a
-    // worker restart landing on an already-dead socket still recovers.
+    // fallback then only covers the visible viewport. Begin fallback renewal
+    // and socket recovery before the API's 30-second freshness lease expires.
+    // The silence clock is seeded on the first poll so a worker restart landing
+    // on an already-dead socket still recovers.
     const silenceNowMs = this.#now();
     const lastSabaFrameAtMs = this.#sabaCatalogFrameAtMs.get(source.sourceId) ??
       (this.#sabaCatalogFrameAtMs.set(source.sourceId, silenceNowMs), silenceNowMs);
-    if (silenceNowMs - lastSabaFrameAtMs > 60_000 &&
-      silenceNowMs - (this.#sabaSilentSocketRecoveryAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) > 60_000) {
-      this.#sabaSilentSocketRecoveryAtMs.set(source.sourceId, silenceNowMs);
-      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+    const silenceAgeMs = silenceNowMs - lastSabaFrameAtMs;
+    const hasCompleteBaseline = this.hasCompleteSabaBaseline(source.sourceId);
+    if (hasCompleteBaseline) this.#sabaBaselineMissingSinceMs.delete(source.sourceId);
+    const baselineMissingSinceMs = hasCompleteBaseline ? null
+      : this.#sabaBaselineMissingSinceMs.get(source.sourceId) ?? silenceNowMs;
+    if (!hasCompleteBaseline && !this.#sabaBaselineMissingSinceMs.has(source.sourceId)) {
+      this.#sabaBaselineMissingSinceMs.set(source.sourceId, baselineMissingSinceMs!);
     }
-    if (this.hasCompleteSabaBaseline(source.sourceId)) {
+    const baselineMissingAgeMs = baselineMissingSinceMs === null ? 0 : silenceNowMs - baselineMissingSinceMs;
+    if (hasCompleteBaseline && silenceAgeMs <= SABA_SOCKET_SILENCE_RECOVERY_MS) {
       if (this.#sabaDomObserversCleaned.has(source.sourceId)) return;
       const evaluations: Array<Promise<unknown>> = [
         this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
@@ -2506,8 +2588,51 @@ export class NetworkObserver {
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId)).catch(() => ({})));
     }
-    if (!evaluations.some((evaluation) => nestedValue(evaluation, "result", "value") === true)) return;
-    await this.#capturePublicCatalogSnapshot(source, hostname, CMD_PUBLIC_CATALOG_EXPRESSION, false, true);
+    const changed = evaluations.some((evaluation) => nestedValue(evaluation, "result", "value") === true);
+    // Traffic is not authority. After an MV3/target handover SABA commonly
+    // resumes on an existing socket with delta-only frames; those frames keep
+    // the silence clock young but cannot reconstruct the hidden catalog that
+    // existed before the handover. Keep a bounded DOM fallback current and
+    // actively request reset..done until this epoch owns a complete socket
+    // baseline.
+    const socketBaselineMissing = !hasCompleteBaseline;
+    const renewalDue = (socketBaselineMissing || silenceAgeMs > SABA_SOCKET_SILENCE_RECOVERY_MS) &&
+      silenceNowMs - (this.#cmdLastSentAtMs.get(source.sourceId) ?? 0) >= CATALOG_REFRESH_INTERVAL_MS;
+    if (changed || renewalDue) {
+      // Publish before starting heap/socket recovery. That recovery can take
+      // tens of seconds on a large provider page; awaiting it here used to stop
+      // the only fallback refresher until after the realtime lease had expired.
+      await this.#capturePublicCatalogSnapshot(source, hostname, CMD_PUBLIC_CATALOG_EXPRESSION, false, true);
+    }
+    if ((baselineMissingAgeMs > SABA_SOCKET_SILENCE_RECOVERY_MS ||
+      silenceAgeMs > SABA_SOCKET_SILENCE_RECOVERY_MS) &&
+      silenceNowMs - (this.#sabaSilentSocketRecoveryAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) >
+        SABA_SOCKET_SILENCE_RECOVERY_MS) {
+      this.#sabaSilentSocketRecoveryAtMs.set(source.sourceId, silenceNowMs);
+      this.#startSabaSilentSocketRecovery(source);
+    }
+  }
+
+  #startSabaSilentSocketRecovery(source: ObservedSource): void {
+    // Orphan-frame recovery uses the general recovery registry. Treat either
+    // registry as ownership of the one SABA heap scan so the now-detached
+    // refresh path cannot race it (or be raced by it).
+    if (this.#sabaSilentSocketRecoveries.has(source.sourceId) ||
+      this.#socketBaselineRecoveries.has(source.sourceId)) return;
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const operation = this.#requestFreshSocketBaseline(source,
+      (url) => /\/socket\.io\/?$/u.test(url.pathname))
+      .catch((error: unknown) => {
+        if (this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) {
+          this.#noteWsRecoveryOutcome(source, `silence:fail-${failureLabel(error)}`);
+        }
+      })
+      .finally(() => {
+        if (this.#sabaSilentSocketRecoveries.get(source.sourceId) === operation) {
+          this.#sabaSilentSocketRecoveries.delete(source.sourceId);
+        }
+      });
+    this.#sabaSilentSocketRecoveries.set(source.sourceId, operation);
   }
 
   /**
@@ -2834,6 +2959,11 @@ export class NetworkObserver {
     const existing = this.#catalogRefreshes.get(source.sourceId);
     if (existing !== undefined) {
       if (prioritizeApsportRoster) {
+        // The periodic poller and bridge resync can both ask for a current
+        // roster while the same bounded roster walk is still traversing the
+        // provider's three football modes. Starting another walk increments
+        // the ordinal and makes the first one self-cancel forever.
+        if (this.#apsportRosterOnlyRefreshes.get(source.sourceId) === existing) return existing;
         // A bridge resync cannot wait behind the rate-limited all-event detail
         // walk: while it waits, the disconnected loopback bridge accumulates
         // live socket frames and can overflow into another resync. Advancing
@@ -2854,8 +2984,12 @@ export class NetworkObserver {
       })
       .finally(() => {
       if (this.#catalogRefreshes.get(source.sourceId) === operation) this.#catalogRefreshes.delete(source.sourceId);
+      if (this.#apsportRosterOnlyRefreshes.get(source.sourceId) === operation) {
+        this.#apsportRosterOnlyRefreshes.delete(source.sourceId);
+      }
     });
     this.#catalogRefreshes.set(source.sourceId, operation);
+    if (prioritizeApsportRoster) this.#apsportRosterOnlyRefreshes.set(source.sourceId, operation);
     return operation;
   }
 
@@ -2869,6 +3003,13 @@ export class NetworkObserver {
       return;
     }
     if (source.lobby === "SABA") {
+      // Durable history remains a current-document cache for explicit
+      // diagnostics, but it is never forwarded during ordinary recovery: the
+      // API deliberately treats replay as non-authoritative, while sending up
+      // to 24 MiB here can starve the fresh Today/socket baseline behind it.
+      await this.#restoreSabaWsSnapshots(source).catch((error) => {
+        this.#noteWsRecoveryOutcome(source, `refresh:restore-${failureLabel(error)}`);
+      });
       // A C-SPORTS schedule launch lands on one live event. Its authenticated
       // `Hôm Nay` tab issues the provider's complete football reset/done
       // baseline (measured live: 5 -> 360 events) without navigating or
@@ -2882,15 +3023,6 @@ export class NetworkObserver {
       // reconnect are evidence priming only; none of them may stop the one
       // action that actually reseeds the lane, and each failure is named in the
       // wsAttach diagnostic so the next stall is not silent.
-      try {
-        const replayed = await this.#replayCatalogWsSnapshots(source.sourceId);
-        if (!replayed) {
-          await this.#restoreSabaWsSnapshots(source);
-          await this.#replayCatalogWsSnapshots(source.sourceId);
-        }
-      } catch (error) {
-        this.#noteWsRecoveryOutcome(source, `refresh:replay-${failureLabel(error)}`);
-      }
       const nowMs = this.#now();
       if (nowMs - (this.#sabaDomBootstrapAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) >= 4_000) {
         this.#sabaDomBootstrapAtMs.set(source.sourceId, nowMs);
@@ -2904,7 +3036,12 @@ export class NetworkObserver {
           this.#noteWsRecoveryOutcome(source, `refresh:dom-${failureLabel(error)}`);
         }
       }
-      await this.#requestFreshSocketBaseline(source, (url) => /\/socket\.io\/?$/u.test(url.pathname));
+      // Socket heap discovery is deliberately detached from the provider work
+      // lane. A large page can keep Runtime.queryObjects pending for tens of
+      // seconds; holding this refresh operation until it settles also blocks
+      // SABA's only DOM renewal path and lets otherwise-current odds expire.
+      // The helper owns epoch fencing, deduplication, diagnostics, and cleanup.
+      this.#startSabaSilentSocketRecovery(source);
       return;
     }
     if (source.lobby === "KSPORT") {
@@ -3225,7 +3362,8 @@ export class NetworkObserver {
       prematchWindowHours: active.prematchWindowHours, records: [detailed] };
     await this.ingestHttpResponse(source,
       `${template.origin}/__fieldline_apsport_catalog_refresh__`, "Fetch", JSON.stringify(batch), {
-        method: "POST", verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
+        method: "POST", currentDocumentConfirmed: true,
+        verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
           ...(template.sessionId === undefined ? {} : { sessionId: template.sessionId }) }
       });
   }
@@ -3251,7 +3389,8 @@ export class NetworkObserver {
         prematchWindowHours: active.prematchWindowHours, records: [detailed] };
       await this.ingestHttpResponse(source,
         `${template.origin}/__fieldline_apsport_catalog_refresh__`, "Fetch", JSON.stringify(batch), {
-          method: "POST", verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
+          method: "POST", currentDocumentConfirmed: true,
+          verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
             ...(template.sessionId === undefined ? {} : { sessionId: template.sessionId }) }
         });
     }
@@ -3314,6 +3453,7 @@ export class NetworkObserver {
       await this.ingestHttpResponse(source,
         `${template.origin}/__fieldline_apsport_catalog_refresh__`, "Fetch", JSON.stringify(batch), {
           method: "POST",
+          currentDocumentConfirmed: true,
           verifiedDocument: { frameId: template.frameId, loaderId: template.loaderId,
             ...(template.sessionId === undefined ? {} : { sessionId: template.sessionId }) }
         });
@@ -3797,6 +3937,9 @@ export class NetworkObserver {
 
   #scheduleFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean,
     preferredSessionId?: string): Promise<void> {
+    const sabaRecovery = source.lobby === "SABA"
+      ? this.#sabaSilentSocketRecoveries.get(source.sourceId) : undefined;
+    if (sabaRecovery !== undefined) return sabaRecovery;
     const existing = this.#socketBaselineRecoveries.get(source.sourceId);
     if (existing !== undefined) return existing.operation;
     const token = Symbol(source.sourceId);
@@ -4778,6 +4921,10 @@ export class NetworkObserver {
             candidate.closing !== true &&
             this.#isSourceGenerationCurrent(source.sourceId, candidate.sourceGeneration))) {
           const nowMs = this.#now();
+          const navigationStartedAtMs = this.#apsportNavigationStartedAtMs.get(source.sourceId);
+          if ((navigationStartedAtMs !== undefined &&
+              nowMs - navigationStartedAtMs < APSPORT_NAVIGATION_SETTLE_GRACE_MS) ||
+            this.#apsportRefreshesInFlight.has(source.sourceId)) return;
           const lastAttemptAtMs = this.#apsportOrphanFrameRecoveryAtMs.get(source.sourceId);
           if (lastAttemptAtMs === undefined ||
             nowMs - lastAttemptAtMs >= APSPORT_ORPHAN_FRAME_RETRY_MS) {
@@ -5169,7 +5316,8 @@ export class NetworkObserver {
     const safeBody = redactNetworkBody(body);
     await this.#recoverMissingImBaseline(pending);
     if (!this.#isPendingCurrent(pending)) return;
-    if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
+    if (pending.requestDocumentKey !== undefined && requestMetadata.currentDocumentConfirmed !== true &&
+      !await this.#requestDocumentIsCurrent(pending)) return;
     if (!this.#isPendingCurrent(pending)) return;
     const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
     this.#rememberHttpSnapshot(pending, safeBody, clocks);
@@ -5183,12 +5331,15 @@ export class NetworkObserver {
     }
     if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return;
     const snapshotId = networkSnapshotId(source.tabId, pending.observerRequestOrdinal);
+    // The exact frame/loader was verified immediately above. Each emission is
+    // still fenced by source, bridge and tab generation in #emit; repeating a
+    // remote Page.getFrameTree call for every chunk stretched a two-part IM
+    // baseline beyond the 30-second realtime lease.
     const emissions = fragments.map((bodyFragment, chunkIndex) => this.#emit(source, url, resourceType, "HTTP_RESPONSE", {
         encoding: "UTF8",
         body: JSON.stringify({ schemaVersion: 1, snapshotId, chunkIndex, chunkCount: fragments.length,
           bodyEncoding: "UTF8", bodyFragment })
-      }, { ...request, ...clocks, sourceGeneration, tabGeneration,
-        beforeForward: () => this.#requestDocumentIsCurrent(pending) }));
+      }, { ...request, ...clocks, sourceGeneration, tabGeneration }));
     await Promise.all(emissions);
   }
 

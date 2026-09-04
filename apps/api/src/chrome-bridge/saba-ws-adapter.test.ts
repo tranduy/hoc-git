@@ -227,8 +227,11 @@ describe("SabaWsCatalogAdapter", () => {
     // A fault on a partition that was never ready is held quietly at first -
     // that hold is what a transient handover needs.
     expect(adapter.decode(faulting(2, base + 1))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("decode-fault-held-bound-exceeded");
     expect(adapter.decode(faulting(3, base + 2))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("decode-fault-held-bound-exceeded");
     expect(adapter.decode(faulting(4, base + 19_000))).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("decode-fault-held-bound-exceeded");
     expect(adapter.decode(faulting(5, base + 23_000))).toEqual([expect.objectContaining({
       invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "SCHEMA_CHANGED"
     })]);
@@ -464,7 +467,8 @@ describe("SabaWsCatalogAdapter", () => {
         oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
       [0, "done"]];
     const adapter = new SabaWsCatalogAdapter();
-    expect(adapter.decode(envelope(`42${JSON.stringify(["m", "b1", rows, 1])}`))).toHaveLength(1);
+    const baseline = adapter.decode(envelope(`42${JSON.stringify(["m", "b1", rows, 1])}`));
+    expect(baseline).toHaveLength(1);
 
     const dom: ChromeBridgeEnvelope = { ...envelope(""), sequence: 5,
       observedAtMs: 1_786_449_550_000, transport: "DOM_SNAPSHOT",
@@ -481,7 +485,7 @@ describe("SabaWsCatalogAdapter", () => {
     const refreshed = adapter.decode(dom);
     expect(refreshed).toHaveLength(1);
     expect(refreshed[0]).toMatchObject({ observedAtMs: 1_786_449_550_000,
-      provenance: "DOM_FALLBACK", evidenceMode: "DELTA",
+      provenance: "DOM_FALLBACK", evidenceMode: "DELTA", generation: baseline[0]!.generation,
       value: { observedAtMs: 1_786_449_550_000 } });
     expect(refreshed[0]).not.toHaveProperty("authoritativeBaseline");
   });

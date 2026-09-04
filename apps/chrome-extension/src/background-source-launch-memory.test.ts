@@ -92,19 +92,27 @@ function mockNetworkObserver(start = vi.fn(async (_source: { readonly tabId: num
   refreshCatalog = vi.fn(async () => undefined)) {
   class NetworkObserver {
     beginSourceEpoch = vi.fn();
+    beginBridgeSourceEpoch = vi.fn();
     captureCmdSnapshot = vi.fn(async () => undefined);
     ensureCompleteKsportBaseline = vi.fn(async () => true);
     focusSelection = vi.fn(async () => true);
     handleEvent = vi.fn(async () => undefined);
     hasCompleteKsportBaseline = vi.fn(() => true);
     hasCompleteSabaBaseline = vi.fn(() => true);
+    hasCompleteCmdBaselineSince = vi.fn(() => true);
     heartbeat = vi.fn(async () => undefined);
     maintain = vi.fn(async () => undefined);
     maintainKsportFeed = vi.fn(async () => undefined);
     pollSabaDomChanges = vi.fn(async () => undefined);
+    prepareDebuggerReattach = vi.fn();
+    prepareSourceNavigation = vi.fn();
+    probeBtiPageHealth = vi.fn(async () => ({ status: "HEALTHY", code: null }));
     probeCmdHiddenMarkets = vi.fn(async () => undefined);
     probeSelectionPrice = vi.fn(async () => undefined);
     recoverCmdCatalog = vi.fn(async () => undefined);
+    replaySnapshots = vi.fn(async () => false);
+    resetApsportRefreshCooldown = vi.fn();
+    resetSabaSocketWorker = vi.fn(async () => 0);
     refreshCatalog = refreshCatalog;
     releaseTab = vi.fn();
     start = start;

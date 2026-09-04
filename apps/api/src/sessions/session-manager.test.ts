@@ -897,10 +897,11 @@ describe("SessionManager", () => {
 
   it("never reuses a SABA launch captured before the current maintenance cycle", async () => {
     const vault = await createVault();
+    let nowMs = 50;
     const manager = new SessionManager({
       vault,
       validators: new SessionValidatorRegistry([]),
-      clock: { nowMs: () => 50 },
+      clock: { nowMs: () => nowMs },
       idFactory: () => "unused",
       fabetDriver: {
         login: async () => undefined,
@@ -923,6 +924,10 @@ describe("SessionManager", () => {
       .rejects.toThrow("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
     await expect(manager.withLatestFabetLaunch("SABA", "FOOTBALL", async (url) => url, 50))
       .resolves.toBe("https://c0z0ob.bpd3a3fn.com/fresh");
+
+    nowMs = 86_400_051;
+    await expect(manager.withLatestFabetLaunch("SABA", "FOOTBALL", async (url) => url, 0))
+      .rejects.toThrow("FABET_PROVIDER_LAUNCH_UNAVAILABLE");
   });
 
   it("uses an operator-configured SBOBET launch instead of replacing it with Fabet capture", async () => {

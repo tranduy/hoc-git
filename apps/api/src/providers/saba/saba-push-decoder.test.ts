@@ -6,6 +6,32 @@ const fields = [
 ] as const;
 
 describe("SabaPushDecoder", () => {
+  it.each([
+    { name: "frame envelope", frame: { bridgeId: "invalid", revision: "r1", rows: [] },
+      reason: "FRAME_INVALID" },
+    { name: "empty row", frame: { bridgeId: "b1", revision: "r1", rows: [[]] },
+      reason: "ROW_INVALID" },
+    { name: "field table", frame: { bridgeId: "b1", revision: "r1", rows: [["f", -1, []]] },
+      reason: "FIELD_TABLE_INVALID" },
+    { name: "field name", frame: { bridgeId: "b1", revision: "r1", rows: [["f", 0, [null]]] },
+      reason: "FIELD_NAME_INVALID" },
+    { name: "row width", frame: { bridgeId: "b1", revision: "r1", rows: [[0, "reset", 1]] },
+      reason: "ROW_WIDTH_ODD" },
+    { name: "field index", frame: { bridgeId: "b1", revision: "r1", rows: [["zero", "reset"]] },
+      reason: "FIELD_INDEX_INVALID" },
+    { name: "unmapped field", frame: { bridgeId: "b1", revision: "r1", rows: [[1, "reset"]] },
+      reason: "FIELD_INDEX_UNMAPPED" }
+  ])("names a malformed SABA $name without exposing provider values", ({ frame, reason }) => {
+    expect(() => new SabaPushDecoder().apply(frame))
+      .toThrow(`SABA_PUSH_SCHEMA_CHANGED:${reason}`);
+  });
+
+  it("reports only bounded field-table shape when a SABA index is unmapped", () => {
+    expect(() => new SabaPushDecoder().apply({ bridgeId: "b1", revision: "r1",
+      rows: [[7, "provider-secret-must-not-appear"]] }))
+      .toThrow("SABA_PUSH_SCHEMA_CHANGED:FIELD_INDEX_UNMAPPED:I7:F0:D0:C0:A0:M0");
+  });
+
   it("decodes an atomic full snapshot from the provider field table", () => {
     const decoder = new SabaPushDecoder();
     const result = decoder.apply({
@@ -74,6 +100,57 @@ describe("SabaPushDecoder", () => {
       expect.objectContaining({ type: "m", matchid: 41385687, marketid: "T" }),
       expect.objectContaining({ type: "o", oddsid: 90001, matchid: 41385687, odds: 2.2 })
     ]);
+  });
+
+  it("inherits the sole verified field table when a rotated bridge omits its channel row", () => {
+    const decoder = new SabaPushDecoder();
+    decoder.apply({ bridgeId: "b100", revision: "schema-1", rows: [
+      ["c", "c2", "subscription", "hash"], ["f", 0, fields]
+    ] });
+
+    const snapshot = decoder.apply({ bridgeId: "b101", revision: "data-1", rows: [
+      [0, "reset"],
+      [0, "m", 1, 41385687, 4, "T", 5, "running"],
+      [0, "o", 2, 90001, 1, 41385687, 3, 1, 6, 2.2, 7, 1],
+      [0, "done"]
+    ] });
+
+    expect(snapshot).toMatchObject({ fullSnapshot: true, duplicate: false });
+    expect(snapshot.records).toEqual([
+      expect.objectContaining({ type: "m", matchid: 41385687, marketid: "T" }),
+      expect.objectContaining({ type: "o", oddsid: 90001, matchid: 41385687, odds: 2.2 })
+    ]);
+  });
+
+  it("inherits identical verified catalog tables announced by multiple logical channels", () => {
+    const decoder = new SabaPushDecoder();
+    decoder.apply({ bridgeId: "b100", revision: "schema-1", rows: [
+      ["c", "c1"], ["f", 0, fields]
+    ] });
+    decoder.apply({ bridgeId: "b101", revision: "schema-2", rows: [
+      ["c", "c2"], ["f", 0, fields]
+    ] });
+
+    const snapshot = decoder.apply({ bridgeId: "b102", revision: "data-1", rows: [
+      [0, "reset"], [0, "m", 1, 77, 4, "T"], [0, "done"]
+    ] });
+
+    expect(snapshot).toMatchObject({ fullSnapshot: true });
+    expect(snapshot.records).toEqual([expect.objectContaining({ type: "m", matchid: 77 })]);
+  });
+
+  it("refuses to guess a rotated bridge field table when multiple channels exist", () => {
+    const decoder = new SabaPushDecoder();
+    decoder.apply({ bridgeId: "b100", revision: "schema-1", rows: [
+      ["c", "c1"], ["f", 0, ["type", "matchid"]]
+    ] });
+    decoder.apply({ bridgeId: "b101", revision: "schema-2", rows: [
+      ["c", "c2"], ["f", 0, fields]
+    ] });
+
+    expect(() => decoder.apply({ bridgeId: "b102", revision: "data-1", rows: [
+      [0, "reset"], [0, "done"]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:FIELD_INDEX_UNMAPPED");
   });
 
   it("fails closed without mutating accepted state on malformed field indexes or incomplete snapshots", () => {

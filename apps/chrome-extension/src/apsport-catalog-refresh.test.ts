@@ -169,7 +169,7 @@ describe("collectApsportCatalog", () => {
       isCurrent: () => true,
       onRoster,
       onDetail: async () => undefined
-    })).rejects.toThrow("APSPORT_ROSTER_REQUEST_FAILED");
+    })).rejects.toThrow("APSPORT_ROSTER_HTTP_500");
 
     expect(onRoster).not.toHaveBeenCalled();
   });

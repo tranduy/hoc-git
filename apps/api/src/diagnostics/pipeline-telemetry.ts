@@ -87,6 +87,9 @@ interface AccountState {
   forcedUnlocks: number;
   /** Endpoints an adapter refused, so a renamed provider path is visible. */
   readonly ignoredEndpoints: Map<string, number>;
+  /** Most recent adapter refusal. Kept separately from the bounded frequency
+   *  table so a new failure cannot be hidden after that table fills. */
+  lastIgnoredEndpoint: { readonly pathnameClass: string; readonly atMs: number } | null;
   /** Decoded updates the data plane then refused, by reason. The data plane
    *  has thirty-one refusal sites and until 2026-09-01 none of them was
    *  reported anywhere; SABA sat frozen for five minutes with the adapter
@@ -224,7 +227,8 @@ function createState(): AccountState {
     buckets: [], selections: new Map(), sourceId: null, sourceEpoch: null, tabId: null,
     attachedAtMs: null, lastEnvelopeAtMs: null, lastSequence: null, lastDecodedAtMs: null,
     lastEvidenceAtMs: null, lastSemanticChangeAtMs: null, forcedUnlocks: 0,
-    ignoredEndpoints: new Map(), refreshOutcomes: new Map(), ingestRejections: new Map(),
+    ignoredEndpoints: new Map(), lastIgnoredEndpoint: null,
+    refreshOutcomes: new Map(), ingestRejections: new Map(),
     wsAttach: null, pageHealth: null,
     recovery: { consecutiveFailures: 0, nextAttemptAtMs: null, lastFailureCode: null }
   };
@@ -279,6 +283,7 @@ export class PipelineTelemetry {
     // remembered. An adapter that matches exact provider paths goes silent when
     // the provider renames one, and nothing else in the pipeline can show that.
     if (pathnameClass === undefined || !/^\/[\w./-]{0,63}$/u.test(pathnameClass)) return;
+    state.lastIgnoredEndpoint = { pathnameClass, atMs };
     const seen = state.ignoredEndpoints.get(pathnameClass) ?? 0;
     if (seen === 0 && state.ignoredEndpoints.size >= 8) return;
     state.ignoredEndpoints.set(pathnameClass, seen + 1);
@@ -393,9 +398,10 @@ export class PipelineTelemetry {
     const status = current.statuses.find((item) => item.id === accountId) ?? null;
     const policy = providerFeedPolicies.get(accountId)!;
     const sums = sumBuckets(state.buckets);
-    const requiredEnvelopeTransport = accountId === "catalog-source:SABA:FOOTBALL" ||
-      accountId === "catalog-source:SBOBET:FOOTBALL" ||
-      accountId === "catalog-source:APSPORT:FOOTBALL" ? "WS_FRAME" : "HTTP_RESPONSE";
+    const requiredEnvelopeTransports: readonly ("HTTP_RESPONSE" | "WS_FRAME" | "DOM_SNAPSHOT" | "TAB_STATE")[] =
+      accountId === "catalog-source:SABA:FOOTBALL" ? ["WS_FRAME", "DOM_SNAPSHOT"]
+      : accountId === "catalog-source:SBOBET:FOOTBALL" ||
+        accountId === "catalog-source:APSPORT:FOOTBALL" ? ["WS_FRAME"] : ["HTTP_RESPONSE"];
     const evidence = state.buckets.flatMap((bucket) => bucket.evidenceAtMs).sort((left, right) => left - right);
     const cadence = percentileCadence(evidence);
     const quoteChanges60s = state.buckets.filter((bucket) => bucket.startedAtMs >= nowMs - 60_000)
@@ -413,9 +419,9 @@ export class PipelineTelemetry {
       } },
       { hop: "HOP3_ENVELOPE", ok: state.lastEnvelopeAtMs !== null &&
         nowMs - state.lastEnvelopeAtMs <= PIPELINE_TELEMETRY_LIMITS.windowMs &&
-        sums.byTransport[requiredEnvelopeTransport] > 0, detail: {
+        requiredEnvelopeTransports.some((transport) => sums.byTransport[transport] > 0), detail: {
         lastEnvelopeAgeMs: age(nowMs, state.lastEnvelopeAtMs), lastSequence: state.lastSequence,
-        requiredTransport: requiredEnvelopeTransport, byTransport: sums.byTransport,
+        requiredTransport: requiredEnvelopeTransports.join("_OR_"), byTransport: sums.byTransport,
         rejected: sums.rejected, wsAttach: state.wsAttach, pageHealth: state.pageHealth
       } },
       { hop: "HOP4_ADAPTER", ok: state.lastDecodedAtMs !== null &&
@@ -436,6 +442,10 @@ export class PipelineTelemetry {
         ignoredEndpoints: [...state.ignoredEndpoints.entries()]
           .sort((left, right) => right[1] - left[1]).slice(0, 6)
           .map(([pathnameClass, count]) => ({ pathnameClass, count })),
+        lastIgnoredEndpoint: state.lastIgnoredEndpoint === null ? null : {
+          pathnameClass: state.lastIgnoredEndpoint.pathnameClass,
+          ageMs: age(nowMs, state.lastIgnoredEndpoint.atMs)
+        },
         refreshOutcomes: [...state.refreshOutcomes.entries()]
           .sort((left, right) => right[1] - left[1]).slice(0, 6)
           .map(([status, count]) => ({ status, count }))
@@ -496,10 +506,12 @@ export class PipelineTelemetry {
         catalogShape?: unknown; reconnectAttempts?: unknown; reconnectOutcomes?: unknown };
       if (Array.isArray((value as { results?: unknown }).results)) {
         for (const entry of (value as { results: readonly unknown[] }).results) {
-          if (typeof entry !== "string" || !refreshOutcomes.has(entry)) continue;
-          const seen = state.refreshOutcomes.get(entry) ?? 0;
+          if (typeof entry !== "string") continue;
+          const status = entry.slice(entry.lastIndexOf(":") + 1);
+          if (!refreshOutcomes.has(status)) continue;
+          const seen = state.refreshOutcomes.get(status) ?? 0;
           if (seen === 0 && state.refreshOutcomes.size >= 8) continue;
-          state.refreshOutcomes.set(entry, seen + 1);
+          state.refreshOutcomes.set(status, seen + 1);
         }
       }
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&

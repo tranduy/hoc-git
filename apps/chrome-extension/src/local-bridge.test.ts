@@ -45,6 +45,56 @@ function btiAuthFailure(sequence = 0): ChromeBridgeEnvelope {
   };
 }
 
+function imCatalogChunk(sequence: number, partition: "IM_MARKET_1" | "IM_MARKET_2",
+  chunkIndex: number, chunkCount: number): ChromeBridgeEnvelope {
+  return {
+    version: 1, kind: "NETWORK", lobby: "IM", sourceId: "chrome:IM:8", tabId: 8,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000, receivedMonotonicMs: 50,
+    transport: "HTTP_RESPONSE",
+    request: {
+      hostname: "imsports.directsb.net", pathnameClass: "/api/EventV6/GetSE", resourceType: "Fetch",
+      method: "POST", observerRequestId: `worker-a:request:${sequence}`,
+      requestFrameKey: "worker-a:frame:8", requestDocumentKey: "worker-a:document:8",
+      streamId: "im:8:1", providerPartition: partition, reconcileCutoffSequence: 0
+    },
+    payload: { encoding: "UTF8", body: JSON.stringify({
+      schemaVersion: 1, snapshotId: `im:8:1:${partition}`, chunkIndex, chunkCount,
+      bodyEncoding: "UTF8", bodyFragment: "x".repeat(110_000)
+    }) }
+  };
+}
+
+function apsportCatalogChunk(sequence: number, chunkIndex: number,
+  chunkCount: number): ChromeBridgeEnvelope {
+  return {
+    version: 1, kind: "NETWORK", lobby: "TSPORT", sourceId: "chrome:TSPORT:15", tabId: 15,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000, receivedMonotonicMs: 50,
+    transport: "HTTP_RESPONSE",
+    request: {
+      hostname: "pacific.agenate.com", pathnameClass: "/__fieldline_apsport_catalog_refresh__",
+      resourceType: "Fetch", method: "POST", observerRequestId: "worker-a:request:1",
+      requestFrameKey: "worker-a:frame:15", requestDocumentKey: "worker-a:document:15"
+    },
+    payload: { encoding: "UTF8", body: JSON.stringify({
+      schemaVersion: 1, snapshotId: "network:15:1", chunkIndex, chunkCount,
+      bodyEncoding: "UTF8", bodyFragment: "x".repeat(110_000)
+    }) }
+  };
+}
+
+function sabaReplayFrame(sequence: number): ChromeBridgeEnvelope {
+  return {
+    version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000, receivedMonotonicMs: 50,
+    transport: "WS_FRAME",
+    request: {
+      hostname: "sports.example", pathnameClass: "/socket.io/", resourceType: "WebSocket",
+      streamId: "1", replayed: true
+    },
+    payload: { encoding: "UTF8", body: `42["m","b1",${JSON.stringify("x".repeat(110_000))}]` }
+  };
+}
+
 class FakeSocket implements BridgeSocket {
   readonly sent: string[] = [];
   readonly sentSourceIds: string[] = [];
@@ -182,7 +232,7 @@ describe("LocalBridge", () => {
     expect(sockets[1]!.sent.map((value) => JSON.parse(value).sequence)).toEqual([0]);
   });
 
-  it("drops a source's gapped backlog atomically and requests a new source epoch", async () => {
+  it("keeps healthy providers connected while a gapped source waits for its replacement epoch", async () => {
     const sockets = [new FakeSocket(), new FakeSocket()];
     let socketIndex = 0;
     const onSourceResync = vi.fn();
@@ -200,7 +250,20 @@ describe("LocalBridge", () => {
 
     expect(bridge.pendingSequences()).toEqual([4]);
     expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
-    await vi.waitFor(() => expect(socketIndex).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // A source recovery can legitimately finish before the next ten-second
+    // heartbeat publishes its replacement epoch. That must not close the one
+    // shared socket and evict every healthy provider from the API registry.
+    expect(socketIndex).toBe(1);
+    expect(sockets[0]!.readyState).toBe(1);
+    sockets[0]!.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:IM:8", sourceEpoch: "worker-a:0", sequence: 4
+    }) });
+    expect(bridge.pendingSequences()).toEqual([]);
+
+    await bridge.enqueue(envelope(0, "replacement-heartbeat", "chrome:SABA:7", "worker-b:0"));
+    expect(sockets[0]!.sent.map((value) => JSON.parse(value).sourceEpoch)).toContain("worker-b:0");
   });
 
   it("keeps the bridge socket when a replacement epoch is already admitted during resync", async () => {
@@ -250,31 +313,52 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([0]);
   });
 
-  it("drops one overflowing source atomically without removing another provider", async () => {
+  it("backpressures an overflowing source until its acknowledged prefix drains", async () => {
+    const socket = new FakeSocket();
     const onSourceResync = vi.fn();
-    const bridge = new LocalBridge({ socketFactory: () => new FakeSocket(), installationKey: "local-key",
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key",
       maxQueueBytes: 700, onSourceResync });
+    bridge.connect();
+    socket.open();
 
     await bridge.enqueue(envelope(0, "x".repeat(200), "chrome:SABA:7", "worker-a:0"));
-    await bridge.enqueue(envelope(1, "y".repeat(200), "chrome:SABA:7", "worker-a:0"));
-    await bridge.enqueue(envelope(9, "z".repeat(200), "chrome:BTI:8", "worker-a:0"));
+    let settled = false;
+    const next = bridge.enqueue(envelope(1, "y".repeat(200), "chrome:SABA:7", "worker-a:0"))
+      .then(() => { settled = true; });
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
 
-    expect(bridge.pendingSequences()).toEqual([9]);
-    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+    expect(settled).toBe(false);
+    expect(onSourceResync).not.toHaveBeenCalled();
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0", sequence: 0
+    }) });
+    await next;
+
+    expect(bridge.pendingSequences()).toEqual([1]);
+    expect(onSourceResync).not.toHaveBeenCalled();
   });
 
   it("refuses the old source epoch until a replacement snapshot begins", async () => {
-    const bridge = new LocalBridge({ socketFactory: () => new FakeSocket(), installationKey: "local-key",
-      maxQueueBytes: 1_300, onSourceResync: vi.fn() });
+    const socket = new FakeSocket();
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key",
+      maxQueueBytes: 1_300, onSourceResync });
+    bridge.connect();
+    socket.open();
 
-    await bridge.enqueue(envelope(0, "x".repeat(500), "chrome:SABA:7", "worker-a:0"));
-    await bridge.enqueue(envelope(1, "y".repeat(500), "chrome:SABA:7", "worker-a:0"));
-    await bridge.enqueue(envelope(2, "old", "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(0, "old", "chrome:SABA:7", "worker-a:0"));
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "REJECT", sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0",
+      sequence: 0, reason: "SEQUENCE_GAP"
+    }) });
+    await Promise.resolve();
+    await bridge.enqueue(envelope(1, "late-old", "chrome:SABA:7", "worker-a:0"));
     await bridge.enqueue(envelope(0, "baseline", "chrome:SABA:7", "worker-a:1"));
     await bridge.enqueue(envelope(1, "replacement", "chrome:SABA:7", "worker-a:1"));
-    await bridge.enqueue(envelope(3, "late-old", "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(2, "later-old", "chrome:SABA:7", "worker-a:0"));
 
     expect(bridge.pendingSequences()).toEqual([0, 1]);
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
   });
 
   it("ignores acknowledgements delivered by a retired socket generation", () => {
@@ -643,32 +727,51 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([0]);
   });
 
-  it("retires a same-provider epoch instead of removing a sequenced diagnostic", async () => {
+  it("backpressures a same-provider quote without removing its sequenced diagnostic", async () => {
+    const socket = new FakeSocket();
     const onSourceResync = vi.fn();
     const bridge = new LocalBridge({
-      socketFactory: () => new FakeSocket(), installationKey: "local-key", maxQueueBytes: 900,
+      socketFactory: () => socket, installationKey: "local-key", maxQueueBytes: 900,
       onSourceResync
     });
+    bridge.connect();
+    socket.open();
     await bridge.enqueue(envelope(0, "d".repeat(100)), "DIAGNOSTIC");
     await bridge.enqueue(envelope(1, "q".repeat(100)), "QUOTE");
-    await bridge.enqueue(envelope(2, "q".repeat(100)), "QUOTE");
-    expect(bridge.pendingSequences()).toEqual([]);
+    const third = bridge.enqueue(envelope(2, "q".repeat(100)), "QUOTE");
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+
+    expect(bridge.pendingSequences()).toEqual([0, 1]);
     expect(bridge.queueBytes).toBeLessThanOrEqual(900);
-    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+    expect(onSourceResync).not.toHaveBeenCalled();
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:SABA:7", sequence: 0
+    }) });
+    await third;
+    expect(bridge.pendingSequences()).toEqual([1, 2]);
   });
 
-  it("never evicts another provider's diagnostic to admit an overflowing source", async () => {
+  it("backpressures another provider without evicting its diagnostic", async () => {
+    const socket = new FakeSocket();
     const onSourceResync = vi.fn();
     const bridge = new LocalBridge({
-      socketFactory: () => new FakeSocket(), installationKey: "local-key", maxQueueBytes: 900,
+      socketFactory: () => socket, installationKey: "local-key", maxQueueBytes: 900,
       onSourceResync
     });
+    bridge.connect();
+    socket.open();
     await bridge.enqueue(envelope(7, "d".repeat(100), "chrome:IM:7"), "DIAGNOSTIC");
     await bridge.enqueue(envelope(0, "q".repeat(100), "chrome:SABA:8"), "QUOTE");
-    await bridge.enqueue(envelope(1, "q".repeat(100), "chrome:SABA:8"), "QUOTE");
+    const next = bridge.enqueue(envelope(1, "q".repeat(100), "chrome:SABA:8"), "QUOTE");
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
 
-    expect(bridge.pendingSequences()).toEqual([7]);
-    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:8");
+    expect(bridge.pendingSequences()).toEqual([7, 0]);
+    expect(onSourceResync).not.toHaveBeenCalled();
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:IM:7", sequence: 7
+    }) });
+    await next;
+    expect(bridge.pendingSequences()).toEqual([0, 1]);
   });
 
   it("cleans up malformed control messages without acknowledging data", () => {
@@ -740,6 +843,143 @@ describe("LocalBridge", () => {
       expect(socket.readyState).toBe(1);
     });
 
+  it("backpressures an APSPORT roster larger than 16 MiB until every chunk is acknowledged", async () => {
+    const socket = new FakeSocket();
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceResync });
+    bridge.connect();
+    socket.open();
+    const chunkCount = 154;
+    const chunks = Array.from({ length: chunkCount }, (_, chunkIndex) =>
+      apsportCatalogChunk(chunkIndex, chunkIndex, chunkCount));
+    expect(chunks.length * 110_000).toBeGreaterThan(16 * 1024 * 1024);
+
+    const publish = (async () => {
+      for (const chunk of chunks) await bridge.enqueue(chunk);
+    })();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const sentApsportCount = () => socket.sentSourceIds
+      .filter((sourceId) => sourceId === "chrome:TSPORT:15").length;
+    expect(sentApsportCount()).toBeGreaterThan(1);
+    expect(sentApsportCount()).toBeLessThan(chunks.length);
+    expect(onSourceResync).not.toHaveBeenCalled();
+
+    let maximumQueueBytes = bridge.queueBytes;
+    for (let index = 0; index < chunks.length; index += 1) {
+      for (let turn = 0; turn < 4 && sentApsportCount() <= index; turn += 1) await Promise.resolve();
+      expect(sentApsportCount()).toBeGreaterThan(index);
+      socket.onmessage?.({ data: JSON.stringify({
+        version: 1, kind: "ACK", sourceId: "chrome:TSPORT:15", sequence: index
+      }) });
+      maximumQueueBytes = Math.max(maximumQueueBytes, bridge.queueBytes);
+    }
+    await publish;
+
+    expect(maximumQueueBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+    expect(bridge.pendingSequences()).toEqual([]);
+    expect(onSourceResync).not.toHaveBeenCalled();
+    expect(socket.readyState).toBe(1);
+  });
+
+  it("does not retire SABA while an APSPORT baseline temporarily owns the shared queue", async () => {
+    const socket = new FakeSocket();
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceResync });
+    bridge.connect();
+    socket.open();
+    const chunks = Array.from({ length: 154 }, (_, chunkIndex) =>
+      apsportCatalogChunk(chunkIndex, chunkIndex, 154));
+    const apsportPublish = (async () => {
+      for (const chunk of chunks) await bridge.enqueue(chunk);
+    })();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    let sabaSettled = false;
+    const sabaPublish = bridge.enqueue(envelope(0, "s".repeat(110_000)))
+      .then(() => { sabaSettled = true; });
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+
+    expect(sabaSettled).toBe(false);
+    expect(onSourceResync).not.toHaveBeenCalled();
+
+    // Closing the bridge releases bounded producers; a normal ACK does the
+    // same in production. The important invariant here is that the unrelated
+    // SABA epoch remains intact while it waits.
+    bridge.close();
+    await sabaPublish;
+    expect(onSourceResync).not.toHaveBeenCalled();
+    void apsportPublish;
+  });
+
+  it("backpressures retained SABA socket evidence instead of recursively resyncing its epoch", async () => {
+    const socket = new FakeSocket();
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceResync });
+    bridge.connect();
+    socket.open();
+    const frames = Array.from({ length: 154 }, (_, sequence) => sabaReplayFrame(sequence));
+    const publish = (async () => {
+      for (const frame of frames) await bridge.enqueue(frame);
+    })();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const sentSabaCount = () => socket.sentSourceIds.filter((sourceId) => sourceId === "chrome:SABA:7").length;
+    expect(sentSabaCount()).toBeGreaterThan(1);
+    expect(sentSabaCount()).toBeLessThan(frames.length);
+    expect(onSourceResync).not.toHaveBeenCalled();
+
+    for (let sequence = 0; sequence < frames.length; sequence += 1) {
+      for (let turn = 0; turn < 4 && sentSabaCount() <= sequence; turn += 1) await Promise.resolve();
+      socket.onmessage?.({ data: JSON.stringify({
+        version: 1, kind: "ACK", sourceId: "chrome:SABA:7", sequence
+      }) });
+    }
+    await publish;
+
+    expect(bridge.pendingSequences()).toEqual([]);
+    expect(onSourceResync).not.toHaveBeenCalled();
+  });
+
+  it("backpressures both IM GetSE partitions larger than 16 MiB without resyncing", async () => {
+    const socket = new FakeSocket();
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key", onSourceResync });
+    bridge.connect();
+    socket.open();
+    const chunks = (["IM_MARKET_1", "IM_MARKET_2"] as const).flatMap((partition, partitionIndex) =>
+      Array.from({ length: 77 }, (_, chunkIndex) =>
+        imCatalogChunk(partitionIndex * 77 + chunkIndex, partition, chunkIndex, 77)));
+    expect(chunks.length * 110_000).toBeGreaterThan(16 * 1024 * 1024);
+
+    const publish = (async () => {
+      for (const chunk of chunks) await bridge.enqueue(chunk);
+    })();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    const sentImCount = () => socket.sentSourceIds.filter((sourceId) => sourceId === "chrome:IM:8").length;
+    const initialWindow = sentImCount();
+    expect(initialWindow).toBeGreaterThan(1);
+    expect(initialWindow).toBeLessThan(chunks.length);
+    expect(onSourceResync).not.toHaveBeenCalled();
+
+    let maximumQueueBytes = bridge.queueBytes;
+    for (let index = 0; index < chunks.length; index += 1) {
+      for (let turn = 0; turn < 4 && sentImCount() <= index; turn += 1) await Promise.resolve();
+      expect(sentImCount()).toBeGreaterThan(index);
+      socket.onmessage?.({ data: JSON.stringify({
+        version: 1, kind: "ACK", sourceId: "chrome:IM:8", sequence: index
+      }) });
+      maximumQueueBytes = Math.max(maximumQueueBytes, bridge.queueBytes);
+    }
+    await publish;
+
+    expect(maximumQueueBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+    expect(bridge.pendingSequences()).toEqual([]);
+    expect(onSourceResync).not.toHaveBeenCalled();
+    expect(socket.readyState).toBe(1);
+  });
+
   it("releases an acknowledged KSPORT producer when the bridge is closed", async () => {
     const socket = new FakeSocket();
     const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key" });
@@ -756,7 +996,7 @@ describe("LocalBridge", () => {
     await pending;
   });
 
-  it("retires an overflowing quote generation without blocking producers", async () => {
+  it("releases an overflowing ordinary producer when the bridge is closed", async () => {
     const socket = new FakeSocket();
     const onSourceResync = vi.fn();
     const bridge = new LocalBridge({
@@ -766,11 +1006,15 @@ describe("LocalBridge", () => {
     socket.open();
 
     await bridge.enqueue(envelope(0, "x".repeat(200)));
-    await expect(bridge.enqueue(envelope(1, "y".repeat(200)))).resolves.toBeUndefined();
+    let settled = false;
+    const pending = bridge.enqueue(envelope(1, "y".repeat(200))).then(() => { settled = true; });
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+    expect(settled).toBe(false);
 
-    expect(bridge.pendingSequences()).toEqual([]);
+    bridge.close();
+    await pending;
     expect(bridge.queueBytes).toBeLessThanOrEqual(700);
-    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+    expect(onSourceResync).not.toHaveBeenCalled();
   });
 });
 

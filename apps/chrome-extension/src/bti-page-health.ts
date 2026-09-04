@@ -44,6 +44,17 @@ export function btiHardRecoveryAction(health: BtiPageHealthProbe | null): "REFRE
   return health?.status === "AUTH_ERROR" && health.code === "1008" ? "RENEW" : "REFRESH";
 }
 
+export type BtiSourceControlCommand = "RELOAD" | "RESTORE" | "ENSURE";
+export type BtiSourceControlAction = "REFRESH_CURRENT" | "RENEW_CURRENT" |
+  "RESTORE_DOCUMENT" | "ENSURE_LAUNCH";
+
+export function btiSourceControlAction(command: BtiSourceControlCommand,
+  health: BtiPageHealthProbe | null): BtiSourceControlAction {
+  if (command === "RESTORE") return "RESTORE_DOCUMENT";
+  if (command === "ENSURE") return "ENSURE_LAUNCH";
+  return btiHardRecoveryAction(health) === "RENEW" ? "RENEW_CURRENT" : "REFRESH_CURRENT";
+}
+
 function parseRosterCoverage(value: unknown): string | null {
   if (value === undefined) return null;
   if (typeof value !== "string" || value.length === 0 || value.length > 400) return null;

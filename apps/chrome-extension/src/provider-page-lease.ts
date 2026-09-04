@@ -262,6 +262,13 @@ export async function renewExactProviderTab(
     throw new Error("PROVIDER_SOURCE_REPLACED");
   }
   options.beginSourceEpoch(source.sourceId);
+  // Navigation can create the provider's catalog socket and issue its one
+  // complete roster request before tabs.onUpdated reports `complete`. Arm CDP
+  // against the owned tab first, then confirm the redirected document again
+  // below. Attaching only after waitForReady permanently missed those first
+  // frames and left APSPORT with orphan deltas but no authoritative baseline.
+  await options.attachBootstrap({ ...current, url: renewalUrl }, source.lobby);
+  if (!options.isAttached(source)) throw new Error("PROVIDER_SOURCE_REPLACED");
   await options.update(source.tabId, renewalUrl);
   const ready = await options.waitForReady(source.tabId, source.lobby);
   if (ready.id !== source.tabId || typeof ready.url !== "string" ||

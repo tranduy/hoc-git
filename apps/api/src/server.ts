@@ -586,6 +586,8 @@ export async function startServer(env: Readonly<Record<string, string | undefine
           minAcquiredAtMs: 0,
           providers: [provider],
           restoreCmd: false,
+          refreshLaunches: () => sessionServices.refreshFabetLaunches(),
+          maxLaunchAttempts: 2,
           beforeDelivery
         }),
       waitForFreshBaseline: providerFeeds.waitForFreshBaseline.bind(providerFeeds)

@@ -24,7 +24,7 @@ function recoveryCommand(_tabId: number, method: string, params?: Record<string,
 }
 
 describe("SABA light snapshot recovery", () => {
-  it("persists a completed socket baseline and replays it after extension worker restart without tab mutation", async () => {
+  it("persists a completed socket baseline but requests fresh evidence after a worker restart", async () => {
     let stored: unknown = null;
     const markerCommand = vi.fn(recoveryCommand);
     const first = new NetworkObserver({ sendCommand: markerCommand,
@@ -47,11 +47,7 @@ describe("SABA light snapshot recovery", () => {
     expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
       params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toBe(true);
     expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
-    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
-      lobby: "SABA", sourceId: source.sourceId, tabId: source.tabId, transport: "WS_FRAME",
-      request: expect.objectContaining({ replayed: true }),
-      payload: expect.objectContaining({ body: baseline })
-    }));
+    expect(forward.mock.calls.some(([envelope]) => envelope.transport === "WS_FRAME")).toBe(false);
     expect(forward.mock.calls.filter(([envelope]) => envelope.transport === "DOM_SNAPSHOT")).toHaveLength(2);
   });
 
@@ -87,7 +83,7 @@ describe("SABA light snapshot recovery", () => {
       method !== "Network.emulateNetworkConditions")).toBe(true);
   });
 
-  it("keeps the durable baseline across a worker reattach context-clear and reloads it only for the same document", async () => {
+  it("never reloads durable baseline bytes after a worker reattach context clear", async () => {
     const stored = {
       version: 1 as const, sourceId: source.sourceId, documentMarker: "1787250000000.5",
       partitions: [{ partition: "1:b1", frames: [{
@@ -96,15 +92,17 @@ describe("SABA light snapshot recovery", () => {
       }] }]
     };
     const clear = vi.fn(async (_sourceId: string) => undefined);
+    const load = vi.fn(async () => stored);
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const sendCommand = vi.fn(recoveryCommand);
     const observer = new NetworkObserver({ sendCommand, forward,
-      loadSabaWsSnapshots: async () => stored, clearSabaWsSnapshots: clear });
+      loadSabaWsSnapshots: load, clearSabaWsSnapshots: clear });
 
     await observer.handleEvent(source, "Runtime.executionContextsCleared", {});
     await observer.refreshCatalog(source);
 
-    expect(clear).toHaveBeenCalledWith(source.sourceId);
+    expect(load).toHaveBeenCalledWith(source.sourceId);
+    expect(clear).not.toHaveBeenCalled();
     expect(forward.mock.calls.some(([envelope]) => envelope.transport === "WS_FRAME")).toBe(false);
     expect(forward.mock.calls.filter(([envelope]) => envelope.transport === "DOM_SNAPSHOT")).toHaveLength(2);
   });

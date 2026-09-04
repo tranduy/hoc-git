@@ -356,7 +356,10 @@ export async function collectApsportCatalog(options: CollectApsportCatalogOption
 }
 
 function assertRosterResponse(response: ApsportCatalogPageResponse): void {
-  if (response.status !== 200 || !Array.isArray(response.data)) {
-    throw new Error("APSPORT_ROSTER_REQUEST_FAILED");
-  }
+  // Status and top-level shape are safe protocol diagnostics. Keeping them in
+  // the bounded work-health code distinguishes an expired page context (0),
+  // provider throttling/auth (4xx), upstream failure (5xx), and schema drift
+  // without retaining response bodies or credentials.
+  if (response.status !== 200) throw new Error(`APSPORT_ROSTER_HTTP_${String(response.status)}`);
+  if (!Array.isArray(response.data)) throw new Error("APSPORT_ROSTER_DATA_SHAPE");
 }

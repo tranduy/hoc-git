@@ -32,6 +32,16 @@ function isSabaEngineIoHeartbeat(body: string): boolean {
   return body === "2" || body === "3";
 }
 
+function sabaDecodeFaultLabel(message: string): string {
+  const raw = message === "SABA_PUSH_FRAME_INVALID" ? "frame-invalid"
+    : message.startsWith("SABA_PUSH_SCHEMA_CHANGED:")
+      ? message.slice("SABA_PUSH_SCHEMA_CHANGED:".length)
+      : message === "SABA_PUSH_SCHEMA_CHANGED" ? "invalid" : "unknown";
+  // Decoder errors contain protocol field/type names only. Keep the label
+  // path-safe and bounded before it enters aggregate telemetry.
+  return raw.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-|-$/gu, "").slice(0, 64) || "unknown";
+}
+
 function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
   return envelope.sourceEpoch ?? "legacy";
 }
@@ -218,10 +228,11 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         timezoneOffsetMinutes: 480, sequence: envelope.sequence
       });
       const establishesDomAuthority = !socketReady && this.#domReadySources.has(envelope.sourceId);
+      const socketGeneration = this.#authoritativeGenerations.get(sourceEpochKey(envelope));
       return this.#update(envelope, "DOM", normalized, establishesDomAuthority
         ? { authoritativeBaseline: true, evidenceMode: "BASELINE",
             generation: `${sourceEpoch(envelope)}:dom:${envelope.sequence}`, provenance: "DOM_FALLBACK" }
-        : { evidenceMode: "DELTA", generation: `${sourceEpoch(envelope)}:dom:${envelope.sequence}`,
+        : { evidenceMode: "DELTA", generation: socketGeneration ?? `${sourceEpoch(envelope)}:dom:${envelope.sequence}`,
             provenance: "DOM_FALLBACK" });
     }
     const streamId = envelope.request.streamId!;
@@ -455,6 +466,7 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         authoritative && applied.records.length === 0);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "";
+      const faultLabel = sabaDecodeFaultLabel(errorMessage);
       const sequenceGap = errorMessage.includes("SABA_PUSH_SCHEMA_CHANGED:SEQUENCE_GAP");
       const schemaFault = errorMessage.startsWith("SABA_PUSH_SCHEMA_CHANGED") ||
         errorMessage === "SABA_PUSH_FRAME_INVALID";
@@ -489,10 +501,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const heldSinceMs = this.#faultHeldSinceMs.get(epochKey);
       if (heldSinceMs === undefined) {
         this.#faultHeldSinceMs.set(epochKey, envelope.observedAtMs);
-        return this.#ignore("decode-fault-held-behind-watermark");
+        return this.#ignore(`decode-fault-held-${faultLabel}`);
       }
       if (envelope.observedAtMs - heldSinceMs < FAULT_HOLD_MS) {
-        return this.#ignore("decode-fault-held-behind-watermark");
+        return this.#ignore(`decode-fault-held-${faultLabel}`);
       }
       // Re-arm rather than reporting one gap per frame, so a recovery that does
       // not land keeps asking on the same bounded window.

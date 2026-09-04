@@ -12,6 +12,11 @@ type ComparableAuthoritativeOrder = readonly [major: number, minor: number];
 // new day's card arrives at a comparable size, so a baseline keeping less than
 // this share of a populated catalog is refused and the last good one is kept.
 const MIN_RETAINED_BASELINE_SHARE = 0.5;
+// APSPORT's all-future roster is large and a transient detail/context failure
+// has repeatedly returned a superficially valid but incomplete generation
+// (measured live: 638 -> 558 events, 3,719 -> 2,762 markets). Normal fixture
+// attrition is much smaller between its one-minute generations.
+const APSPORT_MIN_RETAINED_BASELINE_SHARE = 0.9;
 const COVERAGE_COLLAPSE_FLOOR = 20;
 const MAX_COMPARABLE_AUTHORITATIVE_LINEAGES = 32;
 const MAX_OPAQUE_AUTHORITATIVE_GENERATIONS = 256;
@@ -27,10 +32,13 @@ export interface CatalogCoverageCheckpoint {
   readonly states: ReadonlyMap<string, CoverageState>;
 }
 
-function collapsesCoverage(current: CoverageState, candidate: CatalogCoverageCandidate): boolean {
+function collapsesCoverage(sourceKey: string, current: CoverageState,
+  candidate: CatalogCoverageCandidate): boolean {
   const accepted = current.acceptedEventIds.size;
   if (accepted < COVERAGE_COLLAPSE_FLOOR) return false;
-  return candidate.providerEventIds.length < accepted * MIN_RETAINED_BASELINE_SHARE;
+  const retainedShare = sourceKey === "catalog-source:APSPORT:FOOTBALL"
+    ? APSPORT_MIN_RETAINED_BASELINE_SHARE : MIN_RETAINED_BASELINE_SHARE;
+  return candidate.providerEventIds.length < accepted * retainedShare;
 }
 
 export class CatalogCoverageGuard {
@@ -47,7 +55,7 @@ export class CatalogCoverageGuard {
     if (current === undefined) return true;
     if (candidate.authoritativeBaseline) {
       return allowsAuthoritativeGeneration(current, candidate.generation) &&
-        !collapsesCoverage(current, candidate);
+        !collapsesCoverage(sourceKey, current, candidate);
     }
     const proposed = new Set(candidate.providerEventIds);
     return [...current.acceptedEventIds].every((eventId) => proposed.has(eventId));

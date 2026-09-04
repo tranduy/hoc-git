@@ -47,13 +47,17 @@ const IM_MAX_BASELINE_AGE_MS = 90_000;
 const BTI_EXPECTED_EVIDENCE_CADENCE_MS = 45_000;
 // Measured 2026-08-25: BTI baseline age is 2 × its effective 45 s evidence cadence policy.
 const BTI_MAX_BASELINE_AGE_MS = 90_000;
-// Measured SABA evidence p95 reaches 69.6 s. Its Socket.IO feed sends one complete
-// bootstrap baseline followed by continuous deltas, so the baseline lease must
-// cover the 30-minute soak while evidence recovery remains bounded above p95.
-const SABA_EXPECTED_EVIDENCE_CADENCE_MS = 75_000;
+// SABA currently falls back to a complete hidden-DOM sweep when Chrome attaches
+// after its Socket.IO creation event. Measured live after full hidden-market
+// expansion, the complete authoritative cadence reached p95=122.54 s. A 30 s
+// lease made the UI discard a valid 190+ event catalog for most of every sweep
+// and then escalated into restoration that cancelled the next sweep. Keep a
+// bounded 27.46 s margin above the measured p95; transport recovery still runs
+// independently inside the extension every 20 s.
+const SABA_EXPECTED_EVIDENCE_CADENCE_MS = 150_000;
 const SABA_MAX_BASELINE_AGE_MS = 3_600_000;
-const SABA_SOFT_RECOVERY_AFTER_MS = 90_000;
-const SABA_HARD_RECOVERY_AFTER_MS = 180_000;
+const SABA_SOFT_RECOVERY_AFTER_MS = SABA_EXPECTED_EVIDENCE_CADENCE_MS;
+const SABA_HARD_RECOVERY_AFTER_MS = 2 * SABA_EXPECTED_EVIDENCE_CADENCE_MS;
 // APSPORT renews its authenticated API generation once per minute. A measured
 // roster request can take about eight seconds before the replacement baseline
 // lands, so the accepted evidence/freshness budget includes a 30-second grace.
@@ -82,12 +86,18 @@ export const providerFeedPolicies = new Map<string, ProviderFeedPolicy>([
     REALTIME_CONTRACT_MS, 60_000, ["WS", "AUTHENTICATED_HTTP"])],
   ["catalog-source:IM:FOOTBALL", policy(REALTIME_CONTRACT_MS, IM_MAX_BASELINE_AGE_MS,
     REALTIME_CONTRACT_MS, 60_000, ["WS", "AUTHENTICATED_HTTP"])],
-  ["catalog-source:SABA:FOOTBALL", policy(REALTIME_CONTRACT_MS, SABA_MAX_BASELINE_AGE_MS,
+  ["catalog-source:SABA:FOOTBALL", {
+    ...policy(SABA_EXPECTED_EVIDENCE_CADENCE_MS, SABA_MAX_BASELINE_AGE_MS,
     // Measured 2026-08-26: removing DOM_FALLBACK here is correct per spec 4 but
     // regressed SABA from 90 quote changes/60s to 0, because its socket adapter
     // currently decodes only 16 of 745 frames. DOM stays authoritative until
     // that decoder covers the feed; the fault is in the adapter, not the policy.
-    REALTIME_CONTRACT_MS, SABA_HARD_RECOVERY_AFTER_MS, ["WS", "DOM_FALLBACK"])],
+      SABA_SOFT_RECOVERY_AFTER_MS, SABA_HARD_RECOVERY_AFTER_MS, ["WS", "DOM_FALLBACK"]),
+    // DOM fallback quote changes arrive with the same complete sweep. Applying
+    // the generic 60 s semantic timer to this lane would still demote it halfway
+    // through a normal healthy generation even after the evidence lease above.
+    maxSemanticSilenceMs: SABA_EXPECTED_EVIDENCE_CADENCE_MS
+  }],
   // SBOBET's hard stage reloads the tab, and its STOMP/SockJS page must reload,
   // re-authenticate and re-subscribe before any baseline can land. A 30 s hard
   // window fired again before that finished, which is why sourceGeneration

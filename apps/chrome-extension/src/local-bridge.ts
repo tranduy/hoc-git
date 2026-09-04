@@ -182,12 +182,13 @@ export class LocalBridge {
     if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch ?? null)) return;
     const closeOrdinal = this.#closeOrdinal;
     const serialized = JSON.stringify(envelope);
-    const acknowledgedBackpressure = (envelope.lobby === "KSPORT" && envelope.transport === "HTTP_RESPONSE"
+    const waitsForIndividualAcknowledgement = (envelope.lobby === "KSPORT" &&
+      envelope.transport === "HTTP_RESPONSE"
       && "providerContentIntent" in envelope.request
       && envelope.request.providerContentIntent === "FOOTBALL_FULL_CATALOG") ||
       isBtiAuthFailureEnvelope(envelope);
     let settleAcknowledgement: (() => void) | null = null;
-    const acknowledgement = acknowledgedBackpressure
+    const acknowledgement = waitsForIndividualAcknowledgement
       ? new Promise<void>((resolve) => { settleAcknowledgement = resolve; })
       : null;
     const entry: QueueEntry = {
@@ -200,17 +201,16 @@ export class LocalBridge {
       sentGeneration: null
     };
     if (entry.bytes > this.#maxQueueBytes) throw new Error("BRIDGE_QUEUE_ITEM_TOO_LARGE");
-    while (this.queueBytes + entry.bytes > this.#maxQueueBytes && acknowledgedBackpressure) {
+    // Every envelope consumes a source sequence ordinal. Dropping ordinary
+    // socket/DOM traffic when the bounded queue fills creates an artificial
+    // gap, and resyncing that source under the same load repeats forever.
+    // Backpressure all producers at the byte boundary; #emit already has one
+    // serialized lane per source, so this remains bounded without allowing a
+    // busy provider to accumulate unbounded pending work in the bridge.
+    while (this.queueBytes + entry.bytes > this.#maxQueueBytes) {
       await new Promise<void>((resolve) => this.#queueSpaceWaiters.add(resolve));
       if (this.#closeOrdinal !== closeOrdinal) return;
       if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch ?? null)) return;
-    }
-    if (this.queueBytes + entry.bytes > this.#maxQueueBytes) {
-      // Every envelope is sequenced, including diagnostics. Dropping any one
-      // would manufacture continuity across a hole, so retire the incoming
-      // provider atomically. Another provider is never an eviction candidate.
-      this.#requestSourceResync(envelope.sourceId, envelope.sourceEpoch ?? null);
-      return;
     }
     this.#queue.push(entry);
     this.#queueBytes += entry.bytes;
@@ -534,8 +534,12 @@ export class LocalBridge {
     // the resync, while unrelated providers retain independent lanes.
     this.#recoveryScheduler.clear(sourceId);
     void this.#recoveryScheduler.run(sourceId, async () => {
-      try { await this.#onSourceResync(sourceId); }
-      finally { this.#reconnectAfterResync(sourceId); }
+      // Recovery may finish without emitting data immediately: the next
+      // provider heartbeat will carry the replacement public epoch. Keep the
+      // shared loopback socket open while waiting for it. Closing this socket
+      // to repair one source also releases every healthy provider from the API
+      // registry and was the cause of the all-source presence churn.
+      await this.#onSourceResync(sourceId);
     }).catch(() => undefined);
   }
 
@@ -561,19 +565,6 @@ export class LocalBridge {
     }
     existing.active = sourceEpoch;
     return true;
-  }
-
-  #reconnectAfterResync(sourceId: string): void {
-    // The replacement epoch may already have published sequence zero on this
-    // socket while the snapshot operation was finishing. Closing it now makes
-    // the API forget that acknowledgement; the reconnect then starts with a
-    // later queued sequence, gets another SEQUENCE_GAP, and loops forever.
-    // Reconnect only when recovery produced no replacement envelope at all.
-    if (this.#sourceEpochs.get(sourceId)?.resyncing === false) return;
-    const socket = this.#socket;
-    this.#socket = null;
-    socket?.close();
-    this.connect();
   }
 
 }

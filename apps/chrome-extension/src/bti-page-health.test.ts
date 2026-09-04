@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BtiPageRecoveryWatchdog, btiHardRecoveryAction,
+import { BtiPageRecoveryWatchdog, btiHardRecoveryAction, btiSourceControlAction,
   parseBtiPageHealthProbe } from "./bti-page-health.js";
 
 const failedPage = {
@@ -33,6 +33,14 @@ describe("BTI page health", () => {
     expect(btiHardRecoveryAction({ status: "HEALTHY", code: null })).toBe("REFRESH");
     expect(btiHardRecoveryAction({ status: "UNKNOWN", code: null })).toBe("REFRESH");
     expect(btiHardRecoveryAction({ status: "AUTH_ERROR", code: "1008" })).toBe("RENEW");
+  });
+
+  it("does not turn restore and fresh-launch escalation back into another in-page refresh", () => {
+    const healthy = { status: "HEALTHY", code: null } as const;
+    expect(btiSourceControlAction("RELOAD", healthy)).toBe("REFRESH_CURRENT");
+    expect(btiSourceControlAction("RELOAD", failedPage)).toBe("RENEW_CURRENT");
+    expect(btiSourceControlAction("RESTORE", healthy)).toBe("RESTORE_DOCUMENT");
+    expect(btiSourceControlAction("ENSURE", healthy)).toBe("ENSURE_LAUNCH");
   });
 
   it("reloads the exact failed tab immediately and rate-limits repeated samples", async () => {

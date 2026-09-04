@@ -334,6 +334,27 @@ export class AutomaticSourceRecovery {
         }
       }
       if (source.provider === "SABA" && this.#options.browserRefreshEnabled === false) {
+        // A reachable SABA document can rebuild the complete DOM fallback and
+        // request its Today/socket baseline without navigation. Restoring the
+        // tab first retires the current epoch and cancels that very sweep; on
+        // a DOM-authoritative source this formed a permanent restore loop.
+        // Give the non-destructive path the same settling window as a page
+        // reload, then use restore only when no post-request baseline arrives.
+        let inPlaceConfirmation: RecoveryResult | null = null;
+        if (current.sourceId !== null) {
+          const snapshotStartedAtMs = this.#now();
+          let requested = 0;
+          try { requested = this.#options.controlPlane.requestLobbySnapshot("SABA"); }
+          catch { /* an unavailable current lane may still be restored below */ }
+          if (requested > 0) {
+            inPlaceConfirmation = await this.#confirmAfter(request.accountId, "HARD",
+              snapshotStartedAtMs, this.#reloadBaselineTimeoutMs);
+            if (inPlaceConfirmation.outcome === "RECOVERED" ||
+              inPlaceConfirmation.reason !== "BASELINE_TIMEOUT") return inPlaceConfirmation;
+            if (this.#disposed) return stopped(request.accountId, "HARD");
+            if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+          }
+        }
         const restoreStartedAtMs = this.#now();
         const lastRestoreAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
         if (restoreStartedAtMs - lastRestoreAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS) {
@@ -349,8 +370,10 @@ export class AutomaticSourceRecovery {
             }
             if (this.#disposed) return stopped(request.accountId, "HARD");
             if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+            return confirmation;
           }
         }
+        if (inPlaceConfirmation !== null) return inPlaceConfirmation;
       }
       let delivered: number;
       let confirmationAfterMs = request.requestedAtMs;

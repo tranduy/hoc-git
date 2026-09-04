@@ -269,7 +269,7 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.ensureLobby).not.toHaveBeenCalled();
   });
 
-  it("never reloads a one-time SABA launch when browser refresh is disabled", async () => {
+  it("refreshes a reachable one-time SABA launch in place before any destructive restore", async () => {
     const context = setup(() => 2_000, false);
     context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
       sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
@@ -283,7 +283,8 @@ describe("AutomaticSourceRecovery", () => {
     });
     expect(context.reloadSource).not.toHaveBeenCalled();
     expect(context.reloadRecoverySource).not.toHaveBeenCalled();
-    expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("SABA");
+    expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("SABA");
+    expect(context.restoreLobby).not.toHaveBeenCalled();
   });
 
   it("restores a missing BTI source directly when browser refresh is disabled", async () => {
@@ -329,10 +330,12 @@ describe("AutomaticSourceRecovery", () => {
 
     await context.recovery.recover(request(SABA, "HARD"));
     expect(context.restoreLobby).toHaveBeenCalledTimes(1);
+    expect(context.requestLobbySnapshot).toHaveBeenCalledTimes(1);
 
     clock += 60_000;
     await context.recovery.recover(request(SABA, "HARD"));
     expect(context.restoreLobby).toHaveBeenCalledTimes(1);
+    expect(context.requestLobbySnapshot).toHaveBeenCalledTimes(2);
   });
 
   it("restores SABA through the visible portal when every bridge source is gone", async () => {

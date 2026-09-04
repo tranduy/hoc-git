@@ -95,10 +95,29 @@ export class SabaPushDecoder {
 
   apply(frame: SabaPushFrame): SabaPushApplyResult {
     if (!/^b\d+$/u.test(frame.bridgeId) || (frame.revision !== null && frame.revision.length === 0) ||
-      !Array.isArray(frame.rows)) protocolError();
+      !Array.isArray(frame.rows)) protocolError("FRAME_INVALID");
     const announcedChannel = frame.rows.find((row) => Array.isArray(row) && row[0] === "c" &&
       typeof row[1] === "string")?.[1] as string | undefined;
-    const providerChannel = announcedChannel ?? this.#bridgeChannels.get(frame.bridgeId) ?? frame.bridgeId;
+    const mappedChannel = this.#bridgeChannels.get(frame.bridgeId);
+    // Live SABA rotates bridge ids independently from its logical catalog
+    // channel and sometimes omits the repeated `c` row on the replacement.
+    // Inherit only when exactly one previously verified table has catalog
+    // identity columns. Configuration/account tables therefore cannot be
+    // mistaken for football, while two plausible catalog tables stay
+    // intentionally ambiguous and fail closed below.
+    const catalogFieldTables = announcedChannel === undefined && mappedChannel === undefined
+      ? [...this.#fieldTables].filter(([, table]) => table.includes("type") &&
+          table.some((name) => name === "matchid" || name === "oddsid" || name === "leagueid"))
+      : [];
+    const catalogFieldTableShapes = new Map<string, string>();
+    for (const [channel, table] of catalogFieldTables) {
+      const shape = JSON.stringify(table);
+      if (!catalogFieldTableShapes.has(shape)) catalogFieldTableShapes.set(shape, channel);
+    }
+    const inferredChannel = catalogFieldTableShapes.size === 1
+      ? catalogFieldTableShapes.values().next().value as string : undefined;
+    const providerChannel = announcedChannel ?? mappedChannel ?? inferredChannel ?? frame.bridgeId;
+    const bindsProviderChannel = announcedChannel !== undefined || inferredChannel !== undefined;
     const knownBridgeIds = new Set([...this.#channels.keys(), ...this.#bridgeChannels.keys()]);
     if (!knownBridgeIds.has(frame.bridgeId) && knownBridgeIds.size >= MAX_BRIDGE_IDS) {
       protocolError("BOUND_EXCEEDED");
@@ -108,21 +127,23 @@ export class SabaPushDecoder {
       protocolError("BOUND_EXCEEDED");
     }
     for (const rawRow of frame.rows) {
-      if (!Array.isArray(rawRow) || rawRow.length === 0) protocolError();
+      if (!Array.isArray(rawRow) || rawRow.length === 0) protocolError("ROW_INVALID");
       if (rawRow[0] === "c") continue;
       if (rawRow[0] === "f") {
         const offset = rawRow[1];
         const names = rawRow[2];
-        if (!Number.isSafeInteger(offset) || (offset as number) < 0 || !Array.isArray(names)) protocolError();
+        if (!Number.isSafeInteger(offset) || (offset as number) < 0 || !Array.isArray(names)) {
+          protocolError("FIELD_TABLE_INVALID");
+        }
         if ((offset as number) > MAX_FIELD_COLUMNS || names.length > MAX_FIELD_COLUMNS - (offset as number)) {
           protocolError("BOUND_EXCEEDED");
         }
         continue;
       }
-      if (rawRow.length % 2 !== 0) protocolError();
+      if (rawRow.length % 2 !== 0) protocolError("ROW_WIDTH_ODD");
       for (let index = 0; index < rawRow.length; index += 2) {
         const fieldIndex = rawRow[index];
-        if (!Number.isSafeInteger(fieldIndex)) protocolError();
+        if (!Number.isSafeInteger(fieldIndex)) protocolError("FIELD_INDEX_INVALID");
         if ((fieldIndex as number) < 0 || (fieldIndex as number) >= MAX_FIELD_COLUMNS) {
           protocolError("BOUND_EXCEEDED");
         }
@@ -132,7 +153,7 @@ export class SabaPushDecoder {
       fields: this.#fieldTables.get(providerChannel) ?? [], records: new Map(), lastRevision: null, pending: null
     };
     if (current.pending === null && frame.revision !== null && frame.revision === current.lastRevision) {
-      if (announcedChannel !== undefined) this.#bridgeChannels.set(frame.bridgeId, announcedChannel);
+      if (bindsProviderChannel) this.#bridgeChannels.set(frame.bridgeId, providerChannel);
       return {
         bridgeId: frame.bridgeId,
         revision: frame.revision,
@@ -151,27 +172,34 @@ export class SabaPushDecoder {
     let sawDone = false;
 
     for (const rawRow of frame.rows) {
-      if (!Array.isArray(rawRow) || rawRow.length === 0) protocolError();
+      if (!Array.isArray(rawRow) || rawRow.length === 0) protocolError("ROW_INVALID");
       if (rawRow[0] === "c") continue;
       if (rawRow[0] === "f") {
         const offset = rawRow[1];
         const names = rawRow[2];
-        if (!Number.isSafeInteger(offset) || (offset as number) < 0 || !Array.isArray(names)) protocolError();
+        if (!Number.isSafeInteger(offset) || (offset as number) < 0 || !Array.isArray(names)) {
+          protocolError("FIELD_TABLE_INVALID");
+        }
         names.forEach((rawName, index) => {
           let name = rawName;
           if (typeof name === "number") name = fields[name - (offset as number) - index];
-          if (typeof name !== "string" || name.length === 0) protocolError();
+          if (typeof name !== "string" || name.length === 0) protocolError("FIELD_NAME_INVALID");
           fields[(offset as number) + index] = name;
         });
         continue;
       }
-      if (rawRow.length % 2 !== 0) protocolError();
+      if (rawRow.length % 2 !== 0) protocolError("ROW_WIDTH_ODD");
       const decoded: Record<string, unknown> = {};
       for (let index = 0; index < rawRow.length; index += 2) {
         const fieldIndex = rawRow[index];
-        if (!Number.isSafeInteger(fieldIndex)) protocolError();
+        if (!Number.isSafeInteger(fieldIndex)) protocolError("FIELD_INDEX_INVALID");
         const name = fields[fieldIndex as number];
-        if (name === undefined) protocolError();
+        if (name === undefined) {
+          const definedFields = fields.reduce((count, field) => count + (field === undefined ? 0 : 1), 0);
+          protocolError(`FIELD_INDEX_UNMAPPED:I${String(fieldIndex)}:F${fields.length}:D${definedFields}:` +
+            `C${catalogFieldTableShapes.size}:A${announcedChannel === undefined ? 0 : 1}:` +
+            `M${mappedChannel === undefined ? 0 : 1}`);
+        }
         decoded[name] = rawRow[index + 1];
       }
       const action = decoded.type;
@@ -208,7 +236,7 @@ export class SabaPushDecoder {
     const snapshotOpen = current.pending !== null || sawReset;
     if (snapshotOpen && !sawDone) {
       const pending: PendingSnapshot = { fields, records, changes, lastRevision: frame.revision };
-      if (announcedChannel !== undefined) this.#bridgeChannels.set(frame.bridgeId, announcedChannel);
+      if (bindsProviderChannel) this.#bridgeChannels.set(frame.bridgeId, providerChannel);
       if (fields.length > 0) this.#fieldTables.set(providerChannel, [...fields]);
       this.#channels.set(frame.bridgeId, { ...current, pending });
       return {
@@ -226,7 +254,7 @@ export class SabaPushDecoder {
     }
     const committedRevision = frame.revision ?? current.pending?.lastRevision ?? null;
     const next: ChannelState = { fields, records, lastRevision: committedRevision, pending: null };
-    if (announcedChannel !== undefined) this.#bridgeChannels.set(frame.bridgeId, announcedChannel);
+    if (bindsProviderChannel) this.#bridgeChannels.set(frame.bridgeId, providerChannel);
     if (fields.length > 0) this.#fieldTables.set(providerChannel, [...fields]);
     this.#channels.set(frame.bridgeId, next);
     return {

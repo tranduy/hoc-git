@@ -43,7 +43,7 @@ describe("provider page renewal URL policy", () => {
 });
 
 describe("exact provider tab renewal", () => {
-  it("navigates the exact tab and reattaches only after its provider redirect is ready", async () => {
+  it("rearms the observer before navigating the exact tab and confirms it after the redirect", async () => {
     const { renewExactProviderTab } = await import("./provider-page-lease.js");
     const source = { lobby: "TSPORT" as const, sourceId: "chrome:TSPORT:7", tabId: 7 };
     const calls: string[] = [];
@@ -68,6 +68,7 @@ describe("exact provider tab renewal", () => {
 
     expect(calls).toEqual([
       "epoch:chrome:TSPORT:7",
+      "attach:TSPORT:7",
       "update:7:https://pacific.agenate.com/?agentId=4&lng=vi&t=9000&sportType=1_1&sportId=1&periodId=2",
       "ready:TSPORT:7",
       "attach:TSPORT:7"
@@ -79,12 +80,13 @@ describe("exact provider tab renewal", () => {
     const { renewExactProviderTab } = await import("./provider-page-lease.js");
     const source = { lobby: "IM" as const, sourceId: "chrome:IM:7", tabId: 7 };
     let attached = true;
+    let attachCalls = 0;
     const update = vi.fn(async () => ({ id: 7, url: "https://imsports.directsb.net/?languageCode=vi" }));
 
     await expect(renewExactProviderTab(source, {
       isAttached: () => attached,
       get: async () => ({ id: 7, url: "https://imsports.directsb.net/" }),
-      attachBootstrap: async () => { attached = false; },
+      attachBootstrap: async () => { if (++attachCalls === 2) attached = false; },
       beginSourceEpoch: vi.fn(),
       update,
       waitForReady: async () => ({ id: 7, url: "https://imsports.directsb.net/?languageCode=vi" })

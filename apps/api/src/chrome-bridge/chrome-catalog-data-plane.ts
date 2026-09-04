@@ -357,6 +357,27 @@ export class ChromeCatalogDataPlane {
       // for every service-worker or loopback reconnect.
       return this.#reject(envelope, "BTI_REPLACEMENT_COVERAGE_INCOMPLETE");
     }
+    if (envelope.lobby === "TSPORT" && admission.disposition === "CANDIDATE" &&
+      currentCatalog !== undefined && !retainsApsportReplacementCoverage(currentCatalog, nextCatalog)) {
+      // The all-future APSPORT roster can briefly lose a sizeable partition
+      // when its page context or detail hydration fails. A fresh bridge/source
+      // epoch owns a fresh lane-local coverage guard, so compare it with the
+      // catalog that is actually being served before allowing promotion.
+      this.#resetRejectedCandidatePipeline(identity, admission.token, pipeline);
+      return this.#reject(envelope, "APSPORT_REPLACEMENT_COVERAGE_INCOMPLETE");
+    }
+    if (envelope.lobby === "SABA" && admission.disposition === "CANDIDATE" &&
+      provenance === "WS" && this.#catalogBases.get(nextCatalog.accountId) === "DOM_FALLBACK" &&
+      currentCatalog !== undefined && !retainsSabaReplacementCoverage(currentCatalog, nextCatalog)) {
+      // SABA's socket baseline can contain only the small live partition while
+      // the completed DOM sweep also carries the full pre-match card. A source
+      // epoch rotation creates a fresh lane-local coverage guard, so without a
+      // cross-authority check that 15-event socket baseline can replace a
+      // 190-event catalog. Keep the old authority until the new epoch's DOM
+      // sweep proves comparable coverage; that sweep remains eligible below.
+      this.#resetRejectedCandidatePipeline(identity, admission.token, pipeline);
+      return this.#reject(envelope, "SABA_REPLACEMENT_COVERAGE_INCOMPLETE");
+    }
     const explicitDomSweep = envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
       update.completeSweepEvidence === true;
     if (!explicitDomSweep && !pipeline.coverage.allows(nextCatalog.accountId, coverage)) {
@@ -473,6 +494,16 @@ export class ChromeCatalogDataPlane {
     const pipeline = createDecodePipeline(this.#networkBodyBudget, laneToken);
     this.#candidatePipelines.set(identity.accountId, { identity, token, pipeline });
     return pipeline;
+  }
+
+  #resetRejectedCandidatePipeline(identity: AuthorityIdentity, token: AuthorityCandidateToken,
+    pipeline: DecodePipeline): void {
+    const current = this.#candidatePipelines.get(identity.accountId);
+    if (current === undefined || current.token !== token || current.pipeline !== pipeline ||
+      !sameAuthorityIdentity(current.identity, identity)) return;
+    pipeline.networkBodies.dispose();
+    this.#candidatePipelines.set(identity.accountId, { identity, token,
+      pipeline: createDecodePipeline(this.#networkBodyBudget, pipeline.laneToken) });
   }
 
   #promoteCandidate(identity: AuthorityIdentity, token: AuthorityCandidateToken,
@@ -674,6 +705,18 @@ function retainsBtiReplacementCoverage(current: ObservedProviderCatalog,
   const retained = current.events.reduce((count, event) =>
     count + (candidateIds.has(event.providerEventId) ? 1 : 0), 0);
   return retained >= Math.ceil(current.events.length * 0.95);
+}
+
+function retainsSabaReplacementCoverage(current: ObservedProviderCatalog,
+  candidate: ObservedProviderCatalog): boolean {
+  if (current.events.length < 20) return true;
+  return candidate.events.length >= Math.ceil(current.events.length * 0.5);
+}
+
+function retainsApsportReplacementCoverage(current: ObservedProviderCatalog,
+  candidate: ObservedProviderCatalog): boolean {
+  if (current.events.length < 20) return true;
+  return candidate.events.length >= Math.ceil(current.events.length * 0.9);
 }
 
 function sameAuthorityObservation(left: AuthorityObservation, right: AuthorityObservation): boolean {

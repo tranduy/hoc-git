@@ -472,7 +472,8 @@ export class SessionManager {
     if (manualOverride !== undefined) return consume(manualOverride.secret.value);
     const candidates = records.filter((record) =>
       record.source === "FABET_LOGIN" && record.provider === provider && record.category === category &&
-      record.secret.kind === "LAUNCH_URL" && record.acquiredAtMs !== null &&
+      record.secret.kind === "LAUNCH_URL" && record.renewAfterMs !== null &&
+      this.#clock.nowMs() < record.renewAfterMs && record.acquiredAtMs !== null &&
       record.acquiredAtMs >= minAcquiredAtMs)
       .sort((left, right) => (right.acquiredAtMs ?? -1) - (left.acquiredAtMs ?? -1));
     const latest = candidates[0];

@@ -22,13 +22,14 @@ import { SourceLaunchMemory } from "./source-launch-memory.js";
 import { extensionLobbyScope, lobbyIsInExtensionScope } from "./extension-lobby-scope.js";
 import { runDebuggerEventTask } from "./debugger-event-task.js";
 import { ApsportPageRecoveryWatchdog } from "./apsport-page-recovery.js";
-import { BtiPageRecoveryWatchdog, btiHardRecoveryAction } from "./bti-page-health.js";
+import { BtiPageRecoveryWatchdog, btiSourceControlAction } from "./bti-page-health.js";
 import { CmdPageKeepalive, SourceActivityGuard, parseCmdPageKeepaliveState,
   recoverCmdTab, replaceExactCmdTab } from "./cmd-page-keepalive.js";
 import { ProviderPageLeaseCoordinator, isRenewableLobby, parseProviderPageLeaseState,
   renewExactProviderTab, type RenewableLobby } from "./provider-page-lease.js";
 import { recoverUnexpectedDebuggerDetach } from "./debugger-detach-recovery.js";
 import { reloadAttachedSourceTab } from "./source-tab-reload.js";
+import { sabaSourceControlAction } from "./saba-source-control.js";
 
 declare const __CHROME_BRIDGE_DEFAULT_KEY__: string;
 declare const __CHROME_EXTENSION_BUILD_IDENTITY__: string;
@@ -198,6 +199,19 @@ async function recoverSourceSnapshot(request: { readonly sourceId: string;
   });
 }
 
+async function refreshAttachedSaba(tabId: number): Promise<void> {
+  const source: ObservedSource = { lobby: "SABA", sourceId: `chrome:SABA:${tabId}`, tabId };
+  await observer.refreshCatalog(source).catch(() => undefined);
+  // Keep any delayed child-frame/socket bootstrap inside the current document.
+  // The retry is intentionally detached from the bridge command: an API
+  // restart must not leave a long-running control operation that can later
+  // navigate or rotate this source epoch.
+  void retrySabaBootstrapRefresh(
+    () => observer.refreshCatalog(source),
+    () => observer.hasCompleteSabaBaseline(source.sourceId)
+  );
+}
+
 const tabBootstrapper = new TabBootstrapper({
   has: async (key) => (await chrome.storage.session.get(key))[key] === true,
   mark: async (key) => { await chrome.storage.session.set({ [key]: true }); },
@@ -280,7 +294,7 @@ const sourceTabRecovery = new SourceTabRecovery({
   attachBootstrap: async (tab, lobby) => {
     await attachRecoveredTabAsExpected(tab, lobby);
   },
-  beginSourceEpoch: (sourceId) => { observer.beginSourceEpoch(sourceId); },
+  beginSourceEpoch: (sourceId) => { observer.prepareSourceNavigation(sourceId); },
   onBootstrapStart: (tabId) => {
     bootstrappingSourceTabs.add(tabId);
     setTimeout(() => bootstrappingSourceTabs.delete(tabId), 30_000);
@@ -337,7 +351,7 @@ providerPageLeaseCoordinator = new ProviderPageLeaseCoordinator({
     get: async (tabId) => chrome.tabs.get(tabId),
     attachBootstrap: (tab, lobby) => attachRecoveredTabAsExpected(tab, lobby),
     beginSourceEpoch: (sourceId) => {
-      observer.beginSourceEpoch(sourceId);
+      observer.prepareSourceNavigation(sourceId);
       if (sourceId.startsWith("chrome:TSPORT:")) observer.resetApsportRefreshCooldown(sourceId);
     },
     update: async (tabId, url) => {
@@ -549,7 +563,7 @@ async function configureBridgeOnce(): Promise<boolean> {
           } else if (attached.lobby === "BTI") {
             const source: ObservedSource = { lobby: "BTI", sourceId, tabId: attached.tabId };
             const health = await observer.probeBtiPageHealth(source).catch(() => null);
-            if (btiHardRecoveryAction(health) === "RENEW") {
+            if (btiSourceControlAction("RELOAD", health) === "RENEW_CURRENT") {
               await providerPageLeaseCoordinator.renewNow({ lobby: "BTI", sourceId, tabId: attached.tabId });
             } else {
               // A healthy authenticated page already has everything needed to
@@ -560,13 +574,27 @@ async function configureBridgeOnce(): Promise<boolean> {
             }
           } else if (attached.lobby === "IM") {
             // IM is the only provider whose public-looking URL cannot recreate
-            // an authenticated page. A hard recovery must preserve this exact
-            // tab and session, rebuild the observer epoch, and issue fresh
-            // signed GetSE requests from inside the already-authenticated page.
+            // an authenticated page. Preserve this exact tab, session and last
+            // complete authority while issuing fresh signed GetSE requests.
+            // Rotating the source epoch before those requests complete deletes
+            // the only usable baseline and turns a transient timeout into an
+            // outage/recovery loop.
             const source: ObservedSource = { lobby: "IM", sourceId, tabId: attached.tabId };
-            observer.beginSourceEpoch(sourceId);
             await observer.refreshCatalog(source).catch(() => undefined);
             await retryImBootstrapRefresh(() => observer.refreshCatalog(source));
+          } else if (attached.lobby === "SABA") {
+            const hasCompleteBaseline = observer.hasCompleteSabaBaseline(sourceId);
+            if (sabaSourceControlAction("RELOAD", hasCompleteBaseline) === "REFRESH_CURRENT") {
+              // Keep a proved complete document: reloading it would briefly
+              // expose only the small live socket partition.
+              await refreshAttachedSaba(attached.tabId);
+            } else {
+              // A no-content/expired SABA document cannot be repaired by
+              // issuing the same in-page request forever. The bounded restore
+              // path preserves this tab, then mints a direct session only when
+              // the lightweight baseline retry still produces nothing.
+              await sourceTabRecovery.restore("SABA");
+            }
           } else if (isRenewableLobby(attached.lobby)) {
             await providerPageLeaseCoordinator.renewNow({ lobby: attached.lobby, sourceId,
               tabId: attached.tabId });
@@ -586,13 +614,37 @@ async function configureBridgeOnce(): Promise<boolean> {
       },
       onSourceEnsure: async (lobby, url) => {
         if (!lobbyIsAllowed(lobby)) return;
+        if (lobby === "SABA") {
+          const attached = registry.list().find((entry) => entry.lobby === "SABA");
+          if (attached !== undefined) {
+            const sourceId = `chrome:SABA:${attached.tabId}`;
+            if (sabaSourceControlAction("ENSURE",
+              observer.hasCompleteSabaBaseline(sourceId)) === "REFRESH_CURRENT") {
+              await refreshAttachedSaba(attached.tabId);
+              return;
+            }
+            // ENSURE is the final fallback after current-document restore has
+            // timed out, so consume its fresh launch URL instead of looping on
+            // the already-proved dead document.
+          }
+        }
+        if (lobby === "IM") {
+          const attached = registry.list().find((entry) => entry.lobby === "IM");
+          if (attached !== undefined) {
+            const source: ObservedSource = { lobby: "IM", tabId: attached.tabId,
+              sourceId: `chrome:IM:${attached.tabId}` };
+            await observer.refreshCatalog(source).catch(() => undefined);
+            void retryImBootstrapRefresh(() => observer.refreshCatalog(source));
+            return;
+          }
+        }
         if (lobby === "BTI") {
           const attached = registry.list().find((entry) => entry.lobby === "BTI");
           if (attached !== undefined) {
             const source: ObservedSource = { lobby: "BTI", tabId: attached.tabId,
               sourceId: `chrome:BTI:${attached.tabId}` };
             const health = await observer.probeBtiPageHealth(source).catch(() => null);
-            if (btiHardRecoveryAction(health) === "REFRESH") {
+            if (btiSourceControlAction("ENSURE", health) === "REFRESH_CURRENT") {
               await observer.refreshCatalog(source).catch(() => undefined);
               return;
             }
@@ -602,6 +654,17 @@ async function configureBridgeOnce(): Promise<boolean> {
       },
       onSourceRestore: async (lobby) => {
         if (!lobbyIsAllowed(lobby)) return;
+        if (lobby === "SABA") {
+          const attached = registry.list().find((entry) => entry.lobby === "SABA");
+          if (attached !== undefined) {
+            const sourceId = `chrome:SABA:${attached.tabId}`;
+            if (sabaSourceControlAction("RESTORE",
+              observer.hasCompleteSabaBaseline(sourceId)) === "REFRESH_CURRENT") {
+              await refreshAttachedSaba(attached.tabId);
+              return;
+            }
+          }
+        }
         if (lobby === "CMD") {
           const attached = registry.list().find((entry) => entry.lobby === "CMD");
           if (attached !== undefined) {
@@ -617,7 +680,7 @@ async function configureBridgeOnce(): Promise<boolean> {
             const source: ObservedSource = { lobby: "BTI", tabId: attached.tabId,
               sourceId: `chrome:BTI:${attached.tabId}` };
             const health = await observer.probeBtiPageHealth(source).catch(() => null);
-            if (btiHardRecoveryAction(health) === "REFRESH") {
+            if (btiSourceControlAction("RESTORE", health) === "REFRESH_CURRENT") {
               await observer.refreshCatalog(source).catch(() => undefined);
               return;
             }

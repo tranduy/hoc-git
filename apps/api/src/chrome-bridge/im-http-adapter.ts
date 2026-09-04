@@ -73,6 +73,18 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
   readonly lobby = "IM" as const;
   readonly providerFamily = "IM";
   readonly #states = new Map<string, SourceState>();
+  #lastIgnoreReason: string | null = null;
+
+  takeIgnoreReason(): string | null {
+    const reason = this.#lastIgnoreReason;
+    this.#lastIgnoreReason = null;
+    return reason;
+  }
+
+  #ignore(reason: string): [] {
+    this.#lastIgnoreReason = reason;
+    return [];
+  }
 
   resetSource(sourceId: string): void {
     this.#states.delete(sourceId);
@@ -96,21 +108,21 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       const partition = envelope.request.providerPartition;
       const generation = envelope.request.streamId;
       const cutoffSequence = envelope.request.reconcileCutoffSequence;
-      if (typeof generation !== "string") return [];
+      if (typeof generation !== "string") return this.#ignore("snapshot-generation-missing");
       const ordinal = canonicalGenerationOrdinal(generation, envelope.tabId);
       if (ordinal === null) {
         rememberRejected(state, generation);
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore("snapshot-generation-invalid");
       }
       if (state.obsoleteGenerations.has(generation) || state.rejectedGenerations.has(generation) ||
-        state.currentGeneration === generation) return [];
+        state.currentGeneration === generation) return this.#ignore("snapshot-generation-not-current");
       const matchesPending = state.pending?.id === generation;
       if (!matchesPending && state.highestGenerationOrdinal !== null &&
         ordinal <= state.highestGenerationOrdinal) {
         rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore("snapshot-generation-not-newer");
       }
       if (!matchesPending) {
         if (state.pending !== null) rememberObsolete(state, state.pending.id);
@@ -120,33 +132,35 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       if (!isImPartition(partition) || !isValidCutoff(cutoffSequence)) {
         rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore(!isImPartition(partition) ? "snapshot-partition-invalid" : "snapshot-cutoff-invalid");
       }
       if (state.discardedDeltaSequence !== null && state.discardedDeltaSequence > cutoffSequence) {
         rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore("snapshot-delta-replay-gap");
       }
       const root = parseRecord(envelope.payload.body);
       if (root === null || root.StatusCode !== 100 || !Array.isArray(root.sel)) {
         rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore("snapshot-response-invalid");
       }
       if (state.pending === null) {
         state.pending = { id: generation, partitions: new Map<ImPartition, ClassifiedPartition>(),
           startedSequence: envelope.sequence, cutoffSequence };
       }
       if (state.pending.cutoffSequence !== cutoffSequence || state.pending.partitions.has(partition)) {
+        const reason = state.pending.cutoffSequence !== cutoffSequence
+          ? "snapshot-cutoff-mismatch" : "snapshot-partition-duplicate";
         rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore(reason);
       }
       const classified = classifySnapshot(root, envelope.observedAtMs);
       if (classified === null) {
         rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore("snapshot-classification-invalid");
       }
       const records = new Map<string, RetainedRecord>();
       for (const record of classified.records) {
@@ -156,7 +170,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       state.pending.partitions.set(partition, { records, inputCount: classified.inputCount });
       this.#states.set(envelope.sourceId, state);
       if (!state.pending.partitions.has("IM_MARKET_1") || !state.pending.partitions.has("IM_MARKET_2")) {
-        return state.current === null ? [] : [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
+        return state.current === null ? this.#ignore("snapshot-awaiting-partition") : [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
           observedAtMs: envelope.observedAtMs, transportAlive: true }];
       }
       const pendingPartitions = state.pending.partitions;
@@ -165,7 +179,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       if (acceptedCount === 0 && inputCount > 0) {
         rememberRejected(state, generation, ordinal);
         this.#states.set(envelope.sourceId, state);
-        return [];
+        return this.#ignore("snapshot-no-accepted-records");
       }
       if (state.currentGeneration !== null) rememberObsolete(state, state.currentGeneration);
       state.current = new Map([...pendingPartitions].map(([key, value]) => [key, value.records]));

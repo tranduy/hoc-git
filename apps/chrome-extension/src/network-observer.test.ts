@@ -46,9 +46,10 @@ function ksportDeltaReceipt(partition: "live" | "today", order: number): string 
 describe("NetworkObserver", () => {
   it("publishes APSPORT API roster and hidden-detail batches without using the virtualized DOM", async () => {
     const forwarded: ChromeBridgeEnvelope[] = [];
-    const sendCommand = vi.fn(async (_tabId: number, method: string, _params?: Record<string, unknown>) => method === "Page.getFrameTree"
-      ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
-      : {});
+    // OOPIF Page.getFrameTree can be unavailable even though the exact
+    // main-world context just completed the authenticated page fetch.
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>) => ({}));
     const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
       expect(options.prematchWindowHours).toBe(24);
       expect(options.template).toMatchObject({
@@ -143,6 +144,37 @@ describe("NetworkObserver", () => {
     expect(collect).toHaveBeenCalledTimes(2);
     expect(forwarded.map((envelope) => JSON.parse(envelope.payload.body).phase))
       .toEqual(["ROSTER", "ROSTER"]);
+  });
+
+  it("coalesces repeated APSPORT roster-only recovery while the current roster is still loading", async () => {
+    let finishRoster!: () => void;
+    const blocked = new Promise<void>((resolve) => { finishRoster = resolve; });
+    const collect = vi.fn(async () => blocked);
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+      : {});
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      collectApsportCatalog: collect });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://spbui.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+        postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+
+    const first = observer.refreshCatalog(apsport, { prematchWindowHours: 24, rosterOnly: true });
+    await vi.waitFor(() => expect(collect).toHaveBeenCalledOnce());
+    const second = observer.refreshCatalog(apsport, { prematchWindowHours: 24, rosterOnly: true });
+    await Promise.resolve();
+    expect(collect).toHaveBeenCalledOnce();
+
+    finishRoster();
+    await Promise.all([first, second]);
+    expect(collect).toHaveBeenCalledOnce();
   });
 
   it("queues every APSPORT roster event for hidden-detail enrichment after a roster-only refresh", async () => {
@@ -570,7 +602,8 @@ describe("NetworkObserver", () => {
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("IsCombo: false");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SortType: 2");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("CompetitionIds: []");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("for (const Market of [1, 2])");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("Promise.all([1, 2].map");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("StatusCode: parsed.StatusCode, sel:");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("new AbortController()");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("signal: controller.signal");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).not.toMatch(/odds?|price|stake/iu);
@@ -1208,7 +1241,7 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.callFunctionOn")).toBe(false);
   });
 
-  it("reconnects a silently dead SABA socket after 60s without catalog frames, once per minute", async () => {
+  it("reconnects a silently dead SABA socket before 30s freshness expires, with bounded retries", async () => {
     let now = 1_000;
     const sendCommand = vi.fn(async (_tabId: number, method: string,
       params?: Record<string, unknown>) => {
@@ -1231,23 +1264,21 @@ describe("NetworkObserver", () => {
     await observer.pollSabaDomChanges(source, "push.example");
     expect(reconnects()).toBe(0);
 
-    now = 30_000;
+    now = 15_000;
     await observer.pollSabaDomChanges(source, "push.example");
     expect(reconnects()).toBe(0);
 
-    // A full minute with no decoded catalog frame forces one reconnect.
-    now = 62_000;
+    now = 22_000;
+    await observer.pollSabaDomChanges(source, "push.example");
+    await vi.waitFor(() => expect(reconnects()).toBe(1));
+
+    now = 30_000;
     await observer.pollSabaDomChanges(source, "push.example");
     expect(reconnects()).toBe(1);
 
-    // Bounded to once per minute.
-    now = 90_000;
+    now = 43_000;
     await observer.pollSabaDomChanges(source, "push.example");
-    expect(reconnects()).toBe(1);
-
-    now = 125_000;
-    await observer.pollSabaDomChanges(source, "push.example");
-    expect(reconnects()).toBe(2);
+    await vi.waitFor(() => expect(reconnects()).toBe(2));
   });
 
   it("does not force a SABA reconnect while catalog frames keep arriving", async () => {
@@ -1460,6 +1491,146 @@ describe("NetworkObserver", () => {
     expect(cleanupAttempts).toBe(2);
   });
 
+  it("renews SABA from the DOM before a completed socket baseline can miss the realtime deadline", async () => {
+    let now = 1_000;
+    const records = JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [{ betTypeIds: ["3"], labels: ["2.5"],
+        odds: [{ marketOddsId: `market-${index}`, priceText: "0.91", status: null, greyedOut: null },
+          { marketOddsId: `market-${index}`, priceText: "0.99", status: null, greyedOut: null }] }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("delete globalThis.__fieldlineSabaOddsMutationV1")) {
+        return { result: { value: true } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression ===
+        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        return { result: { objectId: "socket-io-prototype" } };
+      }
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "saba-current", url: "wss://sports.example/socket.io/"
+    });
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "saba-current", response: { opcode: 1, payloadData:
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type"]],
+          [0, "reset"], [0, "o"], [0, "done"]], "r1"])}` }
+    });
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    forward.mockClear();
+
+    now = 22_000;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "SABA", transport: "DOM_SNAPSHOT" }));
+  });
+
+  it("renews SABA from the DOM after a worker reload has no in-memory socket baseline", async () => {
+    let now = 1_000;
+    const records = JSON.stringify([{
+      sportId: "1", leagueId: "league-1", leagueName: "League", matchId: "match-1",
+      timeText: "LIVE", teamNames: ["Home", "Away"], groups: [{ betTypeIds: ["3"], labels: ["2.5"],
+        odds: [{ marketOddsId: "market-1", priceText: "0.91" },
+          { marketOddsId: "market-1", priceText: "0.99" }] }]
+    }]);
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    now = 22_000;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "SABA", transport: "DOM_SNAPSHOT" }));
+  });
+
+  it("recovers a SABA baseline even while a replacement socket keeps streaming deltas", async () => {
+    let now = 1_000;
+    const records = JSON.stringify(Array.from({ length: 50 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: `market-${index}`, priceText: "0.91" },
+          { marketOddsId: `market-${index}`, priceText: "0.99" }
+        ]
+      }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression ===
+        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        return { result: { objectId: "socket-io-prototype" } };
+      }
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "saba-delta-only", url: "wss://sports.example/socket.io/"
+    });
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "saba-delta-only", response: { opcode: 1, payloadData:
+        `42${JSON.stringify(["m", "b1", [["f", 0, ["type"]], [0, "o"]], "r27"])}` }
+    });
+    forward.mockClear();
+    sendCommand.mockClear();
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    now = 21_000;
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "saba-delta-only", response: { opcode: 1, payloadData:
+        `42${JSON.stringify(["m", "b1", [["f", 0, ["type"]], [0, "o"]], "r28"])}` }
+    });
+    forward.mockClear();
+    sendCommand.mockClear();
+    now = 22_000;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await Promise.resolve();
+
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      lobby: "SABA", transport: "DOM_SNAPSHOT"
+    }));
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.callFunctionOn")).toBe(true);
+  });
+
   it("does not mistake a partial SABA DOM cache for a complete socket baseline", async () => {
       const sendCommand = vi.fn(async (_tabId: number, _method: string,
         _params?: Record<string, unknown>) => ({}));
@@ -1533,6 +1704,49 @@ describe("NetworkObserver", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("returns only IM fields consumed by the strict football adapter", async () => {
+    const listeners = new Map<string, (event: { detail: string }) => void>();
+    const windowStub = {
+      global: { PlatForm: "web" },
+      addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
+      removeEventListener: (name: string) => listeners.delete(name),
+      dispatchEvent: (event: { type: string; detail: { c: string } }) => {
+        if (event.type === "helo") listeners.get(`halo_${event.detail.c}`)?.({ detail: "signed" });
+      }
+    };
+    const execute = new Function("document", "location", "window", "sessionStorage", "CustomEvent", "fetch",
+      `return ${IM_CATALOG_DISCOVERY_EXPRESSION}`) as (...args: unknown[]) => Promise<unknown>;
+    const rich = { StatusCode: 100, serverTrace: "discard", sel: [{
+      eid: 11, edt: "2026-09-05T01:00:00Z", htn: "Home", atn: "Away", cn: "League",
+      isrbt: false, iscyb: false, hs: 0, as: 0, rbt: "", eventTrace: "discard",
+      mls: [
+        { mi: 21, bti: 1, gp: 1, marketTrace: "discard", ws: [
+          { wsi: 31, si: 1, hdp: 0.5, dih: "0.5", o: 0.91, selectionTrace: "discard" },
+          { wsi: 32, si: 2, hdp: -0.5, dih: "-0.5", o: -0.99, selectionTrace: "discard" }
+        ] },
+        { mi: 22, bti: 5, gp: 1, ws: [], unsupportedTrace: "discard" }
+      ]
+    }] };
+
+    const result = await execute(
+      { documentElement: { dataset: {} }, querySelectorAll: () => [] },
+      { hostname: "imsports.directsb.net", search: "" }, windowStub, { getItem: () => "token" },
+      class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
+        get detail(): { c: string } { return this.init.detail; } },
+      async () => ({ text: async () => JSON.stringify(rich) })
+    ) as { responses: Array<{ body: string }> };
+
+    expect(JSON.parse(result.responses[0]!.body)).toEqual({ StatusCode: 100, sel: [{
+      eid: 11, edt: "2026-09-05T01:00:00Z", htn: "Home", atn: "Away", cn: "League",
+      isrbt: false, iscyb: false, hs: 0, as: 0, rbt: "", mls: [{
+        mi: 21, bti: 1, gp: 1, ws: [
+          { wsi: 31, si: 1, hdp: 0.5, dih: "0.5", o: 0.91 },
+          { wsi: 32, si: 2, hdp: -0.5, dih: "-0.5", o: -0.99 }
+        ]
+      }]
+    }] });
   });
 
   it("prefers the fresh IM URL token over stale same-origin session storage", async () => {
@@ -3058,11 +3272,11 @@ describe("NetworkObserver", () => {
       typeof params?.expression === "string" && params.expression.includes("querySelectorAll('body *')"))).toBe(false);
   });
 
-  it("captures SABA only after its page-side odds observer reports a price mutation", async () => {
-    const records = JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
+  it("bootstraps missing SABA authority from DOM and still captures later price mutations", async () => {
+    const records = (priceText: string) => JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
       sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
       timeText: "LIVE", teamNames: ["Home", "Away"], groups: [{ betTypeIds: ["3"], labels: ["2.5"],
-        odds: [{ marketOddsId: `market-${index}`, priceText: "0.91", status: null, greyedOut: null },
+        odds: [{ marketOddsId: `market-${index}`, priceText, status: null, greyedOut: null },
           { marketOddsId: `market-${index}`, priceText: "0.99", status: null, greyedOut: null }] }]
     })));
     let dirty = false;
@@ -3072,7 +3286,7 @@ describe("NetworkObserver", () => {
       }
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
-      if (method === "Runtime.evaluate") return { result: { value: records } };
+      if (method === "Runtime.evaluate") return { result: { value: records(dirty ? "0.85" : "0.91") } };
       return {};
     });
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
@@ -3080,7 +3294,7 @@ describe("NetworkObserver", () => {
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
 
     await observer.pollSabaDomChanges(saba, "sports.example");
-    expect(forward).not.toHaveBeenCalled();
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "SABA", transport: "DOM_SNAPSHOT" }));
     const watcherExpression = String(sendCommand.mock.calls.find(([, method, params]) => method ===
       "Runtime.evaluate" && String(params?.expression).includes("fieldline-saba-odds-mutation"))?.[2]?.expression);
     expect(watcherExpression).toContain("characterData: true");
@@ -3088,6 +3302,7 @@ describe("NetworkObserver", () => {
     expect(watcherExpression).toContain("'aria-disabled'");
 
     dirty = true;
+    forward.mockClear();
     await observer.pollSabaDomChanges(saba, "sports.example");
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "SABA", transport: "DOM_SNAPSHOT" }));
   });
@@ -3095,7 +3310,9 @@ describe("NetworkObserver", () => {
   it("ignores SABA hover animation classes but observes semantic disabled transitions", async () => {
     let watcher = "";
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
-      if (method === "Runtime.evaluate") watcher = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-saba-odds-mutation")) {
+        watcher = String(params?.expression ?? "");
+      }
       return { result: { value: false } };
     });
     const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
@@ -4804,6 +5021,24 @@ describe("NetworkObserver", () => {
     })).toBe(true);
   });
 
+  it("validates one direct IM document once before forwarding all of its snapshot chunks", async () => {
+    const largeBody = JSON.stringify({ StatusCode: 100,
+      sel: Array.from({ length: 5_000 }, (_, index) => ({ eid: index + 1, pad: "x".repeat(80) })) });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "im-frame", loaderId: "im-document" } } } : {});
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 1_000, monotonicNow: () => 50 });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+
+    await observer.ingestHttpResponse(im, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch", largeBody, {
+      method: "POST", providerPartition: "IM_MARKET_1", streamId: "im:8:1", reconcileCutoffSequence: 0,
+      verifiedDocument: { frameId: "im-frame", loaderId: "im-document" }
+    });
+
+    expect(forward.mock.calls.length).toBeGreaterThan(1);
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Page.getFrameTree")).toHaveLength(1);
+  });
+
   it("keeps unverified direct HTTP diagnostic-only and never emits authority-bearing chunks", async () => {
     const forwarded: ChromeBridgeEnvelope[] = [];
     const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
@@ -5362,6 +5597,35 @@ describe("NetworkObserver", () => {
       String(params?.expression).includes("self.close") && sessionId === "saba-frame-session")).toBe(false);
   });
 
+  it("closes a surviving SABA worker target even when Chrome refuses to attach its old session", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>) => {
+      if (method === "Target.getTargets") return { targetInfos: [
+        { targetId: "surviving-saba-worker", type: "shared_worker",
+          url: "blob:https://c0z0oa.bpd3a3fn.com/worker-id" },
+        { targetId: "other-worker", type: "worker", url: "blob:https://example.com/worker-id" }
+      ] };
+      if (method === "Target.attachToTarget") throw new Error("Already attached");
+      if (method === "Target.closeTarget" && params?.targetId === "surviving-saba-worker") {
+        return { success: true };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:24", tabId: 24 } as const;
+
+    await observer.start(saba);
+    sendCommand.mockClear();
+
+    await expect(observer.resetSabaSocketWorker(saba)).resolves.toBe(1);
+    expect(sendCommand).toHaveBeenCalledWith(24, "Target.closeTarget", {
+      targetId: "surviving-saba-worker"
+    });
+    expect(sendCommand).not.toHaveBeenCalledWith(24, "Target.closeTarget", {
+      targetId: "other-worker"
+    });
+  });
+
   it("uses an attached KSPORT OOPIF session for targeted socket recovery", async () => {
     vi.useFakeTimers();
     try {
@@ -5890,6 +6154,86 @@ describe("NetworkObserver", () => {
       .toMatchObject({ functionDeclaration: expect.stringContaining("socket.disconnect(); socket.connect()") });
   });
 
+  it("re-arms debugger observation before a replacement SABA document starts", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, _method: string,
+      _params?: Record<string, unknown>, _sessionId?: string) => ({}));
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:24", tabId: 24 } as const;
+    await observer.start(saba);
+    sendCommand.mockClear();
+
+    observer.prepareSourceNavigation(saba.sourceId);
+    await observer.start(saba);
+
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Network.enable")).toBe(true);
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === "Target.setAutoAttach" &&
+      params?.autoAttach === true && params?.waitForDebuggerOnStart === true)).toBe(true);
+  });
+
+  it("does not block SABA DOM renewal behind a slow socket heap query", async () => {
+    let resolveQuery!: (value: unknown) => void;
+    const query = new Promise<unknown>((resolve) => { resolveQuery = resolve; });
+    let queryCount = 0;
+    let now = 1_000;
+    const records = JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: `over-${index}`, priceText: "0.91" },
+          { marketOddsId: `under-${index}`, priceText: "0.99" }
+        ]
+      }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-time-baseline")) {
+        return { result: { value: { status: "today-tab-active" } } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { type: "string", value: records } };
+      }
+      if (method === "Runtime.evaluate" && (expression.includes("window.io.Socket.prototype") ||
+        expression.includes("window.WebSocket.prototype"))) {
+        return { result: { objectId: "slow-saba-prototype" } };
+      }
+      if (method === "Runtime.queryObjects") {
+        queryCount += 1;
+        return query;
+      }
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => now,
+      monotonicNow: () => now, frameCommandTimeoutMs: 10 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+
+    const refresh = observer.refreshCatalog(saba);
+    await vi.waitFor(() => expect(queryCount).toBe(1));
+    let refreshResolved = false;
+    void refresh.then(() => { refreshResolved = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    try {
+      expect(refreshResolved).toBe(true);
+      forward.mockClear();
+      now = 6_000;
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+        lobby: "SABA", transport: "DOM_SNAPSHOT"
+      }));
+      expect(queryCount).toBe(1);
+    } finally {
+      resolveQuery({ objects: { objectId: "slow-saba-instances" } });
+      await refresh;
+    }
+  });
+
   it("waits for one slow SABA heap query instead of timing out and starting overlapping scans", async () => {
     let resolveQuery!: (value: unknown) => void;
     const query = new Promise<unknown>((resolve) => { resolveQuery = resolve; });
@@ -5958,10 +6302,11 @@ describe("NetworkObserver", () => {
     resolveQuery({ objects: { objectId: "retired-saba-instances" } });
     await recovery;
 
-    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.callFunctionOn")).toBe(false);
-    expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.releaseObjectGroup", {
+    await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.releaseObjectGroup", {
       objectGroup: "fieldline-baseline-recovery-13"
-    });
+    }));
+
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.callFunctionOn")).toBe(false);
   });
 
   it("bounds SABA heap cleanup when the query fails and object-group release never settles", async () => {
@@ -6229,6 +6574,28 @@ describe("NetworkObserver", () => {
     expect(renew).toHaveBeenCalledTimes(2);
   });
 
+  it("does not restart APSPORT again while a replacement document is still establishing its roster", async () => {
+    const now = { value: 10_000 };
+    const renew = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => undefined), onApsportOrphanSocket: renew,
+      now: () => now.value, monotonicNow: () => now.value });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:14", tabId: 14 } as const;
+    const orphan = () => observer.handleEvent(apsport, "Network.webSocketFrameReceived", {
+      requestId: "socket-from-retired-document", response: { opcode: 1, payloadData: "{}" }
+    });
+
+    observer.prepareSourceNavigation(apsport.sourceId);
+    await orphan();
+    now.value = 69_999;
+    await orphan();
+    expect(renew).not.toHaveBeenCalled();
+
+    now.value = 70_000;
+    await orphan();
+    expect(renew).toHaveBeenCalledExactlyOnceWith(apsport);
+  });
+
   it("reconnects SABA's native Socket.IO transport when window.io is not global", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
@@ -6244,6 +6611,9 @@ describe("NetworkObserver", () => {
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
 
     await observer.refreshCatalog(saba);
+
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([, method]) =>
+      method === "Runtime.callFunctionOn")).toBe(true));
 
     expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
       params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(1);
@@ -6283,6 +6653,35 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
       params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toBe(false);
     expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(false);
+  });
+
+  it("does not replay stale SABA socket history into the sequenced bridge before a fresh Today selection", async () => {
+    const body = '42["m","b1",[["f",0,["type","matchid"]],[0,"reset"],[0,"m",1,55],[0,"done"]],"r1"]';
+    const loadSabaWsSnapshots = vi.fn(async (): Promise<PersistedSabaWsSnapshots> => ({
+      version: 1, sourceId: "chrome:SABA:13", documentMarker: "1787250000000.5",
+      partitions: [{ partition: "1:b1", frames: [{ url: "wss://sports.example/socket.io/", body,
+        streamId: "1", observedAtMs: 9_000, receivedMonotonicMs: 50 }] }]
+    }));
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && typeof params?.expression === "string" &&
+        params.expression.includes("fieldline-saba-time-baseline")) {
+        return { result: { value: { status: "today-tab-selected" } } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === "String(performance.timeOrigin)") {
+        return { result: { value: "1787250000000.5" } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward, loadSabaWsSnapshots,
+      now: () => 10_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+
+    await observer.refreshCatalog(saba);
+
+    expect(loadSabaWsSnapshots).toHaveBeenCalledExactlyOnceWith(saba.sourceId);
+    expect(forward.mock.calls.map(([message]) => message).filter((message) =>
+      message.transport === "WS_FRAME" && message.payload.body === body)).toHaveLength(0);
   });
 
   it("falls through to the socket reconnect when SABA Hôm Nay is already active", async () => {
@@ -6347,6 +6746,9 @@ describe("NetworkObserver", () => {
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
 
     await observer.refreshCatalog(saba);
+
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some((call) =>
+      call[1] === "Runtime.callFunctionOn")).toBe(true));
 
     expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.queryObjects")).toBe(true);
     expect(sendCommand.mock.calls.some((call) => call[1] === "Runtime.callFunctionOn")).toBe(true);

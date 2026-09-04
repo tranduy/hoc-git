@@ -59,7 +59,7 @@ describe("PipelineTelemetry", () => {
   it.each([
     { accountId: "catalog-source:CMD:FOOTBALL", lobby: "CMD", transport: "HTTP_RESPONSE" },
     { accountId: "catalog-source:IM:FOOTBALL", lobby: "IM", transport: "HTTP_RESPONSE" },
-    { accountId: "catalog-source:SABA:FOOTBALL", lobby: "SABA", transport: "WS_FRAME" },
+    { accountId: "catalog-source:SABA:FOOTBALL", lobby: "SABA", transport: "DOM_SNAPSHOT" },
     { accountId: "catalog-source:SBOBET:FOOTBALL", lobby: "KSPORT", transport: "WS_FRAME" },
     { accountId: "catalog-source:APSPORT:FOOTBALL", lobby: "TSPORT", transport: "WS_FRAME" },
     { accountId: "catalog-source:BTI:FOOTBALL", lobby: "BTI", transport: "HTTP_RESPONSE" }
@@ -303,6 +303,27 @@ describe("ignored-envelope endpoints", () => {
 
     expect(result?.hops.find((hop) => hop.hop === "HOP4_ADAPTER")?.detail.ignoredEndpoints)
       .toEqual([{ pathnameClass: "/api/EventV7/GetSE", count: 2 }, { pathnameClass: "/api/Other/Ping", count: 1 }]);
+    expect(result?.hops.find((hop) => hop.hop === "HOP4_ADAPTER")?.detail.lastIgnoredEndpoint)
+      .toEqual({ pathnameClass: "/api/Other/Ping", ageMs: 10_000 });
+  });
+
+  it("keeps the latest refusal visible after the bounded frequency table fills", async () => {
+    const telemetry = new PipelineTelemetry({ now: () => 120_000 });
+    for (let index = 0; index < 8; index += 1) {
+      telemetry.recordAdapterIgnored(accountId, 100_000 + index, `/ignored/old-${index}`);
+    }
+    telemetry.recordAdapterIgnored(accountId, 119_000, "/ignored/dom-no-record-of-91-matched-schema");
+
+    const result = await telemetry.diagnostic(readers(
+      { accountId, catalog: catalog(100_000, []), revision: "rev-latest-ignore", observedAtMs: 100_000,
+        snapshotState: "STALE", sequence: 1, freshUntilMs: 100_000 },
+      { accountId, state: "STARTING", reason: null, sourceId: "chrome:CMD:7", sourceEpoch: "worker-a:0",
+        tabReachableAtMs: 100_000, providerTransportAtMs: null, lastAuthoritativeEvidenceAtMs: null,
+        lastCompleteBaselineAtMs: null, lastDeltaAtMs: null, lastSemanticChangeAtMs: null,
+        activeGeneration: null, recoveryStage: "NONE", recoveryAttempt: 0 }), accountId);
+
+    expect(result?.hops.find((hop) => hop.hop === "HOP4_ADAPTER")?.detail.lastIgnoredEndpoint)
+      .toEqual({ pathnameClass: "/ignored/dom-no-record-of-91-matched-schema", ageMs: 1_000 });
   });
 });
 
@@ -318,7 +339,8 @@ describe("provider refresh outcomes", () => {
       request: { hostname: "provider.invalid", pathnameClass: "/__fieldline_im_catalog_refresh__",
         resourceType: "Diagnostic" },
       payload: { encoding: "UTF8", body: JSON.stringify({
-        results: ["token-unavailable", "token-unavailable", "catalog-requested", "not-in-allowlist"] }) }
+        results: ["top:token-unavailable", "im-app:token-unavailable",
+          "im-app:catalog-requested", "im-app:not-in-allowlist"] }) }
     }, "worker-a:0");
 
     const result = await telemetry.diagnostic(readers(

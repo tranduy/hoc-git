@@ -9,13 +9,14 @@ const before = {
 const REALTIME_CONTRACT_MS = 30_000;
 
 describe("provider feed policies under measured realtime contracts (2026-09-02)", () => {
-  it("holds realtime providers to 30s while allowing APSPORT's measured 90s roster window", () => {
+  it("uses each provider's measured complete-authority cadence", () => {
     // The operator rule: no book may go longer than 30 seconds without
     // answering with decodable data. Waiting longer than the contract before
     // asking for a snapshot is what let SABA freeze for 5.5 minutes and
     // APSPORT for 2 minutes while their strips still read ACTIVE.
     for (const [accountId, policy] of providerFeedPolicies) {
-      const expectedMs = accountId === "catalog-source:APSPORT:FOOTBALL" ? 90_000 : REALTIME_CONTRACT_MS;
+      const expectedMs = accountId === "catalog-source:APSPORT:FOOTBALL" ? 90_000
+        : accountId === "catalog-source:SABA:FOOTBALL" ? 150_000 : REALTIME_CONTRACT_MS;
       expect(policy.expectedEvidenceCadenceMs,
         `${accountId} must use its measured evidence window`).toBe(expectedMs);
       expect(policy.catalogFreshnessMs,
@@ -40,7 +41,7 @@ describe("provider feed policies under measured realtime contracts (2026-09-02)"
       { provider: "IM", beforeExpectedMs: 45_000, beforeSoftMs: 20_000,
         afterExpectedMs: 30_000, afterSoftMs: 30_000 },
       { provider: "SABA", beforeExpectedMs: 75_000, beforeSoftMs: 90_000,
-        afterExpectedMs: 30_000, afterSoftMs: 30_000 },
+        afterExpectedMs: 150_000, afterSoftMs: 150_000 },
       { provider: "SBOBET", beforeExpectedMs: 60_000, beforeSoftMs: 60_000,
         afterExpectedMs: 30_000, afterSoftMs: 30_000 },
       { provider: "APSPORT", beforeExpectedMs: 90_000, beforeSoftMs: 90_000,
@@ -60,6 +61,13 @@ describe("provider feed policies under measured realtime contracts (2026-09-02)"
         `${accountId} hard stage must not fire at the contract`)
         .toBeGreaterThanOrEqual(2 * REALTIME_CONTRACT_MS);
     }
+  });
+
+  it("does not declare SABA's complete hidden-DOM sweep silent before its measured p95", () => {
+    const policy = providerFeedPolicies.get("catalog-source:SABA:FOOTBALL")!;
+    expect(policy.expectedEvidenceCadenceMs).toBeGreaterThan(122_540);
+    expect(policy.maxSemanticSilenceMs).toBeGreaterThan(122_540);
+    expect(policy.hardRecoveryAfterMs).toBeGreaterThanOrEqual(2 * policy.expectedEvidenceCadenceMs);
   });
 
   it("never lets a tab-reloading hard stage fire while a baseline is still valid", () => {

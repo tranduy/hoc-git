@@ -104,20 +104,20 @@ const sabaPushFields = ["type", "leagueid", "leaguenameen", "sporttype", "matchi
   "enable", "odds1a", "odds2a", "hdp1", "hdp2"];
 
 function sabaPushEnvelope(sequence: number, streamId: string, body: string,
-  transport: "WS_FRAME" | "WS_STATE" = "WS_FRAME"): ChromeBridgeEnvelope {
+  transport: "WS_FRAME" | "WS_STATE" = "WS_FRAME", sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7,
-    sourceEpoch: "worker-a:0", sequence, observedAtMs: 100_000 + sequence,
+    sourceEpoch, sequence, observedAtMs: 100_000 + sequence,
     receivedMonotonicMs: 50 + sequence, transport,
     request: { hostname: "sports.example", pathnameClass: "/socket.io/",
       resourceType: "WebSocket", streamId },
     payload: { encoding: "UTF8", body } };
 }
 
-function sabaPushOpen(sequence: number, streamId: string): ChromeBridgeEnvelope {
-  return sabaPushEnvelope(sequence, streamId, '{"state":"OPEN"}', "WS_STATE");
+function sabaPushOpen(sequence: number, streamId: string, sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
+  return sabaPushEnvelope(sequence, streamId, '{"state":"OPEN"}', "WS_STATE", sourceEpoch);
 }
 
-function sabaPushBaseline(sequence: number, streamId: string): ChromeBridgeEnvelope {
+function sabaPushBaseline(sequence: number, streamId: string, sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
   const encode = (record: Record<string, unknown>): readonly unknown[] => Object.entries(record)
     .flatMap(([key, value]) => [sabaPushFields.indexOf(key), value]);
   const rows = [["f", 0, sabaPushFields], [0, "reset"],
@@ -128,17 +128,17 @@ function sabaPushBaseline(sequence: number, streamId: string): ChromeBridgeEnvel
       oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
     [0, "done"]];
   return sabaPushEnvelope(sequence, streamId,
-    `42${JSON.stringify(["m", "b1", rows, `revision-${sequence}`])}`);
+    `42${JSON.stringify(["m", "b1", rows, `revision-${sequence}`])}`, "WS_FRAME", sourceEpoch);
 }
 
-function sabaDomEnvelope(sequence: number): ChromeBridgeEnvelope {
-  const records = Array.from({ length: 20 }, (_, index) => ({ ...record,
+function sabaDomEnvelope(sequence: number, sourceEpoch = "worker-a:0", eventCount = 20): ChromeBridgeEnvelope {
+  const records = Array.from({ length: eventCount }, (_, index) => ({ ...record,
     matchId: `saba-event-${index}`, teamNames: [`Home ${index}`, `Away ${index}`],
     groups: record.groups.map((group) => ({ ...group, odds: group.odds.map((odds) => ({ ...odds,
       marketOddsId: `saba-market-${index}` })) })) }));
   return { ...cmdEnvelope(sequence, records, 0, 1,
     `saba:7:stable-generation-${sequence.toString().padStart(4, "0")}`),
-    lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7, sourceEpoch: "worker-a:0",
+    lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7, sourceEpoch,
     observedAtMs: 100_000 + sequence,
     request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" } };
 }
@@ -232,14 +232,15 @@ function apsportRawEvent(eventId: number, firstPrice = "0.83") {
 }
 
 function apsportApiEnvelope(sequence: number, records: readonly unknown[],
-  phase: "ROSTER" | "DETAIL" = "ROSTER"): ChromeBridgeEnvelope {
+  phase: "ROSTER" | "DETAIL" = "ROSTER", sourceEpoch = "worker-a:0",
+  generation = "apsport:7:1"): ChromeBridgeEnvelope {
   return { version: 1, kind: "NETWORK", lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7,
-    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000 + sequence,
+    sourceEpoch, sequence, observedAtMs: 1_000 + sequence,
     receivedMonotonicMs: 50 + sequence, transport: "HTTP_RESPONSE",
     request: { hostname: "pacific.agenate.com", pathnameClass: "/__fieldline_apsport_catalog_refresh__",
       resourceType: "Fetch", method: "POST", observerRequestId: `observer-a:request:${sequence}`,
       requestFrameKey: "http-frame:apsport-main", requestDocumentKey: "http-document:apsport-main" },
-    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, generation: "apsport:7:1",
+    payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, generation,
       phase, complete: true, prematchWindowHours: 24, records }) } };
 }
 
@@ -415,6 +416,59 @@ describe("ChromeCatalogDataPlane", () => {
       state: "LIVE", activeGeneration: "worker-a:0:dom:2"
     });
     await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA", events: expect.any(Array) });
+  });
+
+  it("does not promote an incomplete APSPORT roster after an API or source epoch handover", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const onIngestRejected = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 2_000,
+      authorityCoordinator: coordinator, onIngestRejected });
+    const events = (count: number) => Array.from({ length: count }, (_, index) => apsportRawEvent(index + 1));
+
+    expect(plane.ingest(apsportApiEnvelope(1, events(100)), { connectionGeneration: 1 })).toBe(true);
+    expect((await plane.read(APSPORT)).events).toHaveLength(100);
+
+    expect(plane.ingest(apsportApiEnvelope(2, events(85), "ROSTER", "worker-a:1", "apsport:7:2"),
+      { connectionGeneration: 1 })).toBe(false);
+    expect(onIngestRejected.mock.calls.map((call) => call[1])).toContain(
+      "APSPORT_REPLACEMENT_COVERAGE_INCOMPLETE"
+    );
+    expect((await plane.read(APSPORT)).events).toHaveLength(100);
+
+    expect(plane.ingest(apsportApiEnvelope(3, events(95), "ROSTER", "worker-a:1", "apsport:7:3"),
+      { connectionGeneration: 1 })).toBe(true);
+    expect((await plane.read(APSPORT)).events).toHaveLength(95);
+  });
+
+  it("does not let a small new-epoch SABA socket baseline replace the complete DOM catalog", async () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const feeds = new ProviderFeedRegistry({ now: () => 100_010 });
+    const onIngestRejected = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 100_010,
+      authorityCoordinator: coordinator, feedRegistry: feeds, onIngestRejected });
+
+    expect(plane.ingest(sabaDomEnvelope(1), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaDomEnvelope(2), { connectionGeneration: 1 })).toBe(true);
+    expect((await plane.read(SABA)).events).toHaveLength(20);
+
+    expect(plane.ingest(sabaPushOpen(3, "1", "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaPushBaseline(4, "1", "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
+
+    expect(onIngestRejected.mock.calls.map((call) => call[1])).toContain(
+      "SABA_REPLACEMENT_COVERAGE_INCOMPLETE"
+    );
+    expect(coordinator.snapshot(SABA)).toMatchObject({
+      active: expect.objectContaining({ sourceEpoch: "worker-a:0" }),
+      candidate: expect.objectContaining({ sourceEpoch: "worker-a:1" })
+    });
+    expect((await plane.read(SABA)).events).toHaveLength(20);
+
+    expect(plane.ingest(sabaDomEnvelope(5, "worker-a:1"), { connectionGeneration: 1 })).toBe(false);
+    expect(plane.ingest(sabaDomEnvelope(6, "worker-a:1"), { connectionGeneration: 1 })).toBe(true);
+    expect(coordinator.snapshot(SABA)).toMatchObject({
+      active: expect.objectContaining({ sourceEpoch: "worker-a:1" }), candidate: null
+    });
+    expect((await plane.read(SABA)).events).toHaveLength(20);
   });
 
   it("keeps an active SABA DOM generation when a non-authoritative socket frame is malformed", async () => {
