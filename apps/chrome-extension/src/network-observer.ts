@@ -1529,7 +1529,8 @@ export class NetworkObserver {
   readonly #apsportRefreshesInFlight = new Set<string>();
   readonly #apsportActiveCatalogs = new Map<string, { readonly generation: string;
     readonly prematchWindowHours: number; readonly rosterCount: number;
-    readonly rosterEventIds: ReadonlySet<string> }>();
+    readonly rosterEventIds: ReadonlySet<string>;
+    readonly rosterLeagueIds: ReadonlyMap<string, string> }>();
   readonly #apsportEventDetailTimers = new Map<string, { readonly sourceId: string;
     readonly timer: ReturnType<typeof setTimeout> }>();
   readonly #apsportEventDetailJobs = new Map<string, symbol>();
@@ -3201,6 +3202,8 @@ export class NetworkObserver {
 
   async #refreshApsportEventDetail(source: ObservedSource, eventId: string, leagueId?: string): Promise<void> {
     const template = this.#apsportRequestTemplates.get(source.sourceId);
+    const rosterLeagueId = leagueId ??
+      this.#apsportActiveCatalogs.get(source.sourceId)?.rosterLeagueIds.get(eventId);
     const currentRosterContainsEvent = (): boolean =>
       this.#apsportActiveCatalogs.get(source.sourceId)?.rosterEventIds.has(eventId) === true;
     if (!currentRosterContainsEvent() || template === undefined) return;
@@ -3211,7 +3214,7 @@ export class NetworkObserver {
     const isCurrent = (): boolean => currentRosterContainsEvent() &&
       this.#apsportTemplateIsCurrent(source, template);
     const detailed = await this.#collectApsportEventDetail({ eventId,
-      ...(leagueId === undefined ? {} : { leagueId }),
+      ...(rosterLeagueId === undefined ? {} : { leagueId: rosterLeagueId }),
       template: { origin: template.origin, headers: template.headers, body: template.body },
       request: (input) => this.#requestApsportPage(source, template, input),
       sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
@@ -3231,8 +3234,11 @@ export class NetworkObserver {
     request: SelectionPriceProbeIdentity): Promise<Record<string, unknown> | null> {
     const template = this.#apsportRequestTemplates.get(source.sourceId);
     if (template === undefined) return null;
+    const leagueId = this.#apsportActiveCatalogs.get(source.sourceId)
+      ?.rosterLeagueIds.get(request.providerEventId);
     const isCurrent = (): boolean => this.#apsportTemplateIsCurrent(source, template);
     const detailed = await this.#collectApsportEventDetail({ eventId: request.providerEventId,
+      ...(leagueId === undefined ? {} : { leagueId }),
       template: { origin: template.origin, headers: template.headers, body: template.body },
       request: (input) => this.#requestApsportPage(source, template, input),
       sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
@@ -3330,9 +3336,11 @@ export class NetworkObserver {
                 ? String(rawLeagueId) : undefined;
               return eventId.trim() === "" || eventId.length > 128 ? [] : [{ eventId, leagueId }];
             });
+            const rosterLeagueIds = new Map(roster.flatMap(({ eventId, leagueId }) =>
+              leagueId === undefined ? [] : [[eventId, leagueId] as const]));
             this.#apsportActiveCatalogs.set(source.sourceId,
               { generation: batch.generation, prematchWindowHours: batch.prematchWindowHours,
-                rosterCount: batch.records.length,
+                rosterCount: batch.records.length, rosterLeagueIds,
                 rosterEventIds: new Set(roster.map(({ eventId }) => eventId)) });
             if (options.rosterOnly === true) {
               for (const item of roster) this.#scheduleApsportEventDetail(source, item.eventId, item.leagueId);

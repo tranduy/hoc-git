@@ -241,6 +241,7 @@ describe("NetworkObserver", () => {
       });
       const collectDetail = vi.fn(async (options: CollectApsportEventDetailOptions) => {
         expect(options.eventId).toBe("event-42");
+        expect(options.leagueId).toBe("league-1");
         return record;
       });
       const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
@@ -1671,7 +1672,7 @@ describe("NetworkObserver", () => {
     expect(evaluations.every(([, , params]) => params?.awaitPromise === true)).toBe(true);
   });
 
-  it("reads an exact hidden APSPORT price from authenticated event detail before trying DOM", async () => {
+  it("reads an exact hidden APSPORT price with its roster league from authenticated event detail", async () => {
     const detailed = { "1": "league-1", "2": "event-hidden", "5": "Alpha", "6": true,
       "10": "Active", "11": null, "22": "Beta", "53": "League", "50": [{
         "3": 80, "10": "Active", "9": [{ "0": "hidden-over", "2": "hidden-under",
@@ -1681,7 +1682,10 @@ describe("NetworkObserver", () => {
       await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
         complete: true, prematchWindowHours: 24, records: [detailed] });
     });
-    const collectDetail = vi.fn(async () => detailed);
+    const collectDetail = vi.fn(async (options: CollectApsportEventDetailOptions) => {
+      expect(options.leagueId).toBe("league-1");
+      return detailed;
+    });
     const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
       ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
       : {});
