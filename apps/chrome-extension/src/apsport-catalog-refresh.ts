@@ -53,6 +53,7 @@ export interface CollectApsportCatalogOptions {
 
 export interface CollectApsportEventDetailOptions {
   readonly eventId: string;
+  readonly leagueId?: string;
   readonly template: ApsportRequestTemplate;
   readonly request: (request: ApsportCatalogPageRequest) => Promise<ApsportCatalogPageResponse>;
   readonly sleep: (delayMs: number) => Promise<void>;
@@ -279,7 +280,9 @@ export async function collectApsportEventDetail(
 ): Promise<ApsportRawEvent | null> {
   const id = eventId({ "2": options.eventId });
   if (id === null || !options.isCurrent()) return null;
-  const response = await detailResponse(options, { "2": id });
+  const leagueId = scalar(options.leagueId);
+  const response = await detailResponse(options, { "2": id,
+    ...(leagueId === null ? {} : { "1": leagueId }) });
   if (response?.status !== 200 || !options.isCurrent()) return null;
   return apsportEventsFromProviderData(response.data).find((item) => eventId(item) === id) ?? null;
 }

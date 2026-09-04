@@ -761,6 +761,31 @@ describe("SourceTabRecovery", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it("abandons a dead SABA session path and mints a new direct session when no baseline returns", async () => {
+    const deadSession = "https://c0z0oa.bpd3a3fn.com/(S(dead))/NewIndex?lang=vn";
+    let current = { id: 18, url: deadSession, title: "Sports" };
+    const update = vi.fn(async (tabId: number, url: string) => {
+      current = { id: tabId, url, title: "Sports" };
+      return current;
+    });
+    const reload = vi.fn(async () => current);
+    const beginSourceEpoch = vi.fn();
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "SABA", tabId: 18 }],
+      query: async () => [current], create: vi.fn(), update, reload, attach: vi.fn(),
+      attachBootstrap: vi.fn(async () => undefined), loadRemembered: async () => deadSession,
+      get: async () => current,
+      validateReady: async (tab) => tab.url === SABA_DIRECT_LOBBY_URL,
+      delay: async () => undefined, beginSourceEpoch
+    });
+
+    await expect(recovery.restore("SABA")).resolves.toBeUndefined();
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledExactlyOnceWith(18, SABA_DIRECT_LOBBY_URL);
+    expect(beginSourceEpoch).toHaveBeenCalledTimes(2);
+  });
+
   it("allows a recovered SABA page sixty seconds to publish its complete baseline", async () => {
     let checks = 0;
     const create = vi.fn(async () => ({ id: 20, url: "about:blank" }));

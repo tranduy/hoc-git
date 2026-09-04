@@ -98,6 +98,14 @@ export class LocalBridge {
     maxConcurrent: RECOVERY_LANES,
     onRejected: (error) => { console.warn("[fieldline] recovery request dropped", error.sourceId); }
   });
+  // Source-tab creation/navigation has its own per-lobby lanes. A provider
+  // bootstrap can wait on a page indefinitely, so sharing one global promise
+  // chain allowed that provider to prevent SABA (and every later provider)
+  // from ever receiving RESTORE_SOURCE.
+  readonly #sourceRecoveryScheduler = new ProviderWorkScheduler({
+    maxConcurrent: RECOVERY_LANES,
+    onRejected: (error) => { console.warn("[fieldline] source recovery request dropped", error.sourceId); }
+  });
   readonly #sourceEpochs = new Map<string, SourceEpochAdmission>();
   readonly #releasedSources = new Set<string>();
   #socket: BridgeSocket | null = null;
@@ -108,7 +116,6 @@ export class LocalBridge {
   #probeInFlight = false;
   #connectToken = 0;
   #closeOrdinal = 0;
-  #sourceRecoveryTail: Promise<void> | null = null;
   #lastServerContactAtMs = 0;
 
   constructor(options: LocalBridgeOptions) {
@@ -399,20 +406,12 @@ export class LocalBridge {
       }
       if (parsed.data.kind === "ENSURE_SOURCE") {
         const { lobby, url } = parsed.data;
-        this.#enqueueSourceRecovery(() => this.#onSourceEnsure(lobby, url));
+        this.#enqueueSourceRecovery(lobby, () => this.#onSourceEnsure(lobby, url));
         return;
       }
       if (parsed.data.kind === "RESTORE_SOURCE") {
         const { lobby } = parsed.data;
-        if (lobby === "CMD") {
-          // CMD recovery only navigates its already-owned exact tab. It must
-          // not wait behind a slow provider bootstrap in the global launch
-          // lane, otherwise the API observes delivery while no reload occurs.
-          try { void Promise.resolve(this.#onSourceRestore(lobby)).catch(() => undefined); }
-          catch { /* exact-tab recovery must not disrupt the bridge */ }
-          return;
-        }
-        this.#enqueueSourceRecovery(() => this.#onSourceRestore(lobby));
+        this.#enqueueSourceRecovery(lobby, () => this.#onSourceRestore(lobby));
         return;
       }
       if (parsed.data.kind === "FOCUS_SELECTION") {
@@ -476,17 +475,20 @@ export class LocalBridge {
     }
   }
 
-  #enqueueSourceRecovery(task: () => void | Promise<void>): void {
-    const invoke = async (): Promise<void> => {
-      try { await task(); } catch { /* one source failure must not block the remaining reset */ }
-    };
-    const operation = this.#sourceRecoveryTail === null
-      ? invoke()
-      : this.#sourceRecoveryTail.then(invoke, invoke);
-    const settled = operation.finally(() => {
-      if (this.#sourceRecoveryTail === settled) this.#sourceRecoveryTail = null;
-    });
-    this.#sourceRecoveryTail = settled;
+  #enqueueSourceRecovery(lobby: ChromeBridgeEnvelope["lobby"], task: () => void | Promise<void>): void {
+    // RESTORE_SOURCE is retried by the API while the first recovery is still
+    // running. Keeping one duplicate queued means it fires after the healthy
+    // tab comes back and needlessly replaces that fresh source epoch again.
+    // Drop only requests that overlap an active/queued recovery; a later retry
+    // is accepted as soon as the bounded lane has been released.
+    if (this.#sourceRecoveryScheduler.isBusy(lobby)) return;
+    void this.#sourceRecoveryScheduler.run(lobby, async () => {
+      let operation: Promise<void>;
+      try { operation = Promise.resolve(task()); }
+      catch { return; }
+      try { await this.#boundedRecovery(`source:${lobby}`, operation); }
+      catch { /* one source failure must not block this provider's next recovery */ }
+    }).catch(() => undefined);
   }
 
   #enqueueSnapshotRecovery(request: Parameters<NonNullable<LocalBridgeOptions["onSnapshotRequest"]>>[0]): void {

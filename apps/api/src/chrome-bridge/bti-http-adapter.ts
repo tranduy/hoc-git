@@ -5,16 +5,17 @@ import { extractBtiCatalogRecords } from "../providers/bti/bti-direct-catalog.js
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 
 const ACCOUNT_ID = "catalog-source:BTI:FOOTBALL";
-const DETAIL_TTL_MS = 10_000;
 const LIST_PATHS = new Set([
   "/api/eventlist/asia/leagues/v2/1/live",
   "/api/eventlist/asia/leagues/v2/1/live/initial",
   "/api/eventlist/asia/leagues/v2/1/prematch/initial"
 ]);
+const OPTIONAL_LIST_PATH = "/api/eventlist/asia/leagues/v2/1/prematch";
 
 interface PendingGeneration {
   readonly order: readonly [number, number];
   readonly lists: Map<string, ObservedProviderCatalog>;
+  readonly details: Map<string, ObservedProviderCatalog | null>;
 }
 
 interface SourceParts {
@@ -54,14 +55,8 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
       lists: new Map<string, ObservedProviderCatalog>(), details: new Map<string, ObservedProviderCatalog>(),
       pending: new Map<string, PendingGeneration>(), latestGeneration: null, newestGenerationSeen: null
     };
-    if (isDetail) {
-      const detailGeneration = parseGeneration(envelope.request.streamId);
-      if (detailGeneration === null || parts.latestGeneration === null ||
-        compareGeneration(detailGeneration.order, parts.latestGeneration) !== 0) return [];
-    }
-    for (const [eventId, detail] of parts.details) {
-      if (envelope.observedAtMs - detail.observedAtMs > DETAIL_TTL_MS) parts.details.delete(eventId);
-    }
+    const generation = parseGeneration(envelope.request.streamId);
+    if (generation === null) return [];
     let part = emptyCatalog(envelope.observedAtMs);
     if (records.length > 0) {
       const normalized = normalizeSbobetCatalog(records, {
@@ -78,44 +73,57 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
       };
     }
     if (isDetail) {
-      if (records.length === 0) {
-        const eventId = decodeURIComponent(envelope.request.pathnameClass.slice("/api/eventpage/events/".length));
-        parts.details.delete(eventId);
+      const eventId = decodeURIComponent(envelope.request.pathnameClass.slice("/api/eventpage/events/".length));
+      const detail = records.length === 0 ? null : catalogForEvent(part, eventId);
+      if (records.length > 0 && detail === null) return [];
+      if (parts.latestGeneration !== null && compareGeneration(generation.order, parts.latestGeneration) < 0) return [];
+      const targetsCurrent = parts.latestGeneration !== null &&
+        compareGeneration(generation.order, parts.latestGeneration) === 0;
+      if (targetsCurrent) {
+        if (!listedEventIds(parts.lists).has(eventId)) return [];
+        if (detail === null) parts.details.delete(eventId);
+        else parts.details.set(eventId, detail);
       } else {
-        for (const event of part.events) {
-          const detail: ObservedProviderCatalog = {
-            ...part,
-            events: part.events.filter((candidate) => candidate.providerEventId === event.providerEventId),
-            markets: part.markets.filter((candidate) => candidate.providerEventId === event.providerEventId),
-            quotes: part.quotes.filter((candidate) => candidate.providerEventId === event.providerEventId)
-          };
-          parts.details.set(event.providerEventId, detail);
-        }
+        if (!acceptNewestGeneration(parts, generation.order)) return [];
+        const pending = parts.pending.get(generation.id) ?? {
+          order: generation.order, lists: new Map<string, ObservedProviderCatalog>(),
+          details: new Map<string, ObservedProviderCatalog | null>()
+        };
+        pending.details.set(eventId, detail);
+        parts.pending.set(generation.id, pending);
+        this.#parts.set(envelope.sourceId, parts);
+        return [];
       }
     } else {
-      const generation = parseGeneration(envelope.request.streamId);
-      if (generation === null || (parts.latestGeneration !== null && compareGeneration(generation.order,
-        parts.latestGeneration) <= 0)) return [];
-      if (parts.newestGenerationSeen !== null && compareGeneration(generation.order,
-        parts.newestGenerationSeen) < 0) return [];
-      if (parts.newestGenerationSeen === null || compareGeneration(generation.order,
-        parts.newestGenerationSeen) > 0) {
-        parts.newestGenerationSeen = generation.order;
-        for (const [id, candidate] of parts.pending) {
-          if (compareGeneration(candidate.order, generation.order) < 0) parts.pending.delete(id);
+      const latestComparison = parts.latestGeneration === null ? 1 :
+        compareGeneration(generation.order, parts.latestGeneration);
+      if (latestComparison < 0) return [];
+      if (latestComparison === 0) {
+        if (envelope.request.pathnameClass !== OPTIONAL_LIST_PATH ||
+          parts.lists.has(OPTIONAL_LIST_PATH)) return [];
+        parts.lists.set(OPTIONAL_LIST_PATH, part);
+      } else {
+        if (!acceptNewestGeneration(parts, generation.order)) return [];
+        const pending = parts.pending.get(generation.id) ?? { order: generation.order,
+          lists: new Map<string, ObservedProviderCatalog>(),
+          details: new Map<string, ObservedProviderCatalog | null>() };
+        pending.lists.set(envelope.request.pathnameClass, part);
+        parts.pending.set(generation.id, pending);
+        this.#parts.set(envelope.sourceId, parts);
+        if ([...LIST_PATHS].some((path) => !pending.lists.has(path))) return [];
+        const currentEventIds = listedEventIds(pending.lists);
+        for (const eventId of parts.details.keys()) {
+          if (!currentEventIds.has(eventId)) parts.details.delete(eventId);
         }
-      }
-      const pending = parts.pending.get(generation.id) ?? { order: generation.order,
-        lists: new Map<string, ObservedProviderCatalog>() };
-      pending.lists.set(envelope.request.pathnameClass, part);
-      parts.pending.set(generation.id, pending);
-      this.#parts.set(envelope.sourceId, parts);
-      if ([...LIST_PATHS].some((path) => !pending.lists.has(path))) return [];
-      parts.details.clear();
-      parts.lists = pending.lists;
-      parts.latestGeneration = pending.order;
-      for (const [id, candidate] of parts.pending) {
-        if (compareGeneration(candidate.order, pending.order) <= 0) parts.pending.delete(id);
+        for (const [eventId, detail] of pending.details) {
+          if (!currentEventIds.has(eventId) || detail === null) parts.details.delete(eventId);
+          else parts.details.set(eventId, detail);
+        }
+        parts.lists = pending.lists;
+        parts.latestGeneration = pending.order;
+        for (const [id, candidate] of parts.pending) {
+          if (compareGeneration(candidate.order, pending.order) <= 0) parts.pending.delete(id);
+        }
       }
     }
     this.#parts.set(envelope.sourceId, parts);
@@ -135,6 +143,31 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog, authoritativeBaseline: !isDetail }];
   }
+}
+
+function acceptNewestGeneration(parts: SourceParts, order: readonly [number, number]): boolean {
+  if (parts.newestGenerationSeen !== null && compareGeneration(order, parts.newestGenerationSeen) < 0) return false;
+  if (parts.newestGenerationSeen === null || compareGeneration(order, parts.newestGenerationSeen) > 0) {
+    parts.newestGenerationSeen = order;
+    for (const [id, candidate] of parts.pending) {
+      if (compareGeneration(candidate.order, order) < 0) parts.pending.delete(id);
+    }
+  }
+  return true;
+}
+
+function listedEventIds(lists: ReadonlyMap<string, ObservedProviderCatalog>): Set<string> {
+  return new Set([...lists.values()].flatMap(({ events }) => events.map(({ providerEventId }) => providerEventId)));
+}
+
+function catalogForEvent(part: ObservedProviderCatalog, eventId: string): ObservedProviderCatalog | null {
+  if (!part.events.some((event) => event.providerEventId === eventId)) return null;
+  return {
+    ...part,
+    events: part.events.filter((event) => event.providerEventId === eventId),
+    markets: part.markets.filter((market) => market.providerEventId === eventId),
+    quotes: part.quotes.filter((quote) => quote.providerEventId === eventId)
+  };
 }
 
 function parseGeneration(value: string | undefined): { readonly id: string; readonly order: readonly [number, number] } | null {

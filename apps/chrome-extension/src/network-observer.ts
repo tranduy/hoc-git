@@ -292,6 +292,7 @@ interface ObservedWebSocketState {
   ksportRecovery?: KsportRecoveryGenerationTracker;
   ksportFrameTail?: Promise<void>;
   urgentKsportRecoveryStarted?: boolean;
+  sabaLifecycleAnnounced?: boolean;
   closing?: boolean;
 }
 
@@ -921,11 +922,13 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   const listHeaders = { Accept: 'application/json', 'X-Fieldline-Generation': generation };
   if (authValue) listHeaders[authName] = authValue;
   if (contextValue) listHeaders[contextName] = contextValue;
-  const listPaths = [
+  const requiredListPaths = [
     '/api/eventlist/asia/leagues/v2/1/live',
     '/api/eventlist/asia/leagues/v2/1/live/initial',
     '/api/eventlist/asia/leagues/v2/1/prematch/initial'
   ];
+  const listPaths = [...requiredListPaths,
+    '/api/eventlist/asia/leagues/v2/1/prematch'];
   const listResponses = await Promise.all(listPaths.map(async (path) => {
     let timeoutId;
     const timeout = new Promise((resolve) => { timeoutId = setTimeout(() => resolve(null), 5000); });
@@ -965,12 +968,13 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) priorVisits = parsed;
   } catch { /* A malformed page-owned dataset must not stop catalog refresh. */ }
   const detailWorkerKey = '__fieldlineBtiDetailWorkerV1';
-  if (listResponses.length === listPaths.length && listResponses.every(Boolean)) {
+  const requiredResponses = listResponses.slice(0, requiredListPaths.length);
+  if (requiredResponses.length === requiredListPaths.length && requiredResponses.every(Boolean)) {
     const ranked = eventIds.map((eventId, index) => {
       const visitedAt = Number(priorVisits[eventId]);
       return { eventId, index, visitedAt: Number.isFinite(visitedAt) && visitedAt > 0 ? visitedAt : 0 };
     }).sort((left, right) => left.visitedAt - right.visitedAt || left.index - right.index);
-    const selected = ranked.slice(0, 12).map(({ eventId }) => eventId);
+    const selected = ranked.map(({ eventId }) => eventId);
     const nextVisits = {};
     for (const [eventId, value] of Object.entries(priorVisits)) {
       const visitedAt = Number(value);
@@ -978,50 +982,72 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
         nextVisits[eventId] = visitedAt;
       }
     }
-    for (const eventId of selected) nextVisits[eventId] = now;
     root.dataset.fieldlineBtiDetailVisits = JSON.stringify(nextVisits);
     const nextJob = { generation, headers: { ...listHeaders }, eventIds: selected };
     const currentWorker = root[detailWorkerKey];
-    if (currentWorker && typeof currentWorker.replace === 'function') {
-      currentWorker.replace(nextJob);
+    if (currentWorker && typeof currentWorker.update === 'function') {
+      currentWorker.update(nextJob);
     } else {
-      // A worker from an older extension document cannot be cancelled, but it
-      // must not retain ownership or delete the replacement when it settles.
+      // A worker from an older extension build cannot be trusted to own the
+      // complete queue. Retire only that incompatible object; current workers
+      // keep their in-flight request and adopt new generation headers.
       if (currentWorker) delete root[detailWorkerKey];
       const detailWorker = {
-        generation,
-        pending: nextJob,
+        generation: '',
+        headers: nextJob.headers,
+        desired: new Set(),
+        queue: [],
+        activeEventId: null,
         controller: null,
-        replace(job) {
+        update(job) {
           if (this.generation === job.generation) return;
           this.generation = job.generation;
-          this.pending = job;
-          if (this.controller) this.controller.abort();
+          this.headers = job.headers;
+          const desired = new Set(job.eventIds);
+          this.queue = this.queue.filter((eventId) => desired.has(eventId));
+          const queued = new Set(this.queue);
+          for (const eventId of job.eventIds) {
+            if (eventId === this.activeEventId || queued.has(eventId)) continue;
+            queued.add(eventId);
+            this.queue.push(eventId);
+          }
+          this.desired = desired;
+        },
+        markVisited(eventId) {
+          let visits = {};
+          try {
+            const parsed = JSON.parse(root.dataset.fieldlineBtiDetailVisits || '{}');
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) visits = parsed;
+          } catch { /* Rebuild malformed page-owned scheduling state. */ }
+          visits[eventId] = Date.now();
+          root.dataset.fieldlineBtiDetailVisits = JSON.stringify(visits);
         }
       };
+      detailWorker.update(nextJob);
       root[detailWorkerKey] = detailWorker;
       detailWorker.promise = (async () => {
-        while (root[detailWorkerKey] === detailWorker && detailWorker.pending) {
-          const job = detailWorker.pending;
-          detailWorker.pending = null;
-          for (const eventId of job.eventIds) {
-            if (detailWorker.pending) break;
-            const controller = new AbortController();
-            detailWorker.controller = controller;
-            const timeoutId = setTimeout(() => controller.abort(), 3000);
-            try {
-              const response = await fetch('/api/eventpage/events/' + encodeURIComponent(eventId) +
-                '?hideX25X75Selections=false',
-              { method: 'GET', credentials: 'include', cache: 'no-store', headers: job.headers,
-                signal: controller.signal });
-              if (typeof response?.arrayBuffer === 'function') await response.arrayBuffer();
-              else if (typeof response?.text === 'function') await response.text();
-              else if (typeof response?.json === 'function') await response.json();
-            } catch { /* Detail enrichment must not invalidate the complete list generation. */ }
-            finally {
-              clearTimeout(timeoutId);
-              if (detailWorker.controller === controller) detailWorker.controller = null;
-            }
+        while (root[detailWorkerKey] === detailWorker && detailWorker.queue.length > 0) {
+          const eventId = detailWorker.queue.shift();
+          if (!eventId || !detailWorker.desired.has(eventId)) continue;
+          detailWorker.activeEventId = eventId;
+          const headers = { ...detailWorker.headers };
+          const controller = new AbortController();
+          detailWorker.controller = controller;
+          const timeoutId = setTimeout(() => controller.abort(), 3000);
+          try {
+            const response = await fetch('/api/eventpage/events/' + encodeURIComponent(eventId) +
+              '?hideX25X75Selections=false',
+            { method: 'GET', credentials: 'include', cache: 'no-store', headers,
+              signal: controller.signal });
+            if (typeof response?.arrayBuffer === 'function') await response.arrayBuffer();
+            else if (typeof response?.text === 'function') await response.text();
+            else if (typeof response?.json === 'function') await response.json();
+          } catch { /* Detail enrichment must not invalidate the complete list generation. */ }
+          finally {
+            clearTimeout(timeoutId);
+            detailWorker.markVisited(eventId);
+            if (detailWorker.controller === controller) detailWorker.controller = null;
+            if (detailWorker.activeEventId === eventId) detailWorker.activeEventId = null;
           }
         }
       })().finally(() => {
@@ -1113,9 +1139,11 @@ export class NetworkObserver {
   readonly #apsportLastRefreshStartedAtMs = new Map<string, number>();
   readonly #apsportRefreshesInFlight = new Set<string>();
   readonly #apsportActiveCatalogs = new Map<string, { readonly generation: string;
-    readonly prematchWindowHours: number; readonly rosterCount: number }>();
+    readonly prematchWindowHours: number; readonly rosterCount: number;
+    readonly rosterEventIds: ReadonlySet<string> }>();
   readonly #apsportEventDetailTimers = new Map<string, { readonly sourceId: string;
     readonly timer: ReturnType<typeof setTimeout> }>();
+  readonly #apsportEventDetailJobs = new Map<string, symbol>();
   readonly #apsportEventDetailLastAtMs = new Map<string, number>();
   readonly #apsportEventDetailTails = new Map<string, Promise<void>>();
   readonly #apsportPageRequestTails = new Map<string, Promise<void>>();
@@ -1715,6 +1743,9 @@ export class NetworkObserver {
     }
     for (const key of this.#apsportEventDetailLastAtMs.keys()) {
       if (key.startsWith(`${sourceId}\u0000`)) this.#apsportEventDetailLastAtMs.delete(key);
+    }
+    for (const key of this.#apsportEventDetailJobs.keys()) {
+      if (key.startsWith(`${sourceId}\u0000`)) this.#apsportEventDetailJobs.delete(key);
     }
     this.#apsportEventDetailTails.delete(sourceId);
   }
@@ -2405,10 +2436,9 @@ export class NetworkObserver {
     const prioritizeApsportRoster = source.lobby === "TSPORT" && options.rosterOnly === true;
     if (prioritizeApsportRoster) {
       // A current roster after bridge/API restart outranks per-event detail
-      // enrichment. Retiring the active roster cancels queued detail work via
-      // its existing identity checks and re-arms the catalog cooldown so this
-      // recovery cannot be coalesced away.
-      this.#clearApsportEventDetails(source.sourceId);
+      // enrichment. Re-arm the catalog cooldown so this recovery cannot be
+      // coalesced away, but keep the independent deduplicated detail queue: it
+      // yields after each request and the roster reserves the next page turn.
       this.#apsportLastRefreshStartedAtMs.delete(source.sourceId);
     }
     const existing = this.#catalogRefreshes.get(source.sourceId);
@@ -2743,12 +2773,15 @@ export class NetworkObserver {
     }
   }
 
-  #scheduleApsportEventDetail(source: ObservedSource, eventId: string): void {
+  #scheduleApsportEventDetail(source: ObservedSource, eventId: string, leagueId?: string): void {
+    const active = this.#apsportActiveCatalogs.get(source.sourceId);
     if (source.lobby !== "TSPORT" || eventId.trim() === "" || eventId.length > 128 ||
-      !this.#apsportActiveCatalogs.has(source.sourceId) ||
+      active === undefined || !active.rosterEventIds.has(eventId) ||
       !this.#apsportRequestTemplates.has(source.sourceId)) return;
     const key = `${source.sourceId}\u0000${eventId}`;
-    if (this.#apsportEventDetailTimers.has(key)) return;
+    if (this.#apsportEventDetailJobs.has(key)) return;
+    const token = Symbol(eventId);
+    this.#apsportEventDetailJobs.set(key, token);
     const nowMs = this.#now();
     const previousAtMs = this.#apsportEventDetailLastAtMs.get(key);
     const delayMs = previousAtMs === undefined ? APSPORT_EVENT_DETAIL_DEBOUNCE_MS : Math.max(
@@ -2756,12 +2789,19 @@ export class NetworkObserver {
       previousAtMs + APSPORT_EVENT_DETAIL_MIN_INTERVAL_MS - nowMs
     );
     const timer = setTimeout(() => {
+      if (this.#apsportEventDetailJobs.get(key) !== token) return;
       this.#apsportEventDetailTimers.delete(key);
       this.#apsportEventDetailLastAtMs.set(key, this.#now());
       const prior = this.#apsportEventDetailTails.get(source.sourceId) ?? Promise.resolve();
-      const operation = prior.catch(() => undefined).then(() => this.#refreshApsportEventDetail(source, eventId));
+      const operation = prior.catch(() => undefined).then(async () => {
+        await this.#refreshApsportEventDetail(source, eventId, leagueId);
+        // Preserve the provider-safe cadence used by full sweeps while the
+        // independent queue works through every roster event.
+        await new Promise<void>((resolve) => setTimeout(resolve, APSPORT_DETAIL_DELAY_MS));
+      });
       this.#apsportEventDetailTails.set(source.sourceId, operation);
       void operation.finally(() => {
+        if (this.#apsportEventDetailJobs.get(key) === token) this.#apsportEventDetailJobs.delete(key);
         if (this.#apsportEventDetailTails.get(source.sourceId) === operation) {
           this.#apsportEventDetailTails.delete(source.sourceId);
         }
@@ -2770,13 +2810,14 @@ export class NetworkObserver {
     this.#apsportEventDetailTimers.set(key, { sourceId: source.sourceId, timer });
   }
 
-  async #refreshApsportEventDetail(source: ObservedSource, eventId: string): Promise<void> {
+  async #refreshApsportEventDetail(source: ObservedSource, eventId: string, leagueId?: string): Promise<void> {
     const active = this.#apsportActiveCatalogs.get(source.sourceId);
     const template = this.#apsportRequestTemplates.get(source.sourceId);
-    if (active === undefined || template === undefined) return;
+    if (active === undefined || !active.rosterEventIds.has(eventId) || template === undefined) return;
     const isCurrent = (): boolean => this.#apsportActiveCatalogs.get(source.sourceId) === active &&
-      this.#apsportTemplateIsCurrent(source, template);
+      active.rosterEventIds.has(eventId) && this.#apsportTemplateIsCurrent(source, template);
     const detailed = await this.#collectApsportEventDetail({ eventId,
+      ...(leagueId === undefined ? {} : { leagueId }),
       template: { origin: template.origin, headers: template.headers, body: template.body },
       request: (input) => this.#requestApsportPage(source, template, input),
       sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
@@ -2884,9 +2925,24 @@ export class NetworkObserver {
         sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
         isCurrent: refreshIsCurrent, onRoster: async (batch) => {
           await emitBatch(batch);
-          if (templateIsCurrent() && batch.complete) this.#apsportActiveCatalogs.set(source.sourceId,
-            { generation: batch.generation, prematchWindowHours: batch.prematchWindowHours,
-              rosterCount: batch.records.length });
+          if (templateIsCurrent() && batch.complete) {
+            const roster = batch.records.flatMap((record) => {
+              const rawEventId = record["2"];
+              const eventId = typeof rawEventId === "string" || typeof rawEventId === "number"
+                ? String(rawEventId) : "";
+              const rawLeagueId = record["1"];
+              const leagueId = typeof rawLeagueId === "string" || typeof rawLeagueId === "number"
+                ? String(rawLeagueId) : undefined;
+              return eventId.trim() === "" || eventId.length > 128 ? [] : [{ eventId, leagueId }];
+            });
+            this.#apsportActiveCatalogs.set(source.sourceId,
+              { generation: batch.generation, prematchWindowHours: batch.prematchWindowHours,
+                rosterCount: batch.records.length,
+                rosterEventIds: new Set(roster.map(({ eventId }) => eventId)) });
+            if (options.rosterOnly === true) {
+              for (const item of roster) this.#scheduleApsportEventDetail(source, item.eventId, item.leagueId);
+            }
+          }
           if (options.rosterOnly === true && batch.complete) rosterOnlyComplete = true;
         }, onDetail: emitBatch,
         detailBatchSize: 5, detailDelayMs: APSPORT_DETAIL_DELAY_MS });
@@ -3731,19 +3787,22 @@ export class NetworkObserver {
     let origin: URL;
     try { origin = new URL(value.origin); } catch { return false; }
     if (origin.protocol !== "https:" || origin.username !== "" || origin.password !== "") return false;
-    const allowedPaths = new Set([
+    const requiredPaths = new Set([
       "/api/eventlist/asia/leagues/v2/1/live",
       "/api/eventlist/asia/leagues/v2/1/live/initial",
       "/api/eventlist/asia/leagues/v2/1/prematch/initial"
     ]);
+    const optionalPath = "/api/eventlist/asia/leagues/v2/1/prematch";
+    const allowedPaths = new Set([...requiredPaths, optionalPath]);
     const unique = new Map<string, string>();
     for (const response of value.responses) {
       if (!isRecord(response) || typeof response.url !== "string" || typeof response.body !== "string" ||
         !allowedPaths.has(response.url) || response.body.length > 12 * 1024 * 1024) continue;
       unique.set(response.url, response.body);
     }
-    if (unique.size !== allowedPaths.size) return false;
-    for (const path of allowedPaths) {
+    if ([...requiredPaths].some((path) => !unique.has(path))) return false;
+    const ingestPaths = [optionalPath, ...requiredPaths].filter((path) => unique.has(path));
+    for (const path of ingestPaths) {
       await this.ingestHttpResponse(source, new URL(path, origin).href, "Fetch", unique.get(path)!,
         { method: "GET", streamId: value.generation,
           ...(verifiedDocument === undefined ? {} : { verifiedDocument }) });
@@ -4141,6 +4200,19 @@ export class NetworkObserver {
         return;
       }
       const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
+      if (source.lobby === "SABA") {
+        const existing = this.#webSockets.get(key) ?? this.#sabaSocketAcrossSession(source, requestId)?.[1];
+        // Flattened CDP can repeat one physical SABA socket creation on both
+        // the root target and its worker target. Treat that as one lifecycle:
+        // emitting another OPEN gives the API a newer stream ordinal, retires
+        // the already-authoritative stream and leaves fresh frames split across
+        // two logical owners. Only collapse an exact URL match where at least
+        // one observation is root-attributed; two child workers may genuinely
+        // own different sockets despite target-local request-id reuse.
+        if (existing !== undefined && existing.sourceGeneration === sourceGeneration &&
+          existing.url === params.url && (existing.sessionId === undefined || sessionId === undefined ||
+            existing.sessionId === sessionId)) return;
+      }
       const streamId = String((this.#streamOrdinals.get(source.sourceId) ?? 0) + 1);
       this.#streamOrdinals.set(source.sourceId, Number(streamId));
       let recoveryGeneration: number | undefined;
@@ -4160,6 +4232,7 @@ export class NetworkObserver {
         ...(recoveryGeneration === undefined ? {} : { recoveryGeneration }),
         ...(ksportRecovery === undefined ? {} : { ksportRecovery, ksportFrameTail: Promise.resolve(),
           ksportObservedFrameCount: 0 }),
+        ...(source.lobby === "SABA" ? { sabaLifecycleAnnounced: false } : {}),
         ...(sessionId === undefined ? {} : { sessionId }) });
       if (source.lobby === "SBO") {
         try {
@@ -4168,10 +4241,11 @@ export class NetworkObserver {
           }
         } catch { /* malformed socket URL cannot be a catalog authority */ }
       }
-      // KSPORT pages can open several /sport sockets in one document. An OPEN
-      // alone is not ownership evidence: defer the public OPEN until this exact
-      // socket sends or receives a recognized catalog subscription/receipt.
-      if (ksportRecovery !== undefined) return;
+      // KSPORT and SABA can open auxiliary sockets in the same document. An
+      // OPEN alone is not catalog ownership evidence: defer the public OPEN
+      // until this exact socket sends a recognized catalog frame. Otherwise an
+      // auxiliary SABA socket retires the healthy baseline-owning stream.
+      if (ksportRecovery !== undefined || source.lobby === "SABA") return;
       await this.#emit(source, params.url, "WebSocket", "WS_STATE", {
         encoding: "UTF8", body: '{"state":"OPEN"}'
       }, { request: { streamId,
@@ -4221,6 +4295,10 @@ export class NetworkObserver {
           this.#webSockets.get(socketKey) !== socket) return;
         if (socket.source.lobby === "KSPORT" &&
           this.#activeKsportStreams.get(socket.source.sourceId) !== socket.streamId) {
+          this.#webSockets.delete(socketKey);
+          return;
+        }
+        if (socket.source.lobby === "SABA" && socket.sabaLifecycleAnnounced !== true) {
           this.#webSockets.delete(socketKey);
           return;
         }
@@ -4331,6 +4409,23 @@ export class NetworkObserver {
       if (!this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration)) return;
       const opcode = typeof response.opcode === "number" ? response.opcode : 1;
       const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
+      if (socket.source.lobby === "SABA" && socket.sabaLifecycleAnnounced !== true) {
+        if (opcode === 2 || !isPotentialSabaCatalogPayload(response.payloadData)) return;
+        // The document marker lookup is asynchronous. Fence the deferred OPEN
+        // behind it as well as the frame; otherwise a navigation can retire
+        // the source while the lookup is pending and still receive a ghost
+        // OPEN from the old SABA document.
+        await this.#sabaDocumentMarker(socket.source, socket.sessionId, socket.sourceGeneration);
+        if (socketIsClosing(socket) ||
+          !this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration)) return;
+        socket.sabaLifecycleAnnounced = true;
+        await this.#emit(socket.source, socket.url, "WebSocket", "WS_STATE", {
+          encoding: "UTF8", body: '{"state":"OPEN"}'
+        }, { request: { streamId: socket.streamId }, ...clocks,
+          sourceGeneration: socket.sourceGeneration });
+        if (socketIsClosing(socket) ||
+          !this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration)) return;
+      }
       if (socket.ksportRecovery !== undefined) {
         const ksportRecovery = socket.ksportRecovery;
         const payloadData = response.payloadData;
@@ -6000,6 +6095,18 @@ function isProviderCatalogWebSocket(source: ObservedSource, _value: string): boo
   return source.lobby === "SABA" || source.lobby === "TSPORT" || source.lobby === "SBO";
 }
 
+function isPotentialSabaCatalogPayload(value: string): boolean {
+  if (!value.startsWith("42")) return false;
+  try {
+    const payload: unknown = JSON.parse(value.slice(2));
+    return Array.isArray(payload) && payload[0] === "m" &&
+      typeof payload[1] === "string" && /^b\d+$/u.test(payload[1]) &&
+      Array.isArray(payload[2]) && payload.length >= 3 && payload.length <= 4;
+  } catch {
+    return false;
+  }
+}
+
 function isProviderCatalogHttpResponse(source: ObservedSource, value: string,
   streamId: string | undefined, providerFunctionCode: number | undefined,
   providerPartition?: ProviderPartition): boolean {
@@ -6040,6 +6147,10 @@ function isReplayableCmdCatalog(records: readonly unknown[]): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function socketIsClosing(socket: ObservedWebSocketState): boolean {
+  return socket.closing === true;
 }
 
 function sabaFramesContainCompleteBaseline(frames: readonly ReplayableWsEvent[]): boolean {

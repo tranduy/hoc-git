@@ -155,7 +155,8 @@ export class SourceTabRecovery {
         // SABA shell without its Socket.IO catalog. Error documents still use
         // the canonical tokenless entry so the provider can mint a new session.
         await this.#reuse({ ...existing, title: undefined }, lobby,
-          existingSabaSession?.url ?? directUrl, existingSabaSession?.reload ?? false);
+          existingSabaSession?.url ?? directUrl, existingSabaSession?.reload ?? false,
+          existingSabaSession?.reload === true ? directUrl : undefined);
         await this.#removeRecoveryDuplicates(lobby, recoveryTabs, existing.id);
         return;
       }
@@ -194,7 +195,8 @@ export class SourceTabRecovery {
     throw new Error(`SOURCE_RESTORE_UNAVAILABLE:${lobby}`);
   }
 
-  async #reuse(tab: TabDescriptor, lobby: ChromeLobbyId, url: string, reload: boolean): Promise<void> {
+  async #reuse(tab: TabDescriptor, lobby: ChromeLobbyId, url: string, reload: boolean,
+    deadSessionFallbackUrl?: string): Promise<void> {
     if (tab.id === undefined) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
     this.#options.beginSourceEpoch?.(`chrome:${lobby}:${tab.id}`);
     this.#options.onBootstrapStart?.(tab.id);
@@ -211,9 +213,20 @@ export class SourceTabRecovery {
           return;
         } catch { /* no complete baseline yet; continue with the exact-tab reload */ }
       }
-      const navigated = reload && this.#options.reload !== undefined
-        ? await this.#options.reload(tab.id, lobby)
-        : await this.#options.update(tab.id, url);
+      let navigated: TabDescriptor;
+      if (deadSessionFallbackUrl !== undefined) {
+        // A SABA /(S(...))/ document can remain visually open after its
+        // server-side session and Socket.IO catalog have died. Reloading that
+        // exact URL only replays the dead session. Once lightweight same-tab
+        // recovery fails, enter the public tokenless URL so SABA mints a new
+        // session on this same tab.
+        this.#options.beginSourceEpoch?.(`chrome:${lobby}:${tab.id}`);
+        navigated = await this.#options.update(tab.id, deadSessionFallbackUrl);
+      } else {
+        navigated = reload && this.#options.reload !== undefined
+          ? await this.#options.reload(tab.id, lobby)
+          : await this.#options.update(tab.id, url);
+      }
       await this.#waitForLobby(navigated, lobby);
     } catch (error) {
       this.#options.onBootstrapFailure?.(tab.id);

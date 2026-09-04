@@ -104,6 +104,7 @@ describe("collectApsportCatalog", () => {
 
     const result = await collectApsportEventDetail({
       eventId: "live-42",
+      leagueId: "league-42",
       template: { origin: "https://pacific.agenate.com", headers: { lng: "vi" }, body: {} },
       request: async (input) => {
         requests.push(input);
@@ -116,7 +117,8 @@ describe("collectApsportCatalog", () => {
     expect(requests).toEqual([expect.objectContaining({
       kind: "DETAIL",
       eventId: "live-42",
-      url: "https://pacific.agenate.com/be-ui/pac/api/v3/events/live-42"
+      url: "https://pacific.agenate.com/be-ui/pac/api/v3/events/live-42",
+      body: expect.objectContaining({ li: "league-42" })
     })]);
     expect(result).toEqual(expect.objectContaining({ "2": "live-42" }));
   });

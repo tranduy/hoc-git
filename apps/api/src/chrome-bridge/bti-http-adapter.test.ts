@@ -92,6 +92,17 @@ describe("BtiHttpCatalogAdapter", () => {
       value: expect.objectContaining({ events: expect.any(Array), quotes: expect.any(Array) }) })]);
   });
 
+  it("accepts the optional prematch partition when it arrives after the required generation commits", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const required = [listPaths[0], listPaths[1], listPaths[3]] as const;
+    const updates = required.map((path, index) =>
+      adapter.decode(generationEnvelope(path, "bti:2200:1", 40 + index)));
+    expect(updates[2]).toHaveLength(1);
+
+    expect(adapter.decode(generationEnvelope(listPaths[2], "bti:2200:1", 43)))
+      .toEqual([expect.objectContaining({ authoritativeBaseline: true, sequence: 43 })]);
+  });
+
   it("does not roll back when an older generation completes after a newer snapshot", () => {
     const adapter = new BtiHttpCatalogAdapter();
     for (const [index, path] of listPaths.slice(0, 3).entries()) {
@@ -150,24 +161,26 @@ describe("BtiHttpCatalogAdapter", () => {
     expect(combined.quotes).toHaveLength(4);
   });
 
-  it("evicts expired detail markets and removes a valid empty event detail", () => {
+  it("retains hidden detail markets across list generations while the event remains listed", () => {
     const adapter = new BtiHttpCatalogAdapter();
-    committedCatalog(adapter);
+    committedCatalog(adapter, "bti:1000:1");
     const withDetail = adapter.decode(detailEnvelope())[0]!.value as { markets: { marketType: string }[] };
     expect(withDetail.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(true);
 
-    const expiredAt = envelope().observedAtMs + 10_001;
-    const expired = adapter.decode(detailEnvelope({ data: [] }, expiredAt))[0]!.value as {
+    const nextGeneration = committedCatalog(adapter, "bti:2000:1", 20) as {
       markets: { marketType: string }[];
     };
-    expect(expired.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(false);
+    expect(nextGeneration.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(true);
+  });
 
-    adapter.decode(detailEnvelope(detailPayload(), expiredAt + 1));
-    expect(adapter.decode(detailEnvelope({ data: [] }, expiredAt + 2))).toHaveLength(1);
-    const afterEmpty = adapter.decode(detailEnvelope({ data: [] }, expiredAt + 3))[0]!.value as {
+  it("buffers event detail that arrives before its list generation commits", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    expect(adapter.decode(detailEnvelope(detailPayload(), envelope().observedAtMs, "bti:1000:1"))).toEqual([]);
+
+    const committed = committedCatalog(adapter, "bti:1000:1", 20) as {
       markets: { marketType: string }[];
     };
-    expect(afterEmpty.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(false);
+    expect(committed.markets.some(({ marketType }) => marketType === "FH_TOTAL")).toBe(true);
   });
 
   it("publishes removal immediately when a valid event detail becomes empty", () => {

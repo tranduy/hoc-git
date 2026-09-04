@@ -144,6 +144,53 @@ describe("NetworkObserver", () => {
       .toEqual(["ROSTER", "ROSTER"]);
   });
 
+  it("queues every APSPORT roster event for hidden-detail enrichment after a roster-only refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      const records = ["event-1", "event-2", "event-3"].map((id) => ({
+        "1": `league-${id}`, "2": id, "5": `Home ${id}`, "6": true,
+        "10": "Active", "11": null, "22": `Away ${id}`, "50": [], "53": "League"
+      }));
+      const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+        await options.onRoster({ schemaVersion: 1, generation: options.generation,
+          phase: "ROSTER", complete: true, prematchWindowHours: 24, records });
+      });
+      const requested: string[] = [];
+      const collectDetail = vi.fn(async (options: CollectApsportEventDetailOptions) => {
+        requested.push(options.eventId);
+        return records.find((record) => record["2"] === options.eventId) ?? null;
+      });
+      const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+        : {});
+      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+        collectApsportCatalog: collect, collectApsportEventDetail: collectDetail,
+        now: () => 10_000, monotonicNow: () => 500 });
+      const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+      await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+        context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+      });
+      await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+        requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+        request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+          postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+      });
+
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(collectDetail).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(collectDetail).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.waitFor(() => expect(collectDetail).toHaveBeenCalledTimes(3));
+
+      expect(requested.sort()).toEqual(["event-1", "event-2", "event-3"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports an empty APSPORT page only when a completed API roster proves matches exist", async () => {
     const healthSamples: unknown[] = [];
     const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
@@ -233,7 +280,7 @@ describe("NetworkObserver", () => {
     }
   });
 
-  it("prioritizes a roster-only bootstrap over queued APSPORT event details", async () => {
+  it("keeps one queued APSPORT event detail across a roster-only bootstrap", async () => {
     vi.useFakeTimers();
     try {
       const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": true,
@@ -272,7 +319,7 @@ describe("NetworkObserver", () => {
       await vi.advanceTimersByTimeAsync(500);
 
       expect(collect).toHaveBeenCalledTimes(2);
-      expect(collectDetail).not.toHaveBeenCalled();
+      expect(collectDetail).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }
@@ -2182,7 +2229,6 @@ describe("NetworkObserver", () => {
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("credentials: 'include'");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("cache: 'no-store'");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("X-Fieldline-Generation");
-    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("slice(0, 12)");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).not.toMatch(/cookie|authorization|password/iu);
     expect(() => new Function(`return ${BTI_CATALOG_REFRESH_EXPRESSION}`)).not.toThrow();
   });
@@ -2192,7 +2238,8 @@ describe("NetworkObserver", () => {
     const responses = [
       "/api/eventlist/asia/leagues/v2/1/live",
       "/api/eventlist/asia/leagues/v2/1/live/initial",
-      "/api/eventlist/asia/leagues/v2/1/prematch/initial"
+      "/api/eventlist/asia/leagues/v2/1/prematch/initial",
+      "/api/eventlist/asia/leagues/v2/1/prematch"
     ].map((url, index) => ({ url, body: JSON.stringify({ serializedData: [], index }) }));
     const sendCommand = vi.fn(async (_tabId: number, method: string) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
@@ -2207,15 +2254,22 @@ describe("NetworkObserver", () => {
 
     await observer.refreshCatalog({ lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 });
 
-    expect(forwarded).toHaveLength(3);
+    expect(forwarded).toHaveLength(4);
     expect(forwarded.map(({ transport }) => transport)).toEqual([
-      "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE"
+      "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE"
     ]);
-    expect(forwarded.map(({ request }) => request.pathnameClass)).toEqual(responses.map(({ url }) => url));
+    expect(forwarded.map(({ request }) => request.pathnameClass)).toEqual([
+      "/api/eventlist/asia/leagues/v2/1/prematch",
+      "/api/eventlist/asia/leagues/v2/1/live",
+      "/api/eventlist/asia/leagues/v2/1/live/initial",
+      "/api/eventlist/asia/leagues/v2/1/prematch/initial"
+    ]);
     expect(forwarded.map(({ request }) => request.streamId)).toEqual([
-      generation, generation, generation
+      generation, generation, generation, generation
     ]);
-    expect(forwarded.map(({ payload }) => payload.body)).toEqual(responses.map(({ body }) => body));
+    expect(forwarded.map(({ payload }) => payload.body)).toEqual([
+      responses[3]!.body, responses[0]!.body, responses[1]!.body, responses[2]!.body
+    ]);
   });
 
   it("waits long enough for a bounded BTI fetch generation that completes after the generic frame timeout", async () => {
@@ -2272,7 +2326,7 @@ describe("NetworkObserver", () => {
           url: "/api/eventlist/asia/leagues/v2/1/prematch/initial"
         })]) });
       const listRequests = requests.filter(({ path }) => path.startsWith("/api/eventlist/"));
-      expect(listRequests).toHaveLength(3);
+      expect(listRequests).toHaveLength(4);
       expect(new Set(listRequests.map(({ generation }) => generation)).size).toBe(1);
       expect(listRequests[0]!.generation).toMatch(/^bti:\d+:\d+$/u);
     } finally {
@@ -2335,14 +2389,43 @@ describe("NetworkObserver", () => {
     expect(maxActiveDetails).toBe(1);
   });
 
-  it("retires slow BTI detail work when a newer list generation arrives", async () => {
+  it("requests hidden BTI detail for every event when the roster exceeds the former batch cap", async () => {
+    const eventIds = Array.from({ length: 20 }, (_unused, index) => `event-${index + 1}`);
     const root = { dataset: {} as Record<string, string> };
     const league = Array.from({ length: 13 }, () => null) as unknown[];
-    league[12] = [["event-1"]];
+    league[12] = eventIds.map((eventId) => [eventId]);
+    const requested: string[] = [];
+    const fetcher = async (path: string) => {
+      if (path.startsWith("/api/eventpage/events/")) {
+        requested.push(decodeURIComponent(path.slice("/api/eventpage/events/".length).split("?")[0]!));
+        return { ok: true, text: async () => '{"data":[]}' };
+      }
+      return { ok: true, text: async () => JSON.stringify({ serializedData: path.endsWith("/live")
+        ? [league] : [] }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string; origin: string }, fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }) => Promise<unknown>;
+
+    await evaluate({ documentElement: root }, {
+      pathname: "/sports", hostname: "bti.test", origin: "https://bti.test"
+    }, fetcher, { getItem: () => null });
+    await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
+      .__fieldlineBtiDetailWorkerV1).toBeUndefined());
+
+    expect(requested).toEqual(eventIds);
+  });
+
+  it("finishes the complete BTI detail queue while adopting the newest generation headers", async () => {
+    const root = { dataset: {} as Record<string, string> };
+    const league = Array.from({ length: 13 }, () => null) as unknown[];
+    league[12] = [["event-1"], ["event-2"]];
     let detailRequests = 0;
     let activeBodies = 0;
     let maxActiveBodies = 0;
     const detailGenerations: string[] = [];
+    let releaseFirst!: () => void;
     const fetcher = async (path: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => {
       if (!path.startsWith("/api/eventpage/")) {
         return { ok: true, text: async () => JSON.stringify({ serializedData: [league] }) };
@@ -2356,10 +2439,10 @@ describe("NetworkObserver", () => {
           activeBodies -= 1;
           return "";
         }
-        return new Promise<string>((_resolve, reject) => init?.signal?.addEventListener("abort", () => {
+        return new Promise<string>((resolve) => { releaseFirst = () => {
           activeBodies -= 1;
-          reject(new Error("retired-generation"));
-        }, { once: true }));
+          resolve("");
+        }; });
       } };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage",
@@ -2376,6 +2459,9 @@ describe("NetworkObserver", () => {
     const second = await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null }) as {
       generation: string;
     };
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(detailRequests).toBe(1);
+    releaseFirst();
     await vi.waitFor(() => expect(detailRequests).toBe(2));
 
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
@@ -2429,8 +2515,8 @@ describe("NetworkObserver", () => {
         : key === "CT_APP_SERVICE_CONTEXT" ? "opaque-service-context" : null
     });
 
-    expect(listHeaders).toHaveLength(3);
-    expect(listHeaders).toEqual(Array.from({ length: 3 }, () => expect.objectContaining({
+    expect(listHeaders).toHaveLength(4);
+    expect(listHeaders).toEqual(Array.from({ length: 4 }, () => expect.objectContaining({
       authorization: "opaque-session-token",
       "service-context": "opaque-service-context"
     })));
@@ -3710,15 +3796,16 @@ describe("NetworkObserver", () => {
   });
 
   it("forwards redacted WebSocket text frames with ordered sequence", async () => {
+    const sbo = { lobby: "SBO", sourceId: "chrome:SBO:7", tabId: 7 } as const;
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({
       sendCommand: vi.fn(async () => ({})), forward,
       now: () => 1_000, monotonicNow: () => 50, observerSessionId: "observer-a"
     });
-    await observer.handleEvent(source, "Network.webSocketCreated", {
-      requestId: "ws-1", url: "wss://sports.example/feed?token=secret"
+    await observer.handleEvent(sbo, "Network.webSocketCreated", {
+      requestId: "ws-1", url: "wss://sports.example/socket.io/?token=secret"
     });
-    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+    await observer.handleEvent(sbo, "Network.webSocketFrameReceived", {
       requestId: "ws-1", response: { opcode: 1, payloadData: "{\"eventId\":1}" }
     });
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({
@@ -3729,10 +3816,10 @@ describe("NetworkObserver", () => {
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({
       sourceEpoch: "observer-a:0", sequence: 1,
       transport: "WS_FRAME",
-      request: expect.objectContaining({ hostname: "sports.example", pathnameClass: "/feed", streamId: "1" }),
+      request: expect.objectContaining({ hostname: "sports.example", pathnameClass: "/socket.io/", streamId: "1" }),
       payload: { encoding: "UTF8", body: "{\"eventId\":1}" }
     }));
-    await observer.handleEvent(source, "Network.webSocketClosed", { requestId: "ws-1" });
+    await observer.handleEvent(sbo, "Network.webSocketClosed", { requestId: "ws-1" });
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({
       sequence: 2, transport: "WS_STATE", request: expect.objectContaining({ streamId: "1" }),
       payload: { encoding: "UTF8", body: '{"state":"CLOSED"}' }
@@ -3750,14 +3837,70 @@ describe("NetworkObserver", () => {
     forward.mockClear();
 
     await observer.handleEvent(source, "Network.webSocketFrameReceived", {
-      requestId: "provider-ws", response: { opcode: 1, payloadData: "42[]" }
+      requestId: "provider-ws", response: { opcode: 1,
+        payloadData: '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]' }
     }, "saba-child-session");
 
-    expect(forward).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
       lobby: "SABA", transport: "WS_FRAME",
       request: expect.objectContaining({ streamId: "1" }),
-      payload: { encoding: "UTF8", body: "42[]" }
+      payload: { encoding: "UTF8",
+        body: '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]' }
     }));
+  });
+
+  it("does not create a second SABA stream when CDP repeats one socket creation in a child session", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => 1_000, monotonicNow: () => 50 });
+    const created = { requestId: "provider-ws", url: "wss://socket.saba.test/socket.io/" };
+
+    await observer.handleEvent(source, "Network.webSocketCreated", created);
+    await observer.handleEvent(source, "Network.webSocketCreated", created, "saba-child-session");
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "provider-ws", response: { opcode: 1,
+        payloadData: '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]' }
+    }, "saba-child-session");
+    await observer.heartbeat(source, "socket.saba.test");
+
+    const opened = forwarded.filter((envelope) => envelope.transport === "WS_STATE" &&
+      envelope.payload.body === '{"state":"OPEN"}');
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.request.streamId).toBe("1");
+    expect(forwarded).toContainEqual(expect.objectContaining({
+      lobby: "SABA", transport: "WS_FRAME", request: expect.objectContaining({ streamId: "1" })
+    }));
+    const heartbeat = forwarded.at(-1);
+    expect(heartbeat?.transport).toBe("TAB_STATE");
+    expect(JSON.parse(heartbeat?.payload.body ?? "{}")).toMatchObject({ webSockets: 1 });
+  });
+
+  it("does not let an auxiliary SABA Socket.IO connection retire the catalog stream", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => 1_000, monotonicNow: () => 50 });
+    await observer.handleEvent(source, "Network.webSocketCreated", {
+      requestId: "catalog", url: "wss://socket.saba.test/socket.io/"
+    });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "catalog", response: { opcode: 1,
+        payloadData: '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]' }
+    });
+
+    await observer.handleEvent(source, "Network.webSocketCreated", {
+      requestId: "auxiliary", url: "wss://socket.saba.test/socket.io/"
+    });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "auxiliary", response: { opcode: 1, payloadData: '42["notice",{}]' }
+    });
+
+    const opened = forwarded.filter((envelope) => envelope.transport === "WS_STATE" &&
+      envelope.payload.body === '{"state":"OPEN"}');
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.request.streamId).toBe("1");
+    expect(forwarded.some((envelope) => envelope.request.streamId === "2")).toBe(false);
   });
 
   it("retires a root-created SABA socket when its close arrives from a child session", async () => {
@@ -3767,6 +3910,10 @@ describe("NetworkObserver", () => {
       now: () => 1_000, monotonicNow: () => 50 });
     await observer.handleEvent(source, "Network.webSocketCreated", {
       requestId: "provider-ws", url: "wss://socket.saba.test/socket.io/"
+    });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "provider-ws", response: { opcode: 1,
+        payloadData: '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]' }
     });
 
     await observer.handleEvent(source, "Network.webSocketClosed", {
@@ -3790,11 +3937,16 @@ describe("NetworkObserver", () => {
     await observer.handleEvent(source, "Network.webSocketCreated", {
       requestId: "provider-ws", url: "wss://socket.saba.test/socket.io/"
     });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "provider-ws", response: { opcode: 1,
+        payloadData: '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]' }
+    });
     forward.mockClear();
 
     observer.prepareDebuggerReattach(source.tabId);
     await observer.handleEvent(source, "Network.webSocketFrameReceived", {
-      requestId: "provider-ws", response: { opcode: 1, payloadData: "42[]" }
+      requestId: "provider-ws", response: { opcode: 1,
+        payloadData: '42["m","b1",[[0,"reset"],[0,"done"]],"r2"]' }
     }, "replacement-child-session");
 
     expect(forward).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
@@ -5157,13 +5309,15 @@ describe("NetworkObserver", () => {
   });
 
   it("drops an oversized frame without disrupting later frames", async () => {
+    const genericSocketSource = { lobby: "SBO", sourceId: "chrome:SBO:7", tabId: 7 } as const;
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward });
-    await observer.handleEvent(source, "Network.webSocketCreated", { requestId: "ws-1", url: "wss://sports.example/feed" });
-    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+    await observer.handleEvent(genericSocketSource, "Network.webSocketCreated", {
+      requestId: "ws-1", url: "wss://sports.example/feed" });
+    await observer.handleEvent(genericSocketSource, "Network.webSocketFrameReceived", {
       requestId: "ws-1", response: { opcode: 1, payloadData: "x".repeat(262_145) }
     });
-    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+    await observer.handleEvent(genericSocketSource, "Network.webSocketFrameReceived", {
       requestId: "ws-1", response: { opcode: 2, payloadData: "YWJj" }
     });
     expect(forward).toHaveBeenCalledTimes(2);
@@ -5172,6 +5326,7 @@ describe("NetworkObserver", () => {
   });
 
   it("serializes concurrent frames from one source without duplicating sequence numbers", async () => {
+    const genericSocketSource = { lobby: "SBO", sourceId: "chrome:SBO:7", tabId: 7 } as const;
     let releaseFirst: (() => void) | undefined;
     const firstForwarded = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const forwarded: number[] = [];
@@ -5182,14 +5337,14 @@ describe("NetworkObserver", () => {
         if (envelope.sequence === 1) await firstForwarded;
       }
     });
-    await observer.handleEvent(source, "Network.webSocketCreated", {
+    await observer.handleEvent(genericSocketSource, "Network.webSocketCreated", {
       requestId: "ws-1", url: "wss://sports.example/feed"
     });
 
-    const first = observer.handleEvent(source, "Network.webSocketFrameReceived", {
+    const first = observer.handleEvent(genericSocketSource, "Network.webSocketFrameReceived", {
       requestId: "ws-1", response: { opcode: 1, payloadData: "{\"price\":1.9}" }
     });
-    const second = observer.handleEvent(source, "Network.webSocketFrameReceived", {
+    const second = observer.handleEvent(genericSocketSource, "Network.webSocketFrameReceived", {
       requestId: "ws-1", response: { opcode: 1, payloadData: "{\"price\":2.1}" }
     });
 
