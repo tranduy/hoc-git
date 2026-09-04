@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { BtiPageRecoveryWatchdog, parseBtiPageHealthProbe } from "./bti-page-health.js";
+import { BtiPageRecoveryWatchdog, btiHardRecoveryAction,
+  parseBtiPageHealthProbe } from "./bti-page-health.js";
 
 const failedPage = {
   sourceId: "chrome:BTI:7",
@@ -14,6 +15,24 @@ describe("BTI page health", () => {
       .toEqual({ status: "AUTH_ERROR", code: "1008" });
     expect(parseBtiPageHealthProbe({ status: "AUTH_ERROR", code: "9999" })).toBeNull();
     expect(parseBtiPageHealthProbe("1008 login failed token=secret")).toBeNull();
+  });
+
+  it("forwards only bounded numeric BTI roster coverage", () => {
+    const rosterCoverage = JSON.stringify({ phase: "HYDRATING", liveLeagues: 321,
+      prematchLeagues: 45, liveBatches: 33, prematchBatches: 5, liveDone: 17,
+      prematchDone: 5, failed: 0, events: 200, namedEvents: 198, timedEvents: 190,
+      marketEvents: 31, validEvents: 188, detailCachedEvents: 171, detailCachedBytes: 9_871_234,
+      detailPendingEvents: 29 });
+    expect(parseBtiPageHealthProbe({ status: "HEALTHY", code: null, rosterCoverage }))
+      .toEqual({ status: "HEALTHY", code: null, rosterCoverage });
+    expect(parseBtiPageHealthProbe({ status: "HEALTHY", code: null,
+      rosterCoverage: JSON.stringify({ phase: "FAILED", token: "secret" }) })).toBeNull();
+  });
+
+  it("keeps hard recovery in-page unless BTI proves an authentication failure", () => {
+    expect(btiHardRecoveryAction({ status: "HEALTHY", code: null })).toBe("REFRESH");
+    expect(btiHardRecoveryAction({ status: "UNKNOWN", code: null })).toBe("REFRESH");
+    expect(btiHardRecoveryAction({ status: "AUTH_ERROR", code: "1008" })).toBe("RENEW");
   });
 
   it("reloads the exact failed tab immediately and rate-limits repeated samples", async () => {

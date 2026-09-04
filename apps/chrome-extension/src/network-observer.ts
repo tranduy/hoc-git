@@ -814,7 +814,6 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
     try {
     const providerDate = (value) => new Date(value).toISOString().slice(0, 10).replace(/-/g, '/');
     const dateFrom = providerDate(now);
-    const dateTo = providerDate(now + 48 * 60 * 60 * 1000);
     // IM signs each API request through its same-page CORS helper. Cookies alone
     // are insufficient: an unsigned GetSE returns StatusCode 500 even while the
     // tab is authenticated. Reuse the page's own signing event and keep every
@@ -839,7 +838,7 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
     });
     const common = {
       SportId: 1, BetTypeIds: [1, 2, 3, 5], GamePeriods: [1, 2, 3], IsCombo: false,
-      ['O' + 'ddsType']: 2, DateFrom: dateFrom, DateTo: dateTo, CompetitionIds: [],
+      ['O' + 'ddsType']: 2, DateFrom: dateFrom, CompetitionIds: [],
       SortType: 2, ProgrammeIds: []
     };
     const path = '/api/EventV6/GetSE';
@@ -914,7 +913,28 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   if (Number.isFinite(prior) && now - prior < 1800) return 'rate-limited';
   if (!location.pathname || !location.hostname) return 'page-unavailable';
   root.dataset.fieldlineBtiCatalogRefreshAt = String(now);
+  const rosterWorkerKey = '__fieldlineBtiRosterWorkerV9';
+  const detailBodiesKey = '__fieldlineBtiDetailBodiesV8';
+  const existingRosterWorker = root[rosterWorkerKey];
+  if (existingRosterWorker && existingRosterWorker.result &&
+    now - Number(existingRosterWorker.completedAt || 0) <= 12000) {
+    return existingRosterWorker.result;
+  }
+  if (existingRosterWorker && existingRosterWorker.promise && !existingRosterWorker.result) {
+    return await existingRosterWorker.promise;
+  }
   const generation = 'bti:' + now + ':' + Math.floor(Math.random() * 1000000000);
+  const rosterWorker = { generation, completedAt: 0, result: null, promise: null,
+    coverage: { phase: 'INITIAL', liveLeagues: 0, prematchLeagues: 0,
+      liveBatches: 0, prematchBatches: 0, liveDone: 0, prematchDone: 0, failed: 0,
+      events: 0, namedEvents: 0, timedEvents: 0, marketEvents: 0, validEvents: 0,
+      detailCachedEvents: 0, detailCachedBytes: 0, detailPendingEvents: 0 } };
+  const publishCoverage = () => {
+    root.dataset.fieldlineBtiRosterCoverage = JSON.stringify(rosterWorker.coverage);
+  };
+  publishCoverage();
+  root[rosterWorkerKey] = rosterWorker;
+  rosterWorker.promise = (async () => {
   const authName = ['author', 'ization'].join('');
   const contextName = ['service', '-', 'context'].join('');
   const authValue = localStorage.getItem(['CT_APP_', 'AUTH', 'ORIZATION'].join(''));
@@ -922,33 +942,158 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
   const listHeaders = { Accept: 'application/json', 'X-Fieldline-Generation': generation };
   if (authValue) listHeaders[authName] = authValue;
   if (contextValue) listHeaders[contextName] = contextValue;
-  const requiredListPaths = [
-    '/api/eventlist/asia/leagues/v2/1/live',
-    '/api/eventlist/asia/leagues/v2/1/live/initial',
-    '/api/eventlist/asia/leagues/v2/1/prematch/initial'
-  ];
-  const listPaths = [...requiredListPaths,
-    '/api/eventlist/asia/leagues/v2/1/prematch'];
-  const listResponses = await Promise.all(listPaths.map(async (path) => {
-    let timeoutId;
-    const timeout = new Promise((resolve) => { timeoutId = setTimeout(() => resolve(null), 5000); });
-    const response = await Promise.race([
-      fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
-        headers: listHeaders }).catch(() => null),
-      timeout
-    ]);
-    clearTimeout(timeoutId);
-    if (!response || !response.ok) return null;
-    try {
-      const body = typeof response.text === 'function'
-        ? await response.text()
-        : JSON.stringify(await response.json());
-      return { path, body, payload: JSON.parse(body) };
-    } catch { return null; }
+  const listBase = '/api/eventlist/asia/leagues/v2/1/';
+  const fetchList = async (path) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const controller = new AbortController();
+      let timeoutId;
+      const request = (async () => {
+        const response = await fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
+          headers: listHeaders, signal: controller.signal });
+        if (!response || !response.ok) return null;
+        const body = typeof response.text === 'function'
+          ? await response.text()
+          : JSON.stringify(await response.json());
+        return { path, body, payload: JSON.parse(body) };
+      })().catch(() => null);
+      const timeout = new Promise((resolve) => { timeoutId = setTimeout(() => {
+        controller.abort();
+        resolve(null);
+      }, 5000); });
+      const result = await Promise.race([request, timeout]);
+      clearTimeout(timeoutId);
+      if (result) return result;
+    }
+    return null;
+  };
+  const regionCandidate = globalThis.APP_USER_DATA?.countryCode ||
+    globalThis.APP_USER_DATA?.userSettings?.countryCode;
+  const regionCode = typeof regionCandidate === 'string' && /^[A-Za-z]{2}$/u.test(regionCandidate)
+    ? regionCandidate.toUpperCase() : 'VN';
+  const initialPlans = ['live', 'prematch'].map((partition) => ({
+    partition,
+    canonicalPath: listBase + partition,
+    initialCanonicalPath: listBase + partition + '/initial',
+    requestPath: listBase + partition + '/initial?regionCode=' +
+      encodeURIComponent(regionCode) + '&leagueIds=01'
   }));
+  const hydratePartition = async (plan) => {
+    const initial = await fetchList(plan.requestPath);
+    if (!initial || !Array.isArray(initial.payload?.serializedData)) {
+      rosterWorker.coverage.failed += 1;
+      rosterWorker.coverage.phase = 'FAILED';
+      publishCoverage();
+      return null;
+    }
+    const leagueIds = [];
+    const seenLeagueIds = new Set();
+    for (const league of initial.payload.serializedData) {
+      const candidate = Array.isArray(league) ? league[0] : null;
+      const leagueId = typeof candidate === 'string' || typeof candidate === 'number'
+        ? String(candidate) : '';
+      if (!leagueId || !/^[A-Za-z0-9_-]+$/u.test(leagueId) || seenLeagueIds.has(leagueId)) continue;
+      seenLeagueIds.add(leagueId);
+      leagueIds.push(leagueId);
+    }
+    const batches = [];
+    for (let index = 0; index < leagueIds.length; index += 10) {
+      batches.push(leagueIds.slice(index, index + 10));
+    }
+    rosterWorker.coverage[plan.partition + 'Leagues'] = leagueIds.length;
+    rosterWorker.coverage[plan.partition + 'Batches'] = batches.length;
+    rosterWorker.coverage.phase = 'HYDRATING';
+    publishCoverage();
+    const pages = new Array(batches.length);
+    let nextBatch = 0;
+    let failed = false;
+    const worker = async () => {
+      while (!failed) {
+        const index = nextBatch;
+        nextBatch += 1;
+        if (index >= batches.length) return;
+        const page = await fetchList(plan.canonicalPath + '?leagueIds=' + batches[index].join(','));
+        if (!page || !Array.isArray(page.payload?.serializedData)) {
+          failed = true;
+          rosterWorker.coverage.failed += 1;
+          rosterWorker.coverage.phase = 'FAILED';
+          publishCoverage();
+          return;
+        }
+        pages[index] = page;
+        rosterWorker.coverage[plan.partition + 'Done'] += 1;
+        publishCoverage();
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, batches.length) }, () => worker()));
+    if (failed || pages.some((page) => !page)) return null;
+    const merged = new Map();
+    const anonymous = [];
+    const rowRichness = (value) => {
+      try { return JSON.stringify(value).length; } catch { return Array.isArray(value) ? value.length : 0; }
+    };
+    const addLeagues = (payload) => {
+      for (const league of payload.serializedData) {
+        if (!Array.isArray(league)) continue;
+        const candidate = league[0];
+        const leagueId = typeof candidate === 'string' || typeof candidate === 'number'
+          ? String(candidate) : '';
+        if (!leagueId) {
+          anonymous.push(league);
+          continue;
+        }
+        const existing = merged.get(leagueId);
+        if (!Array.isArray(existing)) {
+          merged.set(leagueId, league);
+          continue;
+        }
+        const events = new Map();
+        const eventRows = [];
+        const addEvents = (source) => {
+          for (const event of Array.isArray(source?.[12]) ? source[12] : []) {
+            if (!Array.isArray(event)) continue;
+            const rawId = event[0];
+            const eventId = typeof rawId === 'string' || typeof rawId === 'number' ? String(rawId) : '';
+            if (!eventId) {
+              eventRows.push(event);
+              continue;
+            }
+            const retained = events.get(eventId);
+            if (!retained || rowRichness(event) > rowRichness(retained)) events.set(eventId, event);
+          }
+        };
+        addEvents(existing);
+        addEvents(league);
+        const richerLeague = rowRichness(league) > rowRichness(existing) ? league : existing;
+        const combined = [...richerLeague];
+        combined[12] = [...events.values(), ...eventRows];
+        merged.set(leagueId, combined);
+      }
+    };
+    addLeagues(initial.payload);
+    for (const page of pages) addLeagues(page.payload);
+    // The initial roster advertises hundreds of empty league shells. Returning
+    // those shells (and the provider's unrelated top-level metadata) through
+    // Runtime.evaluate can exceed CDP's by-value result limit, even though the
+    // actual event catalog is much smaller. The adapter only consumes league
+    // rows that own events, so keep every event-bearing row and discard only
+    // provably empty shells from the direct recovery envelope.
+    const populatedLeagues = [...merged.values(), ...anonymous].filter((league) =>
+      Array.isArray(league?.[12]) && league[12].length > 0);
+    const payload = { serializedData: populatedLeagues };
+    const body = JSON.stringify(payload);
+    return {
+      payload,
+      responses: plan.partition === 'live'
+        ? [{ path: plan.canonicalPath, body },
+          { path: plan.initialCanonicalPath, body: '{"serializedData":[]}' }]
+        : [{ path: plan.initialCanonicalPath, body }]
+    };
+  };
+  const partitions = await Promise.all(initialPlans.map(hydratePartition));
+  const listResponses = partitions.filter(Boolean).flatMap((partition) => partition.responses);
   const eventIds = [];
   const seen = new Set();
-  for (const entry of listResponses) {
+  for (const entry of partitions) {
     const payload = entry?.payload;
     const leagues = Array.isArray(payload?.serializedData) ? payload.serializedData : [];
     for (const league of leagues) {
@@ -959,17 +1104,40 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
         if (!id || seen.has(id)) continue;
         seen.add(id);
         eventIds.push(id);
+        const participants = Array.isArray(event?.[1]) ? event[1] : [];
+        const names = participants.slice(0, 2).map((participant) => {
+          const localized = Array.isArray(participant) && participant[1] &&
+            typeof participant[1] === 'object' ? participant[1] : {};
+          const fallback = Object.values(localized).find((value) =>
+            typeof value === 'string' && value.trim().length > 0);
+          return String(localized.VI || localized.EN || localized.VN || fallback ||
+            (Array.isArray(participant) ? participant[2] : '') || '').trim();
+        });
+        const splitNames = String(event?.[2] || '').split(/\s+(?:v(?:s\.?)?|[-\u2013\u2014])\s+/iu)
+          .map((name) => name.trim());
+        const named = (names.length === 2 && names.every(Boolean)) ||
+          (splitNames.length === 2 && splitNames.every(Boolean));
+        const timed = event?.[5] === true || (event?.[5] === false &&
+          Number.isFinite(Date.parse(String(event?.[3] || ''))));
+        const hasMarkets = Array.isArray(event?.[8]) && event[8].length > 0;
+        if (named) rosterWorker.coverage.namedEvents += 1;
+        if (timed) rosterWorker.coverage.timedEvents += 1;
+        if (hasMarkets) rosterWorker.coverage.marketEvents += 1;
+        if (named && timed) rosterWorker.coverage.validEvents += 1;
       }
     }
   }
+  rosterWorker.coverage.phase = partitions.length === initialPlans.length && partitions.every(Boolean)
+    ? 'COMPLETE' : 'FAILED';
+  rosterWorker.coverage.events = eventIds.length;
+  publishCoverage();
   let priorVisits = {};
   try {
     const parsed = JSON.parse(root.dataset.fieldlineBtiDetailVisits || '{}');
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) priorVisits = parsed;
   } catch { /* A malformed page-owned dataset must not stop catalog refresh. */ }
-  const detailWorkerKey = '__fieldlineBtiDetailWorkerV1';
-  const requiredResponses = listResponses.slice(0, requiredListPaths.length);
-  if (requiredResponses.length === requiredListPaths.length && requiredResponses.every(Boolean)) {
+  const detailWorkerKey = '__fieldlineBtiDetailWorkerV9';
+  if (partitions.length === initialPlans.length && partitions.every(Boolean)) {
     const ranked = eventIds.map((eventId, index) => {
       const visitedAt = Number(priorVisits[eventId]);
       return { eventId, index, visitedAt: Number.isFinite(visitedAt) && visitedAt > 0 ? visitedAt : 0 };
@@ -997,8 +1165,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
         headers: nextJob.headers,
         desired: new Set(),
         queue: [],
-        activeEventId: null,
-        controller: null,
+        activeEventIds: new Set(),
+        controllers: new Map(),
         update(job) {
           if (this.generation === job.generation) return;
           this.generation = job.generation;
@@ -1007,7 +1175,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
           this.queue = this.queue.filter((eventId) => desired.has(eventId));
           const queued = new Set(this.queue);
           for (const eventId of job.eventIds) {
-            if (eventId === this.activeEventId || queued.has(eventId)) continue;
+            if (this.activeEventIds.has(eventId) || queued.has(eventId)) continue;
             queued.add(eventId);
             this.queue.push(eventId);
           }
@@ -1025,42 +1193,263 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
       };
       detailWorker.update(nextJob);
       root[detailWorkerKey] = detailWorker;
-      detailWorker.promise = (async () => {
+      const runDetailLane = async () => {
         while (root[detailWorkerKey] === detailWorker && detailWorker.queue.length > 0) {
           const eventId = detailWorker.queue.shift();
           if (!eventId || !detailWorker.desired.has(eventId)) continue;
-          detailWorker.activeEventId = eventId;
+          detailWorker.activeEventIds.add(eventId);
           const headers = { ...detailWorker.headers };
           const controller = new AbortController();
-          detailWorker.controller = controller;
+          detailWorker.controllers.set(eventId, controller);
           const timeoutId = setTimeout(() => controller.abort(), 3000);
           try {
             const response = await fetch('/api/eventpage/events/' + encodeURIComponent(eventId) +
               '?hideX25X75Selections=false',
             { method: 'GET', credentials: 'include', cache: 'no-store', headers,
               signal: controller.signal });
-            if (typeof response?.arrayBuffer === 'function') await response.arrayBuffer();
-            else if (typeof response?.text === 'function') await response.text();
-            else if (typeof response?.json === 'function') await response.json();
+            let body = '';
+            if (typeof response?.text === 'function') body = await response.text();
+            else if (typeof response?.json === 'function') body = JSON.stringify(await response.json());
+            else if (typeof response?.arrayBuffer === 'function') {
+              body = new TextDecoder().decode(await response.arrayBuffer());
+            }
+            let compactBody = '';
+            try {
+              const payload = JSON.parse(body);
+              if (payload && Array.isArray(payload.data) && payload.data.length > 0) {
+                const compactLocalized = (value) => {
+                  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+                  const compact = {};
+                  for (const key of ['VI', 'EN', 'VN']) {
+                    if (typeof value[key] === 'string' && value[key].trim()) compact[key] = value[key];
+                  }
+                  if (Object.keys(compact).length === 0) {
+                    const fallback = Object.values(value).find((item) => typeof item === 'string' && item.trim());
+                    if (fallback) compact._ = fallback;
+                  }
+                  return compact;
+                };
+                const compactName = (value) => {
+                  if (typeof value === 'string') return value.trim();
+                  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+                  for (const key of ['VI', 'EN', 'VN', '_']) {
+                    if (typeof value[key] === 'string' && value[key].trim()) return value[key].trim();
+                  }
+                  return '';
+                };
+                const participantName = (value) => Array.isArray(value)
+                  ? compactName(value[1]) || compactName(value[2]) : '';
+                const placeholderPair = (participants) => {
+                  if (!Array.isArray(participants) || participants.length < 2) return true;
+                  const normalized = participants.slice(0, 2).map((participant) => participantName(participant)
+                    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+                    .replace(/[^a-z0-9]+/g, ' ').trim());
+                  const pair = normalized.join('|');
+                  return pair === 'home|away' || pair === 'team a|team b' ||
+                    pair === 'doi nha|doi khach' || pair === 'chu nha|doi khach';
+                };
+                const compactParticipant = (value) => {
+                  if (!Array.isArray(value)) return null;
+                  const compact = Array(3).fill(null);
+                  if (typeof value[0] === 'string' || typeof value[0] === 'number') compact[0] = value[0];
+                  const candidates = [value[1], value[2]].map((candidate) => {
+                    if (typeof candidate === 'string' && candidate.trim()) {
+                      return { name: candidate.trim(), localized: { _: candidate.trim() }, raw: candidate.trim() };
+                    }
+                    const localized = compactLocalized(candidate);
+                    return localized ? { name: compactName(localized), localized, raw: null } : null;
+                  }).filter((candidate) => candidate && candidate.name);
+                  const generic = (name) => /^(?:home|away|team [ab12]|doi nha|doi khach|chu nha)$/u.test(
+                    name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+                      .replace(/[^a-z0-9]+/g, ' ').trim());
+                  const selected = candidates.find((candidate) => !generic(candidate.name)) || candidates[0];
+                  if (selected) {
+                    compact[1] = selected.localized;
+                    if (selected.raw) compact[2] = selected.raw;
+                  }
+                  return compact;
+                };
+                const compactSelection = (value) => {
+                  if (!Array.isArray(value)) return null;
+                  const id = typeof value[0] === 'string' ? value[0].trim() : '';
+                  const side = value[9];
+                  const line = value[16];
+                  const malay = Array.isArray(value[8]) && typeof value[8][5] === 'string'
+                    ? value[8][5].trim() : '';
+                  const quarterUnits = typeof line === 'number' && Number.isFinite(line) ? Math.abs(line) * 4 : NaN;
+                  if (!id || (side !== 1 && side !== 3) || !Number.isInteger(quarterUnits) ||
+                    quarterUnits % 4 === 0 || Math.abs(line) > 100 ||
+                    !/^-?(?:0|1)(?:[.][0-9]+)?$/u.test(malay) || Number(malay) === 0 || value[13] === true) return null;
+                  const compact = Array(17).fill(null);
+                  for (const index of [0, 5, 9, 13, 16]) compact[index] = value[index] ?? null;
+                  compact[2] = typeof value[2] === 'string' ? value[2] : compactLocalized(value[2]);
+                  const formats = Array.isArray(value[8]) ? Array(6).fill(null) : null;
+                  if (formats) formats[5] = value[8][5] ?? null;
+                  compact[8] = formats;
+                  return compact;
+                };
+                const compactMarket = (value) => {
+                  if (!Array.isArray(value)) return null;
+                  const marketType = Array.isArray(value[5]) ? value[5] : [];
+                  const code = String(marketType[0] || marketType[1] || value[1] || '').trim();
+                  const label = String(value[1] || '') + ' ' + String(marketType[1] || '');
+                  const evidence = label.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                  const handicap = /^HC(?:39|0|1)$/u.test(code) || /\b(?:asian handicap|handicap|ah)\b/u.test(evidence);
+                  const total = /^OU(?:39|0|1|201|249)$/u.test(code) || /\b(?:total|over under|ou)\b/u.test(evidence);
+                  if (value[15] === true || value[23] === true || handicap === total ||
+                    !Array.isArray(value[13])) return null;
+                  const selections = value[13].map(compactSelection).filter(Boolean);
+                  if (selections.length < 2) return null;
+                  const compact = Array(24).fill(null);
+                  for (const index of [0, 1, 15, 23]) compact[index] = value[index] ?? null;
+                  if (Array.isArray(value[5])) compact[5] = [value[5][0] ?? null, value[5][1] ?? null];
+                  compact[13] = selections;
+                  return compact;
+                };
+                const compactEvent = (value) => {
+                  if (!Array.isArray(value)) return null;
+                  const compact = Array(34).fill(null);
+                  for (const index of [0, 2, 11, 13, 32]) compact[index] = value[index] ?? null;
+                  let participants = Array.isArray(value[8])
+                    ? value[8].slice(0, 2).map(compactParticipant).filter(Boolean) : [];
+                  for (const index of [20, 33]) {
+                    compact[index] = Array.isArray(value[index])
+                      ? value[index].map(compactMarket).filter(Boolean) : [];
+                  }
+                  if (placeholderPair(participants)) {
+                    const markets = [...compact[20], ...compact[33]];
+                    for (const market of markets) {
+                      const type = Array.isArray(market?.[5]) ? market[5] : [];
+                      const code = String(type[0] || type[1] || market?.[1] || '').trim();
+                      const label = (String(market?.[1] || '') + ' ' + String(type[1] || ''))
+                        .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+                        .replace(/[^a-z0-9]+/g, ' ').trim();
+                      if (!(/^HC(?:39|0|1)$/u.test(code) || /\b(?:asian handicap|handicap|ah)\b/u.test(label))) continue;
+                      const selections = Array.isArray(market?.[13]) ? market[13] : [];
+                      const home = selections.find((selection) => Array.isArray(selection) && selection[9] === 1);
+                      const away = selections.find((selection) => Array.isArray(selection) && selection[9] === 3);
+                      if (!home || !away) continue;
+                      const candidate = [home, away].map((selection, index) => {
+                        const participant = Array.isArray(participants[index]) ? participants[index] : [];
+                        const hydrated = Array(3).fill(null);
+                        hydrated[0] = participant[0] ?? selection[0] ?? null;
+                        if (selection[2] && typeof selection[2] === 'object') hydrated[1] = selection[2];
+                        else if (typeof selection[2] === 'string') hydrated[2] = selection[2];
+                        return hydrated;
+                      });
+                      if (!placeholderPair(candidate) && candidate.every((participant) => participantName(participant))) {
+                        participants = candidate;
+                        break;
+                      }
+                    }
+                  }
+                  compact[8] = participants;
+                  return compact;
+                };
+                const compactEvents = payload.data.map(compactEvent).filter(Boolean);
+                if (compactEvents.length > 0) compactBody = JSON.stringify({ data: compactEvents });
+              }
+            } catch { /* Invalid or empty detail is not useful catalog evidence. */ }
+            if (response?.ok && compactBody.length > 0 && compactBody.length <= 2 * 1024 * 1024) {
+              const cached = Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
+              const path = '/api/eventpage/events/' + encodeURIComponent(eventId);
+              const existingIndex = cached.findIndex((item) => item && item.path === path);
+              if (existingIndex >= 0) cached.splice(existingIndex, 1);
+              cached.push({ path, body: compactBody });
+              let cachedBytes = cached.reduce((sum, item) => sum +
+                (item && typeof item.body === 'string' ? item.body.length : 0), 0);
+              while (cached.length > 512 || cachedBytes > 24 * 1024 * 1024) {
+                const removed = cached.shift();
+                if (removed && typeof removed.body === 'string') cachedBytes -= removed.body.length;
+              }
+              root[detailBodiesKey] = cached;
+            }
           } catch { /* Detail enrichment must not invalidate the complete list generation. */ }
           finally {
             clearTimeout(timeoutId);
             detailWorker.markVisited(eventId);
-            if (detailWorker.controller === controller) detailWorker.controller = null;
-            if (detailWorker.activeEventId === eventId) detailWorker.activeEventId = null;
+            if (detailWorker.controllers.get(eventId) === controller) detailWorker.controllers.delete(eventId);
+            detailWorker.activeEventIds.delete(eventId);
           }
         }
-      })().finally(() => {
+      };
+      detailWorker.promise = Promise.all(Array.from({ length: 3 }, () => runDetailLane())).finally(() => {
         if (root[detailWorkerKey] === detailWorker) delete root[detailWorkerKey];
       });
+    }
+  }
+  const detailCache = partitions.length === initialPlans.length && partitions.every(Boolean) &&
+    Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
+  rosterWorker.coverage.detailCachedBytes = detailCache.reduce((sum, item) => sum +
+    (item && typeof item.body === 'string' ? item.body.length : 0), 0);
+  const cachedEventIds = new Set(detailCache.flatMap((item) => {
+    if (!item || typeof item.path !== 'string') return [];
+    const prefix = '/api/eventpage/events/';
+    if (!item.path.startsWith(prefix)) return [];
+    try { return [decodeURIComponent(item.path.slice(prefix.length))]; } catch { return []; }
+  }));
+  rosterWorker.coverage.detailCachedEvents = eventIds.filter((eventId) => cachedEventIds.has(eventId)).length;
+  rosterWorker.coverage.detailPendingEvents = eventIds.filter((eventId) => !cachedEventIds.has(eventId)).length;
+  publishCoverage();
+  const cachedDetails = [];
+  if (detailCache.length > 0) {
+    let batch = [];
+    let batchBytes = 0;
+    let batchIndex = 0;
+    const flushBatch = () => {
+      if (batch.length === 0) return;
+      cachedDetails.push({ path: '/api/eventpage/events/__fieldline_batch_' + batchIndex + '__',
+        body: JSON.stringify({ data: batch }) });
+      batchIndex += 1;
+      batch = [];
+      batchBytes = 0;
+    };
+    for (const item of detailCache) {
+      if (!item || typeof item.body !== 'string') continue;
+      try {
+        const payload = JSON.parse(item.body);
+        for (const event of Array.isArray(payload?.data) ? payload.data : []) {
+          const eventBytes = JSON.stringify(event).length;
+          if (batch.length > 0 && batchBytes + eventBytes > 1536 * 1024) flushBatch();
+          batch.push(event);
+          batchBytes += eventBytes;
+        }
+      } catch { /* Ignore a stale malformed page-cache entry. */ }
+    }
+    flushBatch();
+  }
+  const responses = new Map();
+  // A bridge reconnect creates a fresh API decode pipeline. Prime that pipeline
+  // with every cached event detail before the three list partitions commit the
+  // authoritative baseline, so a healthy reconnect never publishes the small
+  // roster shell and then spends a minute rebuilding visible coverage.
+  for (const item of [...cachedDetails, ...listResponses]) {
+    if (item && typeof item.path === 'string' && typeof item.body === 'string') {
+      responses.set(item.path, { url: item.path, body: item.body });
     }
   }
   return {
     status: 'catalog-requested',
     generation,
     origin: location.origin || ('https://' + location.hostname),
-    responses: listResponses.filter(Boolean).map(({ path, body }) => ({ url: path, body }))
+    responses: [...responses.values()]
   };
+  })().then((result) => {
+    rosterWorker.result = result;
+    rosterWorker.completedAt = Date.now();
+    return result;
+  }).catch(() => {
+    rosterWorker.coverage.phase = 'FAILED';
+    rosterWorker.coverage.failed += 1;
+    publishCoverage();
+    if (root[rosterWorkerKey] === rosterWorker) delete root[rosterWorkerKey];
+    return {
+      status: 'catalog-failed', generation,
+      origin: location.origin || ('https://' + location.hostname), responses: []
+    };
+  });
+  return await rosterWorker.promise;
 })()`;
 
 export class NetworkObserver {
@@ -1212,7 +1601,7 @@ export class NetworkObserver {
     this.#monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.#recoverImBaseline = dependencies.recoverImBaseline ?? null;
     this.#frameCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 2_500;
-    this.#btiCatalogRefreshTimeoutMs = dependencies.btiCatalogRefreshTimeoutMs ?? 8_000;
+    this.#btiCatalogRefreshTimeoutMs = dependencies.btiCatalogRefreshTimeoutMs ?? 60_000;
     this.#cmdRecoveryMaxAttempts = dependencies.cmdRecoveryMaxAttempts ?? CMD_RECOVERY_MAX_ATTEMPTS;
     this.#cmdRecoveryDeadlineMs = dependencies.cmdRecoveryDeadlineMs ?? CMD_RECOVERY_DEADLINE_MS;
     this.#cmdRecoveryRetryMs = dependencies.cmdRecoveryRetryMs ?? CMD_RECOVERY_RETRY_MS;
@@ -2811,17 +3200,23 @@ export class NetworkObserver {
   }
 
   async #refreshApsportEventDetail(source: ObservedSource, eventId: string, leagueId?: string): Promise<void> {
-    const active = this.#apsportActiveCatalogs.get(source.sourceId);
     const template = this.#apsportRequestTemplates.get(source.sourceId);
-    if (active === undefined || !active.rosterEventIds.has(eventId) || template === undefined) return;
-    const isCurrent = (): boolean => this.#apsportActiveCatalogs.get(source.sourceId) === active &&
-      active.rosterEventIds.has(eventId) && this.#apsportTemplateIsCurrent(source, template);
+    const currentRosterContainsEvent = (): boolean =>
+      this.#apsportActiveCatalogs.get(source.sourceId)?.rosterEventIds.has(eventId) === true;
+    if (!currentRosterContainsEvent() || template === undefined) return;
+    // A large all-future roster can take several minutes to hydrate. Its
+    // periodic one-minute roster renewal must not discard the one detail
+    // response already in flight when the event still belongs to the newer
+    // roster and the authenticated page/template identity has not changed.
+    const isCurrent = (): boolean => currentRosterContainsEvent() &&
+      this.#apsportTemplateIsCurrent(source, template);
     const detailed = await this.#collectApsportEventDetail({ eventId,
       ...(leagueId === undefined ? {} : { leagueId }),
       template: { origin: template.origin, headers: template.headers, body: template.body },
       request: (input) => this.#requestApsportPage(source, template, input),
       sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
-    if (detailed === null || !isCurrent()) return;
+    const active = this.#apsportActiveCatalogs.get(source.sourceId);
+    if (detailed === null || !isCurrent() || active === undefined) return;
     const batch: ApsportCatalogBatch = { schemaVersion: 1, generation: active.generation,
       phase: "DETAIL", complete: false, trigger: "EVENT_CHANGE",
       prematchWindowHours: active.prematchWindowHours, records: [detailed] };
@@ -3795,13 +4190,18 @@ export class NetworkObserver {
     const optionalPath = "/api/eventlist/asia/leagues/v2/1/prematch";
     const allowedPaths = new Set([...requiredPaths, optionalPath]);
     const unique = new Map<string, string>();
-    for (const response of value.responses) {
+    for (const response of value.responses.slice(0, 64)) {
+      const allowedDetail = isRecord(response) && typeof response.url === "string" &&
+        /^\/api\/eventpage\/events\/[^/?]{1,1024}$/u.test(response.url);
       if (!isRecord(response) || typeof response.url !== "string" || typeof response.body !== "string" ||
-        !allowedPaths.has(response.url) || response.body.length > 12 * 1024 * 1024) continue;
+        (!allowedPaths.has(response.url) && !allowedDetail) || response.body.length > 12 * 1024 * 1024) continue;
       unique.set(response.url, response.body);
     }
     if ([...requiredPaths].some((path) => !unique.has(path))) return false;
-    const ingestPaths = [optionalPath, ...requiredPaths].filter((path) => unique.has(path));
+    const detailPaths = [...unique.keys()].filter((path) =>
+      /^\/api\/eventpage\/events\/[^/?]{1,1024}$/u.test(path)).slice(0, 48);
+    const ingestPaths = [detailPaths,
+      [optionalPath, ...requiredPaths].filter((path) => unique.has(path))].flat();
     for (const path of ingestPaths) {
       await this.ingestHttpResponse(source, new URL(path, origin).href, "Fetch", unique.get(path)!,
         { method: "GET", streamId: value.generation,
@@ -4567,7 +4967,7 @@ export class NetworkObserver {
       const providerFunctionCode = this.#requestFunctionCodes.get(key);
       const requestIdentity = this.#requestIdentities.get(key);
       if (requestIdentity === undefined) return;
-      if (!isProviderCatalogHttpResponse(source, response.url, streamId, providerFunctionCode,
+      if (!isProviderCatalogHttpResponse(source, response.url, providerFunctionCode,
         providerPartition)) {
         this.#cmdRecoveryRequests.delete(key);
         this.#pending.delete(key);
@@ -6108,7 +6508,7 @@ function isPotentialSabaCatalogPayload(value: string): boolean {
 }
 
 function isProviderCatalogHttpResponse(source: ObservedSource, value: string,
-  streamId: string | undefined, providerFunctionCode: number | undefined,
+  providerFunctionCode: number | undefined,
   providerPartition?: ProviderPartition): boolean {
   let url: URL;
   try { url = new URL(value); } catch { return false; }
@@ -6130,9 +6530,11 @@ function isProviderCatalogHttpResponse(source: ObservedSource, value: string,
       (providerPartition === "KSPORT_LIVE" || providerPartition === "KSPORT_TODAY");
   }
   if (source.lobby === "BTI") {
-    const detailId = url.pathname.slice("/api/eventpage/events/".length);
-    return url.pathname.startsWith("/api/eventpage/events/") && detailId.length > 0 &&
-      !detailId.includes("/") && streamId !== undefined && /^bti:\d+:\d+$/u.test(streamId);
+    // BTI refresh requests are fetched by the page worker and copied from its
+    // bounded detail cache by refreshCatalog(). Reading those same responses
+    // again through CDP duplicates every hidden-market body and can starve the
+    // complete direct generation behind hundreds of passive envelopes.
+    return false;
   }
   return false;
 }

@@ -900,8 +900,8 @@ export function isFocusedTwoWayTicket(cell: ComparisonCell): boolean {
     quote.scope === cell.market.scope && sameMarketLine(quote.line, cell.market.line));
 }
 
-export function isVisibleEvent(event: ProviderEvent, nowMs: number, horizonMs = 86_400_000): boolean {
-  return event.isLive || (event.startAtUtcMs >= nowMs && event.startAtUtcMs <= nowMs + horizonMs);
+export function isVisibleEvent(event: ProviderEvent, nowMs: number): boolean {
+  return event.isLive || event.startAtUtcMs >= nowMs;
 }
 
 export type EventPhase = "LIVE" | "PREMATCH";

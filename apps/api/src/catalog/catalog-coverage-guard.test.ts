@@ -86,6 +86,21 @@ describe("CatalogCoverageGuard", () => {
     expect(guard.accept("source", candidate("im:8:1", true, ["after-reset"]))).toBe(true);
   });
 
+  it("tracks BTI timestamp generations without exhausting lineage history", () => {
+    const guard = new CatalogCoverageGuard();
+    for (let index = 1; index <= 50_000; index += 1) {
+      if (!guard.accept("source", candidate(`bti:${1_788_520_000_000 + index}:${index}`, true,
+        [`event-${index}`]))) throw new Error(`BTI generation ${index} was unexpectedly rejected`);
+    }
+
+    expect(guard.accept("source", candidate("bti:1788520000001:999999", true, ["old"]))).toBe(false);
+    expect(guard.accept("source", candidate("bti:1788520050000:50000", true, ["repeat"]))).toBe(false);
+    expect(guard.accept("source", candidate("bti:1788520050001:1", true, ["next"]))).toBe(true);
+    expect(guard.checkpoint().states.get("source")?.comparableAuthoritativeOrders.size).toBe(1);
+    guard.reset("source");
+    expect(guard.accept("source", candidate("bti:1788520000001:1", true, ["after-reset"]))).toBe(true);
+  });
+
   it("tracks canonical source-epoch fallback sequences without exhausting history", () => {
     const guard = new CatalogCoverageGuard();
     for (let sequence = 0; sequence < 50_000; sequence += 1) {
@@ -244,6 +259,7 @@ describe("CatalogCoverageGuard", () => {
     const malformedCases = [
       ["CMD", (index: number) => `cmd:${index}:0`],
       ["IM", (index: number) => `im:${index}:0`],
+      ["BTI", (index: number) => `bti:${index}:invalid`],
       ["KSPORT HTTP", (index: number) => `worker-a:0:ksport-http:${index}:0`],
       ["KSPORT WS", (index: number) => `worker-a:0:ksport-ws:0:${index + 1}`],
       ["SABA", (index: number) => `worker-a:0:saba:0:${index}`]

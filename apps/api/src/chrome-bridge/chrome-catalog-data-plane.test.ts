@@ -260,15 +260,21 @@ const btiListPaths = [
 ] as const;
 
 function btiEnvelope(sequence: number, pathnameClass: string,
-  sourceEpoch = "worker-a:0", generation = "bti:1000:1"): ChromeBridgeEnvelope {
-  const selection = (id: string, side: number, line: number, price: string) =>
+  sourceEpoch = "worker-a:0", generation = "bti:1000:1", eventCount = 1): ChromeBridgeEnvelope {
+  const selection = (eventId: string, id: string, side: number, line: number, price: string) =>
     [id, { VI: "team" }, { VI: "team line" }, false, false, 1.9,
-      ["", "1.90", "", "", "", price], side, 2, {}, "", "event", "market", line];
-  const market = ["hc", "Live", "Live", ["HC39", "full time", 1], "event", "league", "1", [
-    selection("home", 1, -0.5, "0.82"), selection("away", 3, 0.5, "-0.92")]];
+      ["", "1.90", "", "", "", price], side, 2, {}, "", eventId, `market-${eventId}`, line];
+  const event = (index: number) => {
+    const eventId = `event-${index + 1}`;
+    const market = [`hc-${eventId}`, "Live", "Live", ["HC39", "full time", 1], eventId, "league", "1", [
+      selection(eventId, `home-${eventId}`, 1, -0.5, "0.82"),
+      selection(eventId, `away-${eventId}`, 3, 0.5, "-0.92")]];
+    return [eventId, [["h", { VI: `Home ${index + 1}` }], ["a", { VI: `Away ${index + 1}` }]],
+      `Home ${index + 1} vs Away ${index + 1}`, "", ["1", "0"], true, false, [],
+      [eventId, 0, [], [market]]];
+  };
   const payload = { serializedData: [["league", "League", 0, "", false, "", "", "", "", "", "1",
-    "Football", [["event", [["h", { VI: "Home" }], ["a", { VI: "Away" }]], "Home vs Away", "",
-      ["1", "0"], true, false, [], ["event", 0, [], [market]]]]]] };
+    "Football", Array.from({ length: eventCount }, (_unused, index) => event(index))]] };
   return { version: 1, kind: "NETWORK", lobby: "BTI", sourceId: "chrome:BTI:18", tabId: 18,
     sourceEpoch, sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
     transport: "HTTP_RESPONSE", request: { hostname: "prod20091.fxf774.com", pathnameClass,
@@ -334,6 +340,36 @@ describe("ChromeCatalogDataPlane", () => {
       expect(plane.ingest(btiEnvelope(index + 6, path, "worker-a:0", "bti:2000:1"))).toBe(false);
     }
     await expect(plane.read(BTI)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+  });
+
+  it("keeps a complete BTI catalog while the same tab rebuilds a partial replacement pipeline", async () => {
+    const publish = vi.fn();
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish });
+    for (const [index, path] of btiListPaths.entries()) {
+      plane.ingest(btiEnvelope(index + 1, path, "worker-a:0", "bti:1000:1", 100),
+        { connectionGeneration: 1 });
+    }
+    await expect(plane.read(BTI)).resolves.toMatchObject({ events: expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "event-100" })
+    ]) });
+
+    let partialAccepted = false;
+    for (const [index, path] of btiListPaths.entries()) {
+      partialAccepted = plane.ingest(btiEnvelope(index + 10, path, "worker-b:0", "bti:2000:1", 10),
+        { connectionGeneration: 2 });
+    }
+    expect(partialAccepted).toBe(false);
+    await expect(plane.read(BTI)).resolves.toMatchObject({ events: expect.arrayContaining([
+      expect.objectContaining({ providerEventId: "event-100" })
+    ]) });
+
+    let completeAccepted = false;
+    for (const [index, path] of btiListPaths.entries()) {
+      completeAccepted = plane.ingest(btiEnvelope(index + 20, path, "worker-b:0", "bti:3000:1", 100),
+        { connectionGeneration: 2 });
+    }
+    expect(completeAccepted).toBe(true);
+    expect(publish).toHaveBeenCalledTimes(2);
   });
 
   it("publishes an APSPORT API baseline and applies a later socket price without DOM authority", async () => {

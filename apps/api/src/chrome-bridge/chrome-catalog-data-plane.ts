@@ -343,6 +343,20 @@ export class ChromeCatalogDataPlane {
     }
     const coverage = { generation, authoritativeBaseline: mode === "BASELINE",
       providerEventIds: nextCatalog.events.map((event) => event.providerEventId) };
+    const currentAuthority = admission.disposition === "CANDIDATE"
+      ? this.#authorityCoordinator.snapshot(transportAccountId).active : null;
+    const currentCatalog = this.#catalogs.get(nextCatalog.accountId);
+    if (envelope.lobby === "BTI" && admission.disposition === "CANDIDATE" &&
+      currentAuthority?.sourceId === update.sourceId && currentCatalog !== undefined &&
+      !retainsBtiReplacementCoverage(currentCatalog, nextCatalog)) {
+      // An extension/bridge reconnect keeps the same authenticated BTI tab but
+      // creates a fresh lane-local adapter. Its first three list responses hold
+      // only the small visible roster shell; hidden event detail follows in a
+      // chunked batch. Keep serving the complete active catalog until that same
+      // tab proves a near-complete replacement instead of visibly collapsing
+      // for every service-worker or loopback reconnect.
+      return this.#reject(envelope, "BTI_REPLACEMENT_COVERAGE_INCOMPLETE");
+    }
     const explicitDomSweep = envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
       update.completeSweepEvidence === true;
     if (!explicitDomSweep && !pipeline.coverage.allows(nextCatalog.accountId, coverage)) {
@@ -574,12 +588,17 @@ function isBtiAuthFailurePageHealth(envelope: ChromeBridgeEnvelope): boolean {
   if (envelope.lobby !== "BTI" || envelope.transport !== "TAB_STATE" ||
     envelope.request.hostname !== "prod20091.fxf774.com" ||
     envelope.request.pathnameClass !== "/__fieldline_heartbeat__" ||
-    envelope.payload.encoding !== "UTF8" || envelope.payload.body.length > 160) return false;
+    envelope.payload.encoding !== "UTF8" || envelope.payload.body.length > 640) return false;
   try {
     const value = JSON.parse(envelope.payload.body) as unknown;
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     const candidate = value as Record<string, unknown>;
-    return Object.keys(candidate).length === 3 && candidate.kind === "PAGE_HEALTH" &&
+    const keys = Object.keys(candidate);
+    const coverageSafe = candidate.rosterCoverage === undefined ||
+      (typeof candidate.rosterCoverage === "string" && candidate.rosterCoverage.length <= 400 &&
+        /^[-A-Za-z0-9_":{},.]+$/u.test(candidate.rosterCoverage));
+    return keys.every((key) => ["kind", "status", "code", "rosterCoverage"].includes(key)) &&
+      keys.length >= 3 && coverageSafe && candidate.kind === "PAGE_HEALTH" &&
       candidate.status === "AUTH_ERROR" && candidate.code === "1008";
   } catch {
     return false;
@@ -646,6 +665,15 @@ function createDecodePipeline(budget: NetworkBodyAssemblyBudget, laneToken: Auth
 function sameAuthorityIdentity(left: AuthorityIdentity, right: AuthorityIdentity): boolean {
   return left.accountId === right.accountId && left.sourceId === right.sourceId &&
     left.sourceEpoch === right.sourceEpoch && left.connectionGeneration === right.connectionGeneration;
+}
+
+function retainsBtiReplacementCoverage(current: ObservedProviderCatalog,
+  candidate: ObservedProviderCatalog): boolean {
+  if (current.events.length < 20) return true;
+  const candidateIds = new Set(candidate.events.map((event) => event.providerEventId));
+  const retained = current.events.reduce((count, event) =>
+    count + (candidateIds.has(event.providerEventId) ? 1 : 0), 0);
+  return retained >= Math.ceil(current.events.length * 0.95);
 }
 
 function sameAuthorityObservation(left: AuthorityObservation, right: AuthorityObservation): boolean {

@@ -207,7 +207,7 @@ function eligibleApsportApiEvent(event: JsonRecord, nowMs: number, prematchWindo
   if (typeof event["11"] !== "string") return false;
   const startAtMs = Date.parse(event["11"]);
   if (!Number.isFinite(startAtMs)) return false;
-  return startAtMs >= nowMs && startAtMs <= nowMs + prematchWindowHours * 60 * 60 * 1_000;
+  return startAtMs >= nowMs;
 }
 
 function retainedRecord(record: SbobetCatalogInputRecord, envelope: ChromeBridgeEnvelope): RetainedRecord {

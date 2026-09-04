@@ -583,19 +583,17 @@ describe("withinComparisonHorizon", () => {
     quotes: events.map((event) => ({ providerEventId: event.id, providerMarketId: `${event.id}-m` }))
   } as unknown as ObservedProviderCatalog);
 
-  it("drops fixtures the comparison will never show, and their prices with them", () => {
-    // IM publishes two days ahead where the others publish one: 351 of its 513
-    // fixtures sat beyond the horizon, parsed and held for nothing.
+  it("keeps every future fixture and its prices without a comparison horizon", () => {
     const day = 86_400_000;
     const kept = withinComparisonHorizon(catalog([
       { id: "soon", startAtUtcMs: 1_000_000_000 + 3_600_000 },
       { id: "edge", startAtUtcMs: 1_000_000_000 + day },
-      { id: "far", startAtUtcMs: 1_000_000_000 + 2 * day }
+      { id: "far", startAtUtcMs: 1_000_000_000 + 30 * day }
     ]));
 
-    expect(kept.events.map((event) => event.providerEventId)).toEqual(["soon", "edge"]);
-    expect(kept.markets.map((market) => market.providerEventId)).toEqual(["soon", "edge"]);
-    expect(kept.quotes.map((quote) => quote.providerEventId)).toEqual(["soon", "edge"]);
+    expect(kept.events.map((event) => event.providerEventId)).toEqual(["soon", "edge", "far"]);
+    expect(kept.markets.map((market) => market.providerEventId)).toEqual(["soon", "edge", "far"]);
+    expect(kept.quotes.map((quote) => quote.providerEventId)).toEqual(["soon", "edge", "far"]);
   });
 
   it("keeps a running fixture and one whose start time is unknown", () => {
@@ -608,7 +606,7 @@ describe("withinComparisonHorizon", () => {
     expect(kept.events.map((event) => event.providerEventId)).toEqual(["live", "undated"]);
   });
 
-  it("returns the same catalog when nothing is beyond the horizon", () => {
+  it("returns the same catalog instance when no filtering is needed", () => {
     const source = catalog([{ id: "soon", startAtUtcMs: 1_000_000_000 }]);
 
     expect(withinComparisonHorizon(source)).toBe(source);

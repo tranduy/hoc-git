@@ -3,6 +3,7 @@ import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { TSPORT_CATALOG_SHAPE_EXPRESSION } from "./tsport-catalog-shape.js";
+import { buildImExactSelectionPriceExpression } from "./im-selection-price.js";
 import { ksportTimeTabExpressionForTest } from "./network-observer.js";
 import { BTI_CATALOG_REFRESH_EXPRESSION, CMD_CATALOG_DISCOVERY_EXPRESSION,
   CMD_FULL_BASELINE_EXPRESSION, IM_CATALOG_DISCOVERY_EXPRESSION, KEEP_ACTIVE_EXPRESSION,
@@ -320,6 +321,56 @@ describe("NetworkObserver", () => {
 
       expect(collect).toHaveBeenCalledTimes(2);
       expect(collectDetail).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an in-flight APSPORT event detail when a newer roster still contains the event", async () => {
+    vi.useFakeTimers();
+    try {
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": true,
+        "10": "Active", "11": null, "22": "Away", "50": [], "53": "League" };
+      const generations: string[] = [];
+      const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+        generations.push(options.generation);
+        await options.onRoster({ schemaVersion: 1, generation: options.generation,
+          phase: "ROSTER", complete: true, prematchWindowHours: 24, records: [record] });
+      });
+      let releaseDetail!: (value: typeof record) => void;
+      const pendingDetail = new Promise<typeof record>((resolve) => { releaseDetail = resolve; });
+      const collectDetail = vi.fn(async () => pendingDetail);
+      const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+        : {});
+      const observer = new NetworkObserver({ sendCommand,
+        forward: async (envelope) => { forwarded.push(envelope); }, collectApsportCatalog: collect,
+        collectApsportEventDetail: collectDetail, now: () => 10_000, monotonicNow: () => 500 });
+      const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+      await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+        context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+      });
+      await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+        requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+        request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+          postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+      });
+
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      await vi.advanceTimersByTimeAsync(400);
+      expect(collectDetail).toHaveBeenCalledOnce();
+
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      releaseDetail(record);
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(generations).toHaveLength(2);
+      const detail = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+        .find((body) => body.phase === "DETAIL");
+      expect(detail).toMatchObject({ generation: generations[1], phase: "DETAIL",
+        trigger: "EVENT_CHANGE", records: [expect.objectContaining({ "2": "event-42" })] });
     } finally {
       vi.useRealTimers();
     }
@@ -1432,7 +1483,7 @@ describe("NetworkObserver", () => {
       expect(sendCommand).not.toHaveBeenCalledWith(8, "Page.reload", expect.anything());
   });
 
-  it("requests only IM prematch events in the next 48-hour UTC window", async () => {
+  it("requests IM prematch events without an upper date bound", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-19T00:00:00.000Z"));
     try {
@@ -1464,10 +1515,16 @@ describe("NetworkObserver", () => {
       );
 
       expect(requests).toHaveLength(2);
-      expect(requests.map(({ DateFrom, DateTo, Market }) => ({ DateFrom, DateTo, Market }))).toEqual([
-        { DateFrom: "2026/08/19", DateTo: "2026/08/21", Market: 1 },
-        { DateFrom: "2026/08/19", DateTo: "2026/08/21", Market: 2 }
+      expect(requests.map(({ DateFrom, Market }) => ({ DateFrom, Market }))).toEqual([
+        { DateFrom: "2026/08/19", Market: 1 },
+        { DateFrom: "2026/08/19", Market: 2 }
       ]);
+      expect(requests.every((request) => !Object.prototype.hasOwnProperty.call(request, "DateTo"))).toBe(true);
+      expect(buildImExactSelectionPriceExpression({
+        providerEventId: "event", providerMarketId: "market", providerSelectionId: "selection",
+        eventLabel: "Home vs Away", participantA: "Home", participantB: "Away",
+        marketType: "FT_AH", scope: "FULL_TIME", selection: "HOME", line: "0.5"
+      })).not.toContain("DateTo");
       expect(result).toEqual({ status: "catalog-requested", responses: [
         { market: 1, body: '{"Market":1,"StatusCode":100}' },
         { market: 2, body: '{"Market":2,"StatusCode":100}' }
@@ -2222,8 +2279,9 @@ describe("NetworkObserver", () => {
     expect(evaluations.map(([, , params]) => params?.contextId)).toEqual([undefined, 22]);
     expect(evaluations.every(([, , params]) => params?.expression === BTI_CATALOG_REFRESH_EXPRESSION &&
       params?.awaitPromise === true)).toBe(true);
-    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventlist/asia/leagues/v2/1/live");
-    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventlist/asia/leagues/v2/1/prematch");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventlist/asia/leagues/v2/1/");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("['live', 'prematch']");
+    expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("&leagueIds=01");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("/api/eventpage/events/");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("hideX25X75Selections=false");
     expect(BTI_CATALOG_REFRESH_EXPRESSION).toContain("credentials: 'include'");
@@ -2233,13 +2291,115 @@ describe("NetworkObserver", () => {
     expect(() => new Function(`return ${BTI_CATALOG_REFRESH_EXPRESSION}`)).not.toThrow();
   });
 
+  it("hydrates every BTI league advertised by the initial roster before publishing the generation", async () => {
+    const root = { dataset: {} as Record<string, string> };
+    const league = (leagueId: string, eventIds: readonly string[] = []): unknown[] => {
+      const value = Array.from({ length: 13 }, () => null) as unknown[];
+      value[0] = leagueId;
+      value[12] = eventIds.map((eventId) => [eventId]);
+      return value;
+    };
+    const liveLeagueIds = Array.from({ length: 12 }, (_unused, index) => `live-league-${index + 1}`);
+    const prematchLeagueIds = ["prematch-league-1", "prematch-league-2"];
+    const requested: string[] = [];
+    const fetcher = async (path: string) => {
+      requested.push(path);
+      if (path.startsWith("/api/eventpage/")) return { ok: true, text: async () => '{"data":[]}' };
+      if (path === "/api/eventlist/asia/leagues/v2/1/live/initial?regionCode=VN&leagueIds=01") {
+        const leagues = liveLeagueIds.map((leagueId) => league(leagueId));
+        (leagues[0]![12] as unknown[]) = [["live-event-live-league-1", "richer-initial-market-data"]];
+        return { ok: true, text: async () => JSON.stringify({ serializedData: leagues }) };
+      }
+      if (path === "/api/eventlist/asia/leagues/v2/1/prematch/initial?regionCode=VN&leagueIds=01") {
+        return { ok: true, text: async () => JSON.stringify({
+          serializedData: prematchLeagueIds.map((leagueId) => league(leagueId))
+        }) };
+      }
+      const match = /^\/api\/eventlist\/asia\/leagues\/v2\/1\/(live|prematch)\?leagueIds=(.+)$/u.exec(path);
+      if (match !== null) {
+        const eventPrefix = match[1] === "live" ? "live" : "prematch";
+        return { ok: true, text: async () => JSON.stringify({
+          serializedData: match[2]!.split(",").map((leagueId) => league(leagueId,
+            leagueId === "live-league-12" ? [] : [`${eventPrefix}-event-${leagueId}`]))
+        }) };
+      }
+      return { ok: false, text: async () => "" };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (
+        document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string; origin: string },
+        fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }
+      ) => Promise<{ readonly responses: readonly { readonly url: string; readonly body: string }[] }>;
+
+    const result = await evaluate({ documentElement: root }, {
+      pathname: "/sports", hostname: "bti.test", origin: "https://bti.test"
+    }, fetcher, { getItem: () => null });
+
+    expect(requested.filter((path) => path.includes("/live?leagueIds="))).toEqual([
+      `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(0, 10).join(",")}`,
+      `/api/eventlist/asia/leagues/v2/1/live?leagueIds=${liveLeagueIds.slice(10).join(",")}`
+    ]);
+    expect(requested.filter((path) => path.includes("/prematch?leagueIds="))).toEqual([
+      `/api/eventlist/asia/leagues/v2/1/prematch?leagueIds=${prematchLeagueIds.join(",")}`
+    ]);
+    const live = result.responses.find(({ url }) =>
+      url === "/api/eventlist/asia/leagues/v2/1/live");
+    const prematch = result.responses.find(({ url }) =>
+      url === "/api/eventlist/asia/leagues/v2/1/prematch/initial");
+    expect((JSON.parse(live!.body) as { serializedData: unknown[][] }).serializedData
+      .flatMap((item) => item[12] as string[][]).map(([eventId]) => eventId)).toEqual([
+      ...liveLeagueIds.slice(0, 11).map((leagueId) => `live-event-${leagueId}`)
+    ]);
+    expect((JSON.parse(live!.body) as { serializedData: unknown[][] }).serializedData).toHaveLength(11);
+    expect(((JSON.parse(live!.body) as { serializedData: unknown[][] }).serializedData[0]![12] as unknown[][])[0])
+      .toEqual(["live-event-live-league-1", "richer-initial-market-data"]);
+    expect((JSON.parse(prematch!.body) as { serializedData: unknown[][] }).serializedData
+      .flatMap((item) => item[12] as string[][]).map(([eventId]) => eventId)).toEqual([
+      ...prematchLeagueIds.map((leagueId) => `prematch-event-${leagueId}`)
+    ]);
+  });
+
+  it("reuses one in-page BTI roster worker when a later refresh joins the unfinished generation", async () => {
+    const root = { dataset: {} as Record<string, string> };
+    const releases: Array<() => void> = [];
+    const requested: string[] = [];
+    const fetcher = (path: string) => {
+      requested.push(path);
+      return new Promise((resolve) => releases.push(() => resolve({
+        ok: true, text: async () => '{"serializedData":[]}'
+      })));
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (
+        document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string; origin: string },
+        fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }
+      ) => Promise<{ readonly generation: string }>;
+    const location = { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" };
+
+    const first = evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+    const second = evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requested).toHaveLength(2);
+    for (const release of releases) release();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(secondResult.generation).toBe(firstResult.generation);
+  });
+
   it("forwards one complete BTI generation directly when CDP does not retain the fetch bodies", async () => {
     const generation = "bti:1720000000000:17";
     const responses = [
       "/api/eventlist/asia/leagues/v2/1/live",
       "/api/eventlist/asia/leagues/v2/1/live/initial",
       "/api/eventlist/asia/leagues/v2/1/prematch/initial",
-      "/api/eventlist/asia/leagues/v2/1/prematch"
+      "/api/eventlist/asia/leagues/v2/1/prematch",
+      "/api/eventpage/events/event-hidden"
     ].map((url, index) => ({ url, body: JSON.stringify({ serializedData: [], index }) }));
     const sendCommand = vi.fn(async (_tabId: number, method: string) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
@@ -2254,21 +2414,23 @@ describe("NetworkObserver", () => {
 
     await observer.refreshCatalog({ lobby: "BTI", sourceId: "chrome:BTI:6", tabId: 6 });
 
-    expect(forwarded).toHaveLength(4);
+    expect(forwarded).toHaveLength(5);
     expect(forwarded.map(({ transport }) => transport)).toEqual([
-      "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE"
+      "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE", "HTTP_RESPONSE"
     ]);
     expect(forwarded.map(({ request }) => request.pathnameClass)).toEqual([
+      "/api/eventpage/events/event-hidden",
       "/api/eventlist/asia/leagues/v2/1/prematch",
       "/api/eventlist/asia/leagues/v2/1/live",
       "/api/eventlist/asia/leagues/v2/1/live/initial",
       "/api/eventlist/asia/leagues/v2/1/prematch/initial"
     ]);
     expect(forwarded.map(({ request }) => request.streamId)).toEqual([
-      generation, generation, generation, generation
+      generation, generation, generation, generation, generation
     ]);
     expect(forwarded.map(({ payload }) => payload.body)).toEqual([
-      responses[3]!.body, responses[0]!.body, responses[1]!.body, responses[2]!.body
+      responses[4]!.body, responses[3]!.body, responses[0]!.body, responses[1]!.body,
+      responses[2]!.body
     ]);
   });
 
@@ -2311,7 +2473,7 @@ describe("NetworkObserver", () => {
       const fetcher = (path: string, init?: { headers?: Record<string, string> }) => {
         const generation = init?.headers?.["X-Fieldline-Generation"];
         requests.push({ path, ...(generation === undefined ? {} : { generation }) });
-        if (path.endsWith("/live")) return new Promise<never>(() => undefined);
+        if (path.includes("/live/initial?")) return new Promise<never>(() => undefined);
         return Promise.resolve({ ok: true, json: async () => ({ serializedData: [] }) });
       };
       const evaluate = new Function("document", "location", "fetch", "localStorage",
@@ -2320,13 +2482,15 @@ describe("NetworkObserver", () => {
           localStorage: { getItem: (_key: string) => null }) => Promise<string>;
       const refresh = evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" },
         fetcher, { getItem: () => null });
-      await vi.advanceTimersByTimeAsync(5_001);
+      await vi.advanceTimersByTimeAsync(10_002);
       await expect(refresh).resolves.toMatchObject({ status: "catalog-requested",
         responses: expect.arrayContaining([expect.objectContaining({
           url: "/api/eventlist/asia/leagues/v2/1/prematch/initial"
         })]) });
       const listRequests = requests.filter(({ path }) => path.startsWith("/api/eventlist/"));
-      expect(listRequests).toHaveLength(4);
+      expect(listRequests).toHaveLength(3);
+      expect(listRequests.filter(({ path }) => path.includes("/live/initial?"))).toHaveLength(2);
+      expect(listRequests.filter(({ path }) => path.includes("/prematch/initial?"))).toHaveLength(1);
       expect(new Set(listRequests.map(({ generation }) => generation)).size).toBe(1);
       expect(listRequests[0]!.generation).toMatch(/^bti:\d+:\d+$/u);
     } finally {
@@ -2354,7 +2518,129 @@ describe("NetworkObserver", () => {
       .resolves.toMatchObject({ status: "catalog-requested", responses: expect.any(Array) });
   });
 
-  it("serializes BTI detail enrichment instead of starting a concurrent request burst", async () => {
+  it("returns completed BTI detail bodies directly on the next catalog generation", async () => {
+    const root = { dataset: {} as Record<string, string> };
+    const league = Array.from({ length: 13 }, () => null) as unknown[];
+    league[12] = [["event-direct"]];
+    const detailSelection = Array.from({ length: 30 }, () => null) as unknown[];
+    detailSelection[0] = "selection-direct";
+    detailSelection[2] = { VI: "Tài" };
+    detailSelection[5] = false;
+    detailSelection[8] = ["", "1.90", "", "", "", "0.90"];
+    detailSelection[9] = 1;
+    detailSelection[13] = false;
+    detailSelection[16] = 2.75;
+    detailSelection[29] = "selection-private-canary";
+    const opposingSelection = [...detailSelection];
+    opposingSelection[0] = "selection-opposing";
+    opposingSelection[2] = { VI: "Xỉu" };
+    opposingSelection[9] = 3;
+    const detailMarket = Array.from({ length: 30 }, () => null) as unknown[];
+    detailMarket[0] = "market-direct";
+    detailMarket[1] = "OU1";
+    detailMarket[5] = ["OU1", "First Half Total"];
+    detailMarket[13] = [detailSelection, opposingSelection];
+    detailMarket[29] = "market-private-canary";
+    const homeHandicap = [...detailSelection];
+    homeHandicap[0] = "home-handicap";
+    homeHandicap[2] = { VI: "Home" };
+    homeHandicap[9] = 1;
+    homeHandicap[16] = -0.5;
+    const awayHandicap = [...detailSelection];
+    awayHandicap[0] = "away-handicap";
+    awayHandicap[2] = { VI: "Away" };
+    awayHandicap[9] = 3;
+    awayHandicap[16] = 0.5;
+    const detailHandicap = Array.from({ length: 30 }, () => null) as unknown[];
+    detailHandicap[0] = "handicap-direct";
+    detailHandicap[1] = "HC0";
+    detailHandicap[5] = ["HC0", "Asian Handicap"];
+    detailHandicap[13] = [homeHandicap, awayHandicap];
+    const detailEvent = Array.from({ length: 39 }, () => null) as unknown[];
+    detailEvent[0] = "event-direct";
+    detailEvent[2] = "Direct League";
+    detailEvent[8] = [["home", { VI: "Home" }, { VI: "Alpha" }],
+      ["away", { VI: "Away" }, { VI: "Beta" }]];
+    detailEvent[11] = "2026-09-07T00:15:00.000Z";
+    detailEvent[13] = false;
+    detailEvent[20] = [detailMarket, detailHandicap];
+    detailEvent[38] = "event-private-canary";
+    let detailRead = 0;
+    const fetcher = async (path: string) => {
+      if (!path.startsWith("/api/eventpage/")) {
+        return { ok: true, text: async () => JSON.stringify({ serializedData: [league] }) };
+      }
+      const currentDetail = [...detailEvent];
+      currentDetail[34] = ++detailRead;
+      return { ok: true, text: async () => JSON.stringify({ data: [currentDetail],
+        unrelatedProviderMetadata: "must-not-cross-the-bridge" }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string; origin: string }, fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }) => Promise<{
+          responses: Array<{ url: string; body: string }>;
+        }>;
+    const location = { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" };
+
+    await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
+    await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
+      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+    root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+    await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
+    await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
+      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+    root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+    const next = await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
+
+    const batch = next.responses.find(({ url }) =>
+      url.startsWith("/api/eventpage/events/__fieldline_batch_"));
+    expect(batch).toBeDefined();
+    const compactEvent = JSON.parse(batch!.body).data[0] as unknown[];
+    expect(compactEvent[0]).toBe("event-direct");
+    expect(compactEvent[2]).toBe("Direct League");
+    expect((compactEvent[8] as unknown[][]).map((participant) => participant[1])).toEqual([
+      { VI: "Alpha" }, { VI: "Beta" }
+    ]);
+    expect(compactEvent[11]).toBe("2026-09-07T00:15:00.000Z");
+    expect(compactEvent[13]).toBe(false);
+    expect((compactEvent[20] as unknown[][])[0]?.[13]).toHaveLength(2);
+    expect(batch!.body).not.toContain("must-not-cross-the-bridge");
+    expect(batch!.body).not.toContain("private-canary");
+    expect(next.responses.indexOf(batch!)).toBeLessThan(next.responses.findIndex(({ url }) =>
+      url === "/api/eventlist/asia/leagues/v2/1/live"));
+    expect((root as unknown as Record<string, Array<unknown>>).__fieldlineBtiDetailBodiesV8).toHaveLength(1);
+  });
+
+  it("does not cache an empty BTI detail response for later catalog removal", async () => {
+    const root = { dataset: {} as Record<string, string> };
+    const league = Array.from({ length: 13 }, () => null) as unknown[];
+    league[12] = [["event-empty"]];
+    const fetcher = async (path: string) => path.startsWith("/api/eventpage/")
+      ? { ok: true, text: async () => '{"data":[]}' }
+      : { ok: true, text: async () => JSON.stringify({ serializedData: [league] }) };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string; origin: string }, fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }) => Promise<{
+          responses: Array<{ url: string; body: string }>;
+        }>;
+    const location = { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" };
+
+    await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
+    await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
+      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+    root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+    const next = await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
+
+    expect(next.responses.some(({ url }) =>
+      url.startsWith("/api/eventpage/events/__fieldline_batch_"))).toBe(false);
+  });
+
+  it("bounds BTI detail enrichment to three concurrent requests", async () => {
     const root = { dataset: {} as Record<string, string> };
     const league = Array.from({ length: 13 }, () => null) as unknown[];
     league[12] = [["event-1"], ["event-2"], ["event-3"]];
@@ -2380,13 +2666,11 @@ describe("NetworkObserver", () => {
     await evaluate({ documentElement: root }, {
       pathname: "/sports", hostname: "bti.test", origin: "https://bti.test"
     }, fetcher, { getItem: () => null });
-    expect(maxActiveDetails).toBe(1);
-    for (let index = 0; index < 3; index += 1) {
-      releases.shift()?.();
-      if (index < 2) await vi.waitFor(() => expect(releases).toHaveLength(1));
-      else await vi.waitFor(() => expect(activeDetails).toBe(0));
-    }
-    expect(maxActiveDetails).toBe(1);
+    expect(releases).toHaveLength(3);
+    expect(maxActiveDetails).toBe(3);
+    for (const release of releases.splice(0)) release();
+    await vi.waitFor(() => expect(activeDetails).toBe(0));
+    expect(maxActiveDetails).toBe(3);
   });
 
   it("requests hidden BTI detail for every event when the roster exceeds the former batch cap", async () => {
@@ -2400,7 +2684,7 @@ describe("NetworkObserver", () => {
         requested.push(decodeURIComponent(path.slice("/api/eventpage/events/".length).split("?")[0]!));
         return { ok: true, text: async () => '{"data":[]}' };
       }
-      return { ok: true, text: async () => JSON.stringify({ serializedData: path.endsWith("/live")
+      return { ok: true, text: async () => JSON.stringify({ serializedData: path.includes("/live/initial?")
         ? [league] : [] }) };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage",
@@ -2412,7 +2696,7 @@ describe("NetworkObserver", () => {
       pathname: "/sports", hostname: "bti.test", origin: "https://bti.test"
     }, fetcher, { getItem: () => null });
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV1).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
 
     expect(requested).toEqual(eventIds);
   });
@@ -2420,12 +2704,12 @@ describe("NetworkObserver", () => {
   it("finishes the complete BTI detail queue while adopting the newest generation headers", async () => {
     const root = { dataset: {} as Record<string, string> };
     const league = Array.from({ length: 13 }, () => null) as unknown[];
-    league[12] = [["event-1"], ["event-2"]];
+    league[12] = [["event-1"], ["event-2"], ["event-3"], ["event-4"]];
     let detailRequests = 0;
     let activeBodies = 0;
     let maxActiveBodies = 0;
     const detailGenerations: string[] = [];
-    let releaseFirst!: () => void;
+    const releases: Array<() => void> = [];
     const fetcher = async (path: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => {
       if (!path.startsWith("/api/eventpage/")) {
         return { ok: true, text: async () => JSON.stringify({ serializedData: [league] }) };
@@ -2435,14 +2719,10 @@ describe("NetworkObserver", () => {
       return { ok: true, text: async () => {
         activeBodies += 1;
         maxActiveBodies = Math.max(maxActiveBodies, activeBodies);
-        if (detailRequests > 1) {
-          activeBodies -= 1;
-          return "";
-        }
-        return new Promise<string>((resolve) => { releaseFirst = () => {
+        return new Promise<string>((resolve) => { releases.push(() => {
           activeBodies -= 1;
           resolve("");
-        }; });
+        }); });
       } };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage",
@@ -2454,21 +2734,25 @@ describe("NetworkObserver", () => {
     const first = await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null }) as {
       generation: string;
     };
-    await vi.waitFor(() => expect(detailRequests).toBe(1));
+    await vi.waitFor(() => expect(detailRequests).toBe(3));
     root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
     const second = await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null }) as {
       generation: string;
     };
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(detailRequests).toBe(1);
-    releaseFirst();
-    await vi.waitFor(() => expect(detailRequests).toBe(2));
+    expect(detailRequests).toBe(3);
+    releases.shift()?.();
+    await vi.waitFor(() => expect(detailRequests).toBe(4));
+    for (const release of releases.splice(0)) release();
 
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV1).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
     expect(first.generation).not.toBe(second.generation);
-    expect(detailGenerations).toEqual([first.generation, second.generation]);
-    expect(maxActiveBodies).toBe(1);
+    expect(detailGenerations).toEqual([
+      first.generation, first.generation, first.generation, second.generation
+    ]);
+    expect(maxActiveBodies).toBe(3);
   });
 
   it("stops BTI frame discovery after the first complete authenticated generation", async () => {
@@ -2515,8 +2799,8 @@ describe("NetworkObserver", () => {
         : key === "CT_APP_SERVICE_CONTEXT" ? "opaque-service-context" : null
     });
 
-    expect(listHeaders).toHaveLength(4);
-    expect(listHeaders).toEqual(Array.from({ length: 4 }, () => expect.objectContaining({
+    expect(listHeaders).toHaveLength(2);
+    expect(listHeaders).toEqual(Array.from({ length: 2 }, () => expect.objectContaining({
       authorization: "opaque-session-token",
       "service-context": "opaque-service-context"
     })));
@@ -2539,7 +2823,7 @@ describe("NetworkObserver", () => {
         return { ok: true, json: async () => ({ data: [] }) };
       }
       const league = Array.from({ length: 13 }, () => null) as unknown[];
-      league[12] = path.endsWith("/live")
+      league[12] = path.includes("/live/initial?")
         ? orders[Math.min(round, orders.length - 1)]!.map((id) => [id])
         : [];
       return { ok: true, json: async () => ({ serializedData: [league] }) };
@@ -2554,6 +2838,7 @@ describe("NetworkObserver", () => {
 
     for (round = 0; round < orders.length; round += 1) {
       root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
       await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
         { getItem: () => null });
       await vi.waitFor(() => expect(requestCounts[round]).toBe(7));
@@ -2579,7 +2864,7 @@ describe("NetworkObserver", () => {
         return { ok: true, json: async () => ({ data: [] }) };
       }
       const league = Array.from({ length: 13 }, () => null) as unknown[];
-      league[12] = path.endsWith("/live") ? orders[round]!.map((id) => [id]) : [];
+      league[12] = path.includes("/live/initial?") ? orders[round]!.map((id) => [id]) : [];
       return { ok: true, json: async () => ({ serializedData: [league] }) };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage",
@@ -2592,10 +2877,11 @@ describe("NetworkObserver", () => {
 
     for (round = 0; round < orders.length; round += 1) {
       root.dataset.fieldlineBtiCatalogRefreshAt = "0";
+      delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
       await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
         { getItem: () => null });
       await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-        .__fieldlineBtiDetailWorkerV1).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
     }
 
     expect([...requested].sort()).toEqual(["a", "b", "c", "d", "e", "f", "g",
@@ -4262,7 +4548,7 @@ describe("NetworkObserver", () => {
     }) }));
   });
 
-  it("carries the BTI refresh generation from request headers into the HTTP response envelope", async () => {
+  it("does not passively copy a generated BTI detail body that the direct refresh cache already owns", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Network.getResponseBody"
       ? { body: JSON.stringify({ data: [] }), base64Encoded: false }
       : {});
@@ -4277,10 +4563,8 @@ describe("NetworkObserver", () => {
       response: { url: detailUrl } });
     await observer.handleEvent(bti, "Network.loadingFinished", { requestId: "bti-detail" });
 
-    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
-      lobby: "BTI", transport: "HTTP_RESPONSE",
-      request: expect.objectContaining({ streamId: "bti:2000:7" })
-    }));
+    expect(sendCommand.mock.calls.some(([, method]) => method === "Network.getResponseBody")).toBe(false);
+    expect(forward).not.toHaveBeenCalled();
   });
 
   it("does not passively copy a generated BTI list body that the direct complete generation already owns", async () => {

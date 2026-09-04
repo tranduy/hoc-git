@@ -22,7 +22,7 @@ import { SourceLaunchMemory } from "./source-launch-memory.js";
 import { extensionLobbyScope, lobbyIsInExtensionScope } from "./extension-lobby-scope.js";
 import { runDebuggerEventTask } from "./debugger-event-task.js";
 import { ApsportPageRecoveryWatchdog } from "./apsport-page-recovery.js";
-import { BtiPageRecoveryWatchdog } from "./bti-page-health.js";
+import { BtiPageRecoveryWatchdog, btiHardRecoveryAction } from "./bti-page-health.js";
 import { CmdPageKeepalive, SourceActivityGuard, parseCmdPageKeepaliveState,
   recoverCmdTab, replaceExactCmdTab } from "./cmd-page-keepalive.js";
 import { ProviderPageLeaseCoordinator, isRenewableLobby, parseProviderPageLeaseState,
@@ -546,6 +546,18 @@ async function configureBridgeOnce(): Promise<boolean> {
         if (attached) {
           if (attached.lobby === "CMD") {
             await cmdPageKeepalive.reloadNow({ lobby: "CMD", sourceId, tabId: attached.tabId });
+          } else if (attached.lobby === "BTI") {
+            const source: ObservedSource = { lobby: "BTI", sourceId, tabId: attached.tabId };
+            const health = await observer.probeBtiPageHealth(source).catch(() => null);
+            if (btiHardRecoveryAction(health) === "RENEW") {
+              await providerPageLeaseCoordinator.renewNow({ lobby: "BTI", sourceId, tabId: attached.tabId });
+            } else {
+              // A healthy authenticated page already has everything needed to
+              // rebuild its roster. Reloading it on every backend recovery
+              // request rotates the source epoch before hidden-detail capture
+              // can finish, so keep recovery inside the current document.
+              await observer.refreshCatalog(source).catch(() => undefined);
+            }
           } else if (attached.lobby === "IM") {
             // IM is the only provider whose public-looking URL cannot recreate
             // an authenticated page. A hard recovery must preserve this exact
@@ -574,6 +586,18 @@ async function configureBridgeOnce(): Promise<boolean> {
       },
       onSourceEnsure: async (lobby, url) => {
         if (!lobbyIsAllowed(lobby)) return;
+        if (lobby === "BTI") {
+          const attached = registry.list().find((entry) => entry.lobby === "BTI");
+          if (attached !== undefined) {
+            const source: ObservedSource = { lobby: "BTI", tabId: attached.tabId,
+              sourceId: `chrome:BTI:${attached.tabId}` };
+            const health = await observer.probeBtiPageHealth(source).catch(() => null);
+            if (btiHardRecoveryAction(health) === "REFRESH") {
+              await observer.refreshCatalog(source).catch(() => undefined);
+              return;
+            }
+          }
+        }
         await sourceTabRecovery.ensure(lobby, url);
       },
       onSourceRestore: async (lobby) => {
@@ -585,6 +609,18 @@ async function configureBridgeOnce(): Promise<boolean> {
               lobby: "CMD", sourceId: `chrome:CMD:${attached.tabId}`, tabId: attached.tabId
             });
             return;
+          }
+        }
+        if (lobby === "BTI") {
+          const attached = registry.list().find((entry) => entry.lobby === "BTI");
+          if (attached !== undefined) {
+            const source: ObservedSource = { lobby: "BTI", tabId: attached.tabId,
+              sourceId: `chrome:BTI:${attached.tabId}` };
+            const health = await observer.probeBtiPageHealth(source).catch(() => null);
+            if (btiHardRecoveryAction(health) === "REFRESH") {
+              await observer.refreshCatalog(source).catch(() => undefined);
+              return;
+            }
           }
         }
         await sourceTabRecovery.restore(lobby);

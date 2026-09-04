@@ -22,7 +22,7 @@ const event = {
 };
 
 describe("extractImFootballCatalog", () => {
-  it("keeps live events but limits prematch events to the next 48 hours", () => {
+  it("keeps live events and every future prematch event without a time horizon", () => {
     const nowMs = Date.parse("2026-08-19T00:00:00.000Z");
     const candidate = (eid: number, edt: string, isrbt = false) => ({ ...event, eid, edt, isrbt });
 
@@ -32,9 +32,9 @@ describe("extractImFootballCatalog", () => {
       candidate(3, "2026-08-19T00:00:00.000Z"),
       candidate(4, "2026-08-21T00:00:00.000Z"),
       candidate(5, "2026-08-21T00:00:00.001Z")
-    ] }, { nowMs, prematchHorizonMs: 48 * 60 * 60 * 1_000 });
+    ] }, { nowMs });
 
-    expect(records.map(({ eventId }) => eventId)).toEqual(["1", "3", "4"]);
+    expect(records.map(({ eventId }) => eventId)).toEqual(["1", "3", "4", "5"]);
   });
 
   it("extracts exact full-time fractional handicap and total tickets", () => {

@@ -150,6 +150,7 @@ interface AccountState {
     readonly status: "HEALTHY" | "AUTH_ERROR" | "UNKNOWN";
     readonly code: "1008" | null;
     readonly observedAtMs: number;
+    readonly rosterCoverage?: string;
   } | null;
   recovery: {
     consecutiveFailures: number;
@@ -474,7 +475,7 @@ export class PipelineTelemetry {
   #recordWorkHealth(state: AccountState, body: string, observedAtMs: number): void {
     try {
       const value = JSON.parse(body) as { kind?: unknown; results?: unknown;
-        status?: unknown; code?: unknown;
+        status?: unknown; code?: unknown; rosterCoverage?: unknown;
         counters?: { forcedUnlocks?: unknown };
         sourceGeneration?: unknown; webSocketCreated?: unknown; webSockets?: unknown;
         ksportTargets?: unknown; attachedTargets?: unknown; framesReceived?: unknown;
@@ -503,11 +504,15 @@ export class PipelineTelemetry {
       }
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
+      const rosterCoverage = typeof value.rosterCoverage === "string" && value.rosterCoverage.length <= 400 &&
+        /^[-A-Za-z0-9_":{},.]+$/u.test(value.rosterCoverage) ? value.rosterCoverage : undefined;
       if (value.kind === "PAGE_HEALTH" &&
         (value.status === "HEALTHY" || value.status === "UNKNOWN") && value.code === null) {
-        state.pageHealth = { status: value.status, code: null, observedAtMs };
+        state.pageHealth = { status: value.status, code: null, observedAtMs,
+          ...(rosterCoverage === undefined ? {} : { rosterCoverage }) };
       } else if (value.kind === "PAGE_HEALTH" && value.status === "AUTH_ERROR" && value.code === "1008") {
-        state.pageHealth = { status: "AUTH_ERROR", code: "1008", observedAtMs };
+        state.pageHealth = { status: "AUTH_ERROR", code: "1008", observedAtMs,
+          ...(rosterCoverage === undefined ? {} : { rosterCoverage }) };
       }
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
         value.ksportTargets, value.attachedTargets];

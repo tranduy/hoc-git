@@ -116,7 +116,8 @@ interface ComparableAuthoritativeGeneration {
 }
 
 function comparableAuthoritativeGeneration(generation: string): ComparableAuthoritativeGeneration | null {
-  const parsers = [comparableCmdGeneration, comparableImGeneration, comparableKsportGeneration,
+  const parsers = [comparableCmdGeneration, comparableImGeneration, comparableBtiGeneration,
+    comparableKsportGeneration,
     comparableSabaGeneration, comparableSabaDomGeneration, comparableTsportGeneration] as const;
   for (const parse of parsers) {
     const comparable = parse(generation);
@@ -142,6 +143,15 @@ function comparableImGeneration(generation: string): ComparableAuthoritativeGene
   const ordinal = Number(match[2]);
   if (!Number.isSafeInteger(tabId) || !Number.isSafeInteger(ordinal)) return null;
   return { lineage: lineageKey("IM", match[1]!), order: [ordinal, 0] };
+}
+
+function comparableBtiGeneration(generation: string): ComparableAuthoritativeGeneration | null {
+  const match = /^bti:(0|[1-9]\d*):(0|[1-9]\d*)$/u.exec(generation);
+  if (match === null) return null;
+  const timestamp = Number(match[1]);
+  const ordinal = Number(match[2]);
+  if (!Number.isSafeInteger(timestamp) || !Number.isSafeInteger(ordinal)) return null;
+  return { lineage: lineageKey("BTI"), order: [timestamp, ordinal] };
 }
 
 function comparableKsportGeneration(generation: string): ComparableAuthoritativeGeneration | null {
@@ -211,7 +221,7 @@ function comparableFallbackGeneration(generation: string): ComparableAuthoritati
 }
 
 function hasReservedGenerationSyntax(generation: string): boolean {
-  return generation.startsWith("cmd:") || generation.startsWith("im:") ||
+  return generation.startsWith("cmd:") || generation.startsWith("im:") || generation.startsWith("bti:") ||
     generation.startsWith("ksport-http:") || generation.includes(":ksport-http:") ||
     generation.includes(":ksport-ws:") || generation.includes(":saba:") || generation.includes(":dom:") ||
     generation.startsWith("[") || generation.startsWith("{");

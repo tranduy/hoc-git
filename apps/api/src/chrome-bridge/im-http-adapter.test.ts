@@ -40,6 +40,20 @@ describe("ImHttpCatalogAdapter", () => {
     });
   });
 
+  it("keeps a future prematch fixture beyond the legacy 48-hour horizon", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    const farFuture = { ...event, eid: 112516391, edt: "2026-09-16T20:00:00-04:00" };
+
+    expect(adapter.decode(envelope({ StatusCode: 100, sel: [farFuture] }, 1, undefined,
+      "IM_MARKET_1"))).toEqual([]);
+    const update = adapter.decode(envelope({ StatusCode: 100, sel: [] }, 2, undefined,
+      "IM_MARKET_2"))[0];
+
+    expect(update?.value).toMatchObject({
+      events: [expect.objectContaining({ providerEventId: "112516391", isLive: false })]
+    });
+  });
+
   it("emits transport continuity for a valid incomplete newer GetSE generation after a baseline", () => {
     const adapter = new ImHttpCatalogAdapter();
     seedBothPartitions(adapter);

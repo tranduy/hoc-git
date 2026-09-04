@@ -9,7 +9,19 @@ function text(value: unknown): string { return typeof value === "string" ? value
 function localized(value: unknown): string {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
   const values = value as Record<string, unknown>;
-  return text(values.VI) || text(values.EN);
+  return text(values.VI) || text(values.EN) || text(values.VN) ||
+    Object.values(values).map(text).find((candidate) => candidate !== "") || "";
+}
+function rosterNames(event: Row): readonly string[] {
+  const participants = row(event[1]) ?? [];
+  const names = participants.slice(0, 2).map((participant) => {
+    const item = row(participant);
+    return localized(item?.[1]) || text(item?.[2]);
+  });
+  if (names.length === 2 && names.every((name) => name !== "")) return names;
+  const display = text(event[2]);
+  const split = display.split(/\s+(?:v(?:s\.?)?|[-\u2013\u2014])\s+/iu).map((name) => name.trim());
+  return split.length === 2 && split.every((name) => name !== "") ? split : names;
 }
 function halfLine(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 100 &&
@@ -188,15 +200,14 @@ export function extractBtiCatalogRecords(payload: unknown): readonly SbobetCatal
     return events.flatMap((eventValue): SbobetCatalogInputRecord[] => {
       const event = row(eventValue);
       const eventId = text(event?.[0]);
-      const participants = row(event?.[1]) ?? [];
-      const names = participants.slice(0, 2).map((participant) => localized(row(participant)?.[1]));
+      const names = event === null ? [] : rosterNames(event);
       const scores = row(event?.[4]);
       const eventMarkets = markets(event?.[8]);
       const isLive = event?.[5] === true;
       const startAtUtcMs = isLive ? null : Date.parse(text(event?.[3]));
       if (eventId === "" || (event?.[5] !== true && event?.[5] !== false) ||
         (!isLive && !Number.isFinite(startAtUtcMs)) || names.length !== 2 ||
-        names.some((name) => name === "") || eventMarkets.length === 0) return [];
+        names.some((name) => name === "")) return [];
       const scoreText = isLive && typeof scores?.[0] === "string" && typeof scores?.[1] === "string"
         ? `${scores[0]} - ${scores[1]}` : null;
       return [{ eventId, leagueName, timeText: isLive ? "LIVE" : "PREMATCH", scoreText,

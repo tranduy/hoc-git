@@ -41,7 +41,7 @@ function committedCatalog(adapter: BtiHttpCatalogAdapter, generation = "bti:1000
   return completeGeneration(adapter, generation, firstSequence, body)[3]![0]!.value;
 }
 
-function detailPayload(): unknown {
+function detailPayload(eventId = "event"): unknown {
   const detailSelection = (id: string, side: 1 | 3, points: number, malay: string) => {
     const value = Array<unknown>(30).fill(null);
     value[0] = id; value[2] = id.includes("over") ? { VI: "Over" } : id.includes("under") ? { VI: "Under" } :
@@ -52,20 +52,20 @@ function detailPayload(): unknown {
   };
   const detailMarket = Array<unknown>(30).fill(null);
   detailMarket[0] = "detail-ou"; detailMarket[1] = "OU1"; detailMarket[5] = ["OU1", "OU1"];
-  detailMarket[6] = "event"; detailMarket[13] = [
+  detailMarket[6] = eventId; detailMarket[13] = [
     detailSelection("detail-over", 1, 2.75, "0.90"), detailSelection("detail-under", 3, 2.75, "-0.99")
   ];
   const detailEvent = Array<unknown>(39).fill(null);
-  detailEvent[0] = "event"; detailEvent[1] = "league"; detailEvent[2] = "Champions League";
+  detailEvent[0] = eventId; detailEvent[1] = "league"; detailEvent[2] = "Champions League";
   detailEvent[3] = "1"; detailEvent[8] = [["h", { VI: "Home" }, "Home"], ["a", { VI: "Away" }, "Away"]];
   detailEvent[11] = "2026-08-19T00:15:00.000Z"; detailEvent[13] = true; detailEvent[20] = [detailMarket];
   return { data: [detailEvent] };
 }
 
 function detailEnvelope(body: unknown = detailPayload(), observedAtMs = envelope().observedAtMs,
-  generation: string | null = "bti:1000:1"): ChromeBridgeEnvelope {
+  generation: string | null = "bti:1000:1", eventId = "event"): ChromeBridgeEnvelope {
   return { ...envelope(JSON.stringify(body)), sequence: 10, observedAtMs,
-    request: { ...envelope().request, pathnameClass: "/api/eventpage/events/event",
+    request: { ...envelope().request, pathnameClass: `/api/eventpage/events/${eventId}`,
       ...(generation === null ? {} : { streamId: generation }) } };
 }
 
@@ -76,6 +76,7 @@ describe("BtiHttpCatalogAdapter", () => {
 
     expect(updates.slice(0, 3)).toEqual([[], [], []]);
     expect(updates[3]).toEqual([expect.objectContaining({ authoritativeBaseline: true,
+      generation: "bti:2000:1",
       sequence: 23, value: expect.objectContaining({ events: [expect.objectContaining({
         providerEventId: "event" })] }) })]);
   });
@@ -101,6 +102,28 @@ describe("BtiHttpCatalogAdapter", () => {
 
     expect(adapter.decode(generationEnvelope(listPaths[2], "bti:2200:1", 43)))
       .toEqual([expect.objectContaining({ authoritativeBaseline: true, sequence: 43 })]);
+  });
+
+  it("keeps raw roster ids so later hidden detail can join even before names are populated", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const rosterOnly = JSON.stringify({ serializedData: [["league-hidden", "Hidden League", 0, "", false,
+      "", "", "", "", "", "1", "Football", [["hidden-event",
+        [["h", {}], ["a", {}]], "",
+        "2026-09-07T00:15:00.000Z", ["", ""], false, false, [], ["hidden-event", 0, [], []]]]]] });
+
+    expect(adapter.decode(generationEnvelope(listPaths[0], "bti:2300:1", 50, rosterOnly))).toEqual([]);
+    expect(adapter.decode(generationEnvelope(listPaths[1], "bti:2300:1", 51))).toEqual([]);
+    const committed = adapter.decode(generationEnvelope(listPaths[3], "bti:2300:1", 52))[0]!.value as {
+      events: Array<{ providerEventId: string }>;
+    };
+    expect(committed.events.map(({ providerEventId }) => providerEventId)).toEqual(["event"]);
+
+    const enriched = adapter.decode(detailEnvelope(detailPayload("hidden-event"),
+      envelope().observedAtMs + 1, "bti:2300:1", "hidden-event"))[0]!.value as {
+      events: Array<{ providerEventId: string }>;
+    };
+    expect(enriched.events.map(({ providerEventId }) => providerEventId)).toEqual(
+      expect.arrayContaining(["event", "hidden-event"]));
   });
 
   it("does not roll back when an older generation completes after a newer snapshot", () => {
@@ -152,7 +175,9 @@ describe("BtiHttpCatalogAdapter", () => {
     const adapter = new BtiHttpCatalogAdapter();
     committedCatalog(adapter);
     expect(adapter.fingerprint(detailEnvelope())).toBe(true);
-    const combined = adapter.decode(detailEnvelope())[0]!.value as {
+    const update = adapter.decode(detailEnvelope())[0]!;
+    expect(update).toMatchObject({ authoritativeBaseline: false, generation: "bti:1000:1" });
+    const combined = update.value as {
       events: unknown[]; markets: { marketType: string }[]; quotes: unknown[];
     };
     expect(combined.events).toHaveLength(1);
@@ -161,10 +186,59 @@ describe("BtiHttpCatalogAdapter", () => {
     expect(combined.quotes).toHaveLength(4);
   });
 
+  it("merges every listed event from a compact BTI detail batch", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const originalLeague = payload.serializedData[0] as unknown[];
+    const league = [...originalLeague];
+    const firstEvent = (originalLeague[12] as unknown[][])[0]!;
+    const secondEvent = [...firstEvent];
+    secondEvent[0] = "event-2";
+    secondEvent[1] = [["h", { VI: "Gamma" }], ["a", { VI: "Delta" }]];
+    secondEvent[2] = "Gamma vs Delta";
+    league[12] = [firstEvent, secondEvent];
+    committedCatalog(adapter, "bti:1000:1", 1, JSON.stringify({ serializedData: [league] }));
+    const firstDetail = (detailPayload("event") as { data: unknown[] }).data[0];
+    const secondDetail = (detailPayload("event-2") as { data: unknown[] }).data[0];
+
+    const update = adapter.decode(detailEnvelope({ data: [firstDetail, secondDetail] },
+      envelope().observedAtMs + 1, "bti:1000:1", "__fieldline_batch_0__"))[0]!;
+    const combined = update.value as {
+      events: Array<{ providerEventId: string }>;
+      markets: Array<{ providerEventId: string; marketType: string }>;
+    };
+
+    expect(update).toMatchObject({ authoritativeBaseline: false, generation: "bti:1000:1" });
+    expect(combined.events.map(({ providerEventId }) => providerEventId)).toEqual(["event", "event-2"]);
+    expect(combined.markets.filter(({ marketType }) => marketType === "FH_TOTAL")
+      .map(({ providerEventId }) => providerEventId)).toEqual(["event", "event-2"]);
+  });
+
   it("preserves list participant identity when event detail only labels sides as Home and Away", () => {
     const adapter = new BtiHttpCatalogAdapter();
     committedCatalog(adapter);
     const combined = adapter.decode(detailEnvelope())[0]!.value as {
+      events: { participantA: string; participantB: string }[];
+    };
+
+    expect(combined.events).toEqual([
+      expect.objectContaining({ participantA: "Alpha", participantB: "Beta" })
+    ]);
+  });
+
+  it("uses hydrated detail identity when the BTI roster only labels sides as Home and Away", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const placeholderRoster = JSON.stringify({ ...payload, serializedData: payload.serializedData.map((league) =>
+      league.map((value, index) => index === 12 ? (value as unknown[]).map((rawEvent) => {
+        const event = [...rawEvent as unknown[]];
+        event[1] = [["h", { VI: "Home" }], ["a", { VI: "Away" }]];
+        event[2] = "Home vs Away";
+        return event;
+      }) : value)) });
+    committedCatalog(adapter, "bti:1000:1", 1, placeholderRoster);
+    const hydrated = detailPayload() as { data: unknown[][] };
+    hydrated.data[0]![8] = [["h", { VI: "Alpha" }, "Alpha"], ["a", { VI: "Beta" }, "Beta"]];
+
+    const combined = adapter.decode(detailEnvelope(hydrated))[0]!.value as {
       events: { participantA: string; participantB: string }[];
     };
 

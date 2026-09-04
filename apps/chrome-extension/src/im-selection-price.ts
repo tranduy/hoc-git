@@ -38,7 +38,7 @@ export function buildImExactSelectionPriceExpression(identity: SelectionPricePro
     const now = Date.now();
     const providerDate = (value) => new Date(value).toISOString().slice(0, 10).replace(/-/g, '/');
     const common = { SportId: 1, BetTypeIds: [1, 2, 3, 5], GamePeriods: [1, 2, 3], IsCombo: false,
-      ['O' + 'ddsType']: 2, DateFrom: providerDate(now), DateTo: providerDate(now + 48 * 60 * 60 * 1000),
+      ['O' + 'ddsType']: 2, DateFrom: providerDate(now),
       CompetitionIds: [], SortType: 2, ProgrammeIds: [] };
     const path = '/api/EventV6/GetSE';
     const payloads = [];

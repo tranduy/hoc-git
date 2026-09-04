@@ -132,8 +132,7 @@ export function eligibleApsportFootballEvent(
   if (typeof value["11"] !== "string") return false;
   const startAtMs = Date.parse(value["11"]);
   if (!Number.isFinite(startAtMs)) return false;
-  const cutoffMs = nowMs + prematchWindowHours * 60 * 60 * 1_000;
-  return startAtMs >= nowMs && startAtMs <= cutoffMs;
+  return startAtMs >= nowMs;
 }
 
 export function apsportSelectionPriceFromEvent(value: ApsportRawEvent, identity: {

@@ -128,7 +128,6 @@ function liveTime(value: unknown): string {
 
 export interface ImFootballCatalogWindow {
   readonly nowMs: number;
-  readonly prematchHorizonMs: number;
 }
 
 export function extractImFootballCatalog(
@@ -148,8 +147,7 @@ export function extractImFootballCatalog(
     const isLive = item.isrbt === true;
     if (eventId === null || home === null || away === null || home === away || leagueName === null ||
       !Number.isFinite(startAtUtcMs) || !Array.isArray(item.mls)) return [];
-    if (!isLive && window !== undefined &&
-      (startAtUtcMs < window.nowMs || startAtUtcMs > window.nowMs + window.prematchHorizonMs)) return [];
+    if (!isLive && window !== undefined && startAtUtcMs < window.nowMs) return [];
     const acceptedMarkets = markets(item.mls);
     if (acceptedMarkets.length === 0) return [];
     const scoreText = isLive && Number.isSafeInteger(item.hs) && Number.isSafeInteger(item.as) &&

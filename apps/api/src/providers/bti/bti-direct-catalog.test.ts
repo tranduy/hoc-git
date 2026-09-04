@@ -189,7 +189,18 @@ describe("BTI direct catalog", () => {
     })]);
   });
 
-  it("fails closed for malformed and three-way-only data", () => {
+  it("retains a structurally valid roster event while its supported markets are still hidden", () => {
+    const payload = { serializedData: [["id", "League", 0, "", false, "", "", "", "", "", "1", "Football", [[
+      "event-hidden", [["h", { VN: "A" }, ""], ["a", { VN: "B" }, ""]], "", "2026-09-07T00:15:00.000Z",
+      ["", "", null, {}], false, false, [false, 0, null, null, null], ["event-hidden", 0, [], []]
+    ]]]] };
+
+    expect(extractBtiCatalogRecords(payload)).toEqual([expect.objectContaining({
+      eventId: "event-hidden", teamNames: ["A", "B"], markets: []
+    })]);
+  });
+
+  it("fails closed for malformed data", () => {
     expect(extractBtiCatalogRecords({ serializedData: [["id", "League", 0, "", false, "", "", "", "", "", "1", "Football", [[
       "event", [["h", { VI: "A" }], ["a", { VI: "B" }]], "A vs B", "", ["0", "0"], false, false, [], []
     ]]]]})).toEqual([]);

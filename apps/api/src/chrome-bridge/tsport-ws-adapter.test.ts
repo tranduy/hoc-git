@@ -246,14 +246,18 @@ describe("TsportWsCatalogAdapter", () => {
     expect(update.value.markets).toHaveLength(4);
   });
 
-  it("enforces the API prematch window again at the adapter boundary", () => {
+  it("keeps a future API prematch event beyond the legacy window at the adapter boundary", () => {
     const adapter = new TsportWsCatalogAdapter();
-    const outside = { ...event(104, "Outside Home"), "6": false, "11": "2026-08-17T04:00:01Z" };
+    const outside = { ...event(104, "Outside Home"), "6": false, "11": "2026-09-17T04:00:01Z" };
 
     const update = adapter.decode(apiEnvelope([outside]))[0] as AuthorityUpdate;
 
     expect(update).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE" });
-    expect(update.value).toMatchObject({ events: [], markets: [], quotes: [] });
+    expect(update.value.events).toEqual([
+      expect.objectContaining({ providerEventId: "104", isLive: false })
+    ]);
+    expect(update.value.markets).toHaveLength(4);
+    expect(update.value.quotes).toHaveLength(8);
   });
 
   it("keeps multiple proven APSPORT football sockets alive and invalidates only after the last one closes", () => {

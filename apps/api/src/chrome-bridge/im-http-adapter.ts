@@ -9,7 +9,6 @@ const ACCOUNT_ID = "catalog-source:IM:FOOTBALL";
 const HOST = "imsports.directsb.net";
 const SNAPSHOT_PATH = "/api/EventV6/GetSE";
 const DELTA_PATH = "/api/EventV6/GetSEDelta";
-const PREMATCH_HORIZON_MS = 48 * 60 * 60 * 1_000;
 const MAX_RECENT_DELTAS = 128;
 type ImPartition = "IM_MARKET_1" | "IM_MARKET_2";
 type ImRecord = ReturnType<typeof extractImFootballCatalog>[number];
@@ -299,10 +298,10 @@ function classifySnapshot(root: Record<string, unknown>, nowMs: number): {
     if (candidate.iscyb === true) continue;
     if (candidate.iscyb !== false) return null;
     const extracted = extractImFootballCatalog({ StatusCode: 100, sel: [candidate] }, {
-      nowMs, prematchHorizonMs: PREMATCH_HORIZON_MS
+      nowMs
     });
     if (extracted.length > 0) accepted.push(...extracted);
-    else if (candidate.isrbt !== true && (eventAtMs < nowMs || eventAtMs > nowMs + PREMATCH_HORIZON_MS)) continue;
+    else if (candidate.isrbt !== true && eventAtMs < nowMs) continue;
     // Structurally valid but unsupported market/period/line records are an
     // explained provider-domain exclusion rather than malformed evidence.
   }

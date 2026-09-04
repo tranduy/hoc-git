@@ -585,11 +585,11 @@ describe("catalog comparison", () => {
     expect(result[0]?.rows).toEqual([]);
   });
 
-  it("shows live events and pre-match events in the next 24 hours", () => {
+  it("shows live events and every future pre-match event without a time horizon", () => {
     const now = 1_000_000;
     expect(isVisibleEvent({ ...event("SABA", "live"), isLive: true, startAtUtcMs: 1 }, now)).toBe(true);
     expect(isVisibleEvent({ ...event("SABA", "soon"), startAtUtcMs: now + 86_400_000 }, now)).toBe(true);
-    expect(isVisibleEvent({ ...event("SABA", "later"), startAtUtcMs: now + 86_400_001 }, now)).toBe(false);
+    expect(isVisibleEvent({ ...event("SABA", "later"), startAtUtcMs: now + 30 * 86_400_000 }, now)).toBe(true);
     expect(isVisibleEvent({ ...event("SABA", "old"), startAtUtcMs: now - 1 }, now)).toBe(false);
   });
 

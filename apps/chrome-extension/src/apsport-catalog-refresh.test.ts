@@ -45,7 +45,7 @@ function league(name: string, events: readonly ApsportRawEvent[]) {
 }
 
 describe("eligibleApsportFootballEvent", () => {
-  it("keeps every active live event and applies an inclusive 24-hour cutoff only to prematch", () => {
+  it("keeps every active live event and every future prematch event without a time horizon", () => {
     expect(eligibleApsportFootballEvent(event("live-old", {
       live: true, startAt: "2020-01-01T00:00:00.000Z"
     }), NOW, 24)).toBe(true);
@@ -53,7 +53,10 @@ describe("eligibleApsportFootballEvent", () => {
       startAt: "2026-08-29T00:00:00.000Z"
     }), NOW, 24)).toBe(true);
     expect(eligibleApsportFootballEvent(event("outside", {
-      startAt: "2026-08-29T00:00:00.001Z"
+      startAt: "2026-09-28T00:00:00.000Z"
+    }), NOW, 24)).toBe(true);
+    expect(eligibleApsportFootballEvent(event("past", {
+      startAt: "2026-08-27T23:59:59.999Z"
     }), NOW, 24)).toBe(false);
     expect(eligibleApsportFootballEvent(event("missing", { startAt: null }), NOW, 24)).toBe(false);
     expect(eligibleApsportFootballEvent(event("invalid", { startAt: "not-a-date" }), NOW, 24)).toBe(false);
@@ -171,19 +174,19 @@ describe("collectApsportCatalog", () => {
     expect(onRoster).not.toHaveBeenCalled();
   });
 
-  it("uses lazy-league cursor field 17 and requests detail only for live plus next-24h events", async () => {
+  it("uses lazy-league cursor field 17 and requests detail for live plus every future event", async () => {
     const requests: ApsportCatalogPageRequest[] = [];
     const detailIds: string[] = [];
     const rosterBatches: unknown[] = [];
     const detailBatches: Array<{ readonly complete: boolean; readonly records: readonly ApsportRawEvent[] }> = [];
     const eligible = [
       event("live", { live: true, startAt: null }),
-      event("soon", { startAt: "2026-08-28T23:59:59.000Z" })
+      event("soon", { startAt: "2026-08-28T23:59:59.000Z" }),
+      event("far", { startAt: "2026-09-28T00:00:00.000Z" })
     ];
-    const outside = event("outside", { startAt: "2026-08-29T00:00:00.001Z" });
     const request = vi.fn(async (input: ApsportCatalogPageRequest) => {
       requests.push(input);
-      if (input.kind === "EVENTS") return { status: 200, data: [league("Top", [eligible[0]!, outside])] };
+      if (input.kind === "EVENTS") return { status: 200, data: [league("Top", [eligible[0]!, eligible[2]!])] };
       if (input.kind === "OTHER_LEAGUES") return { status: 200,
         data: [{ "4": "lazy-league", "5": "Lazy", "7": 999, "17": 42 }] };
       if (input.kind === "LEAGUE_TOPS") return { status: 200, data: [league("Lazy", [eligible[1]!])] };
@@ -206,10 +209,10 @@ describe("collectApsportCatalog", () => {
       detailBatchSize: 10
     });
 
-    expect(detailIds.sort()).toEqual(["live", "soon"]);
+    expect(detailIds.sort()).toEqual(["far", "live", "soon"]);
     expect(requests.filter((item): item is Extract<ApsportCatalogPageRequest, { readonly kind: "DETAIL" }> =>
       item.kind === "DETAIL").map((item) => item.eventId).sort())
-      .toEqual(["live", "soon"]);
+      .toEqual(["far", "live", "soon"]);
     const lazyBodies = requests.filter((item) => item.kind === "LEAGUE_TOPS").map((item) => item.body);
     expect(lazyBodies).toContainEqual(expect.objectContaining({
       lis: [{ li: "lazy-league", in: "42" }]
@@ -218,7 +221,8 @@ describe("collectApsportCatalog", () => {
     expect(rosterBatches).toHaveLength(1);
     expect(detailBatches).toEqual([expect.objectContaining({
       complete: true,
-      records: [expect.objectContaining({ "2": "live" }), expect.objectContaining({ "2": "soon" })]
+      records: [expect.objectContaining({ "2": "live" }), expect.objectContaining({ "2": "far" }),
+        expect.objectContaining({ "2": "soon" })]
     })]);
   });
 
