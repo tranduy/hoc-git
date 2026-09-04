@@ -7,7 +7,7 @@ const selection = (id: string, side: 1 | 3, line: number, malay: string) =>
 const market = ["hc", "Live", "Live", ["HC39", "full time", 1], "event", "league", "1", [
   selection("home", 1, -0.5, "0.82"), selection("away", 3, 0.5, "-0.92")]];
 const payload = { serializedData: [["league", "Champions League", 0, "", false, "", "", "", "", "", "1", "Football", [[
-  "event", [["h", { VI: "Home" }], ["a", { VI: "Away" }]], "Home vs Away", "", ["1", "0"], true, false, [],
+  "event", [["h", { VI: "Alpha" }], ["a", { VI: "Beta" }]], "Alpha vs Beta", "", ["1", "0"], true, false, [],
   ["event", 0, [], [market]]
 ]]]] };
 
@@ -159,6 +159,18 @@ describe("BtiHttpCatalogAdapter", () => {
     expect(combined.markets.map(({ marketType }) => marketType)).toEqual(
       expect.arrayContaining(["FT_AH", "FH_TOTAL"]));
     expect(combined.quotes).toHaveLength(4);
+  });
+
+  it("preserves list participant identity when event detail only labels sides as Home and Away", () => {
+    const adapter = new BtiHttpCatalogAdapter();
+    committedCatalog(adapter);
+    const combined = adapter.decode(detailEnvelope())[0]!.value as {
+      events: { participantA: string; participantB: string }[];
+    };
+
+    expect(combined.events).toEqual([
+      expect.objectContaining({ participantA: "Alpha", participantB: "Beta" })
+    ]);
   });
 
   it("retains hidden detail markets across list generations while the event remains listed", () => {

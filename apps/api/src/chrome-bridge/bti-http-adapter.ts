@@ -134,7 +134,8 @@ export class BtiHttpCatalogAdapter implements ChromeTrafficAdapter {
     const catalog: ObservedProviderCatalog = {
       ...emptyCatalog(envelope.observedAtMs),
       rejectedMarketCount: all.reduce((sum, value) => sum + value.rejectedMarketCount, 0),
-      events: unique(all.flatMap(({ events }) => events), (event) => event.providerEventId),
+      events: unique([...parts.lists.values()].flatMap(({ events }) => events),
+        (event) => event.providerEventId),
       markets: unique(all.flatMap(({ markets }) => markets),
         (market) => `${market.providerEventId}\u0000${market.providerMarketId}`),
       quotes: unique(all.flatMap(({ quotes }) => quotes),
