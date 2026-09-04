@@ -84,6 +84,27 @@ describe("ChromeBridgeRegistry", () => {
     expect(accepted).toHaveBeenCalledTimes(2);
   });
 
+  it("consumes a replayed transport sequence without granting it data authority", () => {
+    const accepted = vi.fn();
+    const registry = new ChromeBridgeRegistry({ now: () => 2_000 });
+    const connection = {};
+    registry.subscribe(accepted);
+    const current = { ...envelope(80), sourceEpoch: "observer-a:0" };
+
+    expect(registry.ingest(current, connection)).toMatchObject({ kind: "ACK", sequence: 80 });
+    expect(registry.ingest({ ...current, sequence: 81,
+      request: { ...current.request, replayed: true } }, connection))
+      .toMatchObject({ kind: "ACK", sequence: 81 });
+    expect(accepted).toHaveBeenCalledTimes(1);
+
+    expect(registry.ingest({ ...current, sequence: 82 }, connection))
+      .toMatchObject({ kind: "ACK", sequence: 82 });
+    expect(accepted).toHaveBeenCalledTimes(2);
+    expect(registry.listSources()).toEqual([expect.objectContaining({
+      sourceId: "chrome:SABA:7", state: "LIVE", lastSequence: 82
+    })]);
+  });
+
   it("rejects duplicates, lower sequence, and quarantines a sequence gap without publishing", () => {
     const accepted = vi.fn();
     const registry = new ChromeBridgeRegistry({ now: () => 2_000 });

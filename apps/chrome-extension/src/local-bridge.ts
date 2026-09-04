@@ -175,9 +175,10 @@ export class LocalBridge {
     if (!this.#admitSourceEpoch(envelope.sourceId, envelope.sourceEpoch ?? null)) return;
     const closeOrdinal = this.#closeOrdinal;
     const serialized = JSON.stringify(envelope);
-    const acknowledgedBackpressure = envelope.lobby === "KSPORT" && envelope.transport === "HTTP_RESPONSE"
+    const acknowledgedBackpressure = (envelope.lobby === "KSPORT" && envelope.transport === "HTTP_RESPONSE"
       && "providerContentIntent" in envelope.request
-      && envelope.request.providerContentIntent === "FOOTBALL_FULL_CATALOG";
+      && envelope.request.providerContentIntent === "FOOTBALL_FULL_CATALOG") ||
+      isBtiAuthFailureEnvelope(envelope);
     let settleAcknowledgement: (() => void) | null = null;
     const acknowledgement = acknowledgedBackpressure
       ? new Promise<void>((resolve) => { settleAcknowledgement = resolve; })
@@ -280,6 +281,14 @@ export class LocalBridge {
       if (this.#socket !== socket) return;
       this.#reconnectAttempts = 0;
       for (const entry of this.#queue) entry.sentGeneration = null;
+      // An ACK from the retiring API process can leave a hole in a source's
+      // local backlog just before the WebSocket is replaced (for example
+      // [0, 1, 2] becomes [0, 2]). A fresh API has no way to distinguish that
+      // split history and will correctly reject the replay forever. Detect the
+      // hole before sending anything and publish one new authoritative epoch.
+      for (const source of this.#discontinuousQueuedSources()) {
+        this.#requestSourceResync(source.sourceId, source.sourceEpoch);
+      }
       this.#flush(generation);
       try { void Promise.resolve(this.#onOpen()).catch(() => undefined); }
       catch { /* replay failure must not close the bridge */ }
@@ -322,6 +331,27 @@ export class LocalBridge {
       (left.envelope.sourceId < right.envelope.sourceId ? -1 : left.envelope.sourceId > right.envelope.sourceId ? 1 : 0)
       || left.envelope.sequence - right.envelope.sequence
       || left.insertedAt - right.insertedAt);
+  }
+
+  #discontinuousQueuedSources(): Array<{ sourceId: string; sourceEpoch: string | null }> {
+    const grouped = new Map<string, QueueEntry[]>();
+    for (const entry of this.#queue) {
+      const entries = grouped.get(entry.envelope.sourceId) ?? [];
+      entries.push(entry);
+      grouped.set(entry.envelope.sourceId, entries);
+    }
+    const discontinuous: Array<{ sourceId: string; sourceEpoch: string | null }> = [];
+    for (const [sourceId, entries] of grouped) {
+      if (entries.length < 2) continue;
+      const ordered = this.#ordered(entries);
+      const sourceEpoch = ordered[0]!.envelope.sourceEpoch ?? null;
+      const hasGap = ordered.some((entry, index) => {
+        if ((entry.envelope.sourceEpoch ?? null) !== sourceEpoch) return true;
+        return index > 0 && entry.envelope.sequence !== ordered[index - 1]!.envelope.sequence + 1;
+      });
+      if (hasGap) discontinuous.push({ sourceId, sourceEpoch });
+    }
+    return discontinuous;
   }
 
   #flush(generation = this.#generation): void {
@@ -374,6 +404,14 @@ export class LocalBridge {
       }
       if (parsed.data.kind === "RESTORE_SOURCE") {
         const { lobby } = parsed.data;
+        if (lobby === "CMD") {
+          // CMD recovery only navigates its already-owned exact tab. It must
+          // not wait behind a slow provider bootstrap in the global launch
+          // lane, otherwise the API observes delivery while no reload occurs.
+          try { void Promise.resolve(this.#onSourceRestore(lobby)).catch(() => undefined); }
+          catch { /* exact-tab recovery must not disrupt the bridge */ }
+          return;
+        }
         this.#enqueueSourceRecovery(() => this.#onSourceRestore(lobby));
         return;
       }
@@ -411,14 +449,16 @@ export class LocalBridge {
           // Drop only the rejected source and republish its authoritative
           // snapshot; healthy sources remain queued and connected.
           const rejected = this.#queue.find((entry) => entry.envelope.sourceId === rejection.sourceId
-            && entry.sentGeneration === generation);
+            && entry.envelope.sequence === rejection.sequence && entry.sentGeneration === generation &&
+            controlEpochMatches(entry, rejection.sourceEpoch));
           if (rejected === undefined) return;
           this.#requestSourceResync(rejection.sourceId, rejected?.envelope.sourceEpoch ?? null);
           return;
         }
         if (rejection.sequence !== null) {
           const index = this.#queue.findIndex((entry) => entry.envelope.sourceId === rejection.sourceId
-            && entry.envelope.sequence === rejection.sequence && entry.sentGeneration === generation);
+            && entry.envelope.sequence === rejection.sequence && entry.sentGeneration === generation &&
+            controlEpochMatches(entry, rejection.sourceEpoch));
           if (index >= 0) this.#removeAt(index);
         }
         return;
@@ -428,7 +468,8 @@ export class LocalBridge {
       const index = this.#queue.findIndex((entry) =>
         entry.envelope.sourceId === acknowledgement.sourceId
         && entry.envelope.sequence === acknowledgement.sequence
-        && entry.sentGeneration === generation);
+        && entry.sentGeneration === generation
+        && controlEpochMatches(entry, acknowledgement.sourceEpoch));
       if (index >= 0) this.#removeAt(index);
     } catch {
       // Invalid control traffic cannot mutate the send queue.
@@ -492,7 +533,7 @@ export class LocalBridge {
     this.#recoveryScheduler.clear(sourceId);
     void this.#recoveryScheduler.run(sourceId, async () => {
       try { await this.#onSourceResync(sourceId); }
-      finally { this.#reconnectAfterResync(); }
+      finally { this.#reconnectAfterResync(sourceId); }
     }).catch(() => undefined);
   }
 
@@ -520,11 +561,40 @@ export class LocalBridge {
     return true;
   }
 
-  #reconnectAfterResync(): void {
+  #reconnectAfterResync(sourceId: string): void {
+    // The replacement epoch may already have published sequence zero on this
+    // socket while the snapshot operation was finishing. Closing it now makes
+    // the API forget that acknowledgement; the reconnect then starts with a
+    // later queued sequence, gets another SEQUENCE_GAP, and loops forever.
+    // Reconnect only when recovery produced no replacement envelope at all.
+    if (this.#sourceEpochs.get(sourceId)?.resyncing === false) return;
     const socket = this.#socket;
     this.#socket = null;
     socket?.close();
     this.connect();
   }
 
+}
+
+function controlEpochMatches(entry: QueueEntry, sourceEpoch: string | undefined): boolean {
+  // Older local APIs did not echo the epoch. Keep that compatibility path,
+  // while current peers bind every ACK/REJECT to the exact public epoch so a
+  // delayed control message can never remove or retire its replacement.
+  return sourceEpoch === undefined || entry.envelope.sourceEpoch === sourceEpoch;
+}
+
+function isBtiAuthFailureEnvelope(envelope: ChromeBridgeEnvelope): boolean {
+  if (envelope.lobby !== "BTI" || envelope.transport !== "TAB_STATE" ||
+    envelope.request.hostname !== "prod20091.fxf774.com" ||
+    envelope.request.pathnameClass !== "/__fieldline_heartbeat__" ||
+    envelope.payload.encoding !== "UTF8" || envelope.payload.body.length > 160) return false;
+  try {
+    const value = JSON.parse(envelope.payload.body) as unknown;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const candidate = value as Record<string, unknown>;
+    return candidate.kind === "PAGE_HEALTH" && candidate.status === "AUTH_ERROR" &&
+      candidate.code === "1008";
+  } catch {
+    return false;
+  }
 }

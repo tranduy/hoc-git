@@ -38,9 +38,9 @@ describe("TabBootstrapper", () => {
       has: async (key) => values.has(key), mark: async (key) => { values.add(key); }, reload
     });
 
-    await expect(bootstrapper.ensure({ lobby: "SABA", tabId: 8, hostname: "sports.example", state: "ATTACHED" }, "SCHEDULED_MAINTENANCE"))
+    await expect(bootstrapper.ensure({ lobby: "SABA", tabId: 8, hostname: "sports.example", state: "ATTACHED" }, "EXPLICIT_RESET"))
       .resolves.toBeUndefined();
-    await bootstrapper.ensure({ lobby: "SABA", tabId: 8, hostname: "sports.example", state: "ATTACHED" }, "SCHEDULED_MAINTENANCE");
+    await bootstrapper.ensure({ lobby: "SABA", tabId: 8, hostname: "sports.example", state: "ATTACHED" }, "EXPLICIT_RESET");
     expect(reload).toHaveBeenCalledTimes(2);
   });
 });

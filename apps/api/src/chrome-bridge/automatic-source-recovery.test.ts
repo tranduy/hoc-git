@@ -77,8 +77,6 @@ describe("AutomaticSourceRecovery", () => {
       status.nextAttemptInMs <= 30_000)).toBe(true);
     expect(context.onStateChange.mock.calls.every(([status]) =>
       status.lastFailureCode === "BASELINE_TIMEOUT")).toBe(true);
-    expect(context.restoreLobby.mock.calls.length)
-      .toBe(context.onStateChange.mock.calls.length);
   });
 
   it("resets exponential backoff after a confirmed recovery", async () => {
@@ -232,6 +230,45 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [IM, "IM"],
+    [BTI, "BTI"]
+  ] as const)("renews the attached %s page before giving up when browser refresh is disabled",
+    async (accountId, lobby) => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(accountId, {
+      sourceId: `chrome:${lobby}:5`, sourceEpoch: "observer-a:0"
+    }));
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(accountId, {
+      state: "LIVE", reason: null, sourceId: `chrome:${lobby}:5`, sourceEpoch: "observer-b:0",
+      activeGeneration: `${lobby.toLowerCase()}:5:1`, lastCompleteBaselineAtMs: 2_001
+    }));
+
+    await expect(context.recovery.recover(request(accountId, "HARD"))).resolves.toEqual({
+      accountId, stage: "HARD", outcome: "RECOVERED", reason: null
+    });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith(`chrome:${lobby}:5`);
+    expect(context.reloadRecoverySource).not.toHaveBeenCalled();
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+  });
+
+  it("never replaces IM with a Fabet launch after safe same-tab recovery times out", async () => {
+    const context = setup(() => 2_000, true);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(IM, {
+      sourceId: "chrome:IM:5", sourceEpoch: "observer-a:0",
+      activeGeneration: "im:5:1"
+    }));
+    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+
+    await expect(context.recovery.recover(request(IM, "HARD"))).resolves.toEqual({
+      accountId: IM, stage: "HARD", outcome: "ACTION_REQUIRED",
+      reason: "IM_MANUAL_TOKEN_REQUIRED"
+    });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:IM:5");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+  });
+
   it("never reloads a one-time SABA launch when browser refresh is disabled", async () => {
     const context = setup(() => 2_000, false);
     context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
@@ -247,6 +284,55 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.reloadSource).not.toHaveBeenCalled();
     expect(context.reloadRecoverySource).not.toHaveBeenCalled();
     expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("SABA");
+  });
+
+  it("restores a missing BTI source directly when browser refresh is disabled", async () => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(BTI));
+    context.reloadRecoverySource.mockReturnValue(0);
+    context.requestLobbySnapshot.mockReturnValue(0);
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(BTI, {
+      state: "LIVE", reason: null, sourceId: "chrome:BTI:24", sourceEpoch: "observer-b:0",
+      activeGeneration: "bti:24:1", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    await expect(context.recovery.recover(request(BTI, "HARD"))).resolves.toEqual({
+      accountId: BTI, stage: "HARD", outcome: "RECOVERED", reason: null
+    });
+
+    expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("BTI");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+  });
+
+  it("keeps a reachable SABA tab intact when only the soft snapshot times out", async () => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1", tabReachableAtMs: 1_999 }));
+    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+
+    await expect(context.recovery.recover(request(SABA, "SOFT"))).resolves.toEqual({
+      accountId: SABA, stage: "SOFT", outcome: "DELIVERED", reason: "BASELINE_TIMEOUT"
+    });
+    expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("SABA");
+    expect(context.reloadSource).not.toHaveBeenCalled();
+    expect(context.reloadRecoverySource).not.toHaveBeenCalled();
+    expect(context.restoreLobby).not.toHaveBeenCalled();
+  });
+
+  it("does not restore SABA twice inside the provider settling window", async () => {
+    let clock = 1_000_000;
+    const context = setup(() => clock, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
+    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+
+    await context.recovery.recover(request(SABA, "HARD"));
+    expect(context.restoreLobby).toHaveBeenCalledTimes(1);
+
+    clock += 60_000;
+    await context.recovery.recover(request(SABA, "HARD"));
+    expect(context.restoreLobby).toHaveBeenCalledTimes(1);
   });
 
   it("restores SABA through the visible portal when every bridge source is gone", async () => {
@@ -645,15 +731,61 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(CMD, 1_000, 50, expect.any(AbortSignal));
   });
 
-  it("reports a hard command as merely delivered when no newer baseline confirms it", async () => {
-    const context = setup();
-    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+  it("gives CMD one bounded same-tab reload time to finish its full baseline", async () => {
+    // CMD can keep publishing deltas while its full fc=1 catalog is late. A
+    // hard-recovery loop used to restore the visible tab every 30 seconds and
+    // wait only the short in-page timeout, so it repeatedly destroyed the
+    // working page before the full catalog sweep could complete.
+    let clock = 1_000_000;
+    const requestLobbySnapshot = vi.fn(() => 1);
+    const reloadSource = vi.fn(() => 1);
+    const restoreLobby = vi.fn(() => 1);
+    const waitForFreshBaseline = vi.fn(async () => {
+      throw new Error("PROVIDER_FEED_BASELINE_TIMEOUT");
+    });
+    const recovery = new AutomaticSourceRecovery({
+      controlPlane: {
+        requestLobbySnapshot,
+        reloadSource,
+        reloadRecoverySource: vi.fn(() => 1),
+        ensureLobby: vi.fn(() => 1),
+        restoreLobby
+      },
+      feedRegistry: {
+        snapshot: vi.fn(() => snapshot(CMD, {
+          sourceId: "chrome:CMD:5", sourceEpoch: "observer-a:0",
+          activeGeneration: "cmd:5:observation:7"
+        })),
+        subscribe: vi.fn(() => () => undefined),
+        waitForFreshBaseline
+      },
+      refreshFabetLaunches: vi.fn(async () => undefined),
+      withLatestFabetLaunch: async (_provider, _category, consume) =>
+        consume("https://unused.test"),
+      baselineTimeoutMs: 10_000,
+      reloadBaselineTimeoutMs: 90_000,
+      now: () => clock
+    });
 
-    await expect(context.recovery.recover(request(CMD, "HARD"))).resolves.toEqual({
+    await expect(recovery.recover(request(CMD, "HARD"))).resolves.toEqual({
       accountId: CMD, stage: "HARD", outcome: "DELIVERED", reason: "BASELINE_TIMEOUT"
     });
-    expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("CMD");
-    expect(context.requestLobbySnapshot).not.toHaveBeenCalled();
+    expect(reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:CMD:5");
+    expect(restoreLobby).not.toHaveBeenCalled();
+    expect(waitForFreshBaseline).toHaveBeenNthCalledWith(
+      1, CMD, 1_000_000, 90_000, expect.any(AbortSignal)
+    );
+
+    clock += 60_000;
+    await expect(recovery.recover(request(CMD, "HARD"))).resolves.toEqual({
+      accountId: CMD, stage: "HARD", outcome: "DELIVERED", reason: "BASELINE_TIMEOUT"
+    });
+    expect(reloadSource).toHaveBeenCalledOnce();
+    expect(restoreLobby).not.toHaveBeenCalled();
+    expect(requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("CMD");
+    expect(waitForFreshBaseline).toHaveBeenNthCalledWith(
+      2, CMD, 1_060_000, 10_000, expect.any(AbortSignal)
+    );
   });
 
   it("rejects an authoritative baseline whose timestamp only equals the recovery request", async () => {
@@ -855,6 +987,7 @@ describe("a hard stage that cannot relaunch must still ask for a snapshot", () =
     // a window arriving. Asking for a snapshot is cheap and touches no tab.
     const context = setup(() => 2_000, false);
     context.feedRegistry.snapshot.mockReturnValue(snapshot(IM));
+    context.reloadRecoverySource.mockReturnValue(0);
     context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(IM, {
       state: "LIVE", reason: null, sourceId: "chrome:IM:5", sourceEpoch: "observer-b:0",
       activeGeneration: "im:5:1", lastCompleteBaselineAtMs: 2_001
@@ -867,7 +1000,7 @@ describe("a hard stage that cannot relaunch must still ask for a snapshot", () =
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
   });
 
-  it("still reports browser refresh disabled when the snapshot changes nothing", async () => {
+  it("requires a manual IM token when every safe in-page action changes nothing", async () => {
     const context = setup(() => 2_000, false);
     context.feedRegistry.snapshot.mockReturnValue(snapshot(IM));
     context.requestLobbySnapshot.mockReturnValue(0);
@@ -875,6 +1008,6 @@ describe("a hard stage that cannot relaunch must still ask for a snapshot", () =
     const result = await context.recovery.recover(request(IM, "HARD"));
 
     expect(result).toEqual({ accountId: IM, stage: "HARD", outcome: "ACTION_REQUIRED",
-      reason: "BROWSER_REFRESH_DISABLED" });
+      reason: "IM_MANUAL_TOKEN_REQUIRED" });
   });
 });

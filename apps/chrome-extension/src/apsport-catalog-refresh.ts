@@ -31,6 +31,7 @@ export interface ApsportCatalogBatch {
   readonly generation: string;
   readonly phase: "ROSTER" | "DETAIL";
   readonly complete: boolean;
+  readonly verifiedEmpty?: true;
   readonly trigger?: "SWEEP" | "EVENT_CHANGE";
   readonly prematchWindowHours: number;
   readonly records: readonly ApsportRawEvent[];
@@ -195,19 +196,24 @@ export function buildApsportPageRequestExpression(
   return `(async () => {
     try {
       const input = ${input};
-      const response = await fetch(input.url, { method: 'POST', headers: input.headers,
-        body: JSON.stringify(input.body), credentials: 'include', cache: 'no-store' });
-      const text = await response.text();
-      let value = text.length === 0 ? null : JSON.parse(text);
-      if (value && typeof value === 'object' && typeof value.data === 'string') {
-        value = value.data.length === 0 ? null : JSON.parse(value.data);
-      } else if (value && typeof value === 'object' && 'data' in value) {
-        value = value.data;
-      }
-      const retryAfterSeconds = Number(response.headers.get('retry-after') || 0);
-      return { status: response.status, data: value,
-        retryAfterMs: Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-          ? Math.min(60000, retryAfterSeconds * 1000) : undefined };
+      const controller = new AbortController();
+      const requestTimer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(input.url, { method: 'POST', headers: input.headers,
+          body: JSON.stringify(input.body), credentials: 'include', cache: 'no-store',
+          signal: controller.signal });
+        const text = await response.text();
+        let value = text.length === 0 ? null : JSON.parse(text);
+        if (value && typeof value === 'object' && typeof value.data === 'string') {
+          value = value.data.length === 0 ? null : JSON.parse(value.data);
+        } else if (value && typeof value === 'object' && 'data' in value) {
+          value = value.data;
+        }
+        const retryAfterSeconds = Number(response.headers.get('retry-after') || 0);
+        return { status: response.status, data: value,
+          retryAfterMs: Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+            ? Math.min(60000, retryAfterSeconds * 1000) : undefined };
+      } finally { clearTimeout(requestTimer); }
     } catch { return { status: 0, data: null }; }
   })()`;
 }
@@ -286,17 +292,20 @@ export async function collectApsportCatalog(options: CollectApsportCatalogOption
     const body = rosterBody(mode);
     const top = await options.request({ kind: "EVENTS", mode,
       url: endpoint(options.template, "events"), body });
+    assertRosterResponse(top);
     for (const item of apsportEventsFromProviderData(top.data)) {
       const id = eventId(item);
       if (id !== null) indexed.set(id, item);
     }
     const other = await options.request({ kind: "OTHER_LEAGUES", mode,
       url: endpoint(options.template, "other-leagues"), body: otherLeaguesBody(mode) });
+    assertRosterResponse(other);
     const lis = otherLeagueCursors(other.data);
     if (lis.length > 0) {
       const lazy = await options.request({ kind: "LEAGUE_TOPS", mode,
         url: endpoint(options.template, "leagues/tops"),
         body: { lis, mno: String(mode), mg: "1", si: 1, do: mode === 3 ? "0" : "1" } });
+      assertRosterResponse(lazy);
       for (const item of apsportEventsFromProviderData(lazy.data)) {
         const id = eventId(item);
         if (id !== null) indexed.set(id, item);
@@ -307,7 +316,8 @@ export async function collectApsportCatalog(options: CollectApsportCatalogOption
   const retained = [...indexed.values()].filter((item) =>
     eligibleApsportFootballEvent(item, options.nowMs, options.prematchWindowHours));
   await options.onRoster({ schemaVersion: 1, generation: options.generation,
-    phase: "ROSTER", complete: true, prematchWindowHours: options.prematchWindowHours, records: retained });
+    phase: "ROSTER", complete: true, ...(retained.length === 0 ? { verifiedEmpty: true as const } : {}),
+    prematchWindowHours: options.prematchWindowHours, records: retained });
   if (!options.isCurrent()) return;
 
   const detailBatchSize = options.detailBatchSize ?? 10;
@@ -340,5 +350,11 @@ export async function collectApsportCatalog(options: CollectApsportCatalogOption
   if (retained.length === 0 && options.isCurrent()) {
     await options.onDetail({ schemaVersion: 1, generation: options.generation,
       phase: "DETAIL", complete: true, prematchWindowHours: options.prematchWindowHours, records: [] });
+  }
+}
+
+function assertRosterResponse(response: ApsportCatalogPageResponse): void {
+  if (response.status !== 200 || !Array.isArray(response.data)) {
+    throw new Error("APSPORT_ROSTER_REQUEST_FAILED");
   }
 }

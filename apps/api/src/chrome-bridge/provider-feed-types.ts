@@ -14,7 +14,8 @@ export type ProviderFeedEvidence =
       generation: string; mode: "BASELINE" | "DELTA"; provenance: FeedProvenance;
       providerTimestampMs: number | null; catalog: ObservedProviderCatalog }
   | { kind: "INVALIDATE"; accountId: string; sourceId: string; sourceEpoch: string; atMs: number;
-      reason: "SOURCE_REPLACED" | "PROVIDER_STREAM_CLOSED" | "PROVIDER_STREAM_GAP" | "SCHEMA_CHANGED" };
+      reason: "SOURCE_REPLACED" | "PROVIDER_STREAM_CLOSED" | "PROVIDER_STREAM_GAP" | "SCHEMA_CHANGED" |
+        "PROVIDER_PAGE_INVALID" };
 
 export interface ProviderFeedPolicy {
   readonly expectedEvidenceCadenceMs: number;

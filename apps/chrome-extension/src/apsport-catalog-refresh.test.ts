@@ -1,8 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { apsportSelectionPriceFromEvent, collectApsportCatalog, collectApsportEventDetail, eligibleApsportFootballEvent,
+import { apsportSelectionPriceFromEvent, buildApsportPageRequestExpression, collectApsportCatalog,
+  collectApsportEventDetail, eligibleApsportFootballEvent,
   type ApsportCatalogPageRequest, type ApsportRawEvent } from "./apsport-catalog-refresh.js";
 
 const NOW = Date.parse("2026-08-28T00:00:00.000Z");
+
+describe("buildApsportPageRequestExpression", () => {
+  it("aborts a provider fetch inside the page instead of leaving it spinning after CDP times out", () => {
+    const expression = buildApsportPageRequestExpression({
+      origin: "https://pacific.agenate.com", headers: { lng: "vi" }, body: { si: 1 }
+    }, {
+      kind: "EVENTS", mode: 2, url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+      body: { mno: "2" }
+    });
+
+    expect(expression).toContain("new AbortController()");
+    expect(expression).toContain("signal: controller.signal");
+    expect(expression).toContain("controller.abort()");
+  });
+});
 
 function event(id: string, options: {
   readonly live?: boolean;
@@ -131,6 +147,26 @@ describe("collectApsportCatalog", () => {
     });
     expect(requests.find((request) => request.kind === "EVENTS" && request.mode === 3)?.body)
       .toEqual(expect.objectContaining({ mno: "3", do: "0" }));
+  });
+
+  it("does not publish an empty authoritative roster when a mandatory list request fails", async () => {
+    const onRoster = vi.fn(async () => undefined);
+
+    await expect(collectApsportCatalog({
+      generation: "apsport-failed-roster",
+      nowMs: NOW,
+      prematchWindowHours: 24,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async (input) => input.kind === "EVENTS" && input.mode === 2
+        ? { status: 500, data: { message: "temporary provider failure" } }
+        : { status: 200, data: [] },
+      sleep: async () => undefined,
+      isCurrent: () => true,
+      onRoster,
+      onDetail: async () => undefined
+    })).rejects.toThrow("APSPORT_ROSTER_REQUEST_FAILED");
+
+    expect(onRoster).not.toHaveBeenCalled();
   });
 
   it("uses lazy-league cursor field 17 and requests detail only for live plus next-24h events", async () => {

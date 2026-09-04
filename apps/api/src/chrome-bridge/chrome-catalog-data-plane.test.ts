@@ -14,6 +14,7 @@ const SBOBET = "catalog-source:SBOBET:FOOTBALL";
 const SABA = "catalog-source:SABA:FOOTBALL";
 const CMD = "catalog-source:CMD:FOOTBALL";
 const APSPORT = "catalog-source:APSPORT:FOOTBALL";
+const BTI = "catalog-source:BTI:FOOTBALL";
 
 const record = { sportId: "1", leagueId: "league-1", leagueName: "League", matchId: "event-1",
   timeText: "08/17 02:30AM", teamNames: ["Alpha", "Beta"], groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
@@ -251,6 +252,40 @@ function apsportWsEnvelope(sequence: number, rawEvent: unknown): ChromeBridgeEnv
     payload: { encoding: "UTF8", body: JSON.stringify({ s: 1, t: "eu", d: JSON.stringify(rawEvent) }) } };
 }
 
+const btiListPaths = [
+  "/api/eventlist/asia/leagues/v2/1/live",
+  "/api/eventlist/asia/leagues/v2/1/live/initial",
+  "/api/eventlist/asia/leagues/v2/1/prematch",
+  "/api/eventlist/asia/leagues/v2/1/prematch/initial"
+] as const;
+
+function btiEnvelope(sequence: number, pathnameClass: string,
+  sourceEpoch = "worker-a:0", generation = "bti:1000:1"): ChromeBridgeEnvelope {
+  const selection = (id: string, side: number, line: number, price: string) =>
+    [id, { VI: "team" }, { VI: "team line" }, false, false, 1.9,
+      ["", "1.90", "", "", "", price], side, 2, {}, "", "event", "market", line];
+  const market = ["hc", "Live", "Live", ["HC39", "full time", 1], "event", "league", "1", [
+    selection("home", 1, -0.5, "0.82"), selection("away", 3, 0.5, "-0.92")]];
+  const payload = { serializedData: [["league", "League", 0, "", false, "", "", "", "", "", "1",
+    "Football", [["event", [["h", { VI: "Home" }], ["a", { VI: "Away" }]], "Home vs Away", "",
+      ["1", "0"], true, false, [], ["event", 0, [], [market]]]]]] };
+  return { version: 1, kind: "NETWORK", lobby: "BTI", sourceId: "chrome:BTI:18", tabId: 18,
+    sourceEpoch, sequence, observedAtMs: 1_000 + sequence, receivedMonotonicMs: 50 + sequence,
+    transport: "HTTP_RESPONSE", request: { hostname: "prod20091.fxf774.com", pathnameClass,
+      resourceType: "Fetch", method: "GET", observerRequestId: `observer-a:request:${sequence}`,
+      requestFrameKey: "http-frame:bti-main", requestDocumentKey: "http-document:bti-main",
+      streamId: generation }, payload: { encoding: "UTF8", body: JSON.stringify(payload) } };
+}
+
+function btiPageHealth(sequence: number, status: "HEALTHY" | "AUTH_ERROR",
+  sourceEpoch = "worker-a:0"): ChromeBridgeEnvelope {
+  const base = btiEnvelope(sequence, btiListPaths[0], sourceEpoch);
+  return { ...base, transport: "TAB_STATE", request: { hostname: "prod20091.fxf774.com",
+    pathnameClass: "/__fieldline_heartbeat__", resourceType: "Tab" },
+    payload: { encoding: "UTF8", body: JSON.stringify({ kind: "PAGE_HEALTH", status,
+      code: status === "AUTH_ERROR" ? "1008" : null }) } };
+}
+
 const activeSbobet: CatalogSourceStatus = { id: SBOBET, alias: "K-Sports · SBOBET", provider: "SBOBET",
   category: "FOOTBALL", sessionState: "ACTIVE", acquiredAtMs: 900, reason: null };
 const activeSaba: CatalogSourceStatus = { id: SABA, alias: "SABA", provider: "SABA", category: "FOOTBALL",
@@ -283,6 +318,24 @@ class RejectingPromotionFeedRegistry extends ProviderFeedRegistry {
 afterEach(() => vi.restoreAllMocks());
 
 describe("ChromeCatalogDataPlane", () => {
+  it("invalidates a fresh BTI catalog immediately when its page reports auth error 1008", async () => {
+    const feeds = new ProviderFeedRegistry({ now: () => 1_500 });
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, feedRegistry: feeds });
+    for (const [index, path] of btiListPaths.entries()) {
+      plane.ingest(btiEnvelope(index + 1, path));
+    }
+    await expect(plane.read(BTI)).resolves.toMatchObject({ provider: "BTI" });
+
+    expect(plane.ingest(btiPageHealth(5, "AUTH_ERROR"))).toBe(true);
+
+    expect(feeds.snapshot(BTI)).toMatchObject({ state: "STALLED", reason: "PROVIDER_PAGE_INVALID" });
+    await expect(plane.read(BTI)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    for (const [index, path] of btiListPaths.entries()) {
+      expect(plane.ingest(btiEnvelope(index + 6, path, "worker-a:0", "bti:2000:1"))).toBe(false);
+    }
+    await expect(plane.read(BTI)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+  });
+
   it("publishes an APSPORT API baseline and applies a later socket price without DOM authority", async () => {
     let now = 1_500;
     const publish = vi.fn();

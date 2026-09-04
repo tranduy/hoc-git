@@ -181,6 +181,18 @@ export class ChromeCatalogDataPlane {
     }
     const sourceEpoch = identity.sourceEpoch;
     this.#telemetry?.recordEnvelope(envelope, sourceEpoch);
+    if (isBtiAuthFailurePageHealth(envelope)) {
+      if (admission.disposition === "CANDIDATE") {
+        return this.#reject(envelope, "CANDIDATE_PAGE_INVALIDATION_IGNORED");
+      }
+      if (!this.#authorityCoordinator.invalidate(identity, "PROVIDER_PAGE_INVALID").accepted) {
+        return this.#reject(envelope, "AUTHORITY_PAGE_INVALIDATION_REJECTED");
+      }
+      const applied = this.#applyDecision(this.#feeds.accept({ kind: "INVALIDATE",
+        accountId: transportAccountId, sourceId: envelope.sourceId, sourceEpoch,
+        atMs: envelope.observedAtMs, reason: "PROVIDER_PAGE_INVALID" }));
+      return applied ? true : this.#reject(envelope, "FEED_PAGE_INVALIDATION_REJECTED");
+    }
     if (admission.disposition === "ACTIVE") {
       this.#lastEnvelopeAtMsBySource.set(envelope.sourceId, this.#now());
       this.#feeds.accept({ kind: "TAB_REACHABLE", accountId: transportAccountId, sourceId: envelope.sourceId,
@@ -555,6 +567,22 @@ export class ChromeCatalogDataPlane {
     this.#telemetry?.recordCatalog(decision.publish.catalog);
     this.#publish?.(decision.publish.catalog, decision.publish.snapshotState);
     return true;
+  }
+}
+
+function isBtiAuthFailurePageHealth(envelope: ChromeBridgeEnvelope): boolean {
+  if (envelope.lobby !== "BTI" || envelope.transport !== "TAB_STATE" ||
+    envelope.request.hostname !== "prod20091.fxf774.com" ||
+    envelope.request.pathnameClass !== "/__fieldline_heartbeat__" ||
+    envelope.payload.encoding !== "UTF8" || envelope.payload.body.length > 160) return false;
+  try {
+    const value = JSON.parse(envelope.payload.body) as unknown;
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const candidate = value as Record<string, unknown>;
+    return Object.keys(candidate).length === 3 && candidate.kind === "PAGE_HEALTH" &&
+      candidate.status === "AUTH_ERROR" && candidate.code === "1008";
+  } catch {
+    return false;
   }
 }
 

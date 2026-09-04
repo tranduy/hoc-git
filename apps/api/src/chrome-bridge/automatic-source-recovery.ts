@@ -70,12 +70,12 @@ const SOURCES = new Map<string, RecoverySource>([
   ["catalog-source:BTI:FOOTBALL", source("BTI", "BTI", ["BTI"])]
 ]);
 
-// Chrome never replays Network.webSocketCreated for a socket opened before the
-// debugger attached, so a re-attached WebSocket tab stays permanently blind.
-// Reloading the source is the only recovery that rebuilds an observable socket,
-// and unlike the Fabet relaunch it works while browser refresh is disabled.
-const WEBSOCKET_PROVIDERS: ReadonlySet<FabetProvider | null> = new Set<FabetProvider>([
-  "SABA", "SBOBET", "APSPORT"
+// Recovery must first renew the exact attached provider page while the private
+// Fabet-launch browser is disabled. For WebSocket books this rebuilds a socket
+// Chrome can observe; for IM/BTI it rebuilds the signed HTTP generation without
+// opening a second tab or depending on a portal launch.
+const SAME_TAB_RECOVERY_PROVIDERS: ReadonlySet<FabetProvider | null> = new Set<FabetProvider | null>([
+  null, "SABA", "SBOBET", "APSPORT", "IM", "BTI"
 ]);
 
 const ACTIONABLE_REASONS = new Set([
@@ -202,6 +202,14 @@ export class AutomaticSourceRecovery {
         if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
           return confirmation;
         }
+        // SABA's current source can remain transport-connected through a
+        // naturally quiet Socket.IO interval. The controller owns the later
+        // HARD deadline; turning this SOFT timeout into an immediate restore
+        // navigates the healthy tab after roughly forty seconds and destroys
+        // the very socket the next delta would have renewed.
+        if (source.provider === "SABA" && this.#options.browserRefreshEnabled === false) {
+          return confirmation;
+        }
       }
     } catch (error) {
       if (this.#disposed) return stopped(request.accountId, "SOFT");
@@ -241,7 +249,7 @@ export class AutomaticSourceRecovery {
         }
       }
       const oneTimeSabaLaunch = source.provider === "SABA" && this.#options.browserRefreshEnabled === false;
-      if (!oneTimeSabaLaunch && WEBSOCKET_PROVIDERS.has(source.provider) &&
+      if (!oneTimeSabaLaunch && SAME_TAB_RECOVERY_PROVIDERS.has(source.provider) &&
         (this.#options.controlPlane.reloadSource !== undefined ||
           this.#options.controlPlane.reloadRecoverySource !== undefined)) {
         const prior = current;
@@ -265,34 +273,88 @@ export class AutomaticSourceRecovery {
         }
         if (delivered > 0) {
           const confirmation = await this.#confirmReplacement(request, prior, actionStartedAtMs);
-          if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
+          if (source.provider === null || confirmation.outcome === "RECOVERED" ||
+            confirmation.reason !== "BASELINE_TIMEOUT") {
             return confirmation;
           }
           if (this.#disposed) return stopped(request.accountId, "HARD");
           if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+        }
+      }
+      if (source.provider === null) {
+        const lastReloadAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
+        if (actionStartedAtMs - lastReloadAtMs < MIN_SOURCE_RELOAD_INTERVAL_MS) {
+          const snapshotStartedAtMs = this.#now();
+          if (this.#options.controlPlane.requestLobbySnapshot("CMD") <= 0) {
+            return noSource(request.accountId, "HARD");
+          }
+          return this.#confirmAfter(request.accountId, "HARD", snapshotStartedAtMs);
+        }
+        const delivered = this.#options.controlPlane.restoreLobby("CMD");
+        if (delivered <= 0) return noSource(request.accountId, "HARD");
+        this.#lastReloadAtMs.set(request.accountId, actionStartedAtMs);
+        return this.#confirmAfter(request.accountId, "HARD", actionStartedAtMs,
+          this.#reloadBaselineTimeoutMs);
+      }
+      if (source.provider === "IM") {
+        // An IM launch token is provider-specific and one-time. Fabet can
+        // return another sportsbook's operator token here, which produces a
+        // syntactically valid IM URL but destroys the authenticated IM page.
+        // Exhaust only non-navigating actions; a genuinely expired IM session
+        // requires an operator-supplied fresh IM URL.
+        const snapshotStartedAtMs = this.#now();
+        if (this.#options.controlPlane.requestLobbySnapshot("IM") > 0) {
+          const confirmation = await this.#confirmAfter(
+            request.accountId, "HARD", snapshotStartedAtMs
+          );
+          if (confirmation.outcome === "RECOVERED") return confirmation;
+          if (this.#disposed) return stopped(request.accountId, "HARD");
+          if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+        }
+        return { accountId: request.accountId, stage: "HARD", outcome: "ACTION_REQUIRED",
+          reason: "IM_MANUAL_TOKEN_REQUIRED" };
+      }
+      if (source.provider === "BTI" && this.#options.browserRefreshEnabled === false) {
+        const restoreStartedAtMs = this.#now();
+        const lastRestoreAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
+        if (restoreStartedAtMs - lastRestoreAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS) {
+          let restored = 0;
+          try { restored = this.#options.controlPlane.restoreLobby("BTI"); }
+          catch { /* an unavailable direct source falls through to the actionable state */ }
+          if (restored > 0) {
+            this.#lastReloadAtMs.set(request.accountId, restoreStartedAtMs);
+            const confirmation = await this.#confirmAfter(request.accountId, "HARD", restoreStartedAtMs,
+              this.#reloadBaselineTimeoutMs);
+            if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
+              return confirmation;
+            }
+            if (this.#disposed) return stopped(request.accountId, "HARD");
+            if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+          }
         }
       }
       if (source.provider === "SABA" && this.#options.browserRefreshEnabled === false) {
         const restoreStartedAtMs = this.#now();
-        let restored = 0;
-        try { restored = this.#options.controlPlane.restoreLobby("SABA"); }
-        catch { /* an unavailable visible portal falls through to the stable actionable state */ }
-        if (restored > 0) {
-          const confirmation = await this.#confirmAfter(request.accountId, "HARD", restoreStartedAtMs,
-            this.#reloadBaselineTimeoutMs);
-          if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
-            return confirmation;
+        const lastRestoreAtMs = this.#lastReloadAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
+        if (restoreStartedAtMs - lastRestoreAtMs >= MIN_SOURCE_RELOAD_INTERVAL_MS) {
+          let restored = 0;
+          try { restored = this.#options.controlPlane.restoreLobby("SABA"); }
+          catch { /* an unavailable visible portal falls through to the stable actionable state */ }
+          if (restored > 0) {
+            this.#lastReloadAtMs.set(request.accountId, restoreStartedAtMs);
+            const confirmation = await this.#confirmAfter(request.accountId, "HARD", restoreStartedAtMs,
+              this.#reloadBaselineTimeoutMs);
+            if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
+              return confirmation;
+            }
+            if (this.#disposed) return stopped(request.accountId, "HARD");
+            if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
           }
-          if (this.#disposed) return stopped(request.accountId, "HARD");
-          if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
         }
       }
       let delivered: number;
       let confirmationAfterMs = request.requestedAtMs;
-      if (source.provider === null) {
-        delivered = this.#options.controlPlane.restoreLobby("CMD");
-      } else {
-        if (this.#options.browserRefreshEnabled === false) {
+      if (this.#options.browserRefreshEnabled === false) {
           // Returning here did nothing at all, and once a feed reaches the hard
           // stage only the hard stage is requested again, so the book stayed
           // dead with its tab alive. A lobby snapshot is the cheap action that
@@ -308,14 +370,14 @@ export class AutomaticSourceRecovery {
           }
           return { accountId: request.accountId, stage: "HARD", outcome: "ACTION_REQUIRED",
             reason: "BROWSER_REFRESH_DISABLED" };
-        }
-        const recoveryStartedAtMs = this.#now();
-        const refresh = await this.#whileActive(this.#options.refreshFabetLaunches(this.#abortController.signal));
-        if (refresh === DISPOSED) return stopped(request.accountId, "HARD");
-        if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
-        let targetedDelivery: number | typeof DISPOSED;
-        try {
-          targetedDelivery = await this.#whileActive(refreshBridgeProviderSources({
+      }
+      const recoveryStartedAtMs = this.#now();
+      const refresh = await this.#whileActive(this.#options.refreshFabetLaunches(this.#abortController.signal));
+      if (refresh === DISPOSED) return stopped(request.accountId, "HARD");
+      if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
+      let targetedDelivery: number | typeof DISPOSED;
+      try {
+        targetedDelivery = await this.#whileActive(refreshBridgeProviderSources({
             controlPlane: this.#options.controlPlane,
             withLatestFabetLaunch: this.#options.withLatestFabetLaunch,
             minAcquiredAtMs: recoveryStartedAtMs,
@@ -336,17 +398,16 @@ export class AutomaticSourceRecovery {
                 throw SBOBET_SAME_TAB_RECOVERY;
               }
             }
-          }));
-        } catch (error) {
-          if (error === SBOBET_SAME_TAB_RECOVERY) {
-            return this.#confirmAfter(request.accountId, "HARD", confirmationAfterMs,
-              this.#reloadBaselineTimeoutMs);
-          }
-          throw error;
+        }));
+      } catch (error) {
+        if (error === SBOBET_SAME_TAB_RECOVERY) {
+          return this.#confirmAfter(request.accountId, "HARD", confirmationAfterMs,
+            this.#reloadBaselineTimeoutMs);
         }
-        if (targetedDelivery === DISPOSED) return stopped(request.accountId, "HARD");
-        delivered = targetedDelivery;
+        throw error;
       }
+      if (targetedDelivery === DISPOSED) return stopped(request.accountId, "HARD");
+      delivered = targetedDelivery;
       if (delivered <= 0) return noSource(request.accountId, "HARD");
       return this.#confirmAfter(request.accountId, "HARD", confirmationAfterMs);
     } catch (error) {

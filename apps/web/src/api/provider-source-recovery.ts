@@ -16,7 +16,10 @@ export class ProviderSourceRecoveryApi implements ProviderSourceRecoveryApiLike 
     try {
       await this.#requestFreshSnapshot(provider);
     } catch (error) {
-      if (provider === "SBOBET") throw error;
+      // APSPORT owns a periodic authenticated roster refresh and a backend
+      // same-tab hard-recovery actor. Let those converge instead of navigating
+      // the tab from every open catalog UI after a short snapshot timeout.
+      if (provider === "SBOBET" || provider === "APSPORT") throw error;
       await this.#hardRefresh(provider);
     }
   }

@@ -146,6 +146,11 @@ interface AccountState {
     readonly reconnectAttempts: number;
     readonly reconnectOutcomes: string;
   } | null;
+  pageHealth: {
+    readonly status: "HEALTHY" | "AUTH_ERROR" | "UNKNOWN";
+    readonly code: "1008" | null;
+    readonly observedAtMs: number;
+  } | null;
   recovery: {
     consecutiveFailures: number;
     nextAttemptAtMs: number | null;
@@ -219,7 +224,7 @@ function createState(): AccountState {
     attachedAtMs: null, lastEnvelopeAtMs: null, lastSequence: null, lastDecodedAtMs: null,
     lastEvidenceAtMs: null, lastSemanticChangeAtMs: null, forcedUnlocks: 0,
     ignoredEndpoints: new Map(), refreshOutcomes: new Map(), ingestRejections: new Map(),
-    wsAttach: null,
+    wsAttach: null, pageHealth: null,
     recovery: { consecutiveFailures: 0, nextAttemptAtMs: null, lastFailureCode: null }
   };
 }
@@ -247,10 +252,11 @@ export class PipelineTelemetry {
       state.tabId = envelope.tabId;
       state.attachedAtMs = atMs;
       state.wsAttach = null;
+      state.pageHealth = null;
     }
     state.lastEnvelopeAtMs = atMs;
     state.lastSequence = envelope.sequence;
-    if (envelope.transport === "TAB_STATE") this.#recordWorkHealth(state, envelope.payload.body);
+    if (envelope.transport === "TAB_STATE") this.#recordWorkHealth(state, envelope.payload.body, atMs);
   }
 
   recordEnvelopeRejected(accountId: ChromeBridgeProviderAccountId, reason: EnvelopeRejectReason,
@@ -409,7 +415,7 @@ export class PipelineTelemetry {
         sums.byTransport[requiredEnvelopeTransport] > 0, detail: {
         lastEnvelopeAgeMs: age(nowMs, state.lastEnvelopeAtMs), lastSequence: state.lastSequence,
         requiredTransport: requiredEnvelopeTransport, byTransport: sums.byTransport,
-        rejected: sums.rejected, wsAttach: state.wsAttach
+        rejected: sums.rejected, wsAttach: state.wsAttach, pageHealth: state.pageHealth
       } },
       { hop: "HOP4_ADAPTER", ok: state.lastDecodedAtMs !== null &&
         nowMs - state.lastDecodedAtMs <= PIPELINE_TELEMETRY_LIMITS.windowMs, detail: {
@@ -465,9 +471,10 @@ export class PipelineTelemetry {
       firstFailingHop: hops.find((hop) => !hop.ok)?.hop ?? null, hops };
   }
 
-  #recordWorkHealth(state: AccountState, body: string): void {
+  #recordWorkHealth(state: AccountState, body: string, observedAtMs: number): void {
     try {
       const value = JSON.parse(body) as { kind?: unknown; results?: unknown;
+        status?: unknown; code?: unknown;
         counters?: { forcedUnlocks?: unknown };
         sourceGeneration?: unknown; webSocketCreated?: unknown; webSockets?: unknown;
         ksportTargets?: unknown; attachedTargets?: unknown; framesReceived?: unknown;
@@ -496,6 +503,12 @@ export class PipelineTelemetry {
       }
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
+      if (value.kind === "PAGE_HEALTH" &&
+        (value.status === "HEALTHY" || value.status === "UNKNOWN") && value.code === null) {
+        state.pageHealth = { status: value.status, code: null, observedAtMs };
+      } else if (value.kind === "PAGE_HEALTH" && value.status === "AUTH_ERROR" && value.code === "1008") {
+        state.pageHealth = { status: "AUTH_ERROR", code: "1008", observedAtMs };
+      }
       const counters = [value.sourceGeneration, value.webSocketCreated, value.webSockets,
         value.ksportTargets, value.attachedTargets];
       if (value.kind === "WS_ATTACH" && counters.every((counter) => Number.isSafeInteger(counter) &&

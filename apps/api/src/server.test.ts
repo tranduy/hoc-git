@@ -11,6 +11,7 @@ import * as serverModule from "./server.js";
 const SABA = "catalog-source:SABA:FOOTBALL";
 const sabaPolicy = providerFeedPolicies.get(SABA)!;
 const APSPORT = "catalog-source:APSPORT:FOOTBALL";
+const BTI = "catalog-source:BTI:FOOTBALL";
 const CMD = "catalog-source:CMD:FOOTBALL";
 type TestRefreshableProvider = "SABA" | "IM" | "SBOBET" | "APSPORT" | "BTI" | "CMD";
 
@@ -214,7 +215,8 @@ describe("targeted manual provider refresh ownership", () => {
 
   it.each([
     ["SABA", SABA, "SABA"],
-    ["APSPORT", APSPORT, "TSPORT"]
+    ["APSPORT", APSPORT, "TSPORT"],
+    ["BTI", BTI, "BTI"]
   ] as const)("restores %s first and skips a fresh launch after exact baseline confirmation",
     async (provider, accountId, lobby) => {
     const restore = vi.fn(() => 1);
@@ -243,6 +245,16 @@ describe("targeted manual provider refresh ownership", () => {
     expect(restore).toHaveBeenCalledExactlyOnceWith("CMD");
     expect(deliver).not.toHaveBeenCalled();
     expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(CMD, 1_000, 5_000);
+  });
+
+  it("allows the default CMD refresh enough time to replace a crashed renderer", async () => {
+    const waitForFreshBaseline = vi.fn(async () => liveSnapshot(CMD, 1_001, "chrome:CMD:8"));
+    const manual = factory({ now: () => 1_000, restore: vi.fn(() => 1),
+      deliver: vi.fn(async () => 1), waitForFreshBaseline });
+
+    await expect(manual.refresh("CMD")).resolves.toBe(1);
+
+    expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(CMD, 1_000, 90_000);
   });
 
   it("falls back to a fresh SABA launch with its own delivery-bound cutoff when restore is undelivered",
@@ -354,7 +366,26 @@ describe("targeted manual provider refresh ownership", () => {
     expect(waitForFreshBaseline).not.toHaveBeenCalled();
   });
 
-  it("keeps non-SABA providers on the existing fresh-delivery path", async () => {
+  it("refreshes IM only inside its current authenticated tab", async () => {
+    const requestSnapshot = vi.fn(() => 1);
+    const restore = vi.fn(() => 1);
+    const deliver = vi.fn(async () => 1);
+    const waitForFreshBaseline = vi.fn(async () =>
+      liveSnapshot("catalog-source:IM:FOOTBALL", 1_001, "chrome:IM:7"));
+    const manual = factory({ now: () => 1_000, baselineTimeoutMs: 5_000,
+      requestSnapshot, restore, deliver, waitForFreshBaseline });
+
+    await expect(manual.refresh("IM")).resolves.toBe(1);
+
+    expect(requestSnapshot).toHaveBeenCalledExactlyOnceWith("IM");
+    expect(restore).not.toHaveBeenCalled();
+    expect(deliver).not.toHaveBeenCalled();
+    expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(
+      "catalog-source:IM:FOOTBALL", 1_000, 5_000
+    );
+  });
+
+  it("falls back to fresh BTI delivery only when direct restore does not publish a baseline", async () => {
     let nowMs = 1_000;
     const restore = vi.fn(() => 1);
     const deliver = vi.fn(async (_provider: TestRefreshableProvider, beforeDelivery?: () => void) => {
@@ -362,18 +393,20 @@ describe("targeted manual provider refresh ownership", () => {
       beforeDelivery?.();
       return 1;
     });
-    const waitForFreshBaseline = vi.fn(async () =>
-      liveSnapshot("catalog-source:IM:FOOTBALL", 1_101));
+    const waitForFreshBaseline = vi.fn()
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(liveSnapshot("catalog-source:BTI:FOOTBALL", 1_101, "chrome:BTI:7"));
     const manual = factory({ now: () => nowMs, baselineTimeoutMs: 5_000,
       restore, deliver, waitForFreshBaseline });
 
-    await expect(manual.refresh("IM")).resolves.toBe(1);
+    await expect(manual.refresh("BTI")).resolves.toBe(1);
 
-    expect(restore).not.toHaveBeenCalled();
+    expect(restore).toHaveBeenCalledExactlyOnceWith("BTI");
     expect(deliver).toHaveBeenCalledOnce();
-    expect(waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(
-      "catalog-source:IM:FOOTBALL", 1_100, 4_900
-    );
+    expect(waitForFreshBaseline).toHaveBeenNthCalledWith(1,
+      "catalog-source:BTI:FOOTBALL", 1_000, 2_500);
+    expect(waitForFreshBaseline).toHaveBeenNthCalledWith(2,
+      "catalog-source:BTI:FOOTBALL", 1_100, 4_900);
   });
 
   it("keeps concurrent same-provider ownership until every baseline confirmation settles", async () => {

@@ -14,8 +14,8 @@ import { FileTicketReportJournal } from "./routes/ticket-report-journal.js";
 import { LiveCatalogBridge } from "./catalog/live-catalog-bridge.js";
 import { resolveProviderFees } from "./providers/provider-fees.js";
 import { FileBetHistory } from "./history/file-bet-history.js";
-import { createDailyMaintenanceScheduler, createSessionMaintenanceRunner,
-  MaintenanceJournal, SessionRefreshControl } from "./session-maintenance.js";
+import { createSessionMaintenanceRunner, MaintenanceJournal,
+  SessionRefreshControl } from "./session-maintenance.js";
 import { DurableCatalogStore } from "./catalog/durable-catalog-store.js";
 import { bindGracefulShutdown } from "./process-shutdown.js";
 import { chromeBridgeProviderAccountIdForLobby } from "./chrome-bridge/chrome-bridge-account.js";
@@ -145,6 +145,7 @@ interface TargetedProviderRefreshOptions {
   readonly now?: () => number;
   readonly baselineTimeoutMs?: number;
   readonly restore?: (lobby: ChromeLobbyId) => number;
+  readonly requestSnapshot?: (lobby: ChromeLobbyId) => number;
   readonly deliver: (provider: Exclude<RefreshableProvider, "CMD">,
     beforeDelivery: () => void) => Promise<number>;
   readonly waitForFreshBaseline: (accountId: string, afterMs: number,
@@ -154,13 +155,17 @@ interface TargetedProviderRefreshOptions {
 const TARGETED_PROVIDER_LOBBIES = {
   SABA: "SABA", IM: "IM", SBOBET: "KSPORT", APSPORT: "TSPORT", BTI: "BTI", CMD: "CMD"
 } as const satisfies Record<RefreshableProvider, ChromeLobbyId>;
-const RESTORE_FIRST_PROVIDERS = new Set<RefreshableProvider>(["SABA", "APSPORT"]);
+const RESTORE_FIRST_PROVIDERS = new Set<RefreshableProvider>(["SABA", "APSPORT", "BTI"]);
 
 export function createTargetedProviderRefresh(options: TargetedProviderRefreshOptions): {
   refresh(provider: RefreshableProvider): Promise<number>;
   isRecoverySuppressed(accountId: string): boolean;
 } {
-  const baselineTimeoutMs = options.baselineTimeoutMs ?? 10_000;
+  // A crashed Chrome renderer may need one failed in-place reload followed by
+  // tab replacement and a new provider baseline. Keep the request alive for
+  // the same bounded window used by the bridge instead of reporting a false
+  // timeout while that replacement is completing.
+  const baselineTimeoutMs = options.baselineTimeoutMs ?? 90_000;
   if (!Number.isFinite(baselineTimeoutMs) || baselineTimeoutMs <= 0) {
     throw new Error("TARGETED_PROVIDER_REFRESH_OPTIONS_INVALID");
   }
@@ -179,6 +184,17 @@ export function createTargetedProviderRefresh(options: TargetedProviderRefreshOp
       const lobby = TARGETED_PROVIDER_LOBBIES[provider];
       acquire(accountId);
       try {
+        if (provider === "IM") {
+          const snapshotStartedAtMs = now();
+          const requested = options.requestSnapshot?.("IM") ?? 0;
+          if (requested <= 0) {
+            throw new Error("CHROME_BRIDGE_SNAPSHOT_UNDELIVERED:IM");
+          }
+          await confirmTargetedBaseline(
+            options, accountId, "IM", snapshotStartedAtMs, deadlineAtMs, now
+          );
+          return requested;
+        }
         if (provider === "CMD") {
           if (options.restore === undefined) throw new Error("CHROME_BRIDGE_RESTORE_UNDELIVERED:CMD");
           const restoreStartedAtMs = now();
@@ -530,9 +546,9 @@ export async function startServer(env: Readonly<Record<string, string | undefine
       chrome: chromeCatalogDataPlane
     });
   const maintenance = new SessionRefreshControl({ refresh: async () => {
-    // Only the explicit Reset button and scheduled 03:00 run enter this path.
-    // They are the sole authority to replace a complete catalog with a much
-    // smaller provider baseline after a real day/view transition.
+    // Only the explicit Reset button enters this path. Automatic 03:00
+    // maintenance was removed because it destroyed healthy provider sockets;
+    // normal per-source recovery owns stale/dead feeds without a global reset.
     return refreshCatalogSources({
       legacyRefresh: () => sessionServices.refreshAll(),
       ...(chromeBridgeControlPlane === null ? {} : {
@@ -563,6 +579,7 @@ export async function startServer(env: Readonly<Record<string, string | undefine
   const targetedProviderRefresh = chromeBridgeControlPlane === null || providerFeeds === null ? null
     : createTargetedProviderRefresh({
       restore: (lobby) => chromeBridgeControlPlane.restoreLobby(lobby),
+      requestSnapshot: (lobby) => chromeBridgeControlPlane.requestLobbySnapshot(lobby),
       deliver: async (provider, beforeDelivery) => refreshBridgeProviderSources({
           controlPlane: chromeBridgeControlPlane,
           withLatestFabetLaunch: sessionServices.withLatestFabetLaunch,
@@ -644,6 +661,12 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     betHistory,
     maintenance,
     ...(refreshProvider === undefined ? {} : { refreshProvider }),
+    ...(chromeBridgeControlPlane === null ? {} : {
+      // ENSURE_SOURCE deliberately reuses the already-open recognized IM tab;
+      // unlike navigateLobby it also reaches a candidate that has no baseline
+      // yet, which is exactly the state an expired IM bootstrap leaves behind.
+      recoverIm: (url: string) => chromeBridgeControlPlane.ensureLobby("IM", url)
+    }),
     ...(cmdHiddenMarketProbe === null ? {} : { cmdHiddenMarketProbe }),
     ...(chromeBridgeRegistry && chromeBridgeKey
       ? { chromeBridge: {
@@ -681,8 +704,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     : startExtensionReloadSweep(chromeBridgeControlPlane, readExtensionBuildIdentity());
   if (extensionReload !== null) app.addHook("onClose", async () => { extensionReload.dispose(); });
   await app.listen({ host: config.host, port: config.port });
-  const dailyMaintenance = createDailyMaintenanceScheduler(() => maintenance.runScheduled());
-  dailyMaintenance.start();
   let sessionTimer: ReturnType<typeof setInterval> | null = null;
   if (shouldRunLegacySessionMaintenance(env)) {
     const maintainSessions = createSessionMaintenanceRunner(
@@ -697,7 +718,6 @@ export async function startServer(env: Readonly<Record<string, string | undefine
     app,
     runtime,
     async stop(): Promise<void> {
-      dailyMaintenance.stop();
       if (sessionTimer !== null) clearInterval(sessionTimer);
       controller.abort();
       await app.close();

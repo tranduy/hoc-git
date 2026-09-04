@@ -88,7 +88,8 @@ function serializedStorageCalls(storage: ReturnType<typeof createChromeHarness>[
   ]);
 }
 
-function mockNetworkObserver(start = vi.fn(async (_source: { readonly tabId: number }) => undefined)) {
+function mockNetworkObserver(start = vi.fn(async (_source: { readonly tabId: number }) => undefined),
+  refreshCatalog = vi.fn(async () => undefined)) {
   class NetworkObserver {
     beginSourceEpoch = vi.fn();
     captureCmdSnapshot = vi.fn(async () => undefined);
@@ -104,7 +105,7 @@ function mockNetworkObserver(start = vi.fn(async (_source: { readonly tabId: num
     probeCmdHiddenMarkets = vi.fn(async () => undefined);
     probeSelectionPrice = vi.fn(async () => undefined);
     recoverCmdCatalog = vi.fn(async () => undefined);
-    refreshCatalog = vi.fn(async () => undefined);
+    refreshCatalog = refreshCatalog;
     releaseTab = vi.fn();
     start = start;
     stop = vi.fn(async () => undefined);
@@ -184,5 +185,41 @@ describe("background source launch memory", () => {
     await vi.advanceTimersByTimeAsync(25);
 
     expect(start.mock.calls.map(([source]) => source.tabId)).toEqual([7, 8]);
+  });
+
+  it("renews an attached BTI lease in the exact tab without creating a replacement", async () => {
+    const harness = createChromeHarness("https://prod20091.fxf774.com/old?operatorToken=secret");
+    vi.stubGlobal("chrome", harness.api);
+    mockNetworkObserver();
+
+    await import("./background.js");
+    await settleWorkerStart(harness.storage);
+    harness.api.tabs.update.mockClear();
+    harness.api.tabs.create.mockClear();
+
+    await vi.advanceTimersByTimeAsync(1_340_000);
+
+    expect(harness.api.tabs.update).toHaveBeenCalledWith(7, {
+      url: "https://prod20091.fxf774.com/vi/asian-view/today/B%C3%B3ng-%C4%91%C3%A1?operatorToken=logout"
+    });
+    expect(harness.api.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it("uses a bounded roster-only refresh for APSPORT's periodic catalog lease", async () => {
+    const harness = createChromeHarness(
+      "https://pacific.agenate.com/?agentId=4&lng=vi&sportType=1_1&periodId=2"
+    );
+    vi.stubGlobal("chrome", harness.api);
+    const refreshCatalog = vi.fn(async () => undefined);
+    mockNetworkObserver(undefined, refreshCatalog);
+
+    await import("./background.js");
+    await settleWorkerStart(harness.storage);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(refreshCatalog).toHaveBeenCalledWith(
+      { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 },
+      { rosterOnly: true }
+    );
   });
 });

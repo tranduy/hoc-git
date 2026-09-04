@@ -89,6 +89,59 @@ describe("NetworkObserver", () => {
     expect(JSON.stringify(forwarded)).not.toMatch(/Bearer private|must-not-be-copied/iu);
     expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
       String(params?.expression).includes("fieldlineTsport"))).toHaveLength(0);
+
+    forwarded.length = 0;
+    await observer.replaySnapshots(apsport.sourceId);
+    expect(forwarded).toHaveLength(1);
+    expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ phase: "ROSTER", complete: true });
+    expect(forwarded[0]!.request).toMatchObject({ replayed: true });
+  });
+
+  it("preempts a long APSPORT detail sweep and completes a roster-only bridge resync", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let invocation = 0;
+    const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+      invocation += 1;
+      const record = { "1": "league-1", "2": "event-1", "5": "Home", "6": true,
+        "10": "Active", "11": null, "22": "Away", "50": [], "53": "League" };
+      await options.onRoster({ schemaVersion: 1, generation: options.generation,
+        phase: "ROSTER", complete: true, prematchWindowHours: 24, records: [record] });
+      if (invocation === 1) {
+        await firstBlocked;
+        if (!options.isCurrent()) return;
+      }
+      if (options.isCurrent()) {
+        await options.onDetail({ schemaVersion: 1, generation: options.generation,
+          phase: "DETAIL", complete: true, prematchWindowHours: 24, records: [record] });
+      }
+    });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+      : {});
+    const observer = new NetworkObserver({ sendCommand,
+      forward: async (envelope) => { forwarded.push(envelope); }, collectApsportCatalog: collect });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+        postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+
+    const detailSweep = observer.refreshCatalog(apsport, { prematchWindowHours: 24 });
+    await vi.waitFor(() => expect(collect).toHaveBeenCalledTimes(1));
+    const resync = observer.refreshCatalog(apsport, { prematchWindowHours: 24, rosterOnly: true });
+    releaseFirst();
+    await Promise.all([detailSweep, resync]);
+
+    expect(collect).toHaveBeenCalledTimes(2);
+    expect(forwarded.map((envelope) => JSON.parse(envelope.payload.body).phase))
+      .toEqual(["ROSTER", "ROSTER"]);
   });
 
   it("reports an empty APSPORT page only when a completed API roster proves matches exist", async () => {
@@ -175,6 +228,51 @@ describe("NetworkObserver", () => {
       }).find((body) => body.trigger === "EVENT_CHANGE");
       expect(targeted).toMatchObject({ phase: "DETAIL", complete: false, trigger: "EVENT_CHANGE",
         records: [expect.objectContaining({ "2": "event-42" })] });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prioritizes a roster-only bootstrap over queued APSPORT event details", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": true,
+        "10": "Active", "11": null, "22": "Away", "50": [], "53": "League" };
+      const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+        await options.onRoster({ schemaVersion: 1, generation: options.generation,
+          phase: "ROSTER", complete: true, prematchWindowHours: 24, records: [record] });
+      });
+      const collectDetail = vi.fn(async () => record);
+      const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+        : {});
+      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+        collectApsportCatalog: collect, collectApsportEventDetail: collectDetail,
+        now: () => 10_000, monotonicNow: () => 500 });
+      const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+      await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+        context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+      });
+      await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+        requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+        request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+          postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+      });
+      await observer.refreshCatalog(apsport);
+      await observer.handleEvent(apsport, "Network.webSocketCreated", {
+        requestId: "ap-socket", url: "wss://spws.agenate.com/ln/en/s/1/mg/0/tr/0"
+      });
+      await observer.handleEvent(apsport, "Network.webSocketFrameReceived", {
+        requestId: "ap-socket", response: { opcode: 1,
+          payloadData: JSON.stringify({ s: 1, t: "eu", d: JSON.stringify(record) }) }
+      });
+
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(collect).toHaveBeenCalledTimes(2);
+      expect(collectDetail).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -505,6 +603,7 @@ describe("NetworkObserver", () => {
 
   it("evaluates CMD recovery on the owning child session and completes only a matching current-loader fc=1", async () => {
     const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    let nowMs = 1_000;
     const row = Array<unknown>(91).fill(null);
     Object.assign(row, { 0: 25299763, 3: 108007, 10: 0.25, 12: 2.5, 25: 1,
       37: "League", 38: "Home", 39: "Away", 40: 0.8, 41: -0.9, 42: 0.8, 43: -0.9,
@@ -531,11 +630,12 @@ describe("NetworkObserver", () => {
       return {};
     });
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
-    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "observer-cmd",
+    const observer = new NetworkObserver({ sendCommand, forward, observerSessionId: "observer-cmd", now: () => nowMs,
       cmdRecoveryMaxAttempts: 20, cmdRecoveryDeadlineMs: 2_000, cmdRecoveryRetryMs: 50 });
     await observer.handleEvent(cmd, "Runtime.executionContextCreated", {
       context: { id: 91, auxData: { frameId: "odds-frame", isDefault: true } }
     }, "child-session");
+    expect(observer.hasCompleteCmdBaselineSince(cmd.sourceId, nowMs)).toBe(false);
 
     let settled = 0;
     const recovery = observer.refreshCatalog(cmd).finally(() => { settled += 1; });
@@ -566,6 +666,8 @@ describe("NetworkObserver", () => {
       JSON.stringify({ t: "104", a: true, data: [], today: [Array(91).fill(null)], f: [] }));
     expect(settled).toBe(0);
 
+    const recoveryStartedAtMs = nowMs;
+    nowMs += 1;
     await completeRequest("matching-full", 1,
       JSON.stringify({ t: "105", a: true, data: [metadataRow], today: [row], f: [] }));
     await Promise.resolve();
@@ -574,8 +676,11 @@ describe("NetworkObserver", () => {
     await observer.handleEvent(cmd, "Network.loadingFinished", { requestId: "matching-full" }, "child-session");
 
     expect(settled).toBe(1);
+    expect(observer.hasCompleteCmdBaselineSince(cmd.sourceId, recoveryStartedAtMs)).toBe(true);
     expect(sendCommand.mock.calls.some(([, method]) => method === "Page.reload")).toBe(false);
     expect(CMD_FULL_BASELINE_EXPRESSION).toContain("LoadFullRunningTodayData()");
+    observer.beginSourceEpoch(cmd.sourceId);
+    expect(observer.hasCompleteCmdBaselineSince(cmd.sourceId, recoveryStartedAtMs)).toBe(false);
   });
 
   it("replays sticky CMD root contexts and recovers its same-process odds frame after worker restart", async () => {
@@ -1086,6 +1191,27 @@ describe("NetworkObserver", () => {
       envelope.payload.body === body)).toBe(true);
   });
 
+  it("rotates only the bridge epoch during resync and keeps the live TSPORT socket owned", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: async (envelope) => { forwarded.push(envelope); }, observerSessionId: "worker-a" });
+    const source = { lobby: "TSPORT", sourceId: "chrome:TSPORT:9", tabId: 9 } as const;
+    const url = "wss://spws.agenate.com/ln/en/p/2/u/MxcZnFVvGKUOdnHngKzURw==/s/1/mg/1/tr/0";
+
+    await observer.handleEvent(source, "Network.webSocketCreated", { requestId: "ts-ws", url });
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", { requestId: "ts-ws",
+      response: { opcode: 1, payloadData: JSON.stringify({ s: 1, t: "pong" }) } });
+    expect(forwarded.at(-1)).toMatchObject({ sourceEpoch: "worker-a:0", sequence: 1,
+      transport: "WS_FRAME" });
+
+    expect(observer.beginBridgeSourceEpoch(source.sourceId)).toBe("worker-a:1");
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", { requestId: "ts-ws",
+      response: { opcode: 1, payloadData: JSON.stringify({ s: 2, t: "pong" }) } });
+
+    expect(forwarded.at(-1)).toMatchObject({ sourceEpoch: "worker-a:1", sequence: 0,
+      transport: "WS_FRAME" });
+  });
+
   it("reconnects only SABA Socket.IO after an epoch bump discards its retired baseline", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string,
       params?: Record<string, unknown>) => {
@@ -1302,6 +1428,37 @@ describe("NetworkObserver", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("prefers the fresh IM URL token over stale same-origin session storage", async () => {
+    const listeners = new Map<string, (event: { detail: string }) => void>();
+    const sentTokens: string[] = [];
+    const windowStub = {
+      global: { PlatForm: "web" },
+      addEventListener: (name: string, listener: (event: { detail: string }) => void) =>
+        listeners.set(name, listener),
+      removeEventListener: (name: string) => listeners.delete(name),
+      dispatchEvent: (event: { type: string; detail: { c: string } }) => {
+        if (event.type === "helo") listeners.get(`halo_${event.detail.c}`)?.({ detail: "signed" });
+      }
+    };
+    const execute = new Function("document", "location", "window", "sessionStorage", "CustomEvent", "fetch",
+      `return ${IM_CATALOG_DISCOVERY_EXPRESSION}`) as (...args: unknown[]) => Promise<unknown>;
+
+    await execute(
+      { documentElement: { dataset: {} }, querySelectorAll: () => [] },
+      { hostname: "imsports.directsb.net", search: "?languageCode=vi&token=4-fresh" },
+      windowStub,
+      { getItem: () => "4-stale" },
+      class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
+        get detail(): { c: string } { return this.init.detail; } },
+      async (_path: string, init: { headers: Record<string, string> }) => {
+        sentTokens.push(init.headers["x-token"]!);
+        return { text: async () => '{"StatusCode":100,"sel":[]}' };
+      }
+    );
+
+    expect(sentTokens).toEqual(["4-fresh", "4-fresh"]);
   });
 
   it("keeps CMD on the unfiltered football catalog before advancing its virtualized table", async () => {
@@ -3583,6 +3740,69 @@ describe("NetworkObserver", () => {
     expect(JSON.stringify(forward.mock.calls)).not.toContain("secret");
   });
 
+  it("correlates a SABA frame emitted from a child session with its root socket creation", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward,
+      now: () => 1_000, monotonicNow: () => 50 });
+    await observer.handleEvent(source, "Network.webSocketCreated", {
+      requestId: "provider-ws", url: "wss://socket.saba.test/socket.io/"
+    });
+    forward.mockClear();
+
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "provider-ws", response: { opcode: 1, payloadData: "42[]" }
+    }, "saba-child-session");
+
+    expect(forward).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      lobby: "SABA", transport: "WS_FRAME",
+      request: expect.objectContaining({ streamId: "1" }),
+      payload: { encoding: "UTF8", body: "42[]" }
+    }));
+  });
+
+  it("retires a root-created SABA socket when its close arrives from a child session", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => 1_000, monotonicNow: () => 50 });
+    await observer.handleEvent(source, "Network.webSocketCreated", {
+      requestId: "provider-ws", url: "wss://socket.saba.test/socket.io/"
+    });
+
+    await observer.handleEvent(source, "Network.webSocketClosed", {
+      requestId: "provider-ws"
+    }, "saba-child-session");
+    await observer.heartbeat(source, "socket.saba.test");
+
+    expect(forwarded).toContainEqual(expect.objectContaining({
+      transport: "WS_STATE", request: expect.objectContaining({ streamId: "1" }),
+      payload: { encoding: "UTF8", body: '{"state":"CLOSED"}' }
+    }));
+    const heartbeat = forwarded.at(-1);
+    expect(heartbeat?.transport).toBe("TAB_STATE");
+    expect(JSON.parse(heartbeat?.payload.body ?? "{}")).toMatchObject({ webSockets: 0 });
+  });
+
+  it("preserves a current SABA socket while its debugger target is reattached", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward,
+      now: () => 1_000, monotonicNow: () => 50, observerSessionId: "worker-a" });
+    await observer.handleEvent(source, "Network.webSocketCreated", {
+      requestId: "provider-ws", url: "wss://socket.saba.test/socket.io/"
+    });
+    forward.mockClear();
+
+    observer.prepareDebuggerReattach(source.tabId);
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "provider-ws", response: { opcode: 1, payloadData: "42[]" }
+    }, "replacement-child-session");
+
+    expect(forward).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      sourceEpoch: "worker-a:0", lobby: "SABA", transport: "WS_FRAME",
+      request: expect.objectContaining({ streamId: "1" })
+    }));
+  });
+
   it("emits a lightweight ordered heartbeat so an idle attached tab stays live", async () => {
     const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
     const observer = new NetworkObserver({
@@ -3605,6 +3825,52 @@ describe("NetworkObserver", () => {
       // could not be told from a day list the page never sent.
       payload: { encoding: "UTF8", body: expect.stringContaining('"kind":"WS_ATTACH"') as unknown as string }
     }));
+  });
+
+  it("does not create replacement source epochs when child execution contexts clear", async () => {
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => undefined), observerSessionId: "worker-a" });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+
+    await observer.handleEvent(apsport, "Runtime.executionContextsCleared", {}, "child-one");
+    await observer.handleEvent(apsport, "Runtime.executionContextsCleared", {}, "child-two");
+
+    expect(observer.beginSourceEpoch(apsport.sourceId)).toBe("worker-a:1");
+  });
+
+  it("does not create a replacement epoch when Runtime.enable clears an unchanged root context", async () => {
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => undefined), observerSessionId: "worker-a" });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+
+    await observer.handleEvent(apsport, "Runtime.executionContextsCleared", {});
+
+    expect(observer.beginSourceEpoch(apsport.sourceId)).toBe("worker-a:1");
+  });
+
+  it("reports a BTI 1008 page as an auth failure instead of a healthy tab heartbeat", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const onBtiPageHealth = vi.fn();
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Runtime.evaluate"
+      ? { result: { value: { status: "AUTH_ERROR", code: "1008" } } }
+      : {});
+    const observer = new NetworkObserver({ sendCommand, forward, onBtiPageHealth });
+    const bti = { lobby: "BTI", sourceId: "chrome:BTI:18", tabId: 18 } as const;
+
+    await observer.heartbeat(bti, "prod20091.fxf774.com");
+
+    expect(sendCommand).toHaveBeenCalledWith(18, "Runtime.evaluate", expect.objectContaining({
+      returnByValue: true
+    }));
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      transport: "TAB_STATE",
+      payload: { encoding: "UTF8", body: JSON.stringify({
+        kind: "PAGE_HEALTH", status: "AUTH_ERROR", code: "1008"
+      }) }
+    }));
+    expect(onBtiPageHealth).toHaveBeenCalledExactlyOnceWith({
+      sourceId: "chrome:BTI:18", tabId: 18, status: "AUTH_ERROR", code: "1008"
+    });
   });
 
   it("reports socket-created, retained-socket, and KSPORT child-target attach counts", async () => {
@@ -4168,7 +4434,7 @@ describe("NetworkObserver", () => {
     }));
     expect(sendCommand).toHaveBeenCalledWith(7, "Page.setLifecycleEventsEnabled", { enabled: true });
     expect(sendCommand).toHaveBeenCalledWith(7, "Target.setAutoAttach", {
-      autoAttach: true, waitForDebuggerOnStart: false, flatten: true
+      autoAttach: true, waitForDebuggerOnStart: true, flatten: true
     });
     const autoAttachCalls = sendCommand.mock.calls.filter(([, method]) => method === "Target.setAutoAttach");
     expect(autoAttachCalls.map(([, , params]) => params?.autoAttach)).toEqual([false, true]);
@@ -4267,6 +4533,24 @@ describe("NetworkObserver", () => {
     expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.enable", {}, "sportsbook-child");
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "KSPORT", transport: "WS_FRAME",
       payload: expect.objectContaining({ body: expect.stringContaining("/topic/sports/1_1/live/") }) }));
+  });
+
+  it("enables SABA worker observation before releasing its paused bootstrap", async () => {
+    const operations: string[] = [];
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      _params?: Record<string, unknown>, sessionId?: string) => {
+      if (sessionId === "saba-worker") operations.push(method);
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+
+    await observer.handleEvent(saba, "Target.attachedToTarget", {
+      sessionId: "saba-worker",
+      targetInfo: { type: "worker", targetId: "saba-worker-target" }
+    });
+
+    expect(operations).toEqual(["Network.enable", "Runtime.enable", "Runtime.runIfWaitingForDebugger"]);
   });
 
   it("enables Network and Runtime inside an attached KSPORT worker target", async () => {
@@ -4561,6 +4845,81 @@ describe("NetworkObserver", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("discovers an already-running SABA socket worker before reconnecting a root orphan", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (method === "Target.getTargets") return { targetInfos: [{
+        targetId: "saba-worker-target", type: "worker",
+        url: "blob:https://c0z0oa.bpd3a3fn.com/worker-id", attached: false
+      }] };
+      if (method === "Target.attachToTarget" && params?.targetId === "saba-worker-target") {
+        return { sessionId: "saba-worker-session" };
+      }
+      if (method === "Runtime.evaluate" && sessionId === "saba-worker-session" &&
+        String(params?.expression).includes("globalThis.WebSocket.prototype")) {
+        return { result: { objectId: "saba-worker-websocket-prototype" } };
+      }
+      if (method === "Runtime.queryObjects" && sessionId === "saba-worker-session") {
+        return { objects: { objectId: "saba-worker-websocket-instances" } };
+      }
+      if (method === "Runtime.callFunctionOn" && sessionId === "saba-worker-session") {
+        return { result: { value: 1 } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:24", tabId: 24 } as const;
+
+    await observer.start(saba);
+    sendCommand.mockClear();
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "socket-created-before-worker",
+      response: { opcode: 1, payloadData: "42[]" }
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith(24, "Runtime.callFunctionOn", expect.objectContaining({
+      objectId: "saba-worker-websocket-instances",
+      functionDeclaration: expect.stringContaining("socket.close(4000")
+    }), "saba-worker-session");
+  });
+
+  it("terminates only SABA socket workers before an attached hard reload", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (method === "Target.getTargets") return { targetInfos: [
+        { targetId: "saba-worker-target", type: "worker",
+          url: "blob:https://c0z0oa.bpd3a3fn.com/worker-id" },
+        { targetId: "saba-frame-target", type: "iframe",
+          url: "https://c0z0oa.bpd3a3fn.com/frame" }
+      ] };
+      if (method === "Target.attachToTarget" && params?.targetId === "saba-worker-target") {
+        return { sessionId: "saba-worker-session" };
+      }
+      if (method === "Target.attachToTarget" && params?.targetId === "saba-frame-target") {
+        return { sessionId: "saba-frame-session" };
+      }
+      if (method === "Runtime.evaluate" && sessionId === "saba-worker-session" &&
+        String(params?.expression).includes("self.close")) return { result: { value: true } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:24", tabId: 24 } as const;
+
+    await observer.start(saba);
+    sendCommand.mockClear();
+    await expect(observer.resetSabaSocketWorker(saba)).resolves.toBe(1);
+
+    expect(sendCommand).toHaveBeenCalledWith(24, "Runtime.evaluate", expect.objectContaining({
+      expression: expect.stringContaining("self.close")
+    }), "saba-worker-session");
+    expect(sendCommand).toHaveBeenCalledWith(24, "Target.closeTarget", {
+      targetId: "saba-worker-target"
+    });
+    expect(sendCommand.mock.calls.some(([, method, params, sessionId]) => method === "Runtime.evaluate" &&
+      String(params?.expression).includes("self.close") && sessionId === "saba-frame-session")).toBe(false);
   });
 
   it("uses an attached KSPORT OOPIF session for targeted socket recovery", async () => {
@@ -5327,6 +5686,104 @@ describe("NetworkObserver", () => {
     now.value = 6_000;
     await orphan();
     expect(attempts()).toBe(2);
+  });
+
+  it("reconnects a SABA orphan in its owning child session when no context event was replayed", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (method === "Runtime.evaluate" && sessionId === "saba-child" &&
+        typeof params?.expression === "string" && params.expression.includes("window.WebSocket.prototype")) {
+        return { result: { objectId: "child-websocket-prototype" } };
+      }
+      if (method === "Runtime.queryObjects" && sessionId === "saba-child") {
+        return { objects: { objectId: "child-websocket-instances" } };
+      }
+      if (method === "Runtime.callFunctionOn" && sessionId === "saba-child") {
+        return { result: { value: 1 } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+    await observer.handleEvent(saba, "Runtime.executionContextCreated", { context: { id: 17,
+      auxData: { frameId: "root", isDefault: true } } });
+    sendCommand.mockClear();
+
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "socket-created-before-worker",
+      response: { opcode: 1, payloadData: "42[]" }
+    }, "saba-child");
+
+    expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.callFunctionOn", expect.objectContaining({
+      objectId: "child-websocket-instances",
+      functionDeclaration: expect.stringContaining("socket.close(4000")
+    }), "saba-child");
+  });
+
+  it("reconnects a root-attributed SABA orphan through its attached socket worker", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>, sessionId?: string) => {
+      if (method === "Runtime.evaluate" && sessionId === "saba-socket-worker" &&
+        typeof params?.expression === "string" && params.expression.includes("globalThis.WebSocket.prototype")) {
+        return { result: { objectId: "worker-websocket-prototype" } };
+      }
+      if (method === "Runtime.queryObjects" && sessionId === "saba-socket-worker") {
+        return { objects: { objectId: "worker-websocket-instances" } };
+      }
+      if (method === "Runtime.callFunctionOn" && sessionId === "saba-socket-worker") {
+        return { result: { value: 1 } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 60 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:13", tabId: 13 } as const;
+    await observer.handleEvent(saba, "Target.attachedToTarget", {
+      sessionId: "saba-socket-worker",
+      targetInfo: { type: "worker", targetId: "saba-socket-worker-target" }
+    });
+    sendCommand.mockClear();
+
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "socket-created-before-worker",
+      response: { opcode: 1, payloadData: "42[]" }
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith(13, "Runtime.callFunctionOn", expect.objectContaining({
+      objectId: "worker-websocket-instances",
+      functionDeclaration: expect.stringContaining("socket.close(4000")
+    }), "saba-socket-worker");
+  });
+
+  it("requests one bounded APSPORT tab renewal when its sockets predate the worker", async () => {
+    const now = { value: 10_000 };
+    const renew = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => undefined), onApsportOrphanSocket: renew,
+      now: () => now.value, monotonicNow: () => now.value });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:14", tabId: 14 } as const;
+    const orphan = () => observer.handleEvent(apsport, "Network.webSocketFrameReceived", {
+      requestId: "socket-created-before-worker", response: { opcode: 1, payloadData: "{}" }
+    });
+
+    await orphan();
+    observer.beginSourceEpoch(apsport.sourceId);
+    await orphan();
+    now.value = 39_999;
+    await orphan();
+    expect(renew).toHaveBeenCalledExactlyOnceWith(apsport);
+
+    now.value = 40_000;
+    await orphan();
+    expect(renew).toHaveBeenCalledTimes(2);
+
+    await observer.handleEvent(apsport, "Network.webSocketCreated", {
+      requestId: "current-football-socket", url: "wss://spbui.agenate.com/ln/en/s/1/mg/1/tr/0"
+    });
+    now.value = 70_000;
+    await orphan();
+    expect(renew).toHaveBeenCalledTimes(2);
   });
 
   it("reconnects SABA's native Socket.IO transport when window.io is not global", async () => {

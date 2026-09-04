@@ -94,6 +94,7 @@ const apsportCatalogBatchSchema = z.object({
   generation: boundedText(128),
   phase: z.enum(["ROSTER", "DETAIL"]),
   complete: z.boolean(),
+  verifiedEmpty: z.literal(true).optional(),
   trigger: z.enum(["SWEEP", "EVENT_CHANGE"]).optional(),
   prematchWindowHours: z.number().int().min(1).max(48),
   records: z.array(z.record(z.string(), z.unknown())).max(5_000)
@@ -494,6 +495,9 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (batch.data.phase === "ROSTER") {
       if (!batch.data.complete || (current !== undefined && current.sourceEpoch === sourceEpoch(envelope) &&
         compareGeneration(parsedGeneration.order, current.generationOrder) <= 0)) return this.#ignore("roster-incomplete-or-old");
+      if (batch.data.records.length === 0 && batch.data.verifiedEmpty !== true) {
+        return this.#ignore("roster-empty-unverified");
+      }
       const rosterEventIds = new Set<string>();
       const rosterRecords = new Map<string, RetainedRecord>();
       for (const rawEvent of batch.data.records) {

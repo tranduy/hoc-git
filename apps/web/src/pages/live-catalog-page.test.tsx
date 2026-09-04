@@ -13,6 +13,7 @@ import { filterAccountBackedSignals, LiveCatalogPage, selectBettingAccount } fro
 import { WATCH_BASE_STAKE_STORAGE_KEY } from "../watch/stake-settings.js";
 import { SOUND_VOLUME_STORAGE_KEY } from "../watch/sound-settings.js";
 import type { LagSignal } from "../watch/lag-signal-tracker.js";
+import { saveProfitAlerts, type ProfitAlert } from "../watch/profit-alert-tracker.js";
 
 const account: AccountStatus = {
   id: "account-1", alias: "CMD main", provider: "CMD", category: "FOOTBALL", sessionState: "ACTIVE", profileState: "FRESH",
@@ -95,6 +96,24 @@ describe("LiveCatalogPage", () => {
     expect((await screen.findByRole("slider", { name: "Âm lượng thông báo" }) as HTMLInputElement).value).toBe("35");
   });
 
+  it("restores profitable ticket history in the bell without exposing maintenance errors", async () => {
+    const saved: ProfitAlert = { id: "profit-1", identity: "event::ticket::BTI|SABA",
+      observedAtMs: new Date(2026, 8, 1, 10, 30).getTime(), competition: "Premier Test",
+      matchName: "Alpha vs Beta", marketName: "Chấp toàn trận", line: "-0.5",
+      providers: ["SABA", "BTI"], legs: [{ provider: "SABA", selection: "Alpha" },
+        { provider: "BTI", selection: "Beta" }], roi: "0.1261", worstCaseProfit: "80645",
+      currency: "VND", freshness: "FRESH" };
+    saveProfitAlerts(window.localStorage, [saved]);
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={catalogApi} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Kèo profit.*1/u }));
+
+    const history = screen.getByRole("complementary", { name: /100 kèo profit/u });
+    expect(history.textContent).toContain("Alpha vs Beta");
+    expect(history.textContent).toContain("ROI 12.61%");
+    expect(history.textContent).not.toContain("SABA hết phiên");
+  });
+
   it("keeps diagnostics compact without empty monitoring panels", async () => {
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={catalogApi} />);
 
@@ -120,7 +139,7 @@ describe("LiveCatalogPage", () => {
     expect(providers.nextElementSibling).toBe(phases);
     expect(phases?.nextElementSibling).toBe(actions);
     expect(within(actions).getByRole("button", { name: "Reset sàn" })).toBeTruthy();
-    expect(within(actions).getByRole("button", { name: /Thông báo hệ thống/u })).toBeTruthy();
+    expect(within(actions).getByRole("button", { name: /Kèo profit/u })).toBeTruthy();
     expect(within(actions).queryByRole("button", { name: "Load live catalog" })).toBeNull();
     expect(within(actions).getByRole("region", { name: /Cấu hình tiền cược/u })).toBeTruthy();
   });

@@ -6,6 +6,7 @@ import { providerFeedPolicies } from "./provider-feed-policies.js";
 const SABA = "catalog-source:SABA:FOOTBALL";
 const CMD = "catalog-source:CMD:FOOTBALL";
 const IM = "catalog-source:IM:FOOTBALL";
+const APSPORT = "catalog-source:APSPORT:FOOTBALL";
 const BTI = "catalog-source:BTI:FOOTBALL";
 const clock = { nowMs: 0, set(nowMs: number) { this.nowMs = nowMs; } };
 
@@ -68,6 +69,24 @@ function btiCatalogEvidence(atMs: number) {
 function imTransport(atMs: number) {
   return { kind: "TRANSPORT" as const, accountId: IM, sourceId: "chrome:IM:8", sourceEpoch: "worker-a:0",
     atMs, provenance: "AUTHENTICATED_HTTP" as const };
+}
+
+function apsportCatalogEvidence(atMs: number, mode: "BASELINE" | "DELTA") {
+  const liveFixture = { provider: "APSPORT" as const, category: "FOOTBALL" as const,
+    providerEventId: "ap-live-1", competition: "League", seasonStage: null, startAtUtcMs: 0,
+    participantA: "Alpha", participantB: "Beta", eventScope: "REGULATION" as const,
+    bestOf: null, isLive: true, rematchCandidate: false, fixtureDiscriminator: null,
+    isVirtual: false, sportVariant: "FOOTBALL" as const, liveState: null };
+  return { kind: "CATALOG" as const, accountId: APSPORT, sourceId: "chrome:TSPORT:11",
+    sourceEpoch: "worker-a:0", atMs, generation: "apsport:11:1", mode,
+    provenance: "AUTHENTICATED_HTTP" as const, providerTimestampMs: null,
+    catalog: catalog({ accountId: APSPORT, provider: "APSPORT", observedAtMs: atMs,
+      events: [liveFixture] }) };
+}
+
+function apsportTransport(atMs: number) {
+  return { kind: "TRANSPORT" as const, accountId: APSPORT, sourceId: "chrome:TSPORT:11",
+    sourceEpoch: "worker-a:0", atMs, provenance: "WS" as const };
 }
 
 function invalidate(atMs: number, sourceEpoch: string,
@@ -186,6 +205,24 @@ describe("ProviderFeedController", () => {
     clock.set(policy.maxBaselineAgeMs + 1);
     expect(() => controller.read()).toThrow("PROVIDER_FEED_NOT_LIVE");
     expect(controller.snapshot()).toMatchObject({ state: "STALLED", reason: "BASELINE_EXPIRED" });
+  });
+
+  it("keeps APSPORT live while a large sequential detail sweep delays the next roster", () => {
+    // Production observed 212 football events. The collector deliberately
+    // waits 500 ms between sequential detail requests, so delay alone is 106 s;
+    // request latency and the next 25 s poll can carry a healthy generation
+    // beyond the old 120 s lease. Fresh socket evidence must keep that current
+    // roster readable through the bounded sweep instead of reloading its tab.
+    const controller = controllerFor(APSPORT, 0);
+    expect(controller.accept(apsportCatalogEvidence(0, "BASELINE")).publish?.snapshotState).toBe("FRESH");
+
+    for (const nowMs of [60_000, 120_000, 180_000]) {
+      clock.set(nowMs);
+      expect(controller.accept(apsportTransport(nowMs))).toMatchObject({ accepted: true });
+      expect(controller.sweep()).toBeNull();
+      expect(controller.read()).toMatchObject({ accountId: APSPORT });
+      expect(controller.snapshot()).toMatchObject({ state: "LIVE", recoveryStage: "NONE" });
+    }
   });
 
   it("keeps BTI live through its configured sweep-safe window and enforces evidence cadence", () => {

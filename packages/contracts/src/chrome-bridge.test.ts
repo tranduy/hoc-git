@@ -213,6 +213,10 @@ describe("ChromeBridgeControlMessageSchema", () => {
     expect(schema).toBeDefined();
     expect(schema.safeParse({ version: 1, kind: "ACK", sourceId: "chrome:SABA:42", sequence: 7 }).success).toBe(true);
     expect(schema.safeParse({ version: 1, kind: "ACK", sourceId: "chrome:SABA:42", sequence: 7,
+      sourceEpoch: "worker-a:0" }).success).toBe(true);
+    expect(schema.safeParse({ version: 1, kind: "REJECT", sourceId: "chrome:SABA:42", sequence: 7,
+      sourceEpoch: "worker-a:0", reason: "SEQUENCE_GAP" }).success).toBe(true);
+    expect(schema.safeParse({ version: 1, kind: "ACK", sourceId: "chrome:SABA:42", sequence: 7,
       token: "super-secret" }).success).toBe(false);
     expect(schema.safeParse({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:IM:42" }).success).toBe(true);
     expect(schema.safeParse({ version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:TSPORT:42",

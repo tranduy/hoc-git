@@ -152,6 +152,30 @@ export class ChromeBridgeRegistry {
       sourceEpoch, connectionGeneration });
 
     if (envelope.request.replayed === true) {
+      // Replay is never authority/data evidence, but it is still one envelope
+      // in the bridge transport sequence. Ignoring its ordinal leaves the
+      // admitted record at N while the next current frame arrives at N+2,
+      // manufacturing a SEQUENCE_GAP on every snapshot recovery.
+      const replaySlot = this.#slot(accountId);
+      this.#reconcile(accountId);
+      const replayRecord = [replaySlot.active, replaySlot.candidate].find((candidate) =>
+        candidate !== null && sameIdentity(candidate.identity, identity)) ?? null;
+      if (replayRecord !== null) {
+        if (envelope.sequence === replayRecord.lastSequence) {
+          return { control: reject(envelope, "DUPLICATE"), context: null };
+        }
+        if (envelope.sequence < replayRecord.lastSequence) {
+          return { control: reject(envelope, "OUT_OF_ORDER"), context: null };
+        }
+        if (envelope.sequence !== replayRecord.lastSequence + 1) {
+          replayRecord.state = "ERROR";
+          replayRecord.reason = "SEQUENCE_GAP";
+          replayRecord.quarantined = true;
+          this.#onRejected?.(accountId, "SEQUENCE_GAP");
+          return { control: reject(envelope, "SEQUENCE_GAP"), context: null };
+        }
+        replayRecord.lastSequence = envelope.sequence;
+      }
       return { control: ack(envelope), context: null };
     }
 
@@ -334,12 +358,14 @@ function sameIdentity(left: AuthorityIdentity, right: AuthorityIdentity): boolea
 }
 
 function ack(envelope: ChromeBridgeEnvelope): ChromeBridgeControlMessage {
-  return { version: 1, kind: "ACK", sourceId: envelope.sourceId, sequence: envelope.sequence };
+  return { version: 1, kind: "ACK", sourceId: envelope.sourceId, sequence: envelope.sequence,
+    ...(envelope.sourceEpoch === undefined ? {} : { sourceEpoch: envelope.sourceEpoch }) };
 }
 
 function reject(
   envelope: ChromeBridgeEnvelope,
   reason: "DUPLICATE" | "OUT_OF_ORDER" | "SEQUENCE_GAP"
 ): ChromeBridgeControlMessage {
-  return { version: 1, kind: "REJECT", sourceId: envelope.sourceId, sequence: envelope.sequence, reason };
+  return { version: 1, kind: "REJECT", sourceId: envelope.sourceId, sequence: envelope.sequence, reason,
+    ...(envelope.sourceEpoch === undefined ? {} : { sourceEpoch: envelope.sourceEpoch }) };
 }

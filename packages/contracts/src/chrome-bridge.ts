@@ -173,6 +173,7 @@ const AckMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("ACK"),
   sourceId: SourceIdSchema,
+  sourceEpoch: PublicGenerationIdSchema.optional(),
   sequence: SafeIntegerSchema
 });
 
@@ -276,6 +277,7 @@ const RejectMessageSchema = z.strictObject({
   version: z.literal(1),
   kind: z.literal("REJECT"),
   sourceId: SourceIdSchema.nullable(),
+  sourceEpoch: PublicGenerationIdSchema.optional(),
   sequence: SafeIntegerSchema.nullable(),
   reason: z.enum([
     "UNAUTHORIZED",

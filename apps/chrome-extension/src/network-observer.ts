@@ -24,6 +24,8 @@ import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent, buil
   type ApsportCatalogPageRequest, type ApsportRequestTemplate, type CollectApsportCatalogOptions,
   type CollectApsportEventDetailOptions } from "./apsport-catalog-refresh.js";
 import type { ApsportPageHealth } from "./apsport-page-recovery.js";
+import { BTI_PAGE_HEALTH_EXPRESSION, parseBtiPageHealthProbe,
+  type BtiPageHealth } from "./bti-page-health.js";
 
 const NETWORK_CHUNK_BODY_BYTES = 110_000;
 const CATALOG_REFRESH_INTERVAL_MS = 4_000;
@@ -36,6 +38,10 @@ const KSPORT_IGNORED_SOCKETS_PER_SOURCE = 64;
 // Long enough that a failed reconnect cannot become a per-frame storm, short
 // enough that a provider is never dark for more than a minute.
 const KSPORT_ORPHAN_FRAME_RETRY_MS = 30_000;
+// APSPORT cannot expose a pre-existing native socket to a restarted MV3
+// worker. One exact-tab renewal recreates every sport socket under CDP; pace a
+// failed renewal so high-frequency orphan frames cannot cause reload churn.
+const APSPORT_ORPHAN_FRAME_RETRY_MS = 30_000;
 // Socket.IO keeps emitting orphan frames after an MV3 worker restart. Repeated
 // reconnects visibly cycle the legacy SBO sportsbook, so a failed recovery is
 // retried at most once per minute for the current source epoch.
@@ -158,6 +164,21 @@ export interface ObservedSource {
 
 export interface CatalogRefreshOptions {
   readonly prematchWindowHours?: number;
+  readonly rosterOnly?: boolean;
+}
+
+function isSabaChildTargetUrl(rawUrl: string, targetType: string): boolean {
+  if (targetType !== "iframe" && targetType !== "worker" && targetType !== "shared_worker") return false;
+  try {
+    let url = new URL(rawUrl);
+    if ((targetType === "worker" || targetType === "shared_worker") && url.protocol === "blob:") {
+      url = new URL(url.pathname);
+    }
+    const hostname = url.hostname.toLowerCase();
+    return url.protocol === "https:" && url.username === "" && url.password === "" &&
+      /^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/u.test(hostname) &&
+      !/^c0z0o[a-z0-9]+\.(?:bpb7jrm5|bpf7t7s9)\.com$/u.test(hostname);
+  } catch { return false; }
 }
 
 export interface NetworkObserverDependencies {
@@ -180,6 +201,8 @@ export interface NetworkObserverDependencies {
   readonly collectApsportCatalog?: (options: CollectApsportCatalogOptions) => Promise<void>;
   readonly collectApsportEventDetail?: (options: CollectApsportEventDetailOptions) => Promise<Record<string, unknown> | null>;
   readonly onApsportPageHealth?: (health: ApsportPageHealth) => void;
+  readonly onApsportOrphanSocket?: (source: ObservedSource) => void | Promise<void>;
+  readonly onBtiPageHealth?: (health: BtiPageHealth) => void;
 }
 
 type ImProviderPartition = "IM_MARKET_1" | "IM_MARKET_2";
@@ -819,8 +842,12 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
       SortType: 2, ProgrammeIds: []
     };
     const path = '/api/EventV6/GetSE';
-    const token = sessionStorage.getItem('to' + 'ken') ||
-      new URLSearchParams(location.search).get('to' + 'ken');
+    // A fresh operator URL must override same-origin sessionStorage. Navigating
+    // an existing IM tab preserves sessionStorage, so a failed prior recovery
+    // can otherwise keep signing every GetSE with the old token even after the
+    // operator pastes a valid replacement into the address bar.
+    const token = new URLSearchParams(location.search).get('to' + 'ken') ||
+      sessionStorage.getItem('to' + 'ken');
     if (!token) return { status: 'token-unavailable', responses: [] };
     const responses = [];
     for (const Market of [1, 2]) {
@@ -1029,10 +1056,14 @@ export class NetworkObserver {
   readonly #collectApsportCatalog: NonNullable<NetworkObserverDependencies["collectApsportCatalog"]>;
   readonly #collectApsportEventDetail: NonNullable<NetworkObserverDependencies["collectApsportEventDetail"]>;
   readonly #onApsportPageHealth: NetworkObserverDependencies["onApsportPageHealth"];
+  readonly #onApsportOrphanSocket: NetworkObserverDependencies["onApsportOrphanSocket"];
+  readonly #onBtiPageHealth: NetworkObserverDependencies["onBtiPageHealth"];
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
   readonly #tabGenerations = new Map<number, number>();
-  readonly #publicSourceEpochs = new Map<string, { readonly sourceGeneration: number; readonly ordinal: number }>();
+  readonly #bridgeEpochGenerations = new Map<string, number>();
+  readonly #publicSourceEpochs = new Map<string, { readonly sourceGeneration: number;
+    readonly bridgeGeneration: number; readonly ordinal: number }>();
   #nextPublicEpochOrdinal = 0;
   readonly #activeWorkGenerations = new Map<string, number>();
   readonly #streamOrdinals = new Map<string, number>();
@@ -1071,6 +1102,7 @@ export class NetworkObserver {
     readonly receivedMonotonicMs: number }>();
   readonly #cmdLastBodies = new Map<string, string>();
   readonly #cmdLastSentAtMs = new Map<string, number>();
+  readonly #cmdFullBaselineAtMs = new Map<string, number>();
   readonly #cmdSnapshotHosts = new Map<string, string>();
   readonly #domSnapshotOrdinals = new Map<string, number>();
   readonly #httpSnapshots = new Map<string, ReplayableHttpSnapshot[]>();
@@ -1115,6 +1147,8 @@ export class NetworkObserver {
   readonly #mainWorldContexts = new Map<number, Map<string, MainWorldContextBinding>>();
   readonly #observedChildSessions = new Map<string, Set<string>>();
   readonly #ksportAttachedTargetSessions = new Map<string, Map<string, string>>();
+  readonly #sabaAttachedTargetSessions = new Map<string, Map<string, {
+    readonly sessionId: string; readonly targetType: "iframe" | "worker" }>>();
   readonly #wsAttachDiagnostics = new Map<string, WsAttachDiagnosticState>();
   readonly #preexistingSocketReconnects = new Map<string, PreexistingSocketReconnectState>();
   readonly #preexistingSocketReconnectSources = new Map<string, ObservedSource>();
@@ -1137,6 +1171,7 @@ export class NetworkObserver {
   readonly #ksportBaselineLeaseAtMs = new Map<string, number>();
   readonly #sabaOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sboOrphanFrameRecoveryAtMs = new Map<string, number>();
+  readonly #apsportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
     readonly headers: Readonly<Record<string, string>>; readonly method: "GET" | "POST";
     readonly hasPostData: boolean }>();
@@ -1167,6 +1202,8 @@ export class NetworkObserver {
     this.#collectApsportCatalog = dependencies.collectApsportCatalog ?? collectApsportCatalog;
     this.#collectApsportEventDetail = dependencies.collectApsportEventDetail ?? collectApsportEventDetail;
     this.#onApsportPageHealth = dependencies.onApsportPageHealth;
+    this.#onApsportOrphanSocket = dependencies.onApsportOrphanSocket;
+    this.#onBtiPageHealth = dependencies.onBtiPageHealth;
     if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
       throw new Error("OBSERVER_SESSION_ID_INVALID");
     }
@@ -1576,7 +1613,7 @@ export class NetworkObserver {
     }));
     await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Target.setAutoAttach", {
       autoAttach: true,
-      waitForDebuggerOnStart: false,
+      waitForDebuggerOnStart: source.lobby === "SABA",
       flatten: true
     }));
     await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Network.enable", {
@@ -1590,6 +1627,9 @@ export class NetworkObserver {
     }
     if (source.lobby === "KSPORT") {
       await this.#discoverExistingKsportChildTargets(source);
+    }
+    if (source.lobby === "SABA") {
+      await this.#discoverExistingSabaChildTargets(source);
     }
     if (source.lobby !== "SABA" && source.lobby !== "CMD" && source.lobby !== "KSPORT" &&
       source.lobby !== "TSPORT") {
@@ -1612,8 +1652,58 @@ export class NetworkObserver {
     this.releaseTab(source.tabId);
   }
 
+  #sabaSocketAcrossSession(source: ObservedSource,
+    requestId: string): [string, ObservedWebSocketState] | undefined {
+    if (source.lobby !== "SABA") return undefined;
+    const prefix = `${source.tabId}:`;
+    const suffix = `:${requestId}`;
+    const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
+    let match: [string, ObservedWebSocketState] | undefined;
+    for (const [candidateKey, socket] of this.#webSockets) {
+      if (!candidateKey.startsWith(prefix) || !candidateKey.endsWith(suffix) ||
+        socket.source.sourceId !== source.sourceId || socket.sourceGeneration !== sourceGeneration ||
+        socket.closing === true) continue;
+      // CDP can report webSocketCreated on the root target and later frames on
+      // a SABA worker target with the same requestId. Only correlate when that
+      // requestId identifies exactly one live socket in this source epoch.
+      if (match !== undefined) return undefined;
+      match = [candidateKey, socket];
+    }
+    return match;
+  }
+
+  async resetSabaSocketWorker(source: ObservedSource): Promise<number> {
+    if (source.lobby !== "SABA") return 0;
+    await this.#discoverExistingSabaChildTargets(source).catch(() => undefined);
+    const targets = this.#sabaAttachedTargetSessions.get(source.sourceId);
+    if (targets === undefined) return 0;
+    let terminated = 0;
+    for (const [targetId, target] of [...targets]) {
+      if (target.targetType !== "worker") continue;
+      try {
+        await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+          expression: "(() => { if (typeof self.close !== 'function') return false; self.close(); return true; })()",
+          returnByValue: true,
+          awaitPromise: false
+        }, target.sessionId));
+        terminated += 1;
+      } catch { /* Page.reload remains the bounded fallback when the worker already exited. */ }
+      await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Target.closeTarget", {
+        targetId
+      })).catch(() => undefined);
+      targets.delete(targetId);
+      this.#observedChildSessions.get(source.sourceId)?.delete(target.sessionId);
+    }
+    if (targets.size === 0) this.#sabaAttachedTargetSessions.delete(source.sourceId);
+    return terminated;
+  }
+
   resetApsportRefreshCooldown(sourceId: string): void {
     this.#apsportLastRefreshStartedAtMs.delete(sourceId);
+  }
+
+  hasCompleteCmdBaselineSince(sourceId: string, startedAtMs: number): boolean {
+    return (this.#cmdFullBaselineAtMs.get(sourceId) ?? Number.NEGATIVE_INFINITY) >= startedAtMs;
   }
 
   #clearApsportEventDetails(sourceId: string): void {
@@ -1642,6 +1732,7 @@ export class NetworkObserver {
     this.#cmdSnapshots.delete(sourceId);
     this.#cmdLastBodies.delete(sourceId);
     this.#cmdLastSentAtMs.delete(sourceId);
+    this.#cmdFullBaselineAtMs.delete(sourceId);
     this.#cmdSnapshotHosts.delete(sourceId);
     this.#domSnapshotOrdinals.delete(sourceId);
     this.#httpSnapshots.delete(sourceId);
@@ -1675,6 +1766,7 @@ export class NetworkObserver {
     this.#sbobetEventRequests.delete(sourceId);
     this.#observedChildSessions.delete(sourceId);
     this.#ksportAttachedTargetSessions.delete(sourceId);
+    this.#sabaAttachedTargetSessions.delete(sourceId);
     this.#wsAttachDiagnostics.delete(sourceId);
     this.#clearPreexistingSocketReconnect(sourceId);
     this.#ksportDiagnosticAtMs.delete(sourceId);
@@ -1733,6 +1825,43 @@ export class NetworkObserver {
     return `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(sourceId, generation)}`;
   }
 
+  beginBridgeSourceEpoch(sourceId: string): string {
+    const sourceGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
+    // Reserve the current public identity before advancing it, including when
+    // resync is the first operation observed for this source in a new worker.
+    this.#publicSourceEpochOrdinal(sourceId, sourceGeneration);
+    this.#bridgeEpochGenerations.set(sourceId, this.#captureBridgeGeneration(sourceId) + 1);
+    this.#sequences.delete(sourceId);
+    this.#emissionTails.delete(sourceId);
+    return `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(sourceId, sourceGeneration)}`;
+  }
+
+  prepareDebuggerReattach(tabId: number): void {
+    // Chrome can detach the extension debugger only after a reloaded page has
+    // already opened its replacement socket. A full release here discards the
+    // webSocketCreated event forever and every later frame becomes orphaned.
+    // Fence document-bound HTTP work and child-session handles, but preserve
+    // socket/request attribution until the same owned tab is reattached.
+    this.#tabGenerations.set(tabId, this.#captureTabGeneration(tabId) + 1);
+    this.#startedTabs.delete(tabId);
+    this.#mainWorldContexts.delete(tabId);
+    const sourceIds = new Set<string>();
+    for (const sourceId of this.#sourceGenerations.keys()) {
+      if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
+    }
+    for (const socket of this.#webSockets.values()) {
+      if (socket.source.tabId === tabId) sourceIds.add(socket.source.sourceId);
+    }
+    for (const sourceId of sourceIds) {
+      this.#retireCmdRecovery(sourceId, "DOCUMENT_CHANGED");
+      this.#observedChildSessions.delete(sourceId);
+      this.#ksportAttachedTargetSessions.delete(sourceId);
+      this.#sabaAttachedTargetSessions.delete(sourceId);
+      const diagnostic = this.#wsAttachDiagnostics.get(sourceId);
+      if (diagnostic !== undefined) diagnostic.attachedTargets = 0;
+    }
+  }
+
   releaseTab(tabId: number): void {
     this.#tabGenerations.set(tabId, this.#captureTabGeneration(tabId) + 1);
     this.#startedTabs.delete(tabId);
@@ -1750,6 +1879,7 @@ export class NetworkObserver {
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
     for (const sourceId of this.#ksportNativeHttpCaptures.keys()) remember(sourceId);
+    for (const sourceId of this.#bridgeEpochGenerations.keys()) remember(sourceId);
     for (const sourceId of this.#publicSourceEpochs.keys()) remember(sourceId);
     for (const sourceId of this.#sourceGenerations.keys()) remember(sourceId);
     for (const sourceId of this.#activeWorkGenerations.keys()) remember(sourceId);
@@ -1760,10 +1890,12 @@ export class NetworkObserver {
     for (const sourceId of sourceIds) {
       this.#retireCmdRecovery(sourceId, "RELEASED");
       this.beginSourceEpoch(sourceId);
+      this.#bridgeEpochGenerations.delete(sourceId);
       this.#publicSourceEpochs.delete(sourceId);
       this.#cmdSnapshots.delete(sourceId);
       this.#cmdLastBodies.delete(sourceId);
       this.#cmdLastSentAtMs.delete(sourceId);
+      this.#cmdFullBaselineAtMs.delete(sourceId);
       this.#cmdSnapshotHosts.delete(sourceId);
       this.#domSnapshotOrdinals.delete(sourceId);
       this.#httpSnapshots.delete(sourceId);
@@ -1792,6 +1924,7 @@ export class NetworkObserver {
       this.#sbobetEventRequests.delete(sourceId);
       this.#observedChildSessions.delete(sourceId);
       this.#ksportAttachedTargetSessions.delete(sourceId);
+      this.#sabaAttachedTargetSessions.delete(sourceId);
       this.#wsAttachDiagnostics.delete(sourceId);
       this.#clearPreexistingSocketReconnect(sourceId);
       this.#preexistingSocketReconnectSources.delete(sourceId);
@@ -1807,6 +1940,7 @@ export class NetworkObserver {
       this.#ksportOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#sabaOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#sboOrphanFrameRecoveryAtMs.delete(sourceId);
+      this.#apsportOrphanFrameRecoveryAtMs.delete(sourceId);
       this.#socketBaselineRecoveries.delete(sourceId);
       this.#cmdCapturesInFlight.delete(sourceId);
       this.#imLastRecoveryAtMs.delete(sourceId);
@@ -2237,7 +2371,10 @@ export class NetworkObserver {
       !this.#cmdRecoveryIdentityIsCurrent(active) || !isCompleteCmdFullResponse(body)) return;
     const resolution = this.#cmdRecoveryState.complete({ document: target.document,
       providerFunctionCode: 1, responseComplete: true }, this.#now());
-    if (resolution?.outcome === "SUCCESS") this.#finishCmdRecovery(active);
+    if (resolution?.outcome === "SUCCESS") {
+      this.#cmdFullBaselineAtMs.set(pending.source.sourceId, this.#now());
+      this.#finishCmdRecovery(active);
+    }
   }
 
   async #awaitCmdRecovery<T>(active: ActiveCmdRecovery, operation: Promise<T>): Promise<CmdRecoveryAwait<T>> {
@@ -2265,10 +2402,30 @@ export class NetworkObserver {
     // its own step (measured 2026-09-01: SABA reconnectAttempts stayed 0 with
     // no visible reason across two extension builds).
     if (source.lobby === "SABA") this.#noteWsRecoveryOutcome(source, "refresh:enter");
+    const prioritizeApsportRoster = source.lobby === "TSPORT" && options.rosterOnly === true;
+    if (prioritizeApsportRoster) {
+      // A current roster after bridge/API restart outranks per-event detail
+      // enrichment. Retiring the active roster cancels queued detail work via
+      // its existing identity checks and re-arms the catalog cooldown so this
+      // recovery cannot be coalesced away.
+      this.#clearApsportEventDetails(source.sourceId);
+      this.#apsportLastRefreshStartedAtMs.delete(source.sourceId);
+    }
     const existing = this.#catalogRefreshes.get(source.sourceId);
     if (existing !== undefined) {
-      if (source.lobby === "SABA") this.#noteWsRecoveryOutcome(source, "refresh:dedupe");
-      return existing;
+      if (prioritizeApsportRoster) {
+        // A bridge resync cannot wait behind the rate-limited all-event detail
+        // walk: while it waits, the disconnected loopback bridge accumulates
+        // live socket frames and can overflow into another resync. Advancing
+        // the catalog ordinal makes the running collector's isCurrent() false;
+        // the provider lane then starts this short roster generation next.
+        this.#apsportRefreshOrdinals.set(source.sourceId,
+          (this.#apsportRefreshOrdinals.get(source.sourceId) ?? 0) + 1);
+        this.#catalogRefreshes.delete(source.sourceId);
+      } else {
+        if (source.lobby === "SABA") this.#noteWsRecoveryOutcome(source, "refresh:dedupe");
+        return existing;
+      }
     }
     const operation = this.#runPeriodicDomWork(source.sourceId, () => this.#refreshCatalog(source, options))
       .catch((error: unknown) => {
@@ -2705,7 +2862,10 @@ export class NetworkObserver {
     const ordinal = (this.#apsportRefreshOrdinals.get(source.sourceId) ?? 0) + 1;
     this.#apsportRefreshOrdinals.set(source.sourceId, ordinal);
     const generation = `apsport:${source.tabId}:${ordinal}`;
-    const templateIsCurrent = (): boolean => this.#apsportTemplateIsCurrent(source, template);
+    const templateIsCurrent = (): boolean => this.#apsportTemplateIsCurrent(source, template) &&
+      this.#apsportRefreshOrdinals.get(source.sourceId) === ordinal;
+    let rosterOnlyComplete = false;
+    const refreshIsCurrent = (): boolean => templateIsCurrent() && !rosterOnlyComplete;
     const request = (input: ApsportCatalogPageRequest) => this.#requestApsportPage(source, template, input);
     const emitBatch = async (batch: ApsportCatalogBatch): Promise<void> => {
       if (!templateIsCurrent()) return;
@@ -2722,11 +2882,12 @@ export class NetworkObserver {
       await this.#collectApsportCatalog({ generation, nowMs: refreshStartedAtMs, prematchWindowHours,
         template: { origin: template.origin, headers: template.headers, body: template.body }, request,
         sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
-        isCurrent: templateIsCurrent, onRoster: async (batch) => {
+        isCurrent: refreshIsCurrent, onRoster: async (batch) => {
           await emitBatch(batch);
           if (templateIsCurrent() && batch.complete) this.#apsportActiveCatalogs.set(source.sourceId,
             { generation: batch.generation, prematchWindowHours: batch.prematchWindowHours,
               rosterCount: batch.records.length });
+          if (options.rosterOnly === true && batch.complete) rosterOnlyComplete = true;
         }, onDetail: emitBatch,
         detailBatchSize: 5, detailDelayMs: APSPORT_DETAIL_DELAY_MS });
       if (templateIsCurrent()) this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_DONE");
@@ -2827,7 +2988,8 @@ export class NetworkObserver {
     }
   }
 
-  async #requestFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean): Promise<void> {
+  async #requestFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean,
+    preferredSessionId?: string): Promise<void> {
     const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
     const isCurrent = (): boolean => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration);
     if (!isCurrent()) return;
@@ -2855,7 +3017,13 @@ export class NetworkObserver {
       knownContexts.length > 0
         ? knownContexts.map((binding) => ({ contextId: binding.contextId,
             ...(binding.sessionId === undefined ? {} : { sessionId: binding.sessionId }) }))
-        : [{ ...(active?.sessionId === undefined ? {} : { sessionId: active.sessionId }) }];
+        : [{ ...(preferredSessionId !== undefined ? { sessionId: preferredSessionId }
+            : active?.sessionId === undefined ? {} : { sessionId: active.sessionId }) }];
+    if (preferredSessionId !== undefined) {
+      const preferredIndex = targets.findIndex((target) => target.sessionId === preferredSessionId);
+      if (preferredIndex < 0) targets.unshift({ sessionId: preferredSessionId });
+      else if (preferredIndex > 0) targets.unshift(...targets.splice(preferredIndex, 1));
+    }
     if (active !== undefined && !targets.some((target) => target.contextId === undefined &&
       target.sessionId === active.sessionId)) {
       targets.push({ ...(active.sessionId === undefined ? {} : { sessionId: active.sessionId }) });
@@ -2867,6 +3035,24 @@ export class NetworkObserver {
       // root/iframe main worlds. Keep those worlds as fallbacks for older UI
       // versions where the socket was page-owned.
       const attachedSocketTargets = [...(this.#ksportAttachedTargetSessions.get(source.sourceId)?.values() ?? [])]
+        .filter((sessionId) => !targets.some((target) =>
+          target.contextId === undefined && target.sessionId === sessionId))
+        .map((sessionId) => ({ sessionId }));
+      targets.unshift(...attachedSocketTargets);
+    }
+    const sabaAttachedTargets = source.lobby === "SABA"
+      ? [...(this.#sabaAttachedTargetSessions.get(source.sourceId)?.values() ?? [])]
+      : [];
+    const sabaWorkerSessions = source.lobby === "SABA"
+      ? new Set(sabaAttachedTargets.filter((target) => target.targetType === "worker")
+        .map((target) => target.sessionId))
+      : new Set<string>();
+    if (source.lobby === "SABA") {
+      // SABA can keep Engine.IO in a dedicated worker while CDP attributes the
+      // surviving socket frames to the root tab after an MV3 restart. Probe
+      // attached workers before page heaps so the replacement OPEN is observed
+      // without navigating or focusing the provider tab.
+      const attachedSocketTargets = sabaAttachedTargets.map((target) => target.sessionId)
         .filter((sessionId) => !targets.some((target) =>
           target.contextId === undefined && target.sessionId === sessionId))
         .map((sessionId) => ({ sessionId }));
@@ -2917,7 +3103,23 @@ export class NetworkObserver {
           : this.#sendCommand(source.tabId, method, params, target.sessionId);
       const group = `fieldline-baseline-recovery-${source.tabId}`;
       try {
-        for (const strategy of strategies) {
+        const targetStrategies = source.lobby === "SABA" && target.sessionId !== undefined &&
+          sabaWorkerSessions.has(target.sessionId) ? [{
+            prototypeExpression: "globalThis.io && globalThis.io.Socket && globalThis.io.Socket.prototype",
+            reconnect: `function() { let count = 0; for (const socket of this) { try {
+              if (!socket || !socket.connected || !socket.io) continue;
+              socket.disconnect(); socket.connect(); count += 1;
+            } catch {} } return count; }`
+          }, {
+            prototypeExpression: "globalThis.WebSocket && globalThis.WebSocket.prototype",
+            reconnect: `function() { let count = 0; for (const socket of this) { try {
+              if (!socket || socket.readyState !== 1) continue;
+              const url = new URL(socket.url, globalThis.location?.href || socket.url);
+              if (!/\\/socket\\.io\\/?$/u.test(url.pathname)) continue;
+              socket.close(4000, "fieldline-baseline-recovery"); count += 1;
+            } catch {} } return count; }`
+          }] : strategies;
+        for (const strategy of targetStrategies) {
           if (!isCurrent()) return;
           const prototype = await this.#withFrameCommandTimeout(sendToSocketTarget("Runtime.evaluate", {
             expression: strategy.prototypeExpression,
@@ -2982,6 +3184,8 @@ export class NetworkObserver {
         await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Target.setAutoAttach", {
           autoAttach: true, waitForDebuggerOnStart: true, flatten: true
         }, sessionId));
+      }
+      if (targetType !== "worker" || source.lobby === "SABA") {
         await this.#withFrameCommandTimeout(
           this.#sendCommand(source.tabId, "Runtime.runIfWaitingForDebugger", {}, sessionId)
         );
@@ -2990,6 +3194,12 @@ export class NetworkObserver {
       observedSessions.delete(sessionId);
       if (observedSessions.size === 0) this.#observedChildSessions.delete(source.sourceId);
       throw error;
+    }
+    if (source.lobby === "SABA" && targetId !== undefined) {
+      const attachedTargets = this.#sabaAttachedTargetSessions.get(source.sourceId) ??
+        new Map<string, { readonly sessionId: string; readonly targetType: "iframe" | "worker" }>();
+      attachedTargets.set(targetId, { sessionId, targetType });
+      this.#sabaAttachedTargetSessions.set(source.sourceId, attachedTargets);
     }
     if (source.lobby !== "KSPORT") return;
     if (targetId !== undefined) {
@@ -3025,6 +3235,29 @@ export class NetworkObserver {
         info.type === "worker" ? "worker" : "iframe").catch(() => undefined);
     }
     diagnostic.attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId)?.size ?? 0;
+  }
+
+  async #discoverExistingSabaChildTargets(source: ObservedSource): Promise<void> {
+    const discovered = await this.#withFrameCommandTimeout(
+      this.#sendCommand(source.tabId, "Target.getTargets")
+    ).catch(() => ({}));
+    const infos = isRecord(discovered) && Array.isArray(discovered.targetInfos)
+      ? discovered.targetInfos : [];
+    const diagnostic = this.#wsAttachDiagnostic(source);
+    diagnostic.targetsTotal = infos.length;
+    diagnostic.targetsIframe = infos.filter((info) => isRecord(info) && info.type === "iframe").length;
+    for (const info of infos.slice(0, 32)) {
+      if (!isRecord(info) || typeof info.type !== "string" || typeof info.targetId !== "string" ||
+        typeof info.url !== "string" || !isSabaChildTargetUrl(info.url, info.type) ||
+        this.#sabaAttachedTargetSessions.get(source.sourceId)?.has(info.targetId) === true) continue;
+      const attached = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+        "Target.attachToTarget", { targetId: info.targetId, flatten: true })).catch(() => ({}));
+      const childSessionId = nestedValue(attached, "sessionId");
+      if (typeof childSessionId !== "string") continue;
+      await this.#observeChildTarget(source, childSessionId, info.targetId, true,
+        info.type === "iframe" ? "iframe" : "worker").catch(() => undefined);
+    }
+    diagnostic.attachedTargets = this.#sabaAttachedTargetSessions.get(source.sourceId)?.size ?? 0;
   }
 
   #noteWsRecoveryOutcome(source: ObservedSource, label: string): void {
@@ -3103,12 +3336,13 @@ export class NetworkObserver {
     this.#preexistingSocketReconnects.delete(sourceId);
   }
 
-  #scheduleFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean): Promise<void> {
+  #scheduleFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean,
+    preferredSessionId?: string): Promise<void> {
     const existing = this.#socketBaselineRecoveries.get(source.sourceId);
     if (existing !== undefined) return existing.operation;
     const token = Symbol(source.sourceId);
     const operation = this.#runPeriodicDomWork(source.sourceId,
-      () => this.#requestFreshSocketBaseline(source, matches)).finally(() => {
+      () => this.#requestFreshSocketBaseline(source, matches, preferredSessionId)).finally(() => {
         if (this.#socketBaselineRecoveries.get(source.sourceId)?.token === token) {
           this.#socketBaselineRecoveries.delete(source.sourceId);
         }
@@ -3579,11 +3813,13 @@ export class NetworkObserver {
     const diagnostic = source.lobby === "KSPORT" || source.lobby === "TSPORT" ||
       source.lobby === "SABA"
       ? this.#wsAttachDiagnostic(source) : null;
+    const btiPageHealth = source.lobby === "BTI" ? await this.probeBtiPageHealth(source) : null;
     const webSockets = diagnostic === null ? 0 : [...this.#webSockets.values()].filter((socket) =>
       socket.source.sourceId === source.sourceId && socket.sourceGeneration === diagnostic.sourceGeneration).length;
     await this.#emit(source, `https://${hostname}/__fieldline_heartbeat__`, "Tab", "TAB_STATE", {
       encoding: "UTF8",
-      body: diagnostic === null ? "{}" : JSON.stringify({ kind: "WS_ATTACH",
+      body: btiPageHealth !== null ? JSON.stringify({ kind: "PAGE_HEALTH", ...btiPageHealth }) :
+        diagnostic === null ? "{}" : JSON.stringify({ kind: "WS_ATTACH",
         sourceGeneration: diagnostic.sourceGeneration, webSocketCreated: diagnostic.webSocketCreated,
         webSockets, ksportTargets: diagnostic.ksportTargets, attachedTargets: diagnostic.attachedTargets,
         framesReceived: diagnostic.framesReceived, framesOrphan: diagnostic.framesOrphan,
@@ -3625,6 +3861,9 @@ export class NetworkObserver {
             .map(([path, count]) => `${path}:${count}`).join(",")}] ` +
           (this.#lastCatalogShape.get(source.sourceId) ?? "") })
     });
+    if (btiPageHealth !== null) {
+      this.#onBtiPageHealth?.({ sourceId: source.sourceId, tabId: source.tabId, ...btiPageHealth });
+    }
     // Keep only a small read-only shape diagnostic for APSPORT. Its periodic
     // authenticated API roster/detail collector owns the catalog generation;
     // a heartbeat must not start the old virtualized-DOM sweep or reconnect a
@@ -3632,6 +3871,15 @@ export class NetworkObserver {
     if (source.lobby === "TSPORT") {
       await this.#recordTsportCatalogShape(source).catch(() => undefined);
     }
+  }
+
+  async probeBtiPageHealth(source: ObservedSource): Promise<ReturnType<typeof parseBtiPageHealthProbe>> {
+    if (source.lobby !== "BTI") return null;
+    const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+      "Runtime.evaluate", { expression: BTI_PAGE_HEALTH_EXPRESSION, returnByValue: true }))
+      .catch(() => null);
+    return parseBtiPageHealthProbe(nestedValue(evaluation, "result", "value")) ??
+      { status: "UNKNOWN", code: null };
   }
 
   async emitWorkHealth(source: ObservedSource, health: {
@@ -3669,7 +3917,7 @@ export class NetworkObserver {
     if (method === "Target.attachedToTarget") {
       const childSessionId = typeof params.sessionId === "string" ? params.sessionId : null;
       const targetInfo = isRecord(params.targetInfo) ? params.targetInfo : null;
-      if (source.lobby === "KSPORT") {
+      if (source.lobby === "KSPORT" || source.lobby === "SABA") {
         this.#wsAttachDiagnostic(source).autoAttachEvents += 1;
         const type = typeof targetInfo?.type === "string" ? targetInfo.type.slice(0, 24) : "none";
         const seen = this.#targetTypesSeen.get(source.sourceId) ?? new Map<string, number>();
@@ -3677,11 +3925,12 @@ export class NetworkObserver {
         this.#targetTypesSeen.set(source.sourceId, seen);
       }
       const observeChild = targetInfo?.type === "iframe" ||
-        (source.lobby === "KSPORT" && targetInfo?.type === "worker");
+        ((source.lobby === "KSPORT" || source.lobby === "SABA") && targetInfo?.type === "worker") ||
+        (source.lobby === "SABA" && targetInfo?.type === "shared_worker");
       if (childSessionId !== null && observeChild) {
         const targetId = typeof targetInfo.targetId === "string" ? targetInfo.targetId : undefined;
         await this.#observeChildTarget(source, childSessionId, targetId, true,
-          targetInfo.type === "worker" ? "worker" : "iframe");
+          targetInfo.type === "iframe" ? "iframe" : "worker");
       }
       return;
     }
@@ -3700,6 +3949,13 @@ export class NetworkObserver {
             if (attachedSessionId === childSessionId) attachedTargets.delete(targetId);
           }
           if (attachedTargets.size === 0) this.#ksportAttachedTargetSessions.delete(source.sourceId);
+        }
+        const sabaTargets = this.#sabaAttachedTargetSessions.get(source.sourceId);
+        if (sabaTargets !== undefined) {
+          for (const [targetId, attachedTarget] of sabaTargets) {
+            if (attachedTarget.sessionId === childSessionId) sabaTargets.delete(targetId);
+          }
+          if (sabaTargets.size === 0) this.#sabaAttachedTargetSessions.delete(source.sourceId);
         }
         const cmdRecovery = this.#cmdRecoveries.get(source.sourceId);
         if (cmdRecovery?.target?.sessionId === childSessionId) {
@@ -3737,7 +3993,11 @@ export class NetworkObserver {
         }
         if (contexts.size === 0) this.#mainWorldContexts.delete(source.tabId);
       }
-      this.beginSourceEpoch(source.sourceId);
+      // Runtime.enable emits this event when an MV3 worker reattaches even if
+      // the provider document did not navigate. It is also emitted separately
+      // by child/OOPIF targets. Context loss therefore clears only bindings;
+      // actual tab mutation boundaries call beginSourceEpoch explicitly before
+      // navigation/reload and releaseTab retires a detached document.
       if (source.lobby === "SABA") {
         // Runtime.enable can emit executionContextsCleared while an unchanged
         // document is merely being reattached after an MV3 worker restart.
@@ -3948,16 +4208,20 @@ export class NetworkObserver {
       return;
     }
     if (method === "Network.webSocketClosed" && key) {
-      const socket = this.#webSockets.get(key);
+      const directSocket = this.#webSockets.get(key);
+      const crossSessionSocket = directSocket === undefined && requestId !== null
+        ? this.#sabaSocketAcrossSession(source, requestId) : undefined;
+      const socketKey = crossSessionSocket?.[0] ?? key;
+      const socket = directSocket ?? crossSessionSocket?.[1];
       if (socket !== undefined) {
         if (socket.closing === true) return;
         socket.closing = true;
         await socket.ksportFrameTail?.catch(() => undefined);
         if (!this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration) ||
-          this.#webSockets.get(key) !== socket) return;
+          this.#webSockets.get(socketKey) !== socket) return;
         if (socket.source.lobby === "KSPORT" &&
           this.#activeKsportStreams.get(socket.source.sourceId) !== socket.streamId) {
-          this.#webSockets.delete(key);
+          this.#webSockets.delete(socketKey);
           return;
         }
         const lifecycleRecoveryGeneration = socket.ksportRecovery?.currentGeneration ??
@@ -3969,7 +4233,7 @@ export class NetworkObserver {
             { recoveryGeneration: lifecycleRecoveryGeneration }) }, sourceGeneration: socket.sourceGeneration });
         const ownsSocket = (): boolean =>
           this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration) &&
-          this.#webSockets.get(key) === socket;
+          this.#webSockets.get(socketKey) === socket;
         if (!ownsSocket()) return;
         if (socket.source.lobby === "KSPORT" &&
           this.#activeKsportStreams.get(socket.source.sourceId) === socket.streamId) {
@@ -3986,14 +4250,15 @@ export class NetworkObserver {
           } catch { /* malformed socket URL cannot be a catalog authority */ }
         }
       }
-      if (this.#webSockets.get(key) === socket && (socket === undefined ||
+      if (this.#webSockets.get(socketKey) === socket && (socket === undefined ||
         this.#isSourceGenerationCurrent(socket.source.sourceId, socket.sourceGeneration))) {
-        this.#webSockets.delete(key);
+        this.#webSockets.delete(socketKey);
       }
       return;
     }
     if (method === "Network.webSocketFrameReceived" && key) {
-      const socket = this.#webSockets.get(key);
+      const socket = this.#webSockets.get(key) ??
+        (requestId === null ? undefined : this.#sabaSocketAcrossSession(source, requestId)?.[1]);
       const response = isRecord(params.response) ? params.response : null;
       this.#wsAttachDiagnostic(source).framesReceived += 1;
       if (!socket) {
@@ -4010,8 +4275,9 @@ export class NetworkObserver {
           const lastAttemptAtMs = this.#sabaOrphanFrameRecoveryAtMs.get(source.sourceId);
           if (lastAttemptAtMs === undefined || nowMs - lastAttemptAtMs >= 5_000) {
             this.#sabaOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
+            await this.#discoverExistingSabaChildTargets(source).catch(() => undefined);
             await this.#scheduleFreshSocketBaseline(source,
-              (url) => /\/socket\.io\/?$/u.test(url.pathname));
+              (url) => /\/socket\.io\/?$/u.test(url.pathname), sessionId);
           }
         } else if (source.lobby === "SBO") {
           const nowMs = this.#now();
@@ -4020,6 +4286,19 @@ export class NetworkObserver {
             this.#sboOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
             await this.#scheduleFreshSocketBaseline(source,
               (url) => /\/socket\.io\/?$/u.test(url.pathname));
+          }
+        } else if (source.lobby === "TSPORT" && this.#onApsportOrphanSocket !== undefined &&
+          ![...this.#webSockets.values()].some((candidate) => candidate.source.sourceId === source.sourceId &&
+            candidate.closing !== true &&
+            this.#isSourceGenerationCurrent(source.sourceId, candidate.sourceGeneration))) {
+          const nowMs = this.#now();
+          const lastAttemptAtMs = this.#apsportOrphanFrameRecoveryAtMs.get(source.sourceId);
+          if (lastAttemptAtMs === undefined ||
+            nowMs - lastAttemptAtMs >= APSPORT_ORPHAN_FRAME_RETRY_MS) {
+            this.#apsportOrphanFrameRecoveryAtMs.set(source.sourceId, nowMs);
+            try {
+              void Promise.resolve(this.#onApsportOrphanSocket(source)).catch(() => undefined);
+            } catch { /* A failed exact-tab renewal is retried after the bounded cooldown. */ }
           }
         } else if (source.lobby === "KSPORT") {
           const payload = isRecord(params.response) && typeof params.response.payloadData === "string"
@@ -5345,11 +5624,36 @@ export class NetworkObserver {
     clocks: { readonly observedAtMs: number; readonly receivedMonotonicMs: number }): void {
     let url: URL;
     try { url = new URL(pending.url); } catch { return; }
-    if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined ||
-      pending.source.lobby !== "IM" || url.hostname !== "imsports.directsb.net" ||
-      url.pathname !== "/api/EventV6/GetSE") return;
+    if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return;
     let parsed: unknown;
     try { parsed = JSON.parse(body); } catch { return; }
+
+    // Keep only APSPORT's completed roster boundary. Detail batches are
+    // deltas, so retaining them would not give a restarted API a complete
+    // catalog. Replaying this roster with its original observation time lets a
+    // replacement local API recover immediately from a transient provider
+    // request failure without presenting old data as newly fetched data.
+    if (pending.source.lobby === "TSPORT" &&
+      url.pathname === "/__fieldline_apsport_catalog_refresh__") {
+      if (!isRecord(parsed) || parsed.schemaVersion !== 1 || parsed.phase !== "ROSTER" ||
+        parsed.complete !== true || !Array.isArray(parsed.records)) return;
+      this.#httpSnapshots.set(pending.source.sourceId, [{
+        source: pending.source, url: pending.url, resourceType: pending.resourceType, body,
+        method: pending.method, observerRequestId: pending.observerRequestId,
+        observerRequestOrdinal: pending.observerRequestOrdinal,
+        requestFrameKey: pending.requestFrameKey, requestDocumentKey: pending.requestDocumentKey,
+        ...(pending.providerPartition === undefined ? {} : { providerPartition: pending.providerPartition }),
+        ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }),
+        ...(pending.providerFunctionCode === undefined ? {} :
+          { providerFunctionCode: pending.providerFunctionCode }),
+        ...(pending.reconcileCutoffSequence === undefined ? {} :
+          { reconcileCutoffSequence: pending.reconcileCutoffSequence }), ...clocks
+      }]);
+      return;
+    }
+
+    if (pending.source.lobby !== "IM" || url.hostname !== "imsports.directsb.net" ||
+      url.pathname !== "/api/EventV6/GetSE") return;
     if (!isRecord(parsed) || parsed.StatusCode !== 100 || !Array.isArray(parsed.sel)) return;
     const existing = this.#httpSnapshots.get(pending.source.sourceId) ?? [];
     // Market 1 and Market 2 can legitimately return byte-identical bodies.
@@ -5408,13 +5712,16 @@ export class NetworkObserver {
     } = {}
   ): Promise<void> {
     const sourceGeneration = metadata.sourceGeneration ?? this.#captureSourceGeneration(source.sourceId);
+    const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const tabGeneration = metadata.tabGeneration ?? this.#captureTabGeneration(source.tabId);
     const previous = this.#emissionTails.get(source.sourceId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(async () => {
       if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
+        this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
         this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
       if (metadata.beforeForward !== undefined && !await metadata.beforeForward()) return;
       if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
+        this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
         this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
       const sequence = this.#sequences.get(source.sourceId) ?? 0;
       try {
@@ -5436,6 +5743,7 @@ export class NetworkObserver {
           this.#clearPreexistingSocketReconnect(source.sourceId);
         }
         if ((this.#sourceGenerations.get(source.sourceId) ?? 0) === sourceGeneration &&
+          this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration &&
           this.#captureTabGeneration(source.tabId) === tabGeneration) {
           this.#sequences.set(source.sourceId, sequence + 1);
         }
@@ -5455,6 +5763,10 @@ export class NetworkObserver {
     return this.#activeWorkGenerations.get(sourceId) ?? this.#sourceGenerations.get(sourceId) ?? 0;
   }
 
+  #captureBridgeGeneration(sourceId: string): number {
+    return this.#bridgeEpochGenerations.get(sourceId) ?? 0;
+  }
+
   #allocateObserverRequestIdentity(): { readonly observerRequestId: string;
     readonly observerRequestOrdinal: number } {
     if (this.#nextObserverRequestOrdinal >= Number.MAX_SAFE_INTEGER) {
@@ -5467,11 +5779,14 @@ export class NetworkObserver {
   }
 
   #publicSourceEpochOrdinal(sourceId: string, sourceGeneration: number): number {
+    const bridgeGeneration = this.#captureBridgeGeneration(sourceId);
     const current = this.#publicSourceEpochs.get(sourceId);
-    if (current?.sourceGeneration === sourceGeneration) return current.ordinal;
+    if (current?.sourceGeneration === sourceGeneration && current.bridgeGeneration === bridgeGeneration) {
+      return current.ordinal;
+    }
     const ordinal = this.#nextPublicEpochOrdinal;
     this.#nextPublicEpochOrdinal += 1;
-    this.#publicSourceEpochs.set(sourceId, { sourceGeneration, ordinal });
+    this.#publicSourceEpochs.set(sourceId, { sourceGeneration, bridgeGeneration, ordinal });
     return ordinal;
   }
 

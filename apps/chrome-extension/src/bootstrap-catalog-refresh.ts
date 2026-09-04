@@ -9,7 +9,7 @@ import type { ChromeLobbyId } from "@tool-chenh/contracts";
  * events with 19 upcoming to 68 with 4 and stayed there - its pre-match list
  * gone, which is most of what another book can be compared against.
  */
-const BOOTSTRAP_CATALOG_LOBBIES: ReadonlySet<ChromeLobbyId> = new Set<ChromeLobbyId>(["SABA", "IM"]);
+const BOOTSTRAP_CATALOG_LOBBIES: ReadonlySet<ChromeLobbyId> = new Set<ChromeLobbyId>(["SABA", "IM", "TSPORT"]);
 
 export interface AttachedLobby {
   readonly lobby: ChromeLobbyId;
@@ -37,4 +37,13 @@ export function bootstrapCatalogSources(
       sourceId: `chrome:${entry.lobby}:${entry.tabId}` });
   }
   return sources;
+}
+
+/** Start each provider's bootstrap independently. One slow authenticated page
+ * must not delay a different provider's current baseline after API restart. */
+export async function refreshBootstrapCatalogSources(
+  sources: readonly BootstrapCatalogSource[],
+  refresh: (source: BootstrapCatalogSource) => Promise<void>
+): Promise<void> {
+  await Promise.all(sources.map((source) => refresh(source).catch(() => undefined)));
 }

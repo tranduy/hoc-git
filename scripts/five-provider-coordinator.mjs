@@ -3,12 +3,12 @@ import { open, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PROVIDERS = new Set(["SABA", "CMD", "APSPORT", "IM", "SBOBET"]);
+const PROVIDERS = new Set(["SABA", "CMD", "APSPORT", "IM", "SBOBET", "BTI"]);
 const EMPTY_STATE = Object.freeze({ version: 3, deployment: null, lastDeployment: null,
   edits: [], acceptances: [] });
 const BUILD_ID_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const PROVIDER_LOBBIES = Object.freeze({ SABA: "SABA", CMD: "CMD", APSPORT: "TSPORT",
-  IM: "IM", SBOBET: "KSPORT" });
+  IM: "IM", SBOBET: "KSPORT", BTI: "BTI" });
 const BUILD_OUTPUT_DIRECTORIES = Object.freeze([
   "packages/contracts/dist", "apps/api/dist", "apps/chrome-extension/dist", "apps/web/dist"
 ]);

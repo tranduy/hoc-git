@@ -65,6 +65,16 @@ test("grants one deployment lease and rejects a competing build or acceptance", 
   assert.equal(second.provider, "CMD");
 }));
 
+test("grants BTI the same deployment lease as every catalog provider", async () => fixture(
+  async (coordinator) => {
+    const deployment = await coordinator.claimDeployment("BTI", "worker-BTI");
+    assert.equal(deployment.provider, "BTI");
+    await coordinator.releaseDeployment(deployment.token, BUILD_ID);
+    const acceptance = await coordinator.beginAcceptance("BTI", "worker-BTI", sourceId("BTI"));
+    assert.equal(acceptance.sourceId, "chrome:BTI:7");
+  }
+));
+
 test("allows disjoint provider edits but freezes all edits during deployment", async () => fixture(async (coordinator) => {
   const edits = [];
   for (const provider of ["SABA", "CMD", "APSPORT", "IM", "SBOBET"]) {

@@ -10,6 +10,7 @@ interface PortalTab extends TabDescriptor {
 interface FabetPortalLauncherOptions {
   readonly query: () => Promise<readonly PortalTab[]>;
   readonly update: (tabId: number, url: string, active: boolean) => Promise<PortalTab>;
+  readonly reload?: (tabId: number) => Promise<PortalTab>;
   readonly focusWindow: (windowId: number) => Promise<void>;
   readonly attachDebugger: (tabId: number) => Promise<void>;
   readonly detachDebugger: (tabId: number) => Promise<void>;
@@ -73,7 +74,9 @@ export class FabetPortalLauncher {
     const portal = initialTabs.find(isFabetPortalTab);
     if (portal?.id === undefined || !portal.url) throw new Error("FABET_PORTAL_TAB_UNAVAILABLE");
     const lobbyUrl = new URL("/lobby-the-thao?type=livesports", portal.url).href;
-    const focused = await this.#options.update(portal.id, lobbyUrl, true);
+    const focused = this.#options.reload !== undefined && new URL(portal.url).href === lobbyUrl
+      ? await this.#options.reload(portal.id)
+      : await this.#options.update(portal.id, lobbyUrl, true);
     if (focused.windowId !== undefined) await this.#options.focusWindow(focused.windowId);
 
     await this.#options.attachDebugger(portal.id);

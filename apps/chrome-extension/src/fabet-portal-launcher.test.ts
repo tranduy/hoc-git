@@ -75,6 +75,41 @@ describe("FabetPortalLauncher", () => {
     expect(navigations.filter(({ tabId }) => tabId === 21)).toEqual([]);
   });
 
+  it("really reloads an already-open canonical sports portal before requesting SABA", async () => {
+    let clicked = false;
+    const fresh = "https://c0z0oa.bpy6vurb.com/(S(fresh))/NewIndex";
+    const reload = vi.fn(async (tabId: number) => ({ id: tabId,
+      url: "https://fabet.markets/lobby-the-thao?type=livesports", title: "Lobby", windowId: 9 }));
+    const update = vi.fn(async (tabId: number, url: string) => ({ id: tabId, url, title: "Lobby" }));
+    const launcher = new FabetPortalLauncher({
+      query: async () => clicked
+        ? [
+            { id: 3, url: "https://fabet.markets/lobby-the-thao?type=livesports", title: "Lobby" },
+            { id: 21, url: fresh, title: "Sports" }
+          ]
+        : [{ id: 3, url: "https://fabet.markets/lobby-the-thao?type=livesports", title: "Lobby" }],
+      update,
+      reload,
+      focusWindow: async () => undefined,
+      attachDebugger: async () => undefined,
+      detachDebugger: async () => undefined,
+      sendCommand: async (_tabId, method, params) => {
+        if (method === "Runtime.evaluate") return { result: { value: { x: 10, y: 20, ready: true } } };
+        if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased") clicked = true;
+        return {};
+      },
+      addCreatedListener: () => undefined,
+      removeCreatedListener: () => undefined,
+      attachSource: async () => undefined,
+      get: async (tabId) => ({ id: tabId, url: fresh, title: "Sports" }),
+      delay: async () => undefined
+    });
+
+    await expect(launcher.launchSaba()).resolves.toMatchObject({ id: 21, url: fresh });
+    expect(reload).toHaveBeenCalledExactlyOnceWith(3);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("never attaches the opaque zenandfe/Volta bootstrap tab as K-Sports", async () => {
     let clicked = false;
     const attachSource = vi.fn(async () => undefined);

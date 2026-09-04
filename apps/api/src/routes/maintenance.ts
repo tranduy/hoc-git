@@ -8,6 +8,7 @@ const PROVIDER_REFRESH_COOLDOWN_MS = 60_000;
 
 interface MaintenanceRouteOptions {
   readonly refreshProvider?: (provider: RefreshableProvider) => Promise<number>;
+  readonly recoverIm?: (url: string) => number;
 }
 
 export function registerMaintenanceRoutes(app: FastifyInstance, maintenance: SessionRefreshControl,
@@ -43,4 +44,17 @@ export function registerMaintenanceRoutes(app: FastifyInstance, maintenance: Ses
       const requested = await options.refreshProvider(refreshableProvider);
       return reply.code(202).send({ provider, requested });
     });
+  app.post<{ Body: { url?: unknown } }>("/api/maintenance/recover-im", async (request, reply) => {
+    if (options.recoverIm === undefined) return reply.code(503).send({ error: "IM_RECOVERY_UNAVAILABLE" });
+    const rawUrl = request.body?.url;
+    let url: URL;
+    try { url = new URL(typeof rawUrl === "string" ? rawUrl : ""); }
+    catch { return reply.code(400).send({ error: "INVALID_IM_RECOVERY_URL" }); }
+    const token = url.searchParams.get("token")?.trim() ?? "";
+    if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "imsports.directsb.net" ||
+      url.username !== "" || url.password !== "" || token.length < 8 || token.length > 512 || url.href.length > 2_048) {
+      return reply.code(400).send({ error: "INVALID_IM_RECOVERY_URL" });
+    }
+    return reply.code(202).send({ provider: "IM", requested: options.recoverIm(url.href) });
+  });
 }

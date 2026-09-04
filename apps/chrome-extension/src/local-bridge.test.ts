@@ -33,6 +33,18 @@ function ksportCatalogChunk(sequence: number, partition: "KSPORT_LIVE" | "KSPORT
   };
 }
 
+function btiAuthFailure(sequence = 0): ChromeBridgeEnvelope {
+  return {
+    version: 1, kind: "NETWORK", lobby: "BTI", sourceId: "chrome:BTI:18", tabId: 18,
+    sourceEpoch: "worker-a:0", sequence, observedAtMs: 1_000, receivedMonotonicMs: 50,
+    transport: "TAB_STATE", request: { hostname: "prod20091.fxf774.com",
+      pathnameClass: "/__fieldline_heartbeat__", resourceType: "Tab" },
+    payload: { encoding: "UTF8", body: JSON.stringify({
+      kind: "PAGE_HEALTH", status: "AUTH_ERROR", code: "1008"
+    }) }
+  };
+}
+
 class FakeSocket implements BridgeSocket {
   readonly sent: string[] = [];
   readonly sentSourceIds: string[] = [];
@@ -116,6 +128,37 @@ describe("LocalBridge", () => {
     expect(sockets[1]!.sent.map((value) => JSON.parse(value).sequence)).toEqual([1]);
   });
 
+  it("resyncs a discontinuous source backlog instead of replaying a manufactured gap", async () => {
+    const sockets = [new FakeSocket(), new FakeSocket()];
+    let socketIndex = 0;
+    const scheduled: Array<() => void> = [];
+    const onSourceResync = vi.fn();
+    const bridge = new LocalBridge({
+      socketFactory: () => sockets[socketIndex++]!, installationKey: "local-key", onSourceResync,
+      setTimer: (callback) => { scheduled.push(callback); return scheduled.length; },
+      clearTimer: () => undefined
+    });
+    bridge.enqueue(envelope(0));
+    bridge.enqueue(envelope(1));
+    bridge.enqueue(envelope(2));
+    bridge.connect();
+    sockets[0]!.open();
+
+    // A control from the retiring API process can acknowledge a middle
+    // entry immediately before the local socket is replaced. Replaying the
+    // remaining [0, 2] to the fresh process manufactures a sequence gap.
+    sockets[0]!.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0", sequence: 1
+    }) });
+    sockets[0]!.close();
+    scheduled[0]!();
+    sockets[1]!.open();
+
+    expect(sockets[1]!.sent).toEqual([]);
+    expect(bridge.pendingSequences()).toEqual([]);
+    expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
+  });
+
   it("replaces a half-open socket when the wake-up alarm observes no server acknowledgement", () => {
     const sockets = [new FakeSocket(), new FakeSocket()];
     let socketIndex = 0;
@@ -158,6 +201,53 @@ describe("LocalBridge", () => {
     expect(bridge.pendingSequences()).toEqual([4]);
     expect(onSourceResync).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
     await vi.waitFor(() => expect(socketIndex).toBe(2));
+  });
+
+  it("keeps the bridge socket when a replacement epoch is already admitted during resync", async () => {
+    const sockets = [new FakeSocket(), new FakeSocket()];
+    let socketIndex = 0;
+    let finishResync!: () => void;
+    const resync = new Promise<void>((resolve) => { finishResync = resolve; });
+    const onSourceResync = vi.fn(async () => resync);
+    const bridge = new LocalBridge({
+      socketFactory: () => sockets[socketIndex++]!, installationKey: "local-key",
+      onSourceResync
+    });
+    await bridge.enqueue(envelope(0, "old-head", "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(12, "old", "chrome:SABA:7", "worker-a:0"));
+    await bridge.enqueue(envelope(13, "old-tail", "chrome:SABA:7", "worker-a:0"));
+    bridge.connect();
+    sockets[0]!.open();
+
+    sockets[0]!.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "REJECT", sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0",
+      sequence: 12, reason: "SEQUENCE_GAP"
+    }) });
+    await bridge.enqueue(envelope(0, "replacement", "chrome:SABA:7", "worker-b:0"));
+    finishResync();
+    await resync;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(socketIndex).toBe(1);
+    expect(sockets[0]!.readyState).toBe(1);
+    expect(sockets[0]!.sent.map((value) => JSON.parse(value).sourceEpoch))
+      .toContain("worker-b:0");
+
+    sockets[0]!.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0", sequence: 0
+    }) });
+    expect(bridge.pendingSequences()).toEqual([0]);
+
+    // The server may already have rejected more than one old queued frame
+    // before it receives sequence zero of the replacement epoch. A delayed
+    // reject for that removed old sequence must not retire the replacement.
+    sockets[0]!.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "REJECT", sourceId: "chrome:SABA:7", sourceEpoch: "worker-a:0",
+      sequence: 13, reason: "SEQUENCE_GAP"
+    }) });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onSourceResync).toHaveBeenCalledTimes(1);
+    expect(bridge.pendingSequences()).toEqual([0]);
   });
 
   it("drops one overflowing source atomically without removing another provider", async () => {
@@ -420,6 +510,45 @@ describe("LocalBridge", () => {
     releaseFirst?.();
     await first;
     await vi.waitFor(() => expect(calls).toEqual(["SABA", "BTI"]));
+  });
+
+  it("does not let BTI renewal retire its auth-failure signal before the API acknowledges it", async () => {
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key" });
+    bridge.connect();
+    socket.open();
+    let settled = false;
+    const pending = bridge.enqueue(btiAuthFailure()).then(() => { settled = true; });
+    await Promise.resolve();
+
+    expect(settled).toBe(false);
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "ACK",
+      sourceId: "chrome:BTI:18", sequence: 0 }) });
+    await pending;
+    expect(settled).toBe(true);
+  });
+
+  it("does not queue exact-tab CMD restore behind a slow provider bootstrap", async () => {
+    const socket = new FakeSocket();
+    let releaseBootstrap: (() => void) | undefined;
+    const bootstrap = new Promise<void>((resolve) => { releaseBootstrap = resolve; });
+    const onSourceRestore = vi.fn(async () => undefined);
+    const bridge = new LocalBridge({
+      socketFactory: () => socket,
+      installationKey: "local-key",
+      onSourceEnsure: async () => bootstrap,
+      onSourceRestore
+    });
+    bridge.connect();
+    socket.open();
+
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "ENSURE_SOURCE", lobby: "SABA",
+      url: "https://c0z0ob.bpd3a3fn.com/sports?token=opaque" }) });
+    socket.onmessage?.({ data: JSON.stringify({ version: 1, kind: "RESTORE_SOURCE", lobby: "CMD" }) });
+
+    expect(onSourceRestore).toHaveBeenCalledExactlyOnceWith("CMD");
+    releaseBootstrap?.();
+    await bootstrap;
   });
 
   it("forwards a restore-source command for a closed provider tab", () => {

@@ -99,7 +99,8 @@ function apiEnvelope(
   complete = true,
   generation = "apsport:7:1",
   prematchWindowHours = 24,
-  trigger?: "SWEEP" | "EVENT_CHANGE"
+  trigger?: "SWEEP" | "EVENT_CHANGE",
+  verifiedEmpty = records.length === 0
 ): ChromeBridgeEnvelope {
   return {
     version: 1, kind: "NETWORK", lobby: "TSPORT", sourceId: SOURCE_ID, tabId: 7,
@@ -109,7 +110,8 @@ function apiEnvelope(
     request: { hostname: "pacific.agenate.com",
       pathnameClass: "/__fieldline_apsport_catalog_refresh__", resourceType: "Fetch" },
     payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 1, generation, phase, complete,
-      ...(trigger === undefined ? {} : { trigger }), prematchWindowHours, records }) }
+      ...(trigger === undefined ? {} : { trigger }), ...(verifiedEmpty ? { verifiedEmpty: true } : {}),
+      prematchWindowHours, records }) }
   };
 }
 
@@ -147,6 +149,14 @@ function beginFreshStream(
 }
 
 describe("TsportWsCatalogAdapter", () => {
+  it("refuses an unverified empty API roster instead of erasing the last good catalog", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    expect(adapter.decode(apiEnvelope([event(101, "API Home")], 1))).toHaveLength(1);
+
+    expect(adapter.decode(apiEnvelope([], 2, "ROSTER", true, "apsport:7:2", 24, undefined, false)))
+      .toEqual([]);
+  });
+
   it("adopts live socket fixtures when the roster established empty", () => {
     // Measured 2026-08-31: with the provider tab on its live view the page never
     // issues the list request the roster is captured from, so the roster arrives

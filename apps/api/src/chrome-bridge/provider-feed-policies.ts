@@ -18,10 +18,10 @@ function policy(expectedEvidenceCadenceMs: number, maxBaselineAgeMs: number,
 const SEMANTIC_SILENCE_LIMIT_MS = 60_000;
 
 /**
- * The operator contract, set 2026-08-31: no book may go longer than 30 seconds
- * without answering with decodable data. Every provider therefore expects
- * evidence inside this window and starts soft recovery - a lobby snapshot
- * request, which reloads and navigates nothing - the moment it lapses.
+ * The operator contract, set 2026-08-31: realtime transports normally answer
+ * within 30 seconds and start soft recovery when that window lapses. APSPORT's
+ * authoritative roster is the measured exception below: its one-minute HTTP
+ * generation needs an additional 30-second completion grace.
  *
  * Measured cadences on live tabs are all far inside it (CMD/SABA/BTI 2-5 s,
  * SBOBET sub-second once socket receipts fold into the HTTP baseline, IM 15 s
@@ -58,13 +58,19 @@ const SABA_HARD_RECOVERY_AFTER_MS = 180_000;
 // roster request can take about eight seconds before the replacement baseline
 // lands, so the accepted evidence/freshness budget includes a 30-second grace.
 // Valid duplicate `eu` events prove transport liveness without publishing a
-// semantic catalog revision, while changed events remain normal WS deltas. The
-// baseline lease still covers two periodic API generations.
+// semantic catalog revision, while changed events remain normal WS deltas.
+//
+// The complete refresh does not finish with the roster: it walks every event
+// detail sequentially and deliberately waits 500 ms between requests. With the
+// 212-event production roster observed on 2026-09-02, delay alone is 106 s;
+// request latency plus the next 25 s scheduler tick can exceed the former 120 s
+// lease even while socket evidence remains fresh. Four roster intervals bound
+// that healthy sweep without weakening the independent 90 s evidence check.
 const APSPORT_API_REFRESH_INTERVAL_MS = 60_000;
 const APSPORT_ROSTER_GRACE_MS = 30_000;
 const APSPORT_EXPECTED_EVIDENCE_CADENCE_MS =
   APSPORT_API_REFRESH_INTERVAL_MS + APSPORT_ROSTER_GRACE_MS;
-const APSPORT_MAX_BASELINE_AGE_MS = 2 * APSPORT_API_REFRESH_INTERVAL_MS;
+const APSPORT_MAX_BASELINE_AGE_MS = 4 * APSPORT_API_REFRESH_INTERVAL_MS;
 // Entering SOFT_RECOVERY makes the catalog unavailable to the UI, so it must
 // not happen before the same evidence-cadence deadline used by read(). Hard
 // recovery still waits for the complete baseline lease.
@@ -102,8 +108,16 @@ export const providerFeedPolicies = new Map<string, ProviderFeedPolicy>([
   // baseline lease so a reload can actually converge.
   ["catalog-source:SBOBET:FOOTBALL", policy(REALTIME_CONTRACT_MS, 120_000,
     REALTIME_CONTRACT_MS, 180_000, ["WS", "AUTHENTICATED_HTTP"])],
-  ["catalog-source:APSPORT:FOOTBALL", policy(REALTIME_CONTRACT_MS, APSPORT_MAX_BASELINE_AGE_MS,
-    REALTIME_CONTRACT_MS, APSPORT_HARD_RECOVERY_AFTER_MS, ["WS", "AUTHENTICATED_HTTP"])],
+  ["catalog-source:APSPORT:FOOTBALL", {
+    ...policy(APSPORT_EXPECTED_EVIDENCE_CADENCE_MS, APSPORT_MAX_BASELINE_AGE_MS,
+      APSPORT_SOFT_RECOVERY_AFTER_MS, APSPORT_HARD_RECOVERY_AFTER_MS,
+      ["WS", "AUTHENTICATED_HTTP"]),
+    // A complete roster is itself the semantic renewal for AP. Do not demote
+    // it at the generic 60 s quiet-price threshold while that 60-180 s roster
+    // operation is still healthy; the independent 90 s evidence bound still
+    // catches a source that has stopped yielding decodable provider data.
+    maxSemanticSilenceMs: APSPORT_MAX_BASELINE_AGE_MS
+  }],
   ["catalog-source:BTI:FOOTBALL", policy(REALTIME_CONTRACT_MS, BTI_MAX_BASELINE_AGE_MS,
     REALTIME_CONTRACT_MS, 60_000, ["AUTHENTICATED_HTTP"])]
 ]);

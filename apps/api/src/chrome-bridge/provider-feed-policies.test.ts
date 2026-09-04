@@ -8,19 +8,20 @@ const before = {
 
 const REALTIME_CONTRACT_MS = 30_000;
 
-describe("provider feed policies under the 30s realtime contract (2026-08-31)", () => {
-  it("holds every provider to the same 30s evidence and soft-recovery contract", () => {
+describe("provider feed policies under measured realtime contracts (2026-09-02)", () => {
+  it("holds realtime providers to 30s while allowing APSPORT's measured 90s roster window", () => {
     // The operator rule: no book may go longer than 30 seconds without
     // answering with decodable data. Waiting longer than the contract before
     // asking for a snapshot is what let SABA freeze for 5.5 minutes and
     // APSPORT for 2 minutes while their strips still read ACTIVE.
     for (const [accountId, policy] of providerFeedPolicies) {
+      const expectedMs = accountId === "catalog-source:APSPORT:FOOTBALL" ? 90_000 : REALTIME_CONTRACT_MS;
       expect(policy.expectedEvidenceCadenceMs,
-        `${accountId} must expect evidence within the contract`).toBe(REALTIME_CONTRACT_MS);
+        `${accountId} must use its measured evidence window`).toBe(expectedMs);
       expect(policy.catalogFreshnessMs,
-        `${accountId} must not serve a catalog older than the contract`).toBe(REALTIME_CONTRACT_MS);
+        `${accountId} must not serve a catalog older than its evidence window`).toBe(expectedMs);
       expect(policy.softRecoveryAfterMs,
-        `${accountId} must start recovery at the contract`).toBe(REALTIME_CONTRACT_MS);
+        `${accountId} must start recovery at its evidence window`).toBe(expectedMs);
     }
   });
 
@@ -43,7 +44,7 @@ describe("provider feed policies under the 30s realtime contract (2026-08-31)", 
       { provider: "SBOBET", beforeExpectedMs: 60_000, beforeSoftMs: 60_000,
         afterExpectedMs: 30_000, afterSoftMs: 30_000 },
       { provider: "APSPORT", beforeExpectedMs: 90_000, beforeSoftMs: 90_000,
-        afterExpectedMs: 30_000, afterSoftMs: 30_000 },
+        afterExpectedMs: 90_000, afterSoftMs: 90_000 },
       { provider: "BTI", beforeExpectedMs: 45_000, beforeSoftMs: 15_000,
         afterExpectedMs: 30_000, afterSoftMs: 30_000 }
     ]);

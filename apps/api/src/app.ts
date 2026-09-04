@@ -56,6 +56,7 @@ export interface AppOptions {
   };
   readonly maintenance?: SessionRefreshControl;
   readonly refreshProvider?: (provider: RefreshableProvider) => Promise<number>;
+  readonly recoverIm?: (url: string) => number;
   readonly cmdHiddenMarketProbe?: CmdHiddenMarketProbeLike;
   readonly pipelineDiagnostics?: PipelineDiagnosticsLike;
 }
@@ -183,8 +184,10 @@ export function buildApp(runtime: Runtime, options: AppOptions = {}): FastifyIns
   if (options.twoLegPreflight !== undefined) registerTwoLegPreflightRoutes(app, options.twoLegPreflight, options.betHistory);
   if (options.receiptProtocol !== undefined) registerReceiptProtocolRoute(app, options.receiptProtocol);
   if (options.betHistory !== undefined) registerBetHistoryRoute(app, options.betHistory);
-  if (options.maintenance !== undefined) registerMaintenanceRoutes(app, options.maintenance,
-    options.refreshProvider === undefined ? {} : { refreshProvider: options.refreshProvider });
+  if (options.maintenance !== undefined) registerMaintenanceRoutes(app, options.maintenance, {
+    ...(options.refreshProvider === undefined ? {} : { refreshProvider: options.refreshProvider }),
+    ...(options.recoverIm === undefined ? {} : { recoverIm: options.recoverIm })
+  });
   if (options.cmdHiddenMarketProbe !== undefined) {
     registerCmdHiddenMarketProbeRoute(app, options.cmdHiddenMarketProbe);
   }

@@ -68,4 +68,33 @@ describe("maintenance routes", () => {
     expect(response.json()).toEqual({ error: "INVALID_PROVIDER" });
     await app.close();
   });
+
+  it("recovers the existing IM tab only from a loopback-supplied authenticated IM launch", async () => {
+    const recoverIm = vi.fn(() => 1);
+    const app = Fastify();
+    registerMaintenanceRoutes(app, new SessionRefreshControl({ refresh: async () => undefined }), { recoverIm });
+
+    const response = await app.inject({ method: "POST", url: "/api/maintenance/recover-im",
+      payload: { url: "https://imsports.directsb.net/?languageCode=vi&token=opaque-launch" } });
+
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toEqual({ provider: "IM", requested: 1 });
+    expect(recoverIm).toHaveBeenCalledWith(
+      "https://imsports.directsb.net/?languageCode=vi&token=opaque-launch");
+    await app.close();
+  });
+
+  it("rejects tokenless or non-IM recovery navigation", async () => {
+    const recoverIm = vi.fn(() => 1);
+    const app = Fastify();
+    registerMaintenanceRoutes(app, new SessionRefreshControl({ refresh: async () => undefined }), { recoverIm });
+
+    for (const url of ["https://imsports.directsb.net/?languageCode=vi", "https://example.test/?token=x"] as const) {
+      const response = await app.inject({ method: "POST", url: "/api/maintenance/recover-im", payload: { url } });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ error: "INVALID_IM_RECOVERY_URL" });
+    }
+    expect(recoverIm).not.toHaveBeenCalled();
+    await app.close();
+  });
 });

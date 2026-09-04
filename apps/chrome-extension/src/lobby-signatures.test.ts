@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { confirmLobbyFingerprint, recognizeExpectedLobbyTab, recognizeLobbyTab,
-  shouldPreserveKsportObserver } from "./lobby-signatures.js";
+  shouldPreserveKsportObserver, shouldPreserveSabaObserver } from "./lobby-signatures.js";
 
 const configuredHosts = [
   ["IM", "imsports.directsb.net"],
@@ -46,6 +46,32 @@ describe("lobby tab recognition", () => {
     expect(recognizeLobbyTab({ id: 15,
       url: "https://c0z0ob.bpd3a3fn.com/(S(expired))/VendorGame/ErrorPage?Game=DepositLogin&ErrCode=SPA-1008",
       title: "" })).toBeNull();
+  });
+
+  it("does not recognize a SABA event-detail page as the catalog source", () => {
+    const detail = { id: 16,
+      url: "https://c0z0oa.bpy6vurb.com/(S(session))/NewIndex?lang=vn&matchid=132645303&leaguekey=43&scmt=tab02&ssmt=tab02",
+      title: "Sports" };
+
+    expect(recognizeLobbyTab(detail)).toBeNull();
+    expect(recognizeExpectedLobbyTab(detail, "SABA")).toBeNull();
+  });
+
+  it("keeps an existing SABA observer across its provider-owned detail URL", () => {
+    const detail = { id: 16,
+      url: "https://c0z0oa.bpy6vurb.com/(S(session))/NewIndex?lang=vn&matchid=132645303&leaguekey=43",
+      title: "Sports" };
+
+    expect(shouldPreserveSabaObserver("SABA", detail)).toBe(true);
+    expect(shouldPreserveSabaObserver("SABA", { id: 16,
+      url: "https://c0z0oa.bpy6vurb.com/(S(session))/VendorGame/Index?lang=vn",
+      title: "Sports" })).toBe(true);
+    expect(shouldPreserveSabaObserver("IM", detail)).toBe(false);
+    expect(shouldPreserveSabaObserver("SABA", { ...detail,
+      url: "https://c0z0oa.bpy6vurb.com/(S(session))/VendorGame/ErrorPage?ErrCode=SPA-1008" }))
+      .toBe(false);
+    expect(shouldPreserveSabaObserver("SABA", { id: 16,
+      url: "https://c0z0oa.bpy6vurb.com.evil.test/NewIndex?matchid=1" })).toBe(false);
   });
 
   it("preserves only an already-baselined KSPORT observer across an outer-shell transition", () => {

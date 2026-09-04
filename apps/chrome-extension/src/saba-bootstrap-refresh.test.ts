@@ -6,7 +6,8 @@ describe("retrySabaBootstrapRefresh", () => {
     const delays: number[] = [];
     const refresh = vi.fn(async () => undefined);
 
-    await retrySabaBootstrapRefresh(refresh, async (delayMs) => { delays.push(delayMs); });
+    await retrySabaBootstrapRefresh(refresh, () => false,
+      async (delayMs) => { delays.push(delayMs); });
 
     expect(delays).toEqual([0, 1_000, 5_000, 15_000, 30_000]);
     expect(refresh).toHaveBeenCalledTimes(5);
@@ -17,7 +18,20 @@ describe("retrySabaBootstrapRefresh", () => {
       .mockRejectedValueOnce(new Error("SABA_SOCKET_CONTEXT_NOT_READY"))
       .mockResolvedValue(undefined);
 
-    await expect(retrySabaBootstrapRefresh(refresh, async () => undefined)).resolves.toBeUndefined();
+    await expect(retrySabaBootstrapRefresh(refresh, () => false,
+      async () => undefined)).resolves.toBeUndefined();
     expect(refresh).toHaveBeenCalledTimes(5);
+  });
+
+  it("stops retrying as soon as the SABA socket baseline is complete", async () => {
+    let ready = false;
+    const refresh = vi.fn(async () => { ready = true; });
+    const delays: number[] = [];
+
+    await retrySabaBootstrapRefresh(refresh, () => ready,
+      async (delayMs) => { delays.push(delayMs); });
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(delays).toEqual([0]);
   });
 });

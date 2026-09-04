@@ -10,7 +10,7 @@ interface SourceTabRecoveryOptions {
   readonly listAttached: () => readonly AttachedSource[];
   readonly query: () => Promise<readonly TabDescriptor[]>;
   readonly update: (tabId: number, url: string) => Promise<TabDescriptor>;
-  readonly reload?: (tabId: number) => Promise<TabDescriptor>;
+  readonly reload?: (tabId: number, lobby: ChromeLobbyId) => Promise<TabDescriptor>;
   readonly create: (url: string, active: boolean) => Promise<TabDescriptor>;
   readonly remove?: (tabId: number) => Promise<void>;
   readonly attach: (tab: TabDescriptor) => Promise<void>;
@@ -29,8 +29,20 @@ interface SourceTabRecoveryOptions {
   readonly delay?: (delayMs: number) => Promise<void>;
   readonly onBootstrapStart?: (tabId: number) => void;
   readonly onBootstrapFailure?: (tabId: number) => void;
+  readonly beginSourceEpoch?: (sourceId: string) => void;
   readonly validateReady?: (tab: TabDescriptor, lobby: ChromeLobbyId) => Promise<boolean>;
 }
+
+export const SABA_DIRECT_LOBBY_URL =
+  "https://c0z0oa.bpd3a3fn.com/NewIndex?lang=vn&webskintype=3&scmt=tab02&ssmt=tab02";
+export const BTI_DIRECT_LOBBY_URL =
+  "https://prod20091.fxf774.com/vi/asian-view/today/B%C3%B3ng-%C4%91%C3%A1?operatorToken=logout";
+
+const directLobbyUrls: Partial<Record<ChromeLobbyId, string>> = {
+  SABA: SABA_DIRECT_LOBBY_URL,
+  BTI: BTI_DIRECT_LOBBY_URL
+};
+const SABA_PRE_RELOAD_BASELINE_ATTEMPTS = 60;
 
 export class SourceTabRecovery {
   readonly #options: SourceTabRecoveryOptions;
@@ -41,19 +53,17 @@ export class SourceTabRecovery {
   async ensure(lobby: ChromeLobbyId, url: string): Promise<void> {
     const recognized = recognizeExpectedLobbyTab({ id: 0, url }, lobby);
     if (recognized?.lobby !== lobby) throw new Error("UNTRUSTED_LAUNCH_URL");
-    if (lobby === "KSPORT" && !hasKsportToken(url)) {
-      throw new Error("FABET_KSPORT_TOKEN_UNAVAILABLE");
-    }
     const launchUrl = lobby === "KSPORT" ? ksportFootballLaunchUrl(url) : url;
 
     const currentTabs = await this.#options.query();
     const attachedTabIds = new Set(this.#options.listAttached()
       .filter((source) => source.lobby === lobby).map((source) => source.tabId));
     const recognizedTabs = currentTabs.filter((tab) => tab.id !== undefined &&
-      recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby);
+      isRecoveryTabForLobby(tab, lobby));
     const existing = recognizedTabs.find((tab) => attachedTabIds.has(tab.id!)) ?? recognizedTabs[0];
     if (existing?.id !== undefined) {
       await this.#reuse(existing, lobby, launchUrl, false);
+      await this.#removeRecoveryDuplicates(lobby, recognizedTabs, existing.id);
       return;
     }
 
@@ -121,30 +131,40 @@ export class SourceTabRecovery {
   async restore(lobby: ChromeLobbyId): Promise<void> {
     const remembered = await this.#options.loadRemembered?.(lobby) ?? null;
     const currentTabs = await this.#options.query();
-    const existing = currentTabs.find((tab) => tab.id !== undefined &&
-      recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby);
-    if (lobby === "SABA" && this.#options.launchFromPortal !== undefined) {
-      if (existing?.id !== undefined && existing.url !== undefined) {
-        // A SABA launch URL is a one-time session entry, but the page it opened
-        // can remain authenticated for hours. A delayed baseline is not proof
-        // that this structurally valid tab is dead: replacing it creates a
-        // short-lived popup that can displace the healthy tab in API authority.
-        // Attach and let the normal same-tab bootstrap/recovery cadence retry;
-        // portal launch is reserved for the case where no SABA tab exists.
-        await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))(existing, lobby);
+    const recoveryTabs = currentTabs.filter((tab) => tab.id !== undefined &&
+      isRecoveryTabForLobby(tab, lobby));
+    const attachedTabIds = new Set(this.#options.listAttached()
+      .filter((source) => source.lobby === lobby).map((source) => source.tabId));
+    const existing = recoveryTabs.find((tab) => attachedTabIds.has(tab.id!)) ?? recoveryTabs[0];
+    if (lobby === "IM") {
+      // A tokenless IM URL works only while an already-authenticated document
+      // and profile session survive; it cannot recreate a missing IM session.
+      // Preserve a visible authenticated page exactly as-is and never replay a
+      // remembered one-time token automatically.
+      if (existing?.id === undefined) throw new Error("SOURCE_RESTORE_UNAVAILABLE:IM");
+      await (this.#options.attachBootstrap ?? ((tab) => this.#options.attach(tab)))(existing, "IM");
+      return;
+    }
+    const directUrl = directLobbyUrls[lobby];
+    if (directUrl !== undefined) {
+      if (existing?.id !== undefined) {
+        const existingSabaSession = lobby === "SABA" && existing.url !== undefined
+          ? sabaExistingSessionRecovery(existing.url) : null;
+        // Keep a healthy provider-minted /(S(...))/ path. Dropping that path
+        // during a scheduled or hard recovery can leave a visually loaded
+        // SABA shell without its Socket.IO catalog. Error documents still use
+        // the canonical tokenless entry so the provider can mint a new session.
+        await this.#reuse({ ...existing, title: undefined }, lobby,
+          existingSabaSession?.url ?? directUrl, existingSabaSession?.reload ?? false);
+        await this.#removeRecoveryDuplicates(lobby, recoveryTabs, existing.id);
         return;
       }
-      const sourceMarkerUrl = remembered ?? existing?.url;
-      // The portal is the authority that issues SABA's next one-time URL. A
-      // marker is useful for validating an API-delivered launch, but it must
-      // not be required after an MV3 extension reload clears storage.session.
-      await this.#waitForLobby(await this.#options.launchFromPortal(
-        lobby, sourceMarkerUrl ?? undefined
-      ), lobby);
+      await this.ensure(lobby, directUrl);
       return;
     }
     if (existing?.id !== undefined && existing.url !== undefined) {
       await this.#reuse(existing, lobby, existing.url, true);
+      await this.#removeRecoveryDuplicates(lobby, recoveryTabs, existing.id);
       return;
     }
     if (this.#options.listAttached().some((source) => source.lobby === lobby)) return;
@@ -176,11 +196,23 @@ export class SourceTabRecovery {
 
   async #reuse(tab: TabDescriptor, lobby: ChromeLobbyId, url: string, reload: boolean): Promise<void> {
     if (tab.id === undefined) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
+    this.#options.beginSourceEpoch?.(`chrome:${lobby}:${tab.id}`);
     this.#options.onBootstrapStart?.(tab.id);
     try {
       await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))({ ...tab, url }, lobby);
+      if (reload && lobby === "SABA") {
+        try {
+          // Reattaching the observer starts SABA's lightweight in-page socket
+          // recovery. Give that recovery a short window before destroying the
+          // document: in production it can restore a complete socket baseline
+          // while resetSabaSocketWorker is still preparing the later reload.
+          // Reload only when this cheaper same-tab recovery really failed.
+          await this.#waitForLobby(tab, lobby, SABA_PRE_RELOAD_BASELINE_ATTEMPTS);
+          return;
+        } catch { /* no complete baseline yet; continue with the exact-tab reload */ }
+      }
       const navigated = reload && this.#options.reload !== undefined
-        ? await this.#options.reload(tab.id)
+        ? await this.#options.reload(tab.id, lobby)
         : await this.#options.update(tab.id, url);
       await this.#waitForLobby(navigated, lobby);
     } catch (error) {
@@ -189,7 +221,18 @@ export class SourceTabRecovery {
     }
   }
 
-  async #waitForLobby(tab: TabDescriptor, lobby: ChromeLobbyId): Promise<TabDescriptor> {
+  async #removeRecoveryDuplicates(
+    lobby: ChromeLobbyId,
+    tabs: readonly TabDescriptor[],
+    keepTabId: number
+  ): Promise<void> {
+    if (lobby !== "SABA" || this.#options.remove === undefined) return;
+    await Promise.all(tabs.filter((tab) => tab.id !== undefined && tab.id !== keepTabId)
+      .map((tab) => this.#options.remove!(tab.id!).catch(() => undefined)));
+  }
+
+  async #waitForLobby(tab: TabDescriptor, lobby: ChromeLobbyId,
+    maxAttemptsOverride?: number): Promise<TabDescriptor> {
     if (await this.#isReady(tab, lobby)) return tab;
     if (tab.id === undefined || !this.#options.get) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
     const delay = this.#options.delay ?? ((delayMs: number) =>
@@ -197,7 +240,7 @@ export class SourceTabRecovery {
     // KSPORT is only ready after both the live and today STOMP baselines have
     // completed. Switching the sportsbook view to collect the second baseline
     // can legitimately take longer than the generic five-second tab check.
-    const maxAttempts = lobby === "KSPORT" || lobby === "SABA" ? 240 : 20;
+    const maxAttempts = maxAttemptsOverride ?? (lobby === "KSPORT" || lobby === "SABA" ? 240 : 20);
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       await delay(250);
       const current = await this.#options.get(tab.id);
@@ -213,19 +256,52 @@ export class SourceTabRecovery {
 
 }
 
+function isRecoveryTabForLobby(tab: TabDescriptor, lobby: ChromeLobbyId): boolean {
+  if (recognizeExpectedLobbyTab(tab, lobby)?.lobby === lobby) return true;
+  if (lobby !== "SABA" || tab.url === undefined) return false;
+  if (isSabaOwnedTab(tab.url)) return true;
+  const lobbyUrl = sabaLobbyUrlFromDetail(tab.url);
+  return lobbyUrl !== null &&
+    recognizeExpectedLobbyTab({ ...tab, url: lobbyUrl }, "SABA")?.lobby === "SABA";
+}
+
+function isSabaOwnedTab(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return /^c0z0o[a-z0-9]+\.bp[a-z0-9]+\.com$/iu.test(hostname) &&
+      !/^c0z0o[a-z0-9]+\.(?:bpb7jrm5|bpf7t7s9)\.com$/iu.test(hostname);
+  } catch {
+    return false;
+  }
+}
+
+function sabaLobbyUrlFromDetail(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (!url.searchParams.get("matchid")?.trim()) return null;
+    for (const key of ["matchid", "leaguekey", "scmt", "ssmt"]) url.searchParams.delete(key);
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function sabaExistingSessionRecovery(value: string): { readonly url: string; readonly reload: boolean } | null {
+  try {
+    const url = new URL(value);
+    if (!isSabaOwnedTab(url.href) || !url.pathname.toLowerCase().endsWith("/newindex")) return null;
+    const lobbyUrl = sabaLobbyUrlFromDetail(url.href);
+    return lobbyUrl === null ? { url: url.href, reload: true } : { url: lobbyUrl, reload: false };
+  } catch {
+    return null;
+  }
+}
+
 function isReadyLobbyTab(tab: TabDescriptor, lobby: ChromeLobbyId): boolean {
   if (recognizeExpectedLobbyTab(tab, lobby)?.lobby !== lobby) return false;
   if (lobby !== "KSPORT") return true;
   const title = tab.title?.trim() ?? "";
   return /sportsbook/iu.test(title) && !/volta|something went wrong/iu.test(title);
-}
-
-function hasKsportToken(value: string): boolean {
-  try {
-    return Boolean(new URL(value).searchParams.get("token")?.trim());
-  } catch {
-    return false;
-  }
 }
 
 function ksportFootballLaunchUrl(value: string): string {

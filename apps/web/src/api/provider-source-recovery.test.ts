@@ -36,6 +36,19 @@ describe("ProviderSourceRecoveryApi", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it("does not navigate APSPORT when its automatic roster snapshot needs longer than ten seconds", async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(json({ sources: [{ lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7,
+        state: "STALE", lastSequence: 10, lastAcceptedAtMs: 2_000, reason: null,
+        authorityDisposition: "ACTIVE" }] }))
+      .mockResolvedValueOnce(json({ sourceId: "chrome:TSPORT:7", requested: 1 }, 202));
+
+    await expect(new ProviderSourceRecoveryApi(fetcher).recover("APSPORT", "AUTO"))
+      .rejects.toThrow("FRESH_BASELINE_NOT_CONFIRMED");
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("falls back to a targeted hard refresh when the in-page snapshot has no fresh baseline", async () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(json({ sources: [{ lobby: "CMD", sourceId: "chrome:CMD:7", tabId: 7,
