@@ -24,6 +24,48 @@ function catalog(provider: "SABA" | "SBOBET", accountId: string, odds: readonly 
 }
 
 describe("ComparisonWorkerEngine", () => {
+  it("keeps complete markets when a provider reuses the same market id across events", () => {
+    const withSecondEvent = (base: LiveCatalogResponse): LiveCatalogResponse => {
+      const secondEventId = `${base.accountId}-second-event`;
+      const secondMarketId = base.markets[0]!.providerMarketId;
+      return { ...base,
+        events: [...base.events, { ...base.events[0]!, providerEventId: secondEventId,
+          participantA: "Rosenborg", participantB: "Brann", startAtUtcMs: 2_060_000 }],
+        markets: [...base.markets, { ...base.markets[0]!, providerEventId: secondEventId,
+          providerMarketId: secondMarketId }],
+        quotes: [...base.quotes, ...base.quotes.map((quote) => ({ ...quote,
+          providerEventId: secondEventId, providerMarketId: secondMarketId,
+          providerSelectionId: `${secondEventId}-${quote.selection}` }))] };
+    };
+    const engine = new ComparisonWorkerEngine();
+
+    const output = engine.apply({ type: "RESET", generation: 1, staleAccountIds: [],
+      catalogs: [withSecondEvent(catalog("SABA", "saba-account", ["2.20", "1.80"])),
+        withSecondEvent(catalog("SBOBET", "sbobet-account", ["2.10", "1.90"]))] });
+
+    expect(output.displayEvents.filter((event) => event.providers.length === 2)).toHaveLength(2);
+  });
+
+  it("does not discard complete tickets because another market is incomplete", () => {
+    const saba = catalog("SABA", "saba-account", ["2.20", "1.80"]);
+    const incompleteEventId = "saba-incomplete-event";
+    const incompleteMarketId = "saba-incomplete-total";
+    const partlyUsable = { ...saba,
+      events: [...saba.events, { ...saba.events[0]!, providerEventId: incompleteEventId,
+        participantA: "Rosenborg", participantB: "Brann", startAtUtcMs: 2_060_000 }],
+      markets: [...saba.markets, { ...saba.markets[0]!, providerEventId: incompleteEventId,
+        providerMarketId: incompleteMarketId }],
+      quotes: [...saba.quotes, { ...saba.quotes[0]!, providerEventId: incompleteEventId,
+        providerMarketId: incompleteMarketId, providerSelectionId: "incomplete-over" }] };
+    const engine = new ComparisonWorkerEngine();
+
+    const output = engine.apply({ type: "RESET", generation: 1, staleAccountIds: [],
+      catalogs: [partlyUsable, catalog("SBOBET", "sbobet-account", ["2.10", "1.90"])] });
+
+    expect(output.displayEvents.find((event) => event.event.participantA === "Kristiansund BK")?.providers)
+      .toEqual(["SABA", "SBOBET"]);
+  });
+
   it("compares one list once when the display and fresh lists are the same list", () => {
     // Nothing stale and every catalog atomic makes the two lists identical, and
     // comparing an identical list twice spends 227ms at the sizes measured on

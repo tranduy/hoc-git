@@ -479,7 +479,7 @@ describe("LiveCatalogPage", () => {
       sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
     });
     const providerCatalog = (provider: "SBOBET" | "APSPORT"): LiveCatalogResponse => ({
-      ...catalog, accountId: `catalog-source:${provider}:FOOTBALL`, provider,
+      ...catalog, accountId: `catalog-source:${provider}:FOOTBALL`, provider, observedAtMs: Date.now(),
       events: [{ ...event, provider, providerEventId: `${provider}-event` }],
       markets: [{ ...market, provider, providerEventId: `${provider}-event`, providerMarketId: `${provider}-market` }],
       quotes: quotes.map((quote) => ({ ...quote, provider, providerEventId: `${provider}-event`,

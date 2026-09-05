@@ -27,14 +27,13 @@ export class ComparisonWorkerEngine {
       this.#stale.clear();
       for (const catalog of command.catalogs) {
         this.#catalogs.set(catalog.accountId, catalog);
-        if (isAtomicComparisonCatalog(catalog)) this.#displayCatalogs.set(catalog.accountId, catalog);
+        this.#displayCatalogs.set(catalog.accountId, completeDisplayCatalog(catalog));
       }
       for (const accountId of command.staleAccountIds) this.#stale.add(accountId);
     } else if (command.type === "UPSERT") {
       this.#catalogs.set(command.catalog.accountId, command.catalog);
-      if (isAtomicComparisonCatalog(command.catalog)) {
-        this.#displayCatalogs.set(command.catalog.accountId, command.catalog);
-      }
+      this.#displayCatalogs.set(command.catalog.accountId,
+        completeDisplayCatalog(command.catalog, this.#displayCatalogs.get(command.catalog.accountId)));
       if (command.stale) this.#stale.add(command.catalog.accountId);
       else this.#stale.delete(command.catalog.accountId);
     } else if (command.type === "SET_STALE") {
@@ -50,7 +49,7 @@ export class ComparisonWorkerEngine {
     const freshCatalogs = catalogs.filter((catalog) => !this.#stale.has(catalog.accountId));
     const displayEvents = buildComparisonEvents(displayCatalogs, this.#competitionMemory).map(project);
     // The two lists are the same list whenever nothing is stale and every
-    // catalog is atomic, which is most of the time, and comparing a list twice
+    // supported market is complete, which is most of the time. Comparing a list twice
     // spends the same 227ms to reach the answer already in hand - 44 times a
     // minute at the sizes measured 2026-08-29, a third of a core for nothing.
     const output = { generation: command.generation, displayEvents,
@@ -78,16 +77,46 @@ function sameCatalogs(left: readonly LiveCatalogResponse[],
   return left.length === right.length && left.every((catalog, index) => catalog === right[index]);
 }
 
-function isAtomicComparisonCatalog(catalog: LiveCatalogResponse): boolean {
+function marketIdentity(item: { readonly providerEventId: string; readonly providerMarketId: string }): string {
+  return `${item.providerEventId}\u0000${item.providerMarketId}`;
+}
+
+function completeDisplayCatalog(catalog: LiveCatalogResponse,
+  previous?: LiveCatalogResponse): LiveCatalogResponse {
   const quotesByMarket = new Map<string, typeof catalog.quotes>();
   for (const quote of catalog.quotes) {
-    quotesByMarket.set(quote.providerMarketId, [...(quotesByMarket.get(quote.providerMarketId) ?? []), quote]);
+    const key = marketIdentity(quote);
+    quotesByMarket.set(key, [...(quotesByMarket.get(key) ?? []), quote]);
   }
+  const previousMarkets = new Map(previous?.markets.map((market) => [marketIdentity(market), market]) ?? []);
+  const previousQuotes = new Map<string, typeof catalog.quotes>();
+  for (const quote of previous?.quotes ?? []) {
+    const key = marketIdentity(quote);
+    previousQuotes.set(key, [...(previousQuotes.get(key) ?? []), quote]);
+  }
+  const markets: Array<(typeof catalog.markets)[number]> = [];
+  const quotes: Array<(typeof catalog.quotes)[number]> = [];
+  let changed = false;
   for (const market of catalog.markets) {
+    const key = marketIdentity(market);
+    const currentQuotes = quotesByMarket.get(key) ?? [];
     const expected = exactTwoWayOutcomeDomain(market.marketType, market.scope, market.line);
-    if (market.status !== "OPEN" || expected === null) continue;
-    const quotes = quotesByMarket.get(market.providerMarketId) ?? [];
-    if (!isFocusedTwoWayTicket({ provider: catalog.provider, market, quotes })) return false;
+    if (market.status !== "OPEN" || expected === null ||
+      isFocusedTwoWayTicket({ provider: catalog.provider, market, quotes: currentQuotes })) {
+      markets.push(market);
+      quotes.push(...currentQuotes);
+      continue;
+    }
+    const previousMarket = previousMarkets.get(key);
+    const lastCompleteQuotes = previousQuotes.get(key) ?? [];
+    const sameTicket = previousMarket !== undefined && previousMarket.marketType === market.marketType &&
+      previousMarket.scope === market.scope && previousMarket.line === market.line;
+    if (sameTicket && isFocusedTwoWayTicket({ provider: catalog.provider,
+      market: previousMarket, quotes: lastCompleteQuotes })) {
+      markets.push(previousMarket);
+      quotes.push(...lastCompleteQuotes);
+    }
+    changed = true;
   }
-  return true;
+  return changed ? { ...catalog, markets, quotes } : catalog;
 }
