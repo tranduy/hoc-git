@@ -368,7 +368,9 @@ export class ChromeCatalogDataPlane {
     const coverage = { generation, authoritativeBaseline: mode === "BASELINE",
       providerEventIds: nextCatalog.events.map((event) => event.providerEventId),
       ...((envelope.lobby === "TSPORT" || (envelope.lobby === "KSPORT" &&
-        route.adapter.id === "ksport-ws-catalog-v1")) && provenance === "AUTHENTICATED_HTTP" && mode === "DELTA" &&
+        route.adapter.id === "ksport-ws-catalog-v1") || (envelope.lobby === "CMD" &&
+        route.adapter.id === "cmd-public-dom-v1" && envelope.request.cmdFullScope === true)) &&
+        provenance === "AUTHENTICATED_HTTP" && mode === "DELTA" &&
         update.authoritativeRemovedEventIds !== undefined
         ? { authoritativeRemovedEventIds: update.authoritativeRemovedEventIds } : {}) };
     const currentAuthority = admission.disposition === "CANDIDATE"

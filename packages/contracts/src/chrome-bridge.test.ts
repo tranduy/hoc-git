@@ -102,6 +102,24 @@ describe("ChromeBridgeEnvelopeSchema", () => {
     ]) expect(schema.safeParse({ ...validEnvelope, request }).success).toBe(false);
   });
 
+  it("binds CMD Early and More scope to the native document and endpoint", () => {
+    const early = { ...validEnvelope, lobby: "CMD", transport: "HTTP_RESPONSE", request: {
+      hostname: "cgnew.fts368.com", pathnameClass: "/Member/BetsView/BetLight/DataOdds.ashx",
+      resourceType: "XHR", method: "POST", observerRequestId: "observer:request:20",
+      requestFrameKey: "frame:1", requestDocumentKey: "document:1", providerFunctionCode: 6,
+      cmdFullScope: true, reconcileCutoffSequence: 5 } };
+    const schema = contracts.ChromeBridgeEnvelopeSchema;
+    expect(schema.safeParse(early).success).toBe(true);
+    expect(schema.safeParse({ ...early, lobby: "BTI" }).success).toBe(false);
+    expect(schema.safeParse({ ...early, request: { ...early.request, requestDocumentKey: undefined } }).success).toBe(false);
+    expect(schema.safeParse({ ...early, request: { ...early.request, providerFunctionCode: 7 } }).success).toBe(false);
+    const more = { ...early, request: { ...early.request, cmdFullScope: undefined, providerFunctionCode: undefined,
+      pathnameClass: "/Member/BetsView/BetLight/DataOdds.asmx/GetAllOdds",
+      providerGroupId: "fa97fe7b-13d3-4b03-96db-68aca62dd73f" } };
+    expect(schema.safeParse(more).success).toBe(true);
+    expect(schema.safeParse({ ...more, request: { ...more.request, pathnameClass: early.request.pathnameClass } }).success).toBe(false);
+  });
+
   it("requires exact all-or-none KSPORT recovery metadata", () => {
     const schema = contracts.ChromeBridgeEnvelopeSchema;
     const recoveryMetadata = {

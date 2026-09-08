@@ -1477,6 +1477,36 @@ describe("NetworkObserver", () => {
     expect(sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
   });
 
+  it("forwards CMD native Early scope and exact More owner without request credentials", async () => {
+    const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
+    const group = "fa97fe7b-13d3-4b03-96db-68aca62dd73f";
+    const frameTree = { frameTree: { frame: { id: "odds", loaderId: "loader",
+      url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx" } } };
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") return frameTree;
+      if (method === "Network.getResponseBody") return { body: JSON.stringify({ d: [group, 25403104, [], []] }), base64Encoded: false };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const paths = ["/Member/BetsView/BetLight/DataOdds.ashx", "/Member/BetsView/BetLight/DataOdds.asmx/GetAllOdds"];
+    const bodies = ["fc=6&TimeFilter=0&m_gameType=S_&SingleDouble=double&m_sp=0&m_LeagueList=&fav=&keywords=&exlist=0",
+      JSON.stringify({ m_groupId: group, isPar: 0, m_accId: "private-account" })];
+    for (let index = 0; index < paths.length; index += 1) {
+      const url = "https://cgnew.fts368.com" + paths[index];
+      const requestId = "cmd-native-" + index;
+      await observer.handleEvent(cmd, "Network.requestWillBeSent", { requestId, frameId: "odds", loaderId: "loader",
+        type: "XHR", request: { url, method: "POST", postData: bodies[index] } });
+      await observer.handleEvent(cmd, "Network.responseReceived", { requestId, type: "XHR", response: { url, status: 200 } });
+      await observer.handleEvent(cmd, "Network.loadingFinished", { requestId });
+    }
+    const requests = forward.mock.calls.map(([envelope]) => envelope.request);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ cmdFullScope: true, providerFunctionCode: 6, reconcileCutoffSequence: 0 });
+    expect(requests[1]).toMatchObject({ providerGroupId: group, requestDocumentKey: expect.any(String) });
+    expect(JSON.stringify(requests)).not.toContain("private-account");
+  });
+
   it("evaluates CMD recovery on the owning child session and completes only a matching current-loader fc=1", async () => {
     const cmd = { lobby: "CMD", sourceId: "chrome:CMD:9", tabId: 9 } as const;
     let nowMs = 1_000;
@@ -1694,9 +1724,9 @@ describe("NetworkObserver", () => {
       url: "https://cgnew.fts368.com/Member/BetOdds/HdpDouble.aspx"
     } }] } };
     let evaluations = 0;
-    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
       if (method === "Page.getFrameTree") return frameTree;
-      if (method === "Runtime.evaluate") {
+      if (method === "Runtime.evaluate" && params?.expression === CMD_FULL_BASELINE_EXPRESSION) {
         evaluations += 1;
         if (evaluations === 1) return new Promise<unknown>(() => undefined);
         return { result: { value: "function-unavailable" } };

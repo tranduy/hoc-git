@@ -46,6 +46,8 @@ const SanitizedRequestBaseShape = {
   streamId: PublicGenerationIdSchema.optional(),
   recoveryGeneration: PositiveSafeIntegerSchema.optional(),
   providerFunctionCode: z.number().int().min(1).max(7).optional(),
+  cmdFullScope: z.literal(true).optional(),
+  providerGroupId: z.string().regex(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu).optional(),
   reconcileCutoffSequence: SafeIntegerSchema.optional(),
   replayed: z.boolean().optional()
 };
@@ -94,6 +96,20 @@ export const ChromeBridgeEnvelopeSchema = z.strictObject({
   request: SanitizedRequestSchema,
   payload: BridgePayloadSchema
 }).superRefine((value, context) => {
+  if ((value.request.cmdFullScope !== undefined || value.request.providerGroupId !== undefined) &&
+    (value.lobby !== "CMD" || value.transport !== "HTTP_RESPONSE" || value.request.method !== "POST" ||
+      value.request.hostname !== "cgnew.fts368.com" || value.request.requestDocumentKey === undefined)) {
+    context.addIssue({ code: "custom", path: ["request"], message: "CMD native scope requires bound CMD HTTP evidence" });
+  }
+  if (value.request.cmdFullScope !== undefined &&
+    (value.request.pathnameClass !== "/Member/BetsView/BetLight/DataOdds.ashx" ||
+      ![1, 6].includes(value.request.providerFunctionCode ?? 0))) {
+    context.addIssue({ code: "custom", path: ["request", "cmdFullScope"], message: "CMD full scope requires a full roster request" });
+  }
+  if (value.request.providerGroupId !== undefined &&
+    value.request.pathnameClass !== "/Member/BetsView/BetLight/DataOdds.asmx/GetAllOdds") {
+    context.addIssue({ code: "custom", path: ["request", "providerGroupId"], message: "CMD group requires the native More endpoint" });
+  }
   const requestProvenanceCount = [value.request.requestFrameKey, value.request.requestDocumentKey]
     .filter((field) => field !== undefined).length;
   if (requestProvenanceCount === 1) {

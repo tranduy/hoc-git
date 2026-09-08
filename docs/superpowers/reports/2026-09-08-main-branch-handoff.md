@@ -1,4 +1,4 @@
-# Shared MAIN branch handoff ? 2026-09-08
+# Shared MAIN branch handoff — 2026-09-08
 
 The consolidated working branch is **`feat/realtime-hardening`**, checked out at **`F:\0. PROJECT\tool-chenh`**. Start the next provider task from this branch. No new integration branch or runtime was created for this handoff.
 
@@ -19,6 +19,12 @@ The user accepted the current SBOBET hidden-market collection with a tolerance o
 The user explicitly deferred continuous operation, session maintenance and 24/7 hardening to a later phase. Preserve the deployed SBOBET functionality; do not begin another maintenance audit or provider implementation until the user supplies the next provider plan. SABA is not an active task in this handoff.
 
 ## Runtime and verification boundary
+
+### CMD follow-up completed
+
+The subsequent user-authorized CMD task is implemented directly on this same MAIN branch. Current runtime is extension **0.2.78**, managed stack `sha256:26b3fc3570dcde6e53ff088acf7a89abc2661b183d22a171a7c817e8ce59bb66`. Native/API comparison verifies **691/691 prematch fixtures and 897/897 More groups**, including all 17,043 native More arrays and 697 normalized More markets. See [the CMD production report](2026-09-08-cmd-early-more-production.md) for explicit exclusions, unmapped inventory and receipt boundaries. Both SBOBET and BTI passed a LIVE/FRESH preservation check. Deployment leases are released; maintenance and 24/7 work remain deferred. Continue from MAIN; the old CMD worktree is a historical baseline and must not overwrite this implementation.
+
+The BTI and SBOBET runtime identities below are historical checkpoints.
 
 ### BTI follow-up completed
 

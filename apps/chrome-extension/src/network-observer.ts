@@ -1,3 +1,5 @@
+import { cmdNativeRequestMetadata, CMD_MORE_PATH } from "./cmd-native-request.js";
+import { buildCmdNativeCatalogRefreshExpression } from "./cmd-native-catalog-refresh.js";
 import type { ChromeBridgeEnvelope, ChromeBridgeHttpMethod, ChromeLobbyId } from "@tool-chenh/contracts";
 import { splitUtf8Text, utf8ByteLength } from "./utf8-length.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
@@ -296,6 +298,8 @@ interface EmissionRequestMetadata {
   readonly providerPartition?: ProviderPartition;
   readonly replayed?: boolean;
   readonly providerFunctionCode?: number;
+  readonly cmdFullScope?: true;
+  readonly providerGroupId?: string;
   readonly reconcileCutoffSequence?: number;
   readonly method?: ChromeBridgeHttpMethod;
   readonly observerRequestId?: string;
@@ -427,6 +431,8 @@ interface PendingRequest {
   readonly requestStartSequence?: number;
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
+  readonly cmdFullScope?: true;
+  readonly providerGroupId?: string;
   readonly reconcileCutoffSequence?: number;
   readonly sbobetDiscovery?: { readonly httpStatus: number; readonly bridgeGeneration: number;
     readonly diagnosticOnly: boolean };
@@ -464,6 +470,8 @@ interface ReplayableHttpSnapshot {
   readonly requestStartSequence?: number;
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
+  readonly cmdFullScope?: true;
+  readonly providerGroupId?: string;
   readonly reconcileCutoffSequence?: number;
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
@@ -594,6 +602,8 @@ export interface DirectHttpRequestMetadata {
   readonly requestStartSequence?: number;
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
+  readonly cmdFullScope?: true;
+  readonly providerGroupId?: string;
   readonly reconcileCutoffSequence?: number;
   readonly verifiedDocument?: {
     readonly frameId: string;
@@ -1273,6 +1283,7 @@ export class NetworkObserver {
     readonly observerRequestId: string; readonly observerRequestOrdinal: number;
     readonly tabGeneration: number; readonly frameId?: string; readonly loaderId?: string;
     readonly requestFrameKey?: string; readonly requestDocumentKey?: string;
+    readonly cmdFullScope?: true; readonly providerGroupId?: string; readonly reconcileCutoffSequence?: number;
     readonly sbobetMore?: SbobetMoreRequestCapture;
     readonly sbobetEarly?: SbobetEarlyRequestCapture;
     readonly sbobetEventRequest?: SbobetEventRequestCapture }>();
@@ -3520,6 +3531,18 @@ export class NetworkObserver {
       return;
     }
     active.target = target;
+    // Reuse the verified CMD page and existing poller. Native callbacks collect
+    // Early/More without resetting the provider's visible Today table.
+    if (!await this.#cmdRecoveryTargetIsCurrent(active)) return;
+    const nativeGeneration = JSON.stringify([target.document.sourceEpoch,
+      target.document.frameId, target.document.loaderId]);
+    await this.#awaitCmdRecovery(active, this.#withFrameCommandTimeout(
+      this.#sendCommand(active.source.tabId, "Runtime.evaluate", {
+        expression: buildCmdNativeCatalogRefreshExpression(nativeGeneration), contextId: target.contextId,
+        returnByValue: true, awaitPromise: false
+      }, target.sessionId)
+    ).catch(() => null));
+    if (!await this.#cmdRecoveryTargetIsCurrent(active)) return;
     active.session = this.#cmdRecoveryState.begin(target.document, {
       nowMs: this.#now(), maxAttempts: this.#cmdRecoveryMaxAttempts,
       deadlineMs: Math.max(1, active.deadlineAtMs - this.#now())
@@ -6478,6 +6501,8 @@ export class NetworkObserver {
       const requestDocument = requestDocumentBinding(this.#observerSessionId, source.tabId,
         this.#sourceGenerations.get(source.sourceId) ?? 0, sessionId,
         params.frameId, params.loaderId);
+      const cmdNative = source.lobby === "CMD" && requestDocument !== null && request !== null
+        ? cmdNativeRequestMetadata(request) : {};
       const moreContext = requestDocument === null ? undefined :
         this.#mainWorldContexts.get(source.tabId)?.get(requestDocument.frameId);
       const moreRequest = source.lobby === "KSPORT" && requestDocument !== null && moreContext !== undefined &&
@@ -6506,6 +6531,9 @@ export class NetworkObserver {
       if (requestMethod === null) this.#requestIdentities.delete(key);
       else this.#requestIdentities.set(key, { method: requestMethod, ...requestIdentity,
         tabGeneration: this.#captureTabGeneration(source.tabId),
+        ...cmdNative,
+        ...(source.lobby === "CMD" && requestDocument !== null ?
+          { reconcileCutoffSequence: this.#sequences.get(source.sourceId) ?? 0 } : {}),
         ...(moreRequest === null ? {} : { sbobetMore: { request: moreRequest, context: moreContext!,
           ...(matchingActive === undefined ? {} : { active: matchingActive }),
           bridgeGeneration: this.#captureBridgeGeneration(source.sourceId),
@@ -7070,7 +7098,9 @@ export class NetworkObserver {
           diagnosticOnly: !isProviderCatalogHttpResponse(source, response.url, providerFunctionCode, providerPartition)
         } : undefined;
       if (sbobetEarly === undefined && sbobetMore === undefined && sbobetDiscovery === undefined && !isProviderCatalogHttpResponse(source, response.url, providerFunctionCode,
-        providerPartition)) {
+        providerPartition) && !(source.lobby === "CMD" && httpIdentity.providerGroupId !== undefined &&
+          response.status === 200 && new URL(response.url).hostname === "cgnew.fts368.com" &&
+          new URL(response.url).pathname === CMD_MORE_PATH)) {
         this.#sbobetDiscoveryRequests.delete(key);
         this.#cmdRecoveryRequests.delete(key);
         this.#pending.delete(key);
@@ -8712,6 +8742,8 @@ function pendingRequestMetadata(pending: PendingRequest): EmissionRequestMetadat
       { requestStartSequence: pending.requestStartSequence }),
     ...(pending.streamId === undefined ? {} : { streamId: pending.streamId }),
     ...(pending.providerFunctionCode === undefined ? {} : { providerFunctionCode: pending.providerFunctionCode }),
+    ...(pending.cmdFullScope === undefined ? {} : { cmdFullScope: pending.cmdFullScope }),
+    ...(pending.providerGroupId === undefined ? {} : { providerGroupId: pending.providerGroupId }),
     ...(pending.reconcileCutoffSequence === undefined ? {} :
       { reconcileCutoffSequence: pending.reconcileCutoffSequence })
   };
