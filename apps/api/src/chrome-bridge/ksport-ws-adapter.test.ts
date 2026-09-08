@@ -109,7 +109,7 @@ describe("KsportWsCatalogAdapter", () => {
       ]);
   });
 
-  it("accounts duplicate event containers against the final published markets", () => {
+  it("accounts disjoint duplicate event containers against all final published markets", () => {
     const adapter = new KsportWsCatalogAdapter();
     const identity = { "0": "2026-09-08T12:00:00Z", "2": "Home", "3": "Away", "8": 778899 };
     const cornerFirst = { ...identity, "7": {
@@ -127,19 +127,25 @@ describe("KsportWsCatalogAdapter", () => {
 
     expect(committed.markets).toEqual([expect.objectContaining({
       providerEventId: "778899", providerMarketId: "778899210001", marketType: "CORNER_FT_TOTAL"
+    }), expect.objectContaining({
+      providerEventId: "778899", providerMarketId: "778899030001", marketType: "FT_TOTAL"
+    }), expect.objectContaining({
+      providerEventId: "778899", providerMarketId: "778899040001", marketType: "FH_TOTAL"
     })]);
     expect(committed.nativeMarketObservations).toHaveLength(5);
     expect(committed.nativeMarketObservations).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerMarketId: "778899210001", disposition: "NORMALIZED" }),
-      expect.objectContaining({ providerMarketId: "778899030001", disposition: "EXCLUDED", reason: "NORMALIZATION_REJECTED" }),
-      expect.objectContaining({ providerMarketId: "778899040001", disposition: "EXCLUDED", reason: "NORMALIZATION_REJECTED" }),
+      expect.objectContaining({ providerMarketId: "778899030001", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" }),
+      expect.objectContaining({ providerMarketId: "778899040001", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" }),
       expect.objectContaining({ nativeType: "777", disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED" }),
       expect.objectContaining({ nativeType: "1", disposition: "EXCLUDED", reason: "THREE_WAY_OUTCOME_DOMAIN" })
     ]));
 
     const delta = adapter.decode(receiptEnvelope({ ...identity, "7": { "3": goalSecond["7"]["3"] } },
       "today", 12, 100, "ksport-stream-1", "worker-a:0"))[0]!.value as ObservedProviderCatalog;
-    expect(delta.markets.map((market) => market.providerMarketId).sort()).toEqual(["778899030001", "778899210001"]);
+    expect(delta.markets.map((market) => market.providerMarketId).sort()).toEqual([
+      "778899030001", "778899040001", "778899210001"
+    ]);
     expect(delta.nativeMarketObservations).toHaveLength(5);
     expect(delta.nativeMarketObservations).toContainEqual(expect.objectContaining({
       providerMarketId: "778899030001", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED"

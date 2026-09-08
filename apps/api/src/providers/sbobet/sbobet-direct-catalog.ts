@@ -25,15 +25,19 @@ export interface SbobetMarketDomCandidate {
   readonly selectionIds: readonly string[];
 }
 
-const pairPattern = /^(-?(?:0|1)(?:\.\d+)?)\*(\d+[had])$/u;
+const pairPattern = /^(-?(?:0|[1-9]\d*)(?:\.\d+)?)\*(\d+[had])$/u;
 
-function pair(value: unknown, selection: SbobetCatalogSelection["selection"]): SbobetCatalogSelection | null {
+function pair(value: unknown, selection: SbobetCatalogSelection["selection"],
+  format: "MALAY" | "DECIMAL", locked: boolean): SbobetCatalogSelection | null {
   if (typeof value !== "string") return null;
   const match = pairPattern.exec(value);
-  if (match === null || Number(match[1]) === 0 || Math.abs(Number(match[1])) > 1) return null;
-  const expectedSide = selection === "HOME" || selection === "OVER" ? "h" : "a";
+  if (match === null) return null;
+  const price = Number(match[1]);
+  if (!Number.isFinite(price) || (format === "DECIMAL" ? price <= 1 : price === 0 || Math.abs(price) > 1)) return null;
+  const expectedSide = selection === "HOME" || selection === "OVER" || selection === "ODD" || selection === "YES" ? "h" : "a";
   if (!match[2]!.endsWith(expectedSide)) return null;
-  return { selectionId: match[2]!, selection, priceText: match[1]!, locked: false };
+  return { selectionId: match[2]!, selection, priceText: match[1]!, locked,
+    ...(format === "DECIMAL" ? { priceFormat: format } : {}) };
 }
 
 function diagnosticTokenKind(value: string): string {
@@ -148,43 +152,100 @@ export function inspectSbobetMarketLabelEvidence(source: string): readonly Sbobe
 
 type SbobetTwoWayMarketType = Exclude<SbobetCatalogMarket["marketType"], "FT_1X2">;
 
-const totalMarketTypes = new Set<SbobetTwoWayMarketType>([
-  "FT_TOTAL", "FH_TOTAL", "SH_TOTAL", "CORNER_FT_TOTAL", "CORNER_FH_TOTAL",
-  "CARD_FT_TOTAL", "CARD_FH_TOTAL"
-]);
-const sbobetMarketTypeByGroup: Readonly<Record<string, SbobetTwoWayMarketType>> = {
-  "3": "FT_TOTAL", "4": "FH_TOTAL", "5": "FT_AH", "6": "FH_AH",
-  "19": "CORNER_FT_AH", "20": "CORNER_FH_AH",
-  "21": "CORNER_FT_TOTAL", "22": "CORNER_FH_TOTAL",
-  "31": "CARD_FT_TOTAL", "32": "CARD_FH_TOTAL",
-  "33": "CARD_FT_AH", "34": "CARD_FH_AH",
-  "80": "SH_TOTAL", "85": "SH_AH"
+interface SbobetNativeMarketLayout {
+  readonly type: SbobetTwoWayMarketType;
+  readonly layout: "TOTAL" | "HANDICAP" | "ODD_EVEN" | "BTTS" | "YES_NO" | "LINE_YES_NO";
+  readonly format: "MALAY" | "DECIMAL";
+}
+
+// Public bundle f8af9179 module 75895 z/T8 forces Decimal for these More
+// markets independently of the requested style. Chunk 7409 c37303b3 binds
+// native groups to their row maps and ODD/EVEN or YES/NO outcome order.
+// Card group IDs use tG (native), not the separate Gt bet-placement enum.
+const sbobetMarketByGroup: Readonly<Record<string, SbobetNativeMarketLayout>> = {
+  "3": { type: "FT_TOTAL", layout: "TOTAL", format: "MALAY" },
+  "4": { type: "FH_TOTAL", layout: "TOTAL", format: "MALAY" },
+  "5": { type: "FT_AH", layout: "HANDICAP", format: "MALAY" },
+  "6": { type: "FH_AH", layout: "HANDICAP", format: "MALAY" },
+  "8": { type: "FT_ODD_EVEN", layout: "ODD_EVEN", format: "DECIMAL" },
+  "9": { type: "FH_ODD_EVEN", layout: "ODD_EVEN", format: "DECIMAL" },
+  "19": { type: "CORNER_FT_AH", layout: "HANDICAP", format: "MALAY" },
+  "20": { type: "CORNER_FH_AH", layout: "HANDICAP", format: "MALAY" },
+  "21": { type: "CORNER_FT_TOTAL", layout: "TOTAL", format: "MALAY" },
+  "22": { type: "CORNER_FH_TOTAL", layout: "TOTAL", format: "MALAY" },
+  "31": { type: "CARD_FT_TOTAL", layout: "TOTAL", format: "MALAY" },
+  "32": { type: "CARD_FH_TOTAL", layout: "TOTAL", format: "MALAY" },
+  "33": { type: "CARD_FT_AH", layout: "HANDICAP", format: "MALAY" },
+  "34": { type: "CARD_FH_AH", layout: "HANDICAP", format: "MALAY" },
+  "36": { type: "FT_BTTS", layout: "BTTS", format: "DECIMAL" },
+  "37": { type: "FH_BTTS", layout: "BTTS", format: "DECIMAL" },
+  "56": { type: "CORNER_FT_ODD_EVEN", layout: "ODD_EVEN", format: "DECIMAL" },
+  "57": { type: "CORNER_FH_ODD_EVEN", layout: "ODD_EVEN", format: "DECIMAL" },
+  "60": { type: "SENDING_OFF", layout: "YES_NO", format: "DECIMAL" },
+  "61": { type: "HOME_CORNER_FT_TOTAL", layout: "TOTAL", format: "DECIMAL" },
+  "62": { type: "HOME_CORNER_FH_TOTAL", layout: "TOTAL", format: "DECIMAL" },
+  "63": { type: "AWAY_CORNER_FT_TOTAL", layout: "TOTAL", format: "DECIMAL" },
+  "64": { type: "AWAY_CORNER_FH_TOTAL", layout: "TOTAL", format: "DECIMAL" },
+  "69": { type: "HOME_FT_SCORE_BOTH_HALVES", layout: "YES_NO", format: "DECIMAL" },
+  "70": { type: "AWAY_FT_SCORE_BOTH_HALVES", layout: "YES_NO", format: "DECIMAL" },
+  "71": { type: "HOME_FT_WIN_BOTH_HALVES", layout: "YES_NO", format: "DECIMAL" },
+  "72": { type: "AWAY_FT_WIN_BOTH_HALVES", layout: "YES_NO", format: "DECIMAL" },
+  "73": { type: "HOME_FT_WIN_EITHER_HALF", layout: "YES_NO", format: "DECIMAL" },
+  "74": { type: "AWAY_FT_WIN_EITHER_HALF", layout: "YES_NO", format: "DECIMAL" },
+  "76": { type: "HOME_FT_ODD_EVEN", layout: "ODD_EVEN", format: "DECIMAL" },
+  "77": { type: "AWAY_FT_ODD_EVEN", layout: "ODD_EVEN", format: "DECIMAL" },
+  "78": { type: "HOME_FT_WIN_TO_NIL", layout: "YES_NO", format: "DECIMAL" },
+  "79": { type: "AWAY_FT_WIN_TO_NIL", layout: "YES_NO", format: "DECIMAL" },
+  "80": { type: "SH_TOTAL", layout: "TOTAL", format: "DECIMAL" },
+  "83": { type: "HOME_FT_CLEAN_SHEET", layout: "YES_NO", format: "DECIMAL" },
+  "84": { type: "AWAY_FT_CLEAN_SHEET", layout: "YES_NO", format: "DECIMAL" },
+  "85": { type: "SH_AH", layout: "HANDICAP", format: "DECIMAL" },
+  "86": { type: "SH_ODD_EVEN", layout: "ODD_EVEN", format: "DECIMAL" },
+  "99": { type: "FT_BOTH_HALVES_OVER_TOTAL", layout: "LINE_YES_NO", format: "DECIMAL" },
+  "100": { type: "FT_BOTH_HALVES_UNDER_TOTAL", layout: "LINE_YES_NO", format: "DECIMAL" },
+  "101": { type: "HOME_FT_TOTAL", layout: "TOTAL", format: "DECIMAL" },
+  "102": { type: "AWAY_FT_TOTAL", layout: "TOTAL", format: "DECIMAL" }
 };
 const sbobetThreeWayGroups = new Set(["1", "2", "17", "18", "29", "30", "68", "81", "82", "87", "88", "89", "90", "97"]);
-const sbobetRefundGroups = new Set(["75", "150", "151"]);
+const sbobetRefundGroups = new Set(["16", "75", "150", "151"]);
 
-function market(value: unknown, type: SbobetTwoWayMarketType): SbobetCatalogMarket | null {
-  if (typeof value !== "string") return null;
+function nativeMarketIdIndex(layout: SbobetNativeMarketLayout): number {
+  return layout.layout === "ODD_EVEN" || layout.layout === "YES_NO" ? 2 : layout.layout === "HANDICAP" ? 4 : 3;
+}
+
+function market(value: unknown, groupKey: string): SbobetCatalogMarket | null {
+  const descriptor = sbobetMarketByGroup[groupKey];
+  if (typeof value !== "string" || descriptor === undefined) return null;
+  const { type, layout, format } = descriptor;
   const tokens = value.trim().split(/\s+/u);
   const line = tokens[0];
-  if (line === undefined || !isSupportedFootballTwoWayLine(line)) return null;
-  const isTotal = totalMarketTypes.has(type);
-  const isHandicap = !isTotal;
-  const first = pair(tokens[1], isTotal ? "OVER" : "HOME");
-  const second = pair(tokens[2], isTotal ? "UNDER" : "AWAY");
+  const isTotal = layout === "TOTAL";
+  const isHandicap = layout === "HANDICAP";
+  const hasLine = isTotal || isHandicap || layout === "LINE_YES_NO";
+  if (hasLine && (line === undefined || !isSupportedFootballTwoWayLine(line))) return null;
+  // The observed BTTS POINT field is a zero placeholder, not a goal line.
+  if (layout === "BTTS" && (line === undefined || !/^-?0(?:\.0+)?$/u.test(line))) return null;
+  const idIndex = nativeMarketIdIndex(descriptor);
+  const suspended = tokens[idIndex + 1];
+  if (suspended !== undefined && suspended !== "0" && suspended !== "1") return null;
+  const firstIndex = layout === "ODD_EVEN" || layout === "YES_NO" ? 0 : 1;
+  const first = pair(tokens[firstIndex], isTotal ? "OVER" : isHandicap ? "HOME" : layout === "ODD_EVEN" ? "ODD" : "YES",
+    format, suspended === "1");
+  const second = pair(tokens[firstIndex + 1], isTotal ? "UNDER" : isHandicap ? "AWAY" : layout === "ODD_EVEN" ? "EVEN" : "NO",
+    format, suspended === "1");
   if (first === null || second === null) return null;
   const favored = isHandicap ? tokens[3] : null;
-  const marketId = isHandicap ? tokens[4] : tokens[3];
-  if (typeof marketId !== "string" || !/^\d{4,30}$/u.test(marketId) ||
-    (isHandicap && favored !== "h" && favored !== "a")) return null;
+  const marketId = tokens[idIndex];
   const zeroHandicap = isHandicap && Number(line) === 0;
+  if (typeof marketId !== "string" || !/^\d{4,30}$/u.test(marketId) ||
+    (isHandicap && favored !== "h" && favored !== "a" && !(zeroHandicap && favored === "-"))) return null;
   const selections = zeroHandicap ? [
     { ...first, lineText: "0" }, { ...second, lineText: "0" }
   ] : isHandicap ? [
-    { ...first, lineText: favored === "h" ? line : null },
-    { ...second, lineText: favored === "a" ? line : null }
+    { ...first, lineText: favored === "h" ? line! : null },
+    { ...second, lineText: favored === "a" ? line! : null }
   ] : [first, second];
-  return { marketId, marketType: type, lineText: isTotal ? line : null, selections,
+  return { marketId, marketType: type, lineText: isTotal || layout === "LINE_YES_NO" ? line! : null, selections,
     ...(zeroHandicap ? { handicapLineFormat: "SIGNED" as const } : {}) };
 }
 
@@ -202,12 +263,16 @@ function eventRecord(raw: Record<string, unknown>, existing: SbobetCatalogInputR
 export function extractSbobetDirectCatalogRecords(
   body: unknown, fallbackRecords: readonly SbobetCatalogInputRecord[]
 ): readonly SbobetCatalogInputRecord[] {
+  if (fallbackRecords.length === 0) return [];
   const fallback = new Map(fallbackRecords.map((record) => [record.eventId, record]));
   const records = new Map<string, SbobetCatalogInputRecord>();
+  const components = new Map<string, {
+    readonly raw: Record<string, unknown>; readonly groups: ReadonlySet<string>; readonly combinable: boolean;
+  }>();
   const stack: Array<{ readonly value: unknown; readonly depth: number }> = [{ value: body, depth: 0 }];
   const visited = new Set<object>();
   const maxVisitedNodes = 50_000;
-  while (stack.length > 0 && visited.size < maxVisitedNodes && records.size < fallback.size) {
+  while (stack.length > 0 && visited.size < maxVisitedNodes) {
     const current = stack.pop()!;
     const value = current.value;
     if (current.depth > 20 || value === null || typeof value !== "object" || visited.has(value)) continue;
@@ -226,11 +291,12 @@ export function extractSbobetDirectCatalogRecords(
       typeof markets === "object" && markets !== null && !Array.isArray(markets)) {
       const nativeGroups = Object.entries(markets as Record<string, unknown>);
       const validContainer = nativeGroups.every(([, rows]) => Array.isArray(rows));
+      let combinable = nativeGroups.length > 0 && nativeGroups.every(([, rows]) => Array.isArray(rows) && rows.length > 0);
       const parsed = nativeGroups.flatMap(([key, rows]) => {
-        const marketType = sbobetMarketTypeByGroup[key] ?? null;
-        if (marketType === null || !Array.isArray(rows)) return [];
+        if (sbobetMarketByGroup[key] === undefined || !Array.isArray(rows)) return [];
         return rows.flatMap((row) => {
-          const candidate = market(row, marketType);
+          const candidate = market(row, key);
+          if (candidate === null) combinable = false;
           return candidate === null ? [] : [candidate];
         });
       });
@@ -240,7 +306,28 @@ export function extractSbobetDirectCatalogRecords(
       // An explicit empty container is valid empty membership; only the caller
       // knows whether this receipt is authoritative detail or a sparse delta.
       const record = validContainer ? eventRecord(raw, existing, unique) : null;
-      if (record !== null) records.set(eventId, record);
+      if (record !== null) {
+        const prior = records.get(eventId);
+        const component = components.get(eventId);
+        const groups = new Set(nativeGroups.map(([key]) => key));
+        // Observed getEvent emits separate goal/corner components for the same
+        // native event. Combine only disjoint groups with exact explicit native
+        // teams/kickoff. Empty, overlapping, or conflicting components retain
+        // later-container replacement; this is not a sparse-update union.
+        const sameEvent = component !== undefined && ["0", "2", "3"].every((key) =>
+          typeof raw[key] === "string" && raw[key] !== "" && raw[key] === component.raw[key]) &&
+          Number.isFinite(Date.parse(String(raw["0"])));
+        const priorIds = new Set(prior?.markets.map((item) => item.marketId));
+        if (prior !== undefined && component !== undefined && component.combinable && combinable && sameEvent &&
+          [...groups].every((key) => !component.groups.has(key)) &&
+          record.markets.every((item) => !priorIds.has(item.marketId))) {
+          records.set(eventId, { ...record, markets: [...prior.markets, ...record.markets] });
+          components.set(eventId, { raw, groups: new Set([...component.groups, ...groups]), combinable });
+        } else {
+          records.set(eventId, record);
+          components.set(eventId, { raw, groups, combinable });
+        }
+      }
     }
     const children = Object.values(raw);
     for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -286,16 +373,17 @@ export function extractSbobetNativeMarketObservations(
             disposition: "EXCLUDED", reason: "INVALID_NATIVE_GROUP_SHAPE" });
           continue;
         }
-        const mappedType = sbobetMarketTypeByGroup[groupKey] ?? null;
+        const descriptor = sbobetMarketByGroup[groupKey];
+        const mappedType = descriptor?.type ?? null;
         for (const [rowIndex, rawRow] of rows.entries()) {
-          const parsed = mappedType === null ? null : market(rawRow, mappedType);
+          const parsed = market(rawRow, groupKey);
           const rowText = typeof rawRow === "string" ? rawRow : "";
           const tokens = rowText.trim().split(/\s+/u);
           // Unknown groups have no proven market-ID position. Their opaque
           // inventory identity must never collide with a retained mapped row.
-          const nativeMarketId = mappedType === null
+          const nativeMarketId = descriptor === undefined
             ? undefined
-            : tokens[totalMarketTypes.has(mappedType) ? 3 : 4];
+            : tokens[nativeMarketIdIndex(descriptor)];
           const fallbackMarketId = nativeMarketId !== undefined && /^\d{4,30}$/u.test(nativeMarketId)
             ? nativeMarketId : `${eventId}:native:${groupKey}:${rowIndex}`;
           const selectionSides = [...rowText.matchAll(/\*\d{1,40}([had])/gu)].map((match) => match[1]!.toUpperCase());
@@ -342,7 +430,7 @@ export function mergeSbobetSocketCatalogRecords(
       const incomingIds = new Set(record.markets.map((candidate) => candidate.marketId));
       const invalidatedIds = new Set(observations.filter((observation) =>
         observation.providerEventId === record.eventId &&
-        sbobetMarketTypeByGroup[observation.nativeType] !== undefined &&
+        sbobetMarketByGroup[observation.nativeType] !== undefined &&
         /^\d{4,30}$/u.test(observation.providerMarketId) && !incomingIds.has(observation.providerMarketId))
         .map((observation) => observation.providerMarketId));
       records.set(record.eventId, { ...record,

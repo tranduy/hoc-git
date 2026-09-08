@@ -1,3 +1,5 @@
+import { sbobetMoreBatchFromResponse, type SbobetMoreBatch, type SbobetMoreRequest } from "./sbobet-more-protocol.js";
+
 export interface SbobetPrematchEvent {
   readonly eventId: string;
   readonly startAtUtcMs: number;
@@ -35,6 +37,7 @@ export interface SbobetDetailBatch {
 }
 
 export interface SbobetRefreshOptions {
+  readonly mode?: "COMPLETE_EVENT";
   readonly request: (input: SbobetDetailRequest) => Promise<SbobetDetailResponse>;
   /** An asynchronous emitter must check signal/source epoch again before committing externally. */
   readonly onBatch: (batch: SbobetDetailBatch, signal: AbortSignal) => void | Promise<void>;
@@ -55,6 +58,19 @@ export interface SbobetRefreshOptions {
     readonly reason: string; readonly retryAtMs: number }) => void;
 }
 
+export interface SbobetMoreRefreshResponse {
+  readonly status: number;
+  readonly request?: SbobetMoreRequest;
+  readonly body?: string;
+  readonly retryAfterMs?: number;
+}
+
+export interface SbobetMoreRefreshOptions extends Omit<SbobetRefreshOptions, "mode" | "request" | "onBatch"> {
+  readonly mode: "COMPLEMENTARY_MORE";
+  readonly request: (input: SbobetDetailRequest) => Promise<SbobetMoreRefreshResponse>;
+  readonly onBatch: (batch: SbobetMoreBatch, signal: AbortSignal) => void | Promise<void>;
+}
+
 interface EventState {
   event: SbobetPrematchEvent;
   receivedAtMs: number | null;
@@ -68,7 +84,7 @@ interface ActiveRequest {
 
 /** Caller-driven; request timeouts are the only timers this module creates. */
 export class SbobetCatalogRefresh {
-  readonly #options: SbobetRefreshOptions;
+  readonly #options: SbobetRefreshOptions | SbobetMoreRefreshOptions;
   readonly #now: () => number;
   readonly #nearTtlMs: number;
   readonly #farTtlMs: number;
@@ -91,7 +107,7 @@ export class SbobetCatalogRefresh {
   #nextRequestAtMs = 0;
   #disposed = false;
 
-  constructor(options: SbobetRefreshOptions) {
+  constructor(options: SbobetRefreshOptions | SbobetMoreRefreshOptions) {
     this.#options = options;
     this.#now = options.now ?? Date.now;
     this.#nearTtlMs = positive(options.nearTtlMs ?? 30_000);
@@ -206,7 +222,7 @@ export class SbobetCatalogRefresh {
       active.controller.signal.addEventListener("abort", cancelled, { once: true });
     });
     const timer = setTimeout(() => { timedOut = true; active.controller.abort(); }, this.#timeoutMs);
-    let request: Promise<SbobetDetailResponse>;
+    let request: Promise<SbobetDetailResponse | SbobetMoreRefreshResponse>;
     try { request = Promise.resolve(this.#options.request({ eventId, generation, requestStartSequence,
       signal: active.controller.signal })); }
     catch { request = Promise.reject(new Error("SBOBET_DETAIL_REQUEST_FAILED")); }
@@ -231,17 +247,31 @@ export class SbobetCatalogRefresh {
           result.result.status === 429);
         return;
       }
-      const event = result.result.marketContainerComplete === true
-        ? completeNativeEvent(result.result.event, eventId) : null;
-      if (event === null || !Number.isSafeInteger(result.observedAtMs) || result.observedAtMs < 0) {
+      if (!Number.isSafeInteger(result.observedAtMs) || result.observedAtMs < 0) {
         this.#failure(state, generation, "DETAIL_INVALID");
         return;
       }
+      const options = this.#options;
+      let emitBatch: () => void | Promise<void>;
+      if (options.mode === "COMPLEMENTARY_MORE") {
+        const response = result.result as SbobetMoreRefreshResponse;
+        const batch = response.request?.eventId === eventId && typeof response.body === "string"
+          ? sbobetMoreBatchFromResponse(response.request, response.body, {
+            generation, requestStartSequence, observedAtMs: result.observedAtMs }) : null;
+        // Empty/metadata-only or invalid More is not full-event membership.
+        if (batch === null) { this.#failure(state, generation, "DETAIL_INVALID"); return; }
+        emitBatch = () => options.onBatch(batch, active.controller.signal);
+      } else {
+        const response = result.result as SbobetDetailResponse;
+        const event = response.marketContainerComplete === true ? completeNativeEvent(response.event, eventId) : null;
+        if (event === null) { this.#failure(state, generation, "DETAIL_INVALID"); return; }
+        emitBatch = () => options.onBatch({ kind: "SBOBET_EVENT_DETAIL", generation, eventId,
+          requestStartSequence, observedAtMs: result.observedAtMs, marketContainerComplete: true, event },
+        active.controller.signal);
+      }
       let emission: Promise<void>;
       try {
-        emission = Promise.resolve(this.#options.onBatch({ kind: "SBOBET_EVENT_DETAIL", generation, eventId,
-          requestStartSequence, observedAtMs: result.observedAtMs, marketContainerComplete: true, event },
-        active.controller.signal));
+        emission = Promise.resolve(emitBatch());
       } catch { emission = Promise.reject(new Error("SBOBET_DETAIL_EMIT_FAILED")); }
       pendingCallbacks += 1;
       const delivered = emission.then(() => { settled(); return { kind: "EMITTED" as const }; },

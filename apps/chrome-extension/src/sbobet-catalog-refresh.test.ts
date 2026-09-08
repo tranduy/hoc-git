@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SbobetCatalogRefresh, type SbobetDetailBatch, type SbobetDetailRequest,
-  type SbobetDetailResponse, type SbobetRefreshOptions } from "./sbobet-catalog-refresh.js";
+  type SbobetDetailResponse, type SbobetRefreshOptions, type SbobetMoreRefreshOptions,
+  type SbobetMoreRefreshResponse } from "./sbobet-catalog-refresh.js";
+import type { SbobetMoreBatch, SbobetMoreRequest } from "./sbobet-more-protocol.js";
 
 const event = (eventId = "101", startAtUtcMs = 20_000) => ({ eventId, startAtUtcMs, phase: "PREMATCH" as const });
 const response = (eventId: string, markets: unknown = { "3": ["2.5 0.91*101h -0.97*101a 123456"] }): SbobetDetailResponse =>
@@ -22,6 +24,135 @@ function setup(overrides: Partial<SbobetRefreshOptions> = {}) {
   backoffMs: 200, maxBackoffMs: 2_000, minimumDelayMs: 0, ...overrides });
   return { collector, requests, batches };
 }
+
+const moreRequest = (eventId: string): SbobetMoreRequest => ({ eventId, leagueId: "481",
+  url: `https://be.sb21.net/api/v2/getEventBetMore?eventId=${eventId}&oddsStyle=ma&leagueId=481&sportId=1&sportType=1_1` });
+const moreResponse = (eventId: string, groups: unknown = {
+  "21": [`9.5 0.91*${eventId}01h -0.97*${eventId}01a 123456`]
+}): SbobetMoreRefreshResponse => ({ status: 200, request: moreRequest(eventId), body: JSON.stringify(groups) });
+function setupMore(overrides: Partial<SbobetMoreRefreshOptions> = {}) {
+  const requests: SbobetDetailRequest[] = [];
+  const batches: SbobetMoreBatch[] = [];
+  let sequence = 40;
+  const collector = new SbobetCatalogRefresh({ mode: "COMPLEMENTARY_MORE", request: async input => {
+    requests.push(input); return moreResponse(input.eventId);
+  }, onBatch: batch => { batches.push(batch); }, allocateRequestStartSequence: () => ++sequence,
+  nearTtlMs: 1_000, farTtlMs: 5_000, nearWindowMs: 10_000, timeoutMs: 100,
+  backoffMs: 200, maxBackoffMs: 2_000, minimumDelayMs: 0, ...overrides });
+  return { collector, requests, batches };
+}
+
+describe("SbobetCatalogRefresh complementary More mode", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10_000); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("emits observed native More groups unchanged with no complete-event claim", async () => {
+    // Exact representative rows from the observed 2026-09-08 More receipt.
+    const groups = { "0": ["2,3,4,11,12"],
+      "19": ["2.5 0.83*57173570190002995h 0.87*57173570190002995a h 184852809191125 0 4 0 1 0"],
+      "80": ["1.5 1.88*57173570800001005h 1.83*57173570800001005a 184852809801015 0 11 0 0 0"],
+      "131": ["9-10 4.5*57173571310000910h 18485280913110910 0 4 0 1 0"] };
+    const pending = deferred<SbobetMoreRefreshResponse>();
+    const { collector, batches } = setupMore({ request: () => pending.promise });
+    collector.setRoster({ generation: "source:1", events: [event("5717357")] });
+    const tick = collector.tick();
+    vi.setSystemTime(10_050);
+    pending.resolve(moreResponse("5717357", groups));
+    await tick;
+    expect(batches).toEqual([{ kind: "SBOBET_EVENT_MORE", generation: "source:1", eventId: "5717357",
+      leagueId: "481", requestStartSequence: 41, observedAtMs: 10_050, marketContainerComplete: false, groups }]);
+  });
+
+  it.each([{}, { "0": ["2,3,4,11,12"] }])("backs off empty or metadata-only More without emission: %j", async groups => {
+    let attempts = 0;
+    const { collector, batches } = setupMore({ request: async input =>
+      ++attempts === 1 ? moreResponse(input.eventId, groups) : moreResponse(input.eventId) });
+    collector.setRoster({ generation: "source:1", events: [event()] });
+    await collector.tick();
+    expect(batches).toEqual([]);
+    vi.setSystemTime(10_199);
+    await collector.tick();
+    expect(attempts).toBe(1);
+    vi.setSystemTime(10_200);
+    await collector.tick();
+    expect(attempts).toBe(2);
+    expect(batches).toEqual([expect.objectContaining({ kind: "SBOBET_EVENT_MORE", observedAtMs: 10_200,
+      marketContainerComplete: false })]);
+  });
+
+  it("rejects a valid More receipt for a different scheduled event", async () => {
+    const { collector, batches } = setupMore({ request: async () => moreResponse("102") });
+    collector.setRoster({ generation: "source:1", events: [event()] });
+    await collector.tick();
+    expect(batches).toEqual([]);
+  });
+
+  it("never admits a complete-event response through complementary mode", async () => {
+    const { collector, batches } = setupMore({ request: async () => response("101") });
+    collector.setRoster({ generation: "source:1", events: [event()] });
+    await collector.tick();
+    expect(batches).toEqual([]);
+  });
+
+  it("retains physical request capacity until a retired More callback settles", async () => {
+    const old = deferred<SbobetMoreRefreshResponse>();
+    const requests: SbobetDetailRequest[] = [];
+    const { collector, batches } = setupMore({ maxConcurrent: 1, request: input => {
+      requests.push(input); return input.generation === "source:1" ? old.promise : Promise.resolve(moreResponse(input.eventId));
+    } });
+    collector.setRoster({ generation: "source:1", events: [event()] });
+    const retired = collector.tick();
+    collector.setRoster({ generation: "source:2", events: [event("102")] });
+    expect(requests[0]!.signal.aborted).toBe(true);
+    await retired;
+    await collector.tick();
+    expect(requests).toHaveLength(1);
+    old.resolve(moreResponse("101"));
+    await Promise.resolve();
+    await collector.tick();
+    expect(batches).toEqual([expect.objectContaining({ eventId: "102", generation: "source:2",
+      kind: "SBOBET_EVENT_MORE", marketContainerComplete: false })]);
+  });
+
+  it("cancels a queued More emission when its event is removed", async () => {
+    const pending = deferred<void>();
+    const emitted: SbobetMoreBatch[] = [];
+    let emissionSignal: AbortSignal | undefined;
+    const { collector } = setupMore({ onBatch: async (batch, signal) => {
+      emissionSignal = signal;
+      await pending.promise;
+      if (!signal.aborted) emitted.push(batch);
+    } });
+    collector.setRoster({ generation: "source:1", events: [event()] });
+    const tick = collector.tick();
+    for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
+    expect(emissionSignal?.aborted).toBe(false);
+    collector.setRoster({ generation: "source:1", events: [] });
+    expect(emissionSignal?.aborted).toBe(true);
+    await tick;
+    pending.resolve();
+    await Promise.resolve();
+    expect(emitted).toEqual([]);
+  });
+
+  it("honors provider-wide More 429 backoff across other scheduled owners", async () => {
+    const requested: string[] = [];
+    const { collector, batches } = setupMore({ maxConcurrent: 1, request: async input => {
+      requested.push(input.eventId);
+      return requested.length === 1 ? { status: 429, retryAfterMs: 1_500 } : moreResponse(input.eventId);
+    } });
+    collector.setRoster({ generation: "source:1", events: [event(), event("102")] });
+    await collector.tick();
+    expect(requested).toEqual(["101"]);
+    vi.setSystemTime(11_499);
+    await collector.tick();
+    expect(requested).toEqual(["101"]);
+    vi.setSystemTime(11_500);
+    await collector.tick();
+    expect(batches.map(batch => batch.eventId).sort()).toEqual(["101", "102"]);
+    expect(batches.every(batch => batch.marketContainerComplete === false)).toBe(true);
+  });
+});
 
 describe("SbobetCatalogRefresh", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10_000); });

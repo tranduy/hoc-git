@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import {
   extractSbobetDirectCatalogRecords,
@@ -13,6 +14,244 @@ const fallback = [{
   eventId: "5574638", leagueName: "Champions League", timeText: "1H 29'", scoreText: "0 - 1",
   teamNames: ["Kairat", "Levski"], markets: []
 }];
+
+const observedContainers = (JSON.parse(readFileSync(new URL("./sbobet-native-5717357.fixture.json", import.meta.url),
+  "utf8")) as { records: Array<Record<string, unknown> & { "7": Record<string, string[]> }> }).records;
+const observedFallback = [{ eventId: "5717357", leagueName: "K-Sports Football", timeText: "PREMATCH",
+  scoreText: null, startAtUtcMs: Date.parse(String(observedContainers[0]!["0"])),
+  teamNames: [String(observedContainers[0]!["2"]), String(observedContainers[0]!["3"])], markets: [] }];
+const observedOptions = { observedAtMs: 1788841583335, receivedMonotonicMs: 126424, sequence: 1 };
+
+// Exact getEventBetMore rows from the sanitized 5717357 HTTP receipt. Outcome
+// order/indices are independently established by public chunk 7409 renderers.
+const observedMoreRows = [
+  { group: "8", type: "FT_ODD_EVEN", row: "1.91*57173570080000000h 1.8*57173570080000000a 18485280981000 0 2 0 0 0" },
+  { group: "9", type: "FH_ODD_EVEN", row: "2.05*57173570090000000h 1.69*57173570090000000a 18485280991000 0 3 0 0 0" },
+  { group: "36", type: "FT_BTTS", row: "0.0 1.71*57173570360000000h 2.02*57173570360000000a 184852809361000 0 2 0 0 0" },
+  { group: "37", type: "FH_BTTS", row: "0.0 4.5*57173570370000000h 1.16*57173570370000000a 184852809371000 0 3 0 0 0" },
+  { group: "56", type: "CORNER_FT_ODD_EVEN", row: "1.84*57173570560000000h 1.86*57173570560000000a 184852809561000 0 4 0 0 0" },
+  { group: "57", type: "CORNER_FH_ODD_EVEN", row: "1.83*57173570570000000h 1.87*57173570570000000a 184852809571000 0 4 0 0 0" },
+  { group: "76", type: "HOME_FT_ODD_EVEN", row: "1.88*57173570760000000h 1.82*57173570760000000a 184852809761000 0 2 0 0 0" },
+  { group: "80", type: "SH_TOTAL", row: "1.5 1.88*57173570800001005h 1.83*57173570800001005a 184852809801015 0 11 0 0 0" },
+  { group: "86", type: "SH_ODD_EVEN", row: "1.97*57173570860000000h 1.75*57173570860000000a 184852809861000 0 11 0 0 0" }
+] as const;
+
+const observedTeamMoreRows = [
+  { group: "61", type: "HOME_CORNER_FT_TOTAL", line: "6.25", pairStart: 1, row: "6.25 1.83*57173570610060025h 1.87*57173570610060025a 1848528096110625 0 4 0 0 0" },
+  { group: "62", type: "HOME_CORNER_FH_TOTAL", line: "3", pairStart: 1, row: "3.0 1.91*57173570620003000h 1.8*57173570620003000a 184852809621030 0 4 0 0 0" },
+  { group: "63", type: "AWAY_CORNER_FT_TOTAL", line: "3.75", pairStart: 1, row: "3.75 1.9*57173570630030075h 1.8*57173570630030075a 1848528096310375 0 4 0 0 0" },
+  { group: "64", type: "AWAY_CORNER_FH_TOTAL", line: "1.75", pairStart: 1, row: "1.75 1.93*57173570640010075h 1.78*57173570640010075a 1848528096410175 0 4 0 0 0" },
+  { group: "69", type: "HOME_FT_SCORE_BOTH_HALVES", line: null, pairStart: 0, row: "2.33*57173570690000000h 1.54*57173570690000000a 184852809691000 0 2 0 0 0" },
+  { group: "70", type: "AWAY_FT_SCORE_BOTH_HALVES", line: null, pairStart: 0, row: "6.5*57173570700000000h 1.08*57173570700000000a 184852809701000 0 2 0 0 0" },
+  { group: "71", type: "HOME_FT_WIN_BOTH_HALVES", line: null, pairStart: 0, row: "4.12*57173570710000000h 1.19*57173570710000000a 184852809711000 0 2 0 0 0" },
+  { group: "73", type: "HOME_FT_WIN_EITHER_HALF", line: null, pairStart: 0, row: "1.28*57173570730000000h 3.33*57173570730000000a 184852809731000 0 2 0 0 0" },
+  { group: "74", type: "AWAY_FT_WIN_EITHER_HALF", line: null, pairStart: 0, row: "3.08*57173570740000000h 1.32*57173570740000000a 184852809741000 0 2 0 0 0" },
+  { group: "78", type: "HOME_FT_WIN_TO_NIL", line: null, pairStart: 0, row: "2.79*57173570780000000h 1.39*57173570780000000a 184852809781000 0 2 0 0 0" },
+  { group: "83", type: "HOME_FT_CLEAN_SHEET", line: null, pairStart: 0, row: "2.43*57173570830000000h 1.5*57173570830000000a 184852809831000 0 2 0 0 0" },
+  { group: "84", type: "AWAY_FT_CLEAN_SHEET", line: null, pairStart: 0, row: "7.0*57173570840000000h 1.07*57173570840000000a 184852809841000 0 2 0 0 0" },
+  { group: "99", type: "FT_BOTH_HALVES_OVER_TOTAL", line: "1.5", pairStart: 1, row: "1.5 4.85*57173570990001005h 1.15*57173570990001005a 184852809991015 0 12 0 0 0" },
+  { group: "100", type: "FT_BOTH_HALVES_UNDER_TOTAL", line: "1.5", pairStart: 1, row: "1.5 2.98*57173571000001005h 1.34*57173571000001005a 1848528091001015 0 12 0 0 0" },
+  { group: "101", type: "HOME_FT_TOTAL", line: "1.75", pairStart: 1, row: "1.75 1.72*57173571010010075h 2.01*57173571010010075a 18485280910110175 0 12 0 0 0" },
+  { group: "102", type: "AWAY_FT_TOTAL", line: "0.75", pairStart: 1, row: "0.75 1.74*57173571020000075h 1.98*57173571020000075a 18485280910210075 0 12 0 0 0" }
+] as const;
+
+describe("observed More team and predicate formats", () => {
+  it.each(observedTeamMoreRows)("keeps exact group $group team, period, predicate and prices", ({ group, type, line, pairStart, row }) => {
+    const body = { "8": 5717357, "7": { [group]: [row] } };
+    const result = normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(body, observedFallback), observedOptions);
+    const tokens = row.split(" ");
+    const outcomes = ["61", "62", "63", "64", "101", "102"].includes(group) ? ["OVER", "UNDER"] : ["YES", "NO"];
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: type, line, providerMarketId: tokens[pairStart + 2] })]);
+    expect(result.quotes.map(({ providerSelectionId, selection, rawOdds, rawFormat }) =>
+      ({ providerSelectionId, selection, rawOdds, rawFormat }))).toEqual(tokens.slice(pairStart, pairStart + 2).map((token, index) => ({
+      providerSelectionId: token.split("*")[1], selection: outcomes[index], rawOdds: token.split("*")[0], rawFormat: "DECIMAL"
+    })));
+    expect(extractSbobetNativeMarketObservations(body, observedFallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: tokens[pairStart + 2], disposition: "NORMALIZED" })
+    ]);
+  });
+
+  it("maps absent-fixture sending-off and away predicate siblings using the proven no-line YES/NO layout", () => {
+    for (const [group, type] of [["60", "SENDING_OFF"], ["72", "AWAY_FT_WIN_BOTH_HALVES"], ["79", "AWAY_FT_WIN_TO_NIL"]]) {
+      const result = normalizeSbobetCatalog(extractSbobetDirectCatalogRecords({ "8": 5717357, "7": {
+        [group!]: ["2.25*57173570000000000h 1.45*57173570000000000a 12345 0 2 0 0 0"]
+      } }, observedFallback), observedOptions);
+      expect(result.markets).toEqual([expect.objectContaining({ marketType: type, line: null })]);
+      expect(result.quotes.map((quote) => quote.selection)).toEqual(["YES", "NO"]);
+    }
+  });
+
+  it("withdraws an invalid line-bearing YES/NO price under the same native market ID", () => {
+    const source = observedTeamMoreRows.find(({ group }) => group === "99")!;
+    const body = { "8": 5717357, "7": { "99": [source.row] } };
+    const bootstrap = extractSbobetDirectCatalogRecords(body, observedFallback);
+    const invalid = { "8": 5717357, "7": { "99": [source.row.replace("4.85*", "0*")] } };
+    expect(bootstrap[0]?.markets).toHaveLength(1);
+    expect(extractSbobetNativeMarketObservations(invalid, observedFallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "184852809991015", disposition: "EXCLUDED" })
+    ]);
+    expect(mergeSbobetSocketCatalogRecords(bootstrap, [invalid])[0]?.markets).toEqual([]);
+  });
+});
+
+describe("observed More binary formats", () => {
+  it.each(observedMoreRows)("preserves exact native identity, decimal prices and outcomes for group $group", ({ group, type, row }) => {
+    const body = { ...observedContainers[0], "7": { [group]: [row] } };
+    const result = normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(body, observedFallback), observedOptions);
+    const pairs = row.split(" ").filter((token) => token.includes("*"));
+    const outcomes = type.includes("ODD_EVEN") ? ["ODD", "EVEN"] : type.includes("BTTS") ? ["YES", "NO"] : ["OVER", "UNDER"];
+    const id = row.split(" ")[group === "36" || group === "37" || group === "80" ? 3 : 2];
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: type, providerMarketId: id,
+      line: group === "80" ? "1.5" : null, status: "OPEN" })]);
+    expect(result.quotes.map(({ providerSelectionId, selection, rawOdds, rawFormat }) =>
+      ({ providerSelectionId, selection, rawOdds, rawFormat }))).toEqual(pairs.map((token, index) => ({
+      providerSelectionId: token.split("*")[1], selection: outcomes[index], rawOdds: token.split("*")[0], rawFormat: "DECIMAL"
+    })));
+    expect(extractSbobetNativeMarketObservations(body, observedFallback, observedOptions.observedAtMs))
+      .toEqual([expect.objectContaining({ providerMarketId: id, disposition: "NORMALIZED" })]);
+  });
+
+  it("adds all nine observed More markets while preserving the existing main/corner prices", () => {
+    const bootstrap = extractSbobetDirectCatalogRecords(observedContainers, observedFallback);
+    const more = { "8": 5717357, "7": Object.fromEntries(observedMoreRows.map(({ group, row }) => [group, [row]])) };
+    const result = normalizeSbobetCatalog(mergeSbobetSocketCatalogRecords(bootstrap, [more]), observedOptions);
+    expect(result.markets).toHaveLength(33);
+    expect(result.quotes).toHaveLength(66);
+    for (const quote of normalizeSbobetCatalog(bootstrap, observedOptions).quotes) expect(result.quotes).toContainEqual(quote);
+  });
+
+  it("maps the source-defined away odd/even and second-half handicap siblings", () => {
+    const body = { "8": 5717357, "7": {
+      "77": ["2.1*57173570770000000h 1.8*57173570770000000a 77001 0 2 0 0 0"],
+      "85": ["0.5 2.2*57173570850000000h 1.7*57173570850000000a h 85001 0 11 0 0 0"]
+    } };
+    const result = normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(body, observedFallback), observedOptions);
+    expect(result.markets).toEqual([
+      expect.objectContaining({ marketType: "AWAY_FT_ODD_EVEN", line: null, providerMarketId: "77001" }),
+      expect.objectContaining({ marketType: "SH_AH", line: "-0.5", providerMarketId: "85001" })
+    ]);
+    expect(result.quotes.every((quote) => quote.rawFormat === "DECIMAL")).toBe(true);
+  });
+
+  it.each(["8", "36", "80"])("uses the exact status and market-ID token for suspension and withdrawal of group %s", (group) => {
+    const source = observedMoreRows.find((item) => item.group === group)!;
+    const tokens = source.row.split(" ");
+    const idIndex = group === "8" ? 2 : 3;
+    const id = tokens[idIndex];
+    const bootstrap = extractSbobetDirectCatalogRecords({ "8": 5717357, "7": { [group]: [source.row] } }, observedFallback);
+    tokens[idIndex + 1] = "1";
+    const suspended = { "8": 5717357, "7": { [group]: [tokens.join(" ")] } };
+    const result = normalizeSbobetCatalog(mergeSbobetSocketCatalogRecords(bootstrap, [suspended]), observedOptions);
+    expect(result.quotes).toHaveLength(2);
+    expect(result.quotes.every((quote) => quote.status === "SUSPENDED" && quote.providerMarketId === id)).toBe(true);
+    tokens[group === "8" ? 0 : 1] = tokens[group === "8" ? 0 : 1]!.replace(/^[^*]+/u, "0");
+    const invalid = { "8": 5717357, "7": { [group]: [tokens.join(" ")] } };
+    expect(extractSbobetNativeMarketObservations(invalid, observedFallback, 123))
+      .toEqual([expect.objectContaining({ providerMarketId: id, disposition: "EXCLUDED" })]);
+    expect(mergeSbobetSocketCatalogRecords(bootstrap, [invalid])[0]?.markets).toEqual([]);
+  });
+
+  it.each([
+    { group: "8", row: "1.9*801a 1.8*801h 80001 0" },
+    { group: "8", row: "1.9*801h 1.8*801h 80001 0" },
+    { group: "8", row: "0.9*801h -0.8*801a 80001 0" },
+    { group: "8", row: "1*801h 1.8*801a 80001 0" },
+    { group: "8", row: "1.9junk*801h 1.8*801a 80001 0" },
+    { group: "8", row: "1.9*801h 1.8*801a 80001 closed" },
+    { group: "36", row: "0.0 1.9*361a 1.8*361h 36001 0" },
+    { group: "36", row: "0.5 1.9*361h 1.8*361a 36001 0" },
+    { group: "36", row: "junk 1.9*361h 1.8*361a 36001 0" },
+    { group: "80", row: "1.5 0.9*801h -0.8*801a 80001 0" }
+  ])("rejects contradictory outcome/format/placeholder rows: $row", ({ group, row }) => {
+    expect(extractSbobetDirectCatalogRecords({ "8": 5717357, "7": { [group]: [row] } }, observedFallback)[0]?.markets).toEqual([]);
+  });
+
+  it("keeps draw-no-bet explicitly excluded for refund settlement", () => {
+    const body = { "8": 5717357, "7": { "16": [
+      "1.17*57173570160000000h 4.33*57173570160000000a 184852809161000 0 2 0 0 0"
+    ] } };
+    expect(extractSbobetNativeMarketObservations(body, observedFallback, 123)).toEqual([
+      expect.objectContaining({ nativeType: "16", disposition: "EXCLUDED", reason: "PUSH_OR_REFUND_SETTLEMENT" })
+    ]);
+  });
+});
+
+describe("observed same-event goal and corner containers", () => {
+  it.each([
+    { reversed: false, widerRoster: false }, { reversed: false, widerRoster: true },
+    { reversed: true, widerRoster: false }, { reversed: true, widerRoster: true }
+  ])("retains both disjoint native components independently of traversal and roster size: %j", ({ reversed, widerRoster }) => {
+    const body = reversed ? [...observedContainers].reverse() : observedContainers;
+    const bootstrap = widerRoster ? [...observedFallback, { ...observedFallback[0]!, eventId: "unmatched-roster-control" }]
+      : observedFallback;
+    const independent = observedContainers.map((raw) =>
+      normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(raw, observedFallback), observedOptions));
+    const records = extractSbobetDirectCatalogRecords(body, bootstrap);
+    const result = normalizeSbobetCatalog(records, observedOptions);
+    expect(records).toHaveLength(1);
+    expect(result.markets).toHaveLength(24);
+    expect(result.quotes).toHaveLength(48);
+    expect(result.markets.map((market) => market.providerMarketId).sort()).toEqual(
+      independent.flatMap((catalog) => catalog.markets.map((market) => market.providerMarketId)).sort());
+    expect(result.quotes).toHaveLength(independent.reduce((count, catalog) => count + catalog.quotes.length, 0));
+    for (const quote of independent.flatMap((catalog) => catalog.quotes)) expect(result.quotes).toContainEqual(quote);
+    const native = extractSbobetNativeMarketObservations(body, bootstrap, observedOptions.observedAtMs);
+    expect(native.filter((item) => item.disposition === "NORMALIZED").every((item) =>
+      result.markets.some((market) => market.providerMarketId === item.providerMarketId))).toBe(true);
+  });
+
+  it("accepts the observed neutral favorite token only for a zero handicap", () => {
+    const raw = observedContainers[0]!;
+    const zeroRow = raw["7"]["6"]!.find((row) => row.startsWith("0.0 "))!;
+    const body = { ...raw, "7": { "6": [zeroRow, zeroRow.replace(/^0\.0 /u, "0.25 ")] } };
+    const records = extractSbobetDirectCatalogRecords(body, observedFallback);
+    const result = normalizeSbobetCatalog(records, observedOptions);
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FH_AH", line: "0",
+      providerMarketId: "18485280961000" })]);
+    expect(result.quotes.map(({ providerSelectionId, rawOdds, line }) => ({ providerSelectionId, rawOdds, line })))
+      .toEqual([
+        { providerSelectionId: "57173570060000000h", rawOdds: "0.28", line: "0" },
+        { providerSelectionId: "57173570060000000a", rawOdds: "-0.38", line: "0" }
+      ]);
+    expect(extractSbobetNativeMarketObservations(body, observedFallback, observedOptions.observedAtMs)
+      .map((item) => item.disposition)).toEqual(["NORMALIZED", "EXCLUDED"]);
+  });
+
+  it.each([{}, { "3": [] }])("preserves a later explicit empty container or group as replacement: %j", (groups) => {
+    const replacement = { ...observedContainers[0]!, "7": groups };
+    expect(extractSbobetDirectCatalogRecords([...observedContainers, replacement], observedFallback))
+      .toEqual(extractSbobetDirectCatalogRecords(replacement, observedFallback));
+  });
+
+  it("does not resurrect groups preceding an explicit empty container", () => {
+    const cleared = { ...observedContainers[0]!, "7": {} };
+    expect(extractSbobetDirectCatalogRecords([observedContainers[0], cleared, observedContainers[1]], observedFallback))
+      .toEqual(extractSbobetDirectCatalogRecords(observedContainers[1], observedFallback));
+  });
+
+  it("preserves later overlapping-group replacement instead of keeping superseded native prices", () => {
+    const replacement = { ...observedContainers[0]!, "7": {
+      "3": [observedContainers[0]!["7"]["3"]![0]!.replace("0.98*", "0.97*")]
+    } };
+    expect(extractSbobetDirectCatalogRecords([...observedContainers, replacement], observedFallback))
+      .toEqual(extractSbobetDirectCatalogRecords(replacement, observedFallback));
+  });
+
+  it.each([{ "2": "Different Home" }, { "0": "2026-09-09T15:00:00Z" }, { "0": undefined }])(
+    "keeps later replacement when native event metadata conflicts or is unproven: %j", (metadata) => {
+      const replacement = { ...observedContainers[1]!, ...metadata };
+      expect(extractSbobetDirectCatalogRecords([observedContainers[0], replacement], observedFallback))
+        .toEqual(extractSbobetDirectCatalogRecords(replacement, observedFallback));
+    });
+
+  it("does not combine disjoint native groups that reuse a canonical native market ID", () => {
+    const replacement = { ...observedContainers[1]!, "7": {
+      "21": [observedContainers[1]!["7"]["21"]![0]!.replace("18485280921101025", "184852809310275")]
+    } };
+    expect(extractSbobetDirectCatalogRecords([observedContainers[0], replacement], observedFallback))
+      .toEqual(extractSbobetDirectCatalogRecords(replacement, observedFallback));
+  });
+});
 
 describe("extractSbobetDirectCatalogRecords", () => {
   it("merges an exact socket event update over the HTTP bootstrap snapshot", () => {
@@ -196,8 +435,8 @@ describe("extractSbobetDirectCatalogRecords", () => {
       "32": ["1.25 0.89*32h -0.99*32a 32001"],
       "33": ["0.75 0.9*33h -0.8*33a h 33001"],
       "34": ["0.25 0.91*34h -0.81*34a a 34001"],
-      "80": ["1.75 0.92*80h -0.82*80a 80001"],
-      "85": ["0.5 0.93*85h -0.83*85a h 85001"]
+      "80": ["1.75 1.92*80h 1.82*80a 80001"],
+      "85": ["0.5 1.93*85h 1.83*85a h 85001"]
     } }];
 
     const [record] = extractSbobetDirectCatalogRecords(body, fallback);
@@ -290,6 +529,11 @@ describe("extractSbobetDirectCatalogRecords", () => {
 
     expect(() => extractSbobetDirectCatalogRecords(oversized, fallback)).not.toThrow();
     expect(extractSbobetDirectCatalogRecords(oversized, fallback)).toEqual([]);
+  });
+
+  it("does not traverse a body when no fallback events are admitted", () => {
+    const unadmitted = new Proxy({}, { ownKeys: () => { throw new Error("UNADMITTED_TRAVERSAL"); } });
+    expect(extractSbobetDirectCatalogRecords(unadmitted, [])).toEqual([]);
   });
 });
 

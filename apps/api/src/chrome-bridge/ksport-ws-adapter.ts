@@ -52,6 +52,7 @@ interface HttpEpoch {
   pendingBaseline: HttpPendingBaseline | null;
   committedOrdinal: number;
   generation: string;
+  authorityTabId: number | null;
 }
 
 interface HttpPendingBaseline {
@@ -71,11 +72,21 @@ interface SourceEpochState {
   httpAuthorityCutoff: number | null;
   readonly details: Map<string, RetainedRecord>;
   readonly detailOrdinals: Map<string, number>;
+  readonly moreReceipts: Map<string, { readonly ordinal: number; readonly sequence: number }>;
   readonly prematchAdmissions: Map<string, number>;
 }
 
 function detailOrdinal(envelope: ChromeBridgeEnvelope): number | null {
   const match = /^sbobet-detail:(0|[1-9]\d*):([1-9]\d*)$/u.exec(envelope.request.streamId ?? "");
+  if (match === null || Number(match[1]) !== envelope.tabId || !Number.isSafeInteger(Number(match[2]))) return null;
+  return Number(match[2]);
+}
+
+function moreOrdinal(envelope: ChromeBridgeEnvelope): number | null {
+  if (envelope.request.hostname !== "be.sb21.net" ||
+    envelope.request.pathnameClass !== "/api/v2/getEventBetMore" || envelope.request.method !== "GET" ||
+    !envelope.request.observerRequestId) return null;
+  const match = /^sbobet-more:(0|[1-9]\d*):([1-9]\d*)$/u.exec(envelope.request.streamId ?? "");
   if (match === null || Number(match[1]) !== envelope.tabId || !Number.isSafeInteger(Number(match[2]))) return null;
   return Number(match[2]);
 }
@@ -208,12 +219,12 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     const created: SourceEpochState = {
       socket: null,
       http: { committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(),
-        pendingBaseline: null, committedOrdinal: 0,
+        pendingBaseline: null, committedOrdinal: 0, authorityTabId: null,
         generation: `${sourceEpoch(envelope)}:ksport-http:${envelope.tabId}:0` },
       wsSequenceHighWatermark: 0,
       authority: "NONE",
       httpAuthorityCutoff: null,
-      details: new Map(), detailOrdinals: new Map(), prematchAdmissions: new Map()
+      details: new Map(), detailOrdinals: new Map(), moreReceipts: new Map(), prematchAdmissions: new Map()
     };
     this.#states.set(key, created);
     return created;
@@ -222,6 +233,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
   fingerprint(envelope: ChromeBridgeEnvelope): boolean {
     if (envelope.lobby !== "KSPORT" || envelope.payload.encoding !== "UTF8") return false;
     if (envelope.transport === "HTTP_RESPONSE") {
+      if (moreOrdinal(envelope) !== null) return true;
       return envelope.request.pathnameClass === "/api/v2/getEvent" &&
         (httpGeneration(envelope) !== null || detailOrdinal(envelope) !== null);
     }
@@ -242,6 +254,16 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     // to establish authority after an API/bridge reconnect.
     if (envelope.request.replayed === true) return [];
     const source = this.#stateFor(envelope);
+    if (envelope.transport === "HTTP_RESPONSE" && moreOrdinal(envelope) !== null) {
+      if (!applyEventMore(source, envelope)) return [];
+      const catalog = catalogFromPartitions(source.http.committedPartitions, envelope.observedAtMs, source.details);
+      // The retained HTTP roster still owns this materialized catalog. An
+      // explicit row invalidation can withdraw its last quote; More omission
+      // and empty responses never reach this branch or prove completeness.
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+        value: catalog, ...emptyMarketProof(source, catalog), evidenceMode: "DELTA",
+        generation: source.http.generation, provenance: "AUTHENTICATED_HTTP" }];
+    }
     if (envelope.transport === "HTTP_RESPONSE" && detailOrdinal(envelope) !== null) {
       if (!applyEventDetail(source, envelope)) return [];
       const catalog = catalogFromPartitions(source.http.committedPartitions, envelope.observedAtMs, source.details);
@@ -291,6 +313,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       epoch.committedPartitions = reconcileHttpSnapshot(epoch.pendingBaseline, priorPartitions);
       epoch.committedOrdinal = epoch.pendingBaseline.ordinal;
       epoch.generation = epoch.pendingBaseline.generation;
+      epoch.authorityTabId = envelope.tabId;
       epoch.pendingBaseline = null;
       source.authority = "HTTP";
       source.httpAuthorityCutoff = committedCutoff;
@@ -564,6 +587,7 @@ function syncPrematchAdmission(source: SourceEpochState, eventId: string, sequen
     source.prematchAdmissions.delete(eventId);
     source.details.delete(eventId);
     source.detailOrdinals.delete(eventId);
+    source.moreReceipts.delete(eventId);
   } else if (!source.prematchAdmissions.has(eventId)) {
     // Ordinary refreshes retain this floor; disappearance or a live phase
     // ends the membership, so a later same-ID admission receives a new floor.
@@ -599,6 +623,77 @@ function combineDetail(main: RetainedRecord, detail: RetainedRecord | undefined)
   }
   return { ...main, record: { ...main.record, markets: [...markets.values()] },
     marketReceipts, nativeMarketObservations: [...observations.values()] };
+}
+
+function applyEventMore(source: SourceEpochState, envelope: ChromeBridgeEnvelope): boolean {
+  if (source.authority !== "HTTP" || envelope.sourceEpoch === undefined ||
+    source.http.authorityTabId !== envelope.tabId) return false;
+  let payload: Record<string, unknown> | null;
+  try { payload = record(JSON.parse(envelope.payload.body)); } catch { return false; }
+  const cutoff = envelope.request.reconcileCutoffSequence;
+  if (payload === null || payload.kind !== "SBOBET_EVENT_MORE" ||
+    payload.generation !== envelope.sourceEpoch || payload.marketContainerComplete !== false ||
+    payload.observedAtMs !== envelope.observedAtMs || typeof cutoff !== "number" ||
+    !Number.isSafeInteger(cutoff) || cutoff < 0 || cutoff >= envelope.sequence ||
+    payload.requestStartSequence !== cutoff || typeof payload.eventId !== "string" ||
+    !/^\d{1,30}$/u.test(payload.eventId) || typeof payload.leagueId !== "string" ||
+    !/^\d{1,30}$/u.test(payload.leagueId)) return false;
+  const eventId = payload.eventId;
+  const admission = source.prematchAdmissions.get(eventId);
+  const main = prematchEntry(source, eventId);
+  const ordinal = moreOrdinal(envelope)!;
+  const previousMore = source.moreReceipts.get(eventId);
+  const priorDetail = source.details.get(eventId);
+  if (admission === undefined || cutoff < admission || main?.record.timeText !== "PREMATCH" ||
+    ordinal <= (previousMore?.ordinal ?? 0) || envelope.sequence <= (previousMore?.sequence ?? -1) ||
+    envelope.sequence <= (priorDetail?.sequence ?? -1) ||
+    [...source.http.committedPartitions.values()].some((partition) => envelope.sequence <= partition.receiptSequence)) return false;
+  const groups = record(payload.groups);
+  if (groups === null) return false;
+  // getEventBetMore is an observed flat native group map. A successful empty
+  // map or omitted group is not evidence of market absence. Key 0 is metadata.
+  for (const [key, rows] of Object.entries(groups)) {
+    if (!/^\d{1,4}$/u.test(key) || !Array.isArray(rows)) return false;
+    for (const row of rows) {
+      if (typeof row !== "string") return false;
+      for (const token of row.trim().split(/\s+/u)) {
+        if (!token.includes("*")) continue;
+        const selection = /^[+-]?\d+(?:\.\d+)?\*(\d{1,40}[A-Za-z]?)$/u.exec(token);
+        if (selection === null || !selection[1]!.startsWith(eventId)) return false;
+      }
+    }
+  }
+  const native = { "8": eventId, "7": Object.fromEntries(Object.entries(groups).filter(([key]) => key !== "0")) };
+  const incoming = extractSbobetDirectCatalogRecords(native, [main.record])[0];
+  if (incoming === undefined) return false;
+  const observations = extractSbobetNativeMarketObservations(native, [main.record], envelope.observedAtMs);
+  const next = retainedRecord(incoming, envelope, envelope.sequence, observations, "DETAIL");
+  source.moreReceipts.set(eventId, { ordinal, sequence: envelope.sequence });
+  if (next.marketReceipts.size === 0) return false;
+
+  const previous = combineDetail(main, priorDetail);
+  // Only identities actually observed in More join retained detail membership.
+  // Copy a newer current receipt for a touched identity so a later shallow main
+  // refresh cannot discard the identity or replace its original price clock.
+  const markets = new Map(priorDetail?.record.markets.map((market) => [market.marketId, market]));
+  const receipts = new Map(priorDetail?.marketReceipts);
+  const inventory = new Map(priorDetail?.nativeMarketObservations.map((observation) =>
+    [`${observation.providerMarketId}\u0000${observation.nativeType}`, observation]));
+  for (const [id, receipt] of next.marketReceipts) {
+    const newerReceipt = previous.marketReceipts.get(id);
+    const keepNewer = newerReceipt !== undefined && newerReceipt.sequence > cutoff;
+    const record = keepNewer ? previous : next;
+    const market = record.record.markets.find((candidate) => candidate.marketId === id);
+    if (market === undefined) markets.delete(id); else markets.set(id, market);
+    receipts.set(id, keepNewer ? newerReceipt : receipt);
+    for (const [key, observation] of inventory) if (observation.providerMarketId === id) inventory.delete(key);
+    for (const observation of record.nativeMarketObservations) {
+      if (observation.providerMarketId === id) inventory.set(`${id}\u0000${observation.nativeType}`, observation);
+    }
+  }
+  source.details.set(eventId, { ...next, record: { ...main.record, markets: [...markets.values()] },
+    marketReceipts: receipts, nativeMarketObservations: [...inventory.values()] });
+  return true;
 }
 
 function applyEventDetail(source: SourceEpochState, envelope: ChromeBridgeEnvelope): boolean {

@@ -32,7 +32,11 @@ import { summarizeSbobetDiscovery, formatSbobetDiscovery,
 import { SbobetObserverDetailLane, type SbobetDetailReceipt } from "./sbobet-observer-detail-lane.js";
 import { extractSbobetPrematchRoster, parseSbobetDetailEvent, sbobetDetailTemplateFromObserved,
   type SbobetDetailBinding, type SbobetDetailTemplate } from "./sbobet-detail-protocol.js";
-import type { SbobetDetailBatch, SbobetPrematchEvent } from "./sbobet-catalog-refresh.js";
+import { SbobetCatalogRefresh, type SbobetDetailBatch, type SbobetPrematchEvent,
+  type SbobetDetailRequest, type SbobetMoreRefreshResponse } from "./sbobet-catalog-refresh.js";
+import { sbobetMoreRequestFromObserved, sbobetMoreBatchFromResponse, buildSbobetMoreFetchExpression,
+  type SbobetMoreRequest, type SbobetMoreBatch } from "./sbobet-more-protocol.js";
+import { extractSbobetMoreRoster, type SbobetMoreOwner } from "./sbobet-more-roster.js";
 import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent,
   buildApsportPageRequestExpression,
   collectApsportCatalog, collectApsportEventDetail, type ApsportCatalogBatch,
@@ -299,6 +303,48 @@ interface EmissionRequestMetadata {
   readonly requestStartSequence?: number;
 }
 
+interface SbobetMoreRequestCapture {
+  readonly request: SbobetMoreRequest;
+  readonly context: MainWorldContextBinding;
+  readonly bridgeGeneration: number;
+  readonly generation: string;
+  readonly requestStartSequence: number;
+  readonly active?: SbobetActiveMore;
+}
+
+interface SbobetMoreTemplate {
+  readonly pending: PendingRequest;
+  readonly context: MainWorldContextBinding;
+  readonly bridgeGeneration: number;
+  readonly generation: string;
+  readonly url: string;
+}
+
+interface SbobetActiveMore {
+  readonly owner: SbobetMoreOwner;
+  readonly template: SbobetMoreTemplate;
+  readonly request: SbobetMoreRequest;
+  readonly signal: AbortSignal;
+  readonly firstRequestOrdinal: number;
+  observerRequestId?: string;
+  forwarding?: Promise<void>;
+  readonly acknowledgement: Promise<string>;
+  readonly confirm: (body: string) => void;
+  readonly cancel: () => void;
+}
+
+interface SbobetObserverMoreState {
+  readonly source: ObservedSource;
+  readonly refresh: SbobetCatalogRefresh;
+  generation: string | null;
+  template: SbobetMoreTemplate | null;
+  owners: Map<string, SbobetMoreOwner>;
+  readonly active: Map<string, SbobetActiveMore>;
+  committedOrdinal: number;
+  pendingRoster: { readonly ordinal: number; readonly streamId: string; readonly cutoff: number;
+    readonly documentKey: string; readonly parts: Map<KsportProviderPartition, readonly SbobetMoreOwner[]> } | null;
+}
+
 interface PendingRequest {
   readonly source: ObservedSource;
   readonly sourceGeneration: number;
@@ -323,6 +369,7 @@ interface PendingRequest {
   readonly sbobetDiscovery?: { readonly httpStatus: number; readonly bridgeGeneration: number;
     readonly diagnosticOnly: boolean };
   readonly sbobetDetailHeaders?: Readonly<Record<string, string>>;
+  readonly sbobetMore?: SbobetMoreRequestCapture;
 }
 
 interface SbobetObserverDetailState {
@@ -1162,7 +1209,8 @@ export class NetworkObserver {
   readonly #requestIdentities = new Map<string, { readonly method: ChromeBridgeHttpMethod;
     readonly observerRequestId: string; readonly observerRequestOrdinal: number;
     readonly tabGeneration: number; readonly frameId?: string; readonly loaderId?: string;
-    readonly requestFrameKey?: string; readonly requestDocumentKey?: string }>();
+    readonly requestFrameKey?: string; readonly requestDocumentKey?: string;
+    readonly sbobetMore?: SbobetMoreRequestCapture }>();
   #nextObserverRequestOrdinal = 0;
   readonly #pending = new Map<string, PendingRequest>();
   // Direct IM recovery returns a compact, adapter-shaped copy through
@@ -1294,6 +1342,7 @@ export class NetworkObserver {
     readonly bridgeGeneration: number; readonly sourceGeneration: number; readonly tabGeneration: number;
     readonly detailHeaders?: Readonly<Record<string, string>> }>();
   readonly #sbobetDetailStates = new Map<string, SbobetObserverDetailState>();
+  readonly #sbobetMoreStates = new Map<string, SbobetObserverMoreState>();
   readonly #sbobetDiscoveryShapes = new Map<string, Map<string, string>>();
   readonly #sbobetDiscoveryBudgets = new Map<string, { readonly startedAtMs: number; admitted: number }>();
   readonly #sbobetDiscoveryDomAtMs = new Map<string, number>();
@@ -2098,6 +2147,9 @@ export class NetworkObserver {
     for (const sourceId of this.#sbobetDetailStates.keys()) {
       if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
     }
+    for (const sourceId of this.#sbobetMoreStates.keys()) {
+      if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
+    }
     for (const socket of this.#webSockets.values()) {
       if (socket.source.tabId === tabId) sourceIds.add(socket.source.sourceId);
     }
@@ -2139,6 +2191,7 @@ export class NetworkObserver {
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetDiscoveryShapes.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetDetailStates.keys()) remember(sourceId);
+    for (const sourceId of this.#sbobetMoreStates.keys()) remember(sourceId);
     for (const sourceId of this.#ksportNativeHttpCaptures.keys()) remember(sourceId);
     for (const sourceId of this.#bridgeEpochGenerations.keys()) remember(sourceId);
     for (const sourceId of this.#publicSourceEpochs.keys()) remember(sourceId);
@@ -3253,6 +3306,11 @@ export class NetworkObserver {
     readonly recoveryIntervalMs?: number } = {}): Promise<void> {
     // Start independently of periodic DOM work and the price-forwarding tail.
     if (source.lobby === "KSPORT") void this.#sbobetDetailStates.get(source.sourceId)?.lane.tick().catch(() => undefined);
+    if (source.lobby === "KSPORT") {
+      this.#retireSbobetMoreContext(source.sourceId);
+      const more = this.#sbobetMoreStates.get(source.sourceId);
+      if (more?.template !== null) void more?.refresh.tick().catch(() => undefined);
+    }
     const existing = this.#ksportMaintenances.get(source.sourceId);
     if (existing !== undefined) return existing;
     const operation = this.#runPeriodicDomWork(source.sourceId,
@@ -5293,6 +5351,236 @@ export class NetworkObserver {
       this.#sourceGenerations.get(sourceId) ?? 0)}`;
   }
 
+  #sbobetMoreState(source: ObservedSource): SbobetObserverMoreState {
+    let state = this.#sbobetMoreStates.get(source.sourceId);
+    if (state === undefined) {
+      const refresh = new SbobetCatalogRefresh({ mode: "COMPLEMENTARY_MORE", now: this.#now,
+        allocateRequestStartSequence: () => Math.max(0, (this.#sequences.get(source.sourceId) ?? 0) - 1),
+        request: input => this.#requestSbobetMore(state!, input),
+        onBatch: (batch, signal) => this.#acknowledgeSbobetMore(state!, batch, signal),
+        onFailure: failure => state!.active.get(failure.eventId)?.cancel()
+      });
+      state = { source, refresh, generation: null, template: null, owners: new Map(), active: new Map(),
+        committedOrdinal: 0, pendingRoster: null };
+      this.#sbobetMoreStates.set(source.sourceId, state);
+    }
+    if (state.generation === null) state.generation = this.#sbobetDetailEpoch(source.sourceId);
+    return state;
+  }
+
+  #sbobetMoreTemplateCurrent(template: SbobetMoreTemplate): boolean {
+    const pending = template.pending;
+    return this.#isPendingCurrent(pending) &&
+      this.#captureBridgeGeneration(pending.source.sourceId) === template.bridgeGeneration &&
+      this.#sbobetDetailEpoch(pending.source.sourceId) === template.generation && pending.frameId !== undefined &&
+      this.#mainWorldContexts.get(pending.source.tabId)?.get(pending.frameId) === template.context;
+  }
+
+  #sbobetMoreActiveCurrent(state: SbobetObserverMoreState, active: SbobetActiveMore): boolean {
+    return !active.signal.aborted && state.generation === active.template.generation &&
+      state.template === active.template && state.owners.get(active.owner.eventId) === active.owner &&
+      state.active.get(active.owner.eventId) === active && this.#sbobetMoreTemplateCurrent(active.template);
+  }
+
+  #clearSbobetMore(sourceId: string): void {
+    const state = this.#sbobetMoreStates.get(sourceId);
+    if (state === undefined) return;
+    state.template = null;
+    state.owners.clear();
+    state.pendingRoster = null;
+    state.committedOrdinal = 0;
+    // Keep the scheduler instance: aborted CDP/forward callbacks retain their
+    // physical capacity until they settle, including across source resets.
+    state.refresh.setRoster({ generation: state.generation ?? "retired", events: [] });
+    for (const active of state.active.values()) active.cancel();
+    state.generation = null;
+  }
+
+  #retireSbobetMoreContext(sourceId: string): void {
+    const state = this.#sbobetMoreStates.get(sourceId);
+    if (state?.template && !this.#sbobetMoreTemplateCurrent(state.template)) this.#clearSbobetMore(sourceId);
+  }
+
+  #rememberSbobetMoreTemplate(pending: PendingRequest, url: string,
+    context: MainWorldContextBinding, bridgeGeneration: number): void {
+    const state = this.#sbobetMoreState(pending.source);
+    const current = state.template;
+    if (current !== null && current.context === context && current.generation === state.generation &&
+      current.pending.requestDocumentKey === pending.requestDocumentKey &&
+      current.bridgeGeneration === bridgeGeneration) return;
+    if (current !== null) this.#clearSbobetMore(pending.source.sourceId);
+    state.generation = this.#sbobetDetailEpoch(pending.source.sourceId);
+    state.template = { pending, context, bridgeGeneration, generation: state.generation, url };
+  }
+
+  async #rememberSbobetMoreRoster(pending: PendingRequest, body: string, bridgeGeneration: number): Promise<void> {
+    if (pending.source.lobby !== "KSPORT" || pending.providerContentIntent !== "FOOTBALL_FULL_CATALOG" ||
+      pending.frameId === undefined || pending.loaderId === undefined || pending.requestDocumentKey === undefined ||
+      pending.requestFrameKey === undefined || !Number.isSafeInteger(pending.requestStartSequence) ||
+      pending.requestStartSequence! < 0 ||
+      pending.providerPartition !== "KSPORT_LIVE" && pending.providerPartition !== "KSPORT_TODAY" ||
+      ksportPartitionFromRequest(pending.source, { url: pending.url, method: pending.method }) !== pending.providerPartition) return;
+    let url: URL;
+    try { url = new URL(pending.url); } catch { return; }
+    if (url.origin !== "https://be.sb21.net" || url.username || url.password || url.hash) return;
+    const match = /^ksport-http:(0|[1-9]\d*):([1-9]\d*)$/u.exec(pending.streamId ?? "");
+    if (match === null || Number(match[1]) !== pending.source.tabId || !Number.isSafeInteger(Number(match[2]))) return;
+    let native: unknown;
+    try { native = JSON.parse(body); } catch { return; }
+    const owners = extractSbobetMoreRoster(native, pending.providerPartition === "KSPORT_LIVE" ? "LIVE" : "PREMATCH");
+    if (owners === null || owners.length > 2048) return;
+    const context = this.#mainWorldContexts.get(pending.source.tabId)?.get(pending.frameId);
+    const current = () => context !== undefined && context.sessionId === pending.sessionId &&
+      this.#mainWorldContexts.get(pending.source.tabId)?.get(pending.frameId!) === context &&
+      this.#isPendingCurrent(pending) && this.#captureBridgeGeneration(pending.source.sourceId) === bridgeGeneration;
+    if (!current() || !await this.#requestDocumentIsCurrent(pending) || !current()) return;
+    const state = this.#sbobetMoreState(pending.source);
+    if (state.template !== null && !this.#sbobetMoreTemplateCurrent(state.template)) this.#clearSbobetMore(pending.source.sourceId);
+    state.generation = this.#sbobetDetailEpoch(pending.source.sourceId);
+    const ordinal = Number(match[2]);
+    if (ordinal <= state.committedOrdinal || ordinal < (state.pendingRoster?.ordinal ?? 0)) return;
+    if (state.pendingRoster === null || ordinal > state.pendingRoster.ordinal) state.pendingRoster = {
+      ordinal, streamId: pending.streamId!, cutoff: pending.requestStartSequence!,
+      documentKey: pending.requestDocumentKey, parts: new Map()
+    };
+    const pair = state.pendingRoster;
+    if (pair.streamId !== pending.streamId || pair.cutoff !== pending.requestStartSequence ||
+      pair.documentKey !== pending.requestDocumentKey) return;
+    pair.parts.set(pending.providerPartition, owners);
+    const today = pair.parts.get("KSPORT_TODAY");
+    const live = pair.parts.get("KSPORT_LIVE");
+    if (today === undefined || live === undefined) return;
+    const liveIds = new Set(live.map(owner => owner.eventId));
+    const next = new Map(today.filter(owner => !liveIds.has(owner.eventId)).map(owner => {
+      const prior = state.owners.get(owner.eventId);
+      return [owner.eventId, prior !== undefined && JSON.stringify(prior) === JSON.stringify(owner) ? prior : owner];
+    }));
+    if (state.template !== null && (state.template.context !== context ||
+      state.template.pending.requestDocumentKey !== pending.requestDocumentKey)) {
+      // A complete pair commits one document's owners. A still-live context in
+      // another frame must not supply their requests or acknowledge receipts.
+      this.#clearSbobetMore(pending.source.sourceId);
+      state.generation = this.#sbobetDetailEpoch(pending.source.sourceId);
+    }
+    if (state.template === null && next.size > 0) {
+      const owner = next.values().next().value!;
+      const route = `https://be.sb21.net/api/v2/getEventBetMore?eventId=${owner.eventId}&oddsStyle=ma&leagueId=${owner.leagueId}&sportId=1&sportType=1_1`;
+      this.#rememberSbobetMoreTemplate(pending, route, context!, bridgeGeneration);
+    }
+    const unchanged = [...next.values()].filter(owner => state.owners.get(owner.eventId) === owner);
+    state.owners = next;
+    const events = (values: readonly SbobetMoreOwner[]) => values.map(owner => ({ eventId: owner.eventId,
+      startAtUtcMs: owner.startAtUtcMs, phase: "PREMATCH" as const }));
+    state.refresh.setRoster({ generation: state.generation!, events: events(unchanged) });
+    state.refresh.setRoster({ generation: state.generation!, events: events([...next.values()]) });
+    state.committedOrdinal = ordinal;
+    state.pendingRoster = null;
+  }
+
+  async #requestSbobetMore(state: SbobetObserverMoreState, input: SbobetDetailRequest): Promise<SbobetMoreRefreshResponse> {
+    const template = state.template;
+    const owner = state.owners.get(input.eventId);
+    if (template === null || owner === undefined || input.signal.aborted || input.generation !== state.generation ||
+      !this.#sbobetMoreTemplateCurrent(template)) return { status: 0 };
+    const url = new URL(template.url);
+    url.searchParams.set("eventId", owner.eventId);
+    url.searchParams.set("leagueId", owner.leagueId);
+    const request = sbobetMoreRequestFromObserved(url.href, "GET");
+    if (request === null) return { status: 0 };
+    let confirm!: (body: string) => void;
+    let reject!: (reason: Error) => void;
+    const acknowledgement = new Promise<string>((resolve, fail) => { confirm = resolve; reject = fail; });
+    void acknowledgement.catch(() => undefined);
+    const active: SbobetActiveMore = { owner, template, request, signal: input.signal,
+      firstRequestOrdinal: this.#nextObserverRequestOrdinal, acknowledgement, confirm,
+      cancel: () => {
+        input.signal.removeEventListener("abort", active.cancel);
+        if (state.active.get(owner.eventId) === active) state.active.delete(owner.eventId);
+        reject(new Error("SBOBET_MORE_RECEIPT_CANCELLED"));
+      }
+    };
+    state.active.set(owner.eventId, active);
+    input.signal.addEventListener("abort", active.cancel, { once: true });
+    const current = () => this.#sbobetMoreActiveCurrent(state, active);
+    const pending = template.pending;
+    const command = (method: string, params?: Record<string, unknown>) => pending.sessionId === undefined
+      ? this.#sendCommand(state.source.tabId, method, params)
+      : this.#sendCommand(state.source.tabId, method, params, pending.sessionId);
+    let scheduled = false;
+    try {
+      const tree = await command("Page.getFrameTree");
+      const document = sbobetDiscoveryDocument(tree, pending.frameId!);
+      if (!current() || document === null || document.loaderId !== pending.loaderId) { active.cancel(); return { status: 0 }; }
+      const expression = buildSbobetMoreFetchExpression(request, document.origin);
+      if (expression === null) { active.cancel(); return { status: 0 }; }
+      const evaluated = await command("Runtime.evaluate", { expression, contextId: template.context.contextId,
+        returnByValue: true, awaitPromise: true });
+      const value = nestedValue(evaluated, "result", "value");
+      if (!current() || !isRecord(value) || !Number.isSafeInteger(value.status)) { active.cancel(); return { status: 0 }; }
+      if (value.status !== 200 || typeof value.body !== "string") {
+        active.cancel();
+        return { status: value.status as number,
+          ...(typeof value.retryAfterMs === "number" ? { retryAfterMs: value.retryAfterMs } : {}) };
+      }
+      scheduled = true;
+      return { status: 200, request, body: value.body };
+    } catch { active.cancel(); return { status: 0 }; }
+    finally { if (!scheduled) await active.forwarding?.catch(() => undefined); }
+  }
+
+  async #acknowledgeSbobetMore(state: SbobetObserverMoreState, batch: SbobetMoreBatch, signal: AbortSignal): Promise<void> {
+    const active = state.active.get(batch.eventId);
+    if (active === undefined || active.signal !== signal || !this.#sbobetMoreActiveCurrent(state, active)) {
+      throw new Error("SBOBET_MORE_RECEIPT_MISSING");
+    }
+    try {
+      const body = await active.acknowledgement;
+      if (!this.#sbobetMoreActiveCurrent(state, active) || batch.leagueId !== active.owner.leagueId ||
+        JSON.stringify(JSON.parse(body)) !== JSON.stringify(batch.groups)) throw new Error("SBOBET_MORE_RECEIPT_MISMATCH");
+    } finally {
+      // A cancelled acknowledgement must not free a scheduler slot while the
+      // corresponding observed forward is still physically pending.
+      await active.forwarding?.catch(() => undefined);
+      active.cancel();
+    }
+  }
+
+  async #emitObservedSbobetMore(pending: PendingRequest, body: string,
+    clocks: { readonly observedAtMs: number; readonly receivedMonotonicMs: number }): Promise<void> {
+    const more = pending.sbobetMore;
+    if (more === undefined || pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return;
+    const current = () => this.#isPendingCurrent(pending) &&
+      this.#captureBridgeGeneration(pending.source.sourceId) === more.bridgeGeneration &&
+      this.#sbobetDetailEpoch(pending.source.sourceId) === more.generation &&
+      pending.frameId !== undefined &&
+      this.#mainWorldContexts.get(pending.source.tabId)?.get(pending.frameId) === more.context &&
+      (more.active === undefined || this.#sbobetMoreActiveCurrent(this.#sbobetMoreStates.get(pending.source.sourceId)!, more.active));
+    if (!current()) return;
+    const batch = sbobetMoreBatchFromResponse(more.request, body, { generation: more.generation,
+      requestStartSequence: more.requestStartSequence, observedAtMs: clocks.observedAtMs });
+    if (batch === null || !await this.#requestDocumentIsCurrent(pending) || !current()) return;
+    const request = { ...pendingRequestMetadata(pending),
+      streamId: `sbobet-more:${pending.source.tabId}:${pending.observerRequestOrdinal}`,
+      reconcileCutoffSequence: more.requestStartSequence };
+    const fragments = splitUtf8Text(JSON.stringify(batch), NETWORK_CHUNK_BODY_BYTES);
+    const snapshotId = networkSnapshotId(pending.source.tabId, pending.observerRequestOrdinal);
+    // No snapshot replay/cache or full-event membership claim for complementary More.
+    let forwarded = 0;
+    const forwarding = Promise.all(fragments.map((bodyFragment, chunkIndex) => this.#emit(pending.source,
+      more.request.url, pending.resourceType, "HTTP_RESPONSE", { encoding: "UTF8",
+        body: fragments.length === 1 ? bodyFragment : JSON.stringify({ schemaVersion: 1,
+          snapshotId, chunkIndex, chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
+      }, { request, ...clocks, sourceGeneration: pending.sourceGeneration,
+        tabGeneration: pending.tabGeneration, beforeForward: current,
+        onForwarded: () => { forwarded += 1; } }))).then(() => undefined);
+    if (more.active !== undefined) more.active.forwarding = forwarding;
+    await forwarding;
+    if (forwarded === fragments.length && current()) {
+      this.#rememberSbobetMoreTemplate(pending, more.request.url, more.context, more.bridgeGeneration);
+      more.active?.confirm(body);
+    }
+  }
+
   #sbobetDetailState(source: ObservedSource): SbobetObserverDetailState {
     let state = this.#sbobetDetailStates.get(source.sourceId);
     if (state === undefined) {
@@ -5325,6 +5613,7 @@ export class NetworkObserver {
   }
 
   #clearSbobetDetail(sourceId: string): void {
+    this.#clearSbobetMore(sourceId);
     const state = this.#sbobetDetailStates.get(sourceId);
     if (state === undefined) return;
     state.generation = null;
@@ -5788,6 +6077,7 @@ export class NetworkObserver {
           new Map<string, MainWorldContextBinding>();
         contexts.set(frameId, { contextId, ...(sessionId === undefined ? {} : { sessionId }) });
         this.#mainWorldContexts.set(source.tabId, contexts);
+        this.#retireSbobetMoreContext(source.sourceId);
       }
       return;
     }
@@ -5803,6 +6093,7 @@ export class NetworkObserver {
         }
         if (contexts.size === 0) this.#mainWorldContexts.delete(source.tabId);
       }
+      this.#retireSbobetMoreContext(source.sourceId);
       // Runtime.enable emits this event when an MV3 worker reattaches even if
       // the provider document did not navigate. It is also emitted separately
       // by child/OOPIF targets. Context loss therefore clears only bindings;
@@ -5840,6 +6131,7 @@ export class NetworkObserver {
         }
         if (contexts.size === 0) this.#mainWorldContexts.delete(source.tabId);
       }
+      this.#retireSbobetMoreContext(source.sourceId);
       return;
     }
     const requestId = typeof params.requestId === "string" ? params.requestId : null;
@@ -5877,9 +6169,28 @@ export class NetworkObserver {
       const requestDocument = requestDocumentBinding(this.#observerSessionId, source.tabId,
         this.#sourceGenerations.get(source.sourceId) ?? 0, sessionId,
         params.frameId, params.loaderId);
+      const moreContext = requestDocument === null ? undefined :
+        this.#mainWorldContexts.get(source.tabId)?.get(requestDocument.frameId);
+      const moreRequest = source.lobby === "KSPORT" && requestDocument !== null && moreContext !== undefined &&
+        moreContext.sessionId === sessionId &&
+        /^(?:XHR|Fetch)$/u.test(String(params.type ?? ""))
+        ? sbobetMoreRequestFromObserved(request?.url, requestMethod) : null;
+      const moreState = this.#sbobetMoreStates.get(source.sourceId);
+      const moreActive = moreRequest === null ? undefined : moreState?.active.get(moreRequest.eventId);
+      const matchingActive = moreActive !== undefined && moreState !== undefined &&
+        this.#sbobetMoreActiveCurrent(moreState, moreActive) &&
+        moreActive.template.context === moreContext && moreActive.request.url === moreRequest!.url &&
+        moreActive.observerRequestId === undefined && requestIdentity.observerRequestOrdinal >= moreActive.firstRequestOrdinal
+        ? moreActive : undefined;
+      if (matchingActive !== undefined) matchingActive.observerRequestId = requestIdentity.observerRequestId;
       if (requestMethod === null) this.#requestIdentities.delete(key);
       else this.#requestIdentities.set(key, { method: requestMethod, ...requestIdentity,
         tabGeneration: this.#captureTabGeneration(source.tabId),
+        ...(moreRequest === null ? {} : { sbobetMore: { request: moreRequest, context: moreContext!,
+          ...(matchingActive === undefined ? {} : { active: matchingActive }),
+          bridgeGeneration: this.#captureBridgeGeneration(source.sourceId),
+          generation: this.#sbobetDetailEpoch(source.sourceId),
+          requestStartSequence: Math.max(0, (this.#sequences.get(source.sourceId) ?? 0) - 1) } }),
         ...(requestDocument === null ? {} : requestDocument) });
       if (source.lobby === "KSPORT" && requestDocument !== null && request !== null &&
         typeof request.url === "string" && requestMethod !== null &&
@@ -6397,6 +6708,11 @@ export class NetworkObserver {
       const providerFunctionCode = this.#requestFunctionCodes.get(key);
       const requestIdentity = this.#requestIdentities.get(key);
       if (requestIdentity === undefined) return;
+      const { sbobetMore: moreCandidate, ...httpIdentity } = requestIdentity;
+      const sbobetMore = moreCandidate !== undefined && response.status === 200 &&
+        response.url === moreCandidate.request.url &&
+        this.#captureBridgeGeneration(source.sourceId) === moreCandidate.bridgeGeneration &&
+        this.#sbobetDetailEpoch(source.sourceId) === moreCandidate.generation ? moreCandidate : undefined;
       const candidate = this.#sbobetDiscoveryRequests.get(key);
       const sbobetDiscovery = candidate !== undefined && candidate.sourceId === source.sourceId &&
         candidate.url === response.url && Number.isInteger(response.status) &&
@@ -6406,7 +6722,7 @@ export class NetworkObserver {
           httpStatus: response.status as number, bridgeGeneration: candidate.bridgeGeneration,
           diagnosticOnly: !isProviderCatalogHttpResponse(source, response.url, providerFunctionCode, providerPartition)
         } : undefined;
-      if (sbobetDiscovery === undefined && !isProviderCatalogHttpResponse(source, response.url, providerFunctionCode,
+      if (sbobetMore === undefined && sbobetDiscovery === undefined && !isProviderCatalogHttpResponse(source, response.url, providerFunctionCode,
         providerPartition)) {
         this.#sbobetDiscoveryRequests.delete(key);
         this.#cmdRecoveryRequests.delete(key);
@@ -6420,7 +6736,8 @@ export class NetworkObserver {
       }
       this.#pending.set(key, { source,
         sourceGeneration: this.#requestGenerations.get(key) ?? this.#sourceGenerations.get(source.sourceId) ?? 0,
-        url: response.url, resourceType, ...requestIdentity,
+        url: response.url, resourceType, ...httpIdentity,
+        ...(sbobetMore === undefined ? {} : { sbobetMore }),
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(providerPartition === undefined ? {} : { providerPartition }),
         ...(sbobetDiscovery === undefined ? {} : { sbobetDiscovery }),
@@ -6490,6 +6807,12 @@ export class NetworkObserver {
           isImGetSeUrl(pending.source, pending.url), pending.sessionId);
         if (!this.#isPendingCurrent(pending)) return;
         if (!isRecord(response) || typeof response.body !== "string") return;
+        if (pending.sbobetMore !== undefined) {
+          const clocks = { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow() };
+          responseBodyRead = true;
+          if (response.base64Encoded !== true) await this.#emitObservedSbobetMore(pending, response.body, clocks);
+          return;
+        }
         if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
         if (!this.#isPendingCurrent(pending)) return;
         if (pending.sbobetDiscovery !== undefined) {
@@ -6651,6 +6974,7 @@ export class NetworkObserver {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
         { ...request, ...clocks, sourceGeneration, tabGeneration });
       this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration);
+      await this.#rememberSbobetMoreRoster(pending, safeBody, bridgeGeneration);
       return;
     }
     if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return;
@@ -6666,6 +6990,7 @@ export class NetworkObserver {
       }, { ...request, ...clocks, sourceGeneration, tabGeneration }));
     await Promise.all(emissions);
     this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration);
+    await this.#rememberSbobetMoreRoster(pending, safeBody, bridgeGeneration);
   }
 
   async ingestDomSnapshot(source: ObservedSource, hostname: string, body: string): Promise<void> {
@@ -7819,6 +8144,7 @@ export class NetworkObserver {
       readonly sourceGeneration?: number;
       readonly tabGeneration?: number;
       readonly beforeForward?: () => boolean | Promise<boolean>;
+      readonly onForwarded?: () => void;
     } = {}
   ): Promise<void> {
     const sourceGeneration = metadata.sourceGeneration ?? this.#captureSourceGeneration(source.sourceId);
@@ -7853,6 +8179,7 @@ export class NetworkObserver {
           payload
         }) as ChromeBridgeEnvelope;
         await this.#forward(redacted);
+        metadata.onForwarded?.();
         if (transport === "WS_FRAME") {
           this.#wsAttachDiagnostic(source).framesForwarded += 1;
           this.#clearPreexistingSocketReconnect(source.sourceId);
