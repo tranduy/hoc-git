@@ -1307,7 +1307,8 @@ describe("NetworkObserver", () => {
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("'x-v': '91938'");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("'x-platform': String(window.global?.PlatForm || '')");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("sessionStorage.getItem('to' + 'ken')");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("new URLSearchParams(location.search).get('to' + 'ken')");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).not.toContain("new URLSearchParams(location.search).get('to' + 'ken')");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("profile?.StatusCode === 100 && profile.im === true");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("credentials: 'omit'");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SportId: 1");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("BetTypeIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313]");
@@ -3145,7 +3146,7 @@ describe("NetworkObserver", () => {
       const listeners = new Map<string, (event: { detail: string }) => void>();
       const requests: Array<Record<string, unknown>> = [];
       const windowStub = {
-        global: { PlatForm: "web" },
+        global: { PlatForm: "web", SiteProfile: { StatusCode: 100, im: true, t: "token" } },
         addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
         removeEventListener: (name: string) => listeners.delete(name),
         dispatchEvent: (event: { type: string; detail: { c: string } }) => {
@@ -3192,7 +3193,7 @@ describe("NetworkObserver", () => {
   it("returns only IM fields consumed by the strict football adapter", async () => {
     const listeners = new Map<string, (event: { detail: string }) => void>();
     const windowStub = {
-      global: { PlatForm: "web" },
+      global: { PlatForm: "web", SiteProfile: { StatusCode: 100, im: true, t: "token" } },
       addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
       removeEventListener: (name: string) => listeners.delete(name),
       dispatchEvent: (event: { type: string; detail: { c: string } }) => {
@@ -3236,7 +3237,7 @@ describe("NetworkObserver", () => {
     const listeners = new Map<string, (event: { detail: string }) => void>();
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
     const windowStub: Record<string, unknown> = {
-      global: { PlatForm: "web" },
+      global: { PlatForm: "web", SiteProfile: { StatusCode: 100, im: true, t: "token" } },
       addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
       removeEventListener: (name: string) => listeners.delete(name),
       dispatchEvent: (event: { type: string; detail: { c: string } }) => {
@@ -3286,7 +3287,7 @@ describe("NetworkObserver", () => {
     const listeners = new Map<string, (event: { detail: string }) => void>();
     const sentHeaders: Record<string, string>[] = [];
     const windowStub = {
-      global: { PlatForm: "web" },
+      global: { PlatForm: "web", SiteProfile: { StatusCode: 100, im: true, t: "token" } },
       addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
       removeEventListener: (name: string) => listeners.delete(name),
       dispatchEvent: (event: { type: string; detail: { c: string } }) => {
@@ -3311,11 +3312,11 @@ describe("NetworkObserver", () => {
     expect(sentHeaders.every((headers) => headers["x-fieldline-catalog-probe"] === "compact-v1")).toBe(true);
   });
 
-  it("prefers the fresh IM URL token over stale same-origin session storage", async () => {
+  it("uses the IM session token exchanged by the native bootstrap ahead of the launch URL", async () => {
     const listeners = new Map<string, (event: { detail: string }) => void>();
     const sentTokens: string[] = [];
     const windowStub = {
-      global: { PlatForm: "web" },
+      global: { PlatForm: "web", SiteProfile: { StatusCode: 100, im: true, t: "4-stale" } },
       addEventListener: (name: string, listener: (event: { detail: string }) => void) =>
         listeners.set(name, listener),
       removeEventListener: (name: string) => listeners.delete(name),
@@ -3339,7 +3340,7 @@ describe("NetworkObserver", () => {
       }
     );
 
-    expect(sentTokens).toEqual(["4-fresh", "4-fresh"]);
+    expect(sentTokens).toEqual(["4-stale", "4-stale"]);
   });
 
   it("keeps CMD on the unfiltered football catalog before advancing its virtualized table", async () => {
@@ -6712,8 +6713,9 @@ describe("NetworkObserver", () => {
     try {
       const listeners = new Map<string, (event: { detail: string }) => void>();
       let aborted = false;
-      const windowStub: Record<string, unknown> & { global: { PlatForm: string } } = {
-        global: { PlatForm: "web" },
+      const windowStub: Record<string, unknown> & { global: { PlatForm: string;
+        SiteProfile: { StatusCode: number; im: boolean; t: string } } } = {
+        global: { PlatForm: "web", SiteProfile: { StatusCode: 100, im: true, t: "public-test-value" } },
         addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
         removeEventListener: (name: string) => listeners.delete(name),
         dispatchEvent: (event: { type: string; detail: { c: string } }) => {

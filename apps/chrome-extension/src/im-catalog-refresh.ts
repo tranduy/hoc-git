@@ -1,10 +1,29 @@
-// Reuse IM's existing signed GetSE/GetMEI lane. The epoch is supplied by the
+// Reuse IM's signed GetSE/GetEBI lane. The epoch is supplied by the
 // observer and includes source, bridge and document identity.
 export function buildImCatalogRefreshExpression(generation: string): string {
   return `(async () => {
     const generation = ${JSON.stringify(generation)};
     const root = document.documentElement;
     const startedAt = Date.now();
+    // Origin-scoped diagnostic pause leaves the provider's own requests and
+    // passive Network capture running, including in newly opened IM tabs.
+    const pauseKey = '__fieldlineImCollectorPaused';
+    const paused = window.localStorage?.getItem(pauseKey) === '1';
+    if (paused && !window.__fieldlineImPauseUntil) window.__fieldlineImPauseUntil = startedAt + 30_000;
+    if (paused && startedAt >= window.__fieldlineImPauseUntil) {
+      window.localStorage.removeItem(pauseKey);
+      window.__fieldlineImPauseUntil = 0;
+    } else if (paused) {
+      const prior = window.__fieldlineImNativeCatalogV1?.state;
+      if (prior) {
+        prior.retired = true;
+        for (const controller of prior.controllers) controller.abort();
+        for (const resolve of prior.waiters) resolve();
+        window.__fieldlineImNativeCatalogV1.state = null;
+      }
+      return { status: 'collector-paused', responses: [] };
+    }
+    if (!paused) window.__fieldlineImPauseUntil = 0;
     if (location.hostname !== 'imsports.directsb.net') {
       const normalize = (value) => String(value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
         .trim().toLowerCase().replace(/\\s+/g, ' ');
@@ -20,6 +39,27 @@ export function buildImCatalogRefreshExpression(generation: string): string {
     root.dataset.fieldlineImCatalogRefreshAt = String(startedAt);
     const key = '__fieldlineImNativeCatalogV1';
     const manager = window[key] || (window[key] = { state: null, physical: new Set() });
+    // Native GetSP writes this document's SiteProfile only after StatusCode100
+    // and replaces session storage with T.t (public main bundle 618172/618415).
+    // A launch URL or persisted localStorage profile is not completed login.
+    const nativeAuthToken = () => {
+      const profile = window.global?.SiteProfile;
+      const token = sessionStorage.getItem('to' + 'ken');
+      return profile?.StatusCode === 100 && profile.im === true &&
+        typeof profile.t === 'string' && profile.t.length > 0 && token === profile.t ? token : null;
+    };
+    const retire = (prior) => {
+      if (!prior) return;
+      prior.retired = true;
+      for (const controller of prior.controllers) controller.abort();
+      for (const resolve of prior.waiters) resolve();
+      prior.waiters.clear();
+      if (manager.state === prior) manager.state = null;
+    };
+    if (nativeAuthToken() === null) {
+      retire(manager.state);
+      return { status: 'native-auth-not-ready', responses: [] };
+    }
     if (!manager.state || manager.state.generation !== generation) {
       if (manager.state) {
         manager.state.retired = true;
@@ -28,14 +68,27 @@ export function buildImCatalogRefreshExpression(generation: string): string {
       }
       manager.state = { generation, retired: false, controllers: new Set(), owners: new Map(),
         catalogs: [], mainOperation: null, waiters: new Set(), leaseUntil: 0, rosterAtMs: 0,
-        rosterFailures: 0, detailFailures: 0, rosterVersion: 0, publishedRosterVersion: 0, pump: null };
+        rosterFailures: 0, detailFailures: 0, rosterVersion: 0, publishedRosterVersion: 0,
+        retryAfterMs: 0, lastFailure: null, pump: null };
     }
     const state = manager.state;
     state.leaseUntil = startedAt + 20_000;
-    const current = () => manager.state === state && !state.retired;
-    const token = new URLSearchParams(location.search).get('to' + 'ken') || sessionStorage.getItem('to' + 'ken');
-    if (!token) return { status: 'token-unavailable', responses: [] };
-    const sign = (path) => new Promise((resolve, reject) => {
+    const current = () => {
+      if (manager.state !== state || state.retired) return false;
+      if (nativeAuthToken() === null || window.localStorage?.getItem('__fieldlineImCollectorPaused') === '1') {
+        retire(state); return false;
+      }
+      return true;
+    };
+    const recordFailure = (path, status, nativeStatusCode, errorCategory) => {
+      if (!current() || errorCategory === 'RATE_LIMITED') return;
+      if (status === 429 || nativeStatusCode !== null && nativeStatusCode !== 100) {
+        state.retryAfterMs = Math.max(state.retryAfterMs || 0, Date.now() + 30_000);
+      }
+      state.lastFailure = { path, status, nativeStatusCode, errorCategory, observedAtMs: Date.now() };
+    };
+    const rateLimited = () => Date.now() < (state.retryAfterMs || 0);
+    const sign = (path, mode) => new Promise((resolve, reject) => {
       const alphabet = 'abcdefghijklmnopqrstuvwxyz$ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789';
       const callback = Array.from({ length: 7 }, () => alphabet[Math.floor(Math.random() * 64)]).join('');
       const eventName = 'halo_' + callback;
@@ -44,7 +97,7 @@ export function buildImCatalogRefreshExpression(generation: string): string {
       const receive = (event) => { clearTimeout(timer); window.removeEventListener(eventName, receive);
         resolve(event.detail); };
       window.addEventListener(eventName, receive);
-      window.dispatchEvent(new CustomEvent('helo', { detail: { p: { c: path, a: 127 }, c: callback } }));
+      window.dispatchEvent(new CustomEvent('helo', { detail: { p: { c: path, a: mode }, c: callback } }));
     });
     // Existing source-proven football request scope; acquisition does not infer
     // additional native bet types or game periods from normalized market names.
@@ -57,20 +110,50 @@ export function buildImCatalogRefreshExpression(generation: string): string {
       const controller = new AbortController();
       state.controllers.add(controller);
       const timer = setTimeout(() => controller.abort(), 8000);
+      let status = null, nativeStatusCode = null, errorCategory = 'SIGNATURE';
       try {
-        const signature = String(await sign(path));
+        // Public main-9992f20.js w() (121671/125309) reads session storage
+        // per request and signs authenticated catalog paths with mode2. Its
+        // GetSP bootstrap (618172) replaces the URL launch value with T.t.
+        const token = nativeAuthToken();
+        if (!current() || token === null) { errorCategory = 'NATIVE_AUTH_NOT_READY'; throw new Error('native-auth-not-ready'); }
+        if (rateLimited()) { errorCategory = 'RATE_LIMITED'; throw new Error('rate-limited'); }
+        const signature = String(await sign(path, 2));
         if (!current() || controller.signal.aborted) throw new Error('retired');
+        if (nativeAuthToken() !== token) { errorCategory = 'NATIVE_AUTH_CHANGED'; throw new Error('native-auth-changed'); }
+        if (rateLimited()) { errorCategory = 'RATE_LIMITED'; throw new Error('rate-limited'); }
+        const nativeHeaders = {};
+        for (const [header, key] of [['x-lang', 'lang'], ['x-oddsTempBetType', 'sbtt'], ['x-oddsTemp', 'sot']]) {
+          const value = sessionStorage.getItem(key);
+          if (value) nativeHeaders[header] = value;
+        }
+        const visitor = window.localStorage?.getItem('dmlkYw==');
+        if (visitor) nativeHeaders['x-vc'] = visitor;
+        errorCategory = 'NETWORK';
         const response = await fetch(path, { method: 'POST', credentials: 'omit', cache: 'no-store',
           signal: controller.signal, headers: { Accept: 'application/json',
             'Content-Type': 'application/json; charset=utf-8', 'x-fieldline-catalog-probe': 'compact-v1',
             'x-sc': encodeURI(signature), 'x-v': '91938',
-            'x-platform': String(window.global?.PlatForm || ''), ['x-' + 'token']: token },
+            'x-platform': String(window.global?.PlatForm || ''), ['x-' + 'token']: token, ...nativeHeaders },
           body: JSON.stringify(body) });
+        status = Number.isInteger(response.status) ? response.status : null;
+        if (status === 429 && current()) state.retryAfterMs = Math.max(state.retryAfterMs || 0, Date.now() + 30_000);
+        errorCategory = 'BODY_READ';
         const text = await response.text();
         const observedAtMs = Date.now();
-        if (!current() || controller.signal.aborted || response.ok === false ||
-          (typeof response.status === 'number' && response.status !== 200)) throw new Error('native-failure');
-        return { parsed: JSON.parse(text), observedAtMs };
+        if (!current() || controller.signal.aborted) throw new Error('retired');
+        errorCategory = 'INVALID_JSON';
+        const parsed = JSON.parse(text);
+        nativeStatusCode = Number.isSafeInteger(parsed?.StatusCode) ? parsed.StatusCode : null;
+        if (response.ok === false || status !== null && status !== 200) {
+          errorCategory = 'HTTP_STATUS'; throw new Error('native-failure');
+        }
+        if (parsed?.StatusCode !== 100) { errorCategory = 'NATIVE_STATUS'; throw new Error('native-failure'); }
+        return { parsed, observedAtMs, status };
+      } catch (error) {
+        recordFailure(path, status, nativeStatusCode, controller.signal.aborted ? 'REQUEST_TIMEOUT'
+          : status !== null && status !== 200 ? 'HTTP_STATUS' : errorCategory);
+        throw error;
       } finally { clearTimeout(timer); state.controllers.delete(controller); }
     };
     const ownerIdentity = (event) => JSON.stringify([event.eid, event.edt, event.htn, event.atn, event.cn, event.iscyb]);
@@ -88,29 +171,39 @@ export function buildImCatalogRefreshExpression(generation: string): string {
         activeRequests: manager.physical.size, rosterAtMs: state.rosterAtMs,
         rosterFailures: state.rosterFailures, detailFailures: state.detailFailures,
         detailMarkets: owners.reduce((sum, o) => sum + o.markets.size, 0),
-        unkeyedDetailRows: owners.reduce((sum, o) => sum + o.unkeyed.length, 0) };
+        unkeyedDetailRows: owners.reduce((sum, o) => sum + o.unkeyed.length, 0), lastFailure: state.lastFailure ?? null };
       if (current()) root.dataset.fieldlineImNativeCoverage = JSON.stringify(value);
       return value;
     };
     const notify = () => { coverage(); for (const resolve of state.waiters) resolve(); state.waiters.clear(); };
+    const backoffResult = () => {
+      // Do not replay this pair as a fresh response after the error pause.
+      // Retained native values keep their original clocks for the next valid pair.
+      state.publishedRosterVersion = state.rosterVersion;
+      return { status: 'rate-limited', responses: [], coverage: coverage() };
+    };
     const eligible = () => {
       const active = activeOwners();
       return [...state.owners.values()].filter(owner => !active.has(owner) && owner.nextAtMs <= Date.now())
         .sort((a, b) => a.lastAttemptAtMs - b.lastAttemptAtMs);
     };
     state.pump = () => {
-      if (!current() || Date.now() > state.leaseUntil) { notify(); return; }
+      if (!current() || rateLimited() || Date.now() > state.leaseUntil) { notify(); return; }
       while (manager.physical.size < 2) {
         const batch = eligible().slice(0, 1);
         if (batch.length === 0) break;
         const owner = batch[0]; owner.lastAttemptAtMs = Date.now();
         const work = { state, batch }; manager.physical.add(work);
         void request('/api/EventV6/GetEBI/1/' + owner.key + '/false/2/false', undefined)
-          .then(({ parsed, observedAtMs }) => {
+          .then(({ parsed, observedAtMs, status }) => {
             const event = parsed?.e;
             if (!current() || parsed?.StatusCode !== 100 || !validEvent(event) || event.isrbt !== false ||
               event.iscyb !== false || String(event.eid) !== owner.key || state.owners.get(owner.key) !== owner ||
-              ownerIdentity(event) !== owner.identity) throw new Error('native-detail');
+              ownerIdentity(event) !== owner.identity) {
+              recordFailure('/api/EventV6/GetEBI/1/' + owner.key + '/false/2/false', status, parsed.StatusCode,
+                validEvent(event) ? 'DETAIL_OWNER_MISMATCH' : 'DETAIL_SHAPE');
+              throw new Error('native-detail');
+            }
               owner.nativeResponse = parsed;
               // Native getSEVDataSuccess replaces the unfiltered EBI market
               // list. This only replaces this detail domain, not fresh GetSE.
@@ -130,11 +223,19 @@ export function buildImCatalogRefreshExpression(generation: string): string {
       }
       notify();
     };
+    // Renewing the maintenance lease must also resume due retained owners.
+    // Their receipts remain private until a genuinely new paired roster emits.
+    state.pump();
+    if (rateLimited()) return backoffResult();
     if (!state.mainOperation) {
       const operation = Promise.all([1, 2].map(async (Market) => ({ market: Market,
         ...await request('/api/EventV6/GetSE', { ...common, Market }) }))).then((catalogs) => {
-        if (!current() || !catalogs.every(c => c.parsed?.StatusCode === 100 &&
-          Array.isArray(c.parsed.sel) && c.parsed.sel.every(validEvent))) throw new Error('native-roster');
+        if (!current()) throw new Error('retired');
+        const invalid = catalogs.find(c => !Array.isArray(c.parsed.sel) || !c.parsed.sel.every(validEvent));
+        if (invalid) {
+          recordFailure('/api/EventV6/GetSE', invalid.status, invalid.parsed.StatusCode, 'ROSTER_SHAPE');
+          throw new Error('native-roster');
+        }
         const owners = new Map(); const conflicts = new Set();
         for (const catalog of catalogs) for (const event of catalog.parsed.sel) {
           event.mls = stamp(event.mls, catalog.observedAtMs);
@@ -147,7 +248,9 @@ export function buildImCatalogRefreshExpression(generation: string): string {
         }
         for (const key of conflicts) owners.delete(key);
         state.owners = owners; state.catalogs = catalogs; state.rosterAtMs = Math.max(...catalogs.map(c => c.observedAtMs));
-        state.rosterFailures = 0; state.rosterVersion++; state.pump();
+        state.rosterFailures = 0; state.rosterVersion++;
+        if (rateLimited()) state.publishedRosterVersion = state.rosterVersion;
+        state.pump();
       }).catch(() => { if (current()) state.rosterFailures++; }).finally(() => {
         if (state.mainOperation === operation) state.mainOperation = null; notify();
       });
@@ -159,12 +262,13 @@ export function buildImCatalogRefreshExpression(generation: string): string {
     const budget = new Promise(resolve => { budgetTimer = setTimeout(resolve, 8000); });
     const settled = (async () => {
       await state.mainOperation;
-      while (current() && Date.now() <= state.leaseUntil && (activeOwners().size > 0 || eligible().length > 0)) {
+      while (current() && !rateLimited() && Date.now() <= state.leaseUntil && (activeOwners().size > 0 || eligible().length > 0)) {
         await new Promise(resolve => state.waiters.add(resolve));
       }
     })();
     await Promise.race([settled, budget]); clearTimeout(budgetTimer);
     if (!current()) return { status: 'retired', responses: [] };
+    if (rateLimited()) return backoffResult();
     if (state.rosterVersion <= state.publishedRosterVersion) {
       return { status: 'request-failed', responses: [], coverage: coverage() };
     }

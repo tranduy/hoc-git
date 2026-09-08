@@ -1207,6 +1207,7 @@ export class NetworkObserver {
   readonly #ksportBaselineChecks = new Map<string, Promise<boolean>>();
   readonly #snapshotReplays = new Map<string, Promise<boolean>>();
   readonly #imSnapshotOrdinals = new Map<string, number>();
+  readonly #imReadyBaselines = new Map<string, { readonly observedAtMs: number; readonly isCurrent: () => boolean }>();
   readonly #ksportSnapshotOrdinals = new Map<string, number>();
   readonly #startedTabs = new Set<number>();
   readonly #mainWorldContexts = new Map<number, Map<string, MainWorldContextBinding>>();
@@ -1858,6 +1859,11 @@ export class NetworkObserver {
     return (this.#cmdFullBaselineAtMs.get(sourceId) ?? Number.NEGATIVE_INFINITY) >= startedAtMs;
   }
 
+  hasCompleteImBaselineSince(sourceId: string, sinceMs: number): boolean {
+    const proof = this.#imReadyBaselines.get(sourceId);
+    return Number.isFinite(sinceMs) && proof !== undefined && proof.observedAtMs >= sinceMs && proof.isCurrent();
+  }
+
   #clearApsportEventDetails(sourceId: string): void {
     this.#apsportActiveCatalogs.delete(sourceId);
     for (const [key, pending] of this.#apsportEventDetailTimers) {
@@ -1894,6 +1900,7 @@ export class NetworkObserver {
     this.#domSnapshotOrdinals.delete(sourceId);
     this.#httpSnapshots.delete(sourceId);
     this.#imSnapshotOrdinals.delete(sourceId);
+    this.#imReadyBaselines.delete(sourceId);
     this.#ksportSnapshotOrdinals.delete(sourceId);
     this.#tsportSnapshots.delete(sourceId);
     this.#tsportRequestUrls.delete(sourceId);
@@ -2090,6 +2097,7 @@ export class NetworkObserver {
     for (const sourceId of this.#sequences.keys()) remember(sourceId);
     for (const sourceId of this.#cmdSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#httpSnapshots.keys()) remember(sourceId);
+    for (const sourceId of this.#imReadyBaselines.keys()) remember(sourceId);
     for (const sourceId of this.#tsportSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#tsportRequestUrls.keys()) remember(sourceId);
     for (const sourceId of this.#apsportRequestTemplates.keys()) remember(sourceId);
@@ -5226,8 +5234,10 @@ export class NetworkObserver {
   }
 
   async #evaluateImCatalogMainWorlds(source: ObservedSource, awaitPromise: boolean): Promise<string[]> {
+    const evaluationStartedAtMs = this.#now();
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const evaluationIsCurrent = (): boolean =>
       this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
       this.#captureTabGeneration(source.tabId) === tabGeneration;
@@ -5274,10 +5284,48 @@ export class NetworkObserver {
               ...(verifiedDocument === undefined ? { currentDocumentConfirmed: true as const } : {}),
               reconcileCutoffSequence: reconcileCutoffSequence! });
         }
+        const readinessBinding = binding ?? (descriptor === undefined ? undefined : contexts?.get(descriptor.id));
+        const readinessIsCurrent = (): boolean => evaluationIsCurrent() &&
+          this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration && descriptor !== undefined &&
+          readinessBinding !== undefined && this.#mainWorldContexts.get(source.tabId)?.get(descriptor.id) === readinessBinding;
+        const coverage = isRecord(value.coverage) ? value.coverage : null;
+        const observedAtMs = coverage?.rosterAtMs;
+        if (verifiedDocument !== undefined && generation !== undefined && readinessIsCurrent() &&
+          value.status === "catalog-requested" && coverage?.rosterFailures === 0 &&
+          typeof observedAtMs === "number" && Number.isFinite(observedAtMs) &&
+          observedAtMs >= evaluationStartedAtMs && observedAtMs <= this.#now() && value.responses.length === 2) {
+          const document = requestDocumentBinding(this.#observerSessionId, source.tabId, sourceGeneration,
+            verifiedDocument.sessionId, verifiedDocument.frameId, verifiedDocument.loaderId);
+          const snapshots = this.#httpSnapshots.get(source.sourceId) ?? [];
+          const markets = new Set<number>();
+          const complete = value.responses.every(item => {
+            if (!isRecord(item) || (item.market !== 1 && item.market !== 2) || typeof item.body !== "string") return false;
+            const body = item.body;
+            let parsed: unknown;
+            try { parsed = JSON.parse(body); } catch { return false; }
+            if (!isRecord(parsed) || parsed.StatusCode !== 100 || !Array.isArray(parsed.sel)) return false;
+            markets.add(item.market);
+            return document !== null && snapshots.some(snapshot => snapshot.streamId === generation &&
+              snapshot.providerPartition === `IM_MARKET_${item.market}` && snapshot.body === redactNetworkBody(body) &&
+              snapshot.requestDocumentKey === document.requestDocumentKey);
+          });
+          if (complete && markets.size === 2 && readinessIsCurrent()) {
+            this.#imReadyBaselines.set(source.sourceId, { observedAtMs, isCurrent: readinessIsCurrent });
+          }
+        }
       }
       const status = isRecord(value) ? value.status : null;
-      const safeValue = typeof status === "string" && /^(?:catalog-requested|rate-limited|token-unavailable|navigation-not-found|truc tiep|live|bong da|football)$/u
+      const safeValue = typeof status === "string" && /^(?:catalog-requested|request-failed|request-timeout|collector-paused|native-auth-not-ready|rate-limited|token-unavailable|navigation-not-found|truc tiep|live|bong da|football)$/u
         .test(status) ? status : "unavailable";
+      const failure = isRecord(value) && isRecord(value.coverage) && isRecord(value.coverage.lastFailure)
+        ? value.coverage.lastFailure : null;
+      if ((safeValue === "rate-limited" || safeValue === "request-failed") && failure !== null) {
+        const code = failure.nativeStatusCode;
+        if (typeof code === "number" && Number.isSafeInteger(code) && code >= 0 && code <= 999999) {
+          return `${label}:native-status-${code}`;
+        }
+        if (failure.status === 429) return `${label}:http-status-429`;
+      }
       return `${label}:${safeValue}`;
     };
     const evaluations: Array<Promise<string>> = [evaluate("top", frameDescriptors[0])];

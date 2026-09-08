@@ -608,6 +608,39 @@ describe("SourceTabRecovery", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it("restores IM through its native portal and closes the old source only after a fresh pair", async () => {
+    const old = { id: 23, url: "https://imsports.directsb.net/?token=spent" };
+    const fresh = { id: 24, url: "https://imsports.directsb.net/?token=native-new" };
+    const operations: string[] = [];
+    const launchFromPortal = vi.fn(async () => { operations.push("launch"); return fresh; });
+    const validateReady = vi.fn(async (tab: { id?: number | undefined }, _lobby: string, since?: number) => {
+      if (tab.id !== fresh.id) return false;
+      expect(since).toBeGreaterThan(0);
+      operations.push("pair"); return true;
+    });
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "IM", tabId: old.id }], query: async () => [old],
+      create: vi.fn(), update: vi.fn(), attach: vi.fn(), launchFromPortal, validateReady,
+      remove: async id => { operations.push(`remove:${id}`); }
+    });
+    await Promise.all([recovery.restore("IM"), recovery.restore("IM")]);
+    expect(launchFromPortal).toHaveBeenCalledExactlyOnceWith("IM");
+    expect(operations).toEqual(["launch", "pair", "remove:23"]);
+  });
+
+  it("keeps the previous IM tab when native portal recovery has no fresh pair", async () => {
+    const old = { id: 23, url: "https://imsports.directsb.net/?token=spent" };
+    const remove = vi.fn();
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "IM", tabId: old.id }], query: async () => [old],
+      create: vi.fn(), update: vi.fn(), attach: vi.fn(), remove,
+      launchFromPortal: async () => ({ id: 24, url: "https://imsports.directsb.net/" }),
+      validateReady: async () => false
+    });
+    await expect(recovery.restore("IM")).rejects.toThrow("SOURCE_TAB_RECOVERY_FAILED");
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it("restores SABA directly after extension session memory is cleared", async () => {
     const launchFromPortal = vi.fn();
     const create = vi.fn(async () => ({ id: 19, url: "about:blank" }));

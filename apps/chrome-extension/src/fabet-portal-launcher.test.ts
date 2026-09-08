@@ -1,5 +1,120 @@
 import { describe, expect, it, vi } from "vitest";
+import vm from "node:vm";
 import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
+
+type ImTab = { id: number; url: string; openerTabId?: number; status?: "complete" | "loading" };
+function imHarness(options: { login?: boolean; cards?: Array<{ label: string; image: string; x: number; highlight?: boolean }>;
+  onClick?: (h: { create(tab: ImTab): void; change(tab: ImTab): void }) => void } = {}) {
+  const portal = { id: 3, url: "https://fabet.monster/lobby-the-thao?type=livesports", status: "complete" as const };
+  const tabs = new Map<number, ImTab>([[3, portal], [9, { id: 9, url: "https://imsports.directsb.net/?token=OLD_UNRELATED" }]]);
+  let created: ((tab: ImTab) => void) | undefined;
+  let updated: ((id: number, info: unknown, tab: ImTab) => void) | undefined;
+  const rect = (x: number) => ({ left: x, top: 10, width: 20, height: 20 });
+  const cards = (options.cards ?? [{ label: "I-Sports", image: "/game/im-sports.webp", x: 80 }]).map(card => {
+    const control = { getBoundingClientRect: () => rect(card.x), focus() {} };
+    return { textContent: card.label, getClientRects: () => [rect(card.x)], scrollIntoView() {},
+      closest: (selector: string) => selector === ".sport-categories-container__content-highlight" && card.highlight ? {} : null,
+      getBoundingClientRect: () => rect(card.x), querySelector: (selector: string) => selector.includes("name")
+        ? { textContent: card.label } : selector.includes("img") ? { getAttribute: () => card.image } : control };
+  });
+  const document = { querySelectorAll: (selector: string) => selector.includes(".game-item.lobby") ? cards
+    : selector.includes("button") && options.login ? [{ textContent: "Login", getClientRects: () => [rect(1)] }] : [] };
+  const h = { create(tab: ImTab) { tabs.set(tab.id, tab); created?.(tab); },
+    change(tab: ImTab) { tabs.set(tab.id, tab); updated?.(tab.id, { url: tab.url }, tab); } };
+  const attachSource = vi.fn(async () => undefined);
+  const update = vi.fn(async (id: number, url: string) => { const tab = { id, url }; tabs.set(id, tab); return tab; });
+  const detachDebugger = vi.fn(async () => undefined);
+  const sendCommand = vi.fn(async (_tabId: number, method: string, params: Record<string, unknown>) => {
+    if (method === "Runtime.evaluate") return { result: { value: vm.runInNewContext(String(params.expression), {
+      document, innerWidth: 1000, innerHeight: 1000,
+      getComputedStyle: () => ({ visibility: "visible", display: "block" }) }) } };
+    if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased") options.onClick?.(h);
+    return {};
+  });
+  const launcher = new FabetPortalLauncher({ query: async () => [...tabs.values()], update,
+    focusWindow: async () => undefined, attachDebugger: async () => undefined, detachDebugger, sendCommand,
+    addCreatedListener: listener => { created = listener; }, removeCreatedListener: () => { created = undefined; },
+    addUpdatedListener: listener => { updated = listener; }, removeUpdatedListener: () => { updated = undefined; },
+    attachSource, get: async id => { const tab = tabs.get(id); if (!tab) throw Error("MISSING"); return tab; },
+    delay: async () => undefined });
+  return { launcher, tabs, attachSource, update, sendCommand, detachDebugger,
+    listenersGone: () => created === undefined && updated === undefined };
+}
+
+describe("FabetPortalLauncher IM", () => {
+  it("clicks only the football I-Sports card and attaches its native child without rewriting its URL", async () => {
+    const h = imHarness({ cards: [
+      { label: "I-Sports", image: "/game/betradar_esportss_landscape.avif", x: 20 },
+      { label: "I-Sports", image: "/game/im-sports.webp", x: 80 }
+    ], onClick: h => h.create({ id: 12, openerTabId: 3, url: "https://imsports.directsb.net/?token=FRESH_NATIVE" }) });
+    await expect(h.launcher.launchIm()).resolves.toMatchObject({ id: 12 });
+    expect(h.attachSource).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: 12 }), "IM");
+    expect(h.update).not.toHaveBeenCalled();
+    const clicks = h.sendCommand.mock.calls.filter(([, m, p]) => m === "Input.dispatchMouseEvent" && p.type === "mouseReleased");
+    expect(clicks).toHaveLength(1); expect(clicks[0]![2]).toMatchObject({ x: 90 });
+    expect(h.listenersGone()).toBe(true); expect(h.detachDebugger).toHaveBeenCalledExactlyOnceWith(3);
+  });
+
+  it("rejects an unchanged old IM tab and a newly-created unrelated IM tab after one click", async () => {
+    const h = imHarness({ onClick: h => h.create({ id: 14, openerTabId: 800, url: "https://imsports.directsb.net/" }) });
+    await expect(h.launcher.launchIm()).rejects.toThrow("FABET_IM_POPUP_UNAVAILABLE");
+    expect(h.attachSource).not.toHaveBeenCalled();
+    expect(h.sendCommand.mock.calls.filter(([, m, p]) => m === "Input.dispatchMouseEvent" && p.type === "mouseReleased")).toHaveLength(1);
+    expect(h.listenersGone()).toBe(true);
+  });
+
+  it("prefers the actual highlighted I-Sports card over the recently played duplicate", async () => {
+    const h = imHarness({ cards: [
+      { label: "I-Sports", image: "/coin.svg", x: 20 },
+      { label: "I-Sports", image: "/game/im-sports.webp", x: 80, highlight: true },
+      { label: "I-Sports", image: "/game/betradar_esportss_landscape.avif", x: 140, highlight: true }
+    ], onClick: h => h.create({ id: 12, openerTabId: 3, url: "https://imsports.directsb.net/?token=FRESH_NATIVE" }) });
+    await expect(h.launcher.launchIm()).resolves.toMatchObject({ id: 12 });
+    const clicks = h.sendCommand.mock.calls.filter(([, method, params]) =>
+      method === "Input.dispatchMouseEvent" && params.type === "mouseReleased");
+    expect(clicks).toHaveLength(1);
+    expect(clicks[0]![2]).toMatchObject({ x: 90 });
+  });
+
+  it("accepts a URL-changed named child only with the current portal opener", async () => {
+    const h = imHarness({ onClick: h => h.change({ id: 13, openerTabId: 3, url: "https://imsports.directsb.net/?token=NEW" }) });
+    h.tabs.set(13, { id: 13, openerTabId: 3, url: "about:blank" });
+    await expect(h.launcher.launchIm()).resolves.toMatchObject({ id: 13 });
+  });
+
+  it("hands the debugger back before attaching IM when the native launch uses the portal tab", async () => {
+    const h = imHarness({ onClick: h => h.change({ id: 3, url: "https://imsports.directsb.net/?token=NEW" }) });
+    await expect(h.launcher.launchIm()).resolves.toMatchObject({ id: 3 });
+    expect(h.detachDebugger.mock.invocationCallOrder[0]).toBeLessThan(h.attachSource.mock.invocationCallOrder[0]!);
+    expect(h.detachDebugger).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a retired launch before any click or source attachment", async () => {
+    const h = imHarness(), controller = new AbortController(); controller.abort();
+    await expect(h.launcher.launchIm(controller.signal)).rejects.toThrow("FABET_IM_LAUNCH_CANCELLED");
+    expect(h.sendCommand).not.toHaveBeenCalled(); expect(h.attachSource).not.toHaveBeenCalled();
+  });
+
+  it.each(["http://imsports.directsb.net/", "https://other-provider.test/?token=WRONG"])("refuses a child at %s", async url => {
+    const h = imHarness({ onClick: h => h.create({ id: 12, openerTabId: 3, url }) });
+    await expect(h.launcher.launchIm()).rejects.toThrow("FABET_IM_POPUP_UNAVAILABLE");
+    expect(h.attachSource).not.toHaveBeenCalled();
+  });
+
+  it("returns explicit authentication failure without clicking a provider", async () => {
+    const h = imHarness({ login: true });
+    await expect(h.launcher.launchIm()).rejects.toThrow("FABET_NOT_AUTHENTICATED");
+    expect(h.sendCommand.mock.calls.some(([, m]) => m === "Input.dispatchMouseEvent")).toBe(false);
+    expect(h.listenersGone()).toBe(true);
+  });
+
+  it("rejects ambiguous football cards before clicking", async () => {
+    const h = imHarness({ cards: [{ label: "I-Sports", image: "/game/im.webp", x: 10 },
+      { label: "I-Sports", image: "/game/other-im.webp", x: 100 }] });
+    await expect(h.launcher.launchIm()).rejects.toThrow("FABET_IM_CONTROL_AMBIGUOUS");
+    expect(h.sendCommand.mock.calls.some(([, m]) => m === "Input.dispatchMouseEvent")).toBe(false);
+  });
+});
 
 describe("FabetPortalLauncher", () => {
   it("never reattaches an unchanged expired SABA tab when Chrome briefly clears its error title", async () => {

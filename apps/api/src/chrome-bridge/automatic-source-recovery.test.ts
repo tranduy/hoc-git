@@ -22,7 +22,8 @@ function request(accountId: string, stage: "SOFT" | "HARD" = "SOFT"): ProviderRe
   return { accountId, stage, attempt: stage === "SOFT" ? 1 : 2, requestedAtMs: 1_000 };
 }
 
-function setup(now: () => number = () => 2_000, browserRefreshEnabled = true) {
+function setup(now: () => number = () => 2_000, browserRefreshEnabled = true,
+  timeouts: { baselineTimeoutMs?: number; reloadBaselineTimeoutMs?: number } = {}) {
   const requestLobbySnapshot = vi.fn(() => 1);
   const reloadSource = vi.fn(() => 1);
   const reloadRecoverySource = vi.fn(() => 1);
@@ -50,6 +51,7 @@ function setup(now: () => number = () => 2_000, browserRefreshEnabled = true) {
     withLatestFabetLaunch,
     baselineTimeoutMs: 50,
     reloadBaselineTimeoutMs: 50,
+    ...timeouts,
     now,
     onError,
     onStateChange
@@ -252,7 +254,7 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
   });
 
-  it("never replaces IM with a Fabet launch after safe same-tab recovery times out", async () => {
+  it("reports baseline timeout after native IM portal restoration without substituting a Fabet launch", async () => {
     const context = setup(() => 2_000, true);
     context.feedRegistry.snapshot.mockReturnValue(snapshot(IM, {
       sourceId: "chrome:IM:5", sourceEpoch: "observer-a:0",
@@ -261,10 +263,58 @@ describe("AutomaticSourceRecovery", () => {
     context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
 
     await expect(context.recovery.recover(request(IM, "HARD"))).resolves.toEqual({
-      accountId: IM, stage: "HARD", outcome: "ACTION_REQUIRED",
-      reason: "IM_MANUAL_TOKEN_REQUIRED"
+      accountId: IM, stage: "HARD", outcome: "DELIVERED",
+      reason: "BASELINE_TIMEOUT"
     });
     expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:IM:5");
+    expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("IM");
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+  });
+
+  it("accepts a fresh IM pair in the same generation after a non-navigating refresh", async () => {
+    const context = setup(() => 2_000, false, { baselineTimeoutMs: 10_000, reloadBaselineTimeoutMs: 90_000 });
+    const prior = snapshot(IM, { sourceId: "chrome:IM:5", sourceEpoch: "observer-a:0", activeGeneration: "im:5:1" });
+    context.feedRegistry.snapshot.mockReturnValue(prior);
+    context.waitForFreshBaseline.mockResolvedValue({ ...prior, state: "LIVE", reason: null, lastCompleteBaselineAtMs: 2_001 });
+    await expect(context.recovery.recover(request(IM, "HARD"))).resolves.toMatchObject({ outcome: "RECOVERED" });
+    expect(context.waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(IM, 2_000, 10_000, expect.any(AbortSignal));
+    expect(context.requestLobbySnapshot).not.toHaveBeenCalled();
+    expect(context.restoreLobby).not.toHaveBeenCalled();
+  });
+
+  it("confirms a new IM baseline after native portal restore using the independent longer window", async () => {
+    const context = setup(() => 2_000, false, { baselineTimeoutMs: 10_000, reloadBaselineTimeoutMs: 90_000 });
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(IM, { sourceId: "chrome:IM:5", sourceEpoch: "observer-a:0" }));
+    context.waitForFreshBaseline
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(IM, { state: "LIVE", reason: null, sourceId: "chrome:IM:6",
+        sourceEpoch: "observer-b:0", lastCompleteBaselineAtMs: 2_001 }));
+    await expect(context.recovery.recover(request(IM, "HARD"))).resolves.toMatchObject({ outcome: "RECOVERED", reason: null });
+    expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("IM");
+    expect(context.waitForFreshBaseline.mock.calls.map(call => (call as unknown[])[2])).toEqual([10_000, 10_000, 90_000]);
+    expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+  });
+
+  it("throttles repeated IM portal restores independently of refresh and cleared recovery backoff", async () => {
+    let now = 2_000;
+    const context = setup(() => now, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(IM, { sourceId: "chrome:IM:5", sourceEpoch: "observer-a:0" }));
+    context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
+      .mockResolvedValueOnce(snapshot(IM, { state: "LIVE", reason: null, lastCompleteBaselineAtMs: 2_001 }));
+    await expect(context.recovery.recover(request(IM, "HARD"))).resolves.toMatchObject({ outcome: "RECOVERED" });
+    now += 60_000;
+    await expect(context.recovery.recover(request(IM, "HARD"))).resolves.toMatchObject({
+      outcome: "ACTION_REQUIRED", reason: "RECOVERY_BACKOFF" });
+    expect(context.restoreLobby).toHaveBeenCalledTimes(1);
+    now = 302_000;
+    await expect(context.recovery.recover(request(IM, "HARD"))).resolves.toMatchObject({
+      outcome: "DELIVERED", reason: "BASELINE_TIMEOUT" });
+    expect(context.restoreLobby).toHaveBeenCalledTimes(2);
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
     expect(context.ensureLobby).not.toHaveBeenCalled();
   });
@@ -1044,14 +1094,17 @@ describe("a hard stage that cannot relaunch must still ask for a snapshot", () =
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
   });
 
-  it("requires a manual IM token when every safe in-page action changes nothing", async () => {
+  it("reports a missing IM source when the native portal restore cannot be delivered", async () => {
     const context = setup(() => 2_000, false);
     context.feedRegistry.snapshot.mockReturnValue(snapshot(IM));
     context.requestLobbySnapshot.mockReturnValue(0);
+    context.reloadRecoverySource.mockReturnValue(0);
+    context.restoreLobby.mockReturnValue(0);
 
     const result = await context.recovery.recover(request(IM, "HARD"));
 
-    expect(result).toEqual({ accountId: IM, stage: "HARD", outcome: "ACTION_REQUIRED",
-      reason: "IM_MANUAL_TOKEN_REQUIRED" });
+    expect(result).toEqual({ accountId: IM, stage: "HARD", outcome: "NO_SOURCE",
+      reason: "SOURCE_MISSING" });
+    expect(context.restoreLobby).toHaveBeenCalledExactlyOnceWith("IM");
   });
 });

@@ -9,25 +9,29 @@ const market = (mi: number, o = 0.91, bti = 1) => ({ mi, bti, gp: 1,
   ws: [{ wsi: mi * 10, si: 1, hdp: 0.5, dih: "0.5", o }] });
 const event = (eid: number, mls = [market(eid)]) => ({ eid, edt: "2026-09-09T12:00:00Z",
   htn: `Home ${eid}`, atn: `Away ${eid}`, cn: "Football league", isrbt: false, iscyb: false, mls });
-type Request = { path: string; body: any; signal: AbortSignal;
+type Request = { path: string; body: any; signal: AbortSignal; headers: Record<string, string>;
   respond: (body: unknown, status?: number) => void; fail: () => void };
 function harness() {
   const requests: Request[] = [];
+  const signatures: Array<{ path: string; mode: number }> = [];
   const listeners = new Map<string, (event: { detail: string }) => void>();
   const globals: Record<string, any> = { Date, URL, URLSearchParams, AbortController, setTimeout, clearTimeout,
     document: { documentElement: { dataset: {} }, querySelectorAll: () => [] },
     location: { hostname: "imsports.directsb.net", search: "?token=PRIVATE_URL_TOKEN" },
     sessionStorage: { getItem: () => "PRIVATE_STALE_TOKEN" },
-    global: { PlatForm: "web" },
+    global: { PlatForm: "web", SiteProfile: { StatusCode: 100, im: true, t: "PRIVATE_STALE_TOKEN" } },
     addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
     removeEventListener: (name: string) => listeners.delete(name),
-    dispatchEvent: (value: { type: string; detail: { c: string } }) => {
-      if (value.type === "helo") listeners.get(`halo_${value.detail.c}`)?.({ detail: "PRIVATE_SIGNATURE" });
+    dispatchEvent: (value: { type: string; detail: { c: string; p: { c: string; a: number } } }) => {
+      if (value.type === "helo") {
+        signatures.push({ path: value.detail.p.c, mode: value.detail.p.a });
+        listeners.get(`halo_${value.detail.c}`)?.({ detail: "PRIVATE_SIGNATURE" });
+      }
     },
     CustomEvent: class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
       get detail() { return this.init.detail; } },
-    fetch: (path: string, init: { body: string; signal: AbortSignal }) => new Promise((resolve, reject) => {
-      requests.push({ path, body: init.body === undefined ? undefined : JSON.parse(init.body), signal: init.signal,
+    fetch: (path: string, init: { body: string; signal: AbortSignal; headers: Record<string, string> }) => new Promise((resolve, reject) => {
+      requests.push({ path, body: init.body === undefined ? undefined : JSON.parse(init.body), signal: init.signal, headers: init.headers,
         respond: (body, status = 200) => resolve({ status, ok: status === 200,
           text: async () => JSON.stringify(body) }), fail: () => reject(new Error("native failure")) });
     }) };
@@ -51,12 +55,58 @@ function harness() {
       : { ...event(id), ...(rows?.[0] ?? { mls: [market(id + 1000)] }) } }); await settle();
   };
   const parsed = (result: any) => JSON.parse(result.responses.find((r: any) => r.market === 1).body);
-  return { globals, tick, requests, mains, details, settle, commit, complete, parsed };
+  return { globals, tick, requests, signatures, mains, details, settle, commit, complete, parsed };
 }
 
 describe("IM native detail acquisition", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
   afterEach(() => { vi.useRealTimers(); });
+
+  it.each([undefined, { StatusCode: 500, im: true, t: "PRIVATE_STALE_TOKEN" },
+    { StatusCode: 100, im: false, t: "PRIVATE_STALE_TOKEN" },
+    { StatusCode: 100, im: 1, t: "PRIVATE_STALE_TOKEN" },
+    { StatusCode: 100, im: true, t: "" },
+    { StatusCode: 100, im: true, t: "PRIVATE_OTHER_TOKEN" }])(
+    "does not sign or fetch before native member bootstrap is valid: %j", async profile => {
+      const h = harness(); h.globals.global.SiteProfile = profile;
+      const run = h.tick(); await h.settle();
+      expect(h.signatures).toEqual([]); expect(h.requests).toEqual([]);
+      expect(await run).toMatchObject({ status: "native-auth-not-ready", responses: [] });
+    });
+
+  it("stops owned requests on auth loss and resumes only after a new valid native profile", async () => {
+    const h = harness(), first = h.tick(); await h.commit([event(1), event(2), event(3)]);
+    const old = [...h.details()], count = h.signatures.length;
+    h.globals.global.SiteProfile = undefined;
+    const blocked = h.tick(); await h.settle();
+    expect(old.every(request => request.signal.aborted)).toBe(true);
+    expect(await blocked).toMatchObject({ status: "native-auth-not-ready", responses: [] });
+    expect(h.signatures).toHaveLength(count);
+    for (const request of old) await h.complete(request);
+    expect((await first).responses).toEqual([]);
+    h.globals.global.SiteProfile = { StatusCode: 100, im: true, t: "PRIVATE_STALE_TOKEN" };
+    const resumed = h.tick(); await h.commit([event(4)]);
+    await h.complete(h.details().at(-1)!);
+    expect(h.parsed(await resumed).sel.map((e: any) => e.eid)).toEqual([4]);
+  });
+
+  it("pauses active work without signing or fetching and resumes after unpause", async () => {
+    const h = harness(); let paused = false;
+    h.globals.localStorage = { getItem: () => paused ? "1" : null };
+    const first = h.tick(); await h.commit([event(1), event(2)]);
+    const old = [...h.details()], count = h.signatures.length;
+    paused = true;
+    expect(await h.tick()).toEqual({ status: "collector-paused", responses: [] });
+    expect(old.every(request => request.signal.aborted)).toBe(true);
+    expect(h.signatures).toHaveLength(count);
+    paused = false;
+    const resumed = h.tick(); await h.commit([event(3)]);
+    expect(h.details()).toHaveLength(2); // Uncooperative old callbacks still own physical capacity.
+    await h.complete(old[0]!); await h.complete(old[1]!);
+    await h.complete(h.details().at(-1)!);
+    expect((await first).responses).toEqual([]);
+    expect(h.parsed(await resumed).sel.map((e: any) => e.eid)).toEqual([3]);
+  });
 
   it("requests the source-proven unfiltered event route and retains every actual native family", async () => {
     // Actual signed response 1788866173879; only execution clocks are synthetic.
@@ -88,6 +138,62 @@ describe("IM native detail acquisition", () => {
     expect(JSON.stringify(result)).not.toMatch(/PRIVATE_/);
   });
 
+  it("uses the current native session token and signing mode for every queued request", async () => {
+    const h = harness(); const run = h.tick(); await h.commit([event(1), event(2), event(3)]);
+    expect(h.requests.every(r => r.headers["x-token"] === "PRIVATE_STALE_TOKEN")).toBe(true);
+    expect(h.signatures.every(s => s.mode === 2)).toBe(true);
+    h.globals.sessionStorage.getItem = () => "PRIVATE_ROTATED_SESSION";
+    h.globals.global.SiteProfile = { StatusCode: 100, im: true, t: "PRIVATE_ROTATED_SESSION" };
+    await h.complete(h.details()[0]!);
+    expect(h.details()[2]!.headers["x-token"]).toBe("PRIVATE_ROTATED_SESSION");
+    expect(h.signatures.at(-1)).toEqual({ path: "/api/EventV6/GetEBI/1/3/false/2/false", mode: 2 });
+    await h.complete(h.details()[1]!); await h.complete(h.details()[2]!);
+    expect(JSON.stringify(await run)).not.toMatch(/PRIVATE_/);
+  });
+
+  it("stops the queued owners when storage rotates before the current native profile", async () => {
+    const h = harness(), run = h.tick(); await h.commit([event(1), event(2), event(3)]);
+    const count = h.signatures.length;
+    h.globals.sessionStorage.getItem = () => "PRIVATE_ROTATED_SESSION";
+    await h.complete(h.details()[0]!);
+    expect(h.signatures).toHaveLength(count);
+    expect(h.details()).toHaveLength(2);
+    expect(h.details()[1]!.signal.aborted).toBe(true);
+    await h.complete(h.details()[1]!);
+    expect((await run).responses).toEqual([]);
+  });
+
+  it.each([{ status: 200, body: { StatusCode: 501 } }, { status: 429, body: "throttled" }])(
+    "backs off all native requests for 30 seconds after %j without replaying receipts", async failure => {
+      const h = harness(), run = h.tick();
+      const rows = Array.from({ length: 5 }, (_, i) => event(i + 1));
+      await h.commit(rows);
+      h.details()[0]!.respond(failure.body, failure.status); await h.settle();
+      await h.complete(h.details()[1]!);
+      expect(h.details()).toHaveLength(2);
+      expect(await run).toMatchObject({ status: "rate-limited", responses: [] });
+      const count = h.signatures.length;
+      vi.setSystemTime(START + 29_999);
+      expect(await h.tick()).toMatchObject({ status: "rate-limited", responses: [] });
+      expect(h.signatures).toHaveLength(count);
+      vi.setSystemTime(START + 30_000);
+      const resumed = h.tick(); await h.commit(rows);
+      for (let i = 2; i < 6; i++) await h.complete(h.details()[i]!);
+      const result = await resumed;
+      expect(result.coverage).toMatchObject({ detailEvents: 5, pendingEvents: 0 });
+      expect(h.parsed(result).sel.find((e: any) => e.eid === 2).mls.find((m: any) => m.mi === 1002))
+        .toMatchObject({ fieldlineObservedAtMs: START });
+    });
+
+  it("keeps transport failure backoff local to its owner", async () => {
+    const h = harness(), run = h.tick(); await h.commit([event(1), event(2), event(3)]);
+    h.details()[0]!.fail(); await h.settle();
+    expect(h.details()).toHaveLength(3);
+    await h.complete(h.details()[1]!); await h.complete(h.details()[2]!);
+    expect(await run).toMatchObject({ status: "catalog-requested",
+      coverage: { detailEvents: 2, pendingEvents: 1 } });
+  });
+
   it("keeps real receipt clocks and lets newer main replace an older same-ID detail", async () => {
     const h = harness(); const first = h.tick(); await h.commit([event(1)]);
     vi.setSystemTime(START + 100);
@@ -111,6 +217,29 @@ describe("IM native detail acquisition", () => {
     expect((await next).responses).toEqual([]);
     const retained = h.globals.__fieldlineImNativeCatalogV1.state.owners.get("1");
     expect(retained.markets.get("1001").fieldlineObservedAtMs).toBe(START);
+  });
+
+  it("starts due detail before the roster result then backs off and preserves late safe failure fields", async () => {
+    const h = harness(); const first = h.tick(); await h.commit([event(1)]);
+    await h.complete(h.details()[0]!); await first;
+    vi.setSystemTime(START + 61_000);
+    const next = h.tick(); await h.commit([], 500);
+    expect(h.details()).toHaveLength(2);
+    const state = h.globals.__fieldlineImNativeCatalogV1.state;
+    expect(state.lastFailure).toEqual({ path: "/api/EventV6/GetSE", status: 200, nativeStatusCode: 500,
+      errorCategory: "NATIVE_STATUS", observedAtMs: START + 61_000 });
+    h.details()[1]!.respond({ StatusCode: 701, token: "PRIVATE_BODY_TOKEN", signature: "PRIVATE_SIGNATURE" }, 503);
+    await h.settle();
+    const result = await next;
+    expect(result).toMatchObject({ status: "rate-limited", responses: [] });
+    expect(result.coverage.lastFailure).toEqual({ path: "/api/EventV6/GetSE", status: 200, nativeStatusCode: 500,
+      errorCategory: "NATIVE_STATUS", observedAtMs: START + 61_000 });
+    const blocked = await h.tick();
+    expect(blocked).toMatchObject({ status: "rate-limited", responses: [] });
+    expect(blocked.coverage.lastFailure).toEqual({ path: "/api/EventV6/GetEBI/1/1/false/2/false",
+      status: 503, nativeStatusCode: 701, errorCategory: "HTTP_STATUS", observedAtMs: START + 61_000 });
+    expect(JSON.stringify(blocked.coverage)).not.toMatch(/PRIVATE_|token|signature/i);
+    expect(state.owners.get("1").markets.get("1001").fieldlineObservedAtMs).toBe(START);
   });
 
   it("does not publish the previous paired roster when the new pair times out", async () => {

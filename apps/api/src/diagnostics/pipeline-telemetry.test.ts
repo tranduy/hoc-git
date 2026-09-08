@@ -370,7 +370,8 @@ describe("provider refresh outcomes", () => {
         resourceType: "Diagnostic" },
       payload: { encoding: "UTF8", body: JSON.stringify({
         results: ["top:token-unavailable", "im-app:token-unavailable",
-          "im-app:catalog-requested", "im-app:not-in-allowlist"] }) }
+          "im-app:catalog-requested", "im-app:request-failed", "im-app:request-timeout",
+          "im-app:not-in-allowlist"] }) }
     }, "worker-a:0");
 
     const result = await telemetry.diagnostic(readers(
@@ -382,6 +383,7 @@ describe("provider refresh outcomes", () => {
         activeGeneration: null, recoveryStage: "NONE", recoveryAttempt: 0 }), accountId);
 
     expect(result?.hops.find((hop) => hop.hop === "HOP4_ADAPTER")?.detail.refreshOutcomes)
-      .toEqual([{ status: "token-unavailable", count: 2 }, { status: "catalog-requested", count: 1 }]);
+      .toEqual([{ status: "token-unavailable", count: 2 }, { status: "catalog-requested", count: 1 },
+        { status: "request-failed", count: 1 }, { status: "request-timeout", count: 1 }]);
   });
 });

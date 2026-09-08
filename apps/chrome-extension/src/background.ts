@@ -20,6 +20,7 @@ import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
 import { bootstrapCatalogSources, refreshBootstrapCatalogSources } from "./bootstrap-catalog-refresh.js";
 import { SabaSnapshotStorage } from "./saba-snapshot-storage.js";
 import { SourceLaunchMemory } from "./source-launch-memory.js";
+import { FabetPortalLauncher } from "./fabet-portal-launcher.js";
 import { extensionLobbyScope, lobbyIsInExtensionScope } from "./extension-lobby-scope.js";
 import { runDebuggerEventTask } from "./debugger-event-task.js";
 import { ApsportPageRecoveryWatchdog } from "./apsport-page-recovery.js";
@@ -299,7 +300,31 @@ const sabaBlankHandoffJournal = new SabaBlankHandoffJournal({
   }
 });
 
+const imPortalLauncher = new FabetPortalLauncher({
+  query: async () => chrome.tabs.query({}),
+  update: async (tabId, url, active) => {
+    const tab = await chrome.tabs.update(tabId, { url, active });
+    if (!tab) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
+    return tab;
+  },
+  focusWindow: async windowId => { await chrome.windows.update(windowId, { focused: true }); },
+  attachDebugger: async tabId => chrome.debugger.attach({ tabId }, "1.3"),
+  detachDebugger: async tabId => chrome.debugger.detach({ tabId }),
+  sendCommand: async (tabId, method, params) => chrome.debugger.sendCommand({ tabId }, method, params),
+  addCreatedListener: listener => chrome.tabs.onCreated.addListener(listener),
+  removeCreatedListener: listener => chrome.tabs.onCreated.removeListener(listener),
+  addUpdatedListener: listener => chrome.tabs.onUpdated.addListener(listener),
+  removeUpdatedListener: listener => chrome.tabs.onUpdated.removeListener(listener),
+  attachSource: async (tab, lobby) => attachRecoveredTabAsExpected(tab, lobby ?? "IM"),
+  get: async tabId => chrome.tabs.get(tabId)
+});
+
 const sourceTabRecovery = new SourceTabRecovery({
+  launchFromPortal: async lobby => {
+    if (lobby !== "IM") throw new Error("FABET_PORTAL_TAB_UNAVAILABLE");
+    return imPortalLauncher.launchIm();
+  },
+  usePortalLaunch: false,
   listAttached: () => registry.list(),
   query: async () => chrome.tabs.query({}),
   update: async (tabId, url) => {
@@ -336,8 +361,9 @@ const sourceTabRecovery = new SourceTabRecovery({
     setTimeout(() => bootstrappingSourceTabs.delete(tabId), 30_000);
   },
   onBootstrapFailure: (tabId) => { bootstrappingSourceTabs.delete(tabId); },
-  validateReady: async (tab, lobby) => {
+  validateReady: async (tab, lobby, sinceMs) => {
     if (tab.id === undefined) return false;
+    if (lobby === "IM") return observer.hasCompleteImBaselineSince(`chrome:IM:${tab.id}`, sinceMs ?? Date.now() - 30_000);
     if (lobby === "SABA") return observer.hasResponsiveSabaDocument(`chrome:SABA:${tab.id}`);
     if (lobby !== "KSPORT") return true;
     return observer.ensureCompleteKsportBaseline({ lobby: "KSPORT", tabId: tab.id,

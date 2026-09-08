@@ -176,7 +176,7 @@ interface ApsportDetailDiagnostic {
   readonly oldestSuccessAgeMs: number | null;
 }
 
-const refreshOutcomes = new Set(["catalog-requested", "rate-limited", "token-unavailable",
+const refreshOutcomes = new Set(["catalog-requested", "request-failed", "request-timeout", "collector-paused", "native-auth-not-ready", "rate-limited", "token-unavailable",
   "navigation-not-found", "unavailable"]);
 
 const decoderFailCodes = new Set(["NONE", "PAYLOAD_TOO_LONG", "ENVELOPE_INVALID",
@@ -545,7 +545,7 @@ export class PipelineTelemetry {
         for (const entry of (value as { results: readonly unknown[] }).results) {
           if (typeof entry !== "string") continue;
           const status = entry.slice(entry.lastIndexOf(":") + 1);
-          if (!refreshOutcomes.has(status)) continue;
+          if (!refreshOutcomes.has(status) && !/^(?:native-status-[0-9]{1,6}|http-status-429)$/u.test(status)) continue;
           const seen = state.refreshOutcomes.get(status) ?? 0;
           if (seen === 0 && state.refreshOutcomes.size >= 8) continue;
           state.refreshOutcomes.set(status, seen + 1);

@@ -31,7 +31,7 @@ interface SourceTabRecoveryOptions {
   readonly onBootstrapStart?: (tabId: number) => void;
   readonly onBootstrapFailure?: (tabId: number) => void;
   readonly beginSourceEpoch?: (sourceId: string) => void;
-  readonly validateReady?: (tab: TabDescriptor, lobby: ChromeLobbyId) => Promise<boolean>;
+  readonly validateReady?: (tab: TabDescriptor, lobby: ChromeLobbyId, sinceMs?: number) => Promise<boolean>;
   readonly beginBlankHandoff?: (tabId: number, url: string) => Promise<void>;
   readonly completeBlankHandoff?: (tabId: number) => Promise<void>;
 }
@@ -49,6 +49,7 @@ const SABA_PRE_RELOAD_BASELINE_ATTEMPTS = 60;
 
 export class SourceTabRecovery {
   readonly #options: SourceTabRecoveryOptions;
+  #imRestoreInFlight: Promise<void> | null = null;
   constructor(options: SourceTabRecoveryOptions) {
     this.#options = options;
   }
@@ -132,6 +133,14 @@ export class SourceTabRecovery {
   }
 
   async restore(lobby: ChromeLobbyId): Promise<void> {
+    if (lobby === "IM") {
+      if (this.#imRestoreInFlight !== null) return this.#imRestoreInFlight;
+      const operation = this.#restoreIm().finally(() => {
+        if (this.#imRestoreInFlight === operation) this.#imRestoreInFlight = null;
+      });
+      this.#imRestoreInFlight = operation;
+      return operation;
+    }
     const remembered = await this.#options.loadRemembered?.(lobby) ?? null;
     const currentTabs = await this.#options.query();
     const recoveryTabs = currentTabs.filter((tab) => tab.id !== undefined &&
@@ -139,15 +148,6 @@ export class SourceTabRecovery {
     const attachedTabIds = new Set(this.#options.listAttached()
       .filter((source) => source.lobby === lobby).map((source) => source.tabId));
     const existing = recoveryTabs.find((tab) => attachedTabIds.has(tab.id!)) ?? recoveryTabs[0];
-    if (lobby === "IM") {
-      // A tokenless IM URL works only while an already-authenticated document
-      // and profile session survive; it cannot recreate a missing IM session.
-      // Preserve a visible authenticated page exactly as-is and never replay a
-      // remembered one-time token automatically.
-      if (existing?.id === undefined) throw new Error("SOURCE_RESTORE_UNAVAILABLE:IM");
-      await (this.#options.attachBootstrap ?? ((tab) => this.#options.attach(tab)))(existing, "IM");
-      return;
-    }
     const directUrl = directLobbyUrls[lobby];
     if (directUrl !== undefined) {
       if (existing?.id !== undefined) {
@@ -196,6 +196,44 @@ export class SourceTabRecovery {
       return;
     }
     throw new Error(`SOURCE_RESTORE_UNAVAILABLE:${lobby}`);
+  }
+
+  async #restoreIm(): Promise<void> {
+    const tabs = (await this.#options.query()).filter(tab => tab.id !== undefined && isRecoveryTabForLobby(tab, "IM"));
+    const attached = new Set(this.#options.listAttached().filter(source => source.lobby === "IM").map(source => source.tabId));
+    const existing = tabs.find(tab => attached.has(tab.id!)) ?? tabs[0];
+    if (existing !== undefined) {
+      await (this.#options.attachBootstrap ?? ((tab) => this.#options.attach(tab)))(existing, "IM");
+      if (this.#options.launchFromPortal === undefined ||
+        await this.#options.validateReady?.(existing, "IM", Date.now() - 30_000)) return;
+    }
+    if (this.#options.launchFromPortal === undefined) throw new Error("SOURCE_RESTORE_UNAVAILABLE:IM");
+    // Only the native portal can mint the new IM session. Retain existing
+    // sources until the replacement actually publishes a fresh GetSE pair.
+    const startedAtMs = Date.now();
+    const fresh = await this.#options.launchFromPortal("IM");
+    try {
+      await this.#waitForLobby(fresh, "IM", 240, startedAtMs);
+    } catch (error) {
+      if (fresh.id !== undefined && !tabs.some(tab => tab.id === fresh.id) &&
+        this.#options.get !== undefined && this.#options.remove !== undefined) {
+        const current = await this.#options.get(fresh.id).catch(() => null);
+        if (current !== null && isRecoveryTabForLobby(current, "IM")) {
+          await this.#options.remove(fresh.id).catch(() => undefined);
+        }
+      }
+      throw error;
+    }
+    if (this.#options.remove !== undefined) {
+      await Promise.all(tabs.filter(tab => tab.id !== fresh.id)
+        .map(async tab => {
+          const current = this.#options.get === undefined ? tab
+            : await this.#options.get(tab.id!).catch(() => null);
+          if (current !== null && isRecoveryTabForLobby(current, "IM")) {
+            await this.#options.remove!(tab.id!).catch(() => undefined);
+          }
+        }));
+    }
   }
 
   async #reuse(tab: TabDescriptor, lobby: ChromeLobbyId, url: string, reload: boolean,
@@ -291,8 +329,8 @@ export class SourceTabRecovery {
   }
 
   async #waitForLobby(tab: TabDescriptor, lobby: ChromeLobbyId,
-    maxAttemptsOverride?: number): Promise<TabDescriptor> {
-    if (await this.#isReady(tab, lobby)) return tab;
+    maxAttemptsOverride?: number, sinceMs?: number): Promise<TabDescriptor> {
+    if (await this.#isReady(tab, lobby, sinceMs)) return tab;
     if (tab.id === undefined || !this.#options.get) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
     const delay = this.#options.delay ?? ((delayMs: number) =>
       new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
@@ -303,14 +341,14 @@ export class SourceTabRecovery {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       await delay(250);
       const current = await this.#options.get(tab.id);
-      if (await this.#isReady(current, lobby)) return current;
+      if (await this.#isReady(current, lobby, sinceMs)) return current;
     }
     throw new Error("SOURCE_TAB_RECOVERY_FAILED");
   }
 
-  async #isReady(tab: TabDescriptor, lobby: ChromeLobbyId): Promise<boolean> {
+  async #isReady(tab: TabDescriptor, lobby: ChromeLobbyId, sinceMs?: number): Promise<boolean> {
     if (!isReadyLobbyTab(tab, lobby)) return false;
-    return this.#options.validateReady?.(tab, lobby) ?? true;
+    return this.#options.validateReady?.(tab, lobby, sinceMs) ?? true;
   }
 
 }

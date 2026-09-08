@@ -129,6 +129,7 @@ export class AutomaticSourceRecovery {
   readonly #inflight = new Map<string, Promise<RecoveryResult>>();
   readonly #backoff = new Map<string, RecoveryBackoffState>();
   readonly #lastReloadAtMs = new Map<string, number>();
+  readonly #lastImPortalAtMs = new Map<string, number>();
   readonly #disposeSignal: Promise<typeof DISPOSED>;
   readonly #abortController = new AbortController();
   #signalDispose!: () => void;
@@ -272,7 +273,9 @@ export class AutomaticSourceRecovery {
           } catch { /* candidate send failure is undelivered; fall through to a fresh launch */ }
         }
         if (delivered > 0) {
-          const confirmation = await this.#confirmReplacement(request, prior, actionStartedAtMs);
+          const confirmation = source.provider === "IM"
+            ? await this.#confirmAfter(request.accountId, "HARD", actionStartedAtMs)
+            : await this.#confirmReplacement(request, prior, actionStartedAtMs);
           if (source.provider === null || confirmation.outcome === "RECOVERED" ||
             confirmation.reason !== "BASELINE_TIMEOUT") {
             return confirmation;
@@ -297,22 +300,30 @@ export class AutomaticSourceRecovery {
           this.#reloadBaselineTimeoutMs);
       }
       if (source.provider === "IM") {
-        // An IM launch token is provider-specific and one-time. Fabet can
-        // return another sportsbook's operator token here, which produces a
-        // syntactically valid IM URL but destroys the authenticated IM page.
-        // Exhaust only non-navigating actions; a genuinely expired IM session
-        // requires an operator-supplied fresh IM URL.
+        // The extension restores IM through its native portal action. Do not
+        // substitute another provider's launch token or diagnose auth from a
+        // baseline timeout. Same-tab refresh and portal navigation have
+        // independent guards because refresh preserves the current document.
         const snapshotStartedAtMs = this.#now();
         if (this.#options.controlPlane.requestLobbySnapshot("IM") > 0) {
           const confirmation = await this.#confirmAfter(
             request.accountId, "HARD", snapshotStartedAtMs
           );
-          if (confirmation.outcome === "RECOVERED") return confirmation;
+          if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") return confirmation;
           if (this.#disposed) return stopped(request.accountId, "HARD");
           if (this.#suppressed(request.accountId)) return suppressed(request.accountId, "HARD");
         }
-        return { accountId: request.accountId, stage: "HARD", outcome: "ACTION_REQUIRED",
-          reason: "IM_MANUAL_TOKEN_REQUIRED" };
+        const portalStartedAtMs = this.#now();
+        const lastPortalAtMs = this.#lastImPortalAtMs.get(request.accountId) ?? Number.NEGATIVE_INFINITY;
+        if (portalStartedAtMs - lastPortalAtMs < MIN_SOURCE_RELOAD_INTERVAL_MS) {
+          return { accountId: request.accountId, stage: "HARD", outcome: "ACTION_REQUIRED", reason: "RECOVERY_BACKOFF" };
+        }
+        let delivered = 0;
+        try { delivered = this.#options.controlPlane.restoreLobby("IM"); }
+        catch { /* an unavailable extension is an undelivered source action */ }
+        if (delivered <= 0) return noSource(request.accountId, "HARD");
+        this.#lastImPortalAtMs.set(request.accountId, portalStartedAtMs);
+        return this.#confirmAfter(request.accountId, "HARD", portalStartedAtMs, this.#reloadBaselineTimeoutMs);
       }
       if (source.provider === "BTI" && this.#options.browserRefreshEnabled === false) {
         const restoreStartedAtMs = this.#now();
