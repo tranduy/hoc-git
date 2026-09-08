@@ -659,7 +659,13 @@ export const NativeMarketObservationSchema = z.strictObject({
   nativeType: z.string().trim().min(1).max(128),
   nativeLabel: z.string().trim().min(1).max(512).nullable(),
   nativeScope: z.string().trim().min(1).max(128).nullable(),
-  outcomeLabels: z.array(z.string().trim().min(1).max(256)).max(32),
+  outcomeLabels: z.array(z.string().trim().min(1).max(256)).max(256),
+  nativeSelections: z.array(z.strictObject({
+    selectionId: z.string().max(256).nullable(),
+    outcomeId: z.string().max(256).nullable(),
+    line: z.string().max(512).nullable(),
+    price: z.string().max(128).nullable()
+  })).max(256).optional(),
   observedAtMs: z.number().finite().nonnegative(),
   disposition: z.enum(["NORMALIZED", "EXCLUDED", "UNMAPPED"]),
   reason: z.string().trim().min(1).max(256)

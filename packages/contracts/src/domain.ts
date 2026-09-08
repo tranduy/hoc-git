@@ -431,6 +431,13 @@ export interface NativeMarketObservation {
   readonly nativeLabel: string | null;
   readonly nativeScope: string | null;
   readonly outcomeLabels: readonly string[];
+  /** Original provider selection values, including markets awaiting semantic mapping. */
+  readonly nativeSelections?: readonly {
+    readonly selectionId: string | null;
+    readonly outcomeId: string | null;
+    readonly line: string | null;
+    readonly price: string | null;
+  }[] | undefined;
   readonly observedAtMs: number;
   readonly disposition: NativeMarketDisposition;
   readonly reason: string;

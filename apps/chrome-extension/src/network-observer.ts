@@ -1,3 +1,4 @@
+import { buildImCatalogRefreshExpression } from "./im-catalog-refresh.js";
 import { cmdNativeRequestMetadata, CMD_MORE_PATH } from "./cmd-native-request.js";
 import { buildCmdNativeCatalogRefreshExpression } from "./cmd-native-catalog-refresh.js";
 import type { ChromeBridgeEnvelope, ChromeBridgeHttpMethod, ChromeLobbyId } from "@tool-chenh/contracts";
@@ -1012,180 +1013,7 @@ export const CMD_CATALOG_DISCOVERY_EXPRESSION = `(() => {
 // IM does not always request its GetSE catalog when a restored tab is left on
 // an event/detail route. Refresh only an exact public navigation label; never
 // use coordinates or selectors that can resolve to an odds cell.
-export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
-  const root = document.documentElement;
-  const now = Date.now();
-  // Read the same authenticated catalog endpoint used by the IM page. The
-  // relative URL reuses the tab's existing session and never exports auth.
-  // Network observation captures the response exactly like a normal UI read.
-  if (location.hostname === 'imsports.directsb.net') {
-    root.dataset.fieldlineImCatalogRefreshAt = String(now);
-    const controllerKey = '__fieldlineImCatalogAbortV1';
-    const priorController = window[controllerKey];
-    if (priorController && typeof priorController.abort === 'function') priorController.abort();
-    const controller = new AbortController();
-    window[controllerKey] = controller;
-    const requestTimer = setTimeout(() => controller.abort(), 8000);
-    try {
-    const providerDate = (value) => new Date(value).toISOString().slice(0, 10).replace(/-/g, '/');
-    const dateFrom = providerDate(now);
-    // IM signs each API request through its same-page CORS helper. Cookies alone
-    // are insufficient: an unsigned GetSE returns StatusCode 500 even while the
-    // tab is authenticated. Reuse the page's own signing event and keep every
-    // resulting credential on this same IM origin.
-    const sign = (path) => new Promise((resolve, reject) => {
-      const alphabet = 'abcdefghijklmnopqrstuvwxyz$ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789';
-      const callback = Array.from({ length: 7 }, () => alphabet[Math.floor(Math.random() * 64)]).join('');
-      const eventName = 'halo_' + callback;
-      const timer = setTimeout(() => {
-        window.removeEventListener(eventName, receive);
-        reject(new Error('signature-timeout'));
-      }, 3000);
-      const receive = (event) => {
-        clearTimeout(timer);
-        window.removeEventListener(eventName, receive);
-        resolve(event.detail);
-      };
-      window.addEventListener(eventName, receive);
-      window.dispatchEvent(new CustomEvent('helo', {
-        detail: { p: { c: path, a: 127 }, c: callback }
-      }));
-    });
-    const common = {
-      // Public Sunflower football contract (bundle v91938): include every
-      // football family whose selections must either be normalized or
-      // explicitly accounted for. Keeping the non-binary groups is deliberate:
-      // the API inventory must prove why each native market was not compared.
-      SportId: 1, BetTypeIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313], GamePeriods: [1, 2, 3], IsCombo: false,
-      ['O' + 'ddsType']: 2, DateFrom: dateFrom, CompetitionIds: [],
-      SortType: 2, ProgrammeIds: []
-    };
-    const path = '/api/EventV6/GetSE';
-    const detailPath = '/api/EventV6/GetMEI';
-    // A fresh operator URL must override same-origin sessionStorage. Navigating
-    // an existing IM tab preserves sessionStorage, so a failed prior recovery
-    // can otherwise keep signing every GetSE with the old token even after the
-    // operator pastes a valid replacement into the address bar.
-    const token = new URLSearchParams(location.search).get('to' + 'ken') ||
-      sessionStorage.getItem('to' + 'ken');
-    if (!token) return { status: 'token-unavailable', responses: [] };
-    const compactBody = (parsed, fallback) => {
-      if (!parsed || parsed.StatusCode !== 100 || !Array.isArray(parsed.sel)) return fallback;
-      const selections = (items) => Array.isArray(items) ? items.map((item) => ({
-        wsi: item?.wsi, si: item?.si, hdp: item?.hdp, dih: item?.dih, o: item?.o
-      })) : items;
-      const markets = (items) => Array.isArray(items) ? items
-        .map((item) => ({ mi: item?.mi, bti: item?.bti, gp: item?.gp, ws: selections(item?.ws) })) : items;
-      return JSON.stringify({ StatusCode: parsed.StatusCode, sel: parsed.sel.map((item) => ({
-        eid: item?.eid, edt: item?.edt, htn: item?.htn, atn: item?.atn, cn: item?.cn,
-        isrbt: item?.isrbt, iscyb: item?.iscyb, hs: item?.hs, as: item?.as, rbt: item?.rbt,
-        mls: markets(item?.mls)
-      })) });
-    };
-    const request = async (requestPath, body) => {
-      const signature = String(await sign(requestPath));
-      const response = await fetch(requestPath, {
-        method: 'POST', credentials: 'omit', cache: 'no-store', signal: controller.signal,
-        headers: {
-          Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8',
-          'x-fieldline-catalog-probe': 'compact-v1',
-          'x-sc': encodeURI(signature), 'x-v': '91938',
-          'x-platform': String(window.global?.PlatForm || ''),
-          ['x-' + 'token']: token
-        },
-        body: JSON.stringify(body)
-      });
-      const text = await response.text();
-      try { return { text, parsed: JSON.parse(text) }; }
-      catch { return { text, parsed: null }; }
-    };
-    const catalogs = await Promise.all([1, 2].map(async (Market) => {
-      const result = await request(path, { ...common, Market });
-      return { market: Market, ...result };
-    }));
-    // GetSE is the fast board feed; GetMEI is the page's own event-detail API.
-    // Sweep only prematch events, ten at a time (the provider's UI batch size),
-    // and keep the last detail for every still-listed event between sweeps.
-    const prematchEvents = [];
-    const seenEvents = new Set();
-    for (const catalog of catalogs) {
-      if (!catalog.parsed || catalog.parsed.StatusCode !== 100 || !Array.isArray(catalog.parsed.sel)) continue;
-      for (const event of catalog.parsed.sel) {
-        const eventId = event?.eid;
-        const key = String(eventId ?? '');
-        if (event?.isrbt === false && key && key !== 'undefined' && !seenEvents.has(key)) {
-          seenEvents.add(key);
-          prematchEvents.push({ key, eventId });
-        }
-      }
-    }
-    const detailCacheKey = '__fieldlineImPrematchDetailCacheV1';
-    const detailCursorKey = '__fieldlineImPrematchDetailCursorV1';
-    const detailCache = window[detailCacheKey] && typeof window[detailCacheKey] === 'object'
-      ? window[detailCacheKey] : {};
-    window[detailCacheKey] = detailCache;
-    for (const key of Object.keys(detailCache)) if (!seenEvents.has(key)) delete detailCache[key];
-    if (prematchEvents.length > 0) {
-      const start = Number.isSafeInteger(window[detailCursorKey])
-        ? Math.max(0, Number(window[detailCursorKey])) % prematchEvents.length : 0;
-      const size = Math.min(10, prematchEvents.length);
-      const batch = Array.from({ length: size }, (_, offset) => prematchEvents[(start + offset) % prematchEvents.length]);
-      window[detailCursorKey] = (start + size) % prematchEvents.length;
-      try {
-        const detail = await request(detailPath, {
-          ot: 2,
-          eis: batch.map((event) => ({ ei: event.eventId, gp: common.GamePeriods, bti: common.BetTypeIds })),
-          sl: [1], s: 0
-        });
-        if (detail.parsed?.StatusCode === 100 && Array.isArray(detail.parsed.mei)) {
-          // A successful response that omits an event means the detail market
-          // has closed. Replace, never append, so stale hidden markets disappear.
-          for (const event of batch) detailCache[event.key] = [];
-          for (const event of detail.parsed.mei) {
-            const key = String(event?.eid ?? event?.ei ?? '');
-            if (seenEvents.has(key) && Array.isArray(event?.mls)) detailCache[key] = event.mls;
-          }
-        }
-      } catch { /* Keep the last complete detail while this bounded request retries on the next sweep. */ }
-    }
-    for (const catalog of catalogs) {
-      if (!catalog.parsed || catalog.parsed.StatusCode !== 100 || !Array.isArray(catalog.parsed.sel)) continue;
-      for (const event of catalog.parsed.sel) {
-        const hidden = detailCache[String(event?.eid ?? '')];
-        if (!Array.isArray(hidden)) continue;
-        const merged = new Map();
-        for (const market of Array.isArray(event?.mls) ? event.mls : []) merged.set(String(market?.mi), market);
-        for (const market of hidden) merged.set(String(market?.mi), market);
-        event.mls = [...merged.values()];
-      }
-    }
-    const responses = catalogs.map((catalog) => ({ market: catalog.market,
-      body: compactBody(catalog.parsed, catalog.text) }));
-    return { status: 'catalog-requested', responses };
-    } catch (error) {
-      if (controller.signal.aborted) return { status: 'request-timeout', responses: [] };
-      return { status: 'request-failed', responses: [] };
-    } finally {
-      clearTimeout(requestTimer);
-      if (window[controllerKey] === controller) delete window[controllerKey];
-    }
-  }
-  const normalize = (value) => String(value || '').normalize('NFD').replace(/[\\u0300-\\u036f]/g, '')
-    .trim().toLowerCase().replace(/\\s+/g, ' ');
-  const candidates = [...document.querySelectorAll('body *')]
-    .filter((element) => element && typeof element.click === 'function' && element.children.length <= 4 &&
-      !element.hasAttribute('disabled'))
-    .sort((left, right) => left.children.length - right.children.length);
-  const labels = ['truc tiep', 'live', 'bong da', 'football'];
-  for (const label of labels) {
-    const element = candidates.find((candidate) => normalize(candidate.textContent) === label);
-    if (!element) continue;
-    root.dataset.fieldlineImCatalogRefreshAt = String(now);
-    element.click();
-    return { status: label, responses: [] };
-  }
-  return { status: 'navigation-not-found', responses: [] };
-})()`;
+export { IM_CATALOG_DISCOVERY_EXPRESSION } from "./im-catalog-refresh.js";
 
 // Observed provider startup contract: this exact function issues fc=1 and the
 // provider callback atomically replaces both running and today before setting
@@ -5425,7 +5253,9 @@ export class NetworkObserver {
       const verifiedDocument = verifiedDocumentForDescriptor(descriptor, binding?.sessionId);
       const evaluationTargetIsCurrent = (): boolean => evaluationIsCurrent() &&
         (binding === undefined || descriptor === undefined || contexts?.get(descriptor.id) === binding);
-      const params = { expression: IM_CATALOG_DISCOVERY_EXPRESSION,
+      const collectorGeneration = `${this.#observerSessionId}:${sourceGeneration}:${tabGeneration}:` +
+        `${this.#captureBridgeGeneration(source.sourceId)}:${descriptor?.loaderId ?? "current"}`;
+      const params = { expression: buildImCatalogRefreshExpression(collectorGeneration),
         ...(binding === undefined ? {} : { contextId: binding.contextId }),
         returnByValue: true, awaitPromise };
       const response = await this.#withFrameCommandTimeout(binding?.sessionId === undefined

@@ -1316,7 +1316,7 @@ describe("NetworkObserver", () => {
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SortType: 2");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("CompetitionIds: []");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("Promise.all([1, 2].map");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("StatusCode: parsed.StatusCode, sel:");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("StatusCode: catalog.parsed.StatusCode, sel:");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("new AbortController()");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("signal: controller.signal");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).not.toMatch(/odds?|price|stake/iu);
@@ -1348,12 +1348,12 @@ describe("NetworkObserver", () => {
     await observer.refreshCatalog(im);
 
     expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.evaluate", {
-      expression: IM_CATALOG_DISCOVERY_EXPRESSION,
+      expression: expect.stringContaining("__fieldlineImNativeCatalogV1"),
       returnByValue: true,
       awaitPromise: true
     });
     expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.evaluate", {
-      expression: IM_CATALOG_DISCOVERY_EXPRESSION,
+      expression: expect.stringContaining("__fieldlineImNativeCatalogV1"),
       contextId: 82,
       returnByValue: true,
       awaitPromise: true
@@ -3165,7 +3165,7 @@ describe("NetworkObserver", () => {
         async (_path: string, init: { body: string }) => {
           const request = JSON.parse(init.body) as Record<string, unknown>;
           requests.push(request);
-          return { text: async () => JSON.stringify({ Market: request.Market, StatusCode: 100 }) };
+          return { text: async () => JSON.stringify({ sel: [], StatusCode: 100 }) };
         }
       );
 
@@ -3180,9 +3180,9 @@ describe("NetworkObserver", () => {
         eventLabel: "Home vs Away", participantA: "Home", participantB: "Away",
         marketType: "FT_AH", scope: "FULL_TIME", selection: "HOME", line: "0.5"
       })).not.toContain("DateTo");
-      expect(result).toEqual({ status: "catalog-requested", responses: [
-        { market: 1, body: '{"Market":1,"StatusCode":100}' },
-        { market: 2, body: '{"Market":2,"StatusCode":100}' }
+      expect(result).toMatchObject({ status: "catalog-requested", responses: [
+        { market: 1, body: '{"StatusCode":100,"sel":[]}' },
+        { market: 2, body: '{"StatusCode":100,"sel":[]}' }
       ] });
     } finally {
       vi.useRealTimers();
@@ -3224,15 +3224,15 @@ describe("NetworkObserver", () => {
     expect(JSON.parse(result.responses[0]!.body)).toEqual({ StatusCode: 100, sel: [{
       eid: 11, edt: "2026-09-05T01:00:00Z", htn: "Home", atn: "Away", cn: "League",
       isrbt: false, iscyb: false, hs: 0, as: 0, rbt: "", mls: [{
-        mi: 21, bti: 1, gp: 1, ws: [
+        mi: 21, bti: 1, gp: 1, fieldlineObservedAtMs: expect.any(Number), ws: [
           { wsi: 31, si: 1, hdp: 0.5, dih: "0.5", o: 0.91 },
           { wsi: 32, si: 2, hdp: -0.5, dih: "-0.5", o: -0.99 }
         ]
-      }, { mi: 22, bti: 5, gp: 1, ws: [] }]
+      }, { mi: 22, bti: 5, gp: 1, fieldlineObservedAtMs: expect.any(Number), ws: [] }]
     }] });
   });
 
-  it("hydrates a bounded batch of hidden IM prematch markets and merges them into the catalog", async () => {
+  it("hydrates all IM prematch owners through the unfiltered event route", async () => {
     const listeners = new Map<string, (event: { detail: string }) => void>();
     const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
     const windowStub: Record<string, unknown> = {
@@ -3256,28 +3256,30 @@ describe("NetworkObserver", () => {
       { hostname: "imsports.directsb.net", search: "" }, windowStub, { getItem: () => "token" },
       class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
         get detail(): { c: string } { return this.init.detail; } },
-      async (path: string, init: { body: string }) => {
-        const body = JSON.parse(init.body) as Record<string, unknown>;
+      async (path: string, init: { body?: string }) => {
+        const body = init.body === undefined ? {} : JSON.parse(init.body) as Record<string, unknown>;
         requests.push({ path, body });
-        if (path === "/api/EventV6/GetMEI") return { text: async () => JSON.stringify({ StatusCode: 100, mei: [{
-          eid: 1, mls: [{ mi: 9001, bti: 5, gp: 1, ws: [
-            { wsi: 9101, si: 10, o: 0.91 }, { wsi: 9102, si: 11, o: -0.99 }
-          ] }]
-        }] }) };
+        if (path.startsWith("/api/EventV6/GetEBI/1/")) {
+          const eid = Number(path.split("/")[5]);
+          return { text: async () => JSON.stringify({ StatusCode: 100, e: {
+            ...events.find(event => event.eid === eid),
+            mls: eid === 1 ? [{ mi: 9001, bti: 5, gp: 1, ws: [
+              { wsi: 9101, si: 10, o: 0.91 }, { wsi: 9102, si: 11, o: -0.99 }
+            ] }] : []
+          } }) };
+        }
         return { text: async () => JSON.stringify({ StatusCode: 100, sel: body.Market === 1 ? events : [] }) };
       }
     ) as { responses: Array<{ market: number; body: string }> };
 
-    const detailRequest = requests.find((request) => request.path === "/api/EventV6/GetMEI");
-    expect(detailRequest?.body).toMatchObject({ ot: 2, sl: [1], s: 0 });
-    expect(detailRequest?.body.eis).toEqual(events.slice(0, 10).map((item) => ({
-      ei: item.eid, gp: [1, 2, 3],
-      bti: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313]
-    })));
+    const detailRequests = requests.filter(request => request.path.startsWith("/api/EventV6/GetEBI/1/"));
+    expect(detailRequests.map(request => request.path)).toEqual(events.map(event =>
+      `/api/EventV6/GetEBI/1/${event.eid}/false/2/false`));
+    expect(detailRequests.every(request => Object.keys(request.body).length === 0)).toBe(true);
     const marketOne = JSON.parse(result.responses.find((item) => item.market === 1)!.body) as {
       sel: Array<{ eid: number; mls: Array<{ mi: number }> }> };
     expect(marketOne.sel[0]?.mls.map((item) => item.mi)).toEqual([1000, 9001]);
-    expect(requests.filter((request) => request.path === "/api/EventV6/GetMEI")).toHaveLength(1);
+    expect(detailRequests).toHaveLength(12);
   });
 
   it("marks its compact IM catalog fetch so CDP does not forward the same raw body", async () => {
@@ -6728,7 +6730,7 @@ describe("NetworkObserver", () => {
           init.signal.addEventListener("abort", () => { aborted = true; reject(new DOMException("aborted", "AbortError")); });
         }));
       await vi.advanceTimersByTimeAsync(8_001);
-      await expect(pending).resolves.toEqual({ status: "request-timeout", responses: [] });
+      await expect(pending).resolves.toMatchObject({ status: "request-failed", responses: [] });
       expect(aborted).toBe(true);
     } finally { vi.useRealTimers(); }
   });

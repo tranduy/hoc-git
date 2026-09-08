@@ -34,6 +34,20 @@ interface ImFootballMarketSemantics {
   readonly handicap: boolean;
 }
 
+export function imMarketObservedAtMs(value: unknown, envelopeObservedAtMs: number): number | null {
+  const item = record(value);
+  if (item?.fieldlineObservedAtMs === undefined) return envelopeObservedAtMs;
+  const receipt = item.fieldlineObservedAtMs;
+  return typeof receipt === "number" && Number.isFinite(receipt) && receipt >= 0 && receipt <= envelopeObservedAtMs
+    ? receipt : null;
+}
+
+function nativeScalar(value: unknown, maximum: number): string | null {
+  const result = typeof value === "number" && Number.isFinite(value) ? String(value)
+    : typeof value === "string" ? value.trim() : null;
+  return result !== null && result.length > 0 && result.length <= maximum ? result : null;
+}
+
 function outcomeMap(...entries: ReadonlyArray<readonly [number, FootballBinaryOutcome]>):
 ReadonlyMap<number, FootballBinaryOutcome> {
   return new Map(entries);
@@ -166,6 +180,8 @@ readonly NativeMarketObservation[] {
       const semantics = Number.isSafeInteger(bti) && Number.isSafeInteger(gp) ? imMarketSemantics(bti, gp) : null;
       const normalized = market(item);
       const selections = Array.isArray(item?.ws) ? item.ws : [];
+      const marketObservedAtMs = imMarketObservedAtMs(item, observedAtMs);
+      if (marketObservedAtMs === null) continue;
       const rawOutcomeLabels = selections.map((candidateSelection, selectionIndex) => {
         const rawSelection = record(candidateSelection);
         const selectionId = Number(rawSelection?.si);
@@ -186,7 +202,12 @@ readonly NativeMarketObservation[] {
       });
       observations.push({ provider: "IM", category: "FOOTBALL", providerEventId, providerMarketId,
         nativeType, nativeLabel: [...new Set(labels)].join(" | ").slice(0, 512) || null, nativeScope,
-        outcomeLabels: rawOutcomeLabels, observedAtMs, disposition, reason });
+        outcomeLabels: rawOutcomeLabels, observedAtMs: marketObservedAtMs, disposition, reason,
+        nativeSelections: selections.map(candidateSelection => {
+          const selected = record(candidateSelection);
+          return { selectionId: nativeScalar(selected?.wsi, 256), outcomeId: nativeScalar(selected?.si, 256),
+            line: nativeScalar(selected?.dih, 512) ?? nativeScalar(selected?.hdp, 512), price: nativeScalar(selected?.o, 128) };
+        }) });
     }
   }
   return observations;

@@ -125,6 +125,14 @@ describe("NativeMarketObservationSchema", () => {
     expect(NativeMarketObservationSchema.parse(observation)).toEqual(observation);
   });
 
+  it("retains original selection prices for markets awaiting mapping and rejects extra fields", () => {
+    const nativeSelections = [{ selectionId: "32583126984", outcomeId: "638", line: "2.5", price: "0.95" }];
+    expect(NativeMarketObservationSchema.parse({ ...observation, nativeSelections }).nativeSelections)
+      .toEqual(nativeSelections);
+    expect(NativeMarketObservationSchema.safeParse({ ...observation,
+      nativeSelections: [{ ...nativeSelections[0], token: "secret" }] }).success).toBe(false);
+  });
+
   it("rejects secret-shaped extras and observations without an auditable reason", () => {
     expect(NativeMarketObservationSchema.safeParse({ ...observation, token: "secret" }).success).toBe(false);
     expect(NativeMarketObservationSchema.safeParse({ ...observation, reason: "" }).success).toBe(false);

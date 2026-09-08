@@ -1,7 +1,7 @@
 import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope, NativeMarketObservation } from "@tool-chenh/contracts";
 import { extractImFootballCatalog, isLineFieldWellFormed, isValidImFootballDelta, mergeImFootballDelta,
-  normalizeImOdds, observeNativeImFootballMarkets } from "../providers/im/im-football-catalog-source.js";
+  imMarketObservedAtMs, normalizeImOdds, observeNativeImFootballMarkets } from "../providers/im/im-football-catalog-source.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 
@@ -15,6 +15,13 @@ type ImRecord = ReturnType<typeof extractImFootballCatalog>[number];
 
 interface RetainedRecord {
   readonly record: ImRecord;
+  readonly observedAtMs: number;
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number;
+  readonly marketReceipts: ReadonlyMap<string, MarketReceipt>;
+}
+
+interface MarketReceipt {
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
   readonly sequence: number;
@@ -167,8 +174,17 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       }
       const records = new Map<string, RetainedRecord>();
       for (const record of classified.records) {
+        const prior = state.current?.get(partition)?.get(record.eventId);
+        const marketReceipts = new Map<string, MarketReceipt>();
+        for (const market of record.markets) {
+          const observedAtMs = classified.marketObservedAtMs.get(record.eventId)?.get(market.marketId) ?? envelope.observedAtMs;
+          const original = prior?.marketReceipts.get(market.marketId);
+          const priorMarket = prior?.record.markets.find(candidate => candidate.marketId === market.marketId);
+          marketReceipts.set(market.marketId, original?.observedAtMs === observedAtMs && priorMarket !== undefined &&
+            sameImMarket(priorMarket, market) ? original : marketReceipt(envelope, observedAtMs));
+        }
         records.set(record.eventId, { record, observedAtMs: envelope.observedAtMs,
-          receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
+          receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence, marketReceipts });
       }
       state.pending.partitions.set(partition, { records, inputCount: classified.inputCount,
         nativeMarketObservations: classified.nativeMarketObservations });
@@ -197,7 +213,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       state.pending = null;
     } else {
       const root = parseRecord(envelope.payload.body);
-      if (root === null || !isValidImFootballDelta(root)) return [];
+      if (root === null || !isValidImFootballDelta(root) || !validDeltaReceipts(root, envelope.observedAtMs)) return [];
       if (envelope.request.providerPartition !== undefined &&
         !isImPartition(envelope.request.providerPartition)) return [];
       if (state.currentCutoffSequence !== null && envelope.sequence <= state.currentCutoffSequence) return [];
@@ -225,13 +241,18 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
     const parts: NormalizedCatalogPart[] = [];
     for (const partition of ["IM_MARKET_1", "IM_MARKET_2"] as const) {
       for (const entry of sourcePartitions.get(partition)!.values()) {
-        parts.push(normalizeSbobetCatalog([entry.record], {
+        const normalized = normalizeSbobetCatalog([entry.record], {
           observedAtMs: entry.observedAtMs,
           receivedMonotonicMs: entry.receivedMonotonicMs,
           sequence: entry.sequence,
           provider: "IM",
           settlementProfile: "football-regulation-including-added-time"
-        }));
+        });
+        parts.push({ ...normalized, quotes: normalized.quotes.map(quote => {
+          const receipt = entry.marketReceipts.get(quote.providerMarketId);
+          return receipt === undefined ? quote : { ...quote, receivedMonotonicMs: receipt.receivedMonotonicMs,
+            sequence: receipt.sequence };
+        }) });
       }
       const nativeMarketObservations = state.currentNativeMarketObservations?.get(partition);
       if (nativeMarketObservations !== undefined) {
@@ -269,8 +290,20 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
         const updated = mergeImFootballDelta([entry.record], root);
         if (updated.length === 0) { records.delete(eventId); changed = true; }
         else if (!sameImRecord(updated[0]!, entry.record)) {
+          const marketReceipts = new Map(entry.marketReceipts);
+          for (const change of root.dc as unknown[]) {
+            if (!isRecord(change) || String(change.eid) !== eventId || change.a !== 3 || !Array.isArray(change.v)) continue;
+            for (const market of change.v) {
+              if (!isRecord(market)) continue;
+              const marketId = providerIdentifier(market.mi);
+              const observedAtMs = imMarketObservedAtMs(market, envelope.observedAtMs);
+              if (marketId !== null && observedAtMs !== null) marketReceipts.set(marketId, marketReceipt(envelope, observedAtMs));
+            }
+          }
+          const retainedMarketIds = new Set(updated[0]!.markets.map(market => market.marketId));
+          for (const id of marketReceipts.keys()) if (!retainedMarketIds.has(id)) marketReceipts.delete(id);
           records.set(eventId, { record: updated[0]!, observedAtMs: envelope.observedAtMs,
-            receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
+            receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence, marketReceipts });
           changed = true;
         }
       }
@@ -312,10 +345,12 @@ function sameImMarket(left: ImRecord["markets"][number], right: ImRecord["market
 
 function classifySnapshot(root: Record<string, unknown>, nowMs: number): {
   readonly records: readonly ImRecord[]; readonly inputCount: number;
+  readonly marketObservedAtMs: ReadonlyMap<string, ReadonlyMap<string, number>>;
   readonly nativeMarketObservations: readonly NativeMarketObservation[] } | null {
   const candidates = root.sel;
   if (!Array.isArray(candidates)) return null;
   const accepted: ImRecord[] = [];
+  const marketObservedAtMs = new Map<string, ReadonlyMap<string, number>>();
   for (const candidate of candidates) {
     if (!isRecord(candidate)) return null;
     const eventId = candidate.eid;
@@ -328,6 +363,13 @@ function classifySnapshot(root: Record<string, unknown>, nowMs: number): {
       typeof candidate.cn !== "string" || candidate.cn.trim() === "" ||
       typeof candidate.isrbt !== "boolean" || !Number.isFinite(eventAtMs) || !Array.isArray(candidate.mls)) return null;
     if (!(candidate.mls as unknown[]).every(isClassifiedImMarket)) return null;
+    const receipts = new Map<string, number>();
+    for (const market of candidate.mls) {
+      const receipt = imMarketObservedAtMs(market, nowMs);
+      if (receipt === null) return null;
+      receipts.set(String(market.mi), receipt);
+    }
+    marketObservedAtMs.set(String(eventId), receipts);
     if (candidate.iscyb === true) continue;
     if (candidate.iscyb !== false) return null;
     const extracted = extractImFootballCatalog({ StatusCode: 100, sel: [candidate] }, {
@@ -338,8 +380,18 @@ function classifySnapshot(root: Record<string, unknown>, nowMs: number): {
     // Structurally valid but unsupported market/period/line records are an
     // explained provider-domain exclusion rather than malformed evidence.
   }
-  return { records: accepted, inputCount: candidates.length,
+  return { records: accepted, inputCount: candidates.length, marketObservedAtMs,
     nativeMarketObservations: observeNativeImFootballMarkets(root, nowMs) };
+}
+
+function marketReceipt(envelope: ChromeBridgeEnvelope, observedAtMs: number): MarketReceipt {
+  return { observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs - (envelope.observedAtMs - observedAtMs),
+    sequence: envelope.sequence };
+}
+
+function validDeltaReceipts(root: Record<string, unknown>, observedAtMs: number): boolean {
+  return (root.dc as unknown[]).every(change => !isRecord(change) || change.a !== 3 ||
+    Array.isArray(change.v) && change.v.every(market => imMarketObservedAtMs(market, observedAtMs) !== null));
 }
 
 function mergeImDeltaInventory(
