@@ -62,10 +62,11 @@ export function isRenewableLobby(lobby: ChromeLobbyId): lobby is RenewableLobby 
 }
 
 function isPeriodicRenewalLobby(lobby: RenewableLobby): boolean {
-  // APSPORT's authenticated in-page detail hydration can take most of a lease
-  // interval. Timer navigation erased that healthy progress; observed-failure
+  // AP/SBO hidden collection must survive a healthy page's lease timer.
+  // SBO's persisted 20-minute renewal matched the 2026-09-08 14:44 epoch
+  // reset and erased its in-progress More inventory. Observed-failure
   // recovery still reaches renewNow() through isRenewableLobby above.
-  return lobby !== "TSPORT" && isRenewableLobby(lobby);
+  return lobby !== "TSPORT" && lobby !== "KSPORT" && isRenewableLobby(lobby);
 }
 
 export function parseProviderPageLeaseState(value: unknown): ProviderPageLeaseState | null {

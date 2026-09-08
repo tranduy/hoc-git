@@ -1,6 +1,14 @@
 # SBOBET main deployment and bounded live evidence
 
-## Current status: 0.2.71 deployed; Early proven, recovery interruption being fixed
+## Current status: periodic KSPORT page renewal identified; 0.2.73 prepared
+
+The 0.2.72 pass reached 319 priced More owners and 22,688 quotes before another source reset. Its 119-sample window contains two epochs; the one sampling error is an unaligned epoch read, not a clean stability pass. **The remaining reset cause is now directly identified:** persisted `providerPageLeaseV1.KSPORT.lastCompletedAtMs = 1788853460583` (14:44:20.583 UTC+7), with `nextAttemptAtMs = 1788854660583`, exactly 20 minutes later. The stored renewal matches the observed 14:44 epoch transition; the preceding renewal also matches the 14:24 transition.
+
+Version 0.2.73 excludes KSPORT from periodic page navigation, using the existing APSPORT policy, while preserving explicit/observed-failure `renewNow()` recovery. One failing KSPORT renewal regression was reproduced, then all 22 lease tests plus four manifest tests and extension typecheck passed. Other providers' renewal behavior remains covered by the existing controls. This addresses the confirmed periodic reset; the 0.2.72 socket guard addresses a separate reproduced unnecessary-recovery behavior. Full More acceptance remains open until the uninterrupted current pass completes.
+
+Version 0.2.72, commit `b3e0029`, is deployed with stack identity `sha256:a52423df35231e024cd9eedadeff322c663091dae84a17eb937efb35a5f4c6e2` and extension identity `sha256:f40e06ad9fc3e9385abd3f7fe55e34c71bde3cabd70cd0976ed68eed6327c80f`. Exact handoff completed and coordinator lease released at 14:34:02 UTC+7. Actual worker manifest was confirmed at 14:36:39. The new recovery regression and 13 existing recovery tests passed, as did four manifest tests, extension typecheck/build and independent review. API artifacts are unchanged.
+
+The guard retains the receipt time of an actually validated current Live/Today pair, fences source/tab/bridge identity, uses the existing 75-second renewal boundary, and clears proof on a due failed request unless a newer pair has arrived. It prevents socket closure and period switching while HTTP collection is healthy. Quote clocks and realtime cadence are unchanged. The read-only API window starts at 14:35:04; passive source capture starts at 14:36:40. Initial catalog retains 491 prematch owners and More is progressing without the earlier epoch reset. Current complete More denominator comparison remains pending this pass.
 
 Version 0.2.71, commit `dc9669e`, was activated with stack identity `sha256:4681311406f237e786d037e7a1f7a84f776a2b583ee980414e8d4dc89726ca83`, extension `sha256:6c5d164a602d5b3657c36175f99d49986b9df49fd3e3c281f36178849e76a06a`; actual worker confirmed 14:22:50. Focused 44 tests, manifest four tests, typecheck, build and peer review passed. **Actual Early now contains 382 owners**; catalog reached 491 prematch owners and over 10,000 quotes. Latest native Today120 + Early382 - Live11 gives exactly 491 prematch owners.
 

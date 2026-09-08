@@ -192,14 +192,14 @@ describe("provider page lease coordinator", () => {
     expect(schedules.IM.nextAttemptAtMs).toBe(3_000);
   });
 
-  it("does not periodically navigate a healthy APSPORT source when its lease timer is due", async () => {
+  it.each([TSPORT, KSPORT])("does not periodically navigate $lobby while hidden collection is running", async (source) => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
-    schedules.TSPORT.nextAttemptAtMs = 2_000;
+    schedules[source.lobby].nextAttemptAtMs = 2_000;
     const renew = vi.fn(async () => undefined);
     const coordinator = new ProviderPageLeaseCoordinator({
       now: () => 4_000,
-      listAttached: () => [TSPORT],
+      listAttached: () => [source],
       isLoading: async () => false,
       loadState: async () => schedules,
       saveState: async () => undefined,
@@ -209,36 +209,36 @@ describe("provider page lease coordinator", () => {
     await coordinator.tick();
 
     expect(renew).not.toHaveBeenCalled();
-    expect(schedules.TSPORT).toEqual({ lastCompletedAtMs: 1_000, nextAttemptAtMs: 2_000 });
+    expect(schedules[source.lobby]).toEqual({ lastCompletedAtMs: 1_000, nextAttemptAtMs: 2_000 });
   });
 
-  it("still explicitly renews APSPORT for observed failure or manual recovery", async () => {
+  it.each([TSPORT, KSPORT])("still renews $lobby for observed failure or explicit recovery", async (source) => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
     const renew = vi.fn(async () => undefined);
     const coordinator = new ProviderPageLeaseCoordinator({
       now: () => 4_000,
-      listAttached: () => [TSPORT],
+      listAttached: () => [source],
       isLoading: async () => false,
       loadState: async () => schedules,
       saveState: async () => undefined,
       renew
     });
 
-    await coordinator.renewNow(TSPORT);
+    await coordinator.renewNow(source);
 
-    expect(renew).toHaveBeenCalledExactlyOnceWith(TSPORT);
-    expect(schedules.TSPORT).toEqual({ lastCompletedAtMs: 4_000, nextAttemptAtMs: 1_204_000 });
+    expect(renew).toHaveBeenCalledExactlyOnceWith(source);
+    expect(schedules[source.lobby]).toEqual({ lastCompletedAtMs: 4_000, nextAttemptAtMs: 1_204_000 });
   });
 
-  it("keeps KSPORT eligible for scheduled renewal", async () => {
+  it("keeps BTI eligible for scheduled renewal", async () => {
     const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
     const schedules = leaseSchedules(1_000);
-    schedules.KSPORT.nextAttemptAtMs = 2_000;
+    schedules.BTI.nextAttemptAtMs = 2_000;
     const renew = vi.fn(async () => undefined);
     const coordinator = new ProviderPageLeaseCoordinator({
       now: () => 4_000,
-      listAttached: () => [KSPORT],
+      listAttached: () => [BTI],
       isLoading: async () => false,
       loadState: async () => schedules,
       saveState: async () => undefined,
@@ -247,7 +247,7 @@ describe("provider page lease coordinator", () => {
 
     await coordinator.tick();
 
-    expect(renew).toHaveBeenCalledExactlyOnceWith(KSPORT);
+    expect(renew).toHaveBeenCalledExactlyOnceWith(BTI);
   });
 
   it("defers a loading tab for thirty seconds without blocking another tick forever", async () => {
