@@ -108,8 +108,23 @@ function harness() {
       request: { url, method: "GET", headers: { Authorization: "private-sentinel", lng: "vi" } } });
     await observer.handleEvent(source, "Network.responseReceived", { requestId, type: "Fetch", response: { url, status: code } });
   };
+  const workerSession = "worker-native-session";
+  const worker = () => observer.handleEvent(source, "Target.attachedToTarget", {
+    sessionId: workerSession, targetInfo: { type: "worker", targetId: "native-worker", url: `${origin}/native-worker.js` }
+  });
+  const beginWorkerTemplate = async (url = todayUrl, header = "worker-private-sentinel") => {
+    const requestId = `worker-main-${++ordinal}`;
+    await observer.handleEvent(source, "Network.requestWillBeSent", { requestId, type: "Fetch", loaderId: "",
+      request: { url, method: "GET", headers: { Authorization: header, lng: "vi" } } }, workerSession);
+    return { requestId, url };
+  };
+  const finishWorkerTemplate = (request: { requestId: string; url: string }, status = 200) =>
+    observer.handleEvent(source, "Network.responseReceived", { requestId: request.requestId, type: "Fetch",
+      response: { url: request.url, status } }, workerSession);
   const tick = async () => { maintenance.push(observer.maintainKsportFeed(source).catch(() => undefined)); await flush(); await flush(); };
   return { observer, epoch, context, pair, template, tick, receive, requests, forwarded, sendCommand,
+    worker, beginWorkerTemplate, finishWorkerTemplate,
+    detachWorker: () => observer.handleEvent(source, "Target.detachedFromTarget", { sessionId: workerSession }),
     early: () => forwarded.filter(x => x.request.streamId?.startsWith("sbobet-early:")),
     activeEarly: () => requests.filter(x => new URL(x.url).searchParams.get("timeRange") === "early"),
     moreIds: () => requests.filter(x => new URL(x.url).pathname.endsWith("getEventBetMore"))
@@ -125,6 +140,69 @@ function harness() {
 }
 
 describe("SBOBET All Dates observer lane", () => {
+  it("keeps successful worker main provenance when its actual Early response arrives", async () => {
+    const h = harness(); await h.context(); await h.worker(); await h.pair();
+    await h.finishWorkerTemplate(await h.beginWorkerTemplate()); await h.tick();
+    await vi.waitFor(() => expect(h.early()).toHaveLength(1)); await flush();
+    h.setNow(wall + 120_001); await h.tick();
+    await vi.waitFor(() => expect(h.early()).toHaveLength(2));
+    expect(h.activeEarly()).toHaveLength(2);
+    expect(h.activeEarly().every(x =>
+      (x.init.headers as Record<string, string>).Authorization === "worker-private-sentinel")).toBe(true);
+  });
+
+  it.each(["before", "after"])("arms worker main provenance arriving %s the independent More document", async order => {
+    const h = harness(); await h.context(); await h.worker();
+    if (order === "after") await h.pair();
+    await h.finishWorkerTemplate(await h.beginWorkerTemplate());
+    if (order === "before") { await h.tick(); expect(h.activeEarly()).toHaveLength(0); await h.pair(); }
+    await h.tick(); await vi.waitFor(() => expect(h.early()).toHaveLength(1));
+    expect(h.activeEarly()[0]).toMatchObject({ url: earlyUrl,
+      init: { headers: { Authorization: "worker-private-sentinel", lng: "vi" } } });
+    const command = h.sendCommand.mock.calls.find(([, method, params]) =>
+      method === "Runtime.evaluate" && String(params?.expression).includes("timeRange=early"));
+    expect(command?.[2]?.contextId).toBe(91);
+    expect(h.early()[0]!.request.requestDocumentKey).toBeDefined();
+    expect(h.early()[0]!.request.requestDocumentKey).not.toContain("worker-native-session");
+  });
+
+  it("preserves the current worker URL and headers when an older successful response arrives last", async () => {
+    const h = harness(); await h.context(); await h.worker(); await h.pair();
+    const old = await h.beginWorkerTemplate(todayUrl.replace("agentId=4", "agentId=99"), "old-private");
+    await h.finishWorkerTemplate(await h.beginWorkerTemplate());
+    await h.finishWorkerTemplate(old); await h.tick();
+    await vi.waitFor(() => expect(h.early()).toHaveLength(1));
+    expect(h.activeEarly()[0]).toMatchObject({ url: earlyUrl,
+      init: { headers: { Authorization: "worker-private-sentinel" } } });
+  });
+
+  it.each(["bridge", "worker", "document"])("cannot arm a retired worker candidate after %s retirement", async kind => {
+    const h = harness(); await h.context(); await h.worker();
+    const candidate = await h.beginWorkerTemplate();
+    if (kind === "bridge") h.observer.beginBridgeSourceEpoch(source.sourceId);
+    if (kind === "worker") await h.detachWorker();
+    await h.finishWorkerTemplate(candidate); await h.pair();
+    if (kind === "document") await h.observer.handleEvent(source, "Runtime.executionContextDestroyed", { executionContextId: 91 });
+    await h.tick(); expect(h.activeEarly()).toHaveLength(0);
+  });
+
+  it("cancels an active document fetch when its successful worker provenance retires", async () => {
+    const h = harness(); await h.context(); await h.worker(); await h.pair();
+    await h.finishWorkerTemplate(await h.beginWorkerTemplate());
+    const held = h.holdFetch(); await h.tick();
+    await vi.waitFor(() => expect(h.activeEarly()).toHaveLength(1));
+    await h.detachWorker(); held.resolve(); await flush(); await flush();
+    expect(h.early()).toHaveLength(0);
+  });
+
+  it("does not reset Early cadence for ordinary successful worker main refreshes", async () => {
+    const h = harness(); await h.context(); await h.worker(); await h.pair();
+    await h.finishWorkerTemplate(await h.beginWorkerTemplate()); await h.tick();
+    await vi.waitFor(() => expect(h.early()).toHaveLength(1)); await flush();
+    h.setNow(wall + 4000); await h.finishWorkerTemplate(await h.beginWorkerTemplate()); await h.pair(undefined, undefined, 2);
+    await h.tick(); expect(h.activeEarly()).toHaveLength(1);
+  });
+
   it("uses the successful bound main template and publishes only the actual Early receipt", async () => {
     const h = harness(); await h.context(); await h.template(); await h.pair(); await h.tick();
     await vi.waitFor(() => expect(h.early()).toHaveLength(1));
