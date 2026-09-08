@@ -70,6 +70,7 @@ function parseRosterCoverage(value: unknown): string | null {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
   const candidate = parsed as Record<string, unknown>;
   const allowed = ["phase", "liveLeagues", "prematchLeagues", "liveBatches", "prematchBatches",
+    "earlyLeagues", "earlyBatches", "earlyDone",
     "liveDone", "prematchDone", "failed", "events", "namedEvents", "timedEvents", "marketEvents", "validEvents",
     "detailCachedEvents", "detailCachedBytes", "detailPendingEvents", "detailRosterEvents",
     "detailEmptyEvents", "detailFailedEvents", "detailEvictedEvents", "detailQueuedEvents",
@@ -86,7 +87,7 @@ function parseRosterCoverage(value: unknown): string | null {
     !/^(?:[A-Z][A-Z0-9_]{0,23}:\d{1,6}(?:,[A-Z][A-Z0-9_]{0,23}:\d{1,6}){0,31})?$/u.test(candidate.nativeTypeCounts))) return null;
   for (const key of allowed.slice(1)) {
     if (key === "detailOldestReceiptAgeMs" && candidate[key] === null) continue;
-    const maximum = key === "detailCachedBytes" ? 128 * 1024 * 1024
+    const maximum = key === "detailCachedBytes" ? 256 * 1024 * 1024
       : key === "detailOldestReceiptAgeMs" ? Number.MAX_SAFE_INTEGER : 1_000_000;
     if (candidate[key] !== undefined && (!Number.isSafeInteger(candidate[key]) || Number(candidate[key]) < 0 ||
       Number(candidate[key]) > maximum)) return null;

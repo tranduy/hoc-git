@@ -32,6 +32,7 @@ function harness(ids = ["e1"]) {
       return detail(path, init);
     }
     listReads += 1;
+    if (path.includes("/early")) return { ok: rosterOk, text: async () => '{"serializedData":[]}' };
     if (list) return list(path, init);
     const league = Array(13).fill(null);
     league[12] = path.includes("prematch") ? roster : live;
@@ -59,9 +60,122 @@ function harness(ids = ["e1"]) {
 const detailBodies = (result: any) => result.responses.filter((row: any) => row.url.startsWith("/api/eventpage/"))
   .map((row: any) => JSON.parse(row.body));
 
+describe("BTI All Early roster", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+  it("discovers leagues beyond the initial ten and hydrates by master ID before publishing", async () => {
+    const root: PageRoot = { dataset: {} };
+    const requests: string[] = [];
+    const league = (id: string, populated: boolean) => {
+      const value = Array(14).fill(null);
+      value[0] = `container-${id}`; value[1] = "Early League"; value[3] = id; value[10] = "1";
+      value[12] = [[`event-${id}`, populated ? [["h", { EN: "Home Club" }], ["a", { EN: "Away Club" }]] : null,
+        populated ? "Home Club vs Away Club" : null, "2027-11-29T12:00:00Z", null, false]];
+      return value;
+    };
+    const allIds = Array.from({ length: 23 }, (_, index) => `master-${index}`);
+    const fetcher = async (path: string) => {
+      requests.push(path);
+      if (path.startsWith("/api/eventpage/")) return new Promise(() => {});
+      if (!path.includes("/early")) return { ok: true, text: async () => '{"serializedData":[]}' };
+      const url = new URL(path, "https://bti.test");
+      expect(url.searchParams.get("SportId")).toBe("1");
+      expect(url.searchParams.get("allEvents")).toBe("true");
+      const ids = url.searchParams.get("leagueIds")!.split(",");
+      expect(ids.length).toBeLessThanOrEqual(10);
+      const initial = path.includes("/initial?");
+      return { ok: true, text: async () => JSON.stringify({ serializedData:
+        (initial ? allIds.slice(0, 10) : allIds).map((id) => league(id, initial || ids.includes(id))) }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage", `return ${BTI_CATALOG_REFRESH_EXPRESSION}`);
+    const result = await evaluate({ documentElement: root },
+      { pathname: "/sports", hostname: "bti.test", origin: "https://bti.test" }, fetcher, { getItem: () => null });
+    const roster = JSON.parse(result.responses.find((item: any) => item.url.endsWith("prematch/initial")).body);
+    expect(roster.serializedData).toHaveLength(23);
+    expect(roster.serializedData.every((item: any) => item[12][0][1]?.length === 2)).toBe(true);
+    expect(requests.some((path) => path.includes("leagueIds=container-"))).toBe(false);
+    expect(JSON.parse(root.dataset.fieldlineBtiRosterCoverage!)).toMatchObject({
+      earlyLeagues: 23, detailRosterEvents: 23, validEvents: 23
+    });
+  });
+});
+
+describe("BTI bounded cached delivery", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  async function seededCache(count: number, padding = 900 * 1024) {
+    const ids = Array.from({ length: count }, (_, index) => `cached-${index}`);
+    const h = harness(ids);
+    h.setDetail(async () => ({ ok: false, text: async () => "unavailable" }));
+    const initial = await h.refresh();
+    const key = Object.keys(h.root).find((name) => name.startsWith("__fieldlineBtiDetailBodies"))!;
+    h.root[key] = ids.map((eventId) => ({ eventId, path: `/api/eventpage/events/${eventId}`,
+      observedAtMs: START, requestedAtMs: START - 50, generation: initial.generation,
+      body: JSON.stringify({ data: [[eventId, "x".repeat(padding)]], fieldlineBtiDetails: [{
+        eventId, observedAtMs: START, requestedAtMs: START - 50, generation: initial.generation }] }) }));
+    return { h, ids, initial };
+  }
+
+  it("reserves all three roster responses while bounding detail delivery to two batches and four MiB", async () => {
+    const { h } = await seededCache(10);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const result = await h.refresh();
+    const details = result.responses.filter((row: any) => row.url.startsWith("/api/eventpage/"));
+    expect(details).toHaveLength(2);
+    expect(details.reduce((sum: number, row: any) => sum + Buffer.byteLength(row.body), 0)).toBeLessThanOrEqual(4 * 1024 * 1024);
+    expect(result.responses.filter((row: any) => row.url.startsWith("/api/eventlist/"))).toHaveLength(3);
+    expect(h.cache()).toHaveLength(10);
+  });
+
+  it("eventually replays every owner through cache reorder and a new roster generation without changing receipt clocks", async () => {
+    const { h, ids, initial } = await seededCache(7);
+    const received: string[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      // Receipts move refreshed owners to the cache tail; this must not reset delivery fairness.
+      h.cache().reverse();
+      await vi.advanceTimersByTimeAsync(index === 2 ? 13_000 : 2_000);
+      const result = await h.refresh();
+      const metadata = detailBodies(result).flatMap((body: any) => body.fieldlineBtiDetails);
+      expect(metadata).toHaveLength(2);
+      for (const row of metadata) expect(row).toEqual({ eventId: row.eventId,
+        observedAtMs: START, requestedAtMs: START - 50, generation: initial.generation });
+      if (index >= 2) expect(result.generation).not.toBe(initial.generation);
+      received.push(...metadata.map((row: any) => row.eventId));
+    }
+    // Lost forwards need no ACK: each current owner is included again on a later cycle.
+    for (const id of ids) expect(received.filter((value) => value === id).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("retains a roster whose actual cached detail exceeds the old 24 MiB eviction threshold", async () => {
+    const { h } = await seededCache(30, 1024 * 1024);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await h.refresh();
+    expect(h.cache()).toHaveLength(30);
+    expect(JSON.parse(h.root.dataset.fieldlineBtiRosterCoverage!)).toMatchObject({
+      detailCachedEvents: 30, detailPendingEvents: 0, detailEvictedEvents: 0 });
+  });
+});
+
 describe("BTI private collector regression", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it("retires a previous collector's workers while keeping same-session receipt evidence", async () => {
+    const h = harness();
+    await h.refresh();
+    await h.settle();
+    const originalBody = h.cache()[0].body;
+    const oldState = h.root.__fieldlineBtiDetailStateV10;
+    oldState.collectorVersion = 10;
+    const controller = new AbortController();
+    oldState.listControllers.add(controller);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await h.refresh();
+    expect(controller.signal.aborted).toBe(true);
+    expect(h.root.__fieldlineBtiDetailStateV10).not.toBe(oldState);
+    expect(h.cache()[0].body).toBe(originalBody);
+  });
 
   it("only schedules proven prematch rows and retires IDs that are already live", async () => {
     const h = harness();
@@ -129,16 +243,16 @@ describe("BTI private collector regression", () => {
     const h = harness();
     h.setRosterOk(false);
     expect((await h.refresh()).status).toBe("catalog-failed");
-    expect(h.listReads()).toBe(4);
+    expect(h.listReads()).toBe(6);
     for (let index = 0; index < 3; index += 1) {
       await vi.advanceTimersByTimeAsync(3_000);
       expect((await h.refresh()).status).toBe("catalog-failed");
     }
-    expect(h.listReads()).toBe(4);
+    expect(h.listReads()).toBe(6);
     h.setRosterOk(true);
     await vi.advanceTimersByTimeAsync(3_000);
     expect((await h.refresh()).status).toBe("catalog-requested");
-    expect(h.listReads()).toBe(6);
+    expect(h.listReads()).toBe(9);
   });
 
   it("keeps a fast retained league's receipt clock when another league retries and finishes later", async () => {
@@ -460,6 +574,7 @@ describe("BTI private collector regression", () => {
     const fetcher = async (path: string) => {
       requested.push(path);
       if (path.startsWith("/api/eventpage")) return new Promise(() => {});
+      if (path.includes("/early")) return { ok: true, text: async () => '{"serializedData":[]}' };
       if (path.includes("/live")) return { ok: true, text: async () => '{"serializedData":[]}' };
       const ids = path.includes("/initial") ? Array.from({ length: 23 }, (_, i) => `l${i}`)
         : new URL(path, "https://bti.test").searchParams.get("leagueIds")!.split(",");
@@ -496,6 +611,7 @@ describe("BTI private collector regression", () => {
     const fetcher = async (path: string) => {
       requested.push(path);
       if (path.startsWith("/api/eventpage")) return new Promise(() => {});
+      if (path.includes("/early")) return { ok: true, text: async () => '{"serializedData":[]}' };
       if (path.includes("/live")) return { ok: true, text: async () => '{"serializedData":[]}' };
       return { ok: true, text: async () => JSON.stringify({ serializedData: [league(path.includes("/initial")
         ? [raw("e1", ["stale-market"]), raw("departed", ["stale-market"])] : [raw("e1", [])])] }) };

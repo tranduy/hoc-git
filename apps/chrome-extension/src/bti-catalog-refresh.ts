@@ -14,10 +14,13 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const authValue = readAuth();
   const contextValue = readContext();
   const previousState = root[detailStateKey];
-  if (previousState && !previousState.sameSession?.(authValue, contextValue)) {
+  if (previousState && (previousState.collectorVersion !== 11 || !previousState.sameSession?.(authValue, contextValue))) {
+    const retainedBodies = previousState.sameSession?.(authValue, contextValue) &&
+      Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
     for (const controller of previousState.listControllers || []) controller.abort();
     for (const controller of root[detailWorkerKey]?.controllers?.values?.() || []) controller.abort();
     for (const key of [rosterWorkerKey, detailWorkerKey, detailBodiesKey, detailStateKey]) delete root[key];
+    if (retainedBodies.length > 0) root[detailBodiesKey] = retainedBodies;
     delete root.dataset.fieldlineBtiDetailVisits;
     delete root.dataset.fieldlineBtiCatalogRefreshAt;
   }
@@ -37,7 +40,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     for (const controller of legacyWorker.controllers?.values?.() || []) controller.abort();
     delete root.__fieldlineBtiDetailWorkerV9;
   }
-  const detailState = root[detailStateKey] || { desired: new Set(), failures: new Map(), evicted: new Set(),
+  const detailState = root[detailStateKey] || { collectorVersion: 11, desired: new Set(), failures: new Map(), evicted: new Set(),
     starts: new Map(), listControllers: new Set(), committed: null, rosterRetryAtMs: 0, rosterRefreshFailed: false,
     sameSession: (auth, context) => auth === authValue && context === contextValue };
   root[detailStateKey] = detailState;
@@ -51,7 +54,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   const trimCache = () => {
     const cache = Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
     let bytes = cache.reduce((sum, item) => sum + item.body.length, 0);
-    while (cache.length > retainedEventCap || bytes > 24 * 1024 * 1024) {
+    while (cache.length > retainedEventCap || bytes > 256 * 1024 * 1024) {
       const removed = cache.shift();
       bytes -= removed.body.length;
       detailState.evicted.add(removed.eventId);
@@ -71,7 +74,8 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   }
   const generation = 'bti:' + now + ':' + Math.floor(Math.random() * 1000000000);
   const rosterWorker = { generation, completedAt: 0, result: null, promise: null,
-    coverage: { phase: 'INITIAL', liveLeagues: 0, prematchLeagues: 0,
+    coverage: { phase: 'INITIAL', liveLeagues: 0, prematchLeagues: 0, earlyLeagues: 0,
+      earlyBatches: 0, earlyDone: 0,
       liveBatches: 0, prematchBatches: 0, liveDone: 0, prematchDone: 0, failed: 0,
       events: 0, namedEvents: 0, timedEvents: 0, marketEvents: 0, validEvents: 0,
       detailCachedEvents: 0, detailCachedBytes: 0, detailPendingEvents: 0 } };
@@ -153,20 +157,47 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     requestPath: listBase + partition + '/initial?regionCode=' +
       encodeURIComponent(regionCode) + '&leagueIds=01'
   }));
+  // Native All Early is distinct from Today and spans beyond the calendar's
+  // seven visible dates. Its initial response opens only ten leagues.
+  const localDate = new Date(now);
+  const earlyQuery = '?SportId=1&date=' + localDate.getFullYear() + '-' +
+    String(localDate.getMonth() + 1).padStart(2, '0') + '-' +
+    String(localDate.getDate()).padStart(2, '0') + '&allEvents=true';
+  initialPlans.push({ partition: 'early', canonicalPath: '/api/eventlist/asia/leagues/v2/early',
+    initialCanonicalPath: '/api/eventlist/asia/leagues/v2/early/initial',
+    requestPath: '/api/eventlist/asia/leagues/v2/early/initial' + earlyQuery +
+      '&regionCode=' + encodeURIComponent(regionCode) + '&leagueIds=01&returnAvailableDates=true' });
+  const masterId = (league) => {
+    const candidate = Array.isArray(league) ? league[3] ?? league[0] : null;
+    return typeof candidate === 'string' || typeof candidate === 'number' ? String(candidate) : '';
+  };
   const hydratePartition = async (plan) => {
-    const initial = await fetchList(plan.requestPath);
+    const requestId = (league) => plan.partition === 'early' ? masterId(league) :
+      Array.isArray(league) && (typeof league[0] === 'string' || typeof league[0] === 'number') ? String(league[0]) : '';
+    let initial = await fetchList(plan.requestPath);
     if (!initial || !Array.isArray(initial.payload?.serializedData)) {
       rosterWorker.coverage.failed += 1;
       rosterWorker.coverage.phase = 'FAILED';
       publishCoverage();
       return null;
     }
+    const hydrationPath = (ids) => plan.canonicalPath +
+      (plan.partition === 'early' ? earlyQuery + '&' : '?') + 'leagueIds=' + ids.join(',');
+    if (plan.partition === 'early' && initial.payload.serializedData.length > 0) {
+      const expanded = initial.payload.serializedData.map(masterId).filter((id) => /^[A-Za-z0-9_-]+$/u.test(id)).slice(0, 10);
+      const inventory = expanded.length > 0 ? await fetchList(hydrationPath(expanded)) : null;
+      if (!inventory || !Array.isArray(inventory.payload?.serializedData)) {
+        rosterWorker.coverage.failed += 1;
+        rosterWorker.coverage.phase = 'FAILED';
+        publishCoverage();
+        return null;
+      }
+      initial = inventory;
+    }
     const leagueIds = [];
     const seenLeagueIds = new Set();
     for (const league of initial.payload.serializedData) {
-      const candidate = Array.isArray(league) ? league[0] : null;
-      const leagueId = typeof candidate === 'string' || typeof candidate === 'number'
-        ? String(candidate) : '';
+      const leagueId = requestId(league);
       if (!leagueId || !/^[A-Za-z0-9_-]+$/u.test(leagueId) || seenLeagueIds.has(leagueId)) continue;
       seenLeagueIds.add(leagueId);
       leagueIds.push(leagueId);
@@ -187,7 +218,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         const index = nextBatch;
         nextBatch += 1;
         if (index >= batches.length) return;
-        const page = await fetchList(plan.canonicalPath + '?leagueIds=' + batches[index].join(','));
+        const page = await fetchList(hydrationPath(batches[index]));
         if (!page || !Array.isArray(page.payload?.serializedData)) {
           failed = true;
           rosterWorker.coverage.failed += 1;
@@ -256,8 +287,14 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     for (let index = 0; index < pages.length; index += 1) {
       // An explicit league read supersedes that league's initial shell, even
       // when events/markets disappeared. Richness is not a freshness clock.
-      for (const leagueId of batches[index]) { merged.delete(leagueId); leagueClocks.delete(leagueId); }
-      addLeagues(pages[index].payload, pages[index]);
+      const requestedMasters = new Set(batches[index]);
+      for (const [containerId, league] of merged) {
+        if (requestedMasters.has(requestId(league))) { merged.delete(containerId); leagueClocks.delete(containerId); }
+      }
+      // Every normal response also carries unexpanded shells for the other
+      // leagues. Only the requested master IDs have authoritative full rows.
+      addLeagues({ serializedData: pages[index].payload.serializedData.filter((league) =>
+        plan.partition !== 'early' || requestedMasters.has(masterId(league))) }, pages[index]);
     }
     // The initial roster advertises hundreds of empty league shells. Returning
     // those shells (and the provider's unrelated top-level metadata) through
@@ -301,7 +338,46 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   }
   detailState.rosterRefreshFailed = false;
   detailState.rosterRetryAtMs = 0;
-  const listResponses = partitions.filter(Boolean).flatMap((partition) => partition.responses);
+  const today = partitions.find((partition) => partition.partition === 'prematch');
+  const early = partitions.find((partition) => partition.partition === 'early');
+  const retainedPrematch = [today, early].filter((partition) => partition.payload.serializedData.length > 0);
+  const prematchClocks = (retainedPrematch.length > 0 ? retainedPrematch : [today, early])
+    .map((partition) => partition.payload.fieldlineBtiRoster);
+  const prematchClock = { generation, complete: true,
+    requestedAtMs: Math.min(...prematchClocks.map((clock) => clock.requestedAtMs)),
+    observedAtMs: Math.min(...prematchClocks.map((clock) => clock.observedAtMs)) };
+  // Native roster selections include many unused price formats and display
+  // fields. Preserve the decoder's exact tuple positions and every native row
+  // while keeping the complete Today + Early roster within the bridge budget.
+  const compactRosterMarkets = (value) => {
+    if (!Array.isArray(value)) return value;
+    if (Array.isArray(value[3]) && Array.isArray(value[7])) {
+      const market = value.slice();
+      market[7] = value[7].map((selection) => {
+        if (!Array.isArray(selection)) return selection;
+        return selection.map((field, index) => index === 6 && Array.isArray(field)
+          ? field.map((price, format) => format === 5 ? price : null)
+          : [0, 1, 2, 3, 6, 7, 13].includes(index) ? field : null);
+      });
+      return market;
+    }
+    return value.map(compactRosterMarkets);
+  };
+  const compactRosterLeague = (league) => {
+    if (!Array.isArray(league) || !Array.isArray(league[12])) return league;
+    const next = league.slice();
+    next[12] = league[12].map((event) => {
+      if (!Array.isArray(event) || !Array.isArray(event[8])) return event;
+      const row = event.slice();
+      row[8] = compactRosterMarkets(event[8]);
+      return row;
+    });
+    return next;
+  };
+  const listResponses = [...partitions.find((partition) => partition.partition === 'live').responses,
+    { path: listBase + 'prematch/initial', body: JSON.stringify({
+      serializedData: [...today.payload.serializedData, ...early.payload.serializedData].map(compactRosterLeague),
+      fieldlineBtiRoster: prematchClock }) }];
   const eventIds = [];
   const seen = new Set();
   const prematchEventIds = [];
@@ -319,7 +395,7 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
         const id = typeof event?.[0] === 'string' || typeof event?.[0] === 'number'
           ? String(event[0]) : '';
         if (!id) continue;
-        if (entry?.partition === 'prematch' && event?.[5] === false && !liveIds.has(id) && !seenPrematch.has(id)) {
+        if (entry?.partition !== 'live' && event?.[5] === false && !liveIds.has(id) && !seenPrematch.has(id)) {
           seenPrematch.add(id);
           prematchEventIds.push(id);
           starts.set(id, Date.parse(String(event[3] || '')));
@@ -674,6 +750,14 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
   publishCoverage();
   const cachedDetails = [];
   if (detailCache.length > 0) {
+    const cachedById = new Map(detailCache.filter((item) => item && typeof item.eventId === 'string' &&
+      typeof item.body === 'string').map((item) => [item.eventId, item]));
+    // Cache receipts move to the tail on refresh. Keep a separate cyclic owner
+    // order across roster generations so those writes cannot starve replay.
+    const deliveryOrder = (detailState.deliveryOrder || []).filter((eventId) => cachedById.has(eventId));
+    const queued = new Set(deliveryOrder);
+    for (const eventId of cachedById.keys()) if (!queued.has(eventId)) deliveryOrder.push(eventId);
+    detailState.deliveryOrder = deliveryOrder;
     let batch = [];
     let batchMetadata = [];
     let batchBytes = 0;
@@ -687,12 +771,20 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
       batchMetadata = [];
       batchBytes = 0;
     };
-    for (const item of detailCache) {
-      if (!item || typeof item.body !== 'string') continue;
+    const pendingCount = deliveryOrder.length;
+    for (let visited = 0; visited < pendingCount; visited += 1) {
+      const eventId = deliveryOrder[0];
+      const item = cachedById.get(eventId);
+      // The collector admits at most two MiB per event. Two bounded batches
+      // leave the three authoritative list responses available on every tick.
+      if (batchMetadata.length > 0 && batchBytes + item.body.length > 1536 * 1024) flushBatch();
+      if (cachedDetails.length >= 2) break;
+      deliveryOrder.push(deliveryOrder.shift());
       try {
+        if (item.body.length > 2 * 1024 * 1024) continue;
         const payload = JSON.parse(item.body);
-        if (!Array.isArray(payload?.data) || !Array.isArray(payload?.fieldlineBtiDetails)) continue;
-        if (batchMetadata.length > 0 && batchBytes + item.body.length > 1536 * 1024) flushBatch();
+        if (!Array.isArray(payload?.data) || !Array.isArray(payload?.fieldlineBtiDetails) ||
+          payload.fieldlineBtiDetails.length === 0) continue;
         batch.push(...payload.data);
         batchMetadata.push(...payload.fieldlineBtiDetails);
         batchBytes += item.body.length;
@@ -701,10 +793,9 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     flushBatch();
   }
   const responses = new Map();
-  // A bridge reconnect creates a fresh API decode pipeline. Prime that pipeline
-  // with every cached event detail before the three list partitions commit the
-  // authoritative baseline, so a healthy reconnect never publishes the small
-  // roster shell and then spends a minute rebuilding visible coverage.
+  // Retained API detail survives a roster generation. A fresh decoder fills
+  // incrementally; cyclic replay also retries a lost forward without changing
+  // its original request/receipt clocks or duplicating the full page cache.
   for (const item of [...cachedDetails, ...listResponses]) {
     if (item && typeof item.path === 'string' && typeof item.body === 'string') {
       responses.set(item.path, { url: item.path, body: item.body });

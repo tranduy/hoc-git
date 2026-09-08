@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Fieldline Chrome Feed",
-  "version": "0.2.73",
+  "version": "0.2.74",
   "description": "Read-only observer for explicitly selected sportsbook tabs.",
   "permissions": [
     "alarms",

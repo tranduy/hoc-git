@@ -26,7 +26,7 @@ function matches(pattern: string, hostname: string): boolean {
 
 describe("extension manifest", () => {
   it("keeps provider tabs active with the Chrome debugger permission", () => {
-    expect(manifest.version).toBe("0.2.73");
+    expect(manifest.version).toBe("0.2.74");
     expect(manifest.permissions).toContain("debugger");
     expect(manifest.permissions).toContain("sessions");
   });

@@ -12,9 +12,10 @@ const failedPage = {
 describe("BTI page health", () => {
   it("preserves bounded current detail diagnostics through the actual page expression", () => {
     const coverage = { phase: "COMPLETE", liveLeagues: 10, prematchLeagues: 10,
+      earlyLeagues: 178, earlyBatches: 18, earlyDone: 18,
       liveBatches: 1, prematchBatches: 1, liveDone: 1, prematchDone: 1, failed: 0,
       events: 196, namedEvents: 196, timedEvents: 196, marketEvents: 196, validEvents: 196,
-      detailCachedEvents: 159, detailCachedBytes: 17_500_000, detailPendingEvents: 0,
+      detailCachedEvents: 159, detailCachedBytes: 150_000_000, detailPendingEvents: 0,
       detailRosterEvents: 159, detailEmptyEvents: 1, detailFailedEvents: 0,
       detailEvictedEvents: 0, detailCoverageComplete: true, detailQueuedEvents: 0,
       detailInFlightEvents: 0, detailOldestReceiptAgeMs: 60_000,
