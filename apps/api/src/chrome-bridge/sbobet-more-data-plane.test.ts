@@ -68,6 +68,82 @@ function patchBody(input: ChromeBridgeEnvelope, patch: Record<string, unknown>):
 }
 
 describe("passive SBOBET More receipts", () => {
+  const complete = (input: ChromeBridgeEnvelope) => patchBody(input, { moreContainerComplete: true });
+
+  it("replaces only explicitly complete More membership and its unknown native inventory", () => {
+    const adapter = new KsportWsCatalogAdapter(); seed(adapter);
+    catalog(adapter, complete(more(3, { "21": [corner()], "31": [card()],
+      "777": ["0.9*778899771h 1.1*778899772a"] })));
+    const next = catalog(adapter, complete(more(4, { "21": [corner("0.65")] }, 3)));
+    expect(next.quotes.map(x => x.providerMarketId).sort()).toEqual([GOAL, GOAL, CORNER, CORNER].sort());
+    expect(next.nativeMarketObservations?.some(x => x.nativeType === "777" || x.nativeType === "31")).toBe(false);
+    expect(next.quotes).toContainEqual(expect.objectContaining({ providerMarketId: GOAL, sequence: 2 }));
+  });
+
+  it.each([{}, { "0": ["2,3"] }, { "21": [] }])("closes only the More partition on an explicitly complete empty response %j", groups => {
+    const adapter = new KsportWsCatalogAdapter(); seed(adapter);
+    catalog(adapter, complete(more(3, { "21": [corner()] })));
+    const closed = catalog(adapter, complete(more(4, groups, 3)));
+    expect(closed.events).toHaveLength(1);
+    expect(closed.quotes).toHaveLength(2);
+    expect(closed.quotes.every(x => x.providerMarketId === GOAL && x.sequence === 2)).toBe(true);
+  });
+
+  it("keeps complete-event detail and original main prices when complete More closes", () => {
+    const adapter = new KsportWsCatalogAdapter(); seed(adapter);
+    catalog(adapter, detail(3, { "3": [goal()], "31": [card()] }, 2));
+    catalog(adapter, complete(more(4, { "3": [goal("0.63")], "21": [corner()] }, 3)));
+    const closed = catalog(adapter, complete(more(5, {}, 4)));
+    expect(closed.quotes.map(x => x.providerMarketId).sort()).toEqual([GOAL, GOAL, CARD, CARD].sort());
+    expect(closed.quotes).toContainEqual(expect.objectContaining({ providerMarketId: GOAL, rawOdds: "0.92", sequence: 3 }));
+    expect(closed.quotes).toContainEqual(expect.objectContaining({ providerMarketId: CARD, sequence: 3 }));
+  });
+
+  it("keeps the combined detail sequence fence when More advances beyond a complete-event receipt", () => {
+    const adapter = new KsportWsCatalogAdapter(); seed(adapter);
+    catalog(adapter, detail(3, { "3": [goal()], "31": [card()] }, 2));
+    catalog(adapter, complete(more(5, { "21": [corner()] }, 3)));
+    expect(adapter.decode(detail(4, { "3": [goal()] }, 3))).toEqual([]);
+  });
+
+  it("keeps a newer hidden WS receipt against in-flight More closure until a later complete receipt", () => {
+    const adapter = new KsportWsCatalogAdapter(); seed(adapter);
+    catalog(adapter, complete(more(3, { "21": [corner()] })));
+    catalog(adapter, socket(4, { "21": [corner("0.61")] }));
+    const older = catalog(adapter, complete(more(5, {}, 3)));
+    expect(older.quotes).toContainEqual(expect.objectContaining({ providerMarketId: CORNER, rawOdds: "0.61", sequence: 4 }));
+    expect(catalog(adapter, complete(more(6, {}, 5))).quotes.some(x => x.providerMarketId === CORNER)).toBe(false);
+  });
+
+  it.each(["detail", "main"])("does not resurrect a closed More-only identity from an older in-flight %s response", lane => {
+    const adapter = new KsportWsCatalogAdapter(); seed(adapter);
+    catalog(adapter, complete(more(3, { "21": [corner()] })));
+    catalog(adapter, complete(more(4, {}, 3)));
+    if (lane === "main") adapter.decode(main(5, "live", null, 2, 3));
+    const stale = catalog(adapter, lane === "detail" ? detail(5, { "3": [goal()], "21": [corner()] }, 3) :
+      main(6, "today", { "3": [goal()], "21": [corner()] }, 2, 3));
+    expect(stale.quotes.some(x => x.providerMarketId === CORNER)).toBe(false);
+    expect(stale.quotes.some(x => x.providerMarketId === GOAL)).toBe(true);
+  });
+
+  it("refuses invalid complete More bodies without clearing retained odds", () => {
+    const adapter = new KsportWsCatalogAdapter(); seed(adapter);
+    catalog(adapter, complete(more(3, { "21": [corner()] })));
+    for (const groups of [{ "21": ["opaque"] }, { "0": ["error"] }, { "21": ["0.9*999991h"] }]) {
+      expect(adapter.decode(complete(more(4, groups, 3)))).toEqual([]);
+    }
+    expect(catalog(adapter, more(5, { "31": [card()] }, 3)).quotes.some(x => x.providerMarketId === CORNER)).toBe(true);
+  });
+
+  it("publishes and retires a complete More partition containing only unknown native identities", () => {
+    const adapter = new KsportWsCatalogAdapter(); seed(adapter);
+    const inventory = catalog(adapter, complete(more(3, { "777": ["0.9*778899771h 1.1*778899772a"] })));
+    expect(inventory.nativeMarketObservations).toContainEqual(expect.objectContaining({ nativeType: "777", disposition: "UNMAPPED" }));
+    const closed = catalog(adapter, complete(more(4, {}, 3)));
+    expect(closed.nativeMarketObservations?.some(x => x.nativeType === "777")).toBe(false);
+    expect(closed.quotes.every(x => x.providerMarketId === GOAL)).toBe(true);
+  });
+
   it("adds returned identities and unknown inventory while retaining main metadata and clocks", () => {
     const adapter = new KsportWsCatalogAdapter(); seed(adapter);
     const input = more(3, { "0": ["2,3,4,11,12"], "21": [corner()], "777": ["0.9*778899771h 1.1*778899772a"] });

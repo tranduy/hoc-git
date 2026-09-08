@@ -75,7 +75,7 @@ describe("observed SBOBET More HTTP ingestion", () => {
     expect(emitted.sourceEpoch).toBe(h.epoch);
     expect(JSON.parse(emitted.payload.body)).toEqual({ kind: "SBOBET_EVENT_MORE", generation: h.epoch,
       eventId: "5717357", leagueId: "481", requestStartSequence: 0, observedAtMs: 1000,
-      marketContainerComplete: false, groups: realGroups });
+      marketContainerComplete: false, moreContainerComplete: true, groups: realGroups });
     expect(h.sendCommand.mock.calls.filter(([, method]) => method === "Network.getResponseBody")).toHaveLength(1);
     expect(h.sendCommand.mock.calls.some(([, method]) => method === "Runtime.evaluate")).toBe(false);
   });
@@ -103,9 +103,17 @@ describe("observed SBOBET More HTTP ingestion", () => {
     expect(JSON.parse(h.more()[0]!.payload.body).observedAtMs).toBe(1000);
   });
 
-  it.each([{}, { "0": ["2,3,4,11,12"] }])("does not turn empty or metadata-only More into a catalog update", async body => {
+  it.each([{}, { "0": ["2,3,4,11,12"] }])("forwards a valid empty More view without claiming whole-event emptiness", async body => {
     const h = harness(); h.setBody(body);
     await h.request(); await h.response();
+    expect(h.more()).toHaveLength(1);
+    expect(JSON.parse(h.more()[0]!.payload.body)).toMatchObject({ eventId: "5717357", leagueId: "481",
+      marketContainerComplete: false, moreContainerComplete: true, groups: body });
+  });
+
+  it.each([401, 429, 500])("does not turn HTTP %s with an empty body into a clearing receipt", async status => {
+    const h = harness(); h.setBody({});
+    await h.request(); await h.response({ status });
     expect(h.more()).toHaveLength(0);
   });
 

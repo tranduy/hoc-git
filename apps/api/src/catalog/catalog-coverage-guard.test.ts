@@ -31,6 +31,26 @@ describe("CatalogCoverageGuard", () => {
       authoritativeRemovedEventIds: ["a"] })).toBe(false);
   });
 
+  it("accepts exact SBOBET Early removals without accepting an unrelated disappearance", () => {
+    const guard = new CatalogCoverageGuard();
+    const source = "catalog-source:SBOBET:FOOTBALL";
+    guard.accept(source, candidate("ksport:1", true, ["today", "early-a", "early-b"]));
+    expect(guard.accept(source, { ...candidate("ksport:1", false, ["today"]),
+      authoritativeRemovedEventIds: ["early-a"] })).toBe(false);
+    expect(guard.accept(source, { ...candidate("ksport:1", false, ["today"]),
+      authoritativeRemovedEventIds: ["early-a", "early-b"] })).toBe(true);
+    expect(guard.accept(source, candidate("ksport:1", false, ["today"]))).toBe(true);
+  });
+
+  it.each(["catalog-source:CMD:FOOTBALL", "catalog-source:BTI:FOOTBALL", "catalog-source:SABA:FOOTBALL"])(
+    "does not grant Early removal authority to %s", source => {
+      const guard = new CatalogCoverageGuard();
+      guard.accept(source, candidate("one", true, ["a", "b"]));
+      expect(guard.accept(source, { ...candidate("one", false, ["b"]),
+        authoritativeRemovedEventIds: ["a"] })).toBe(false);
+    }
+  );
+
   it("rejects a ten-to-nine identity shrink", () => {
     const guard = new CatalogCoverageGuard();
     expect(guard.accept("source", candidate("A", true,

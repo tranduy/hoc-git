@@ -284,7 +284,7 @@ export class SbobetCatalogRefresh {
         const batch = response.request?.eventId === eventId && typeof response.body === "string"
           ? sbobetMoreBatchFromResponse(response.request, response.body, {
             generation, requestStartSequence, observedAtMs: result.observedAtMs }) : null;
-        // Empty/metadata-only or invalid More is not full-event membership.
+        // Validated empty More clears only the source's More view. Invalid bodies cannot do so.
         if (batch === null) { this.#failure(state, generation, "DETAIL_INVALID"); return; }
         emitBatch = () => options.onBatch(batch, active.controller.signal);
       } else {

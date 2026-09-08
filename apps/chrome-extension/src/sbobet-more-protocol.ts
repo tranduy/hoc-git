@@ -13,6 +13,8 @@ export interface SbobetMoreBatch {
   readonly requestStartSequence: number;
   readonly observedAtMs: number;
   readonly marketContainerComplete: false;
+  /** Successful ordinary More replaces this view; main-feed membership is separate. */
+  readonly moreContainerComplete: true;
   readonly groups: Readonly<Record<string, readonly string[]>>;
 }
 
@@ -33,7 +35,11 @@ export function sbobetMoreRequestFromObserved(urlValue: unknown, method: unknown
   return { url: urlValue, eventId, leagueId };
 }
 
-/** Raw complementary inventory only. Empty/missing groups are never deletion evidence. */
+/**
+ * Ordinary five-parameter More is one complete view, complementary to the main event.
+ * Source: soccer caller in public chunk 7409, offset 1045040, replaces React state
+ * from the HTTP result; tabs only filter that map. Errors never reach this parser.
+ */
 export function sbobetMoreBatchFromResponse(request: SbobetMoreRequest, body: string,
   receipt: { readonly generation: string; readonly requestStartSequence: number;
     readonly observedAtMs: number }): SbobetMoreBatch | null {
@@ -45,7 +51,6 @@ export function sbobetMoreBatchFromResponse(request: SbobetMoreRequest, body: st
   const entries = Object.entries(groups);
   if (entries.length > 256) return null;
   let rowCount = 0;
-  let priced = false;
   for (const [key, rows] of entries) {
     if (!/^\d{1,4}$/u.test(key) || !Array.isArray(rows) || (rowCount += rows.length) > 20_000) return null;
     for (const row of rows) {
@@ -59,12 +64,11 @@ export function sbobetMoreBatchFromResponse(request: SbobetMoreRequest, body: st
         const match = /^(-?\d+(?:\.\d+)?)\*(\d+[had])$/u.exec(token);
         return match === null || !match[2]!.startsWith(request.eventId);
       })) return null;
-      priced = true;
     }
   }
-  if (!priced) return null;
   return { kind: "SBOBET_EVENT_MORE", ...receipt, eventId: request.eventId, leagueId: request.leagueId,
-    marketContainerComplete: false, groups: groups as Record<string, readonly string[]> };
+    marketContainerComplete: false, moreContainerComplete: true,
+    groups: groups as Record<string, readonly string[]> };
 }
 
 /** The caller verifies the document and owner before evaluating this bounded page request. */

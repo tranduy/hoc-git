@@ -159,7 +159,7 @@ describe("SbobetCatalogRefresh complementary More mode", () => {
     expect(starts).toEqual(["101", "102", "105"]);
   });
 
-  it("backs off empty More without spending the rest of a bounded batch on the same owner", async () => {
+  it("processes a valid empty More once without spending the rest of a bounded batch on the same owner", async () => {
     const starts: string[] = [];
     const { collector, batches } = setupMore({ minimumDelayMs: 250, request: async input => {
       starts.push(input.eventId);
@@ -170,7 +170,8 @@ describe("SbobetCatalogRefresh complementary More mode", () => {
     await vi.advanceTimersByTimeAsync(750);
     await tick;
     expect(starts).toEqual(["101", "102", "103", "104"]);
-    expect(batches.map(batch => batch.eventId)).toEqual(["102", "103", "104"]);
+    expect(batches.map(batch => batch.eventId)).toEqual(["101", "102", "103", "104"]);
+    expect(batches[0]).toMatchObject({ groups: {}, moreContainerComplete: true, marketContainerComplete: false });
   });
 
   it("emits observed native More groups unchanged with no complete-event claim", async () => {
@@ -187,24 +188,27 @@ describe("SbobetCatalogRefresh complementary More mode", () => {
     pending.resolve(moreResponse("5717357", groups));
     await tick;
     expect(batches).toEqual([{ kind: "SBOBET_EVENT_MORE", generation: "source:1", eventId: "5717357",
-      leagueId: "481", requestStartSequence: 41, observedAtMs: 10_050, marketContainerComplete: false, groups }]);
+      leagueId: "481", requestStartSequence: 41, observedAtMs: 10_050, marketContainerComplete: false,
+      moreContainerComplete: true, groups }]);
   });
 
-  it.each([{}, { "0": ["2,3,4,11,12"] }])("backs off empty or metadata-only More without emission: %j", async groups => {
+  it.each([{}, { "0": ["2,3,4,11,12"] }])("refreshes a validated empty More view on its normal TTL: %j", async groups => {
     let attempts = 0;
     const { collector, batches } = setupMore({ request: async input =>
       ++attempts === 1 ? moreResponse(input.eventId, groups) : moreResponse(input.eventId) });
     collector.setRoster({ generation: "source:1", events: [event()] });
     await collector.tick();
-    expect(batches).toEqual([]);
-    vi.setSystemTime(10_199);
+    expect(batches).toEqual([expect.objectContaining({ groups, moreContainerComplete: true,
+      marketContainerComplete: false, observedAtMs: 10_000 })]);
+    vi.setSystemTime(10_999);
     await collector.tick();
     expect(attempts).toBe(1);
-    vi.setSystemTime(10_200);
+    vi.setSystemTime(11_000);
     await collector.tick();
     expect(attempts).toBe(2);
-    expect(batches).toEqual([expect.objectContaining({ kind: "SBOBET_EVENT_MORE", observedAtMs: 10_200,
-      marketContainerComplete: false })]);
+    expect(batches).toHaveLength(2);
+    expect(batches[1]).toMatchObject({ kind: "SBOBET_EVENT_MORE", observedAtMs: 11_000,
+      moreContainerComplete: true, marketContainerComplete: false });
   });
 
   it("rejects a valid More receipt for a different scheduled event", async () => {

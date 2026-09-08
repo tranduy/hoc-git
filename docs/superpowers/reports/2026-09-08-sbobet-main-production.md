@@ -1,5 +1,21 @@
 # SBOBET main deployment and bounded live evidence
 
+## Current status: 0.2.69 deployed, 0.2.70 completing All Early and More closure
+
+MAIN is `feat/realtime-hardening`; More integration is committed in `31ef4eb82c7ee5c2d266bbc8d4481fa9df8f417a` and `7f9a8156437d2ebee09c4d52ea9ca1a286ff5c8c`. The exact-v2 handoff activated extension **0.2.69**, confirmed by actual worker manifest readback, and released its coordinator lease. API build: `sha256:bbda500b18a96ef82b6246599484a53bda5219fce245786ea511f1b300b33ca7`. Extension build: `sha256:943122e4e6c2282a4b642a04d49da01a9e235823a403986d9d5a75f3385ea0f3`.
+
+The 13:52:21-14:02:23 UTC+7 read-only window on 2026-09-08 collected **200/200 FRESH samples over 602,113 ms**, one source epoch, zero errors and zero failing pipeline hops. It recorded **293 actual hidden quote price/status changes** across 285 selections and 15 owners, all associated revisions observed on WebSocket, plus 504 main changes and 199 revision messages. Peak: 2,388 markets and 4,776 quotes. Final: 109 events, including 2,618 Decimal More quotes from 63 owners. Zero native NORMALIZED observations were absent from market publication. Sampled hidden receipt intervals: minimum 72 seconds, median 164 seconds, p95 189 seconds; unchanged records were capped at 4,000, so these are bounded estimates, separate from the existing 3-second application publication cadence.
+
+Evidence: `.run/parallel-hidden-markets-2026-09-07/sbobet/production069/LIVE-MORE-600S.json` and its summary; raw SHA256 `056c7222a367f9e0823e754a7e90fe6358109cad592ce328df6b0d1925766da1`. This proves bounded ongoing More updates and stability, not 24-hour operation.
+
+Native Early defaults to one date, but **All Dates** uses unfiltered `getEvent?timeRange=early` with the current football/Malay scope and private agent parameter. Actual HTTP 200: **377 owners in 47 leagues, 7,707 native rows**, matching 377 rendered rows. Original response: 707,480 bytes, SHA256 `81f27a9f88772e9409ccec2267f22c470b1aa483616f9f7969bf0385d1509644`. Sanitized exchange evidence `CORE-ALL-EARLY-NATIVE-069-20260908.json`, SHA256 `efb4a2aacdd43c2372d9ffd9891a1cfc1053f4468b272ced5a7a5a47d1f43c8a`, retains all native rows and records metadata URL redactions. Today was restored afterwards.
+
+Version 0.2.70 derives a bounded All Early refresh only from a successful current native main request, forwards actual correlated HTTP receipts through existing chunking/bridge/revision paths, and feeds the Today-plus-Early-minus-Live roster into More. Early membership stays separate from Today and preserves newer WebSocket clocks during migration.
+
+More-view completeness is now supported by source evidence: the ordinary five-parameter `getEventBetMore` response replaces the native local More state; display tabs filter that returned map locally. Public bundle SHA256 `f8af91799b2562f12ba14c3c37b468173f46b45c597d5a3c37c4045071f2240a`, request builder around offset 136080; chunk SHA256 `c37303b372b886e0a1e55af3d934530570ad3ac579b8d4718b4391f35168a68c`, fetch/state replacement 1045040-1046240 and local filtering around 1039745. Group 0 is display metadata. Valid current HTTP 200, including empty, has authority over its More membership only; HTTP errors, wrong scope and legacy payloads cannot remove markets. Independent main/full-event domains and newer receipts must remain intact.
+
+The expanded 0.2.70 build still requires activation and a current Today-plus-Early denominator comparison against actual More responses, including successful empty results. Full provider acceptance remains open. The following sections retain the preceding deployment history.
+
 The reviewed More collector is integrated into MAIN `feat/realtime-hardening`, commit `31ef4eb82c7ee5c2d266bbc8d4481fa9df8f417a`, and deployed with extension 0.2.68. The user explicitly transferred MAIN and runtime ownership to this SBOBET thread; earlier SABA ownership restrictions are historical.
 
 API build: `sha256:6592ca5c4a5205a352af60071a72c2ccac389f56024d4e3e476fdb266432d52a`. Extension disk build: `sha256:778ae7726cdd5c93e4a2992909399f6a35cbfaaa51fbe494864c52269fca445d`. Deployment used the existing exact-v2 stack handoff and released its coordinator lease. Actual hidden collection and a direct worker manifest readback confirmed running version 0.2.68.
