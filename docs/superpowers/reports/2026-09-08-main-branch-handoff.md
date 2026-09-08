@@ -1,0 +1,21 @@
+# Shared MAIN branch handoff ? 2026-09-08
+
+The consolidated working branch is **`feat/realtime-hardening`**, checked out at **`F:\0. PROJECT\tool-chenh`**. Start the next provider task from this branch. No new integration branch or runtime was created for this handoff.
+
+## Integrated work
+
+- The earlier shared checkpoint `82df066` already contains the BTI worker package, the initial SBOBET package and the other work then present in MAIN. Its [integration record](2026-09-08-integrated-worktree-checkpoint.md) preserves verification results and limitations.
+- The current SBOBET implementation is included through `31ef4eb`, `7f9a815`, `f46e3ce`, `dc9669e`, `b3e0029` and `30e1bea`. Deployment and native evidence are recorded in [the SBOBET production report](2026-09-08-sbobet-main-production.md).
+- The two remaining SBOBET investigation reports have now been preserved in this shared branch with historical-status notices.
+- CMD and IM worktrees have no changes beyond baseline `1710d64`. The BTI worktree retains its old integrated delta: all 22 paths exist in MAIN and all 16 provider-specific source/test/report files match after line-ending/EOF normalization. The shared files have later MAIN changes.
+- The old worker branches still point to the WIP baseline. Their dirty files are retained as historical working copies, not new packages to reapply over current MAIN. No worktree contents were deleted or reset.
+
+## Accepted scope and next step
+
+The user accepted the current SBOBET hidden-market collection with a tolerance of one or two missing markets. Current evidence covers More for 491/491 prematch owners, with actual automatic hidden-price changes and automatic recovery of the two delayed owners. This is acceptance of the current collection scope, not a claim that every provider has passed live hidden-market acceptance.
+
+The user explicitly deferred continuous operation, session maintenance and 24/7 hardening to a later phase. Preserve the deployed SBOBET functionality; do not begin another maintenance audit or provider implementation until the user supplies the next provider plan. SABA is not an active task in this handoff.
+
+## Runtime and verification boundary
+
+The managed runtime remains on extension **0.2.73**, implementation `30e1bea`. This consolidation only preserves documentation and records the accepted handoff; it does not change application code, build output, source tabs or processes. Earlier focused implementation tests and live evidence remain the applicable checks; no test/build/live window was repeated for these documentation changes. Git diff checks and branch ancestry were verified for this handoff.

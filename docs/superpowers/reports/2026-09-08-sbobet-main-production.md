@@ -45,3 +45,7 @@ The final lease change reproduced a failing regression, then passed 22 lease tes
 ## Operational handoff
 
 The managed SBOBET runtime remains active on 0.2.73. Passive listeners, API/WebSocket sampling, local artifact receivers and temporary helper UI have been stopped or removed. No pending deployment lease remains. The current source traversal and automatic updates are proven within the stated evidence windows; this report does not assert every current native row was simultaneously raw-compared, or certify 24/7 operation.
+
+## User acceptance and deferred work
+
+The user accepted the current hidden-market collection with a tolerance of one or two missing markets and explicitly deferred continuous operation/session maintenance/24/7 work. The shared continuation point is recorded in [the MAIN branch handoff](2026-09-08-main-branch-handoff.md). Preserve the bounded evidence and its actual refresh latency; no further SBOBET maintenance work is active at this handoff.
