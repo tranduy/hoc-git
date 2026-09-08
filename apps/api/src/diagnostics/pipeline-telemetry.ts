@@ -148,6 +148,7 @@ interface AccountState {
     readonly catalogShape: string;
     readonly reconnectAttempts: number;
     readonly reconnectOutcomes: string;
+    readonly apsportDetail?: ApsportDetailDiagnostic;
   } | null;
   pageHealth: {
     readonly status: "HEALTHY" | "AUTH_ERROR" | "UNKNOWN";
@@ -160,6 +161,19 @@ interface AccountState {
     nextAttemptAtMs: number | null;
     lastFailureCode: string | null;
   };
+}
+
+interface ApsportDetailDiagnostic {
+  readonly rosterEvents: number;
+  readonly successfulEvents: number;
+  readonly withMarketsEvents: number;
+  readonly emptyEvents: number;
+  readonly pendingEvents: number;
+  readonly failedEvents: number;
+  readonly queuedEvents: number;
+  readonly inFlightEvents: number;
+  readonly complete: boolean;
+  readonly oldestSuccessAgeMs: number | null;
 }
 
 const refreshOutcomes = new Set(["catalog-requested", "rate-limited", "token-unavailable",
@@ -206,6 +220,28 @@ function boundedCounter(value: unknown): number {
   return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 1_000_000
     ? Number(value)
     : 0;
+}
+
+function apsportDetailDiagnostic(value: unknown): ApsportDetailDiagnostic | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const names = ["rosterEvents", "successfulEvents", "withMarketsEvents", "emptyEvents",
+    "pendingEvents", "failedEvents", "queuedEvents", "inFlightEvents"] as const;
+  if (!names.every((name) => Number.isSafeInteger(input[name]) && Number(input[name]) >= 0 &&
+    Number(input[name]) <= 1_000_000) || typeof input.complete !== "boolean") return undefined;
+  const oldestSuccessAgeMs = input.oldestSuccessAgeMs;
+  if (oldestSuccessAgeMs !== null && (!Number.isSafeInteger(oldestSuccessAgeMs) ||
+    Number(oldestSuccessAgeMs) < 0 || Number(oldestSuccessAgeMs) > 1_000_000_000)) return undefined;
+  const counts = Object.fromEntries(names.map((name) => [name, Number(input[name])])) as
+    Record<typeof names[number], number>;
+  if (counts.successfulEvents > counts.rosterEvents ||
+    counts.withMarketsEvents + counts.emptyEvents !== counts.successfulEvents ||
+    counts.pendingEvents !== counts.rosterEvents - counts.successfulEvents ||
+    counts.failedEvents > counts.rosterEvents || counts.queuedEvents > counts.rosterEvents ||
+    counts.inFlightEvents > counts.rosterEvents ||
+    input.complete && (counts.successfulEvents !== counts.rosterEvents || counts.failedEvents !== 0)) return undefined;
+  return { ...counts, complete: input.complete, oldestSuccessAgeMs: oldestSuccessAgeMs === null
+    ? null : Number(oldestSuccessAgeMs) };
 }
 
 function zeroes<T extends readonly string[]>(keys: T): Record<T[number], number> {
@@ -503,7 +539,8 @@ export class PipelineTelemetry {
         baselineTabSelections?: unknown; baselineTabStatus?: unknown;
         baselineTabTargets?: unknown; baselineTabStep?: unknown; baselineTabGroups?: unknown;
         baselineTabScopes?: unknown; baselineTabPeriods?: unknown; baselineTabLabels?: unknown;
-        catalogShape?: unknown; reconnectAttempts?: unknown; reconnectOutcomes?: unknown };
+        catalogShape?: unknown; reconnectAttempts?: unknown; reconnectOutcomes?: unknown;
+        apsportDetail?: unknown };
       if (Array.isArray((value as { results?: unknown }).results)) {
         for (const entry of (value as { results: readonly unknown[] }).results) {
           if (typeof entry !== "string") continue;
@@ -516,7 +553,7 @@ export class PipelineTelemetry {
       }
       if (value.kind === "WORK_HEALTH" && Number.isSafeInteger(value.counters?.forcedUnlocks) &&
         Number(value.counters?.forcedUnlocks) >= 0) state.forcedUnlocks = Number(value.counters?.forcedUnlocks);
-      const rosterCoverage = typeof value.rosterCoverage === "string" && value.rosterCoverage.length <= 400 &&
+      const rosterCoverage = typeof value.rosterCoverage === "string" && value.rosterCoverage.length <= 4096 &&
         /^[-A-Za-z0-9_":{},.]+$/u.test(value.rosterCoverage) ? value.rosterCoverage : undefined;
       if (value.kind === "PAGE_HEALTH" &&
         (value.status === "HEALTHY" || value.status === "UNKNOWN") && value.code === null) {
@@ -533,6 +570,7 @@ export class PipelineTelemetry {
         // Frame counters ship with a newer extension than the running API may
         // be paired with; absent ones read as zero rather than dropping the
         // whole diagnostic.
+        const detailCoverage = apsportDetailDiagnostic(value.apsportDetail);
         state.wsAttach = {
           sourceGeneration: Number(value.sourceGeneration), webSocketCreated: Number(value.webSocketCreated),
           webSockets: Number(value.webSockets), ksportTargets: Number(value.ksportTargets),
@@ -579,7 +617,8 @@ export class PipelineTelemetry {
           baselineTabScopes: boundedCounter(value.baselineTabScopes),
           baselineTabPeriods: boundedCounter(value.baselineTabPeriods),
           baselineTabLabels: tabLabels(value.baselineTabLabels),
-          catalogShape: catalogShape(value.catalogShape)
+          catalogShape: catalogShape(value.catalogShape),
+          ...(detailCoverage === undefined ? {} : { apsportDetail: detailCoverage })
         };
       }
     } catch { /* malformed diagnostic envelopes are ignored without retaining the body */ }

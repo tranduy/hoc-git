@@ -1,4 +1,5 @@
-import { normalizeObservedFootballCatalog, type CmdCatalogInputRecord } from "@tool-chenh/adapters";
+import { normalizeObservedFootballCatalog, observeNativeCmdMarkets,
+  type CmdCatalogInputRecord } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
@@ -504,7 +505,7 @@ function withJustifiedHandicaps(catalog: ObservedProviderCatalog): ObservedProvi
   const byLine = new Map<string, { id: string; prices: string }[]>();
   for (const market of catalog.markets) {
     if (!market.marketType.endsWith("_AH")) continue;
-    const key = `${market.providerEventId} ${market.marketType} ${market.line ?? ""}`;
+    const key = `${market.providerEventId}\u0000${market.marketType}\u0000${market.line ?? ""}`;
     (byLine.get(key) ?? byLine.set(key, []).get(key)!).push({ id: market.providerMarketId,
       prices: [...(pricesByMarket.get(market.providerMarketId) ?? [])].sort().join(" ") });
   }
@@ -526,10 +527,12 @@ function materialize(rows: Map<string, RetainedRow>, observedAtMs: number) {
   for (const retained of rows.values()) {
     const record = decodeRecord(retained.row);
     if (record === null) continue;
-    parts.push(normalizeObservedFootballCatalog("CMD", [record], {
+    const options = {
       observedAtMs: retained.observedAtMs, receivedMonotonicMs: retained.receivedMonotonicMs,
       timezoneOffsetMinutes: 480, sequence: retained.sequence
-    }));
+    };
+    parts.push({ ...normalizeObservedFootballCatalog("CMD", [record], options),
+      nativeMarketObservations: observeNativeCmdMarkets("CMD", [record], options) });
   }
   return withJustifiedHandicaps(mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "CMD",
     observedAtMs, parts, collapseDuplicateEvents: true }));

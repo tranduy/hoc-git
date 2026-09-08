@@ -1,0 +1,135 @@
+{
+  "description": "Actual .61 unchanged source/tab/epoch: Today12 completed, collector stopped13 on precise Early More restoration membership refusal. Not full/realtime acceptance.",
+  "status": {
+    "at": "2026-09-07T22:54:16.667Z",
+    "build": "sha256:f21acbb29c9be29e46c3698e5bd1a8e83ff9cd30468eaa35d74d92ee3f76c19f",
+    "firstFailingHop": null,
+    "source": {
+      "sourceId": "chrome:SABA:2105831907",
+      "tabId": 2105831907,
+      "authorityDisposition": "ACTIVE"
+    },
+    "epoch": "ec26aee2-22f1-4686-869e-056df4f10e3a:2",
+    "catalog": {
+      "state": "FRESH",
+      "events": 15,
+      "markets": 91,
+      "quotes": 182,
+      "native": 215,
+      "observedAtMs": 1788821655864
+    },
+    "capture": {
+      "name": "capture-1788821495769.jsonl",
+      "size": 5957289,
+      "mtime": 1788821656399.6
+    }
+  },
+  "receipts": {
+    "schemaContexts": [],
+    "publicMarketSamples": [],
+    "periodFailures": [],
+    "probeCount": 1,
+    "probes": [
+      {
+        "at": "2026-09-07T22:52:09.283Z",
+        "epoch": "ec26aee2-22f1-4686-869e-056df4f10e3a:2",
+        "status": "NO_ACTION_COLLECTOR_TARGET_BOUND",
+        "viewRestored": true
+      }
+    ],
+    "collectorState": {
+      "nativeReady": false,
+      "schemaContextReady": false,
+      "catalogUsable": false,
+      "discoveryPending": false,
+      "discoveryAttempted": true,
+      "collectorState": "FINISHED",
+      "domBlocked": false,
+      "probeBlocked": false
+    },
+    "collectors": [
+      {
+        "at": "2026-09-07T22:52:18.422Z",
+        "sourceId": "chrome:SABA:2105831907",
+        "epoch": "ec26aee2-22f1-4686-869e-056df4f10e3a:2",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "IN_PROGRESS",
+        "viewRestored": true,
+        "completedOwners": 1,
+        "rosterOwners": 12,
+        "expandedOwners": 0
+      },
+      {
+        "at": "2026-09-07T22:53:14.960Z",
+        "sourceId": "chrome:SABA:2105831907",
+        "epoch": "ec26aee2-22f1-4686-869e-056df4f10e3a:2",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "IN_PROGRESS",
+        "viewRestored": true,
+        "completedOwners": 10,
+        "rosterOwners": 12,
+        "expandedOwners": 0
+      },
+      {
+        "at": "2026-09-07T22:53:22.461Z",
+        "sourceId": "chrome:SABA:2105831907",
+        "epoch": "ec26aee2-22f1-4686-869e-056df4f10e3a:2",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "IN_PROGRESS",
+        "viewRestored": true,
+        "completedOwners": 12,
+        "rosterOwners": 12,
+        "expandedOwners": 0
+      },
+      {
+        "at": "2026-09-07T22:54:15.824Z",
+        "sourceId": "chrome:SABA:2105831907",
+        "epoch": "ec26aee2-22f1-4686-869e-056df4f10e3a:2",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "INCOMPLETE",
+        "viewRestored": true,
+        "reason": "SABA_COLLECTOR_MORE_RESTORE_METADATA_MEMBERSHIP",
+        "collectionErrorCode": "SABA_COLLECTOR_MORE_RESTORE_METADATA_MEMBERSHIP",
+        "restorationErrorCode": null,
+        "completedOwners": 13
+      }
+    ],
+    "latestEnvelopeEpoch": "ec26aee2-22f1-4686-869e-056df4f10e3a:2",
+    "lastHealth": {
+      "at": "2026-09-07T22:54:12.236Z",
+      "counters": {
+        "OK": 17,
+        "ERROR": 0,
+        "TIMEOUT": 1,
+        "SKIPPED_INFLIGHT": 38,
+        "forcedUnlocks": 1
+      },
+      "lastOutcome": {
+        "workItem": "pollSabaDomChanges",
+        "outcome": "SKIPPED_INFLIGHT",
+        "durationMs": 14010
+      },
+      "lastErrorCode": "WORK_ITEM_TIMEOUT",
+      "inFlightAgeMs": 14010
+    },
+    "transports": {
+      "TAB_STATE": 39,
+      "DOM_SNAPSHOT": 12,
+      "WS_STATE": 1,
+      "WS_FRAME": 84
+    },
+    "lastDom": {
+      "at": "2026-09-07T22:54:15.864Z",
+      "epoch": "ec26aee2-22f1-4686-869e-056df4f10e3a:2",
+      "recordCount": 33,
+      "chunkCount": 1,
+      "chunkIndex": 0
+    }
+  },
+  "limitations": [
+    "No expected/actual membership ID differences were emitted by .61; exact cause unproven.",
+    "Tab/epoch remained unchanged through this failure; it is not the prior small-roster recovery replacement.",
+    "One periodic watchdog timeout/forced unlock occurred; existing state-local collector latch protects overlap.",
+    "No full candidate published; API counts are ordinary current visible/native inventory, not collector coverage."
+  ]
+}

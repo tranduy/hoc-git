@@ -1,0 +1,45 @@
+{
+  "provider": "SABA",
+  "extensionVersion": "0.2.46",
+  "buildIdentity": "sha256:2ef2fa385151df5a366b53fbac1e254d0684b2bea676f659ec0251c22fbe4d14",
+  "sourceId": "chrome:SABA:2105831237",
+  "observedAt": "2026-09-07T18:36:53.305Z",
+  "captureFile": "capture-1788806113020.jsonl",
+  "results": [
+    {
+      "at": "2026-09-07T18:36:30.794Z",
+      "epoch": "f0d6d1df-db4d-4554-8162-be66522926eb:5",
+      "status": "COMPLETE_EVIDENCE",
+      "viewRestored": true,
+      "todayRows": 95,
+      "earlyRows": 252,
+      "expansions": [
+        {
+          "ownerMatchId": "132973443",
+          "outcome": "NO_STRUCTURAL_CHANGE",
+          "addedMatchIds": [],
+          "addedNativeTypes": [],
+          "addedMarketIds": [],
+          "restored": true,
+          "truncated": false
+        },
+        {
+          "ownerMatchId": "132974263",
+          "outcome": "NO_STRUCTURAL_CHANGE",
+          "addedMatchIds": [],
+          "addedNativeTypes": [],
+          "addedMarketIds": [],
+          "restored": true,
+          "truncated": false
+        }
+      ],
+      "failureTrace": []
+    }
+  ],
+  "coverageClaim": "PUBLIC_STRUCTURE_ONLY",
+  "limitations": [
+    "Probe only sampled two More owners; no full hidden-market collector or persistent hidden inventory yet",
+    "Full Today and Early roster arrays were read, but capped diagnostic More-owner lists are not a full traversal",
+    "No ongoing hidden-price/recovery/24h acceptance"
+  ]
+}

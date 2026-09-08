@@ -202,12 +202,13 @@ export class AutomaticSourceRecovery {
         if (confirmation.outcome === "RECOVERED" || confirmation.reason !== "BASELINE_TIMEOUT") {
           return confirmation;
         }
-        // SABA's current source can remain transport-connected through a
-        // naturally quiet Socket.IO interval. The controller owns the later
-        // HARD deadline; turning this SOFT timeout into an immediate restore
-        // navigates the healthy tab after roughly forty seconds and destroys
-        // the very socket the next delta would have renewed.
-        if (source.provider === "SABA" && this.#options.browserRefreshEnabled === false) {
+        // SABA can remain transport-connected through a naturally quiet
+        // Socket.IO interval, while APSPORT's measured full-roster response
+        // takes longer than this short in-page confirmation window. The
+        // controller owns the later HARD deadline; escalating either SOFT
+        // timeout here would navigate the healthy tab before it can answer.
+        if (source.provider === "APSPORT" ||
+          source.provider === "SABA" && this.#options.browserRefreshEnabled === false) {
           return confirmation;
         }
       }
@@ -248,8 +249,7 @@ export class AutomaticSourceRecovery {
           }
         }
       }
-      const oneTimeSabaLaunch = source.provider === "SABA" && this.#options.browserRefreshEnabled === false;
-      if (!oneTimeSabaLaunch && SAME_TAB_RECOVERY_PROVIDERS.has(source.provider) &&
+      if (SAME_TAB_RECOVERY_PROVIDERS.has(source.provider) &&
         (this.#options.controlPlane.reloadSource !== undefined ||
           this.#options.controlPlane.reloadRecoverySource !== undefined)) {
         const prior = current;

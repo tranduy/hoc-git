@@ -771,7 +771,16 @@ describe("SourceTabRecovery", () => {
       return current;
     });
     const reload = vi.fn(async () => current);
+    const reset = vi.fn(async (tabId: number, lobby: string) => {
+      operations.push(`reset:${lobby}:${tabId}`);
+    });
     const beginSourceEpoch = vi.fn((sourceId: string) => { operations.push(`epoch:${sourceId}`); });
+    const beginBlankHandoff = vi.fn(async (tabId: number, url: string) => {
+      operations.push(`handoff:start:${tabId}:${url}`);
+    });
+    const completeBlankHandoff = vi.fn(async (tabId: number) => {
+      operations.push(`handoff:complete:${tabId}`);
+    });
     const attachBootstrap = vi.fn(async (tab: {
       readonly id?: number | undefined; readonly url?: string | undefined
     }) => {
@@ -779,34 +788,73 @@ describe("SourceTabRecovery", () => {
     });
     const recovery = new SourceTabRecovery({
       listAttached: () => [{ lobby: "SABA", tabId: 18 }],
-      query: async () => [current], create: vi.fn(), update, reload, attach: vi.fn(),
+      query: async () => [current], create: vi.fn(), update, reload, reset, attach: vi.fn(),
       attachBootstrap, loadRemembered: async () => deadSession,
       get: async () => current,
       validateReady: async (tab) => tab.url === SABA_DIRECT_LOBBY_URL,
-      delay: async () => undefined, beginSourceEpoch
+      delay: async () => undefined, beginSourceEpoch, beginBlankHandoff, completeBlankHandoff
     });
 
     await expect(recovery.restore("SABA")).resolves.toBeUndefined();
 
     expect(reload).not.toHaveBeenCalled();
-    expect(update).toHaveBeenCalledExactlyOnceWith(18, SABA_DIRECT_LOBBY_URL);
+    expect(update).toHaveBeenNthCalledWith(1, 18, "about:blank");
+    expect(update).toHaveBeenNthCalledWith(2, 18, SABA_DIRECT_LOBBY_URL);
     expect(beginSourceEpoch).toHaveBeenCalledTimes(2);
     expect(operations).toEqual([
       "epoch:chrome:SABA:18",
       `attach:${deadSession}`,
+      `handoff:start:18:${SABA_DIRECT_LOBBY_URL}`,
+      "reset:SABA:18",
+      "update:about:blank",
       "epoch:chrome:SABA:18",
       `attach:${SABA_DIRECT_LOBBY_URL}`,
-      `update:${SABA_DIRECT_LOBBY_URL}`
+      `update:${SABA_DIRECT_LOBBY_URL}`,
+      "handoff:complete:18"
     ]);
+    expect(beginBlankHandoff).toHaveBeenCalledExactlyOnceWith(18, SABA_DIRECT_LOBBY_URL);
+    expect(completeBlankHandoff).toHaveBeenCalledExactlyOnceWith(18);
   });
 
-  it("reloads an already-direct SABA URL after rearming instead of issuing a no-op navigation", async () => {
+  it("keeps a SABA blank handoff pending when direct navigation is interrupted", async () => {
+    const deadSession = "https://c0z0oa.bpd3a3fn.com/(S(dead))/NewIndex?lang=vn";
+    let current = { id: 18, url: deadSession, title: "Sports" };
+    const beginBlankHandoff = vi.fn(async () => undefined);
+    const completeBlankHandoff = vi.fn(async () => undefined);
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [{ lobby: "SABA", tabId: 18 }],
+      query: async () => [current], create: vi.fn(), attach: vi.fn(),
+      update: async (tabId, url) => {
+        current = { id: tabId, url, title: "Sports" };
+        if (url === SABA_DIRECT_LOBBY_URL) throw new Error("WORKER_INTERRUPTED");
+        return current;
+      },
+      reset: async () => undefined,
+      attachBootstrap: async () => undefined,
+      loadRemembered: async () => deadSession,
+      get: async () => current,
+      validateReady: async () => false,
+      delay: async () => undefined,
+      beginBlankHandoff,
+      completeBlankHandoff
+    });
+
+    await expect(recovery.restore("SABA")).rejects.toThrow("WORKER_INTERRUPTED");
+    expect(beginBlankHandoff).toHaveBeenCalledExactlyOnceWith(18, SABA_DIRECT_LOBBY_URL);
+    expect(completeBlankHandoff).not.toHaveBeenCalled();
+  });
+
+  it("parks an already-direct SABA tab on blank before navigating back to a fresh session", async () => {
     const operations: string[] = [];
     let ready = false;
-    const current = { id: 18, url: SABA_DIRECT_LOBBY_URL, title: "Sports" };
+    let sawBlank = false;
+    let current = { id: 18, url: SABA_DIRECT_LOBBY_URL, title: "Sports" };
     const update = vi.fn(async (tabId: number, url: string) => {
       operations.push(`update:${url}`);
-      return { id: tabId, url, title: "Sports" };
+      current = { id: tabId, url, title: "Sports" };
+      if (url === "about:blank") sawBlank = true;
+      if (url === SABA_DIRECT_LOBBY_URL && sawBlank) ready = true;
+      return current;
     });
     const reload = vi.fn(async (tabId: number) => {
       operations.push(`reload:${tabId}`);
@@ -826,14 +874,16 @@ describe("SourceTabRecovery", () => {
 
     await expect(recovery.restore("SABA")).resolves.toBeUndefined();
 
-    expect(update).not.toHaveBeenCalled();
-    expect(reload).toHaveBeenCalledExactlyOnceWith(18, "SABA");
+    expect(update).toHaveBeenNthCalledWith(1, 18, "about:blank");
+    expect(update).toHaveBeenNthCalledWith(2, 18, SABA_DIRECT_LOBBY_URL);
+    expect(reload).not.toHaveBeenCalled();
     expect(operations).toEqual([
       "epoch:chrome:SABA:18",
       `attach:${SABA_DIRECT_LOBBY_URL}`,
+      "update:about:blank",
       "epoch:chrome:SABA:18",
       `attach:${SABA_DIRECT_LOBBY_URL}`,
-      "reload:18"
+      `update:${SABA_DIRECT_LOBBY_URL}`
     ]);
   });
 
@@ -852,6 +902,27 @@ describe("SourceTabRecovery", () => {
 
     await expect(recovery.restore("SABA")).resolves.toBeUndefined();
     expect(checks).toBe(21);
+  });
+
+  it("removes a newly created SABA tab when no responsive document appears within its bounded wait", async () => {
+    const remove = vi.fn(async () => undefined);
+    let checks = 0;
+    const recovery = new SourceTabRecovery({
+      listAttached: () => [], query: async () => [],
+      create: async () => ({ id: 20, url: "about:blank" }),
+      update: async () => ({ id: 20, url: SABA_DIRECT_LOBBY_URL, title: "Sports" }),
+      attach: async () => undefined,
+      get: async () => ({ id: 20, url: SABA_DIRECT_LOBBY_URL, title: "Sports" }),
+      validateReady: async () => { checks += 1; return false; },
+      remove,
+      delay: async () => undefined
+    });
+
+    await expect(recovery.ensure("SABA", SABA_DIRECT_LOBBY_URL))
+      .rejects.toThrow("SOURCE_TAB_RECOVERY_FAILED");
+
+    expect(checks).toBe(241);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(20);
   });
 
   it("restores and attaches a recently closed source tab", async () => {

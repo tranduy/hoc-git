@@ -14,7 +14,7 @@ export interface AttributedKsportFrame {
 }
 
 type SnapshotRejection = "NONE" | "NOT_ARRAY" | "LEAGUE_SHAPE" | "EVENT_ID" |
-  "EVENT_TEAMS" | "EVENT_MARKETS" | "NO_DECODABLE_MARKET";
+  "EVENT_TEAMS" | "EVENT_MARKETS";
 
 interface ProviderReceipt {
   readonly partition: CatalogPartition;
@@ -506,7 +506,7 @@ function providerReceipt(frame: string): ProviderReceipt | null {
   try { body = JSON.parse(record.body) as unknown; } catch { return null; }
   const snapshotRejection = fullPartitionSnapshotRejection(body);
   const full = snapshotRejection === "NONE";
-  const catalogMarketKeys = full ? [] : decodableKsportCatalogMarketKeys(body);
+  const catalogMarketKeys = full ? [] : nativeKsportCatalogMarketKeys(body);
   return { partition, snapshotRejection, order: receiptSequence(header["message-id"]), full,
     catalogEvidence: full || catalogMarketKeys.length > 0, catalogMarketKeys };
 }
@@ -560,19 +560,19 @@ function receiptSequence(messageId?: string): number | null {
 
 /**
  * Why a partition payload is not a full snapshot, so a shape that changed on the
- * provider's side is named instead of inferred. Every predicate here is
- * all-or-nothing by design - a baseline missing a market is not a baseline - so
- * knowing which one refused is the difference between a fix and a guess. Names a
- * shape only; no destination, header or body value is ever recorded.
+ * provider's side is named instead of inferred. Every league and event must
+ * carry structurally valid membership; native market comparison eligibility
+ * is independent. Names a shape only; no destination, header or body value is
+ * ever recorded.
  */
 function fullPartitionSnapshotRejection(payload: unknown): SnapshotRejection {
-  let firstRejection: SnapshotRejection | null = null;
+  let result: SnapshotRejection = "NOT_ARRAY";
   for (const body of snapshotArrays(payload)) {
     const rejection = leagueArrayRejection(body);
-    if (rejection === "NONE") return "NONE";
-    firstRejection ??= rejection;
+    if (rejection !== "NONE") return rejection;
+    result = "NONE";
   }
-  return firstRejection ?? "NOT_ARRAY";
+  return result;
 }
 
 /**
@@ -586,8 +586,8 @@ function fullPartitionSnapshotRejection(payload: unknown): SnapshotRejection {
  */
 function snapshotArrays(payload: unknown): readonly unknown[] {
   const candidates: unknown[] = [];
-  const pending: Array<{ readonly value: unknown; readonly depth: number }> = [
-    { value: payload, depth: 0 }
+  const pending: Array<{ readonly value: unknown; readonly depth: number; readonly allowEmpty: boolean }> = [
+    { value: payload, depth: 0, allowEmpty: true }
   ];
   let inspected = 0;
   while (pending.length > 0 && candidates.length < 64 && inspected < 256) {
@@ -599,38 +599,63 @@ function snapshotArrays(payload: unknown): readonly unknown[] {
       if ((encoded.startsWith("[") && encoded.endsWith("]")) ||
         (encoded.startsWith("{") && encoded.endsWith("}"))) {
         try {
-          pending.push({ value: JSON.parse(encoded) as unknown, depth: current.depth + 1 });
+          pending.push({ value: JSON.parse(encoded) as unknown, depth: current.depth + 1,
+            allowEmpty: current.allowEmpty });
         } catch { /* A non-JSON provider string cannot contain a snapshot. */ }
       }
       continue;
     }
     if (Array.isArray(current.value)) {
-      candidates.push(current.value);
+      if (current.value.length === 0) {
+        if (current.allowEmpty) candidates.push(current.value);
+        continue;
+      }
+      // Date groups are one roster. Validating one child independently would
+      // hide malformed events in a later date group.
+      if (current.value.some(Array.isArray) && !current.value.every(Array.isArray)) return [null];
+      const values: unknown[] = current.value.every(Array.isArray) ? current.value.flat(1) : current.value;
+      if (values.some(isLeagueCandidate) || (values.length === 0 && current.allowEmpty)) {
+        candidates.push(values);
+        continue;
+      }
       if (current.depth >= 6) continue;
       for (const value of current.value) {
         if (Array.isArray(value) || asRecord(value) !== null) {
-          pending.push({ value, depth: current.depth + 1 });
+          pending.push({ value, depth: current.depth + 1, allowEmpty: false });
         }
       }
       continue;
     }
     const record = asRecord(current.value);
     if (record === null || current.depth >= 6) continue;
+    // A failed response cannot prove empty membership merely because it also
+    // includes a data/result array. Reject the whole wrapper, including siblings.
+    if (Object.hasOwn(record, "error") || Object.hasOwn(record, "errors") || record.success === false) return [null];
+    // A native event/league is a leaf for wrapper discovery. Its empty market
+    // or event arrays must never masquerade as an unrelated empty roster.
+    if (Object.hasOwn(record, "8") || Object.hasOwn(record, "7") || isLeagueCandidate(record)) continue;
     const values = Object.values(record);
-    if (values.length > 0) candidates.push(values);
-    for (const value of values) {
-      if (Array.isArray(value) || asRecord(value) !== null) {
-        pending.push({ value, depth: current.depth + 1 });
+    if (values.some(isLeagueCandidate)) {
+      candidates.push(values);
+      continue;
+    }
+    for (const [key, value] of Object.entries(record)) {
+      if (typeof value === "string" || Array.isArray(value) || asRecord(value) !== null) {
+        pending.push({ value, depth: current.depth + 1, allowEmpty: /^(?:data|result|leagues)$/u.test(key) });
       }
     }
   }
   return candidates.length > 0 ? candidates : [payload];
 }
 
+function isLeagueCandidate(value: unknown): boolean {
+  const record = asRecord(value);
+  return record !== null && !Object.hasOwn(record, "8") && !Object.hasOwn(record, "7") &&
+    (Object.hasOwn(record, "1") || Object.hasOwn(record, "2"));
+}
+
 function leagueArrayRejection(body: unknown): SnapshotRejection {
   if (!Array.isArray(body)) return "NOT_ARRAY";
-  let eventCount = 0;
-  let decodableMarkets = 0;
   let rejection: SnapshotRejection = "NONE";
   const refuse = (reason: SnapshotRejection): false => {
     if (rejection === "NONE") rejection = reason;
@@ -645,20 +670,18 @@ function leagueArrayRejection(body: unknown): SnapshotRejection {
       const event = asRecord(candidate);
       const eventId = event?.["8"];
       const markets = event === null ? null : asRecord(event["7"]);
-      if (event !== null) eventCount += 1;
-      if (markets !== null && hasDecodableKsportMarket(markets)) decodableMarkets += 1;
       if (event === null) return refuse("LEAGUE_SHAPE");
       if (!(typeof eventId === "string" || typeof eventId === "number") ||
         !/^\d+$/u.test(String(eventId))) return refuse("EVENT_ID");
       if (typeof event["2"] !== "string" || event["2"].trim() === "" ||
         typeof event["3"] !== "string" || event["3"].trim() === "" ||
         event["2"].trim() === event["3"].trim()) return refuse("EVENT_TEAMS");
-      if (markets === null) return refuse("EVENT_MARKETS");
+      if (!isKsportNativeMarketContainer(markets)) return refuse("EVENT_MARKETS");
       return true;
     });
   });
   if (!valid) return rejection;
-  return eventCount === 0 || decodableMarkets > 0 ? "NONE" : "NO_DECODABLE_MARKET";
+  return "NONE";
 }
 
 function collectionValues(value: unknown): readonly unknown[] | null {
@@ -671,52 +694,34 @@ export function isFullKsportPartitionSnapshot(body: unknown): boolean {
   return fullPartitionSnapshotRejection(body) === "NONE";
 }
 
-const KSPORT_SUPPORTED_MARKET_GROUPS = new Set([
+/** Structural membership only; native rows remain accounted for even when they cannot be compared. */
+export function isKsportNativeMarketContainer(value: unknown): value is Readonly<Record<string, readonly unknown[]>> {
+  const groups = asRecord(value);
+  return groups !== null && Object.values(groups).every(Array.isArray);
+}
+
+const KSPORT_MARKET_ID_GROUPS = new Set([
   "3", "4", "5", "6", "19", "20", "21", "22", "31", "32", "33", "34", "80", "85"
 ]);
 const KSPORT_TOTAL_MARKET_GROUPS = new Set(["3", "4", "21", "22", "31", "32", "80"]);
 
-function isSupportedKsportTwoWayLine(value: string | undefined): boolean {
-  if (value === undefined || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) return false;
-  const quarterUnits = Math.abs(Number(value)) * 4;
-  return Number.isFinite(quarterUnits) && Number.isInteger(quarterUnits) && quarterUnits % 4 !== 0;
-}
-
-function isEligibleKsportPrice(value: string | undefined, side: "h" | "a"): boolean {
-  const match = /^(-?(?:0|1)(?:\.\d+)?)\*\d+([ha])$/u.exec(value ?? "");
-  if (match === null || match[2] !== side) return false;
-  const price = Number(match[1]);
-  return Number.isFinite(price) && price !== 0 && Math.abs(price) <= 1;
-}
-
-function decodableKsportMarketIds(groups: Readonly<Record<string, unknown>>,
-  firstOnly = false): readonly string[] {
+function nativeKsportMarketIds(groups: Readonly<Record<string, readonly unknown[]>>): readonly string[] {
   const marketIds = new Set<string>();
   for (const [groupKey, rows] of Object.entries(groups)) {
-    if (!KSPORT_SUPPORTED_MARKET_GROUPS.has(groupKey) || !Array.isArray(rows)) continue;
-    const isHandicap = !KSPORT_TOTAL_MARKET_GROUPS.has(groupKey);
-    for (const row of rows) {
-      if (typeof row !== "string") continue;
-      const tokens = row.trim().split(/\s+/u);
-      const first = isEligibleKsportPrice(tokens[1], "h");
-      const second = isEligibleKsportPrice(tokens[2], "a");
-      const marketId = tokens[isHandicap ? 4 : 3] ?? "";
-      const favored = tokens[3] ?? "";
-      if (isSupportedKsportTwoWayLine(tokens[0]) && first && second && /^\d{4,30}$/u.test(marketId) &&
-        (!isHandicap || favored === "h" || favored === "a")) {
-        marketIds.add(marketId);
-        if (firstOnly) return [...marketIds];
-      }
+    for (const [rowIndex, row] of rows.entries()) {
+      const tokens = typeof row === "string" ? row.trim().split(/\s+/u) : [];
+      const marketId = KSPORT_MARKET_ID_GROUPS.has(groupKey)
+        ? tokens[KSPORT_TOTAL_MARKET_GROUPS.has(groupKey) ? 3 : 4] : undefined;
+      // Only known groups prove the ID position. Unknown/invalid rows retain
+      // the same opaque group/row inventory identity used by native accounting.
+      marketIds.add(marketId !== undefined && /^\d{4,30}$/u.test(marketId)
+        ? marketId : `native:${groupKey}:${rowIndex}`);
     }
   }
   return [...marketIds];
 }
 
-function hasDecodableKsportMarket(groups: Readonly<Record<string, unknown>>): boolean {
-  return decodableKsportMarketIds(groups, true).length > 0;
-}
-
-function decodableKsportCatalogMarketKeys(body: unknown): readonly string[] {
+function nativeKsportCatalogMarketKeys(body: unknown): readonly string[] {
   const pending: Array<{ readonly value: unknown; readonly depth: number }> = [{ value: body, depth: 0 }];
   const marketKeys = new Set<string>();
   let visited = 0;
@@ -737,11 +742,12 @@ function decodableKsportCatalogMarketKeys(body: unknown): readonly string[] {
     const markets = asRecord(event["7"]);
     if ((typeof eventId === "string" || typeof eventId === "number") && /^\d+$/u.test(String(eventId)) &&
       typeof home === "string" && home.trim() !== "" && typeof away === "string" && away.trim() !== "" &&
-      home.trim() !== away.trim() && markets !== null) {
-      for (const marketId of decodableKsportMarketIds(markets)) {
+      home.trim() !== away.trim() && isKsportNativeMarketContainer(markets)) {
+      for (const marketId of nativeKsportMarketIds(markets)) {
         marketKeys.add(`${String(eventId)}\u0000${marketId}`);
       }
     }
+    if (Object.hasOwn(event, "8") || Object.hasOwn(event, "7")) continue;
     const children = Object.values(event);
     for (let index = children.length - 1; index >= 0; index -= 1) {
       pending.push({ value: children[index], depth: current.depth + 1 });

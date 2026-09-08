@@ -798,6 +798,26 @@ describe("LocalBridge", () => {
     expect(bridge.queueBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
   });
 
+  it("does not release the final IM response chunk before loopback acknowledgement", async () => {
+    const socket = new FakeSocket();
+    const bridge = new LocalBridge({ socketFactory: () => socket, installationKey: "local-key" });
+    bridge.connect();
+    socket.open();
+
+    let settled = false;
+    const pending = bridge.enqueue(imCatalogChunk(0, "IM_MARKET_1", 1, 2))
+      .then(() => { settled = true; });
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+
+    expect(socket.sentSourceIds).toEqual(["chrome:IM:8"]);
+    expect(settled).toBe(false);
+    socket.onmessage?.({ data: JSON.stringify({
+      version: 1, kind: "ACK", sourceId: "chrome:IM:8", sequence: 0
+    }) });
+    await pending;
+    expect(settled).toBe(true);
+  });
+
   it("backpressures a paired KSPORT catalog larger than 16 MiB without resyncing or dropping another provider",
     async () => {
       const socket = new FakeSocket();

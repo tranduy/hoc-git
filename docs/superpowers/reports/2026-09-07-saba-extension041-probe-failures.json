@@ -1,0 +1,243 @@
+{
+  "at": "2026-09-07T16:02:59.895Z",
+  "files": [
+    {
+      "name": "capture-1788796684325.jsonl",
+      "bytes": 2020861
+    },
+    {
+      "name": "capture-1788795697208.jsonl",
+      "bytes": 5876304
+    },
+    {
+      "name": "capture-1788791666419.jsonl",
+      "bytes": 9386798
+    },
+    {
+      "name": "capture-1788791666418.jsonl",
+      "bytes": 10381686
+    },
+    {
+      "name": "capture-1788791666417.jsonl",
+      "bytes": 10623217
+    }
+  ],
+  "epochs": [
+    {
+      "epoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:4",
+      "first": 1788796733238,
+      "last": 1788796781461,
+      "transports": {
+        "TAB_STATE": 11
+      },
+      "domTimes": []
+    },
+    {
+      "epoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:6",
+      "first": 1788796783947,
+      "last": 1788796809205,
+      "transports": {
+        "TAB_STATE": 9,
+        "WS_FRAME": 9,
+        "WS_STATE": 1,
+        "DOM_SNAPSHOT": 2
+      },
+      "domTimes": [
+        1788796794556
+      ]
+    },
+    {
+      "epoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:7",
+      "first": 1788796811043,
+      "last": 1788796858404,
+      "transports": {
+        "WS_STATE": 1,
+        "WS_FRAME": 23,
+        "TAB_STATE": 13,
+        "DOM_SNAPSHOT": 3
+      },
+      "domTimes": [
+        1788796831780
+      ]
+    },
+    {
+      "epoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:9",
+      "first": 1788796884519,
+      "last": 1788796978987,
+      "transports": {
+        "TAB_STATE": 24,
+        "WS_STATE": 3,
+        "WS_FRAME": 52,
+        "DOM_SNAPSHOT": 4
+      },
+      "domTimes": [
+        1788796941795,
+        1788796950455
+      ]
+    }
+  ],
+  "probes": [
+    {
+      "epoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:6",
+      "at": 1788796809204,
+      "status": "RECOVERY_PENDING",
+      "mutated": true,
+      "viewRestored": false,
+      "initial": null,
+      "today": null,
+      "early": null,
+      "keys": [
+        "kind",
+        "version",
+        "status",
+        "coverageClaim",
+        "mutated",
+        "viewRestored",
+        "truncated"
+      ]
+    },
+    {
+      "epoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:6",
+      "at": 1788796809205,
+      "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+      "reason": "TODAY_ACTION_UNCONFIRMED",
+      "viewRestored": false,
+      "initial": null,
+      "today": {
+        "keys": [
+          "activePeriod",
+          "activePeriodEvidence",
+          "dateContexts",
+          "eligibleMoreCount",
+          "eligibleMoreOwners",
+          "fingerprint",
+          "headerControls",
+          "moreCandidates",
+          "navRootChildren",
+          "navRootTopology",
+          "pageNowMs",
+          "periodControls",
+          "rosterMatchIds",
+          "rosterSamples",
+          "rowCount",
+          "tableCount",
+          "timeShapes",
+          "truncated"
+        ],
+        "period": "TODAY",
+        "evidence": "FOOTBALL_PAGE_HEADING",
+        "rows": 114,
+        "more": 68,
+        "roster": 114
+      },
+      "early": null,
+      "expansions": [],
+      "keys": [
+        "kind",
+        "version",
+        "status",
+        "coverageClaim",
+        "reason",
+        "today",
+        "early",
+        "expansions",
+        "viewRestored",
+        "truncated"
+      ]
+    },
+    {
+      "epoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:7",
+      "at": 1788796858404,
+      "status": "RECOVERY_PENDING",
+      "mutated": true,
+      "viewRestored": false,
+      "initial": null,
+      "today": null,
+      "early": null,
+      "keys": [
+        "kind",
+        "version",
+        "status",
+        "coverageClaim",
+        "mutated",
+        "viewRestored",
+        "truncated"
+      ]
+    },
+    {
+      "epoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:7",
+      "at": 1788796858404,
+      "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+      "reason": "PROBE_ABORTED_WITHOUT_RESTORE",
+      "viewRestored": false,
+      "initial": null,
+      "today": null,
+      "early": null,
+      "keys": [
+        "kind",
+        "version",
+        "status",
+        "coverageClaim",
+        "reason",
+        "viewRestored",
+        "truncated"
+      ]
+    }
+  ],
+  "pipeline": [
+    {
+      "hop": "HOP1_TAB",
+      "ok": true,
+      "detail": {
+        "sourceId": "chrome:SABA:2105831237",
+        "tabId": 2105831237,
+        "authorityDisposition": "ACTIVE"
+      }
+    },
+    {
+      "hop": "HOP2_ATTACH",
+      "ok": true,
+      "detail": {
+        "sourceEpoch": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:9",
+        "attachedForMs": 95370
+      }
+    },
+    {
+      "hop": "HOP6_FEED",
+      "ok": true,
+      "detail": {
+        "state": "LIVE",
+        "reason": "NO_FEED",
+        "activeGeneration": "7bfdafc5-cfb6-4b74-b4c0-352e8729ceb7:9:dom:59",
+        "baselineAgeMs": 29434,
+        "maxBaselineAgeMs": 3600000,
+        "evidenceAgeMs": 29434,
+        "expectedEvidenceCadenceMs": 150000,
+        "observedEvidenceCadenceMs": {
+          "p50": 35026,
+          "p95": 118675,
+          "samples": 4
+        },
+        "recoveryStage": "NONE",
+        "recoveryAttempt": 0,
+        "consecutiveFailures": 1,
+        "nextAttemptInMs": 0,
+        "lastFailureCode": "BROWSER_REFRESH_DISABLED"
+      }
+    },
+    {
+      "hop": "HOP7_CATALOG",
+      "ok": true,
+      "detail": {
+        "sessionState": "ACTIVE",
+        "reason": null,
+        "snapshotState": "FRESH",
+        "revision": "atZVWwCQGBkHx_fos3ZATS0Ku_60S6mTlMKvTU78C18",
+        "catalogAgeMs": 29434,
+        "events": 94,
+        "markets": 699,
+        "quotes": 1398
+      }
+    }
+  ]
+}

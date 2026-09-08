@@ -92,6 +92,27 @@ const event = (id: number, home: string, firstPrice = "0.83", secondPrice = "-0.
   ]
 });
 
+describe("APSPORT real soccer competition boundaries", () => {
+  it.each([true, false])("keeps MLS roster and exact detail with its full competition name (empty=%s)", (empty) => {
+    const adapter = new TsportWsCatalogAdapter();
+    const mls = { ...event(4352803, "DC United"), "22": "Atlanta United", "6": false,
+      "11": "2026-09-12T23:30:00Z", "53": "USA Major League Soccer",
+      "50": empty ? [] : event(4352803, "DC United")["50"] };
+    const baseline = adapter.decode(apiEnvelope([mls]))[0] as AuthorityUpdate;
+    expect(baseline.value.events).toEqual([expect.objectContaining({ providerEventId: "4352803", isLive: false })]);
+    const detail = adapter.decode(apiEnvelope([mls], 2, "DETAIL", true, "apsport:7:1", 24, "EVENT_CHANGE"))[0] as AuthorityUpdate;
+    expect(detail.value.events).toEqual([expect.objectContaining({ providerEventId: "4352803", isLive: false })]);
+    expect(detail.value.markets.length).toBe(empty ? 0 : 4);
+  });
+
+  it.each(["eSoccer", "e-Soccer", "e Soccer"])("still excludes explicit %s competitions from the API baseline", (label) => {
+    const adapter = new TsportWsCatalogAdapter();
+    const virtual = { ...event(900, "Home"), "53": `World ${label} Battle` };
+    const baseline = adapter.decode(apiEnvelope([virtual]))[0] as AuthorityUpdate;
+    expect(baseline.value.events).toEqual([]);
+  });
+});
+
 function apiEnvelope(
   records: readonly unknown[],
   sequence = 1,
@@ -134,6 +155,13 @@ type AuthorityUpdate = {
       readonly receivedMonotonicMs: number;
       readonly sequence: number | null;
     }>;
+    readonly nativeMarketObservations?: ReadonlyArray<{
+      readonly providerEventId: string;
+      readonly providerMarketId: string;
+      readonly nativeType: string;
+      readonly disposition: "NORMALIZED" | "EXCLUDED" | "UNMAPPED";
+      readonly reason: string;
+    }>;
   };
 };
 
@@ -149,6 +177,29 @@ function beginFreshStream(
 }
 
 describe("TsportWsCatalogAdapter", () => {
+  it.each([
+    [5, "FT_AH"], [6, "FH_AH"], [19, "CORNER_FT_AH"], [20, "CORNER_FH_AH"],
+    [33, "CARD_FT_AH"], [34, "CARD_FH_AH"], [85, "SH_AH"]
+  ] as const)("retains AP native signed and zero lines for group %s (%s)", (groupId, marketType) => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = { ...event(131, "Signed Home"), "6": false, "11": "2026-08-17T03:00:00Z",
+      "50": [{ "3": groupId, "10": "Active", "9": ["0.5", "0.75", "1.0", "0", "-0.5"].map((line, index) => ({
+        "0": `signed-${index}-home`, "2": `signed-${index}-away`, "6": `signed-${index}`, "7": line,
+        "8": { "2": "0.84" }, "9": { "2": "-0.94" }
+      })) }] };
+    const update = adapter.decode(apiEnvelope([raw]))[0] as AuthorityUpdate;
+    expect(update.value.markets).toEqual([
+      expect.objectContaining({ marketType, providerMarketId: "signed-0", line: "0.5" }),
+      expect.objectContaining({ marketType, providerMarketId: "signed-1", line: "0.75" }),
+      expect.objectContaining({ marketType, providerMarketId: "signed-2", line: "1" }),
+      expect.objectContaining({ marketType, providerMarketId: "signed-3", line: "0" }),
+      expect.objectContaining({ marketType, providerMarketId: "signed-4", line: "-0.5" })
+    ]);
+    expect(update.value.quotes).toHaveLength(10);
+    expect(update.value.nativeMarketObservations?.filter((item) => item.disposition === "NORMALIZED"))
+      .toHaveLength(5);
+  });
+
   it("refuses an unverified empty API roster instead of erasing the last good catalog", () => {
     const adapter = new TsportWsCatalogAdapter();
     expect(adapter.decode(apiEnvelope([event(101, "API Home")], 1))).toHaveLength(1);
@@ -260,6 +311,45 @@ describe("TsportWsCatalogAdapter", () => {
     expect(update.value.quotes).toHaveLength(8);
   });
 
+  it("normalizes exact AP binary props and accounts for every native market without guessing three-way groups", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const detailed: Record<string, unknown> = {
+      ...event(130, "Complete Home"), "6": false, "11": "2026-08-16T04:00:00Z"
+    };
+    detailed["50"] = [
+      { "3": 8, "9": [{ "0": "130-odd", "2": "130-even", "6": "130-odd-even", "7": "0.0",
+        "8": { "0": "1.91", "1": "1.91" }, "9": { "0": "1.77", "1": "1.77" } }], "10": "Active" },
+      { "3": 31, "9": [{ "0": "130-card-over", "2": "130-card-under", "6": "130-card-total", "7": "2.5",
+        "8": { "0": "2.49", "1": "2.49" }, "9": { "0": "1.49", "1": "1.49" } }], "10": "Active" },
+      { "3": 36, "9": [{ "0": "130-btts-yes", "2": "130-btts-no", "6": "130-btts",
+        "8": { "0": "1.87", "1": "1.87" }, "9": { "0": "1.93", "1": "1.93" } }], "10": "Active" },
+      { "3": 87, "9": [{ "0": "130-home", "2": "130-away", "3": "130-draw", "6": "130-three-way", "7": "0.0",
+        "8": { "1": "3.27" }, "9": { "1": "2.41" }, "10": { "1": "2.57" } }], "10": "Active" },
+      { "3": 999, "9": [{ "0": "130-x", "2": "130-y", "6": "130-unknown", "7": "0.0",
+        "8": { "1": "1.9" }, "9": { "1": "1.9" } }], "10": "Active" }
+    ];
+
+    const update = adapter.decode(apiEnvelope([detailed]))[0] as AuthorityUpdate;
+
+    expect(update.value.markets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: "130-odd-even", marketType: "FT_ODD_EVEN", line: null }),
+      expect.objectContaining({ providerMarketId: "130-card-total", marketType: "CARD_FT_TOTAL", line: "2.5" }),
+      expect.objectContaining({ providerMarketId: "130-btts", marketType: "FT_BTTS", line: null })
+    ]));
+    expect(update.value.quotes.filter((quote) => quote.providerMarketId === "130-odd-even"))
+      .toEqual([expect.objectContaining({ rawOdds: "1.91" }), expect.objectContaining({ rawOdds: "1.77" })]);
+    expect(update.value.nativeMarketObservations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: "130-odd-even", nativeType: "8", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "130-card-total", nativeType: "31", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "130-btts", nativeType: "36", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "130-three-way", nativeType: "87", disposition: "EXCLUDED",
+        reason: "THREE_WAY_OUTCOME_DOMAIN" }),
+      expect.objectContaining({ providerMarketId: "130-unknown", nativeType: "999", disposition: "UNMAPPED",
+        reason: "NATIVE_TYPE_UNMAPPED" })
+    ]));
+    expect(update.value.nativeMarketObservations).toHaveLength(5);
+  });
+
   it("keeps multiple proven APSPORT football sockets alive and invalidates only after the last one closes", () => {
     const adapter = new TsportWsCatalogAdapter();
     adapter.decode(apiEnvelope([event(105, "Socket Home")]));
@@ -339,6 +429,69 @@ describe("TsportWsCatalogAdapter", () => {
 
     expect(update).toMatchObject({ evidenceMode: "DELTA", provenance: "AUTHENTICATED_HTTP" });
     expect(update.value.quotes.every((quote) => quote.sequence === 3 && quote.receivedMonotonicMs === 70)).toBe(true);
+  });
+
+  it("does not resurrect a roster main market omitted by authoritative event detail", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(132, "Partition Home");
+    adapter.decode(apiEnvelope([raw]));
+    const detailed = { ...raw, "50": [raw["50"][0]!] };
+    const update = adapter.decode(apiEnvelope([detailed], 2, "DETAIL", false,
+      "apsport:7:1", 24, "EVENT_CHANGE"))[0] as AuthorityUpdate;
+    expect(update.value.markets).toEqual([expect.objectContaining({ providerMarketId: "132-total" })]);
+    expect(update.value.nativeMarketObservations).toHaveLength(1);
+    const repricedRoster = event(132, "Partition Home", "0.64");
+    const renewed = adapter.decode(apiEnvelope([repricedRoster], 3, "ROSTER", true, "apsport:7:2"))[0] as AuthorityUpdate;
+    expect(renewed.value.markets).toHaveLength(1);
+    expect(renewed.value.quotes[0]).toMatchObject({ providerMarketId: "132-total", rawOdds: "0.64", sequence: 3 });
+  });
+
+  it("ignores malformed active exact detail instead of deleting its event", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = event(133, "Malformed Home");
+    adapter.decode(apiEnvelope([raw]));
+    expect(adapter.decode(apiEnvelope([{ ...raw, "50": null }], 2, "DETAIL", false,
+      "apsport:7:1", 24, "EVENT_CHANGE"))).toEqual([]);
+    const update = adapter.decode(apiEnvelope([raw], 3, "DETAIL", false,
+      "apsport:7:1", 24, "EVENT_CHANGE"))[0] as AuthorityUpdate;
+    expect(update.value.events).toHaveLength(1);
+    expect(update.value.markets).toHaveLength(4);
+  });
+
+  it.each([[null], [{ "3": 3, "9": null }], [{ "3": 3, "9": [null] }]])(
+    "does not turn malformed detail groups into authoritative empty markets (%j)", (...groups) => {
+      const adapter = new TsportWsCatalogAdapter();
+      const raw = event(136, "Malformed Group Home");
+      adapter.decode(apiEnvelope([raw]));
+      expect(adapter.decode(apiEnvelope([{ ...raw, "50": groups }], 2, "DETAIL", false,
+        "apsport:7:1", 24, "EVENT_CHANGE"))).toEqual([]);
+      const updated = adapter.decode(apiEnvelope([raw], 3, "DETAIL", false,
+        "apsport:7:1", 24, "EVENT_CHANGE"))[0] as AuthorityUpdate;
+      expect(updated.value.markets).toHaveLength(4);
+    });
+
+  it.each([undefined, "invalid-date"])("ignores invalid prematch kickoff %s without authorizing deletion", (start) => {
+    const adapter = new TsportWsCatalogAdapter();
+    const raw = { ...event(137, "Kickoff Home"), "6": false, "11": "2026-08-17T03:00:00Z" };
+    adapter.decode(apiEnvelope([raw]));
+    expect(adapter.decode(apiEnvelope([{ ...raw, "11": start }], 2, "DETAIL", false,
+      "apsport:7:1", 24, "EVENT_CHANGE"))).toEqual([]);
+    const next = adapter.decode(apiEnvelope([raw], 3, "DETAIL", false,
+      "apsport:7:1", 24, "EVENT_CHANGE"))[0] as AuthorityUpdate;
+    expect(next.value.events).toHaveLength(1);
+  });
+
+  it("refuses a multi-event batch mislabeled as one exact event response", () => {
+    const adapter = new TsportWsCatalogAdapter();
+    const first = event(134, "First Home");
+    const second = event(135, "Second Home");
+    adapter.decode(apiEnvelope([first, second]));
+    expect(adapter.decode(apiEnvelope([{ ...first, "10": "Suspended" },
+      { ...second, "10": "Suspended" }], 2, "DETAIL", false,
+    "apsport:7:1", 24, "EVENT_CHANGE"))).toEqual([]);
+    const next = adapter.decode(apiEnvelope([first], 3, "DETAIL", false,
+      "apsport:7:1", 24, "EVENT_CHANGE"))[0] as AuthorityUpdate;
+    expect(next.value.events).toHaveLength(2);
   });
 
   it("stops pricing an APSPORT fixture the socket says the book has paused", () => {

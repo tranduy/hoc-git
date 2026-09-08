@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
+import type { NativeMarketObservation } from "@tool-chenh/contracts";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import { installCatalogResourcePolicy } from "../browser-resource-policy.js";
-import { extractBtiCatalogRecords } from "./bti-direct-catalog.js";
+import { extractBtiCatalogRecords, extractBtiNativeMarketObservations } from "./bti-direct-catalog.js";
 import { parseBtiTicketConstraint, type BtiTicketConstraintSnapshot } from "./bti-ticket-constraint.js";
 import { exactBtiStakeStep } from "./bti-stake-step.js";
 
@@ -15,6 +16,7 @@ interface OpenSession {
 
 export interface BtiCatalogSnapshot {
   readonly records: readonly SbobetCatalogInputRecord[];
+  readonly nativeMarketObservations?: readonly NativeMarketObservation[];
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
 }
@@ -50,8 +52,10 @@ export class PlaywrightBtiBrowserManager {
   readonly #timeoutMs: number;
   readonly #sessions = new Map<string, OpenSession>();
   readonly #opening = new Map<string, Promise<OpenSession>>();
+  readonly #openingContexts = new Set<BrowserContext>();
   readonly #reads = new Map<string, Promise<BtiCatalogSnapshot>>();
   readonly #ticketReads = new Map<string, Promise<BtiTicketConstraintSnapshot | null>>();
+  #generation = 0;
 
   constructor(options: { profilesRoot: string; headless?: boolean; startupTimeoutMs?: number }) {
     this.#profilesRoot = options.profilesRoot;
@@ -66,7 +70,8 @@ export class PlaywrightBtiBrowserManager {
 
   async readCatalog(input: { sessionId: string; launchUrl: string;
     providerEventId?: string }): Promise<BtiCatalogSnapshot> {
-    const key = `${input.sessionId}:${input.providerEventId ?? "CATALOG"}`;
+    const launchKey = createHash("sha256").update(input.launchUrl).digest("hex");
+    const key = `${input.sessionId}:${launchKey}:${input.providerEventId ?? "CATALOG"}`;
     const active = this.#reads.get(key);
     if (active !== undefined) return active;
     const next = this.#read(input).finally(() => {
@@ -111,11 +116,15 @@ export class PlaywrightBtiBrowserManager {
   }
 
   async close(): Promise<void> {
-    const sessions = [...this.#sessions.values()];
+    this.#generation += 1;
+    const contexts = new Set([...this.#sessions.values()].map((session) => session.context));
+    for (const context of this.#openingContexts) contexts.add(context);
     this.#sessions.clear();
+    this.#opening.clear();
+    this.#openingContexts.clear();
     this.#reads.clear();
     this.#ticketReads.clear();
-    await Promise.allSettled(sessions.map((session) => session.context.close()));
+    await Promise.allSettled([...contexts].map((context) => context.close()));
   }
 
   async #readTicketConstraint(input: { sessionId: string; launchUrl: string; providerEventId: string;
@@ -220,7 +229,9 @@ export class PlaywrightBtiBrowserManager {
 
   async #read(input: { sessionId: string; launchUrl: string;
     providerEventId?: string }): Promise<BtiCatalogSnapshot> {
+    const generation = this.#generation;
     const session = await this.#get(input);
+    this.#assertGeneration(generation);
     const payload: unknown = input.providerEventId === undefined
       ? await session.page.evaluate(async (url) => {
         const response = await fetch(url, { credentials: "include", cache: "no-store" });
@@ -238,9 +249,15 @@ export class PlaywrightBtiBrowserManager {
         if (!response.ok) throw new Error("BTI_CATALOG_UNAVAILABLE");
         return response.json();
       }, input.providerEventId);
+    this.#assertGeneration(generation);
+    const observedAtMs = Date.now();
     const records = extractBtiCatalogRecords(payload);
-    if (records.length === 0) throw new Error("BTI_CATALOG_EMPTY");
-    return { records, observedAtMs: Date.now(), receivedMonotonicMs: performance.now() };
+    const nativeMarketObservations = extractBtiNativeMarketObservations(payload, observedAtMs);
+    const response = typeof payload === "object" && payload !== null && !Array.isArray(payload)
+      ? payload as Record<string, unknown> : null;
+    const rows = response?.[input.providerEventId === undefined ? "serializedData" : "data"];
+    if (records.length === 0 && !(Array.isArray(rows) && rows.length === 0)) throw new Error("BTI_CATALOG_EMPTY");
+    return { records, nativeMarketObservations, observedAtMs, receivedMonotonicMs: performance.now() };
   }
 
   async #get(input: { sessionId: string; launchUrl: string }): Promise<OpenSession> {
@@ -249,12 +266,18 @@ export class PlaywrightBtiBrowserManager {
     if (current !== undefined && !current.page.isClosed()) return current;
     const pending = this.#opening.get(key);
     if (pending !== undefined) return pending;
-    const next = this.#open(input.launchUrl, key).finally(() => this.#opening.delete(key));
+    const next = this.#open(input.launchUrl, key, this.#generation).finally(() => {
+      if (this.#opening.get(key) === next) this.#opening.delete(key);
+    });
     this.#opening.set(key, next);
     return next;
   }
 
-  async #open(launchUrl: string, key: string): Promise<OpenSession> {
+  #assertGeneration(generation: number): void {
+    if (generation !== this.#generation) throw new Error("BTI_CATALOG_CANCELLED");
+  }
+
+  async #open(launchUrl: string, key: string, generation: number): Promise<OpenSession> {
     const launch = safeLaunch(launchUrl);
     let context: BrowserContext | null = null;
     try {
@@ -262,6 +285,8 @@ export class PlaywrightBtiBrowserManager {
         `bti-${key}`), {
         headless: this.#headless, acceptDownloads: false
       });
+      this.#assertGeneration(generation);
+      this.#openingContexts.add(context);
       await installCatalogResourcePolicy(context);
       const page = context.pages()[0] ?? await context.newPage();
       let initialUrl = "";
@@ -272,9 +297,11 @@ export class PlaywrightBtiBrowserManager {
         } catch { /* Ignore malformed third-party URLs. */ }
       });
       await page.goto(launch.toString(), { waitUntil: "domcontentloaded", timeout: this.#timeoutMs });
+      this.#assertGeneration(generation);
       const deadline = Date.now() + this.#timeoutMs;
       let evidence: BtiIdentityEvidence = { hostname: launch.hostname, title: "", hasFootball: false, hasLiveInitial: false };
       while (!isVerifiedBtiIdentity(evidence) && Date.now() < deadline) {
+        this.#assertGeneration(generation);
         evidence = {
           hostname: new URL(page.url()).hostname.toLowerCase(),
           title: await page.title(),
@@ -284,13 +311,16 @@ export class PlaywrightBtiBrowserManager {
         if (!isVerifiedBtiIdentity(evidence)) await page.waitForTimeout(100);
       }
       if (!isVerifiedBtiIdentity(evidence) || initialUrl === "") throw new Error("BTI_SCHEMA_CHANGED");
+      this.#assertGeneration(generation);
       const session = { context, page, initialUrl };
       this.#sessions.set(key, session);
+      this.#openingContexts.delete(context);
       context = null;
       return session;
     } catch {
       throw new Error("BTI_BROWSER_UNAVAILABLE");
     } finally {
+      if (context !== null) this.#openingContexts.delete(context);
       await context?.close().catch(() => undefined);
     }
   }

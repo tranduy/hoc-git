@@ -1,0 +1,92 @@
+{
+  "at": "2026-09-07T23:38:13.879Z",
+  "build": "sha256:7e175b87d095988dae3b0d81bf8f0b68a99e262c74f07eb84a4582026e20b08d",
+  "firstFailingHop": null,
+  "source": {
+    "sourceId": "chrome:SABA:2105831907",
+    "tabId": 2105831907,
+    "authorityDisposition": "ACTIVE"
+  },
+  "epoch": "b58221db-1b0e-48b7-a8fb-58f8cea98e43:6",
+  "catalog": {
+    "state": "FRESH",
+    "events": 16,
+    "markets": 94,
+    "quotes": 188,
+    "native": 192,
+    "observedAtMs": 1788824224754
+  },
+  "capture": {
+    "name": "capture-1788824002246.jsonl",
+    "size": 2352589,
+    "mtime": 1788824288060.516
+  },
+  "collectorState": {
+    "nativeReady": false,
+    "schemaContextReady": false,
+    "catalogUsable": false,
+    "discoveryPending": false,
+    "discoveryAttempted": true,
+    "collectorState": "FINISHED",
+    "domBlocked": false,
+    "probeBlocked": false
+  },
+  "collectors": [
+    {
+      "at": "2026-09-07T23:36:02.237Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "b58221db-1b0e-48b7-a8fb-58f8cea98e43:6",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 1,
+      "rosterOwners": 8,
+      "expandedOwners": 1
+    },
+    {
+      "at": "2026-09-07T23:37:03.663Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "b58221db-1b0e-48b7-a8fb-58f8cea98e43:6",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 8,
+      "rosterOwners": 8,
+      "expandedOwners": 5
+    },
+    {
+      "at": "2026-09-07T23:37:59.065Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "b58221db-1b0e-48b7-a8fb-58f8cea98e43:6",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "INCOMPLETE",
+      "viewRestored": true,
+      "reason": "SABA_COLLECTOR_OPERATION_DEADLINE",
+      "collectionErrorCode": "SABA_COLLECTOR_OPERATION_DEADLINE",
+      "restorationErrorCode": null,
+      "completedOwners": 8
+    }
+  ],
+  "lastHealth": {
+    "at": "2026-09-07T23:38:07.276Z",
+    "counters": {
+      "OK": 35,
+      "ERROR": 0,
+      "TIMEOUT": 1,
+      "SKIPPED_INFLIGHT": 68,
+      "forcedUnlocks": 0
+    },
+    "lastOutcome": {
+      "workItem": "pollSabaDomChanges",
+      "outcome": "SKIPPED_INFLIGHT",
+      "durationMs": 6016
+    },
+    "lastErrorCode": "WORK_ITEM_TIMEOUT",
+    "inFlightAgeMs": 6016
+  },
+  "acceptance": {
+    "fullCapture": false,
+    "postCloseRealtime": false,
+    "failedOperation": "UNOBSERVED; existing receipt only supplies OPERATION_DEADLINE"
+  }
+}

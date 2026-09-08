@@ -51,6 +51,8 @@ const typeKeys: Readonly<Record<string, readonly string[]>> = {
 const MAX_BRIDGE_IDS = 64;
 const MAX_LOGICAL_CHANNELS = 64;
 const MAX_FIELD_COLUMNS = 512;
+const MAX_SCHEMA_CONTEXT_ROWS = 512;
+const MAX_SCHEMA_CONTEXT_ID_LENGTH = 128;
 
 function protocolError(reason = "INVALID"): never {
   throw new Error(`SABA_PUSH_SCHEMA_CHANGED:${reason}`);
@@ -92,6 +94,102 @@ export class SabaPushDecoder {
   readonly #channels = new Map<string, ChannelState>();
   readonly #bridgeChannels = new Map<string, string>();
   readonly #fieldTables = new Map<string, readonly (string | undefined)[]>();
+
+  /**
+   * Imports only the verified public field-name table needed to interpret a
+   * later, fresh provider frame. This deliberately creates no channel record
+   * state, revision, pending snapshot, or baseline completion.
+   */
+  seedSchemaContext(frame: SabaPushFrame): void {
+    if (!/^b\d{1,32}$/u.test(frame.bridgeId) || frame.revision !== null ||
+      !Array.isArray(frame.rows) || frame.rows.length === 0 ||
+      frame.rows.length > MAX_SCHEMA_CONTEXT_ROWS) protocolError("SCHEMA_CONTEXT_FRAME_INVALID");
+
+    let announcedChannel: string | undefined;
+    for (const rawRow of frame.rows) {
+      if (!Array.isArray(rawRow) || rawRow.length === 0) protocolError("SCHEMA_CONTEXT_ROW_INVALID");
+      if (rawRow[0] !== "c") continue;
+      if (rawRow.length !== 2 || typeof rawRow[1] !== "string" ||
+        !/^[a-z0-9._:-]{1,128}$/iu.test(rawRow[1])) protocolError("SCHEMA_CONTEXT_CHANNEL_INVALID");
+      if (announcedChannel !== undefined && announcedChannel !== rawRow[1]) {
+        protocolError("SCHEMA_CONTEXT_CHANNEL_CONFLICT");
+      }
+      announcedChannel = rawRow[1];
+    }
+
+    const mappedChannel = this.#bridgeChannels.get(frame.bridgeId);
+    if (announcedChannel !== undefined && mappedChannel !== undefined && announcedChannel !== mappedChannel) {
+      protocolError("SCHEMA_CONTEXT_CHANNEL_CONFLICT");
+    }
+    const providerChannel = announcedChannel ?? mappedChannel ?? frame.bridgeId;
+    if (providerChannel.length > MAX_SCHEMA_CONTEXT_ID_LENGTH) protocolError("SCHEMA_CONTEXT_CHANNEL_INVALID");
+    const knownBridgeIds = new Set([...this.#channels.keys(), ...this.#bridgeChannels.keys()]);
+    if (!knownBridgeIds.has(frame.bridgeId) && knownBridgeIds.size >= MAX_BRIDGE_IDS) {
+      protocolError("BOUND_EXCEEDED");
+    }
+    const knownLogicalChannels = new Set([...this.#fieldTables.keys(), ...this.#bridgeChannels.values()]);
+    if (!knownLogicalChannels.has(providerChannel) && knownLogicalChannels.size >= MAX_LOGICAL_CHANNELS) {
+      protocolError("BOUND_EXCEEDED");
+    }
+
+    const fields = [...(this.#fieldTables.get(providerChannel) ?? [])];
+    let seededNames = 0;
+    for (const rawRow of frame.rows) {
+      if (!Array.isArray(rawRow)) protocolError("SCHEMA_CONTEXT_ROW_INVALID");
+      if (rawRow[0] === "c") continue;
+      if (rawRow[0] !== "f" || rawRow.length !== 3) protocolError("SCHEMA_CONTEXT_ROW_INVALID");
+      const offset = rawRow[1];
+      const names = rawRow[2];
+      if (!Number.isSafeInteger(offset) || (offset as number) < 0 || !Array.isArray(names)) {
+        protocolError("FIELD_TABLE_INVALID");
+      }
+      if ((offset as number) > MAX_FIELD_COLUMNS || names.length > MAX_FIELD_COLUMNS - (offset as number)) {
+        protocolError("BOUND_EXCEEDED");
+      }
+      names.forEach((rawName, index) => {
+        let name = rawName;
+        if (typeof name === "number") name = fields[name - (offset as number) - index];
+        if (typeof name !== "string" || name.length === 0 || name.length > MAX_SCHEMA_CONTEXT_ID_LENGTH) {
+          protocolError("FIELD_NAME_INVALID");
+        }
+        const fieldIndex = (offset as number) + index;
+        const existing = fields[fieldIndex];
+        if (existing !== undefined && existing !== name) protocolError("SCHEMA_CONTEXT_FIELD_CONFLICT");
+        fields[fieldIndex] = name;
+        seededNames += 1;
+      });
+    }
+    if (seededNames === 0) protocolError("SCHEMA_CONTEXT_EMPTY");
+    if (!fields.includes("type") || !fields.some((name) =>
+      name === "matchid" || name === "oddsid" || name === "leagueid")) {
+      protocolError("SCHEMA_CONTEXT_NON_CATALOG");
+    }
+
+    const mergeSeededFields = (base: readonly (string | undefined)[]): readonly (string | undefined)[] => {
+      const merged = [...base];
+      fields.forEach((name, index) => {
+        if (name === undefined) return;
+        const existing = merged[index];
+        if (existing !== undefined && existing !== name) protocolError("SCHEMA_CONTEXT_FIELD_CONFLICT");
+        merged[index] = name;
+      });
+      return merged;
+    };
+    const current = this.#channels.get(frame.bridgeId);
+    const seededCurrent = current === undefined ? undefined : {
+      ...current,
+      fields: mergeSeededFields(current.fields),
+      pending: current.pending === null ? null : {
+        ...current.pending, fields: mergeSeededFields(current.pending.fields)
+      }
+    };
+
+    // Commit only after every row and conflict has passed. A malformed seed
+    // cannot poison a decoder that is already waiting for fresh provider data.
+    this.#bridgeChannels.set(frame.bridgeId, providerChannel);
+    this.#fieldTables.set(providerChannel, fields);
+    if (seededCurrent !== undefined) this.#channels.set(frame.bridgeId, seededCurrent);
+  }
 
   apply(frame: SabaPushFrame): SabaPushApplyResult {
     if (!/^b\d+$/u.test(frame.bridgeId) || (frame.revision !== null && frame.revision.length === 0) ||

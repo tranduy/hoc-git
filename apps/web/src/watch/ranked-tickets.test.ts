@@ -244,4 +244,42 @@ describe("rankTicketsForEvent", () => {
     expect(unrelatedUpdate[0]?.plan).not.toBeNull();
     expect(confirmed[0]?.plan).not.toBeNull();
   });
+
+  it("indexes APSPORT freshness once instead of rescanning the whole catalog for every quote", () => {
+    const line = "-0.5";
+    const apCell = cell("APSPORT", line, { isLive: false, receivedMonotonicMs: 1_000 });
+    const sabaCell = cell("SABA", line, { isLive: false, receivedMonotonicMs: 1_000 });
+    const targetQuotes = Array.from({ length: 100 }, (_, index) => ({
+      ...apCell.quotes[index % apCell.quotes.length]!, providerSelectionId: `target-selection-${index}`
+    }));
+    const unrelated = Array.from({ length: 1_000 }, (_, index) => ({
+      ...apCell.quotes[0]!, providerEventId: `other-event-${index}`,
+      providerMarketId: `other-market-${index}`, providerSelectionId: `other-selection-${index}`
+    }));
+    let indexedReads = 0;
+    const catalogQuotes = new Proxy([...targetQuotes, ...unrelated], {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^\d+$/u.test(property)) indexedReads += 1;
+        return Reflect.get(target, property, receiver);
+      }
+    });
+    const event: ComparisonEvent = {
+      ...comparisonEvent(), providers: ["SABA", "APSPORT"],
+      providerEventIds: { SABA: "SABA-event", APSPORT: "APSPORT-event" },
+      rows: [{ key: "ap-row", marketType: "FT_AH", scope: "FULL_TIME", line,
+        cells: [sabaCell, { ...apCell, quotes: targetQuotes }],
+        bestBySelection: { HOME: "SABA", AWAY: "APSPORT" },
+        margin: 0.25, crossBook: true }],
+      catalogs: [{ dataMode: "LIVE", accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT",
+        category: "FOOTBALL", comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: nowMs,
+        snapshotState: "FRESH", rejectedMarketCount: 0, events: [], markets: [], quotes: catalogQuotes }]
+    };
+
+    rankTicketsForEvent({ event, verified: new Map(), movements: [],
+      selectedProviders: new Set(["SABA", "APSPORT"]), observationPolicy: policy, nowMs });
+    rankTicketsForEvent({ event: { ...event, key: "same-catalog-second-event" }, verified: new Map(), movements: [],
+      selectedProviders: new Set(["SABA", "APSPORT"]), observationPolicy: policy, nowMs });
+
+    expect(indexedReads).toBeLessThan(3_000);
+  });
 });

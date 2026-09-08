@@ -44,7 +44,7 @@ describe("ProfitAlertTracker", () => {
     expect(higher.added).toEqual([]);
     expect(higher.history).toHaveLength(1);
     expect(higher.history[0]).toMatchObject({ roi: "0.2", worstCaseProfit: "90000", observedAtMs: 102,
-      matchName: "Alpha vs Beta", marketName: "Chấp toàn trận", line: "-0.5",
+      matchName: "Alpha vs Beta", marketName: "Full-time handicap", line: "-0.5",
       providers: ["SABA", "BTI"] });
   });
 

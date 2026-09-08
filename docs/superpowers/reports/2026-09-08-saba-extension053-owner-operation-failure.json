@@ -1,0 +1,61 @@
+{
+  "measuredAt": "2026-09-07T20:53:25.207Z",
+  "build": "sha256:b841922a50de643a10121e0a2a22807405712595790849a3b48afc6dd0c0253c",
+  "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+  "collectorState": {
+    "nativeReady": true,
+    "catalogUsable": true,
+    "discoveryPending": false,
+    "discoveryAttempted": true,
+    "collectorState": "FINISHED",
+    "domBlocked": false,
+    "probeBlocked": false
+  },
+  "collectors": [
+    {
+      "at": "2026-09-07T20:51:48.312Z",
+      "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 1,
+      "rosterOwners": 17,
+      "expandedOwners": 1
+    },
+    {
+      "at": "2026-09-07T20:52:20.302Z",
+      "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "INCOMPLETE",
+      "viewRestored": false,
+      "reason": "TODAY_RESTORE_UNCONFIRMED",
+      "collectionErrorCode": "SABA_COLLECTOR_PAGE_OPERATION_FAILED",
+      "restorationErrorCode": "SABA_COLLECTOR_PAGE_OPERATION_FAILED",
+      "completedOwners": 1
+    },
+    {
+      "at": "2026-09-07T20:52:32.345Z",
+      "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "INCOMPLETE",
+      "viewRestored": false,
+      "reason": "TODAY_RESTORE_UNCONFIRMED",
+      "collectionErrorCode": "SABA_COLLECTOR_PAGE_OPERATION_FAILED",
+      "restorationErrorCode": "SABA_COLLECTOR_PAGE_OPERATION_FAILED",
+      "completedOwners": 0
+    },
+    {
+      "at": "2026-09-07T20:52:45.776Z",
+      "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "INCOMPLETE",
+      "viewRestored": false,
+      "reason": "TODAY_RESTORE_UNCONFIRMED",
+      "collectionErrorCode": "SABA_COLLECTOR_PAGE_OPERATION_FAILED",
+      "restorationErrorCode": "SABA_COLLECTOR_PAGE_OPERATION_FAILED",
+      "completedOwners": 0
+    }
+  ],
+  "acceptance": "INCOMPLETE_AFTER_FIRST_OWNER",
+  "cause": "PAGE_OPERATION_FAILED_IS_GENERIC_EXACT_TRANSPORT_CAUSE_NOT_PROVEN"
+}

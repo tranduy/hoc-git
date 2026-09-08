@@ -186,6 +186,29 @@ describe("CmdHttpCatalogAdapter", () => {
       events: [{ providerEventId: "25299763", participantA: "Virtus Verona", participantB: "Calcio Schio" }] });
   });
 
+  it("publishes lossless native accounting for every characterized HTTP row group", () => {
+    const adapter = new CmdHttpCatalogAdapter();
+    const row = publicFullRow();
+    Object.assign(row, {
+      10: 0.5, 12: 2.5, 14: 0.5, 16: 1.5, 24: 1, 64: 0,
+      40: -0.85, 41: 0.75, 42: 0.9, 43: -0.98,
+      44: 0.54, 45: -0.66, 46: 0.85, 47: -0.93
+    });
+
+    const catalog = adapter.decode(envelope({ ...fullResponse, today: [row] }, 1)).at(-1)?.value as {
+      markets: readonly unknown[];
+      nativeMarketObservations?: ReadonlyArray<{ nativeType: string; disposition: string }>;
+    };
+
+    expect(catalog.nativeMarketObservations).toHaveLength(4);
+    expect(catalog.nativeMarketObservations).toEqual(expect.arrayContaining(
+      ["1", "3", "7", "8"].map((nativeType) => expect.objectContaining({
+        nativeType, disposition: "NORMALIZED"
+      }))
+    ));
+    expect(catalog.nativeMarketObservations).toHaveLength(catalog.markets.length);
+  });
+
   it("keeps a response's other prices when one market closes inside it", () => {
     // A book closes a market the moment it repositions, and says so with -999.
     // Read as a schema fault, that discarded the whole response, so every other

@@ -3,5 +3,5 @@ export function isSupportedFootballTwoWayLine(line: string | null): boolean {
   const value = Math.abs(Number(line));
   if (!Number.isFinite(value)) return false;
   const quarterUnits = value * 4;
-  return Number.isInteger(quarterUnits) && quarterUnits % 4 !== 0;
+  return Number.isInteger(quarterUnits);
 }

@@ -5,6 +5,32 @@ describe("CatalogCoverageGuard", () => {
   const candidate = (generation: string, authoritativeBaseline: boolean, providerEventIds: readonly string[]) =>
     ({ generation, authoritativeBaseline, providerEventIds });
 
+  it("accepts only exactly proven APSPORT delta removals and commits reduced coverage", () => {
+    const guard = new CatalogCoverageGuard();
+    const source = "catalog-source:APSPORT:FOOTBALL";
+    guard.accept(source, candidate("apsport:7:1", true, ["a", "b", "c"]));
+    expect(guard.accept(source, { ...candidate("apsport:7:1", false, ["b", "c"]),
+      authoritativeRemovedEventIds: ["a"] })).toBe(true);
+    expect(guard.accept(source, candidate("apsport:7:1", false, ["b", "c"]))).toBe(true);
+  });
+
+  it.each([["a", "a"], ["unknown"], ["b"], ["a", "unknown"], []])(
+    "rejects invalid exact removal evidence %j", (...removed) => {
+      const guard = new CatalogCoverageGuard();
+      const source = "catalog-source:APSPORT:FOOTBALL";
+      guard.accept(source, candidate("apsport:7:1", true, ["a", "b"]));
+      expect(guard.accept(source, { ...candidate("apsport:7:1", false, ["b"]),
+        authoritativeRemovedEventIds: removed })).toBe(false);
+    });
+
+  it("does not let explicit removal proof hide an additional unproved disappearance", () => {
+    const guard = new CatalogCoverageGuard();
+    const source = "catalog-source:APSPORT:FOOTBALL";
+    guard.accept(source, candidate("apsport:7:1", true, ["a", "b", "c"]));
+    expect(guard.accept(source, { ...candidate("apsport:7:1", false, ["c"]),
+      authoritativeRemovedEventIds: ["a"] })).toBe(false);
+  });
+
   it("rejects a ten-to-nine identity shrink", () => {
     const guard = new CatalogCoverageGuard();
     expect(guard.accept("source", candidate("A", true,

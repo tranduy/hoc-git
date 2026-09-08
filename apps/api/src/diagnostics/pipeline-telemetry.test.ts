@@ -151,14 +151,44 @@ describe("PipelineTelemetry", () => {
     });
   });
 
+  it("parses optional bounded APSPORT detail coverage from a WS attach heartbeat", async () => {
+    const telemetry = new PipelineTelemetry({ now: () => 120_000 });
+    telemetry.recordEnvelope({ ...envelope(1, 100_000), lobby: "TSPORT", sourceId: "chrome:TSPORT:7",
+      transport: "TAB_STATE", request: { hostname: "provider.invalid",
+        pathnameClass: "/__fieldline_heartbeat__", resourceType: "Tab" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ kind: "WS_ATTACH", sourceGeneration: 3,
+        webSocketCreated: 7, webSockets: 2, ksportTargets: 1, attachedTargets: 1,
+        apsportDetail: { rosterEvents: 3, successfulEvents: 2, withMarketsEvents: 1, emptyEvents: 1,
+          pendingEvents: 1, failedEvents: 1, queuedEvents: 0, inFlightEvents: 1,
+          complete: false, oldestSuccessAgeMs: 45_000 } }) } }, "worker-a:0");
+
+    const result = await telemetry.diagnostic({
+      listSources: () => [], listAuthorities: () => [], listFeeds: () => [],
+      listCatalogStatuses: async () => [], catalogRevision: () => undefined
+    }, "catalog-source:APSPORT:FOOTBALL");
+
+    expect(result?.hops.find((hop) => hop.hop === "HOP3_ENVELOPE")?.detail.wsAttach).toMatchObject({
+      apsportDetail: { rosterEvents: 3, successfulEvents: 2, withMarketsEvents: 1, emptyEvents: 1,
+        pendingEvents: 1, failedEvents: 1, queuedEvents: 0, inFlightEvents: 1,
+        complete: false, oldestSuccessAgeMs: 45_000 }
+    });
+  });
+
   it("exposes only the bounded current BTI page-health result", async () => {
+    const rosterCoverage = JSON.stringify({ phase: "COMPLETE", detailCoverageComplete: false,
+      detailRosterEvents: 159, detailCachedEvents: 158, detailCachedBytes: 17_500_000,
+      detailPendingEvents: 1, detailFailedEvents: 1, detailOldestReceiptAgeMs: 90_000,
+      detailNearTtlMs: 12_000, detailDistantTtlMs: 60_000, detailRetainedEventCap: 2048,
+      nativeRosterEvents: 196, nativeDetailEvents: 158, nativeMarketRows: 4000,
+      nativeSelectionRows: 9000, nativeTypeCounts: "HC39:1500,OU39:2500", nativeInventoryTruncated: false });
+    expect(rosterCoverage.length).toBeGreaterThan(400);
     const telemetry = new PipelineTelemetry({ now: () => 120_000 });
     telemetry.recordEnvelope({ ...envelope(1, 110_000), lobby: "BTI",
       sourceId: "chrome:BTI:18", tabId: 18, transport: "TAB_STATE",
       request: { hostname: "prod20091.fxf774.com", pathnameClass: "/__fieldline_heartbeat__",
         resourceType: "Tab" },
       payload: { encoding: "UTF8", body: JSON.stringify({
-        kind: "PAGE_HEALTH", status: "AUTH_ERROR", code: "1008"
+        kind: "PAGE_HEALTH", status: "AUTH_ERROR", code: "1008", rosterCoverage
       }) } }, "worker-bti:0");
     const emptyReaders: PipelineTelemetryReaders = {
       listSources: () => [], listAuthorities: () => [], listFeeds: () => [],
@@ -168,7 +198,7 @@ describe("PipelineTelemetry", () => {
     const result = await telemetry.diagnostic(emptyReaders, "catalog-source:BTI:FOOTBALL");
 
     expect(result?.hops.find((hop) => hop.hop === "HOP3_ENVELOPE")?.detail.pageHealth)
-      .toEqual({ status: "AUTH_ERROR", code: "1008", observedAtMs: 110_000 });
+      .toEqual({ status: "AUTH_ERROR", code: "1008", observedAtMs: 110_000, rosterCoverage });
   });
 
   it("keeps frame counters reported by a newer extension", async () => {

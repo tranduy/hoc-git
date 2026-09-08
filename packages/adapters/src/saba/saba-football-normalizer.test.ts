@@ -4,6 +4,24 @@ import { normalizeSabaFootballRecords } from "./saba-football-normalizer.js";
 const options = { observedAtMs: 1_786_449_540_000, receivedMonotonicMs: 40, sequence: 3 };
 
 describe("normalizeSabaFootballRecords", () => {
+  it("accounts for every native odds row instead of silently dropping unknown SABA bet types", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "Premier League", sporttype: 1 },
+      { type: "m", matchid: 10, leagueid: 1, hteamnameen: "Alpha", ateamnameen: "Beta",
+        kickofftime: 1_786_449_540, eventstatus: "running", marketid: "T", sporttype: 1 },
+      { type: "o", matchid: 10, oddsid: 100, bettype: 1, parenttypeid: 1,
+        hdp1: 0.5, hdp2: 0, odds1a: 0.9, odds2a: -0.95, oddsstatus: "running", enable: 1 },
+      { type: "o", matchid: 10, oddsid: 999, bettype: 321, parenttypeid: 321,
+        odds1a: 0.8, odds2a: -0.9, oddsstatus: "running", enable: 1 }
+    ], { observedAtMs: 1_786_000_000_000, receivedMonotonicMs: 5, sequence: 7 });
+
+    expect(normalized.nativeMarketObservations).toEqual([
+      expect.objectContaining({ providerMarketId: "100", nativeType: "1", disposition: "NORMALIZED",
+        reason: "CANONICAL_MARKET_MAPPED" }),
+      expect.objectContaining({ providerMarketId: "999", nativeType: "321", disposition: "UNMAPPED",
+        reason: "NATIVE_TYPE_UNMAPPED" })
+    ]);
+  });
   it("maps a real SABA half-goal handicap using exact provider identities", () => {
     const normalized = normalizeSabaFootballRecords([
       { type: "l", leagueid: 150749, leaguenameen: "AFC Challenge League", sporttype: 1 },
@@ -53,6 +71,108 @@ describe("normalizeSabaFootballRecords", () => {
     ]);
   });
 
+  it("maps SABA native bet type 2 as an exact full-time odd/even pair", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "o", oddsid: 4, matchid: 2, bettype: 2, parenttypeid: 2,
+        oddsstatus: "running", enable: 1, odds1a: 0.82, odds2a: -0.94, hdp1: 0, hdp2: 0 }
+    ], options);
+
+    expect(normalized.markets).toEqual([expect.objectContaining({
+      providerMarketId: "4", marketType: "FT_ODD_EVEN", scope: "FULL_TIME", line: null
+    })]);
+    expect(normalized.quotes.map(({ selection, line }) => [selection, line])).toEqual([
+      ["ODD", null], ["EVEN", null]
+    ]);
+    expect(normalized.nativeMarketObservations).toEqual([expect.objectContaining({
+      nativeType: "2", disposition: "NORMALIZED", outcomeLabels: ["ODD", "EVEN"]
+    })]);
+  });
+
+  it("splits the proven SABA type 13 clean-sheet fields into home and away yes/no markets", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "m", matchid: 133152892, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: Math.floor(options.observedAtMs / 1_000) + 3_600, marketid: "T", sporttype: 1 },
+      { type: "o", oddsid: 1054290306, matchid: 133152892, bettype: 13, parenttypeid: 13,
+        oddsstatus: "running", enable: 1, cs10: 1.36, cs11: 2.72, cs20: 1.22, cs21: 3.60 }
+    ], options);
+
+    expect(normalized.markets).toEqual([
+      expect.objectContaining({ providerMarketId: "1054290306:home-clean-sheet",
+        marketType: "HOME_FT_CLEAN_SHEET", scope: "FULL_TIME", line: null,
+        settlementProfile: "football-home-clean-sheet", status: "OPEN" }),
+      expect.objectContaining({ providerMarketId: "1054290306:away-clean-sheet",
+        marketType: "AWAY_FT_CLEAN_SHEET", scope: "FULL_TIME", line: null,
+        settlementProfile: "football-away-clean-sheet", status: "OPEN" })
+    ]);
+    expect(normalized.quotes.map(({ providerMarketId, providerSelectionId, marketType, selection,
+      rawOdds, rawFormat, status, isLive, receivedMonotonicMs, sequence }) => ({ providerMarketId,
+        providerSelectionId, marketType, selection, rawOdds, rawFormat, status, isLive,
+        receivedMonotonicMs, sequence }))).toEqual([
+      { providerMarketId: "1054290306:home-clean-sheet",
+        providerSelectionId: "1054290306:home-clean-sheet:yes", marketType: "HOME_FT_CLEAN_SHEET",
+        selection: "YES", rawOdds: "2.72", rawFormat: "DECIMAL", status: "OPEN", isLive: false,
+        receivedMonotonicMs: 40, sequence: 3 },
+      { providerMarketId: "1054290306:home-clean-sheet",
+        providerSelectionId: "1054290306:home-clean-sheet:no", marketType: "HOME_FT_CLEAN_SHEET",
+        selection: "NO", rawOdds: "1.36", rawFormat: "DECIMAL", status: "OPEN", isLive: false,
+        receivedMonotonicMs: 40, sequence: 3 },
+      { providerMarketId: "1054290306:away-clean-sheet",
+        providerSelectionId: "1054290306:away-clean-sheet:yes", marketType: "AWAY_FT_CLEAN_SHEET",
+        selection: "YES", rawOdds: "3.6", rawFormat: "DECIMAL", status: "OPEN", isLive: false,
+        receivedMonotonicMs: 40, sequence: 3 },
+      { providerMarketId: "1054290306:away-clean-sheet",
+        providerSelectionId: "1054290306:away-clean-sheet:no", marketType: "AWAY_FT_CLEAN_SHEET",
+        selection: "NO", rawOdds: "1.22", rawFormat: "DECIMAL", status: "OPEN", isLive: false,
+        receivedMonotonicMs: 40, sequence: 3 }
+    ]);
+    expect(normalized.nativeMarketObservations).toEqual([expect.objectContaining({
+      providerMarketId: "1054290306", nativeType: "13", nativeScope: "FULL_TIME",
+      outcomeLabels: ["HOME_YES", "HOME_NO", "AWAY_YES", "AWAY_NO"],
+      disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED"
+    })]);
+  });
+
+  it("refuses malformed, duplicated and non-goals SABA type 13 rows without guessing a clean-sheet market", () => {
+    const base = { type: "o", matchid: 2, bettype: 13, parenttypeid: 13,
+      oddsstatus: "running", enable: 1, cs10: 1.36, cs11: 2.72, cs20: 1.22, cs21: 3.60 };
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
+      { type: "l", leagueid: 2, leaguenameen: "League - CORNERS", sporttype: 1 },
+      { type: "l", leagueid: 3, leaguenameen: "League - BOOKING", sporttype: 1 },
+      { type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "m", matchid: 20, leagueid: 2, hteamnameen: "Home No.of Corners",
+        ateamnameen: "Away No.of Corners", kickofftime: 10, marketid: "L", sporttype: 1 },
+      { type: "m", matchid: 30, leagueid: 3, hteamnameen: "Home Total Booking",
+        ateamnameen: "Away Total Booking", kickofftime: 10, marketid: "L", sporttype: 1 },
+      { ...base, oddsid: 100 },
+      { ...base, oddsid: 100 },
+      { ...base, oddsid: 101, cs21: undefined },
+      { ...base, oddsid: 102, cs11: 1 },
+      { ...base, oddsid: 103, parenttypeid: 14 },
+      { ...base, oddsid: 104, matchid: 20 },
+      { ...base, oddsid: 105, matchid: 30 }
+    ], options);
+
+    expect(normalized.markets.map(({ providerMarketId }) => providerMarketId)).toEqual([
+      "100:home-clean-sheet", "100:away-clean-sheet"
+    ]);
+    expect(normalized.nativeMarketObservations.map(({ providerMarketId, disposition, reason }) =>
+      [providerMarketId, disposition, reason])).toEqual([
+        ["100", "NORMALIZED", "CANONICAL_MARKET_MAPPED"],
+        ["100", "EXCLUDED", "DUPLICATE_NATIVE_MARKET_ID"],
+        ["101", "EXCLUDED", "INVALID_TWO_WAY_SHAPE"],
+        ["102", "EXCLUDED", "INVALID_TWO_WAY_SHAPE"],
+        ["103", "EXCLUDED", "PARENT_MARKET_VARIANT"],
+        ["104", "UNMAPPED", "NATIVE_TYPE_UNMAPPED"],
+        ["105", "UNMAPPED", "NATIVE_TYPE_UNMAPPED"]
+      ]);
+  });
+
   it("normalizes exact first-half handicap and total groups", () => {
     const normalized = normalizeSabaFootballRecords([
       { type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 },
@@ -76,7 +196,7 @@ describe("normalizeSabaFootballRecords", () => {
     ]);
   });
 
-  it("accepts quarter totals and rejects integer or structurally inconsistent totals", () => {
+  it("retains quarter and integer totals while rejecting structurally inconsistent totals", () => {
     const base = { type: "o", matchid: 2, bettype: 3, parenttypeid: 3,
       oddsstatus: "running", enable: 1, odds1a: 0.9, odds2a: -0.9, hdp2: 0 };
     const normalized = normalizeSabaFootballRecords([
@@ -89,8 +209,11 @@ describe("normalizeSabaFootballRecords", () => {
       { ...base, oddsid: 6, hdp1: 2.5, parenttypeid: 8 }
     ], options);
 
-    expect(normalized.markets).toEqual([expect.objectContaining({ marketType: "FT_TOTAL", line: "2.25" })]);
-    expect(normalized.quotes).toHaveLength(2);
+    expect(normalized.markets).toEqual([
+      expect.objectContaining({ marketType: "FT_TOTAL", line: "2.25" }),
+      expect.objectContaining({ marketType: "FT_TOTAL", line: "2" })
+    ]);
+    expect(normalized.quotes).toHaveLength(4);
   });
 
   it("accepts quarter handicap but rejects three-way markets, invalid prices and non-football matches", () => {
@@ -324,5 +447,58 @@ describe("SABA live classification requires a started fixture", () => {
 
     expect(normalized.events[0]).toMatchObject({ isLive: true });
     expect(normalized.quotes[0]).toMatchObject({ isLive: true });
+  });
+});
+
+describe("SABA native multi-match aggregate accounting", () => {
+  const nativeGroups = (matchid: number) => [1, 3, 7, 8, 2].map((bettype, index) => ({
+    type: "o", matchid, oddsid: matchid * 10 + index, bettype, parenttypeid: bettype,
+    hdp1: bettype === 3 || bettype === 8 ? 2.5 : 0.5, hdp2: 0,
+    odds1a: 0.9, odds2a: -0.95, oddsstatus: "running", enable: 1
+  }));
+
+  it.each([
+    [134003685, "*GIẢI SERIE A Ý - ĐỘI NHÀ/ĐỘI KHÁCH", 2],
+    [134003749, "*GIẢI LALIGA TÂY BAN NHA - ĐỘI NHÀ/ĐỘI KHÁCH", 2],
+    [134019593, "GIẢI ALLSVENSKAN THỤY ĐIỂN - ĐỘI NHÀ/ĐỘI KHÁCH", 3]
+  ])("excludes aggregate %s but inventories its five native groups", (matchid, competition, count) => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: matchid, leaguenameen: competition, sporttype: 1 },
+      { type: "m", matchid, leagueid: matchid,
+        hteamnameen: `Đội Nhà - Thứ Hai - ${count} Trận Đấu`,
+        ateamnameen: `Đội Khách - Thứ Hai - ${count} Trận Đấu`,
+        kickofftime: Math.floor(options.observedAtMs / 1_000) + 3_600, marketid: "T", sporttype: 1 },
+      ...nativeGroups(matchid)
+    ], options);
+
+    expect(normalized.events).toEqual([]);
+    expect(normalized.markets).toEqual([]);
+    expect(normalized.quotes).toEqual([]);
+    expect(normalized.nativeMarketObservations).toHaveLength(5);
+    expect(normalized.nativeMarketObservations.every(({ disposition, reason }) =>
+      disposition === "EXCLUDED" && reason === "EVENT_NOT_COMPARABLE")).toBe(true);
+  });
+
+  it("keeps an ordinary real fixture unchanged beside an aggregate", () => {
+    const normalized = normalizeSabaFootballRecords([
+      { type: "l", leagueid: 1, leaguenameen: "League One", sporttype: 1 },
+      { type: "l", leagueid: 2, leaguenameen: "League Two - ĐỘI NHÀ/ĐỘI KHÁCH", sporttype: 1 },
+      { type: "m", matchid: 10, leagueid: 1, hteamnameen: "Real Home", ateamnameen: "Real Away",
+        kickofftime: Math.floor(options.observedAtMs / 1_000) + 3_600, marketid: "T", sporttype: 1 },
+      { type: "m", matchid: 20, leagueid: 2,
+        hteamnameen: "Đội Nhà - Thứ Hai - 2 Trận Đấu",
+        ateamnameen: "Đội Khách - Thứ Hai - 2 Trận Đấu",
+        kickofftime: Math.floor(options.observedAtMs / 1_000) + 3_600, marketid: "T", sporttype: 1 },
+      ...nativeGroups(10).slice(0, 1), ...nativeGroups(20).slice(0, 1)
+    ], options);
+
+    expect(normalized.events).toEqual([expect.objectContaining({ providerEventId: "10",
+      participantA: "Real Home", participantB: "Real Away" })]);
+    expect(normalized.markets).toHaveLength(1);
+    expect(normalized.nativeMarketObservations).toEqual([
+      expect.objectContaining({ providerEventId: "10", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerEventId: "20", disposition: "EXCLUDED",
+        reason: "EVENT_NOT_COMPARABLE" })
+    ]);
   });
 });

@@ -1,9 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SABA_DIRECT_LOBBY_URL } from "./source-tab-recovery.js";
 
 type UpdatedListener = (tabId: number, changeInfo: Record<string, unknown>,
   tab: Record<string, unknown>) => void;
 type MessageListener = (message: unknown, sender: unknown,
   sendResponse: (response: unknown) => void) => boolean;
+type SabaUnavailableCallback = (source: { readonly lobby: "SABA"; readonly sourceId: string;
+  readonly tabId: number }, reason?: "UNSAFE_VIEW") => void | Promise<void>;
+
+let constructedObserver: {
+  readonly prepareSourceNavigation: ReturnType<typeof vi.fn>;
+} | undefined;
+let constructedObserverDependencies: {
+  readonly onSabaSocketUnavailable?: SabaUnavailableCallback;
+} | undefined;
 
 function chromeEvent<T>() {
   const listeners: T[] = [];
@@ -89,8 +99,12 @@ function serializedStorageCalls(storage: ReturnType<typeof createChromeHarness>[
 }
 
 function mockNetworkObserver(start = vi.fn(async (_source: { readonly tabId: number }) => undefined),
-  refreshCatalog = vi.fn(async () => undefined)) {
+  refreshCatalog = vi.fn(async () => undefined), responsive = true) {
   class NetworkObserver {
+    constructor(dependencies: { readonly onSabaSocketUnavailable?: SabaUnavailableCallback }) {
+      constructedObserver = this;
+      constructedObserverDependencies = dependencies;
+    }
     beginSourceEpoch = vi.fn();
     beginBridgeSourceEpoch = vi.fn();
     captureCmdSnapshot = vi.fn(async () => undefined);
@@ -99,6 +113,8 @@ function mockNetworkObserver(start = vi.fn(async (_source: { readonly tabId: num
     handleEvent = vi.fn(async () => undefined);
     hasCompleteKsportBaseline = vi.fn(() => true);
     hasCompleteSabaBaseline = vi.fn(() => true);
+    hasUsableSabaCatalog = vi.fn(() => true);
+    hasResponsiveSabaDocument = vi.fn(() => responsive);
     hasCompleteCmdBaselineSince = vi.fn(() => true);
     heartbeat = vi.fn(async () => undefined);
     maintain = vi.fn(async () => undefined);
@@ -126,6 +142,8 @@ describe("background source launch memory", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.useFakeTimers();
+    constructedObserver = undefined;
+    constructedObserverDependencies = undefined;
   });
 
   afterEach(() => {
@@ -147,7 +165,7 @@ describe("background source launch memory", () => {
 
     expect(harness.storage.session.remove).toHaveBeenCalledTimes(1);
     expect(harness.storage.session.remove).toHaveBeenCalledWith("sourceLaunchUrls");
-    expect(harness.storage.session.get).not.toHaveBeenCalled();
+    expect(harness.storage.session.get).toHaveBeenCalledExactlyOnceWith("sabaBlankHandoffV1");
     expect(harness.storage.session.set).not.toHaveBeenCalled();
     expect(serializedStorageCalls(harness.storage)).not.toContain(signedUrl);
 
@@ -229,5 +247,23 @@ describe("background source launch memory", () => {
       { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 },
       { rosterOnly: true }
     );
+  });
+
+  it("preserves an ordinarily responsive SABA tab but never suppresses explicit unsafe-view recovery", async () => {
+    const harness = createChromeHarness(SABA_DIRECT_LOBBY_URL);
+    vi.stubGlobal("chrome", harness.api);
+    mockNetworkObserver(undefined, undefined, true);
+
+    await import("./background.js");
+    await settleWorkerStart(harness.storage);
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
+    const callback = constructedObserverDependencies?.onSabaSocketUnavailable;
+    expect(callback).toBeTypeOf("function");
+
+    await callback?.(source);
+    expect(constructedObserver?.prepareSourceNavigation).not.toHaveBeenCalled();
+
+    await callback?.(source, "UNSAFE_VIEW");
+    expect(constructedObserver?.prepareSourceNavigation).toHaveBeenCalledWith(source.sourceId);
   });
 });

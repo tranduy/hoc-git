@@ -1,0 +1,3538 @@
+{
+  "capturedAt": "2026-09-07T14:35:33.034Z",
+  "buildIdentity": "sha256:e9e86f1c5d0cd322d06447a37f9bb247b6a03abbec92f19c707ea06f56e45cf8",
+  "extensionVersion": "0.2.39",
+  "sourceEpoch": "74040073-8f28-489c-b83f-5d6f442faf05:5",
+  "catalog": {
+    "observedAtMs": 1788791705753,
+    "snapshotState": "FRESH",
+    "events": 114,
+    "markets": 819,
+    "quotes": 1638,
+    "nativeRows": 1130
+  },
+  "navigationProbe": {
+    "observedAt": "2026-09-07T14:35:06.089Z",
+    "body": {
+      "kind": "SABA_NAVIGATION_PROBE",
+      "version": 1,
+      "status": "NO_ACTION_UNCONFIRMED_SELECTION",
+      "coverageClaim": "PUBLIC_STRUCTURE_ONLY",
+      "mutated": false,
+      "viewRestored": true,
+      "initial": {
+        "activePeriod": "UNKNOWN",
+        "dateContexts": [
+          {
+            "classes": [
+              "c-odds-page__header"
+            ],
+            "tag": "div",
+            "text": "Bóng đá / Hôm NayTất CảTất Cả1X2Tỷ Số Chính XácLẻ/ChẵnTổng Số Bàn ThắngHiệp 1/Toàn TrậnChẵn / Lẻ của Nửa trận/Toàn trậnBàn thắng Đầu/ CuốiCá Cược Tổng HợpTrình Tạo Cược+Cược ThắngCược XiênTrình Tạo Cược+Cược Xiên May MắnBộ Lọc Trận ĐấuLive StreamerTrận đấu trực tiếpThống kêCược XiênSABA Thời Gian Tự ChọnCầu thủFastKèo RungTất cả trận đấuTất cả trận đấuCác trận đấu chínhThị trường khácTừ trước đến nayTừ trước đến naySắp diễn ra 4 giờ tới 8 giờ tớiHiện nay ~ 00:0000:00 ~ 04:0004:00 ~ 08:0008:00 ~ 12:00(101 / "
+          }
+        ],
+        "eligibleMoreCount": 96,
+        "eligibleMoreOwners": [
+          "134003685",
+          "134003749",
+          "134019593",
+          "132968304",
+          "132973443",
+          "132969854",
+          "132974263",
+          "133139869",
+          "133139872",
+          "133139862",
+          "133139859",
+          "133654060",
+          "133654304",
+          "133543542",
+          "133139880",
+          "133143064",
+          "133138943",
+          "133074926",
+          "133074948",
+          "133473211"
+        ],
+        "fingerprint": "[\"UNKNOWN\",2,[\"133314241\",\"133313450\",\"133313452\",\"133427258\",\"133427254\",\"133427262\",\"133771534\",\"133915743\",\"133721630\",\"133914874\",\"133914868\",\"133539342\",\"133539371\",\"133915747\",\"133913558\",\"133913561\",\"133604450\",\"134013722\",\"133867841\",\"134038380\",\"134038487\",\"134038677\",\"134038363\",\"134038486\",\"134038658\",\"134038607\",\"134038683\",\"134038610\",\"134038685\",\"134038502\",\"134038619\",\"134038690\",\"132968304\",\"132973443\",\"134003685\",\"132969854\",\"132974263\",\"134003749\",\"133139869\",\"133139872\",\"133139862\",\"134019593\",\"133139859\",\"133654060\",\"133654304\",\"133543542\",\"133139880\",\"133143064\",\"133138943\",\"133074926\",\"133074948\",\"133473211\",\"133473221\",\"133137276\",\"133141855\",\"133323027\",\"133320758\",\"133320760\",\"133721847\",\"133606681\",\"133320122\",\"133317448\",\"133479301\",\"133318959\",\"133318951\",\"133620940\",\"133622042\",\"133622048\",\"133622028\",\"133622058\",\"133622036\",\"133432484\",\"133867845\",\"133867850\",\"133433312\",\"133433318\",\"133604553\",\"134017315\",\"133317449\",\"133318969\",\"133318885\",\"133318894\",\"133543541\",\"133318882\",\"133837899\",\"133317355\",\"133431564\",\"133431585\",\"133616148\",\"133842851\",\"133431087\",\"133431082\",\"133431078\",\"133431587\",\"133434693\",\"134000929\",\"133375773\",\"133375762\",\"133600362\",\"133721642\",\"133721649\",\"133721655\",\"133784616\",\"133434696\",\"133431577\",\"134015166\",\"133810340\",\"133152892\",\"133090282\",\"133090127\",\"133332269\",\"133865932\",\"133651148\",\"133610704\",\"133437967\",\"133442481\",\"133395988\",\"133745960\",\"133745964\",\"133745957\",\"133773835\",\"133773839\",\"133437958\",\"133869478\",\"133725118\",\"133619326\",\"133631200\",\"133917194\"],96]",
+        "headerControls": [],
+        "moreCandidates": [
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133314241",
+            "text": "83"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133313450",
+            "text": "85"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133313452",
+            "text": "80"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133427258",
+            "text": "46"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133427254",
+            "text": "48"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133427262",
+            "text": "35"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133771534",
+            "text": "9"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133915743",
+            "text": "37"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133721630",
+            "text": "22"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133914874",
+            "text": "22"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133914868",
+            "text": "22"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133539342",
+            "text": "10"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133539371",
+            "text": "19"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133915747",
+            "text": "23"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133913558",
+            "text": "10"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133913561",
+            "text": "9"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133604450",
+            "text": "19"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "134013722",
+            "text": "9"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "133867841",
+            "text": "14"
+          },
+          {
+            "classes": [
+              "c-btn",
+              "c-btn--more",
+              "c-is-close"
+            ],
+            "eligible": false,
+            "hasHref": false,
+            "hrefKind": "EMPTY",
+            "ownerMatchId": "134038380",
+            "text": "2"
+          }
+        ],
+        "navRootChildren": [
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "childIndex": 0,
+            "classes": [
+              "c-side-nav__header"
+            ],
+            "dataState": null,
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "childIndex": 1,
+            "classes": [
+              "c-side-betting__header"
+            ],
+            "dataState": null,
+            "tag": "div",
+            "visible": false
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "childIndex": 2,
+            "classes": [
+              "c-side-nav__tabs"
+            ],
+            "dataState": null,
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "childIndex": 3,
+            "classes": [
+              "c-side-nav__content"
+            ],
+            "dataState": null,
+            "tag": "div",
+            "visible": true
+          }
+        ],
+        "navRootTopology": [
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__header"
+            ],
+            "dataState": null,
+            "path": [
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-iconcolor-sport-all"
+            ],
+            "dataState": null,
+            "path": [
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-icon",
+              "c-icon--caret"
+            ],
+            "dataState": null,
+            "path": [
+              0,
+              2
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__tabs"
+            ],
+            "dataState": null,
+            "path": [
+              2
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__tab-group"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1,
+              0,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1,
+              1
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1,
+              1,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1,
+              2
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1,
+              2,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge",
+              "c-badge--highlight"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1,
+              2,
+              1
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              2,
+              1,
+              2,
+              1,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__content"
+            ],
+            "dataState": null,
+            "path": [
+              3
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__item"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-iconcolor-sport1"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-icon",
+              "c-icon--live"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              0,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "knownLabel": "Bóng đá",
+            "path": [
+              3,
+              0,
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              0,
+              2
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              0,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              1
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              1,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              1,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              2
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              2,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              2,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              3
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              3,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              3,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              4
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              4,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              4,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              5
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              5,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              5,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              6
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              6,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              6,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              7
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              7,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              7,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              8
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              8,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              8,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              9
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              9,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              9,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-sub-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              10
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              10,
+              0
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              0,
+              1,
+              10,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__item"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              1
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              1,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-iconcolor-sport997"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              1,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              1,
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              1,
+              0,
+              2
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__item"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              2
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              2,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-iconcolor-sport2"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              2,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-icon",
+              "c-icon--live"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              2,
+              0,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              2,
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              2,
+              0,
+              2
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__item"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              3
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              3,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-iconcolor-sport993"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              3,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              3,
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              3,
+              0,
+              2
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__item"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              4
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              4,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-iconcolor-sport43"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              4,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-icon",
+              "c-icon--live"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              4,
+              0,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              4,
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              4,
+              0,
+              2
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__item"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              5
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              5,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-iconcolor-sport5"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              5,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-icon",
+              "c-icon--live"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              5,
+              0,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              5,
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              5,
+              0,
+              2
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__item"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              6
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              6,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-iconcolor-sport6"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              6,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-icon",
+              "c-icon--live"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              6,
+              0,
+              0,
+              0
+            ],
+            "tag": "i",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              6,
+              0,
+              1
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-badge"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              6,
+              0,
+              2
+            ],
+            "tag": "span",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__more"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              7
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__more-btn"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              7,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-text"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              7,
+              0,
+              0
+            ],
+            "tag": "div",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-icon",
+              "c-icon--arrow-up"
+            ],
+            "dataState": null,
+            "path": [
+              3,
+              7,
+              0,
+              1
+            ],
+            "tag": "i",
+            "visible": true
+          }
+        ],
+        "pageNowMs": 1788791706039,
+        "periodControls": [
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "dataState": null,
+            "parentClasses": [
+              "c-side-nav__tab-group"
+            ],
+            "parentTag": "div",
+            "period": "EARLY",
+            "structure": {
+              "ancestors": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab-group"
+                  ],
+                  "dataState": null,
+                  "distance": 1,
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tabs"
+                  ],
+                  "dataState": null,
+                  "distance": 2,
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav",
+                    "c-side-nav--event"
+                  ],
+                  "dataState": null,
+                  "distance": 3,
+                  "tag": "div",
+                  "visible": true
+                }
+              ],
+              "descendants": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                }
+              ],
+              "groupDescendants": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    1
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    1,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-badge",
+                    "c-badge--highlight"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    1
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    1,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                }
+              ],
+              "truncated": false
+            },
+            "tag": "div",
+            "text": "Sớm",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "dataState": null,
+            "parentClasses": [
+              "c-side-nav__tab-group"
+            ],
+            "parentTag": "div",
+            "period": "TODAY",
+            "structure": {
+              "ancestors": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab-group"
+                  ],
+                  "dataState": null,
+                  "distance": 1,
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tabs"
+                  ],
+                  "dataState": null,
+                  "distance": 2,
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav",
+                    "c-side-nav--event"
+                  ],
+                  "dataState": null,
+                  "distance": 3,
+                  "tag": "div",
+                  "visible": true
+                }
+              ],
+              "descendants": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                }
+              ],
+              "groupDescendants": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    1
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    1,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-badge",
+                    "c-badge--highlight"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    1
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    1,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                }
+              ],
+              "truncated": false
+            },
+            "tag": "div",
+            "text": "Hôm Nay",
+            "visible": true
+          },
+          {
+            "ariaCurrent": null,
+            "ariaExpanded": null,
+            "ariaSelected": null,
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "dataState": null,
+            "parentClasses": [
+              "c-side-nav__tab-group"
+            ],
+            "parentTag": "div",
+            "period": "LIVE",
+            "structure": {
+              "ancestors": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab-group"
+                  ],
+                  "dataState": null,
+                  "distance": 1,
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tabs"
+                  ],
+                  "dataState": null,
+                  "distance": 2,
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav",
+                    "c-side-nav--event"
+                  ],
+                  "dataState": null,
+                  "distance": 3,
+                  "tag": "div",
+                  "visible": true
+                }
+              ],
+              "descendants": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-badge",
+                    "c-badge--highlight"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    1
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    1,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                }
+              ],
+              "groupDescendants": [
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    0,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    1
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    1,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-side-nav__tab"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-badge",
+                    "c-badge--highlight"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    1
+                  ],
+                  "tag": "div",
+                  "visible": true
+                },
+                {
+                  "ariaCurrent": null,
+                  "ariaExpanded": null,
+                  "ariaSelected": null,
+                  "classes": [
+                    "c-text"
+                  ],
+                  "dataState": null,
+                  "path": [
+                    2,
+                    1,
+                    0
+                  ],
+                  "tag": "span",
+                  "visible": true
+                }
+              ],
+              "truncated": false
+            },
+            "tag": "div",
+            "text": "Trực tiếp184",
+            "visible": true
+          }
+        ],
+        "rosterMatchIds": [
+          "133314241",
+          "133313450",
+          "133313452",
+          "133427258",
+          "133427254",
+          "133427262",
+          "133771534",
+          "133915743",
+          "133721630",
+          "133914874",
+          "133914868",
+          "133539342",
+          "133539371",
+          "133915747",
+          "133913558",
+          "133913561",
+          "133604450",
+          "134013722",
+          "133867841",
+          "134038380",
+          "134038487",
+          "134038677",
+          "134038363",
+          "134038486",
+          "134038658",
+          "134038607",
+          "134038683",
+          "134038610",
+          "134038685",
+          "134038502",
+          "134038619",
+          "134038690",
+          "132968304",
+          "132973443",
+          "134003685",
+          "132969854",
+          "132974263",
+          "134003749",
+          "133139869",
+          "133139872",
+          "133139862",
+          "134019593",
+          "133139859",
+          "133654060",
+          "133654304",
+          "133543542",
+          "133139880",
+          "133143064",
+          "133138943",
+          "133074926",
+          "133074948",
+          "133473211",
+          "133473221",
+          "133137276",
+          "133141855",
+          "133323027",
+          "133320758",
+          "133320760",
+          "133721847",
+          "133606681",
+          "133320122",
+          "133317448",
+          "133479301",
+          "133318959",
+          "133318951",
+          "133620940",
+          "133622042",
+          "133622048",
+          "133622028",
+          "133622058",
+          "133622036",
+          "133432484",
+          "133867845",
+          "133867850",
+          "133433312",
+          "133433318",
+          "133604553",
+          "134017315",
+          "133317449",
+          "133318969",
+          "133318885",
+          "133318894",
+          "133543541",
+          "133318882",
+          "133837899",
+          "133317355",
+          "133431564",
+          "133431585",
+          "133616148",
+          "133842851",
+          "133431087",
+          "133431082",
+          "133431078",
+          "133431587",
+          "133434693",
+          "134000929",
+          "133375773",
+          "133375762",
+          "133600362",
+          "133721642",
+          "133721649",
+          "133721655",
+          "133784616",
+          "133434696",
+          "133431577",
+          "134015166",
+          "133810340",
+          "133152892",
+          "133090282",
+          "133090127",
+          "133332269",
+          "133865932",
+          "133651148",
+          "133610704",
+          "133437967",
+          "133442481",
+          "133395988",
+          "133745960",
+          "133745964",
+          "133745957",
+          "133773835",
+          "133773839",
+          "133437958",
+          "133869478",
+          "133725118",
+          "133619326",
+          "133631200",
+          "133917194"
+        ],
+        "rosterSamples": [
+          {
+            "matchId": "133314241",
+            "teamNames": [
+              "FC Voluntari",
+              "FC Arges Pitesti",
+              "FC Voluntari",
+              "FC Arges Pitesti"
+            ],
+            "timeMetadata": {},
+            "timeText": "TRỰC TIẾP"
+          },
+          {
+            "matchId": "133313450",
+            "teamNames": [
+              "Al Ittihad Alexandria",
+              "Asyut Petroleum",
+              "Al Ittihad Alexandria",
+              "Asyut Petroleum"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H32'"
+          },
+          {
+            "matchId": "133313452",
+            "teamNames": [
+              "El Qanah FC",
+              "Talaea El Gaish SC",
+              "El Qanah FC",
+              "Talaea El Gaish SC"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H34'"
+          },
+          {
+            "matchId": "133427258",
+            "teamNames": [
+              "Esenler Erokspor",
+              "Kayserispor",
+              "Esenler Erokspor",
+              "Kayserispor"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H33'"
+          },
+          {
+            "matchId": "133427254",
+            "teamNames": [
+              "Istanbulspor A.S",
+              "Igdir FK",
+              "Istanbulspor A.S",
+              "Igdir FK"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H34'"
+          },
+          {
+            "matchId": "133427262",
+            "teamNames": [
+              "FC Isloch Minsk",
+              "FK Arsenal Dzyarzhynsk",
+              "FC Isloch Minsk",
+              "FK Arsenal Dzyarzhynsk"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H34'"
+          },
+          {
+            "matchId": "133771534",
+            "teamNames": [
+              "Metallurg Bekabad",
+              "Pakhtakor Tashkent II",
+              "Metallurg Bekabad",
+              "Pakhtakor Tashkent II"
+            ],
+            "timeMetadata": {},
+            "timeText": ""
+          },
+          {
+            "matchId": "133915743",
+            "teamNames": [
+              "Umm Salal",
+              "Al Khor",
+              "Umm Salal",
+              "Al Khor"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H34'"
+          },
+          {
+            "matchId": "133721630",
+            "teamNames": [
+              "Sportist Svoge",
+              "Lokomotiv Gorna Oryahovitsa",
+              "Sportist Svoge",
+              "Lokomotiv Gorna Oryahovitsa"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H35'"
+          },
+          {
+            "matchId": "133914874",
+            "teamNames": [
+              "Ajman U23",
+              "Al Nasr SC Dubai U23",
+              "Ajman U23",
+              "Al Nasr SC Dubai U23"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H45'"
+          },
+          {
+            "matchId": "133914868",
+            "teamNames": [
+              "Al Wahda Abu Dhabi U23",
+              "Al Dhafra U23",
+              "Al Wahda Abu Dhabi U23",
+              "Al Dhafra U23"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H44'"
+          },
+          {
+            "matchId": "133539342",
+            "teamNames": [
+              "FC Marko Markopoulo",
+              "Panserraikos",
+              "FC Marko Markopoulo",
+              "Panserraikos"
+            ],
+            "timeMetadata": {},
+            "timeText": "2H32'"
+          },
+          {
+            "matchId": "133539371",
+            "teamNames": [
+              "Athens Kallithea FC",
+              "Niki Volou",
+              "Athens Kallithea FC",
+              "Niki Volou"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H34'"
+          },
+          {
+            "matchId": "133915747",
+            "teamNames": [
+              "Penarol (Dự Bị)",
+              "CA Boston River (Dự Bị)",
+              "Penarol (Dự Bị)",
+              "CA Boston River (Dự Bị)"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H35'"
+          },
+          {
+            "matchId": "133913558",
+            "teamNames": [
+              "Caykur Rizespor U19",
+              "Alanyaspor U19",
+              "Caykur Rizespor U19",
+              "Alanyaspor U19"
+            ],
+            "timeMetadata": {},
+            "timeText": "2H26'"
+          },
+          {
+            "matchId": "133913561",
+            "teamNames": [
+              "Goztepe AS U19",
+              "Gaziantep FK U19",
+              "Goztepe AS U19",
+              "Gaziantep FK U19"
+            ],
+            "timeMetadata": {},
+            "timeText": "2H28'"
+          },
+          {
+            "matchId": "133604450",
+            "teamNames": [
+              "FC Struga Trim & Lum",
+              "Sileks Kratovo",
+              "FC Struga Trim & Lum",
+              "Sileks Kratovo"
+            ],
+            "timeMetadata": {},
+            "timeText": "1H34'"
+          },
+          {
+            "matchId": "134013722",
+            "teamNames": [
+              "Sport Colonial",
+              "General Caballero CG",
+              "Sport Colonial",
+              "General Caballero CG"
+            ],
+            "timeMetadata": {},
+            "timeText": "2H31'"
+          },
+          {
+            "matchId": "133867841",
+            "teamNames": [
+              "Triều Tiên U20 (Nữ)",
+              "Portugal U20 (W)",
+              "Triều Tiên U20 (Nữ)",
+              "Portugal U20 (W)"
+            ],
+            "timeMetadata": {},
+            "timeText": "2H28'"
+          },
+          {
+            "matchId": "134038380",
+            "teamNames": [
+              "Pháp (PG)",
+              "Anh (PG)",
+              "Pháp (PG)",
+              "Anh (PG)"
+            ],
+            "timeMetadata": {},
+            "timeText": "TRỰC TIẾP"
+          }
+        ],
+        "rowCount": 128,
+        "tableCount": 2,
+        "timeShapes": {
+          "BARE_LIVE": 14,
+          "DATED_KICKOFF": 3,
+          "LIVE_CLOCK": 17,
+          "PREFIXED_KICKOFF": 93,
+          "UNDATED_KICKOFF": 0,
+          "UNKNOWN": 1
+        },
+        "truncated": true
+      },
+      "periodControls": [
+        {
+          "ariaCurrent": null,
+          "ariaExpanded": null,
+          "ariaSelected": null,
+          "classes": [
+            "c-side-nav__tab"
+          ],
+          "dataState": null,
+          "parentClasses": [
+            "c-side-nav__tab-group"
+          ],
+          "parentTag": "div",
+          "period": "EARLY",
+          "structure": {
+            "ancestors": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab-group"
+                ],
+                "dataState": null,
+                "distance": 1,
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tabs"
+                ],
+                "dataState": null,
+                "distance": 2,
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav",
+                  "c-side-nav--event"
+                ],
+                "dataState": null,
+                "distance": 3,
+                "tag": "div",
+                "visible": true
+              }
+            ],
+            "descendants": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              }
+            ],
+            "groupDescendants": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  0
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  0,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  1
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  1,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  2
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-badge",
+                  "c-badge--highlight"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  1
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  1,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              }
+            ],
+            "truncated": false
+          },
+          "tag": "div",
+          "text": "Sớm",
+          "visible": true
+        },
+        {
+          "ariaCurrent": null,
+          "ariaExpanded": null,
+          "ariaSelected": null,
+          "classes": [
+            "c-side-nav__tab"
+          ],
+          "dataState": null,
+          "parentClasses": [
+            "c-side-nav__tab-group"
+          ],
+          "parentTag": "div",
+          "period": "TODAY",
+          "structure": {
+            "ancestors": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab-group"
+                ],
+                "dataState": null,
+                "distance": 1,
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tabs"
+                ],
+                "dataState": null,
+                "distance": 2,
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav",
+                  "c-side-nav--event"
+                ],
+                "dataState": null,
+                "distance": 3,
+                "tag": "div",
+                "visible": true
+              }
+            ],
+            "descendants": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              }
+            ],
+            "groupDescendants": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  0
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  0,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  1
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  1,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  2
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-badge",
+                  "c-badge--highlight"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  1
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  1,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              }
+            ],
+            "truncated": false
+          },
+          "tag": "div",
+          "text": "Hôm Nay",
+          "visible": true
+        },
+        {
+          "ariaCurrent": null,
+          "ariaExpanded": null,
+          "ariaSelected": null,
+          "classes": [
+            "c-side-nav__tab"
+          ],
+          "dataState": null,
+          "parentClasses": [
+            "c-side-nav__tab-group"
+          ],
+          "parentTag": "div",
+          "period": "LIVE",
+          "structure": {
+            "ancestors": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab-group"
+                ],
+                "dataState": null,
+                "distance": 1,
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tabs"
+                ],
+                "dataState": null,
+                "distance": 2,
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav",
+                  "c-side-nav--event"
+                ],
+                "dataState": null,
+                "distance": 3,
+                "tag": "div",
+                "visible": true
+              }
+            ],
+            "descendants": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-badge",
+                  "c-badge--highlight"
+                ],
+                "dataState": null,
+                "path": [
+                  1
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  1,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              }
+            ],
+            "groupDescendants": [
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  0
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  0,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  1
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  1,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-side-nav__tab"
+                ],
+                "dataState": null,
+                "path": [
+                  2
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-badge",
+                  "c-badge--highlight"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  1
+                ],
+                "tag": "div",
+                "visible": true
+              },
+              {
+                "ariaCurrent": null,
+                "ariaExpanded": null,
+                "ariaSelected": null,
+                "classes": [
+                  "c-text"
+                ],
+                "dataState": null,
+                "path": [
+                  2,
+                  1,
+                  0
+                ],
+                "tag": "span",
+                "visible": true
+              }
+            ],
+            "truncated": false
+          },
+          "tag": "div",
+          "text": "Trực tiếp184",
+          "visible": true
+        }
+      ],
+      "today": null,
+      "early": null,
+      "expansions": [],
+      "truncated": true
+    }
+  },
+  "limitation": "Public structure only; UNKNOWN no-action. Visible odds page header proves Today label; no complete hidden membership or realtime acceptance."
+}

@@ -1,0 +1,99 @@
+{
+  "at": "2026-09-07T10:44:40.258Z",
+  "sourceEpoch": "51a90050-ad18-4ff8-8c96-94c444595e50:3",
+  "scope": "PUBLIC_CONTROL_INVENTORY_NOT_COVERAGE",
+  "diagnostics": {
+    "/__fieldline_saba_catalog_discovery__": {
+      "observedAt": "2026-09-07T10:44:33.141Z",
+      "body": {
+        "kind": "SABA_PUBLIC_CATALOG_DISCOVERY",
+        "version": 1,
+        "scope": "LEGACY_SPORTS",
+        "navControls": [
+          {
+            "period": "EARLY",
+            "label": "Sớm",
+            "tag": "div",
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "selected": false,
+            "expanded": null,
+            "visible": true
+          },
+          {
+            "period": "TODAY",
+            "label": "Hôm Nay",
+            "tag": "div",
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "selected": false,
+            "expanded": null,
+            "visible": true
+          }
+        ],
+        "counts": {
+          "footballTables": 2,
+          "compactRows": 115,
+          "legacyLeagues": 0,
+          "legacyRows": 0,
+          "prematchRows": 3
+        },
+        "matches": [
+          {
+            "matchId": "134003685",
+            "shape": "COMPACT",
+            "controls": [
+              {
+                "label": "2",
+                "tag": "a",
+                "classes": [
+                  "c-btn",
+                  "c-btn--more",
+                  "c-is-close"
+                ],
+                "selected": false,
+                "expanded": null,
+                "visible": true
+              }
+            ]
+          },
+          {
+            "matchId": "134003749",
+            "shape": "COMPACT",
+            "controls": [
+              {
+                "label": "2",
+                "tag": "a",
+                "classes": [
+                  "c-btn",
+                  "c-btn--more",
+                  "c-is-close"
+                ],
+                "selected": false,
+                "expanded": null,
+                "visible": true
+              }
+            ]
+          },
+          {
+            "matchId": "134019593",
+            "shape": "COMPACT",
+            "controls": []
+          }
+        ],
+        "scroll": [
+          {
+            "tag": "html",
+            "classes": [],
+            "clientHeight": 948,
+            "scrollHeight": 24766,
+            "scrollTop": 0
+          }
+        ],
+        "truncated": false
+      }
+    }
+  }
+}

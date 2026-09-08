@@ -1,7 +1,15 @@
 import type { ChromeBridgeEnvelope, ChromeBridgeHttpMethod, ChromeLobbyId } from "@tool-chenh/contracts";
-import { splitUtf8Text } from "./utf8-length.js";
+import { splitUtf8Text, utf8ByteLength } from "./utf8-length.js";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
 import { chunkCmdSnapshot } from "./cmd-snapshot-chunker.js";
+import { SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION } from "./saba-catalog-discovery.js";
+import { runSabaNavigationProbe, SABA_NAVIGATION_PROBE_READ_EXPRESSION,
+  type SabaProbeEvaluationFailure } from "./saba-navigation-probe.js";
+import { SabaHiddenMarketCollector, type SabaCollectorBinding,
+  type SabaCollectorPageAdapter } from "./saba-hidden-market-collector.js";
+import { createSabaHiddenMarketPageAdapter,
+  type SabaPeriodUnstableDiagnostic } from "./saba-hidden-market-page.js";
+import { SabaSchemaContextCache, type SabaSchemaContext } from "./saba-schema-context.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { TSPORT_CATALOG_SHAPE_EXPRESSION } from "./tsport-catalog-shape.js";
 import { buildTsportSelectionPriceExpression } from "./tsport-selection-price.js";
@@ -19,10 +27,18 @@ import { CmdRecoveryState, type CmdRecoveryDocument, type CmdRecoverySession } f
 import { ProviderWorkScheduler } from "./provider-work-scheduler.js";
 import { isFullKsportPartitionSnapshot,
   KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
-import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent, buildApsportPageRequestExpression,
+import { summarizeSbobetDiscovery, formatSbobetDiscovery,
+  formatSbobetDomDiscovery, SBOBET_PASSIVE_DOM_DISCOVERY_EXPRESSION } from "./sbobet-discovery.js";
+import { SbobetObserverDetailLane, type SbobetDetailReceipt } from "./sbobet-observer-detail-lane.js";
+import { extractSbobetPrematchRoster, parseSbobetDetailEvent, sbobetDetailTemplateFromObserved,
+  type SbobetDetailBinding, type SbobetDetailTemplate } from "./sbobet-detail-protocol.js";
+import type { SbobetDetailBatch, SbobetPrematchEvent } from "./sbobet-catalog-refresh.js";
+import { apsportPageResponseFromEvaluation, apsportSelectionPriceFromEvent,
+  buildApsportPageRequestExpression,
   collectApsportCatalog, collectApsportEventDetail, type ApsportCatalogBatch,
-  type ApsportCatalogPageRequest, type ApsportRequestTemplate, type CollectApsportCatalogOptions,
-  type CollectApsportEventDetailOptions } from "./apsport-catalog-refresh.js";
+  type ApsportCatalogPageRequest, type ApsportDetailStateUpdate, type ApsportRequestTemplate, type CollectApsportCatalogOptions,
+  type CollectApsportEventDetailOptions, validateApsportDetail } from "./apsport-catalog-refresh.js";
+import { ApsportDetailCoverage } from "./apsport-detail-coverage.js";
 import type { ApsportPageHealth } from "./apsport-page-recovery.js";
 import { BTI_PAGE_HEALTH_EXPRESSION, parseBtiPageHealthProbe,
   type BtiPageHealth } from "./bti-page-health.js";
@@ -74,9 +90,38 @@ const SABA_SOCKET_RECOVERY_QUERY_TIMEOUT_MS = 10_000;
 // Start the lightweight DOM renewal and socket recovery with enough margin for
 // CDP evaluation and bridge delivery instead of waiting until the book is stale.
 const SABA_SOCKET_SILENCE_RECOVERY_MS = 20_000;
+const SABA_HEALTHY_BASELINE_RECOVERY_DELAYS_MS = [40_000, 80_000, 160_000, 300_000] as const;
+const SABA_HARD_SOCKET_RECOVERY_AFTER_MS = 45_000;
+const SABA_HARD_SOCKET_RECOVERY_COOLDOWN_MS = 5 * 60_000;
+// These match the API's first/current-generation SABA DOM acceptance floors.
+// A full current-page catalog is valid fallback authority while Socket.IO is
+// rebuilt; classifying it as a dead page made the hard watchdog destroy a
+// working source every 45 seconds.
+const SABA_USABLE_DOM_FIRST_EVENTS = 50;
+const SABA_USABLE_DOM_CURRENT_EVENTS = 20;
+// A full provider DOM sweep can take close to one minute on a busy SABA page.
+// Keep the last complete sweep alive long enough for its replacement to finish,
+// otherwise the 45s watchdog repeatedly destroys a healthy tab between sweeps.
+// Match the API's measured SABA DOM evidence budget so a normal 120s sweep gap
+// does not discard an otherwise usable catalog and trigger hard recovery.
+const SABA_USABLE_DOM_LEASE_MS = 150_000;
+// A small, valid football view proves only that the current page is physically
+// responsive enough for read-only collector discovery. It is never catalog,
+// native, or coverage authority and expires before two hard-watchdog cycles.
+const SABA_RESPONSIVE_FOOTBALL_DOM_LEASE_MS = 60_000;
+const SABA_PUBLIC_DISCOVERY_INTERVAL_MS = 30_000;
+const SABA_PUBLIC_DISCOVERY_COMMAND_BUDGET_MS = 5_000;
+const SABA_NAVIGATION_PROBE_RETRY_INTERVAL_MS = 30_000;
+const SABA_PUBLIC_DISCOVERY_MAX_BYTES = 24 * 1024;
+const SABA_PUBLIC_DISCOVERY_FAILURE_CATEGORIES = ["DETACHED", "TARGET_GONE", "CONTEXT_GONE",
+  "TIMEOUT", "EVALUATION_EXCEPTION", "NO_RESULT", "UNKNOWN"] as const;
+type SabaPublicDiscoveryFailureCategory = typeof SABA_PUBLIC_DISCOVERY_FAILURE_CATEGORIES[number];
+type SabaPublicDiscoveryFailureCounts = Record<SabaPublicDiscoveryFailureCategory, number>;
 const APSPORT_PAGE_REQUEST_TIMEOUT_MS = 30_000;
 const APSPORT_DETAIL_DELAY_MS = 500;
 const APSPORT_CATALOG_REFRESH_INTERVAL_MS = 60_000;
+const APSPORT_ROSTER_COLLAPSE_FLOOR = 20;
+const APSPORT_MIN_RETAINED_ROSTER_SHARE = 0.9;
 const APSPORT_EVENT_DETAIL_DEBOUNCE_MS = 400;
 const APSPORT_EVENT_DETAIL_MIN_INTERVAL_MS = 2_000;
 const APSPORT_BOOTSTRAP_EXPRESSION = `(() => {
@@ -112,6 +157,24 @@ const SABA_SNAPSHOT_PERSIST_INTERVAL_MS = 5_000;
 const CMD_RECOVERY_MAX_ATTEMPTS = 6;
 const CMD_RECOVERY_DEADLINE_MS = 10_000;
 const CMD_RECOVERY_RETRY_MS = 500;
+
+function sabaPublicDiscoveryFailureCategory(error: unknown): SabaPublicDiscoveryFailureCategory {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  if (/debugger.+not attached|not attached.+debugger/iu.test(message)) return "DETACHED";
+  if (/cannot find context|execution context.+(?:destroyed|gone|not found)|context.+not found/iu.test(message)) {
+    return "CONTEXT_GONE";
+  }
+  if (/no target with given id|target.+(?:closed|gone|not found)|session.+(?:closed|not found)/iu.test(message)) {
+    return "TARGET_GONE";
+  }
+  if (/frame-command-timeout|timed out|timeout/iu.test(message)) return "TIMEOUT";
+  return "UNKNOWN";
+}
+
+function emptySabaPublicDiscoveryFailureCounts(): SabaPublicDiscoveryFailureCounts {
+  return Object.fromEntries(SABA_PUBLIC_DISCOVERY_FAILURE_CATEGORIES.map((category) => [category, 0])) as
+    SabaPublicDiscoveryFailureCounts;
+}
 
 function isKsportCatalogSocket(url: URL): boolean {
   return url.protocol === "wss:" && url.username === "" && url.password === "" &&
@@ -203,6 +266,7 @@ export interface NetworkObserverDependencies {
   readonly cmdRecoveryDeadlineMs?: number;
   readonly cmdRecoveryRetryMs?: number;
   readonly observerSessionId?: string;
+  readonly sabaCollectorEarlyBatchSize?: 1 | 2 | 3 | 4;
   readonly loadSabaWsSnapshots?: (sourceId: string) => Promise<unknown>;
   readonly saveSabaWsSnapshots?: (snapshots: PersistedSabaWsSnapshots) => Promise<void>;
   readonly clearSabaWsSnapshots?: (sourceId: string) => Promise<void>;
@@ -211,6 +275,8 @@ export interface NetworkObserverDependencies {
   readonly collectApsportEventDetail?: (options: CollectApsportEventDetailOptions) => Promise<Record<string, unknown> | null>;
   readonly onApsportPageHealth?: (health: ApsportPageHealth) => void;
   readonly onApsportOrphanSocket?: (source: ObservedSource) => void | Promise<void>;
+  readonly onSabaSocketUnavailable?: (source: ObservedSource,
+    reason?: "UNSAFE_VIEW") => void | Promise<void>;
   readonly onBtiPageHealth?: (health: BtiPageHealth) => void;
 }
 
@@ -254,6 +320,23 @@ interface PendingRequest {
   readonly streamId?: string;
   readonly providerFunctionCode?: number;
   readonly reconcileCutoffSequence?: number;
+  readonly sbobetDiscovery?: { readonly httpStatus: number; readonly bridgeGeneration: number;
+    readonly diagnosticOnly: boolean };
+  readonly sbobetDetailHeaders?: Readonly<Record<string, string>>;
+}
+
+interface SbobetObserverDetailState {
+  readonly source: ObservedSource;
+  readonly lane: SbobetObserverDetailLane;
+  generation: string | null;
+  sourceGeneration: number;
+  tabGeneration: number;
+  bridgeGeneration: number;
+  template: SbobetDetailTemplate | null;
+  committedOrdinal: number;
+  pendingRoster: { readonly ordinal: number; readonly streamId: string; readonly cutoff: number;
+    readonly parts: Map<KsportProviderPartition, { readonly ids: ReadonlySet<string>;
+      readonly events: readonly SbobetPrematchEvent[] }> } | null;
 }
 
 interface ReplayableHttpSnapshot {
@@ -389,6 +472,7 @@ export interface PersistedSabaWsSnapshots {
   readonly version: 1;
   readonly sourceId: string;
   readonly documentMarker: string;
+  readonly schemaContexts?: readonly SabaSchemaContext[];
   readonly partitions: ReadonlyArray<{ readonly partition: string;
     readonly frames: ReadonlyArray<Omit<ReplayableWsEvent, "source">> }>;
 }
@@ -848,11 +932,16 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
       }));
     });
     const common = {
-      SportId: 1, BetTypeIds: [1, 2, 3, 5], GamePeriods: [1, 2, 3], IsCombo: false,
+      // Public Sunflower football contract (bundle v91938): include every
+      // football family whose selections must either be normalized or
+      // explicitly accounted for. Keeping the non-binary groups is deliberate:
+      // the API inventory must prove why each native market was not compared.
+      SportId: 1, BetTypeIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313], GamePeriods: [1, 2, 3], IsCombo: false,
       ['O' + 'ddsType']: 2, DateFrom: dateFrom, CompetitionIds: [],
       SortType: 2, ProgrammeIds: []
     };
     const path = '/api/EventV6/GetSE';
+    const detailPath = '/api/EventV6/GetMEI';
     // A fresh operator URL must override same-origin sessionStorage. Navigating
     // an existing IM tab preserves sessionStorage, so a failed prior recovery
     // can otherwise keep signing every GetSE with the old token even after the
@@ -860,37 +949,98 @@ export const IM_CATALOG_DISCOVERY_EXPRESSION = `(async () => {
     const token = new URLSearchParams(location.search).get('to' + 'ken') ||
       sessionStorage.getItem('to' + 'ken');
     if (!token) return { status: 'token-unavailable', responses: [] };
-    const compactBody = (body) => {
-      let parsed;
-      try { parsed = JSON.parse(body); } catch { return body; }
-      if (!parsed || parsed.StatusCode !== 100 || !Array.isArray(parsed.sel)) return body;
+    const compactBody = (parsed, fallback) => {
+      if (!parsed || parsed.StatusCode !== 100 || !Array.isArray(parsed.sel)) return fallback;
       const selections = (items) => Array.isArray(items) ? items.map((item) => ({
         wsi: item?.wsi, si: item?.si, hdp: item?.hdp, dih: item?.dih, o: item?.o
       })) : items;
       const markets = (items) => Array.isArray(items) ? items
-        .filter((item) => item && (Number(item.bti) === 1 || Number(item.bti) === 2) &&
-          (Number(item.gp) === 1 || Number(item.gp) === 2 || Number(item.gp) === 3))
-        .map((item) => ({ mi: item.mi, bti: item.bti, gp: item.gp, ws: selections(item.ws) })) : items;
+        .map((item) => ({ mi: item?.mi, bti: item?.bti, gp: item?.gp, ws: selections(item?.ws) })) : items;
       return JSON.stringify({ StatusCode: parsed.StatusCode, sel: parsed.sel.map((item) => ({
         eid: item?.eid, edt: item?.edt, htn: item?.htn, atn: item?.atn, cn: item?.cn,
         isrbt: item?.isrbt, iscyb: item?.iscyb, hs: item?.hs, as: item?.as, rbt: item?.rbt,
         mls: markets(item?.mls)
       })) });
     };
-    const responses = await Promise.all([1, 2].map(async (Market) => {
-      const signature = String(await sign(path));
-      const response = await fetch(path, {
+    const request = async (requestPath, body) => {
+      const signature = String(await sign(requestPath));
+      const response = await fetch(requestPath, {
         method: 'POST', credentials: 'omit', cache: 'no-store', signal: controller.signal,
         headers: {
           Accept: 'application/json', 'Content-Type': 'application/json; charset=utf-8',
-          'x-sc': encodeURI(signature), 'x-v': '91460',
+          'x-fieldline-catalog-probe': 'compact-v1',
+          'x-sc': encodeURI(signature), 'x-v': '91938',
           'x-platform': String(window.global?.PlatForm || ''),
           ['x-' + 'token']: token
         },
-        body: JSON.stringify({ ...common, Market })
+        body: JSON.stringify(body)
       });
-      return { market: Market, body: compactBody(await response.text()) };
+      const text = await response.text();
+      try { return { text, parsed: JSON.parse(text) }; }
+      catch { return { text, parsed: null }; }
+    };
+    const catalogs = await Promise.all([1, 2].map(async (Market) => {
+      const result = await request(path, { ...common, Market });
+      return { market: Market, ...result };
     }));
+    // GetSE is the fast board feed; GetMEI is the page's own event-detail API.
+    // Sweep only prematch events, ten at a time (the provider's UI batch size),
+    // and keep the last detail for every still-listed event between sweeps.
+    const prematchEvents = [];
+    const seenEvents = new Set();
+    for (const catalog of catalogs) {
+      if (!catalog.parsed || catalog.parsed.StatusCode !== 100 || !Array.isArray(catalog.parsed.sel)) continue;
+      for (const event of catalog.parsed.sel) {
+        const eventId = event?.eid;
+        const key = String(eventId ?? '');
+        if (event?.isrbt === false && key && key !== 'undefined' && !seenEvents.has(key)) {
+          seenEvents.add(key);
+          prematchEvents.push({ key, eventId });
+        }
+      }
+    }
+    const detailCacheKey = '__fieldlineImPrematchDetailCacheV1';
+    const detailCursorKey = '__fieldlineImPrematchDetailCursorV1';
+    const detailCache = window[detailCacheKey] && typeof window[detailCacheKey] === 'object'
+      ? window[detailCacheKey] : {};
+    window[detailCacheKey] = detailCache;
+    for (const key of Object.keys(detailCache)) if (!seenEvents.has(key)) delete detailCache[key];
+    if (prematchEvents.length > 0) {
+      const start = Number.isSafeInteger(window[detailCursorKey])
+        ? Math.max(0, Number(window[detailCursorKey])) % prematchEvents.length : 0;
+      const size = Math.min(10, prematchEvents.length);
+      const batch = Array.from({ length: size }, (_, offset) => prematchEvents[(start + offset) % prematchEvents.length]);
+      window[detailCursorKey] = (start + size) % prematchEvents.length;
+      try {
+        const detail = await request(detailPath, {
+          ot: 2,
+          eis: batch.map((event) => ({ ei: event.eventId, gp: common.GamePeriods, bti: common.BetTypeIds })),
+          sl: [1], s: 0
+        });
+        if (detail.parsed?.StatusCode === 100 && Array.isArray(detail.parsed.mei)) {
+          // A successful response that omits an event means the detail market
+          // has closed. Replace, never append, so stale hidden markets disappear.
+          for (const event of batch) detailCache[event.key] = [];
+          for (const event of detail.parsed.mei) {
+            const key = String(event?.eid ?? event?.ei ?? '');
+            if (seenEvents.has(key) && Array.isArray(event?.mls)) detailCache[key] = event.mls;
+          }
+        }
+      } catch { /* Keep the last complete detail while this bounded request retries on the next sweep. */ }
+    }
+    for (const catalog of catalogs) {
+      if (!catalog.parsed || catalog.parsed.StatusCode !== 100 || !Array.isArray(catalog.parsed.sel)) continue;
+      for (const event of catalog.parsed.sel) {
+        const hidden = detailCache[String(event?.eid ?? '')];
+        if (!Array.isArray(hidden)) continue;
+        const merged = new Map();
+        for (const market of Array.isArray(event?.mls) ? event.mls : []) merged.set(String(market?.mi), market);
+        for (const market of hidden) merged.set(String(market?.mi), market);
+        event.mls = [...merged.values()];
+      }
+    }
+    const responses = catalogs.map((catalog) => ({ market: catalog.market,
+      body: compactBody(catalog.parsed, catalog.text) }));
     return { status: 'catalog-requested', responses };
     } catch (error) {
       if (controller.signal.aborted) return { status: 'request-timeout', responses: [] };
@@ -933,551 +1083,17 @@ export const CMD_FULL_BASELINE_EXPRESSION = `(() => {
 // BTI's event-list is a same-origin authenticated GET. Trigger the same
 // read-only request from the attached tab so Chrome's network observer receives
 // a genuinely current response instead of replaying old odds as fresh data.
-export const BTI_CATALOG_REFRESH_EXPRESSION = `(async () => {
-  const root = document.documentElement;
-  const now = Date.now();
-  const prior = Number(root.dataset.fieldlineBtiCatalogRefreshAt || 0);
-  if (Number.isFinite(prior) && now - prior < 1800) return 'rate-limited';
-  if (!location.pathname || !location.hostname) return 'page-unavailable';
-  root.dataset.fieldlineBtiCatalogRefreshAt = String(now);
-  const rosterWorkerKey = '__fieldlineBtiRosterWorkerV9';
-  const detailBodiesKey = '__fieldlineBtiDetailBodiesV8';
-  const existingRosterWorker = root[rosterWorkerKey];
-  if (existingRosterWorker && existingRosterWorker.result &&
-    now - Number(existingRosterWorker.completedAt || 0) <= 12000) {
-    return existingRosterWorker.result;
-  }
-  if (existingRosterWorker && existingRosterWorker.promise && !existingRosterWorker.result) {
-    return await existingRosterWorker.promise;
-  }
-  const generation = 'bti:' + now + ':' + Math.floor(Math.random() * 1000000000);
-  const rosterWorker = { generation, completedAt: 0, result: null, promise: null,
-    coverage: { phase: 'INITIAL', liveLeagues: 0, prematchLeagues: 0,
-      liveBatches: 0, prematchBatches: 0, liveDone: 0, prematchDone: 0, failed: 0,
-      events: 0, namedEvents: 0, timedEvents: 0, marketEvents: 0, validEvents: 0,
-      detailCachedEvents: 0, detailCachedBytes: 0, detailPendingEvents: 0 } };
-  const publishCoverage = () => {
-    root.dataset.fieldlineBtiRosterCoverage = JSON.stringify(rosterWorker.coverage);
-  };
-  publishCoverage();
-  root[rosterWorkerKey] = rosterWorker;
-  rosterWorker.promise = (async () => {
-  const authName = ['author', 'ization'].join('');
-  const contextName = ['service', '-', 'context'].join('');
-  const authValue = localStorage.getItem(['CT_APP_', 'AUTH', 'ORIZATION'].join(''));
-  const contextValue = localStorage.getItem(['CT_APP_', 'SERVICE', '_CONTEXT'].join(''));
-  const listHeaders = { Accept: 'application/json', 'X-Fieldline-Generation': generation };
-  if (authValue) listHeaders[authName] = authValue;
-  if (contextValue) listHeaders[contextName] = contextValue;
-  const listBase = '/api/eventlist/asia/leagues/v2/1/';
-  const fetchList = async (path) => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const controller = new AbortController();
-      let timeoutId;
-      const request = (async () => {
-        const response = await fetch(path, { method: 'GET', credentials: 'include', cache: 'no-store',
-          headers: listHeaders, signal: controller.signal });
-        if (!response || !response.ok) return null;
-        const body = typeof response.text === 'function'
-          ? await response.text()
-          : JSON.stringify(await response.json());
-        return { path, body, payload: JSON.parse(body) };
-      })().catch(() => null);
-      const timeout = new Promise((resolve) => { timeoutId = setTimeout(() => {
-        controller.abort();
-        resolve(null);
-      }, 5000); });
-      const result = await Promise.race([request, timeout]);
-      clearTimeout(timeoutId);
-      if (result) return result;
-    }
-    return null;
-  };
-  const regionCandidate = globalThis.APP_USER_DATA?.countryCode ||
-    globalThis.APP_USER_DATA?.userSettings?.countryCode;
-  const regionCode = typeof regionCandidate === 'string' && /^[A-Za-z]{2}$/u.test(regionCandidate)
-    ? regionCandidate.toUpperCase() : 'VN';
-  const initialPlans = ['live', 'prematch'].map((partition) => ({
-    partition,
-    canonicalPath: listBase + partition,
-    initialCanonicalPath: listBase + partition + '/initial',
-    requestPath: listBase + partition + '/initial?regionCode=' +
-      encodeURIComponent(regionCode) + '&leagueIds=01'
-  }));
-  const hydratePartition = async (plan) => {
-    const initial = await fetchList(plan.requestPath);
-    if (!initial || !Array.isArray(initial.payload?.serializedData)) {
-      rosterWorker.coverage.failed += 1;
-      rosterWorker.coverage.phase = 'FAILED';
-      publishCoverage();
-      return null;
-    }
-    const leagueIds = [];
-    const seenLeagueIds = new Set();
-    for (const league of initial.payload.serializedData) {
-      const candidate = Array.isArray(league) ? league[0] : null;
-      const leagueId = typeof candidate === 'string' || typeof candidate === 'number'
-        ? String(candidate) : '';
-      if (!leagueId || !/^[A-Za-z0-9_-]+$/u.test(leagueId) || seenLeagueIds.has(leagueId)) continue;
-      seenLeagueIds.add(leagueId);
-      leagueIds.push(leagueId);
-    }
-    const batches = [];
-    for (let index = 0; index < leagueIds.length; index += 10) {
-      batches.push(leagueIds.slice(index, index + 10));
-    }
-    rosterWorker.coverage[plan.partition + 'Leagues'] = leagueIds.length;
-    rosterWorker.coverage[plan.partition + 'Batches'] = batches.length;
-    rosterWorker.coverage.phase = 'HYDRATING';
-    publishCoverage();
-    const pages = new Array(batches.length);
-    let nextBatch = 0;
-    let failed = false;
-    const worker = async () => {
-      while (!failed) {
-        const index = nextBatch;
-        nextBatch += 1;
-        if (index >= batches.length) return;
-        const page = await fetchList(plan.canonicalPath + '?leagueIds=' + batches[index].join(','));
-        if (!page || !Array.isArray(page.payload?.serializedData)) {
-          failed = true;
-          rosterWorker.coverage.failed += 1;
-          rosterWorker.coverage.phase = 'FAILED';
-          publishCoverage();
-          return;
-        }
-        pages[index] = page;
-        rosterWorker.coverage[plan.partition + 'Done'] += 1;
-        publishCoverage();
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(8, batches.length) }, () => worker()));
-    if (failed || pages.some((page) => !page)) return null;
-    const merged = new Map();
-    const anonymous = [];
-    const rowRichness = (value) => {
-      try { return JSON.stringify(value).length; } catch { return Array.isArray(value) ? value.length : 0; }
-    };
-    const addLeagues = (payload) => {
-      for (const league of payload.serializedData) {
-        if (!Array.isArray(league)) continue;
-        const candidate = league[0];
-        const leagueId = typeof candidate === 'string' || typeof candidate === 'number'
-          ? String(candidate) : '';
-        if (!leagueId) {
-          anonymous.push(league);
-          continue;
-        }
-        const existing = merged.get(leagueId);
-        if (!Array.isArray(existing)) {
-          merged.set(leagueId, league);
-          continue;
-        }
-        const events = new Map();
-        const eventRows = [];
-        const addEvents = (source) => {
-          for (const event of Array.isArray(source?.[12]) ? source[12] : []) {
-            if (!Array.isArray(event)) continue;
-            const rawId = event[0];
-            const eventId = typeof rawId === 'string' || typeof rawId === 'number' ? String(rawId) : '';
-            if (!eventId) {
-              eventRows.push(event);
-              continue;
-            }
-            const retained = events.get(eventId);
-            if (!retained || rowRichness(event) > rowRichness(retained)) events.set(eventId, event);
-          }
-        };
-        addEvents(existing);
-        addEvents(league);
-        const richerLeague = rowRichness(league) > rowRichness(existing) ? league : existing;
-        const combined = [...richerLeague];
-        combined[12] = [...events.values(), ...eventRows];
-        merged.set(leagueId, combined);
-      }
-    };
-    addLeagues(initial.payload);
-    for (const page of pages) addLeagues(page.payload);
-    // The initial roster advertises hundreds of empty league shells. Returning
-    // those shells (and the provider's unrelated top-level metadata) through
-    // Runtime.evaluate can exceed CDP's by-value result limit, even though the
-    // actual event catalog is much smaller. The adapter only consumes league
-    // rows that own events, so keep every event-bearing row and discard only
-    // provably empty shells from the direct recovery envelope.
-    const populatedLeagues = [...merged.values(), ...anonymous].filter((league) =>
-      Array.isArray(league?.[12]) && league[12].length > 0);
-    const payload = { serializedData: populatedLeagues };
-    const body = JSON.stringify(payload);
-    return {
-      payload,
-      responses: plan.partition === 'live'
-        ? [{ path: plan.canonicalPath, body },
-          { path: plan.initialCanonicalPath, body: '{"serializedData":[]}' }]
-        : [{ path: plan.initialCanonicalPath, body }]
-    };
-  };
-  const partitions = await Promise.all(initialPlans.map(hydratePartition));
-  const listResponses = partitions.filter(Boolean).flatMap((partition) => partition.responses);
-  const eventIds = [];
-  const seen = new Set();
-  for (const entry of partitions) {
-    const payload = entry?.payload;
-    const leagues = Array.isArray(payload?.serializedData) ? payload.serializedData : [];
-    for (const league of leagues) {
-      const events = Array.isArray(league?.[12]) ? league[12] : [];
-      for (const event of events) {
-        const id = typeof event?.[0] === 'string' || typeof event?.[0] === 'number'
-          ? String(event[0]) : '';
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        eventIds.push(id);
-        const participants = Array.isArray(event?.[1]) ? event[1] : [];
-        const names = participants.slice(0, 2).map((participant) => {
-          const localized = Array.isArray(participant) && participant[1] &&
-            typeof participant[1] === 'object' ? participant[1] : {};
-          const fallback = Object.values(localized).find((value) =>
-            typeof value === 'string' && value.trim().length > 0);
-          return String(localized.VI || localized.EN || localized.VN || fallback ||
-            (Array.isArray(participant) ? participant[2] : '') || '').trim();
-        });
-        const splitNames = String(event?.[2] || '').split(/\s+(?:v(?:s\.?)?|[-\u2013\u2014])\s+/iu)
-          .map((name) => name.trim());
-        const named = (names.length === 2 && names.every(Boolean)) ||
-          (splitNames.length === 2 && splitNames.every(Boolean));
-        const timed = event?.[5] === true || (event?.[5] === false &&
-          Number.isFinite(Date.parse(String(event?.[3] || ''))));
-        const hasMarkets = Array.isArray(event?.[8]) && event[8].length > 0;
-        if (named) rosterWorker.coverage.namedEvents += 1;
-        if (timed) rosterWorker.coverage.timedEvents += 1;
-        if (hasMarkets) rosterWorker.coverage.marketEvents += 1;
-        if (named && timed) rosterWorker.coverage.validEvents += 1;
-      }
-    }
-  }
-  rosterWorker.coverage.phase = partitions.length === initialPlans.length && partitions.every(Boolean)
-    ? 'COMPLETE' : 'FAILED';
-  rosterWorker.coverage.events = eventIds.length;
-  publishCoverage();
-  let priorVisits = {};
-  try {
-    const parsed = JSON.parse(root.dataset.fieldlineBtiDetailVisits || '{}');
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) priorVisits = parsed;
-  } catch { /* A malformed page-owned dataset must not stop catalog refresh. */ }
-  const detailWorkerKey = '__fieldlineBtiDetailWorkerV9';
-  if (partitions.length === initialPlans.length && partitions.every(Boolean)) {
-    const ranked = eventIds.map((eventId, index) => {
-      const visitedAt = Number(priorVisits[eventId]);
-      return { eventId, index, visitedAt: Number.isFinite(visitedAt) && visitedAt > 0 ? visitedAt : 0 };
-    }).sort((left, right) => left.visitedAt - right.visitedAt || left.index - right.index);
-    const selected = ranked.map(({ eventId }) => eventId);
-    const nextVisits = {};
-    for (const [eventId, value] of Object.entries(priorVisits)) {
-      const visitedAt = Number(value);
-      if (Number.isFinite(visitedAt) && visitedAt > 0 && now - visitedAt <= 10 * 60 * 1000) {
-        nextVisits[eventId] = visitedAt;
-      }
-    }
-    root.dataset.fieldlineBtiDetailVisits = JSON.stringify(nextVisits);
-    const nextJob = { generation, headers: { ...listHeaders }, eventIds: selected };
-    const currentWorker = root[detailWorkerKey];
-    if (currentWorker && typeof currentWorker.update === 'function') {
-      currentWorker.update(nextJob);
-    } else {
-      // A worker from an older extension build cannot be trusted to own the
-      // complete queue. Retire only that incompatible object; current workers
-      // keep their in-flight request and adopt new generation headers.
-      if (currentWorker) delete root[detailWorkerKey];
-      const detailWorker = {
-        generation: '',
-        headers: nextJob.headers,
-        desired: new Set(),
-        queue: [],
-        activeEventIds: new Set(),
-        controllers: new Map(),
-        update(job) {
-          if (this.generation === job.generation) return;
-          this.generation = job.generation;
-          this.headers = job.headers;
-          const desired = new Set(job.eventIds);
-          this.queue = this.queue.filter((eventId) => desired.has(eventId));
-          const queued = new Set(this.queue);
-          for (const eventId of job.eventIds) {
-            if (this.activeEventIds.has(eventId) || queued.has(eventId)) continue;
-            queued.add(eventId);
-            this.queue.push(eventId);
-          }
-          this.desired = desired;
-        },
-        markVisited(eventId) {
-          let visits = {};
-          try {
-            const parsed = JSON.parse(root.dataset.fieldlineBtiDetailVisits || '{}');
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) visits = parsed;
-          } catch { /* Rebuild malformed page-owned scheduling state. */ }
-          visits[eventId] = Date.now();
-          root.dataset.fieldlineBtiDetailVisits = JSON.stringify(visits);
-        }
-      };
-      detailWorker.update(nextJob);
-      root[detailWorkerKey] = detailWorker;
-      const runDetailLane = async () => {
-        while (root[detailWorkerKey] === detailWorker && detailWorker.queue.length > 0) {
-          const eventId = detailWorker.queue.shift();
-          if (!eventId || !detailWorker.desired.has(eventId)) continue;
-          detailWorker.activeEventIds.add(eventId);
-          const headers = { ...detailWorker.headers };
-          const controller = new AbortController();
-          detailWorker.controllers.set(eventId, controller);
-          const timeoutId = setTimeout(() => controller.abort(), 3000);
-          try {
-            const response = await fetch('/api/eventpage/events/' + encodeURIComponent(eventId) +
-              '?hideX25X75Selections=false',
-            { method: 'GET', credentials: 'include', cache: 'no-store', headers,
-              signal: controller.signal });
-            let body = '';
-            if (typeof response?.text === 'function') body = await response.text();
-            else if (typeof response?.json === 'function') body = JSON.stringify(await response.json());
-            else if (typeof response?.arrayBuffer === 'function') {
-              body = new TextDecoder().decode(await response.arrayBuffer());
-            }
-            let compactBody = '';
-            try {
-              const payload = JSON.parse(body);
-              if (payload && Array.isArray(payload.data) && payload.data.length > 0) {
-                const compactLocalized = (value) => {
-                  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-                  const compact = {};
-                  for (const key of ['VI', 'EN', 'VN']) {
-                    if (typeof value[key] === 'string' && value[key].trim()) compact[key] = value[key];
-                  }
-                  if (Object.keys(compact).length === 0) {
-                    const fallback = Object.values(value).find((item) => typeof item === 'string' && item.trim());
-                    if (fallback) compact._ = fallback;
-                  }
-                  return compact;
-                };
-                const compactName = (value) => {
-                  if (typeof value === 'string') return value.trim();
-                  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
-                  for (const key of ['VI', 'EN', 'VN', '_']) {
-                    if (typeof value[key] === 'string' && value[key].trim()) return value[key].trim();
-                  }
-                  return '';
-                };
-                const participantName = (value) => Array.isArray(value)
-                  ? compactName(value[1]) || compactName(value[2]) : '';
-                const placeholderPair = (participants) => {
-                  if (!Array.isArray(participants) || participants.length < 2) return true;
-                  const normalized = participants.slice(0, 2).map((participant) => participantName(participant)
-                    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
-                    .replace(/[^a-z0-9]+/g, ' ').trim());
-                  const pair = normalized.join('|');
-                  return pair === 'home|away' || pair === 'team a|team b' ||
-                    pair === 'doi nha|doi khach' || pair === 'chu nha|doi khach';
-                };
-                const compactParticipant = (value) => {
-                  if (!Array.isArray(value)) return null;
-                  const compact = Array(3).fill(null);
-                  if (typeof value[0] === 'string' || typeof value[0] === 'number') compact[0] = value[0];
-                  const candidates = [value[1], value[2]].map((candidate) => {
-                    if (typeof candidate === 'string' && candidate.trim()) {
-                      return { name: candidate.trim(), localized: { _: candidate.trim() }, raw: candidate.trim() };
-                    }
-                    const localized = compactLocalized(candidate);
-                    return localized ? { name: compactName(localized), localized, raw: null } : null;
-                  }).filter((candidate) => candidate && candidate.name);
-                  const generic = (name) => /^(?:home|away|team [ab12]|doi nha|doi khach|chu nha)$/u.test(
-                    name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
-                      .replace(/[^a-z0-9]+/g, ' ').trim());
-                  const selected = candidates.find((candidate) => !generic(candidate.name)) || candidates[0];
-                  if (selected) {
-                    compact[1] = selected.localized;
-                    if (selected.raw) compact[2] = selected.raw;
-                  }
-                  return compact;
-                };
-                const compactSelection = (value) => {
-                  if (!Array.isArray(value)) return null;
-                  const id = typeof value[0] === 'string' ? value[0].trim() : '';
-                  const side = value[9];
-                  const line = value[16];
-                  const malay = Array.isArray(value[8]) && typeof value[8][5] === 'string'
-                    ? value[8][5].trim() : '';
-                  const quarterUnits = typeof line === 'number' && Number.isFinite(line) ? Math.abs(line) * 4 : NaN;
-                  if (!id || (side !== 1 && side !== 3) || !Number.isInteger(quarterUnits) ||
-                    quarterUnits % 4 === 0 || Math.abs(line) > 100 ||
-                    !/^-?(?:0|1)(?:[.][0-9]+)?$/u.test(malay) || Number(malay) === 0 || value[13] === true) return null;
-                  const compact = Array(17).fill(null);
-                  for (const index of [0, 5, 9, 13, 16]) compact[index] = value[index] ?? null;
-                  compact[2] = typeof value[2] === 'string' ? value[2] : compactLocalized(value[2]);
-                  const formats = Array.isArray(value[8]) ? Array(6).fill(null) : null;
-                  if (formats) formats[5] = value[8][5] ?? null;
-                  compact[8] = formats;
-                  return compact;
-                };
-                const compactMarket = (value) => {
-                  if (!Array.isArray(value)) return null;
-                  const marketType = Array.isArray(value[5]) ? value[5] : [];
-                  const code = String(marketType[0] || marketType[1] || value[1] || '').trim();
-                  const label = String(value[1] || '') + ' ' + String(marketType[1] || '');
-                  const evidence = label.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-                    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-                  const handicap = /^HC(?:39|0|1)$/u.test(code) || /\b(?:asian handicap|handicap|ah)\b/u.test(evidence);
-                  const total = /^OU(?:39|0|1|201|249)$/u.test(code) || /\b(?:total|over under|ou)\b/u.test(evidence);
-                  if (value[15] === true || value[23] === true || handicap === total ||
-                    !Array.isArray(value[13])) return null;
-                  const selections = value[13].map(compactSelection).filter(Boolean);
-                  if (selections.length < 2) return null;
-                  const compact = Array(24).fill(null);
-                  for (const index of [0, 1, 15, 23]) compact[index] = value[index] ?? null;
-                  if (Array.isArray(value[5])) compact[5] = [value[5][0] ?? null, value[5][1] ?? null];
-                  compact[13] = selections;
-                  return compact;
-                };
-                const compactEvent = (value) => {
-                  if (!Array.isArray(value)) return null;
-                  const compact = Array(34).fill(null);
-                  for (const index of [0, 2, 11, 13, 32]) compact[index] = value[index] ?? null;
-                  let participants = Array.isArray(value[8])
-                    ? value[8].slice(0, 2).map(compactParticipant).filter(Boolean) : [];
-                  for (const index of [20, 33]) {
-                    compact[index] = Array.isArray(value[index])
-                      ? value[index].map(compactMarket).filter(Boolean) : [];
-                  }
-                  if (placeholderPair(participants)) {
-                    const markets = [...compact[20], ...compact[33]];
-                    for (const market of markets) {
-                      const type = Array.isArray(market?.[5]) ? market[5] : [];
-                      const code = String(type[0] || type[1] || market?.[1] || '').trim();
-                      const label = (String(market?.[1] || '') + ' ' + String(type[1] || ''))
-                        .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
-                        .replace(/[^a-z0-9]+/g, ' ').trim();
-                      if (!(/^HC(?:39|0|1)$/u.test(code) || /\b(?:asian handicap|handicap|ah)\b/u.test(label))) continue;
-                      const selections = Array.isArray(market?.[13]) ? market[13] : [];
-                      const home = selections.find((selection) => Array.isArray(selection) && selection[9] === 1);
-                      const away = selections.find((selection) => Array.isArray(selection) && selection[9] === 3);
-                      if (!home || !away) continue;
-                      const candidate = [home, away].map((selection, index) => {
-                        const participant = Array.isArray(participants[index]) ? participants[index] : [];
-                        const hydrated = Array(3).fill(null);
-                        hydrated[0] = participant[0] ?? selection[0] ?? null;
-                        if (selection[2] && typeof selection[2] === 'object') hydrated[1] = selection[2];
-                        else if (typeof selection[2] === 'string') hydrated[2] = selection[2];
-                        return hydrated;
-                      });
-                      if (!placeholderPair(candidate) && candidate.every((participant) => participantName(participant))) {
-                        participants = candidate;
-                        break;
-                      }
-                    }
-                  }
-                  compact[8] = participants;
-                  return compact;
-                };
-                const compactEvents = payload.data.map(compactEvent).filter(Boolean);
-                if (compactEvents.length > 0) compactBody = JSON.stringify({ data: compactEvents });
-              }
-            } catch { /* Invalid or empty detail is not useful catalog evidence. */ }
-            if (response?.ok && compactBody.length > 0 && compactBody.length <= 2 * 1024 * 1024) {
-              const cached = Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
-              const path = '/api/eventpage/events/' + encodeURIComponent(eventId);
-              const existingIndex = cached.findIndex((item) => item && item.path === path);
-              if (existingIndex >= 0) cached.splice(existingIndex, 1);
-              cached.push({ path, body: compactBody });
-              let cachedBytes = cached.reduce((sum, item) => sum +
-                (item && typeof item.body === 'string' ? item.body.length : 0), 0);
-              while (cached.length > 512 || cachedBytes > 24 * 1024 * 1024) {
-                const removed = cached.shift();
-                if (removed && typeof removed.body === 'string') cachedBytes -= removed.body.length;
-              }
-              root[detailBodiesKey] = cached;
-            }
-          } catch { /* Detail enrichment must not invalidate the complete list generation. */ }
-          finally {
-            clearTimeout(timeoutId);
-            detailWorker.markVisited(eventId);
-            if (detailWorker.controllers.get(eventId) === controller) detailWorker.controllers.delete(eventId);
-            detailWorker.activeEventIds.delete(eventId);
-          }
-        }
-      };
-      detailWorker.promise = Promise.all(Array.from({ length: 3 }, () => runDetailLane())).finally(() => {
-        if (root[detailWorkerKey] === detailWorker) delete root[detailWorkerKey];
-      });
-    }
-  }
-  const detailCache = partitions.length === initialPlans.length && partitions.every(Boolean) &&
-    Array.isArray(root[detailBodiesKey]) ? root[detailBodiesKey] : [];
-  rosterWorker.coverage.detailCachedBytes = detailCache.reduce((sum, item) => sum +
-    (item && typeof item.body === 'string' ? item.body.length : 0), 0);
-  const cachedEventIds = new Set(detailCache.flatMap((item) => {
-    if (!item || typeof item.path !== 'string') return [];
-    const prefix = '/api/eventpage/events/';
-    if (!item.path.startsWith(prefix)) return [];
-    try { return [decodeURIComponent(item.path.slice(prefix.length))]; } catch { return []; }
-  }));
-  rosterWorker.coverage.detailCachedEvents = eventIds.filter((eventId) => cachedEventIds.has(eventId)).length;
-  rosterWorker.coverage.detailPendingEvents = eventIds.filter((eventId) => !cachedEventIds.has(eventId)).length;
-  publishCoverage();
-  const cachedDetails = [];
-  if (detailCache.length > 0) {
-    let batch = [];
-    let batchBytes = 0;
-    let batchIndex = 0;
-    const flushBatch = () => {
-      if (batch.length === 0) return;
-      cachedDetails.push({ path: '/api/eventpage/events/__fieldline_batch_' + batchIndex + '__',
-        body: JSON.stringify({ data: batch }) });
-      batchIndex += 1;
-      batch = [];
-      batchBytes = 0;
-    };
-    for (const item of detailCache) {
-      if (!item || typeof item.body !== 'string') continue;
-      try {
-        const payload = JSON.parse(item.body);
-        for (const event of Array.isArray(payload?.data) ? payload.data : []) {
-          const eventBytes = JSON.stringify(event).length;
-          if (batch.length > 0 && batchBytes + eventBytes > 1536 * 1024) flushBatch();
-          batch.push(event);
-          batchBytes += eventBytes;
-        }
-      } catch { /* Ignore a stale malformed page-cache entry. */ }
-    }
-    flushBatch();
-  }
-  const responses = new Map();
-  // A bridge reconnect creates a fresh API decode pipeline. Prime that pipeline
-  // with every cached event detail before the three list partitions commit the
-  // authoritative baseline, so a healthy reconnect never publishes the small
-  // roster shell and then spends a minute rebuilding visible coverage.
-  for (const item of [...cachedDetails, ...listResponses]) {
-    if (item && typeof item.path === 'string' && typeof item.body === 'string') {
-      responses.set(item.path, { url: item.path, body: item.body });
-    }
-  }
-  return {
-    status: 'catalog-requested',
-    generation,
-    origin: location.origin || ('https://' + location.hostname),
-    responses: [...responses.values()]
-  };
-  })().then((result) => {
-    rosterWorker.result = result;
-    rosterWorker.completedAt = Date.now();
-    return result;
-  }).catch(() => {
-    rosterWorker.coverage.phase = 'FAILED';
-    rosterWorker.coverage.failed += 1;
-    publishCoverage();
-    if (root[rosterWorkerKey] === rosterWorker) delete root[rosterWorkerKey];
-    return {
-      status: 'catalog-failed', generation,
-      origin: location.origin || ('https://' + location.hostname), responses: []
-    };
-  });
-  return await rosterWorker.promise;
-})()`;
+import { BTI_CATALOG_REFRESH_EXPRESSION } from "./bti-catalog-refresh.js";
+export { BTI_CATALOG_REFRESH_EXPRESSION };
+
+interface SabaCollectorPageFailure {
+  readonly operation: "READ_ROSTER" | "CAPTURE_OWNER" | "RESTORE_TODAY";
+  readonly period: "TODAY" | "EARLY";
+  readonly ownerMatchId: string | null;
+  readonly code: string;
+  readonly capturedAtMs: number;
+  readonly capturedMonotonicMs: number;
+}
 
 export class NetworkObserver {
   readonly #sendCommand: NetworkObserverDependencies["sendCommand"];
@@ -1486,6 +1102,8 @@ export class NetworkObserver {
   readonly #monotonicNow: () => number;
   readonly #recoverImBaseline: ((source: ObservedSource) => Promise<void>) | null;
   readonly #frameCommandTimeoutMs: number;
+  readonly #sabaProbeCommandTimeoutMs: number;
+  readonly #sabaCollectorEarlyBatchSize: 1 | 2 | 3 | 4;
   readonly #btiCatalogRefreshTimeoutMs: number;
   readonly #cmdRecoveryMaxAttempts: number;
   readonly #cmdRecoveryDeadlineMs: number;
@@ -1499,6 +1117,7 @@ export class NetworkObserver {
   readonly #collectApsportEventDetail: NonNullable<NetworkObserverDependencies["collectApsportEventDetail"]>;
   readonly #onApsportPageHealth: NetworkObserverDependencies["onApsportPageHealth"];
   readonly #onApsportOrphanSocket: NetworkObserverDependencies["onApsportOrphanSocket"];
+  readonly #onSabaSocketUnavailable: NetworkObserverDependencies["onSabaSocketUnavailable"];
   readonly #onBtiPageHealth: NetworkObserverDependencies["onBtiPageHealth"];
   readonly #sequences = new Map<string, number>();
   readonly #sourceGenerations = new Map<string, number>();
@@ -1521,6 +1140,10 @@ export class NetworkObserver {
   readonly #sabaBaselineMissingSinceMs = new Map<string, number>();
   readonly #sabaSilentSocketRecoveryAtMs = new Map<string, number>();
   readonly #sabaSilentSocketRecoveries = new Map<string, Promise<void>>();
+  readonly #sabaHealthyBaselineRecovery = new Map<string, { readonly sourceGeneration: number;
+    readonly admittedAttempts: number; readonly nextAtMs: number }>();
+  readonly #sabaHardSocketRecoveryAtMs = new Map<string, number>();
+  readonly #sabaHardSocketRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // The attach diagnostic is rebuilt whenever a source generation rolls, which
   // erased what the tab selector had just seen before it could be read. The
   // labels are the whole point of the report, so keep the last ones per source.
@@ -1542,6 +1165,11 @@ export class NetworkObserver {
     readonly requestFrameKey?: string; readonly requestDocumentKey?: string }>();
   #nextObserverRequestOrdinal = 0;
   readonly #pending = new Map<string, PendingRequest>();
+  // Direct IM recovery returns a compact, adapter-shaped copy through
+  // Runtime.evaluate. Ignore the matching raw CDP response; forwarding both
+  // copies used to enqueue ~20 MB before the compact baseline and expire the
+  // entire source epoch in the loopback bridge.
+  readonly #compactImRecoveryRequests = new Set<string>();
   readonly #cmdSnapshots = new Map<string, { readonly body: string; readonly sentAtMs: number;
     readonly receivedMonotonicMs: number }>();
   readonly #cmdLastBodies = new Map<string, string>();
@@ -1555,10 +1183,11 @@ export class NetworkObserver {
   readonly #apsportRequestTemplates = new Map<string, BoundApsportRequestTemplate>();
   readonly #apsportRefreshOrdinals = new Map<string, number>();
   readonly #apsportLastRefreshStartedAtMs = new Map<string, number>();
-  readonly #apsportRefreshesInFlight = new Set<string>();
+  readonly #apsportRefreshesInFlight = new Map<string, symbol>();
   readonly #apsportActiveCatalogs = new Map<string, { readonly generation: string;
     readonly prematchWindowHours: number; readonly rosterCount: number;
     readonly rosterEventIds: ReadonlySet<string>;
+    readonly hiddenDetailEventIds: ReadonlySet<string>;
     readonly rosterLeagueIds: ReadonlyMap<string, string> }>();
   readonly #apsportEventDetailTimers = new Map<string, { readonly sourceId: string;
     readonly timer: ReturnType<typeof setTimeout> }>();
@@ -1566,16 +1195,27 @@ export class NetworkObserver {
   readonly #apsportEventDetailLastAtMs = new Map<string, number>();
   readonly #apsportEventDetailTails = new Map<string, Promise<void>>();
   readonly #apsportPageRequestTails = new Map<string, Promise<void>>();
+  readonly #apsportDetailCoverage = new Map<string, ApsportDetailCoverage>();
   readonly #catalogWsSnapshots = new Map<string, Map<string, ReplayableWsEvent[]>>();
   readonly #catalogWsSnapshotUsage = new Map<string, RetainedWsUsage>();
   readonly #activeKsportStreams = new Map<string, string>();
   readonly #ksportAuthorityTransitions = new Map<string, Promise<void>>();
   readonly #sabaReadySnapshotPartitions = new Set<string>();
+  readonly #sabaSchemaContexts = new Map<string, SabaSchemaContextCache>();
+  readonly #sabaSchemaSentStreams = new Map<string, Set<string>>();
+  readonly #sabaBaselineBridgeGenerations = new Map<string, number>();
+  readonly #sabaUsableDomCatalogAtMs = new Map<string, number>();
+  readonly #sabaResponsiveFootballDomAtMs = new Map<string, number>();
   readonly #sabaSnapshotLoads = new Set<string>();
   readonly #sabaSnapshotStorageTails = new Map<string, Promise<void>>();
   readonly #sabaSnapshotSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #sabaSnapshotLastSavedAtMs = new Map<string, number>();
   readonly #sabaDocumentMarkers = new Map<string, string>();
+  // CDP dispatches debugger events synchronously, but processing a SABA frame
+  // can await its document marker. Without a per-source tail, the next frame
+  // can overtake it and reach the API first, manufacturing provider revision
+  // gaps from an otherwise healthy Socket.IO stream.
+  readonly #sabaWebSocketEventTails = new Map<string, Promise<void>>();
   readonly #cmdCapturesInFlight = new Map<string, { readonly token: symbol;
     readonly operation: Promise<void>; readonly startedAtMs: number }>();
   readonly #imLastRecoveryAtMs = new Map<string, number>();
@@ -1584,6 +1224,32 @@ export class NetworkObserver {
   readonly #cmdRecoveries = new Map<string, ActiveCmdRecovery>();
   readonly #cmdRecoveryRequests = new Map<string, symbol>();
   readonly #sabaDomPolls = new Map<string, Promise<void>>();
+  readonly #sabaPublicDiscoveryAtMs = new Map<string, number>();
+  readonly #sabaPublicDiscoveries = new Map<string, { readonly token: symbol;
+    readonly operation: Promise<void> }>();
+  readonly #sabaNavigationProbeAttempts = new Set<string>();
+  readonly #sabaNavigationProbeTasks = new Map<string, { readonly token: symbol;
+    readonly operation: Promise<void> }>();
+  readonly #sabaNavigationProbeCompletedAtMs = new Map<string, number>();
+  readonly #sabaProbePublicationBlocks = new Set<string>();
+  readonly #sabaProbePublicationVersions = new Map<string, number>();
+  readonly #sabaCollectorDomBlocks = new Set<string>();
+  readonly #sabaCollectors = new Map<string, {
+    readonly binding: SabaCollectorBinding;
+    readonly sourceGeneration: number;
+    readonly tabGeneration: number;
+    readonly hostname: string;
+    readonly target: { readonly contextId?: number; readonly sessionId?: string };
+    readonly collector: SabaHiddenMarketCollector;
+    readonly adapter: SabaCollectorPageAdapter;
+    readonly lastErrorCode: () => string | null;
+    readonly takePageFailure: () => SabaCollectorPageFailure | null;
+    readonly takePeriodFailure: () => SabaPeriodUnstableDiagnostic | null;
+    inFlight: boolean;
+    restorePending: boolean;
+    finished: boolean;
+    publicMarketSampleKinds: Set<string>;
+  }>();
   readonly #sabaDomObserversCleaned = new Set<string>();
   readonly #ksportMaintenances = new Map<string, Promise<void>>();
   readonly #ksportBaselineChecks = new Map<string, Promise<boolean>>();
@@ -1624,6 +1290,14 @@ export class NetworkObserver {
   readonly #sbobetEventRequests = new Map<string, { readonly url: string;
     readonly headers: Readonly<Record<string, string>>; readonly method: "GET" | "POST";
     readonly hasPostData: boolean }>();
+  readonly #sbobetDiscoveryRequests = new Map<string, { readonly sourceId: string; readonly url: string;
+    readonly bridgeGeneration: number; readonly sourceGeneration: number; readonly tabGeneration: number;
+    readonly detailHeaders?: Readonly<Record<string, string>> }>();
+  readonly #sbobetDetailStates = new Map<string, SbobetObserverDetailState>();
+  readonly #sbobetDiscoveryShapes = new Map<string, Map<string, string>>();
+  readonly #sbobetDiscoveryBudgets = new Map<string, { readonly startedAtMs: number; admitted: number }>();
+  readonly #sbobetDiscoveryDomAtMs = new Map<string, number>();
+  readonly #sbobetDiscoveryDomWork = new Map<string, Promise<void>>();
   readonly #activeCmdHiddenProbes = new Map<string, ActiveCmdHiddenProbe>();
 
   constructor(dependencies: NetworkObserverDependencies) {
@@ -1633,6 +1307,9 @@ export class NetworkObserver {
     this.#monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     this.#recoverImBaseline = dependencies.recoverImBaseline ?? null;
     this.#frameCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 2_500;
+    // More navigation can span rendering work; ordinary captures keep their fast timeout.
+    this.#sabaProbeCommandTimeoutMs = dependencies.frameCommandTimeoutMs ?? 10_000;
+    this.#sabaCollectorEarlyBatchSize = dependencies.sabaCollectorEarlyBatchSize ?? 4;
     this.#btiCatalogRefreshTimeoutMs = dependencies.btiCatalogRefreshTimeoutMs ?? 60_000;
     this.#cmdRecoveryMaxAttempts = dependencies.cmdRecoveryMaxAttempts ?? CMD_RECOVERY_MAX_ATTEMPTS;
     this.#cmdRecoveryDeadlineMs = dependencies.cmdRecoveryDeadlineMs ?? CMD_RECOVERY_DEADLINE_MS;
@@ -1652,6 +1329,7 @@ export class NetworkObserver {
     this.#collectApsportEventDetail = dependencies.collectApsportEventDetail ?? collectApsportEventDetail;
     this.#onApsportPageHealth = dependencies.onApsportPageHealth;
     this.#onApsportOrphanSocket = dependencies.onApsportOrphanSocket;
+    this.#onSabaSocketUnavailable = dependencies.onSabaSocketUnavailable;
     this.#onBtiPageHealth = dependencies.onBtiPageHealth;
     if (!/^[a-z0-9._:-]{1,96}$/iu.test(this.#observerSessionId)) {
       throw new Error("OBSERVER_SESSION_ID_INVALID");
@@ -1818,10 +1496,35 @@ export class NetworkObserver {
       } catch { continue; }
       const partitionPrefix = `${sourceId}|${socket.streamId}:`;
       for (const readyKey of this.#sabaReadySnapshotPartitions) {
-        if (readyKey.startsWith(partitionPrefix)) return true;
+        if (readyKey.startsWith(partitionPrefix) &&
+          this.#sabaBaselineBridgeGenerations.get(readyKey) === this.#captureBridgeGeneration(sourceId) &&
+          this.#sabaSchemaContexts.get(sourceId)?.hasBridgeContext(readyKey.slice(partitionPrefix.length))) return true;
       }
     }
     return false;
+  }
+
+  hasUsableSabaCatalog(sourceId: string): boolean {
+    if (this.hasCompleteSabaBaseline(sourceId)) return true;
+    const capturedAtMs = this.#sabaUsableDomCatalogAtMs.get(sourceId);
+    return capturedAtMs !== undefined && this.#now() - capturedAtMs <= SABA_USABLE_DOM_LEASE_MS;
+  }
+
+  hasResponsiveSabaDocument(sourceId: string): boolean {
+    return this.hasUsableSabaCatalog(sourceId) || this.#hasFreshSabaFootballDomReceipt(sourceId);
+  }
+
+  #sabaRefreshControlsBlocked(sourceId: string): boolean {
+    return this.#sabaProbePublicationBlocks.has(sourceId) ||
+      this.#sabaCollectorDomBlocks.has(sourceId) ||
+      this.#sabaCollectors.get(sourceId)?.finished === false;
+  }
+
+  #hasFreshSabaFootballDomReceipt(sourceId: string): boolean {
+    const capturedAtMs = this.#sabaResponsiveFootballDomAtMs.get(sourceId);
+    if (capturedAtMs === undefined) return false;
+    const ageMs = this.#now() - capturedAtMs;
+    return ageMs >= 0 && ageMs <= SABA_RESPONSIVE_FOOTBALL_DOM_LEASE_MS;
   }
 
   async ensureCompleteKsportBaseline(source: ObservedSource): Promise<boolean> {
@@ -1939,7 +1642,9 @@ export class NetworkObserver {
     } catch { /* A malformed shape is diagnostic-only and cannot trigger recovery. */ }
   }
 
-  async #selectTimeTab(source: ObservedSource, expression: string): Promise<boolean> {
+  async #selectTimeTab(source: ObservedSource, expression: string,
+    isCurrent: () => boolean = () => true): Promise<boolean> {
+    if (!isCurrent()) return false;
     this.#armKsportNativeHttpCapture(source);
     const diagnostic = this.#wsAttachDiagnostic(source);
     diagnostic.baselineTabSelections += 1;
@@ -1969,11 +1674,13 @@ export class NetworkObserver {
     }
     diagnostic.baselineTabTargets = targets.length;
     for (const target of targets) {
+      if (!isCurrent()) return false;
       const params = { expression, ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
         returnByValue: true, awaitPromise: false };
       const evaluation = await this.#withFrameCommandTimeout(target.sessionId === undefined
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId)).catch(() => null);
+      if (!isCurrent()) return false;
       const status = nestedValue(evaluation, "result", "value", "status");
       const step = nestedValue(evaluation, "result", "value", "step");
       if (typeof step === "string") diagnostic.baselineTabStep = step;
@@ -2037,6 +1744,12 @@ export class NetworkObserver {
   }
 
   async start(source: ObservedSource): Promise<void> {
+    if (source.lobby === "SABA") {
+      // Attach itself can hang on a crashed renderer. Arm the watchdog before
+      // issuing the first debugger command so recovery never depends on a
+      // successful attach or DOM poll.
+      this.#scheduleSabaHardSocketRecovery(source, 0, this.#now());
+    }
     if (this.#startedTabs.has(source.tabId)) return;
     if (source.lobby === "KSPORT" || source.lobby === "TSPORT" ||
       source.lobby === "SABA") this.#wsAttachDiagnostic(source);
@@ -2062,7 +1775,11 @@ export class NetworkObserver {
     }));
     await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Target.setAutoAttach", {
       autoAttach: true,
-      waitForDebuggerOnStart: source.lobby === "SABA",
+      // KSPORT creates its catalog WebSocket in a dedicated worker almost
+      // immediately after navigation. Letting that worker run before its
+      // child session has Network enabled loses webSocketCreated forever and
+      // leaves every later frame orphaned.
+      waitForDebuggerOnStart: source.lobby === "SABA" || source.lobby === "KSPORT",
       flatten: true
     }));
     await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Network.enable", {
@@ -2127,12 +1844,19 @@ export class NetworkObserver {
     const discovered = await this.#withFrameCommandTimeout(
       this.#sendCommand(source.tabId, "Target.getTargets")
     ).catch(() => ({}));
-    const workerTargets = isRecord(discovered) && Array.isArray(discovered.targetInfos)
-      ? discovered.targetInfos.filter((info) => isRecord(info) && typeof info.targetId === "string" &&
-          typeof info.type === "string" && typeof info.url === "string" &&
-          (info.type === "worker" || info.type === "shared_worker") &&
-          isSabaChildTargetUrl(info.url, info.type))
-      : [];
+    const discoveredTargets = isRecord(discovered) && Array.isArray(discovered.targetInfos)
+      ? discovered.targetInfos : [];
+    const workerTargetsInTab = discoveredTargets.filter((info) => isRecord(info) &&
+      typeof info.targetId === "string" && typeof info.type === "string" && typeof info.url === "string" &&
+      (info.type === "worker" || info.type === "shared_worker"));
+    const trustedWorkerTargets = workerTargetsInTab.filter((info) => isRecord(info) &&
+      isSabaChildTargetUrl(String(info.url), String(info.type)));
+    // Target.getTargets is issued through this exact tab's debugger session.
+    // SABA sometimes exposes its sole socket worker with an empty/opaque URL,
+    // so adopt that singleton. With multiple workers, fail closed unless the
+    // provider-owned URL identifies the worker unambiguously.
+    const workerTargets = trustedWorkerTargets.length > 0 ? trustedWorkerTargets
+      : workerTargetsInTab.length === 1 ? workerTargetsInTab : [];
     const targets = this.#sabaAttachedTargetSessions.get(source.sourceId);
     let terminated = 0;
     const closedTargetIds = new Set<string>();
@@ -2193,9 +1917,11 @@ export class NetworkObserver {
       if (key.startsWith(`${sourceId}\u0000`)) this.#apsportEventDetailJobs.delete(key);
     }
     this.#apsportEventDetailTails.delete(sourceId);
+    this.#apsportDetailCoverage.get(sourceId)?.reset();
   }
 
   beginSourceEpoch(sourceId: string): string {
+    this.#clearSbobetDetail(sourceId);
     this.#retireCmdRecovery(sourceId, "DOCUMENT_CHANGED");
     const priorGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
     this.#publicSourceEpochOrdinal(sourceId, priorGeneration);
@@ -2226,12 +1952,25 @@ export class NetworkObserver {
     this.#socketBaselineRecoveryAtMs.delete(sourceId);
     this.#socketBaselineRecoveries.delete(sourceId);
     this.#sabaDomBootstrapAtMs.delete(sourceId);
+    this.#sabaUsableDomCatalogAtMs.delete(sourceId);
+    this.#sabaResponsiveFootballDomAtMs.delete(sourceId);
     this.#sabaTodayBootstrapSelected.delete(sourceId);
     this.#sabaCatalogFrameAtMs.delete(sourceId);
     this.#sabaBaselineMissingSinceMs.delete(sourceId);
     this.#sabaSilentSocketRecoveryAtMs.delete(sourceId);
     this.#sabaSilentSocketRecoveries.delete(sourceId);
+    this.#sabaHealthyBaselineRecovery.delete(sourceId);
+    this.#clearSabaHardSocketRecoveryTimer(sourceId);
     this.#sabaDomObserversCleaned.delete(sourceId);
+    this.#sabaPublicDiscoveryAtMs.delete(sourceId);
+    this.#sabaPublicDiscoveries.delete(sourceId);
+    this.#sabaNavigationProbeAttempts.delete(sourceId);
+    this.#sabaNavigationProbeTasks.delete(sourceId);
+    this.#sabaNavigationProbeCompletedAtMs.delete(sourceId);
+    this.#sabaProbePublicationBlocks.delete(sourceId);
+    this.#sabaProbePublicationVersions.delete(sourceId);
+    this.#sabaCollectorDomBlocks.delete(sourceId);
+    this.#sabaCollectors.delete(sourceId);
     for (const key of this.#sabaReadySnapshotPartitions) {
       if (key.startsWith(`${sourceId}|`)) this.#sabaReadySnapshotPartitions.delete(key);
     }
@@ -2241,7 +1980,10 @@ export class NetworkObserver {
     this.#sabaSnapshotSaveTimers.delete(sourceId);
     this.#sabaSnapshotLastSavedAtMs.delete(sourceId);
     this.#sabaDocumentMarkers.delete(sourceId);
+    this.#sabaSchemaContexts.delete(sourceId);
+    this.#sabaSchemaSentStreams.delete(sourceId);
     this.#sbobetEventRequests.delete(sourceId);
+    this.#clearSbobetDiscovery(sourceId);
     this.#observedChildSessions.delete(sourceId);
     this.#ksportAttachedTargetSessions.delete(sourceId);
     this.#sabaAttachedTargetSessions.delete(sourceId);
@@ -2299,6 +2041,9 @@ export class NetworkObserver {
       for (const key of this.#requestIdentities.keys()) {
         if (key.startsWith(`${tabId}:`)) this.#requestIdentities.delete(key);
       }
+      for (const key of this.#compactImRecoveryRequests) {
+        if (key.startsWith(`${tabId}:`)) this.#compactImRecoveryRequests.delete(key);
+      }
     }
     void this.#scheduleSabaWsSnapshotClear(sourceId);
     return `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(sourceId, generation)}`;
@@ -2321,6 +2066,8 @@ export class NetworkObserver {
   }
 
   beginBridgeSourceEpoch(sourceId: string): string {
+    this.#clearSbobetDetail(sourceId);
+    this.#clearSbobetDiscovery(sourceId);
     const sourceGeneration = this.#sourceGenerations.get(sourceId) ?? 0;
     // Reserve the current public identity before advancing it, including when
     // resync is the first operation observed for this source in a new worker.
@@ -2328,6 +2075,7 @@ export class NetworkObserver {
     this.#bridgeEpochGenerations.set(sourceId, this.#captureBridgeGeneration(sourceId) + 1);
     this.#sequences.delete(sourceId);
     this.#emissionTails.delete(sourceId);
+    this.#retireSabaHiddenCollector(sourceId);
     return `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(sourceId, sourceGeneration)}`;
   }
 
@@ -2344,14 +2092,30 @@ export class NetworkObserver {
     for (const sourceId of this.#sourceGenerations.keys()) {
       if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
     }
+    for (const sourceId of this.#sbobetDiscoveryShapes.keys()) {
+      if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
+    }
+    for (const sourceId of this.#sbobetDetailStates.keys()) {
+      if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
+    }
     for (const socket of this.#webSockets.values()) {
       if (socket.source.tabId === tabId) sourceIds.add(socket.source.sourceId);
     }
+    for (const sourceId of this.#sabaCollectors.keys()) {
+      if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
+    }
+    for (const sourceId of this.#sabaResponsiveFootballDomAtMs.keys()) {
+      if (sourceId.endsWith(`:${tabId}`)) sourceIds.add(sourceId);
+    }
     for (const sourceId of sourceIds) {
+      this.#retireSabaHiddenCollector(sourceId);
+      this.#clearSbobetDetail(sourceId);
+      this.#clearSbobetDiscovery(sourceId);
       this.#retireCmdRecovery(sourceId, "DOCUMENT_CHANGED");
       this.#observedChildSessions.delete(sourceId);
       this.#ksportAttachedTargetSessions.delete(sourceId);
       this.#sabaAttachedTargetSessions.delete(sourceId);
+      this.#sabaResponsiveFootballDomAtMs.delete(sourceId);
       const diagnostic = this.#wsAttachDiagnostics.get(sourceId);
       if (diagnostic !== undefined) diagnostic.attachedTargets = 0;
     }
@@ -2373,9 +2137,12 @@ export class NetworkObserver {
     for (const sourceId of this.#apsportRequestTemplates.keys()) remember(sourceId);
     for (const sourceId of this.#catalogWsSnapshots.keys()) remember(sourceId);
     for (const sourceId of this.#sbobetEventRequests.keys()) remember(sourceId);
+    for (const sourceId of this.#sbobetDiscoveryShapes.keys()) remember(sourceId);
+    for (const sourceId of this.#sbobetDetailStates.keys()) remember(sourceId);
     for (const sourceId of this.#ksportNativeHttpCaptures.keys()) remember(sourceId);
     for (const sourceId of this.#bridgeEpochGenerations.keys()) remember(sourceId);
     for (const sourceId of this.#publicSourceEpochs.keys()) remember(sourceId);
+    for (const sourceId of this.#sabaResponsiveFootballDomAtMs.keys()) remember(sourceId);
     for (const sourceId of this.#sourceGenerations.keys()) remember(sourceId);
     for (const sourceId of this.#activeWorkGenerations.keys()) remember(sourceId);
     for (const sourceId of this.#preexistingSocketReconnectSources.keys()) remember(sourceId);
@@ -2401,6 +2168,7 @@ export class NetworkObserver {
       this.#apsportRequestTemplates.delete(sourceId);
       this.#apsportRefreshOrdinals.delete(sourceId);
       this.#apsportLastRefreshStartedAtMs.delete(sourceId);
+      this.#apsportDetailCoverage.delete(sourceId);
       this.#clearCatalogWsSnapshots(sourceId);
       this.#activeKsportStreams.delete(sourceId);
       this.#ksportAuthorityTransitions.delete(sourceId);
@@ -2413,12 +2181,20 @@ export class NetworkObserver {
       this.#sabaSnapshotSaveTimers.delete(sourceId);
       this.#sabaSnapshotLastSavedAtMs.delete(sourceId);
       this.#sabaDocumentMarkers.delete(sourceId);
+      this.#sabaSchemaContexts.delete(sourceId);
+      this.#sabaSchemaSentStreams.delete(sourceId);
       this.#sabaDomBootstrapAtMs.delete(sourceId);
+      this.#sabaUsableDomCatalogAtMs.delete(sourceId);
+      this.#sabaResponsiveFootballDomAtMs.delete(sourceId);
       this.#sabaCatalogFrameAtMs.delete(sourceId);
       this.#sabaBaselineMissingSinceMs.delete(sourceId);
       this.#sabaSilentSocketRecoveryAtMs.delete(sourceId);
       this.#sabaSilentSocketRecoveries.delete(sourceId);
+      this.#sabaHealthyBaselineRecovery.delete(sourceId);
+      this.#sabaHardSocketRecoveryAtMs.delete(sourceId);
+      this.#clearSabaHardSocketRecoveryTimer(sourceId);
       this.#sbobetEventRequests.delete(sourceId);
+      this.#clearSbobetDiscovery(sourceId);
       this.#observedChildSessions.delete(sourceId);
       this.#ksportAttachedTargetSessions.delete(sourceId);
       this.#sabaAttachedTargetSessions.delete(sourceId);
@@ -2470,6 +2246,9 @@ export class NetworkObserver {
     }
     for (const key of this.#requestIdentities.keys()) {
       if (key.startsWith(`${tabId}:`)) this.#requestIdentities.delete(key);
+    }
+    for (const key of this.#compactImRecoveryRequests) {
+      if (key.startsWith(`${tabId}:`)) this.#compactImRecoveryRequests.delete(key);
     }
   }
 
@@ -2526,42 +2305,60 @@ export class NetworkObserver {
 
   async pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
     if (source.lobby !== "SABA" || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    if (this.#sabaNavigationProbeTasks.has(source.sourceId)) return;
     const existing = this.#sabaDomPolls.get(source.sourceId);
     if (existing !== undefined) return existing;
     const operation = this.#runPeriodicDomWork(source.sourceId,
       () => this.#pollSabaDomChanges(source, hostname)).finally(() => {
         if (this.#sabaDomPolls.get(source.sourceId) === operation) this.#sabaDomPolls.delete(source.sourceId);
-      });
+    });
     this.#sabaDomPolls.set(source.sourceId, operation);
+    // Discovery is read-only evidence. Queue it after the authority-renewing
+    // poll so neither it nor the next source-lane operation can overlap CDP
+    // work on this debugger session.
+    void operation.then(() => this.#startSabaPublicCatalogDiscovery(source, hostname), () => undefined);
     return operation;
   }
 
   async #pollSabaDomChanges(source: ObservedSource, hostname: string): Promise<void> {
+    if (!await this.#advanceSabaHiddenCollector(source, hostname)) return;
     // SABA's Socket.IO connection can die without a close event; the DOM
     // fallback then only covers the visible viewport. Begin fallback renewal
     // and socket recovery before the API's 30-second freshness lease expires.
     // The silence clock is seeded on the first poll so a worker restart landing
     // on an already-dead socket still recovers.
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
     const silenceNowMs = this.#now();
     const lastSabaFrameAtMs = this.#sabaCatalogFrameAtMs.get(source.sourceId) ??
       (this.#sabaCatalogFrameAtMs.set(source.sourceId, silenceNowMs), silenceNowMs);
     const silenceAgeMs = silenceNowMs - lastSabaFrameAtMs;
     const hasCompleteBaseline = this.hasCompleteSabaBaseline(source.sourceId);
-    if (hasCompleteBaseline) this.#sabaBaselineMissingSinceMs.delete(source.sourceId);
+    if (hasCompleteBaseline) {
+      this.#sabaBaselineMissingSinceMs.delete(source.sourceId);
+      this.#sabaHealthyBaselineRecovery.delete(source.sourceId);
+    }
     const baselineMissingSinceMs = hasCompleteBaseline ? null
       : this.#sabaBaselineMissingSinceMs.get(source.sourceId) ?? silenceNowMs;
     if (!hasCompleteBaseline && !this.#sabaBaselineMissingSinceMs.has(source.sourceId)) {
       this.#sabaBaselineMissingSinceMs.set(source.sourceId, baselineMissingSinceMs!);
     }
     const baselineMissingAgeMs = baselineMissingSinceMs === null ? 0 : silenceNowMs - baselineMissingSinceMs;
+    // Arm a real timer before any CDP evaluation, bridge publication or heap
+    // scan. A crashed renderer can leave the very first DOM poll pending, so a
+    // watchdog that only runs on a later poll can never fire.
+    if (!hasCompleteBaseline) {
+      this.#scheduleSabaHardSocketRecovery(source, baselineMissingAgeMs, silenceNowMs);
+    }
     if (hasCompleteBaseline && silenceAgeMs <= SABA_SOCKET_SILENCE_RECOVERY_MS) {
+      this.#enqueueSabaNavigationProbe(source, hostname, sourceGeneration, tabGeneration);
       if (this.#sabaDomObserversCleaned.has(source.sourceId)) return;
       const evaluations: Array<Promise<unknown>> = [
         this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
           expression: SABA_ODDS_MUTATION_CLEANUP_EXPRESSION, returnByValue: true, awaitPromise: false
         })).catch(() => null)
       ];
-      for (const binding of this.#mainWorldContexts.get(source.tabId)?.values() ?? []) {
+      for (const binding of [...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])].slice(0, 12)) {
         const params = { expression: SABA_ODDS_MUTATION_CLEANUP_EXPRESSION, contextId: binding.contextId,
           returnByValue: true, awaitPromise: false };
         evaluations.push(this.#withFrameCommandTimeout(binding.sessionId === undefined
@@ -2569,6 +2366,8 @@ export class NetworkObserver {
           : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId)).catch(() => null));
       }
       const results = await Promise.all(evaluations);
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
       if (results.every((result) => nestedValue(result, "result", "value") === true) &&
         this.hasCompleteSabaBaseline(source.sourceId)) {
         this.#sabaDomObserversCleaned.add(source.sourceId);
@@ -2576,19 +2375,23 @@ export class NetworkObserver {
       return;
     }
     this.#sabaDomObserversCleaned.delete(source.sourceId);
-    const evaluations: unknown[] = [];
-    evaluations.push(await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
-      expression: SABA_ODDS_MUTATION_EXPRESSION, returnByValue: true, awaitPromise: false
-    })).catch(() => ({})));
-    const contexts = [...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])];
+    const evaluations: Array<Promise<unknown>> = [
+      this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.evaluate", {
+        expression: SABA_ODDS_MUTATION_EXPRESSION, returnByValue: true, awaitPromise: false
+      })).catch(() => ({}))
+    ];
+    const contexts = [...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])].slice(0, 12);
     for (const binding of contexts) {
       const params = { expression: SABA_ODDS_MUTATION_EXPRESSION, contextId: binding.contextId,
         returnByValue: true, awaitPromise: false };
-      evaluations.push(await this.#withFrameCommandTimeout(binding.sessionId === undefined
+      evaluations.push(this.#withFrameCommandTimeout(binding.sessionId === undefined
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId)).catch(() => ({})));
     }
-    const changed = evaluations.some((evaluation) => nestedValue(evaluation, "result", "value") === true);
+    const mutationResults = await Promise.all(evaluations);
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+      this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
+    const changed = mutationResults.some((evaluation) => nestedValue(evaluation, "result", "value") === true);
     // Traffic is not authority. After an MV3/target handover SABA commonly
     // resumes on an existing socket with delta-only frames; those frames keep
     // the silence clock young but cannot reconstruct the hidden catalog that
@@ -2602,18 +2405,823 @@ export class NetworkObserver {
       // Publish before starting heap/socket recovery. That recovery can take
       // tens of seconds on a large provider page; awaiting it here used to stop
       // the only fallback refresher until after the realtime lease had expired.
+      const usableBeforeCaptureAtMs = this.#sabaUsableDomCatalogAtMs.get(source.sourceId);
+      const responsiveBeforeCaptureAtMs = this.#sabaResponsiveFootballDomAtMs.get(source.sourceId);
       await this.#capturePublicCatalogSnapshot(source, hostname, CMD_PUBLIC_CATALOG_EXPRESSION, false, true);
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
+      const usableAfterCaptureAtMs = this.#sabaUsableDomCatalogAtMs.get(source.sourceId);
+      const responsiveAfterCaptureAtMs = this.#sabaResponsiveFootballDomAtMs.get(source.sourceId);
+      if (usableAfterCaptureAtMs !== undefined && (usableBeforeCaptureAtMs === undefined ||
+        usableAfterCaptureAtMs > usableBeforeCaptureAtMs) ||
+        responsiveAfterCaptureAtMs !== undefined && (responsiveBeforeCaptureAtMs === undefined ||
+          responsiveAfterCaptureAtMs > responsiveBeforeCaptureAtMs)) {
+        this.#enqueueSabaNavigationProbe(source, hostname, sourceGeneration, tabGeneration);
+      }
     }
-    if ((baselineMissingAgeMs > SABA_SOCKET_SILENCE_RECOVERY_MS ||
-      silenceAgeMs > SABA_SOCKET_SILENCE_RECOVERY_MS) &&
-      silenceNowMs - (this.#sabaSilentSocketRecoveryAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) >
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+    const hasCompleteBaselineNow = this.hasCompleteSabaBaseline(source.sourceId);
+    if (!hasCompleteBaseline && hasCompleteBaselineNow) {
+      // A reset..done received while DOM/probe work was pending is authoritative
+      // immediately; it must not wait behind or spend a background retry slot.
+      this.#sabaBaselineMissingSinceMs.delete(source.sourceId);
+      this.#sabaHealthyBaselineRecovery.delete(source.sourceId);
+      return;
+    }
+    const recoveryNowMs = this.#now();
+    const currentBaselineMissingSinceMs = hasCompleteBaselineNow ? null
+      : this.#sabaBaselineMissingSinceMs.get(source.sourceId) ?? recoveryNowMs;
+    if (!hasCompleteBaselineNow && !this.#sabaBaselineMissingSinceMs.has(source.sourceId)) {
+      // reset..done can clear the old clock while DOM/probe work is pending,
+      // followed by a close before this poll resumes. That is a newly missing
+      // baseline and receives the full initial recovery window.
+      this.#sabaBaselineMissingSinceMs.set(source.sourceId, currentBaselineMissingSinceMs!);
+    }
+    const currentBaselineMissingAgeMs = currentBaselineMissingSinceMs === null ? 0
+      : recoveryNowMs - currentBaselineMissingSinceMs;
+    const currentSilenceAgeMs = recoveryNowMs -
+      (this.#sabaCatalogFrameAtMs.get(source.sourceId) ?? recoveryNowMs);
+    const healthyDomMissingBaseline = !hasCompleteBaselineNow &&
+      this.hasUsableSabaCatalog(source.sourceId);
+    const healthyState = this.#sabaHealthyBaselineRecovery.get(source.sourceId);
+    const healthyRecoveryDue = !healthyDomMissingBaseline || healthyState === undefined ||
+      healthyState.sourceGeneration !== sourceGeneration || recoveryNowMs >= healthyState.nextAtMs;
+    if ((currentBaselineMissingAgeMs > SABA_SOCKET_SILENCE_RECOVERY_MS ||
+      currentSilenceAgeMs > SABA_SOCKET_SILENCE_RECOVERY_MS) && healthyRecoveryDue &&
+      !this.#sabaNavigationProbeTasks.has(source.sourceId) &&
+      !this.#sabaProbePublicationBlocks.has(source.sourceId) &&
+      !this.#sabaCollectorDomBlocks.has(source.sourceId) &&
+      this.#sabaCollectors.get(source.sourceId)?.finished !== false &&
+      recoveryNowMs - (this.#sabaSilentSocketRecoveryAtMs.get(source.sourceId) ?? Number.NEGATIVE_INFINITY) >
         SABA_SOCKET_SILENCE_RECOVERY_MS) {
-      this.#sabaSilentSocketRecoveryAtMs.set(source.sourceId, silenceNowMs);
-      this.#startSabaSilentSocketRecovery(source);
+      this.#startSabaSilentSocketRecovery(source, () => {
+        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+        const admittedAtMs = this.#now();
+        this.#sabaSilentSocketRecoveryAtMs.set(source.sourceId, admittedAtMs);
+        if (!healthyDomMissingBaseline) return;
+        const existing = this.#sabaHealthyBaselineRecovery.get(source.sourceId);
+        const admittedAttempts = existing?.sourceGeneration === sourceGeneration
+          ? existing.admittedAttempts + 1 : 1;
+        const delayMs = SABA_HEALTHY_BASELINE_RECOVERY_DELAYS_MS[Math.min(
+          admittedAttempts - 1, SABA_HEALTHY_BASELINE_RECOVERY_DELAYS_MS.length - 1)]!;
+        this.#sabaHealthyBaselineRecovery.set(source.sourceId, {
+          sourceGeneration, admittedAttempts, nextAtMs: admittedAtMs + delayMs
+        });
+      });
     }
   }
 
-  #startSabaSilentSocketRecovery(source: ObservedSource): void {
+  #enqueueSabaNavigationProbe(source: ObservedSource, hostname: string,
+    sourceGeneration: number, tabGeneration: number): void {
+    if (this.#sabaNavigationProbeTasks.has(source.sourceId) ||
+      this.#sabaNavigationProbeAttempts.has(source.sourceId)) return;
+    const nowMs = this.#now();
+    const completedAtMs = this.#sabaNavigationProbeCompletedAtMs.get(source.sourceId);
+    if (completedAtMs !== undefined && nowMs - completedAtMs < SABA_NAVIGATION_PROBE_RETRY_INTERVAL_MS) return;
+    const token = Symbol("saba-navigation-probe");
+    let started = false;
+    const scheduled = this.#runPeriodicDomWork(source.sourceId, async () => {
+      started = true;
+      await this.#runSabaNavigationProbe(source, hostname, sourceGeneration, tabGeneration);
+    });
+    const operation = scheduled.catch(() => undefined).finally(() => {
+      const owner = this.#sabaNavigationProbeTasks.get(source.sourceId);
+      if (owner?.token !== token) return;
+      if (started && this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+        this.#captureTabGeneration(source.tabId) === tabGeneration) {
+        this.#sabaNavigationProbeCompletedAtMs.set(source.sourceId, this.#now());
+      }
+      this.#sabaNavigationProbeTasks.delete(source.sourceId);
+    });
+    this.#sabaNavigationProbeTasks.set(source.sourceId, { token, operation });
+  }
+
+  async #runSabaNavigationProbe(source: ObservedSource, hostname: string,
+    sourceGeneration: number, tabGeneration: number): Promise<void> {
+    const current = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration;
+    const completedAtMs = this.#sabaNavigationProbeCompletedAtMs.get(source.sourceId);
+    if (!current() || (!this.hasUsableSabaCatalog(source.sourceId) &&
+      !this.#hasFreshSabaFootballDomReceipt(source.sourceId)) ||
+      (completedAtMs !== undefined && this.#now() - completedAtMs < SABA_NAVIGATION_PROBE_RETRY_INTERVAL_MS) ||
+      this.#sabaNavigationProbeAttempts.has(source.sourceId) ||
+      this.#sabaProbePublicationBlocks.has(source.sourceId) ||
+      this.#sabaSilentSocketRecoveries.has(source.sourceId) ||
+      this.#socketBaselineRecoveries.has(source.sourceId)) return;
+    const deadlineMs = this.#now() + 60_000;
+    type Target = { readonly contextId?: number; readonly sessionId?: string;
+      readonly documentKey?: string;
+      readonly kind: "ROOT" | "MAIN_WORLD" | "ISOLATED_WORLD"; readonly score: number };
+    const bindings = [...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])].slice(0, 12);
+    const evaluateTarget = async (binding?: MainWorldContextBinding,
+      kind: Target["kind"] = binding === undefined ? "ROOT" : "MAIN_WORLD"): Promise<Target | null> => {
+      const remainingMs = deadlineMs - this.#now();
+      if (remainingMs <= 0) return null;
+      const params = { expression: SABA_NAVIGATION_PROBE_READ_EXPRESSION,
+        ...(binding === undefined ? {} : { contextId: binding.contextId }),
+        returnByValue: true, awaitPromise: false };
+      const evaluated = await this.#withFrameCommandTimeout(binding?.sessionId === undefined
+        ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+        : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId),
+      Math.min(this.#sabaProbeCommandTimeoutMs, remainingMs)).catch(() => null);
+      const candidate = nestedValue(evaluated, "result", "value");
+      if (isRecord(candidate) && typeof candidate.rowCount === "number") {
+        return { ...(binding === undefined ? {} : { contextId: binding.contextId }),
+          ...(binding?.sessionId === undefined ? {} : { sessionId: binding.sessionId }),
+          ...(typeof candidate.documentToken === "string" ? { documentKey: candidate.documentToken } : {}),
+          kind, score: candidate.rowCount };
+      }
+      return null;
+    };
+    const targets = (await Promise.all([...bindings.map((binding) => evaluateTarget(binding)),
+      evaluateTarget()])).filter((target): target is Target => target !== null);
+    if (targets.length === 0 && current() && this.#now() < deadlineMs) {
+      const frameTreeRemainingMs = deadlineMs - this.#now();
+      const frameTree = frameTreeRemainingMs <= 0 ? null : await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Page.getFrameTree"),
+        Math.min(this.#sabaProbeCommandTimeoutMs, frameTreeRemainingMs)).catch(() => null);
+      const childTargets = await Promise.all(collectFrameIds(frameTree).slice(1, 13).map(async (frameId) => {
+        const worldRemainingMs = deadlineMs - this.#now();
+        if (!current() || worldRemainingMs <= 0) return null;
+        const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+          "Page.createIsolatedWorld", { frameId, worldName: "fieldline-saba-navigation-probe",
+            grantUniveralAccess: false }),
+        Math.min(this.#sabaProbeCommandTimeoutMs, worldRemainingMs)).catch(() => null);
+        const contextId = nestedNumber(world, "executionContextId");
+        if (!current() || contextId === null) return null;
+        return evaluateTarget({ contextId }, "ISOLATED_WORLD");
+      }));
+      targets.push(...childTargets.filter((target): target is Target => target !== null));
+    }
+    const target = targets.sort((left, right) => right.score - left.score)[0];
+    if (!current() || target === undefined) return;
+    // Consuming the once-per-epoch attempt starts only after an exact public
+    // Sports document has been identified. A missing context can recover later.
+    this.#sabaNavigationProbeAttempts.add(source.sourceId);
+    if (this.#now() >= deadlineMs) {
+      this.#sabaNavigationProbeAttempts.delete(source.sourceId);
+      void this.#emitSabaProbeDiagnostic(source, hostname, JSON.stringify({
+          kind: "SABA_NAVIGATION_PROBE", version: 1, status: "NO_ACTION_DEADLINE_EXHAUSTED",
+          coverageClaim: "PUBLIC_STRUCTURE_ONLY", mutated: false, viewRestored: true, truncated: false
+        }), sourceGeneration, tabGeneration);
+      return;
+    }
+    this.#sabaProbePublicationVersions.set(source.sourceId,
+      (this.#sabaProbePublicationVersions.get(source.sourceId) ?? 0) + 1);
+    this.#sabaProbePublicationBlocks.add(source.sourceId);
+    let lastEvaluationFailure: SabaProbeEvaluationFailure | null = null;
+    const evaluate = async (expression: string): Promise<unknown> => {
+      lastEvaluationFailure = null;
+      const remainingMs = deadlineMs - this.#now();
+      if (!current()) {
+        lastEvaluationFailure = "STALE";
+        return null;
+      }
+      if (remainingMs <= 0) {
+        lastEvaluationFailure = "DEADLINE";
+        return null;
+      }
+      const params = { expression, ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
+        returnByValue: true, awaitPromise: false };
+      let evaluated: unknown;
+      try {
+        evaluated = await this.#withFrameCommandTimeout(target.sessionId === undefined
+          ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+          : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId),
+        Math.min(this.#sabaProbeCommandTimeoutMs, remainingMs));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        lastEvaluationFailure = /(?:cannot find context|execution context (?:was )?destroyed|no target with given id|session.+(?:closed|not found)|target.+closed)/iu
+          .test(message) ? "CONTEXT_UNAVAILABLE" : message === "frame-command-timeout"
+            ? "FRAME_COMMAND_TIMEOUT" : "CDP_REJECTED";
+        return null;
+      }
+      if (!current()) {
+        lastEvaluationFailure = "STALE";
+        return null;
+      }
+      if (isRecord(evaluated) && evaluated.exceptionDetails !== undefined) {
+        lastEvaluationFailure = "EXCEPTION_DETAILS";
+        return null;
+      }
+      const value = nestedValue(evaluated, "result", "value");
+      if (value === null || value === undefined) lastEvaluationFailure = "PAGE_NULL";
+      return value;
+    };
+    const result = await runSabaNavigationProbe({ evaluate, isCurrent: current, now: this.#now, deadlineMs,
+      discoveryOnly: true,
+      evaluationFailure: () => lastEvaluationFailure,
+      evaluationTarget: () => ({ kind: target.kind, contextIdPresent: target.contextId !== undefined,
+        sessionIdPresent: target.sessionId !== undefined }) });
+    if (!current()) return;
+    if (result === null) {
+      this.#sabaUsableDomCatalogAtMs.delete(source.sourceId);
+      this.#sabaResponsiveFootballDomAtMs.delete(source.sourceId);
+      this.#startSabaProbeRecovery(source, hostname, sourceGeneration, tabGeneration);
+      void this.#emitSabaProbeDiagnostic(source, hostname, JSON.stringify({
+          kind: "SABA_NAVIGATION_PROBE", version: 1, status: "AMBIGUOUS_OR_RESTORE_FAILED",
+          coverageClaim: "PUBLIC_STRUCTURE_ONLY", reason: "PROBE_ABORTED_WITHOUT_RESTORE",
+          viewRestored: false, truncated: false
+        }), sourceGeneration, tabGeneration);
+      return;
+    }
+    if (current() && result.viewRestored) {
+      this.#sabaProbePublicationBlocks.delete(source.sourceId);
+      const diagnostic: unknown = JSON.parse(result.body);
+      // Diagnostic timing is not the collector's authority. An untouched Today
+      // read can exceed the probe's short initial settle budget; the real page
+      // adapter still independently revalidates document/period/roster before
+      // any control action or candidate publication.
+      const untouchedToday = isRecord(diagnostic) && diagnostic.status === "NO_ACTION_INITIAL_TODAY_NOT_STABLE" &&
+        nestedValue(diagnostic, "initial", "activePeriod") === "TODAY";
+      const boundToday = isRecord(diagnostic) && diagnostic.status === "NO_ACTION_COLLECTOR_TARGET_BOUND" &&
+        diagnostic.mutated === false && nestedValue(diagnostic, "initial", "activePeriod") === "TODAY" &&
+        nestedValue(diagnostic, "initial", "documentToken") === target.documentKey;
+      const documentKey = untouchedToday || boundToday ? target.documentKey :
+        nestedValue(diagnostic, "today", "documentToken");
+      if (isRecord(diagnostic) && (diagnostic.status === "COMPLETE_EVIDENCE" || untouchedToday || boundToday) &&
+        typeof documentKey === "string" && documentKey.length > 0) {
+        const binding: SabaCollectorBinding = {
+          sourceEpoch: `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(source.sourceId, sourceGeneration)}`,
+          frameKey: `${target.kind}:${target.sessionId ?? "root"}:${target.contextId ?? "root"}`,
+          documentKey
+        };
+        const collectorCurrent = () => current() && this.#sabaCollectors.get(source.sourceId)?.binding === binding &&
+          binding.sourceEpoch === `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(source.sourceId, sourceGeneration)}`;
+        let pendingPeriodFailure: SabaPeriodUnstableDiagnostic | null = null;
+        let restoreRosterMismatchEmitted = false;
+        const pageAdapter = createSabaHiddenMarketPageAdapter({ binding, isCurrent: collectorCurrent,
+          now: this.#now, monotonicNow: this.#monotonicNow,
+          onPeriodUnstable: (diagnostic) => {
+            if (collectorCurrent()) pendingPeriodFailure ??= diagnostic;
+          },
+          onRestoreRosterMismatch: (diagnostic) => {
+            if (!collectorCurrent() || restoreRosterMismatchEmitted) return;
+            const body = JSON.stringify({ ...diagnostic,
+              kind: "SABA_HIDDEN_COLLECTOR_ROSTER_MISMATCH" });
+            if (utf8ByteLength(body) > 64 * 1024) return;
+            restoreRosterMismatchEmitted = true;
+            void this.#emit(source, `https://${hostname}/__fieldline_saba_hidden_collector__`,
+              "Diagnostic", "TAB_STATE", { encoding: "UTF8", body }, {
+                observedAtMs: diagnostic.capturedAtMs,
+                receivedMonotonicMs: diagnostic.capturedMonotonicMs,
+                sourceGeneration, tabGeneration, beforeForward: async () => collectorCurrent()
+              }).catch(() => undefined);
+          },
+          onUnrepresentedOwner: (diagnostic) => {
+            if (!collectorCurrent()) return;
+            const body = JSON.stringify({ ...diagnostic, kind: "SABA_HIDDEN_COLLECTOR_SHAPE" });
+            if (utf8ByteLength(body) > 64 * 1024) return;
+            void this.#emit(source, `https://${hostname}/__fieldline_saba_hidden_collector__`,
+              "Diagnostic", "TAB_STATE", { encoding: "UTF8", body }, {
+                observedAtMs: diagnostic.capturedAtMs, receivedMonotonicMs: diagnostic.capturedMonotonicMs,
+                sourceGeneration, tabGeneration, beforeForward: async () => collectorCurrent()
+              }).catch(() => undefined);
+          },
+          evaluate: async (expression) => {
+            if (!collectorCurrent()) throw new Error("SABA_COLLECTOR_SOURCE_RETIRED");
+            const params = { expression, returnByValue: true, awaitPromise: false,
+              ...(target.contextId === undefined ? {} : { contextId: target.contextId }) };
+            let value: unknown;
+            try {
+              value = await this.#withFrameCommandTimeout(target.sessionId === undefined
+                ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+                : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId),
+              this.#sabaProbeCommandTimeoutMs);
+            } catch (error) {
+              if (!collectorCurrent()) throw new Error("SABA_COLLECTOR_SOURCE_RETIRED");
+              const message = error instanceof Error ? error.message : "";
+              const reason = message === "frame-command-timeout" ? "FRAME_COMMAND_TIMEOUT" :
+                /(?:cannot find context|execution context (?:was )?destroyed|no target with given id|session.+(?:closed|not found)|target.+closed)/iu
+                  .test(message) ? "CONTEXT_UNAVAILABLE" : "CDP_REJECTED";
+              throw new Error(`SABA_COLLECTOR_${reason}`);
+            }
+            if (!collectorCurrent()) throw new Error("SABA_COLLECTOR_SOURCE_RETIRED");
+            if (isRecord(value) && value.exceptionDetails !== undefined) {
+              throw new Error("SABA_COLLECTOR_PAGE_EXCEPTION");
+            }
+            return nestedValue(value, "result", "value");
+          } });
+        let lastErrorCode: string | null = null;
+        let pendingPageFailure: SabaCollectorPageFailure | null = null;
+        const recordFailure = async <T>(context: Pick<SabaCollectorPageFailure,
+          "operation" | "period" | "ownerMatchId">, operation: () => Promise<T>): Promise<T> => {
+          try { return await operation(); }
+          catch (error) {
+            const code = error instanceof Error ? error.message : "";
+            if (collectorCurrent()) {
+              lastErrorCode = /^SABA_COLLECTOR_[A-Z_]{1,70}$/u.test(code) ? code : "SABA_COLLECTOR_PAGE_OPERATION_FAILED";
+              pendingPageFailure = { ...context, ownerMatchId: context.ownerMatchId?.slice(0, 128) ?? null,
+                code: lastErrorCode, capturedAtMs: this.#now(), capturedMonotonicMs: this.#monotonicNow() };
+            }
+            throw error;
+          }
+        };
+        const adapter: SabaCollectorPageAdapter = {
+          readRoster: (period) => recordFailure({ operation: "READ_ROSTER", period, ownerMatchId: null },
+            () => pageAdapter.readRoster(period)),
+          captureOwner: (period, owner) => recordFailure({ operation: "CAPTURE_OWNER", period,
+            ownerMatchId: owner.ownerMatchId }, () => pageAdapter.captureOwner(period, owner)),
+          restoreToday: () => recordFailure({ operation: "RESTORE_TODAY", period: "TODAY", ownerMatchId: null },
+            () => pageAdapter.restoreToday())
+        };
+        this.#sabaCollectors.set(source.sourceId, { binding, sourceGeneration, tabGeneration, hostname, target,
+          lastErrorCode: () => lastErrorCode,
+          takePageFailure: () => {
+            const failure = pendingPageFailure;
+            pendingPageFailure = null;
+            return failure;
+          },
+          takePeriodFailure: () => {
+            const diagnostic = pendingPeriodFailure;
+            pendingPeriodFailure = null;
+            return diagnostic;
+          },
+          adapter, inFlight: false, restorePending: false, finished: false,
+          publicMarketSampleKinds: new Set(),
+          collector: new SabaHiddenMarketCollector({ binding, adapter,
+            collectorGeneration: `saba:collector:${source.tabId}:${this.#now()}` }) });
+      } else if (isRecord(diagnostic) && diagnostic.mutated === false) {
+        // Read-only discovery has no terminal coverage result to retain. A
+        // later valid Today document may retry under the existing pacing.
+        this.#sabaNavigationProbeAttempts.delete(source.sourceId);
+      }
+    } else if (current()) {
+      // The partial view cannot regain authority without proof. Escalate once
+      // through the existing exact-source recovery; its navigation boundary
+      // retires this generation and clears the temporary publication block.
+      this.#sabaUsableDomCatalogAtMs.delete(source.sourceId);
+      this.#sabaResponsiveFootballDomAtMs.delete(source.sourceId);
+      this.#startSabaProbeRecovery(source, hostname, sourceGeneration, tabGeneration);
+    }
+    void this.#emitSabaProbeDiagnostic(source, hostname, result.body,
+      sourceGeneration, tabGeneration);
+  }
+
+  async #advanceSabaHiddenCollector(source: ObservedSource, hostname: string): Promise<boolean> {
+    const state = this.#sabaCollectors.get(source.sourceId);
+    if (state === undefined) return true;
+    const current = () => this.#sabaCollectors.get(source.sourceId) === state &&
+      this.#isSourceGenerationCurrent(source.sourceId, state.sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === state.tabGeneration &&
+      state.binding.sourceEpoch === `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(source.sourceId, state.sourceGeneration)}`;
+    if (!current()) {
+      this.#retireSabaHiddenCollector(source.sourceId);
+      return !this.#sabaProbePublicationBlocks.has(source.sourceId);
+    }
+    if (state.inFlight) return false;
+    if (state.finished && !this.#sabaCollectorDomBlocks.has(source.sourceId)) return true;
+    state.inFlight = true;
+    try {
+    // Only DOM publication is gated. Native WS frames keep their existing
+    // lifecycle/authority checks and are never paused for a collector sweep.
+    this.#sabaProbePublicationVersions.set(source.sourceId,
+      (this.#sabaProbePublicationVersions.get(source.sourceId) ?? 0) + 1);
+    this.#sabaCollectorDomBlocks.add(source.sourceId);
+    const restorePendingAtEntry = state.restorePending;
+    // A bounded Early batch shares one verified Today restoration. The budget
+    // is checked only between owners: an opened More control always retains
+    // its existing complete capture/close deadline, never a truncated one.
+    const sliceDeadlineMs = this.#monotonicNow() + 5_000;
+    const maxOwners = state.collector.currentPeriod === "EARLY" ? this.#sabaCollectorEarlyBatchSize : 1;
+    const result = state.finished || restorePendingAtEntry ? null : await state.collector.advance(
+      maxOwners, () => current() && this.#monotonicNow() < sliceDeadlineMs);
+    if (!current()) return false;
+    const collectionErrorCode = state.lastErrorCode();
+    const collectionFailure = state.takePageFailure();
+    // A captured Today owner has already proved two stable closed reads on the
+    // bound document. Do not repeat that whole-page proof; no-control and Early
+    // slices still need independent Today restoration before publication.
+    let restored = result?.status === "COMPLETE" || (result?.status === "INCOMPLETE" &&
+      result.items.some((item) => item.kind === "OWNER_COMPLETE" && item.period === "TODAY" &&
+        item.restored === true && item.safeControlOutcome !== "NO_ELIGIBLE_CONTROL"));
+    let retryRestored = false;
+    if (!restored) {
+      try {
+        const restoration = await state.adapter.restoreToday();
+        restored = current() && restoration.selectedPrematch === true &&
+          restoration.binding.sourceEpoch === state.binding.sourceEpoch &&
+          restoration.binding.frameKey === state.binding.frameKey &&
+          restoration.binding.documentKey === state.binding.documentKey;
+        if (restored && (state.finished || result?.status === "SAFE_ERROR")) {
+          retryRestored = state.collector.resumeAfterVerifiedTodayRestore(restoration);
+        }
+      } catch { restored = false; }
+    }
+    if (!current()) return false;
+    const restorationFailure = state.takePageFailure();
+    if (restored) this.#sabaCollectorDomBlocks.delete(source.sourceId);
+    if (restored) {
+      const periodFailure = state.takePeriodFailure();
+      if (periodFailure !== null) {
+        await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
+          ...periodFailure, kind: "SABA_HIDDEN_COLLECTOR_PERIOD", viewRestored: true
+        }), state.sourceGeneration, state.tabGeneration);
+        if (!current()) return false;
+      }
+    }
+    if (restored && restorePendingAtEntry) {
+      state.restorePending = false;
+      await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
+        kind: "SABA_HIDDEN_COLLECTOR", status: "RESUMED_AFTER_RESTORE", viewRestored: true
+      }), state.sourceGeneration, state.tabGeneration);
+      return current();
+    }
+    if (!restored && (restorePendingAtEntry || result?.status === "INCOMPLETE")) {
+      const firstPendingAttempt = !restorePendingAtEntry;
+      state.restorePending = true;
+      if (firstPendingAttempt) {
+        await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
+          kind: "SABA_HIDDEN_COLLECTOR", status: "RESTORE_PENDING", viewRestored: false,
+          reason: "TODAY_RESTORE_UNCONFIRMED", collectionErrorCode,
+          collectionFailure, restorationFailure,
+          restorationErrorCode: state.lastErrorCode(),
+          completedOwners: result?.candidateItems.filter((item) => item.kind === "OWNER_COMPLETE").length ?? 0
+        }), state.sourceGeneration, state.tabGeneration);
+      }
+      return false;
+    }
+    if (retryRestored) {
+      state.finished = false;
+      await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
+        kind: "SABA_HIDDEN_COLLECTOR", status: "RETRY_PENDING", viewRestored: true,
+        reason: collectionErrorCode ?? "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT", collectionFailure
+      }), state.sourceGeneration, state.tabGeneration);
+      return true;
+    }
+    if (!restored || (result !== null && result.status !== "INCOMPLETE" && result.status !== "COMPLETE")) {
+      state.finished = true;
+      await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
+        kind: "SABA_HIDDEN_COLLECTOR", status: "INCOMPLETE", viewRestored: restored,
+        reason: !restored ? "TODAY_RESTORE_UNCONFIRMED" : state.lastErrorCode() ?? result?.error ?? "COLLECTOR_ABORTED",
+        collectionErrorCode, restorationErrorCode: restored ? null : state.lastErrorCode(),
+        collectionFailure, restorationFailure,
+        completedOwners: result?.candidateItems.filter((item) => item.kind === "OWNER_COMPLETE").length ?? 0
+      }), state.sourceGeneration, state.tabGeneration);
+      return restored;
+    }
+    if (result?.status === "INCOMPLETE") {
+      const completedOwners = result.candidateItems.filter((item) => item.kind === "OWNER_COMPLETE").length;
+      const expandedOwners = result.candidateItems.filter((item) => item.kind === "CAPTURE" &&
+        item.captureKind !== "ROSTER").length;
+      const sampleKind = (group: { readonly betTypeIds: readonly string[] }): string | null =>
+        group.betTypeIds.length === 0 ? "UNTYPED" : group.betTypeIds.length === 1 &&
+          ["461", "462"].includes(group.betTypeIds[0]!) ? group.betTypeIds[0]! : null;
+      const informativeGroup = (group: { readonly betTypeIds: readonly string[] }): boolean => {
+        const kind = sampleKind(group);
+        return kind !== null && !state.publicMarketSampleKinds.has(kind);
+      };
+      // At most one bounded public sample per untyped/461/462 evidence class.
+      // A known three-way roster must not consume the hidden expansion sample.
+      const firstPublicCapture = result.items.find((item) =>
+        item.kind === "CAPTURE" && item.record.groups.some(informativeGroup));
+      const publicMarketSample = firstPublicCapture?.kind === "CAPTURE" ? {
+        ownerMatchId: firstPublicCapture.ownerMatchId, capturedAtMs: firstPublicCapture.capturedAtMs,
+        groups: firstPublicCapture.record.groups.filter(informativeGroup).slice(0, 24)
+          .map((group) => ({ betTypeIds: group.betTypeIds.slice(0, 8).map((type) => type.slice(0, 80)),
+            labels: group.labels.slice(0, 8).map((label) => label.slice(0, 80)),
+            outcomeCount: group.odds.length,
+            publicPrices: group.odds.slice(0, 4).map((odd) => odd.priceText.slice(0, 32)),
+            nativeIds: [...new Set(group.odds.map((odd) => odd.marketOddsId))].slice(0, 4)
+              .map((nativeId) => nativeId.slice(0, 128)) }))
+      } : undefined;
+      if (completedOwners === 1 || completedOwners % 10 === 0 ||
+        firstPublicCapture !== undefined ||
+        result.items.some((item) => item.kind === "PERIOD_COMPLETE")) {
+        await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
+          kind: "SABA_HIDDEN_COLLECTOR", status: "IN_PROGRESS", viewRestored: true, completedOwners,
+          rosterOwners: result.candidateItems.filter((item) => item.kind === "CAPTURE" && item.captureKind === "ROSTER").length,
+          expandedOwners, ...(publicMarketSample === undefined ? {} : { publicMarketSample })
+        }), state.sourceGeneration, state.tabGeneration);
+        for (const group of publicMarketSample?.groups ?? []) {
+          const kind = sampleKind(group);
+          if (kind !== null) state.publicMarketSampleKinds.add(kind);
+        }
+      }
+    }
+    if (result?.status === "COMPLETE") {
+      const terminal = result.candidateItems.find((item) => item.kind === "TERMINAL");
+      if (terminal === undefined) return false;
+      const observedAtMs = this.#now();
+      const receivedMonotonicMs = this.#monotonicNow();
+      try {
+        const chunks = chunkCmdSnapshot(result.candidateItems, terminal.collectorGeneration, undefined, {
+          sweepId: terminal.collectorGeneration, sweepComplete: true,
+          sweepFrameKey: state.binding.frameKey, sweepDocumentKey: state.binding.documentKey
+        });
+        for (const chunk of chunks) {
+          if (!current()) return false;
+          await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT",
+            { encoding: "UTF8", body: JSON.stringify(chunk) }, {
+              observedAtMs, receivedMonotonicMs, sourceGeneration: state.sourceGeneration,
+              tabGeneration: state.tabGeneration, beforeForward: async () => current()
+            });
+        }
+        if (!current()) return false;
+        state.finished = true;
+        await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
+          kind: "SABA_HIDDEN_COLLECTOR", status: "COMPLETE_CAPTURE", viewRestored: true,
+          completedOwners: terminal.owners.length, periods: terminal.periods.map(({ period, rosterCount }) =>
+            ({ period, rosterCount })), chunks: chunks.length
+        }), state.sourceGeneration, state.tabGeneration);
+      } catch {
+        state.finished = true;
+        await this.#emitSabaCollectorDiagnostic(source, hostname, JSON.stringify({
+          kind: "SABA_HIDDEN_COLLECTOR", status: "INCOMPLETE", viewRestored: true,
+          reason: "COLLECTOR_PUBLICATION_FAILED"
+        }), state.sourceGeneration, state.tabGeneration);
+      }
+    }
+    return true;
+    } finally {
+      // `state` is identity-bound to this operation. A retired collector or
+      // replacement generation owns a different object, so a late completion
+      // cannot unlock the new collector's admission latch.
+      state.inFlight = false;
+    }
+  }
+
+  #retireSabaHiddenCollector(sourceId: string): void {
+    const state = this.#sabaCollectors.get(sourceId);
+    if (state === undefined) return;
+    this.#sabaCollectors.delete(sourceId);
+    this.#sabaNavigationProbeAttempts.delete(sourceId);
+    this.#sabaNavigationProbeCompletedAtMs.delete(sourceId);
+    this.#sabaProbePublicationVersions.set(sourceId,
+      (this.#sabaProbePublicationVersions.get(sourceId) ?? 0) + 1);
+    if (!this.#sabaCollectorDomBlocks.delete(sourceId)) return;
+    // Losing the exact context while the view is mutated is not proof that
+    // Today is restored. Hand that unsafe view to the existing bounded
+    // exact-source recovery; never leave a stale collector trapping all polls.
+    this.#sabaProbePublicationBlocks.add(sourceId);
+    this.#sabaUsableDomCatalogAtMs.delete(sourceId);
+    this.#sabaResponsiveFootballDomAtMs.delete(sourceId);
+    const tabId = Number(sourceId.split(":").at(-1));
+    if (!Number.isSafeInteger(tabId)) return;
+    this.#startSabaProbeRecovery({ lobby: "SABA", sourceId, tabId }, state.hostname,
+      this.#captureSourceGeneration(sourceId), this.#captureTabGeneration(tabId));
+  }
+
+  #emitSabaCollectorDiagnostic(source: ObservedSource, hostname: string, body: string,
+    sourceGeneration: number, tabGeneration: number): Promise<void> {
+    return this.#emit(source, `https://${hostname}/__fieldline_saba_hidden_collector__`,
+      "Diagnostic", "TAB_STATE", { encoding: "UTF8", body },
+      { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow(),
+        sourceGeneration, tabGeneration }).catch(() => undefined);
+  }
+
+  #emitSabaProbeDiagnostic(source: ObservedSource, hostname: string, body: string,
+    sourceGeneration: number, tabGeneration: number): Promise<void> {
+    return this.#emit(source, `https://${hostname}/__fieldline_saba_navigation_probe__`,
+      "Diagnostic", "TAB_STATE", { encoding: "UTF8", body },
+      { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow(),
+        sourceGeneration, tabGeneration }).catch(() => undefined);
+  }
+
+  #startSabaProbeRecovery(source: ObservedSource, hostname: string,
+    sourceGeneration: number, tabGeneration: number): void {
+    const current = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration &&
+      this.#sabaProbePublicationBlocks.has(source.sourceId);
+    if (!current()) return;
+    this.#clearSabaHardSocketRecoveryTimer(source.sourceId);
+    const emitStatus = (status: "RECOVERY_PENDING" | "RECOVERY_FAILED" | "RECOVERY_NO_EPOCH") =>
+      this.#emitSabaProbeDiagnostic(source, hostname, JSON.stringify({
+          kind: "SABA_NAVIGATION_PROBE", version: 1, status,
+          coverageClaim: "PUBLIC_STRUCTURE_ONLY", mutated: true, viewRestored: false, truncated: false
+        }), sourceGeneration, tabGeneration);
+    this.#sabaHardSocketRecoveryAtMs.set(source.sourceId, this.#now());
+    this.#armSabaProbeRecoveryRetry(source, hostname, sourceGeneration, tabGeneration);
+    void emitStatus("RECOVERY_PENDING");
+    if (this.#onSabaSocketUnavailable === undefined) {
+      void emitStatus("RECOVERY_FAILED");
+      return;
+    }
+    let operation: Promise<unknown>;
+    try { operation = Promise.resolve(this.#onSabaSocketUnavailable(source, "UNSAFE_VIEW")); }
+    catch (error) { operation = Promise.reject(error); }
+    void operation.then(async () => {
+      if (!current()) return;
+      void emitStatus("RECOVERY_NO_EPOCH");
+    }, async () => {
+      if (!current()) return;
+      void emitStatus("RECOVERY_FAILED");
+    });
+  }
+
+  #armSabaProbeRecoveryRetry(source: ObservedSource, hostname: string,
+    sourceGeneration: number, tabGeneration: number): void {
+    if (this.#sabaHardSocketRecoveryTimers.has(source.sourceId)) return;
+    const lastAtMs = this.#sabaHardSocketRecoveryAtMs.get(source.sourceId) ?? this.#now();
+    const delayMs = Math.max(0, SABA_HARD_SOCKET_RECOVERY_COOLDOWN_MS - (this.#now() - lastAtMs));
+    const timer = setTimeout(() => {
+      if (this.#sabaHardSocketRecoveryTimers.get(source.sourceId) !== timer) return;
+      this.#sabaHardSocketRecoveryTimers.delete(source.sourceId);
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration ||
+        !this.#sabaProbePublicationBlocks.has(source.sourceId)) return;
+      this.#startSabaProbeRecovery(source, hostname, sourceGeneration, tabGeneration);
+    }, delayMs);
+    this.#sabaHardSocketRecoveryTimers.set(source.sourceId, timer);
+  }
+
+  #startSabaPublicCatalogDiscovery(source: ObservedSource, hostname: string): void {
+    if (source.lobby !== "SABA" || !/^[a-z0-9.-]+$/iu.test(hostname) ||
+      this.#sabaCollectors.get(source.sourceId)?.finished === false ||
+      this.#sabaPublicDiscoveries.has(source.sourceId)) return;
+    const nowMs = this.#now();
+    const previousAtMs = this.#sabaPublicDiscoveryAtMs.get(source.sourceId);
+    if (previousAtMs !== undefined && nowMs - previousAtMs < SABA_PUBLIC_DISCOVERY_INTERVAL_MS) return;
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const token = Symbol("saba-public-discovery");
+    this.#sabaPublicDiscoveryAtMs.set(source.sourceId, nowMs);
+    const operation = this.#runPeriodicDomWork(source.sourceId, async () => {
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
+      await this.#collectSabaPublicCatalogDiscovery(source, hostname, sourceGeneration, tabGeneration);
+    }).catch(() => undefined).finally(() => {
+      if (this.#sabaPublicDiscoveries.get(source.sourceId)?.token === token) {
+        this.#sabaPublicDiscoveries.delete(source.sourceId);
+      }
+    });
+    this.#sabaPublicDiscoveries.set(source.sourceId, { token, operation });
+  }
+
+  async #collectSabaPublicCatalogDiscovery(source: ObservedSource, hostname: string,
+    sourceGeneration: number, tabGeneration: number): Promise<void> {
+    const current = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration;
+    const commandDeadlineMs = this.#monotonicNow() + SABA_PUBLIC_DISCOVERY_COMMAND_BUDGET_MS;
+    const commandTimeoutMs = () => Math.min(this.#frameCommandTimeoutMs,
+      Math.max(0, commandDeadlineMs - this.#monotonicNow()));
+    const attempts = { evaluate: 0, frameTree: 0, isolatedWorld: 0 };
+    const outcomes = emptySabaPublicDiscoveryFailureCounts();
+    const fail = (category: SabaPublicDiscoveryFailureCategory): void => {
+      outcomes[category] = Math.min(65_536, outcomes[category] + 1);
+    };
+    const evaluate = async (contextId?: number, sessionId?: string): Promise<ReturnType<
+      typeof sabaPublicDiscoveryCandidate>> => {
+      const timeoutMs = commandTimeoutMs();
+      if (!current() || timeoutMs <= 0) return null;
+      attempts.evaluate = Math.min(25, attempts.evaluate + 1);
+      const params = { expression: SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION,
+        ...(contextId === undefined ? {} : { contextId }), returnByValue: true, awaitPromise: false };
+      let evaluated: unknown;
+      try {
+        evaluated = await this.#withFrameCommandTimeout(sessionId === undefined
+          ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+          : this.#sendCommand(source.tabId, "Runtime.evaluate", params, sessionId), timeoutMs);
+      } catch (error) {
+        if (!current()) return null;
+        fail(sabaPublicDiscoveryFailureCategory(error));
+        return null;
+      }
+      if (!current()) return null;
+      if (isRecord(evaluated) && evaluated.exceptionDetails !== undefined) {
+        fail("EVALUATION_EXCEPTION");
+        return null;
+      }
+      const candidate = sabaPublicDiscoveryCandidate(evaluated);
+      if (candidate === null) fail("NO_RESULT");
+      return candidate;
+    };
+    // Runtime context events are the cheapest route to the owning sports
+    // document. Keep the root as a fallback, then inspect a bounded set of
+    // current child frames because MV3 can attach after those events fired.
+    const currentTargets = [...(this.#mainWorldContexts.get(source.tabId)?.values() ?? [])]
+      .slice(0, 12).map((binding) => evaluate(binding.contextId, binding.sessionId));
+    currentTargets.push(evaluate());
+    if (!current()) return;
+    let frameTree: unknown;
+    let frameTreeFailed = false;
+    const frameTreeTimeoutMs = commandTimeoutMs();
+    if (frameTreeTimeoutMs > 0) {
+      attempts.frameTree = 1;
+      try {
+        frameTree = await this.#withFrameCommandTimeout(
+          this.#sendCommand(source.tabId, "Page.getFrameTree"), frameTreeTimeoutMs);
+      } catch (error) {
+        if (!current()) return;
+        frameTreeFailed = true;
+        frameTree = null;
+        fail(sabaPublicDiscoveryFailureCategory(error));
+      }
+    }
+    if (!current()) return;
+    const frameIds = collectFrameIds(frameTree);
+    if (attempts.frameTree === 1 && !frameTreeFailed && frameIds.length === 0) fail("NO_RESULT");
+    const childValues: Array<ReturnType<typeof sabaPublicDiscoveryCandidate>> = [];
+    for (const frameId of frameIds.slice(1, 13)) {
+      if (!current()) return;
+      const worldTimeoutMs = commandTimeoutMs();
+      if (worldTimeoutMs <= 0) break;
+      attempts.isolatedWorld = Math.min(12, attempts.isolatedWorld + 1);
+      let world: unknown;
+      try {
+        world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+          "Page.createIsolatedWorld", { frameId, worldName: "fieldline-saba-public-discovery",
+            grantUniveralAccess: false }), worldTimeoutMs);
+      } catch (error) {
+        if (!current()) return;
+        fail(sabaPublicDiscoveryFailureCategory(error));
+        childValues.push(null);
+        continue;
+      }
+      if (!current()) return;
+      const contextId = nestedNumber(world, "executionContextId");
+      if (contextId === null) {
+        fail("NO_RESULT");
+        childValues.push(null);
+        continue;
+      }
+      childValues.push(await evaluate(contextId));
+      if (!current()) return;
+    }
+    const currentValues = await Promise.all(currentTargets);
+    if (!current()) return;
+    const candidates = [...currentValues, ...childValues]
+      .filter((candidate) => candidate !== null)
+      .sort((left, right) => right.score - left.score);
+    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+      this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
+    if (candidates.length === 0) {
+      const body = JSON.stringify({ kind: "SABA_PUBLIC_CATALOG_DISCOVERY_FAILURE", version: 1,
+        attempts, outcomes });
+      await this.#emit(source, `https://${hostname}/__fieldline_saba_catalog_discovery_failure__`,
+        "Diagnostic", "TAB_STATE", { encoding: "UTF8", body },
+        { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow(),
+          sourceGeneration, tabGeneration });
+      if (this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+        this.#captureTabGeneration(source.tabId) === tabGeneration) {
+        this.#sabaPublicDiscoveryAtMs.set(source.sourceId, this.#now());
+      }
+      return;
+    }
+    const body = candidates[0]!.body;
+    await this.#emit(source, `https://${hostname}/__fieldline_saba_catalog_discovery__`,
+      "Diagnostic", "TAB_STATE", { encoding: "UTF8", body },
+      { observedAtMs: this.#now(), receivedMonotonicMs: this.#monotonicNow(),
+        sourceGeneration, tabGeneration });
+    if (this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration) {
+      // Attempt-start remains the failed-attempt backoff; a successful delayed
+      // read is paced from completion so emitted diagnostics stay >=30s apart.
+      this.#sabaPublicDiscoveryAtMs.set(source.sourceId, this.#now());
+    }
+  }
+
+  #scheduleSabaHardSocketRecovery(
+    source: ObservedSource,
+    baselineMissingAgeMs: number,
+    nowMs: number
+  ): void {
+    if (this.#onSabaSocketUnavailable === undefined) return;
+    const lastHardRecoveryAtMs = this.#sabaHardSocketRecoveryAtMs.get(source.sourceId);
+    const baselineDelayMs = Math.max(0, SABA_HARD_SOCKET_RECOVERY_AFTER_MS - baselineMissingAgeMs);
+    const cooldownDelayMs = lastHardRecoveryAtMs === undefined ? 0
+      : Math.max(0, SABA_HARD_SOCKET_RECOVERY_COOLDOWN_MS - (nowMs - lastHardRecoveryAtMs));
+    const delayMs = Math.max(baselineDelayMs, cooldownDelayMs);
+    if (delayMs === 0) {
+      this.#clearSabaHardSocketRecoveryTimer(source.sourceId);
+      this.#runSabaHardSocketRecovery(source);
+      return;
+    }
+    if (this.#sabaHardSocketRecoveryTimers.has(source.sourceId)) return;
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const timer = setTimeout(() => {
+      if (this.#sabaHardSocketRecoveryTimers.get(source.sourceId) !== timer) return;
+      this.#sabaHardSocketRecoveryTimers.delete(source.sourceId);
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+      if (this.hasResponsiveSabaDocument(source.sourceId)) {
+        // Keep one low-frequency watchdog armed for a socket that can die
+        // silently later without producing a close event.
+        this.#scheduleSabaHardSocketRecovery(source, 0, this.#now());
+        return;
+      }
+      this.#runSabaHardSocketRecovery(source);
+    }, delayMs);
+    this.#sabaHardSocketRecoveryTimers.set(source.sourceId, timer);
+  }
+
+  #runSabaHardSocketRecovery(source: ObservedSource): void {
+    if (this.#onSabaSocketUnavailable === undefined) return;
+    if (this.hasResponsiveSabaDocument(source.sourceId)) return;
+    const nowMs = this.#now();
+    const lastHardRecoveryAtMs = this.#sabaHardSocketRecoveryAtMs.get(source.sourceId);
+    if (lastHardRecoveryAtMs !== undefined &&
+      nowMs - lastHardRecoveryAtMs < SABA_HARD_SOCKET_RECOVERY_COOLDOWN_MS) return;
+    this.#sabaHardSocketRecoveryAtMs.set(source.sourceId, nowMs);
+    void Promise.resolve(this.#onSabaSocketUnavailable(source)).catch(() => undefined);
+  }
+
+  #clearSabaHardSocketRecoveryTimer(sourceId: string): void {
+    const timer = this.#sabaHardSocketRecoveryTimers.get(sourceId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.#sabaHardSocketRecoveryTimers.delete(sourceId);
+  }
+
+  #startSabaSilentSocketRecovery(source: ObservedSource, onAttemptAdmitted?: () => void): void {
     // Orphan-frame recovery uses the general recovery registry. Treat either
     // registry as ownership of the one SABA heap scan so the now-detached
     // refresh path cannot race it (or be raced by it).
@@ -2621,7 +3229,7 @@ export class NetworkObserver {
       this.#socketBaselineRecoveries.has(source.sourceId)) return;
     const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const operation = this.#requestFreshSocketBaseline(source,
-      (url) => /\/socket\.io\/?$/u.test(url.pathname))
+      (url) => /\/socket\.io\/?$/u.test(url.pathname), undefined, onAttemptAdmitted)
       .catch((error: unknown) => {
         if (this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) {
           this.#noteWsRecoveryOutcome(source, `silence:fail-${failureLabel(error)}`);
@@ -2643,6 +3251,8 @@ export class NetworkObserver {
    */
   async maintainKsportFeed(source: ObservedSource, options: { readonly quietMs?: number;
     readonly recoveryIntervalMs?: number } = {}): Promise<void> {
+    // Start independently of periodic DOM work and the price-forwarding tail.
+    if (source.lobby === "KSPORT") void this.#sbobetDetailStates.get(source.sourceId)?.lane.tick().catch(() => undefined);
     const existing = this.#ksportMaintenances.get(source.sourceId);
     if (existing !== undefined) return existing;
     const operation = this.#runPeriodicDomWork(source.sourceId,
@@ -2668,8 +3278,22 @@ export class NetworkObserver {
     const fallbackMode = this.#ksportHttpFallbackModes.get(source.sourceId);
     if (fallbackMode !== undefined) {
       if (this.#retireKsportHttpFallbackIfRecovered(source.sourceId)) return;
-      await this.#refreshKsportHttpFallback(source, nowMs, fallbackMode);
-      await this.#requestFreshSocketBaseline(source, isKsportCatalogSocket);
+      const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+      const tabGeneration = this.#captureTabGeneration(source.tabId);
+      const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+      const ownsFallback = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+        this.#captureTabGeneration(source.tabId) === tabGeneration &&
+        this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration;
+      const previousAttemptAtMs = this.#ksportMaintenanceRecoveryAtMs.get(source.sourceId);
+      const attemptDue = previousAttemptAtMs === undefined ||
+        nowMs - previousAttemptAtMs >= KSPORT_HTTP_RECONCILE_INTERVAL_MS;
+      const refreshed = await this.#refreshKsportHttpFallback(source, nowMs, fallbackMode);
+      if (!ownsFallback()) return;
+      // A stale template can fail after establishing fallback authority. Reuse
+      // native reacquisition only after a due HTTP attempt, not a cadence skip.
+      if (attemptDue && !refreshed) await this.#requestFreshKsportNativeHttpBaseline(source);
+      if (!ownsFallback()) return;
+      await this.#requestFreshSocketBaseline(source, isKsportCatalogSocket, undefined, undefined, ownsFallback);
       return;
     }
     if (socketAlive && recentlyActive) {
@@ -3003,6 +3627,7 @@ export class NetworkObserver {
       return;
     }
     if (source.lobby === "SABA") {
+      const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
       // Durable history remains a current-document cache for explicit
       // diagnostics, but it is never forwarded during ordinary recovery: the
       // API deliberately treats replay as non-authoritative, while sending up
@@ -3010,13 +3635,25 @@ export class NetworkObserver {
       await this.#restoreSabaWsSnapshots(source).catch((error) => {
         this.#noteWsRecoveryOutcome(source, `refresh:restore-${failureLabel(error)}`);
       });
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#sabaRefreshControlsBlocked(source.sourceId)) {
+        // Source controls may request a same-document refresh while a bounded
+        // hidden-market sweep owns that page. Snapshot restore is read-only,
+        // but selecting Today or reseeding the socket heap here would overtake
+        // the collector between slices and invalidate its cursor/restoration
+        // proof. A later refresh can proceed after the terminal collector step.
+        return;
+      }
       // A C-SPORTS schedule launch lands on one live event. Its authenticated
       // `Hôm Nay` tab issues the provider's complete football reset/done
       // baseline (measured live: 5 -> 360 events) without navigating or
       // replaying the one-time launch URL. Attach first, then make this one
       // ordinary page selection so every baseline frame is observed.
       this.#noteWsRecoveryOutcome(source, "refresh:run");
-      if (await this.#selectSabaTodayTab(source) === "selected") return;
+      const todaySelection = await this.#selectSabaTodayTab(source);
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#sabaRefreshControlsBlocked(source.sourceId)) return;
+      if (todaySelection === "selected") return;
       // Measured 2026-09-01: with the socket streaming deltas and never
       // resending reset, every API recovery request reached this branch and
       // reconnectAttempts stayed at 0 for twenty minutes. The steps before the
@@ -3036,6 +3673,8 @@ export class NetworkObserver {
           this.#noteWsRecoveryOutcome(source, `refresh:dom-${failureLabel(error)}`);
         }
       }
+      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#sabaRefreshControlsBlocked(source.sourceId)) return;
       // Socket heap discovery is deliberately detached from the provider work
       // lane. A large page can keep Runtime.queryObjects pending for tens of
       // seconds; holding this refresh operation until it settles also blocks
@@ -3156,6 +3795,12 @@ export class NetworkObserver {
   }
 
   async #selectSabaTodayTab(source: ObservedSource): Promise<"selected" | "active" | null> {
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const current = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration &&
+      !this.#sabaRefreshControlsBlocked(source.sourceId);
+    if (!current()) return null;
     if (this.#sabaTodayBootstrapSelected.has(source.sourceId)) return "active";
     const diagnostic = this.#wsAttachDiagnostic(source);
     diagnostic.baselineTabSelections += 1;
@@ -3167,17 +3812,20 @@ export class NetworkObserver {
       {}
     ];
     const evaluate = async (target: { readonly contextId?: number; readonly sessionId?: string }) => {
+      if (!current()) return null;
       const params = { expression: SABA_TODAY_BASELINE_EXPRESSION,
         ...(target.contextId === undefined ? {} : { contextId: target.contextId }),
         returnByValue: true, awaitPromise: false };
       const evaluation = await this.#withFrameCommandTimeout(target.sessionId === undefined
         ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, target.sessionId)).catch(() => null);
+      if (!current()) return null;
       const status = nestedValue(evaluation, "result", "value", "status");
       if (typeof status === "string") diagnostic.baselineTabStatus = status;
       return status;
     };
     const accept = (status: unknown): "selected" | "active" | null => {
+      if (!current()) return null;
       if (status === "today-tab-selected") {
         this.#sabaTodayBootstrapSelected.add(source.sourceId);
         return "selected";
@@ -3195,7 +3843,10 @@ export class NetworkObserver {
     };
     diagnostic.baselineTabTargets = targets.length;
     for (const target of targets) {
-      const accepted = accept(await evaluate(target));
+      if (!current()) return null;
+      const status = await evaluate(target);
+      if (!current()) return null;
+      const accepted = accept(status);
       if (accepted !== null) return accepted;
     }
     // Runtime.enable normally replays every current main-world context, but a
@@ -3203,19 +3854,25 @@ export class NetworkObserver {
     // running without receiving that event. Discover the live frame tree and
     // create a bounded isolated world in each child so the authenticated period
     // control remains reachable without navigating the one-time launch URL.
+    if (!current()) return null;
     const frameTree = await this.#withFrameCommandTimeout(
       this.#sendCommand(source.tabId, "Page.getFrameTree")
     ).catch(() => null);
+    if (!current()) return null;
     const childFrameIds = collectFrameIds(frameTree).slice(1);
     diagnostic.baselineTabTargets += childFrameIds.length;
     for (const frameId of childFrameIds) {
+      if (!current()) return null;
       const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Page.createIsolatedWorld", {
           frameId, worldName: "fieldline-saba-time-baseline", grantUniveralAccess: false
         })).catch(() => null);
+      if (!current()) return null;
       const contextId = nestedNumber(world, "executionContextId");
       if (contextId === null) continue;
-      const accepted = accept(await evaluate({ contextId }));
+      const status = await evaluate({ contextId });
+      if (!current()) return null;
+      const accepted = accept(status);
       if (accepted !== null) return accepted;
     }
     return null;
@@ -3253,6 +3910,58 @@ export class NetworkObserver {
         body: { mno: 2, si: 1, mg: 1 },
         frameId, loaderId,
         ...(binding.sessionId === undefined ? {} : { sessionId: binding.sessionId }),
+        sourceGeneration, tabGeneration
+      };
+      this.#apsportRequestTemplates.set(source.sourceId, template);
+      return template;
+    }
+    // Runtime.enable normally replays all existing main-world contexts, but
+    // Chrome can omit that replay when an MV3 worker restarts while APSPORT's
+    // embedded application is already running. Discover the current frame
+    // tree and create a same-origin isolated world so the retained provider
+    // session can rebuild its cookie-bound API template without reloading the
+    // tab or waiting for a future native request.
+    const discoveredTree = await this.#withFrameCommandTimeout(
+      this.#sendCommand(source.tabId, "Page.getFrameTree")
+    ).catch(() => null);
+    for (const descriptor of collectFrameDescriptors(discoveredTree)) {
+      if (descriptor.loaderId === null) continue;
+      const world = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+        "Page.createIsolatedWorld", {
+          frameId: descriptor.id, worldName: "fieldline-apsport-catalog-refresh",
+          grantUniveralAccess: false
+        })).catch(() => null);
+      const contextId = nestedNumber(world, "executionContextId");
+      if (contextId === null) continue;
+      const evaluation = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+        "Runtime.evaluate", { expression: APSPORT_BOOTSTRAP_EXPRESSION, contextId,
+          returnByValue: true, awaitPromise: false })).catch(() => null);
+      const value = nestedValue(evaluation, "result", "value");
+      if (!isRecord(value) || typeof value.origin !== "string" || typeof value.language !== "string" ||
+        typeof value.timeZone !== "string" || !/^[A-Za-z]{2,3}(?:-[A-Za-z]{2,4})?$/u.test(value.language) ||
+        value.timeZone.length > 128 ||
+        !/^[A-Za-z0-9_+.-]{1,64}(?:\/[A-Za-z0-9_+.-]{1,64})*$/u.test(value.timeZone)) continue;
+      let origin: URL;
+      try { origin = new URL(value.origin); } catch { continue; }
+      if (value.origin !== origin.origin || origin.protocol !== "https:" || origin.username !== "" ||
+        origin.password !== "" || origin.search !== "" || origin.hash !== "" ||
+        !/^(?:spbui|spbtui)\.agenate\.com$/u.test(origin.hostname)) continue;
+      const currentTree = await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Page.getFrameTree")
+      ).catch(() => null);
+      if (currentFrameLoader(currentTree, descriptor.id) !== descriptor.loaderId ||
+        !this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) ||
+        this.#captureTabGeneration(source.tabId) !== tabGeneration) continue;
+      const binding: MainWorldContextBinding = { contextId };
+      const retainedContexts = this.#mainWorldContexts.get(source.tabId) ??
+        new Map<string, MainWorldContextBinding>();
+      retainedContexts.set(descriptor.id, binding);
+      this.#mainWorldContexts.set(source.tabId, retainedContexts);
+      const template: BoundApsportRequestTemplate = {
+        origin: origin.origin,
+        headers: { "content-type": "application/json", lng: value.language, tz: value.timeZone },
+        body: { mno: 2, si: 1, mg: 1 },
+        frameId: descriptor.id, loaderId: descriptor.loaderId,
         sourceGeneration, tabGeneration
       };
       this.#apsportRequestTemplates.set(source.sourceId, template);
@@ -3303,12 +4012,13 @@ export class NetworkObserver {
   #scheduleApsportEventDetail(source: ObservedSource, eventId: string, leagueId?: string): void {
     const active = this.#apsportActiveCatalogs.get(source.sourceId);
     if (source.lobby !== "TSPORT" || eventId.trim() === "" || eventId.length > 128 ||
-      active === undefined || !active.rosterEventIds.has(eventId) ||
+      active === undefined || !active.hiddenDetailEventIds.has(eventId) ||
       !this.#apsportRequestTemplates.has(source.sourceId)) return;
     const key = `${source.sourceId}\u0000${eventId}`;
     if (this.#apsportEventDetailJobs.has(key)) return;
     const token = Symbol(eventId);
     this.#apsportEventDetailJobs.set(key, token);
+    this.#apsportCoverage(source.sourceId).markQueued(eventId);
     const nowMs = this.#now();
     const previousAtMs = this.#apsportEventDetailLastAtMs.get(key);
     const delayMs = previousAtMs === undefined ? APSPORT_EVENT_DETAIL_DEBOUNCE_MS : Math.max(
@@ -3321,18 +4031,21 @@ export class NetworkObserver {
       this.#apsportEventDetailLastAtMs.set(key, this.#now());
       const prior = this.#apsportEventDetailTails.get(source.sourceId) ?? Promise.resolve();
       const operation = prior.catch(() => undefined).then(async () => {
+        if (this.#apsportEventDetailJobs.get(key) !== token) return;
+        this.#apsportCoverage(source.sourceId).markInFlight(eventId);
         await this.#refreshApsportEventDetail(source, eventId, leagueId);
         // Preserve the provider-safe cadence used by full sweeps while the
         // independent queue works through every roster event.
         await new Promise<void>((resolve) => setTimeout(resolve, APSPORT_DETAIL_DELAY_MS));
       });
       this.#apsportEventDetailTails.set(source.sourceId, operation);
-      void operation.finally(() => {
+      const cleanup = (): void => {
         if (this.#apsportEventDetailJobs.get(key) === token) this.#apsportEventDetailJobs.delete(key);
         if (this.#apsportEventDetailTails.get(source.sourceId) === operation) {
           this.#apsportEventDetailTails.delete(source.sourceId);
         }
-      });
+      };
+      void operation.then(cleanup, cleanup);
     }, delayMs);
     this.#apsportEventDetailTimers.set(key, { sourceId: source.sourceId, timer });
   }
@@ -3341,22 +4054,62 @@ export class NetworkObserver {
     const template = this.#apsportRequestTemplates.get(source.sourceId);
     const rosterLeagueId = leagueId ??
       this.#apsportActiveCatalogs.get(source.sourceId)?.rosterLeagueIds.get(eventId);
-    const currentRosterContainsEvent = (): boolean =>
-      this.#apsportActiveCatalogs.get(source.sourceId)?.rosterEventIds.has(eventId) === true;
-    if (!currentRosterContainsEvent() || template === undefined) return;
+    const currentCatalogAllowsDetail = (): boolean =>
+      this.#apsportActiveCatalogs.get(source.sourceId)?.hiddenDetailEventIds.has(eventId) === true;
+    if (!currentCatalogAllowsDetail() || template === undefined) return;
     // A large all-future roster can take several minutes to hydrate. Its
     // periodic one-minute roster renewal must not discard the one detail
     // response already in flight when the event still belongs to the newer
     // roster and the authenticated page/template identity has not changed.
-    const isCurrent = (): boolean => currentRosterContainsEvent() &&
+    const isCurrent = (): boolean => currentCatalogAllowsDetail() &&
       this.#apsportTemplateIsCurrent(source, template);
-    const detailed = await this.#collectApsportEventDetail({ eventId,
-      ...(rosterLeagueId === undefined ? {} : { leagueId: rosterLeagueId }),
-      template: { origin: template.origin, headers: template.headers, body: template.body },
-      request: (input) => this.#requestApsportPage(source, template, input),
-      sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
+    let detailed: Record<string, unknown> | null;
+    try {
+      detailed = await this.#collectApsportEventDetail({ eventId,
+        ...(rosterLeagueId === undefined ? {} : { leagueId: rosterLeagueId }),
+        template: { origin: template.origin, headers: template.headers, body: template.body },
+        request: (input) => this.#requestApsportPage(source, template, input),
+        sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)), isCurrent });
+    } catch {
+      if (isCurrent()) this.#apsportCoverage(source.sourceId).markFailure(eventId);
+      this.#lastCaptureExit.set(source.sourceId, "APSPORT_EVENT_DETAIL_THROWN");
+      return;
+    }
     const active = this.#apsportActiveCatalogs.get(source.sourceId);
-    if (detailed === null || !isCurrent() || active === undefined) return;
+    if (!isCurrent() || active === undefined) return;
+    const detailedEventId = detailed === null ? null :
+      typeof detailed["2"] === "string" || typeof detailed["2"] === "number" ? String(detailed["2"]) : null;
+    const validation = detailed === null ? null : validateApsportDetail(detailed);
+    if (detailed === null || detailedEventId !== eventId || validation?.eventId !== eventId) {
+      this.#apsportCoverage(source.sourceId).markFailure(eventId);
+      return;
+    }
+    const status = detailed["10"];
+    const hasActiveMarketGroup = (status === undefined || status === null || status === "") &&
+      (detailed["50"] as unknown[]).some((candidate) => isRecord(candidate) &&
+        candidate["10"] === "Active" && Array.isArray(candidate["9"]) && candidate["9"].length > 0);
+    const inactive = status !== "Active" && !hasActiveMarketGroup;
+    const startAtMs = typeof detailed["11"] === "string" ? Date.parse(detailed["11"]) : Number.NaN;
+    const expired = detailed["6"] !== true && Number.isFinite(startAtMs) && startAtMs < this.#now();
+    const removedFromRoster = inactive || expired;
+    const transitionedOutOfPrematch = detailed["6"] === true || removedFromRoster;
+    if (transitionedOutOfPrematch) this.#apsportCoverage(source.sourceId).removeEvent(eventId);
+    else this.#apsportCoverage(source.sourceId).markSuccess(eventId, validation.hasMarkets, this.#now());
+    if (transitionedOutOfPrematch) {
+      const current = this.#apsportActiveCatalogs.get(source.sourceId);
+      if (current !== undefined && current.generation === active.generation) {
+        const hiddenDetailEventIds = new Set(current.hiddenDetailEventIds);
+        hiddenDetailEventIds.delete(eventId);
+        const rosterEventIds = new Set(current.rosterEventIds);
+        const rosterLeagueIds = new Map(current.rosterLeagueIds);
+        if (removedFromRoster) {
+          rosterEventIds.delete(eventId);
+          rosterLeagueIds.delete(eventId);
+        }
+        this.#apsportActiveCatalogs.set(source.sourceId, { ...current,
+          rosterCount: rosterEventIds.size, rosterEventIds, rosterLeagueIds, hiddenDetailEventIds });
+      }
+    }
     const batch: ApsportCatalogBatch = { schemaVersion: 1, generation: active.generation,
       phase: "DETAIL", complete: false, trigger: "EVENT_CHANGE",
       prematchWindowHours: active.prematchWindowHours, records: [detailed] };
@@ -3446,10 +4199,15 @@ export class NetworkObserver {
     const templateIsCurrent = (): boolean => this.#apsportTemplateIsCurrent(source, template) &&
       this.#apsportRefreshOrdinals.get(source.sourceId) === ordinal;
     let rosterOnlyComplete = false;
-    const refreshIsCurrent = (): boolean => templateIsCurrent() && !rosterOnlyComplete;
+    let rosterCoverageRejected = false;
+    let rosterCoverageFailureCode: string | null = null;
+    const ownedDetailEventIds = new Set<string>();
+    const refreshToken = Symbol(generation);
+    const refreshIsCurrent = (): boolean => templateIsCurrent() && !rosterOnlyComplete &&
+      !rosterCoverageRejected;
     const request = (input: ApsportCatalogPageRequest) => this.#requestApsportPage(source, template, input);
     const emitBatch = async (batch: ApsportCatalogBatch): Promise<void> => {
-      if (!templateIsCurrent()) return;
+      if (!templateIsCurrent() || rosterCoverageRejected) return;
       await this.ingestHttpResponse(source,
         `${template.origin}/__fieldline_apsport_catalog_refresh__`, "Fetch", JSON.stringify(batch), {
           method: "POST",
@@ -3459,39 +4217,88 @@ export class NetworkObserver {
         });
     };
     this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_START");
-    this.#apsportRefreshesInFlight.add(source.sourceId);
+    this.#apsportRefreshesInFlight.set(source.sourceId, refreshToken);
     try {
       await this.#collectApsportCatalog({ generation, nowMs: refreshStartedAtMs, prematchWindowHours,
         template: { origin: template.origin, headers: template.headers, body: template.body }, request,
         sleep: (delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)),
         isCurrent: refreshIsCurrent, onRoster: async (batch) => {
-          await emitBatch(batch);
-          if (templateIsCurrent() && batch.complete) {
-            const roster = batch.records.flatMap((record) => {
+          const roster = batch.records.flatMap((record) => {
               const rawEventId = record["2"];
               const eventId = typeof rawEventId === "string" || typeof rawEventId === "number"
                 ? String(rawEventId) : "";
               const rawLeagueId = record["1"];
               const leagueId = typeof rawLeagueId === "string" || typeof rawLeagueId === "number"
                 ? String(rawLeagueId) : undefined;
-              return eventId.trim() === "" || eventId.length > 128 ? [] : [{ eventId, leagueId }];
+              const hiddenDetail = record["6"] !== true;
+              return eventId.trim() === "" || eventId.length > 128 ? [] : [{ eventId, leagueId, hiddenDetail }];
             });
+          const rosterEventIds = new Set(roster.map(({ eventId }) => eventId));
+          const active = this.#apsportActiveCatalogs.get(source.sourceId);
+          if (templateIsCurrent() && batch.complete && batch.verifiedEmpty !== true &&
+            rosterEventIds.size > 0 && active !== undefined &&
+            active.rosterEventIds.size >= APSPORT_ROSTER_COLLAPSE_FLOOR &&
+            rosterEventIds.size < active.rosterEventIds.size * APSPORT_MIN_RETAINED_ROSTER_SHARE) {
+            rosterCoverageRejected = true;
+            const candidateCount = Math.min(5_000, rosterEventIds.size);
+            const priorCount = Math.min(5_000, active.rosterEventIds.size);
+            rosterCoverageFailureCode = `APSPORT_ROSTER_COVERAGE_REJECTED_${candidateCount}_OF_${priorCount}`;
+            this.#lastCaptureExit.set(source.sourceId, rosterCoverageFailureCode);
+            return;
+          }
+          await emitBatch(batch);
+          if (templateIsCurrent() && batch.complete) {
             const rosterLeagueIds = new Map(roster.flatMap(({ eventId, leagueId }) =>
               leagueId === undefined ? [] : [[eventId, leagueId] as const]));
             this.#apsportActiveCatalogs.set(source.sourceId,
               { generation: batch.generation, prematchWindowHours: batch.prematchWindowHours,
-                rosterCount: batch.records.length, rosterLeagueIds,
-                rosterEventIds: new Set(roster.map(({ eventId }) => eventId)) });
+                rosterCount: rosterEventIds.size, rosterLeagueIds,
+                hiddenDetailEventIds: new Set(roster.filter(({ hiddenDetail }) => hiddenDetail)
+                  .map(({ eventId }) => eventId)),
+                rosterEventIds });
+            this.#apsportCoverage(source.sourceId).reconcileRoster(roster
+              .filter(({ hiddenDetail }) => hiddenDetail).map(({ eventId }) => eventId));
             if (options.rosterOnly === true) {
-              for (const item of roster) this.#scheduleApsportEventDetail(source, item.eventId, item.leagueId);
+              for (const item of roster) {
+                if (item.hiddenDetail) this.#scheduleApsportEventDetail(source, item.eventId, item.leagueId);
+              }
             }
           }
           if (options.rosterOnly === true && batch.complete) rosterOnlyComplete = true;
         }, onDetail: emitBatch,
+        onDetailState: (state) => {
+          if (!refreshIsCurrent()) return;
+          if (state.state === "QUEUED" || state.state === "IN_FLIGHT") {
+            ownedDetailEventIds.add(state.eventId);
+          } else {
+            ownedDetailEventIds.delete(state.eventId);
+          }
+          this.#applyApsportDetailState(source.sourceId, state);
+        },
         detailBatchSize: 5, detailDelayMs: APSPORT_DETAIL_DELAY_MS });
-      if (templateIsCurrent()) this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_DONE");
+      if (templateIsCurrent() && rosterCoverageRejected) {
+        throw new Error(rosterCoverageFailureCode ?? "APSPORT_ROSTER_COVERAGE_REJECTED");
+      }
+      if (templateIsCurrent()) {
+        this.#lastCaptureExit.set(source.sourceId, "APSPORT_REFRESH_DONE");
+      }
+    } catch (error) {
+      if (templateIsCurrent() && rosterCoverageRejected) {
+        throw new Error(rosterCoverageFailureCode ?? "APSPORT_ROSTER_COVERAGE_REJECTED");
+      }
+      if (templateIsCurrent()) {
+        const coverage = this.#apsportCoverage(source.sourceId);
+        for (const eventId of ownedDetailEventIds) coverage.markFailure(eventId);
+        const message = error instanceof Error ? error.message : "";
+        const safeCode = /^(?:APSPORT_ROSTER_HTTP_(?:0|[1-5][0-9]{2})|APSPORT_ROSTER_DATA_SHAPE)$/u
+          .test(message) ? message : "APSPORT_REFRESH_FAILED";
+        this.#lastCaptureExit.set(source.sourceId, safeCode);
+        throw new Error(safeCode);
+      }
     } finally {
-      this.#apsportRefreshesInFlight.delete(source.sourceId);
+      if (this.#apsportRefreshesInFlight.get(source.sourceId) === refreshToken) {
+        this.#apsportRefreshesInFlight.delete(source.sourceId);
+      }
     }
   }
 
@@ -3588,9 +4395,10 @@ export class NetworkObserver {
   }
 
   async #requestFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean,
-    preferredSessionId?: string): Promise<void> {
+    preferredSessionId?: string, onAttemptAdmitted?: () => void, ownsRequest?: () => boolean): Promise<void> {
     const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
-    const isCurrent = (): boolean => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration);
+    const isCurrent = (): boolean => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      ownsRequest?.() !== false;
     if (!isCurrent()) return;
     const nowMs = this.#now();
     const previous = this.#socketBaselineRecoveryAtMs.get(source.sourceId);
@@ -3685,6 +4493,7 @@ export class NetworkObserver {
       } catch {} } return count; }`
     }];
     const reconnectDiagnostic = this.#wsAttachDiagnostic(source);
+    onAttemptAdmitted?.();
     reconnectDiagnostic.reconnectAttempts += 1;
     const noteOutcome = (target: { readonly contextId?: number; readonly sessionId?: string },
       outcome: string): void => {
@@ -3769,13 +4578,27 @@ export class NetworkObserver {
     if (observedSessions.has(sessionId)) return;
     observedSessions.add(sessionId);
     this.#observedChildSessions.set(source.sourceId, observedSessions);
+    let fatalSetupError: unknown = null;
     try {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Network.enable", {
         maxTotalBufferSize: 16 * 1024 * 1024,
         maxResourceBufferSize: 12 * 1024 * 1024,
         maxPostDataSize: 0
       }, sessionId));
+    } catch (error) {
+      // A paused provider worker must never remain frozen merely because its
+      // Chromium target does not expose the Network domain. Runtime access is
+      // still enough to release it and to reconnect/terminate its socket.
+      if (source.lobby === "SABA") {
+        this.#noteWsRecoveryOutcome(source, `child:network-${failureLabel(error)}`);
+      }
+    }
+    try {
       await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId, "Runtime.enable", {}, sessionId));
+    } catch (error) {
+      fatalSetupError = error;
+    }
+    try {
       // Dedicated workers cannot own nested targets. Some Chromium builds
       // reject Target.setAutoAttach in that session before Network/Runtime is
       // committed, which used to discard the real KSPORT socket worker.
@@ -3784,15 +4607,21 @@ export class NetworkObserver {
           autoAttach: true, waitForDebuggerOnStart: true, flatten: true
         }, sessionId));
       }
-      if (targetType !== "worker" || source.lobby === "SABA") {
-        await this.#withFrameCommandTimeout(
-          this.#sendCommand(source.tabId, "Runtime.runIfWaitingForDebugger", {}, sessionId)
-        );
-      }
     } catch (error) {
+      fatalSetupError ??= error;
+    }
+    // This is deliberately outside every setup try block. Auto-attach pauses
+    // new child targets before their script runs; failing to release one here
+    // freezes the provider indefinitely and every page reload repeats the trap.
+    if (targetType !== "worker" || source.lobby === "SABA" || source.lobby === "KSPORT") {
+      await this.#withFrameCommandTimeout(
+        this.#sendCommand(source.tabId, "Runtime.runIfWaitingForDebugger", {}, sessionId)
+      ).catch(() => ({}));
+    }
+    if (fatalSetupError !== null) {
       observedSessions.delete(sessionId);
       if (observedSessions.size === 0) this.#observedChildSessions.delete(source.sourceId);
-      throw error;
+      throw fatalSetupError;
     }
     if (source.lobby === "SABA" && targetId !== undefined) {
       const attachedTargets = this.#sabaAttachedTargetSessions.get(source.sourceId) ??
@@ -3836,6 +4665,24 @@ export class NetworkObserver {
     diagnostic.attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId)?.size ?? 0;
   }
 
+  #apsportCoverage(sourceId: string): ApsportDetailCoverage {
+    let coverage = this.#apsportDetailCoverage.get(sourceId);
+    if (coverage === undefined) {
+      coverage = new ApsportDetailCoverage();
+      this.#apsportDetailCoverage.set(sourceId, coverage);
+    }
+    return coverage;
+  }
+
+  #applyApsportDetailState(sourceId: string, state: ApsportDetailStateUpdate): void {
+    const coverage = this.#apsportCoverage(sourceId);
+    if (state.state === "SUCCESS") coverage.markSuccess(state.eventId, state.hasMarkets, this.#now());
+    else if (state.state === "INELIGIBLE") coverage.removeEvent(state.eventId);
+    else if (state.state === "QUEUED") coverage.markQueued(state.eventId);
+    else if (state.state === "IN_FLIGHT") coverage.markInFlight(state.eventId);
+    else coverage.markFailure(state.eventId);
+  }
+
   async #discoverExistingSabaChildTargets(source: ObservedSource): Promise<void> {
     const discovered = await this.#withFrameCommandTimeout(
       this.#sendCommand(source.tabId, "Target.getTargets")
@@ -3845,9 +4692,21 @@ export class NetworkObserver {
     const diagnostic = this.#wsAttachDiagnostic(source);
     diagnostic.targetsTotal = infos.length;
     diagnostic.targetsIframe = infos.filter((info) => isRecord(info) && info.type === "iframe").length;
-    for (const info of infos.slice(0, 32)) {
+    const bounded = infos.slice(0, 32);
+    const trusted = bounded.filter((info) => isRecord(info) && typeof info.type === "string" &&
+      typeof info.targetId === "string" && typeof info.url === "string" &&
+      isSabaChildTargetUrl(info.url, info.type));
+    const workersInTab = bounded.filter((info) => isRecord(info) && typeof info.type === "string" &&
+      typeof info.targetId === "string" && typeof info.url === "string" &&
+      (info.type === "worker" || info.type === "shared_worker"));
+    const trustedWorkerIds = new Set(trusted.flatMap((info) => isRecord(info) &&
+      (info.type === "worker" || info.type === "shared_worker") ? [String(info.targetId)] : []));
+    const singletonOpaqueWorker = trustedWorkerIds.size === 0 && workersInTab.length === 1 ? workersInTab : [];
+    const matchingTargets = [...trusted, ...singletonOpaqueWorker.filter((worker) => isRecord(worker) &&
+      !trusted.some((candidate) => isRecord(candidate) && candidate.targetId === worker.targetId))];
+    for (const info of matchingTargets) {
       if (!isRecord(info) || typeof info.type !== "string" || typeof info.targetId !== "string" ||
-        typeof info.url !== "string" || !isSabaChildTargetUrl(info.url, info.type) ||
+        typeof info.url !== "string" ||
         this.#sabaAttachedTargetSessions.get(source.sourceId)?.has(info.targetId) === true) continue;
       const attached = await this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
         "Target.attachToTarget", { targetId: info.targetId, flatten: true })).catch(() => ({}));
@@ -3936,7 +4795,7 @@ export class NetworkObserver {
   }
 
   #scheduleFreshSocketBaseline(source: ObservedSource, matches: (url: URL) => boolean,
-    preferredSessionId?: string): Promise<void> {
+    preferredSessionId?: string, ownsRequest?: () => boolean): Promise<void> {
     const sabaRecovery = source.lobby === "SABA"
       ? this.#sabaSilentSocketRecoveries.get(source.sourceId) : undefined;
     if (sabaRecovery !== undefined) return sabaRecovery;
@@ -3944,7 +4803,7 @@ export class NetworkObserver {
     if (existing !== undefined) return existing.operation;
     const token = Symbol(source.sourceId);
     const operation = this.#runPeriodicDomWork(source.sourceId,
-      () => this.#requestFreshSocketBaseline(source, matches, preferredSessionId)).finally(() => {
+      () => this.#requestFreshSocketBaseline(source, matches, preferredSessionId, undefined, ownsRequest)).finally(() => {
         if (this.#socketBaselineRecoveries.get(source.sourceId)?.token === token) {
           this.#socketBaselineRecoveries.delete(source.sourceId);
         }
@@ -3999,35 +4858,40 @@ export class NetworkObserver {
   }
 
   async #requestFreshKsportNativeHttpBaseline(source: ObservedSource): Promise<boolean> {
-    // After an MV3 worker reload, Resource Timing still exposes the list URL
-    // but not the authenticated headers used by the provider SPA. Re-fetching
-    // that URL directly returns 500. Only when there is no catalog socket or
-    // retained baseline, let the page issue its own two period requests and
-    // capture those responses instead; this changes no tab, URL or lifecycle
-    // state and is rate-limited independently of maintenance.
+    // An observed list URL can stop returning a usable paired baseline. Let
+    // the provider issue its own period requests through the existing selectors
+    // and capture their responses, including after established fallback expires.
+    // This source-local reacquisition is rate-limited independently of maintenance.
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+    const isCurrent = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration &&
+      this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration;
+    if (!isCurrent()) return false;
     const nowMs = this.#now();
     const lastAttemptAtMs = this.#ksportNativeHttpRecoveryAtMs.get(source.sourceId);
     if (lastAttemptAtMs !== undefined &&
       nowMs - lastAttemptAtMs < KSPORT_NATIVE_HTTP_RECOVERY_RETRY_MS) return false;
     this.#ksportNativeHttpRecoveryAtMs.set(source.sourceId, nowMs);
-    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const ordinalBefore = this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0;
     this.#armKsportNativeHttpCapture(source);
-    const todaySelected = await this.#selectTimeTab(source, KSPORT_TODAY_NATIVE_HTTP_EXPRESSION);
-    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return false;
+    const todaySelected = await this.#selectTimeTab(source, KSPORT_TODAY_NATIVE_HTTP_EXPRESSION, isCurrent);
+    if (!isCurrent()) return false;
     await new Promise<void>((resolve) => setTimeout(resolve, 600));
-    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return false;
-    const liveSelected = await this.#selectTimeTab(source, KSPORT_LIVE_NATIVE_HTTP_EXPRESSION);
+    if (!isCurrent()) return false;
+    const liveSelected = await this.#selectTimeTab(source, KSPORT_LIVE_NATIVE_HTTP_EXPRESSION, isCurrent);
+    if (!isCurrent()) return false;
     if (!todaySelected && !liveSelected) return false;
     for (let attempt = 0; attempt < 12; attempt += 1) {
-      if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return false;
+      if (!isCurrent()) return false;
       if ((this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) > ordinalBefore) {
         this.#lastCatalogShape.set(source.sourceId, "http[NATIVE:catalog-requested]");
         return true;
       }
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
     }
-    return (this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) > ordinalBefore;
+    return isCurrent() && (this.#ksportSnapshotOrdinals.get(source.sourceId) ?? 0) > ordinalBefore;
   }
 
   async #requestFreshKsportHttpBaselineAfterDrain(source: ObservedSource, fence?: {
@@ -4362,6 +5226,11 @@ export class NetworkObserver {
   }
 
   async #evaluateImCatalogMainWorlds(source: ObservedSource, awaitPromise: boolean): Promise<string[]> {
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const evaluationIsCurrent = (): boolean =>
+      this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration;
     let generation: string | undefined;
     let reconcileCutoffSequence: number | undefined;
     if (awaitPromise) {
@@ -4382,6 +5251,8 @@ export class NetworkObserver {
     const evaluate = async (label: string, descriptor?: { readonly id: string;
       readonly loaderId: string | null }, binding?: MainWorldContextBinding): Promise<string> => {
       const verifiedDocument = verifiedDocumentForDescriptor(descriptor, binding?.sessionId);
+      const evaluationTargetIsCurrent = (): boolean => evaluationIsCurrent() &&
+        (binding === undefined || descriptor === undefined || contexts?.get(descriptor.id) === binding);
       const params = { expression: IM_CATALOG_DISCOVERY_EXPRESSION,
         ...(binding === undefined ? {} : { contextId: binding.contextId }),
         returnByValue: true, awaitPromise };
@@ -4390,13 +5261,15 @@ export class NetworkObserver {
         : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId),
       awaitPromise ? 20_000 : this.#frameCommandTimeoutMs).catch(() => null);
       const value = nestedValue(response, "result", "value");
-      if (awaitPromise && isRecord(value) && Array.isArray(value.responses)) {
+      if (awaitPromise && evaluationTargetIsCurrent() && isRecord(value) && Array.isArray(value.responses)) {
         for (const item of value.responses) {
+          if (!evaluationTargetIsCurrent()) break;
           if (!isRecord(item) || (item.market !== 1 && item.market !== 2) || typeof item.body !== "string") continue;
           await this.ingestHttpResponse(source, "https://imsports.directsb.net/api/EventV6/GetSE", "Fetch",
             item.body, { method: "POST", providerPartition: item.market === 1 ? "IM_MARKET_1" : "IM_MARKET_2",
               ...(generation === undefined ? {} : { streamId: generation }),
               ...(verifiedDocument === undefined ? {} : { verifiedDocument }),
+              ...(verifiedDocument === undefined ? { currentDocumentConfirmed: true as const } : {}),
               reconcileCutoffSequence: reconcileCutoffSequence! });
         }
       }
@@ -4415,8 +5288,293 @@ export class NetworkObserver {
     return Promise.all(evaluations);
   }
 
+  #sbobetDetailEpoch(sourceId: string): string {
+    return `${this.#observerSessionId}:${this.#publicSourceEpochOrdinal(sourceId,
+      this.#sourceGenerations.get(sourceId) ?? 0)}`;
+  }
+
+  #sbobetDetailState(source: ObservedSource): SbobetObserverDetailState {
+    let state = this.#sbobetDetailStates.get(source.sourceId);
+    if (state === undefined) {
+      const lane = new SbobetObserverDetailLane({ tabId: source.tabId,
+        currentGeneration: () => state!.generation !== null &&
+          this.#isSourceGenerationCurrent(source.sourceId, state!.sourceGeneration) &&
+          this.#captureTabGeneration(source.tabId) === state!.tabGeneration &&
+          this.#captureBridgeGeneration(source.sourceId) === state!.bridgeGeneration ? state!.generation : null,
+        allocateRequestStartSequence: () => Math.max(0, (this.#sequences.get(source.sourceId) ?? 0) - 1),
+        now: this.#now, monotonicNow: this.#monotonicNow, sendCommand: this.#sendCommand,
+        resolveContext: (binding) => {
+          if (binding.verifiedWorker === true) return null;
+          const context = this.#mainWorldContexts.get(source.tabId)?.get(binding.frameId);
+          return context !== undefined && context.sessionId === binding.sessionId ? context.contextId : null;
+        },
+        isBindingCurrent: (binding) => this.#sbobetDetailBindingCurrent(source, binding),
+        emit: (batch, signal, template, receipt) => this.#emitSbobetDetail(source, batch, signal, template, receipt)
+      });
+      state = { source, lane, generation: null, sourceGeneration: 0, tabGeneration: 0,
+        bridgeGeneration: 0, template: null, committedOrdinal: 0, pendingRoster: null };
+      this.#sbobetDetailStates.set(source.sourceId, state);
+    }
+    if (state.generation === null) {
+      state.sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
+      state.tabGeneration = this.#captureTabGeneration(source.tabId);
+      state.bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+      state.generation = this.#sbobetDetailEpoch(source.sourceId);
+    }
+    return state;
+  }
+
+  #clearSbobetDetail(sourceId: string): void {
+    const state = this.#sbobetDetailStates.get(sourceId);
+    if (state === undefined) return;
+    state.generation = null;
+    state.template = null;
+    state.pendingRoster = null;
+    state.committedOrdinal = 0;
+    // Synchronization cancels requests and emissions but retains the scheduler's
+    // physical capacity until any uncooperative CDP/forward operation settles.
+    state.lane.diagnostics();
+  }
+
+  async #sbobetDetailBindingCurrent(source: ObservedSource, binding: SbobetDetailBinding): Promise<boolean> {
+    if (source.lobby !== "KSPORT" || binding.verifiedWorker === true) return false;
+    const context = this.#mainWorldContexts.get(source.tabId)?.get(binding.frameId);
+    const current = () => this.#isSourceGenerationCurrent(source.sourceId, binding.sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === binding.tabGeneration && context !== undefined &&
+      context.sessionId === binding.sessionId && this.#mainWorldContexts.get(source.tabId)?.get(binding.frameId) === context;
+    if (!current()) return false;
+    const tree = await (binding.sessionId === undefined ? this.#sendCommand(source.tabId, "Page.getFrameTree")
+      : this.#sendCommand(source.tabId, "Page.getFrameTree", {}, binding.sessionId)).catch(() => null);
+    const document = sbobetDiscoveryDocument(tree, binding.frameId);
+    return current() && document?.loaderId === binding.loaderId && document.origin === binding.executionOrigin;
+  }
+
+  /** Independent endpoint evidence only; discovery shape never calls this method. */
+  async setSbobetDetailCompletenessVerified(source: ObservedSource, proof: {
+    readonly sourceEpoch: string; readonly observedUrl: string; readonly frameId: string;
+    readonly loaderId: string; readonly sessionId?: string; readonly verified: boolean
+  }): Promise<boolean> {
+    const state = this.#sbobetDetailStates.get(source.sourceId);
+    const template = state?.template;
+    if (source.lobby !== "KSPORT" || state === undefined || template == null ||
+      state.source.tabId !== source.tabId || state.generation !== proof.sourceEpoch ||
+      this.#sbobetDetailEpoch(source.sourceId) !== proof.sourceEpoch || template.url !== proof.observedUrl ||
+      template.binding.verifiedWorker === true || template.binding.frameId !== proof.frameId ||
+      template.binding.loaderId !== proof.loaderId || template.binding.sessionId !== proof.sessionId ||
+      typeof proof.verified !== "boolean") return false;
+    if (proof.verified && !await this.#sbobetDetailBindingCurrent(source, template.binding)) return false;
+    if (state.template !== template || state.generation !== proof.sourceEpoch ||
+      this.#sbobetDetailEpoch(source.sourceId) !== proof.sourceEpoch) return false;
+    return state.lane.setCompletenessVerified(template, proof.sourceEpoch, proof.verified);
+  }
+
+  async #rememberObservedSbobetDetail(pending: PendingRequest, body: string): Promise<void> {
+    if (pending.source.lobby !== "KSPORT" || pending.method !== "GET" || pending.sbobetDetailHeaders === undefined ||
+      pending.sbobetDiscovery?.httpStatus !== 200 || pending.frameId === undefined || pending.loaderId === undefined ||
+      body.length > 4_000_000) return;
+    const current = () => this.#isPendingCurrent(pending) &&
+      this.#captureBridgeGeneration(pending.source.sourceId) === pending.sbobetDiscovery!.bridgeGeneration &&
+      this.#sbobetDiscoveryBudget(pending.source.sourceId) !== null;
+    if (!current()) return;
+    const tree = await (pending.sessionId === undefined ? this.#sendCommand(pending.source.tabId, "Page.getFrameTree")
+      : this.#sendCommand(pending.source.tabId, "Page.getFrameTree", {}, pending.sessionId)).catch(() => null);
+    const document = sbobetDiscoveryDocument(tree, pending.frameId);
+    if (!current() || document?.loaderId !== pending.loaderId) return;
+    const template = sbobetDetailTemplateFromObserved({ url: pending.url, method: pending.method,
+      headers: pending.sbobetDetailHeaders, binding: { sourceGeneration: pending.sourceGeneration,
+        tabGeneration: pending.tabGeneration, frameId: pending.frameId, loaderId: pending.loaderId,
+        executionOrigin: document.origin, ...(pending.sessionId === undefined ? {} : { sessionId: pending.sessionId }) } });
+    if (template === null) return;
+    let native: unknown;
+    try { native = JSON.parse(body); } catch { return; }
+    if (parseSbobetDetailEvent(native, template.observedEventId) === null) return;
+    const state = this.#sbobetDetailState(pending.source);
+    // An unchanged passive response does not revoke an independently reviewed proof.
+    if (state.template !== null && JSON.stringify(state.template) === JSON.stringify(template)) return;
+    if (state.lane.rememberTemplate(template, state.generation!)) state.template = template;
+  }
+
+  #rememberSbobetDetailRoster(pending: PendingRequest, body: string, bridgeGeneration: number): void {
+    if (pending.source.lobby !== "KSPORT" || !this.#isPendingCurrent(pending) ||
+      this.#captureBridgeGeneration(pending.source.sourceId) !== bridgeGeneration ||
+      pending.providerContentIntent !== "FOOTBALL_FULL_CATALOG" ||
+      pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined ||
+      pending.providerPartition !== "KSPORT_LIVE" && pending.providerPartition !== "KSPORT_TODAY" ||
+      ksportPartitionFromRequest(pending.source, { url: pending.url, method: pending.method }) !== pending.providerPartition ||
+      !Number.isSafeInteger(pending.requestStartSequence) || pending.requestStartSequence! < 0) return;
+    const match = /^ksport-http:(0|[1-9]\d*):([1-9]\d*)$/u.exec(pending.streamId ?? "");
+    if (match === null || Number(match[1]) !== pending.source.tabId || !Number.isSafeInteger(Number(match[2]))) return;
+    let native: unknown;
+    try { native = JSON.parse(body); } catch { return; }
+    if (!isFullKsportPartitionSnapshot(native)) return;
+    const live = pending.providerPartition === "KSPORT_LIVE";
+    const events = extractSbobetPrematchRoster(native, { phase: live ? "LIVE" : "PREMATCH" });
+    if (events === null) return;
+    // The protocol helper has validated the entire direct/date league array.
+    const leagues = (native as unknown[]).every(Array.isArray) ? (native as unknown[][]).flat(1) : native as unknown[];
+    const ids = new Set<string>(live ? leagues.flatMap((league) =>
+      ((league as Record<string, unknown>)["2"] as Record<string, unknown>[]).map((event) => String(event["8"])))
+      : events.map((event) => event.eventId));
+    const state = this.#sbobetDetailState(pending.source);
+    const ordinal = Number(match[2]);
+    if (ordinal <= state.committedOrdinal || ordinal < (state.pendingRoster?.ordinal ?? 0)) return;
+    if (state.pendingRoster === null || ordinal > state.pendingRoster.ordinal) state.pendingRoster = {
+      ordinal, streamId: pending.streamId!, cutoff: pending.requestStartSequence!, parts: new Map()
+    };
+    const pair = state.pendingRoster;
+    if (pair.streamId !== pending.streamId || pair.cutoff !== pending.requestStartSequence) return;
+    pair.parts.set(pending.providerPartition, { ids, events });
+    const today = pair.parts.get("KSPORT_TODAY");
+    const inPlay = pair.parts.get("KSPORT_LIVE");
+    if (today === undefined || inPlay === undefined) return;
+    if (state.lane.setRoster({ generation: state.generation!, events: today.events.filter((event) => !inPlay.ids.has(event.eventId)) })) {
+      state.committedOrdinal = ordinal;
+      state.pendingRoster = null;
+    }
+  }
+
+  async #emitSbobetDetail(source: ObservedSource, batch: SbobetDetailBatch, signal: AbortSignal,
+    template: SbobetDetailTemplate, receipt: SbobetDetailReceipt): Promise<void> {
+    if (template.binding.verifiedWorker === true) throw new Error("SBOBET_DETAIL_DOCUMENT_REQUIRED");
+    const binding = template.binding;
+    const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+    const context = this.#mainWorldContexts.get(source.tabId)?.get(binding.frameId);
+    const current = () => !signal.aborted && this.#sbobetDetailEpoch(source.sourceId) === batch.generation &&
+      this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration &&
+      this.#isSourceGenerationCurrent(source.sourceId, binding.sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === binding.tabGeneration && context !== undefined &&
+      context.sessionId === binding.sessionId && this.#mainWorldContexts.get(source.tabId)?.get(binding.frameId) === context;
+    // Verify once before entering the price emission tail. Remote CDP calls per
+    // chunk can otherwise hold every later WS price behind a large detail body.
+    if (!current() || !await this.#sbobetDetailBindingCurrent(source, binding) || !current()) {
+      throw new Error("SBOBET_DETAIL_STALE");
+    }
+    const document = requestDocumentBinding(this.#observerSessionId, source.tabId, binding.sourceGeneration,
+      binding.sessionId, binding.frameId, binding.loaderId);
+    if (document === null) throw new Error("SBOBET_DETAIL_DOCUMENT_REQUIRED");
+    const identity = this.#allocateObserverRequestIdentity();
+    const request = { method: "GET" as const, observerRequestId: identity.observerRequestId,
+      requestFrameKey: document.requestFrameKey, requestDocumentKey: document.requestDocumentKey,
+      streamId: `sbobet-detail:${source.tabId}:${identity.observerRequestOrdinal}`,
+      reconcileCutoffSequence: batch.requestStartSequence };
+    const url = template.url.replace(/([?&]eventId=)\d{1,30}(?=&|$)/u, `$1${batch.eventId}`);
+    const fragments = splitUtf8Text(JSON.stringify(batch), NETWORK_CHUNK_BODY_BYTES);
+    const snapshotId = networkSnapshotId(source.tabId, identity.observerRequestOrdinal);
+    let admitted = true;
+    const beforeForward = () => {
+      const valid = current();
+      if (!valid) admitted = false;
+      return valid;
+    };
+    await Promise.all(fragments.map((bodyFragment, chunkIndex) => this.#emit(source, url, "Fetch", "HTTP_RESPONSE", {
+      encoding: "UTF8", body: fragments.length === 1 ? bodyFragment : JSON.stringify({ schemaVersion: 1,
+        snapshotId, chunkIndex, chunkCount: fragments.length, bodyEncoding: "UTF8", bodyFragment })
+    }, { request, observedAtMs: batch.observedAtMs, receivedMonotonicMs: receipt.receivedMonotonicMs,
+      sourceGeneration: binding.sourceGeneration, tabGeneration: binding.tabGeneration, beforeForward })));
+    if (!admitted || !current()) throw new Error("SBOBET_DETAIL_STALE");
+  }
+
+  #clearSbobetDiscovery(sourceId: string): void {
+    this.#sbobetDiscoveryShapes.delete(sourceId);
+    this.#sbobetDiscoveryBudgets.delete(sourceId);
+    this.#sbobetDiscoveryDomAtMs.delete(sourceId);
+    for (const [key, request] of this.#sbobetDiscoveryRequests) {
+      if (request.sourceId === sourceId) this.#sbobetDiscoveryRequests.delete(key);
+    }
+    for (const [key, pending] of this.#pending) {
+      if (pending.source.sourceId === sourceId && pending.sbobetDiscovery?.diagnosticOnly) this.#pending.delete(key);
+    }
+    // A pending read retains its physical slot until CDP settles. Its captured
+    // source/tab/bridge identity prevents publication into the next epoch.
+  }
+
+  #rememberSbobetDiscovery(sourceId: string, category: string, summary: string): void {
+    const shapes = this.#sbobetDiscoveryShapes.get(sourceId) ?? new Map<string, string>();
+    shapes.set(category, summary);
+    this.#sbobetDiscoveryShapes.set(sourceId, shapes);
+  }
+
+  #sbobetDiscoveryBudget(sourceId: string): { readonly startedAtMs: number; admitted: number } | null {
+    const budget = this.#sbobetDiscoveryBudgets.get(sourceId) ?? { startedAtMs: this.#now(), admitted: 0 };
+    this.#sbobetDiscoveryBudgets.set(sourceId, budget);
+    return this.#now() - budget.startedAtMs <= 120_000 ? budget : null;
+  }
+
+  #sbobetDiscoveryText(sourceId: string): string {
+    const shapes = this.#sbobetDiscoveryShapes.get(sourceId);
+    if (shapes === undefined) return "";
+    return `SBO_DISCOVERY[${["detail", "roster", "dom"].flatMap((key) =>
+      shapes.has(key) ? [shapes.get(key)!] : []).join(";").slice(0, 740)}] `;
+  }
+
+  #catalogShapeDiagnostic(source: ObservedSource): string {
+    const existing = `${this.#lastCaptureExit.get(source.sourceId) ?? "NONE"} ` +
+      `targets[${[...(this.#targetTypesSeen.get(source.sourceId) ?? new Map())]
+        .map(([type, count]) => `${type}:${count}`).join(",")}] ` +
+      `sockets[${[...(this.#socketPathsSeen.get(source.sourceId) ?? new Map())]
+        .map(([path, count]) => `${path}:${count}`).join(",")}] ` +
+      (this.#lastCatalogShape.get(source.sourceId) ?? "");
+    return source.lobby === "KSPORT" ? (this.#sbobetDiscoveryText(source.sourceId) + existing).slice(0, 900) : existing;
+  }
+
+  /** Existing main-world contexts only; passive public DOM, no click/fetch/attach. */
+  probeSbobetDiscovery(source: ObservedSource): Promise<void> {
+    if (source.lobby !== "KSPORT") return Promise.resolve();
+    const active = this.#sbobetDiscoveryDomWork.get(source.sourceId);
+    if (active !== undefined) return active;
+    const contexts = this.#mainWorldContexts.get(source.tabId);
+    if (contexts === undefined || contexts.size === 0) return Promise.resolve();
+    if (this.#sbobetDiscoveryBudget(source.sourceId) === null) return Promise.resolve();
+    const startedAtMs = this.#now();
+    const lastAtMs = this.#sbobetDiscoveryDomAtMs.get(source.sourceId);
+    if (lastAtMs !== undefined && startedAtMs - lastAtMs < 30_000) return Promise.resolve();
+    this.#sbobetDiscoveryDomAtMs.set(source.sourceId, startedAtMs);
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+    const current = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration &&
+      this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration &&
+      this.#now() - startedAtMs <= 2_000 && this.#sbobetDiscoveryBudget(source.sourceId) !== null;
+    const read = async (): Promise<void> => {
+      const rootTree = await this.#sendCommand(source.tabId, "Page.getFrameTree").catch(() => null);
+      if (!current()) return;
+      const candidates = [...contexts].slice(0, 128).filter(([frameId]) =>
+        sbobetDiscoveryDocument(rootTree, frameId) !== null).slice(0, 2);
+      for (const [frameId, binding] of candidates) {
+        if (!current()) return;
+        const command = (method: string, params: Record<string, unknown> = {}) => binding.sessionId === undefined
+          ? this.#sendCommand(source.tabId, method, params)
+          : this.#sendCommand(source.tabId, method, params, binding.sessionId);
+        const before = await command("Page.getFrameTree").catch(() => null);
+        if (!current()) return;
+        const document = sbobetDiscoveryDocument(before, frameId);
+        if (document === null) continue;
+        const evaluated = await command("Runtime.evaluate", {
+          expression: `(() => { if (location.origin !== ${JSON.stringify(document.origin)}) return null; ` +
+            `return ${SBOBET_PASSIVE_DOM_DISCOVERY_EXPRESSION}; })()`, contextId: binding.contextId,
+          returnByValue: true, awaitPromise: false, timeout: 1_500
+        }).catch(() => null);
+        if (!current()) return;
+        const after = await command("Page.getFrameTree").catch(() => null);
+        const verified = sbobetDiscoveryDocument(after, frameId);
+        if (!current() || verified?.loaderId !== document.loaderId ||
+          verified.origin !== document.origin || this.#mainWorldContexts.get(source.tabId)?.get(frameId) !== binding) return;
+        const summary = formatSbobetDomDiscovery(isRecord(evaluated) && isRecord(evaluated.result)
+          ? evaluated.result.value : null);
+        if (summary !== null) this.#rememberSbobetDiscovery(source.sourceId, "dom", summary);
+      }
+    };
+    const operation = read().finally(() => {
+      if (this.#sbobetDiscoveryDomWork.get(source.sourceId) === operation) this.#sbobetDiscoveryDomWork.delete(source.sourceId);
+    });
+    this.#sbobetDiscoveryDomWork.set(source.sourceId, operation);
+    return operation;
+  }
+
   async heartbeat(source: ObservedSource, hostname: string): Promise<void> {
     if (!/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    if (source.lobby === "KSPORT") void this.probeSbobetDiscovery(source).catch(() => undefined);
     // SABA now visits its day list too, and without this its selector could
     // only be judged by whether the fixtures appeared - not by whether it
     // found the tab at all.
@@ -4430,6 +5588,17 @@ export class NetworkObserver {
       encoding: "UTF8",
       body: btiPageHealth !== null ? JSON.stringify({ kind: "PAGE_HEALTH", ...btiPageHealth }) :
         diagnostic === null ? "{}" : JSON.stringify({ kind: "WS_ATTACH",
+        ...(source.lobby === "SABA" ? { sabaCollector: {
+          nativeReady: this.hasCompleteSabaBaseline(source.sourceId),
+          schemaContextReady: (this.#sabaSchemaContexts.get(source.sourceId)?.size ?? 0) > 0,
+          catalogUsable: this.hasUsableSabaCatalog(source.sourceId),
+          discoveryPending: this.#sabaNavigationProbeTasks.has(source.sourceId),
+          discoveryAttempted: this.#sabaNavigationProbeAttempts.has(source.sourceId),
+          collectorState: this.#sabaCollectors.has(source.sourceId)
+            ? this.#sabaCollectors.get(source.sourceId)!.finished ? "FINISHED" : "RUNNING" : "NONE",
+          domBlocked: this.#sabaCollectorDomBlocks.has(source.sourceId),
+          probeBlocked: this.#sabaProbePublicationBlocks.has(source.sourceId)
+        } } : {}),
         sourceGeneration: diagnostic.sourceGeneration, webSocketCreated: diagnostic.webSocketCreated,
         webSockets, ksportTargets: diagnostic.ksportTargets, attachedTargets: diagnostic.attachedTargets,
         framesReceived: diagnostic.framesReceived, framesOrphan: diagnostic.framesOrphan,
@@ -4464,12 +5633,10 @@ export class NetworkObserver {
         baselineTabPeriods: diagnostic.baselineTabPeriods,
         baselineTabLabels: diagnostic.baselineTabLabels.length > 0
           ? diagnostic.baselineTabLabels : this.#lastTabLabels.get(source.sourceId) ?? "",
-        catalogShape: `${this.#lastCaptureExit.get(source.sourceId) ?? "NONE"} ` +
-          `targets[${[...(this.#targetTypesSeen.get(source.sourceId) ?? new Map())]
-            .map(([type, count]) => `${type}:${count}`).join(",")}] ` +
-          `sockets[${[...(this.#socketPathsSeen.get(source.sourceId) ?? new Map())]
-            .map(([path, count]) => `${path}:${count}`).join(",")}] ` +
-          (this.#lastCatalogShape.get(source.sourceId) ?? "") })
+        ...(source.lobby === "TSPORT" && this.#apsportDetailCoverage.has(source.sourceId)
+          ? { apsportDetail: this.#apsportDetailCoverage.get(source.sourceId)!.snapshot(this.#now()) }
+          : {}),
+        catalogShape: this.#catalogShapeDiagnostic(source) })
     });
     if (btiPageHealth !== null) {
       this.#onBtiPageHealth?.({ sourceId: source.sourceId, tabId: source.tabId, ...btiPageHealth });
@@ -4506,6 +5673,32 @@ export class NetworkObserver {
 
   async handleEvent(source: ObservedSource, method: string, rawParams: unknown,
     sessionId?: string): Promise<void> {
+    const sabaProbeBlockedAtReceipt = source.lobby === "SABA" &&
+      method === "Network.webSocketFrameReceived" &&
+      this.#sabaProbePublicationBlocks.has(source.sourceId);
+    if (source.lobby === "SABA" && method.startsWith("Network.webSocket")) {
+      const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+      const tailKey = `${source.sourceId}\u0000${String(sourceGeneration)}`;
+      const prior = this.#sabaWebSocketEventTails.get(tailKey) ?? Promise.resolve();
+      const operation = prior.catch(() => undefined).then(async () => {
+        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+        await this.#handleEvent(source, method, rawParams, sessionId, sabaProbeBlockedAtReceipt);
+      });
+      this.#sabaWebSocketEventTails.set(tailKey, operation);
+      try {
+        await operation;
+      } finally {
+        if (this.#sabaWebSocketEventTails.get(tailKey) === operation) {
+          this.#sabaWebSocketEventTails.delete(tailKey);
+        }
+      }
+      return;
+    }
+    await this.#handleEvent(source, method, rawParams, sessionId, sabaProbeBlockedAtReceipt);
+  }
+
+  async #handleEvent(source: ObservedSource, method: string, rawParams: unknown,
+    sessionId?: string, sabaProbeBlockedAtReceipt = false): Promise<void> {
     const params = isRecord(rawParams) ? rawParams : {};
     if (method === "Network.webSocketCreated" && (source.lobby === "KSPORT" || source.lobby === "TSPORT")) {
       this.#wsAttachDiagnostic(source).webSocketCreated += 1;
@@ -4551,6 +5744,9 @@ export class NetworkObserver {
       const childSessionId = typeof params.sessionId === "string" ? params.sessionId : null;
       if (childSessionId !== null) {
         const observedSessions = this.#observedChildSessions.get(source.sourceId);
+        if (this.#sabaCollectors.get(source.sourceId)?.target.sessionId === childSessionId) {
+          this.#retireSabaHiddenCollector(source.sourceId);
+        }
         observedSessions?.delete(childSessionId);
         if (observedSessions?.size === 0) this.#observedChildSessions.delete(source.sourceId);
         const attachedTargets = this.#ksportAttachedTargetSessions.get(source.sourceId);
@@ -4596,6 +5792,10 @@ export class NetworkObserver {
       return;
     }
     if (method === "Runtime.executionContextsCleared") {
+      if (source.lobby === "SABA" &&
+        this.#sabaCollectors.get(source.sourceId)?.target.sessionId === sessionId) {
+        this.#retireSabaHiddenCollector(source.sourceId);
+      }
       const contexts = this.#mainWorldContexts.get(source.tabId);
       if (contexts !== undefined) {
         for (const [frameId, binding] of contexts) {
@@ -4623,6 +5823,9 @@ export class NetworkObserver {
       return;
     }
     if (method === "Runtime.executionContextDestroyed" && typeof params.executionContextId === "number") {
+      const sabaCollector = this.#sabaCollectors.get(source.sourceId);
+      if (sabaCollector?.target.contextId === params.executionContextId &&
+        sabaCollector.target.sessionId === sessionId) this.#retireSabaHiddenCollector(source.sourceId);
       const cmdRecovery = this.#cmdRecoveries.get(source.sourceId);
       if (cmdRecovery?.target?.contextId === params.executionContextId &&
         cmdRecovery.target.sessionId === sessionId) {
@@ -4649,9 +5852,26 @@ export class NetworkObserver {
       return;
     }
 
+    if (key !== null && this.#compactImRecoveryRequests.has(key) &&
+      (method === "Network.responseReceived" || method === "Network.loadingFinished" ||
+        method === "Network.loadingFailed")) {
+      if (method === "Network.loadingFinished" || method === "Network.loadingFailed") {
+        this.#compactImRecoveryRequests.delete(key);
+      }
+      return;
+    }
+
     if (method === "Network.requestWillBeSent" && key) {
-      this.#requestGenerations.set(key, this.#sourceGenerations.get(source.sourceId) ?? 0);
       const request = isRecord(params.request) ? params.request : null;
+      const headers = request !== null && isRecord(request.headers) ? request.headers : {};
+      const compactImProbe = source.lobby === "IM" && typeof request?.url === "string" &&
+        isImGetSeUrl(source, request.url) && Object.entries(headers).some(([name, value]) =>
+          name.toLowerCase() === "x-fieldline-catalog-probe" && value === "compact-v1");
+      if (compactImProbe) {
+        this.#compactImRecoveryRequests.add(key);
+        return;
+      }
+      this.#requestGenerations.set(key, this.#sourceGenerations.get(source.sourceId) ?? 0);
       const requestMethod = sanitizeHttpMethod(request?.method);
       const requestIdentity = this.#allocateObserverRequestIdentity();
       const requestDocument = requestDocumentBinding(this.#observerSessionId, source.tabId,
@@ -4661,6 +5881,27 @@ export class NetworkObserver {
       else this.#requestIdentities.set(key, { method: requestMethod, ...requestIdentity,
         tabGeneration: this.#captureTabGeneration(source.tabId),
         ...(requestDocument === null ? {} : requestDocument) });
+      if (source.lobby === "KSPORT" && requestDocument !== null && request !== null &&
+        typeof request.url === "string" && requestMethod !== null &&
+        /^(?:XHR|Fetch)$/u.test(String(params.type ?? "")) &&
+        summarizeSbobetDiscovery({ url: request.url, method: requestMethod }) !== null) {
+        const budget = this.#sbobetDiscoveryBudget(source.sourceId);
+        if (budget !== null && budget.admitted < 24) {
+          budget.admitted += 1;
+          while (this.#sbobetDiscoveryRequests.size >= 64) {
+            this.#sbobetDiscoveryRequests.delete(this.#sbobetDiscoveryRequests.keys().next().value!);
+          }
+          this.#sbobetDiscoveryRequests.set(key, { sourceId: source.sourceId, url: String(request.url),
+            sourceGeneration: this.#captureSourceGeneration(source.sourceId),
+            tabGeneration: this.#captureTabGeneration(source.tabId),
+            bridgeGeneration: this.#captureBridgeGeneration(source.sourceId),
+            ...(requestMethod === "GET" && (this.#sbobetDetailStates.get(source.sourceId)?.lane.diagnostics().inFlight ?? 0) === 0 &&
+              Object.keys(headers).length <= 64 ? { detailHeaders: Object.fromEntries(Object.entries(headers)
+                .filter(([name, value]) => /^[a-z0-9-]{1,128}$/iu.test(name) && typeof value === "string" &&
+                  value.length <= 8_192 && !/[\r\n\0]/u.test(value) &&
+                  !/^(?:cookie2?$|host$|content-length$|accept-encoding$|connection$|origin$|referer$|user-agent$|sec-|proxy-)/iu.test(name))) as Record<string, string> } : {}) });
+        }
+      } else this.#sbobetDiscoveryRequests.delete(key);
       if (source.lobby === "CMD" && request !== null && typeof request.url === "string") {
         const functionCode = cmdProviderFunctionCode(request);
         if (functionCode === null) this.#requestFunctionCodes.delete(key);
@@ -4886,10 +6127,34 @@ export class NetworkObserver {
       return;
     }
     if (method === "Network.webSocketFrameReceived" && key) {
-      const socket = this.#webSockets.get(key) ??
+      let socket = this.#webSockets.get(key) ??
         (requestId === null ? undefined : this.#sabaSocketAcrossSession(source, requestId)?.[1]);
       const response = isRecord(params.response) ? params.response : null;
       this.#wsAttachDiagnostic(source).framesReceived += 1;
+      // A period/More action can make the provider publish a reset..done view
+      // that is complete only for the temporary probe screen. Drop catalog
+      // traffic attributed at receipt; do not adopt, cache, ready, or forward
+      // it after an asynchronous marker lookup outlives restoration.
+      if (sabaProbeBlockedAtReceipt && response !== null && response.opcode !== 2 &&
+        typeof response.payloadData === "string" && isPotentialSabaCatalogPayload(response.payloadData)) return;
+      if (socket === undefined && source.lobby === "SABA" && requestId !== null &&
+        response !== null && response.opcode !== 2 && typeof response.payloadData === "string" &&
+        isPotentialSabaCatalogPayload(response.payloadData)) {
+        // An MV3 worker can attach after the provider worker has opened its
+        // Socket.IO connection. Chrome then reports the exact catalog frames
+        // but does not replay Network.webSocketCreated. The strict SABA frame
+        // shape is sufficient ownership evidence here: the event already came
+        // from this recognized source tab/session, and no other provider frame
+        // can pass isPotentialSabaCatalogPayload. Adopt that existing physical
+        // socket so its reset/done baseline and following deltas are not thrown
+        // away forever merely because one CDP lifecycle event was missed.
+        const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
+        const streamId = String((this.#streamOrdinals.get(source.sourceId) ?? 0) + 1);
+        this.#streamOrdinals.set(source.sourceId, Number(streamId));
+        socket = { source, sourceGeneration, url: "wss://saba.invalid/socket.io/", streamId,
+          sabaLifecycleAnnounced: false, ...(sessionId === undefined ? {} : { sessionId }) };
+        this.#webSockets.set(key, socket);
+      }
       if (!socket) {
         this.#wsAttachDiagnostic(source).framesOrphan += 1;
         // MV3 can restart while an existing Socket.IO connection survives.
@@ -4953,8 +6218,15 @@ export class NetworkObserver {
             // never attached, so its socket stayed orphan forever and the
             // reconnect below could not observe the replacement either.
             // Re-discover before asking the page to reconnect.
+            const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
+            const tabGeneration = this.#captureTabGeneration(source.tabId);
+            const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+            const ownsReceipt = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+              this.#captureTabGeneration(source.tabId) === tabGeneration &&
+              this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration;
             await this.#discoverExistingKsportChildTargets(source).catch(() => undefined);
-            await this.#scheduleFreshSocketBaseline(source, isKsportCatalogSocket);
+            if (!ownsReceipt()) return;
+            await this.#scheduleFreshSocketBaseline(source, isKsportCatalogSocket, sessionId, ownsReceipt);
           }
         }
         return;
@@ -5111,6 +6383,9 @@ export class NetworkObserver {
         ...(socket.recoveryGeneration === undefined ? {} :
           { recoveryGeneration: socket.recoveryGeneration }) }, ...clocks,
         sourceGeneration: socket.sourceGeneration });
+      if (opcode !== 2 && socket.source.lobby === "SABA") {
+        await this.#emitSabaSchemaContext(socket);
+      }
       return;
     }
     if (method === "Network.responseReceived" && key) {
@@ -5122,8 +6397,18 @@ export class NetworkObserver {
       const providerFunctionCode = this.#requestFunctionCodes.get(key);
       const requestIdentity = this.#requestIdentities.get(key);
       if (requestIdentity === undefined) return;
-      if (!isProviderCatalogHttpResponse(source, response.url, providerFunctionCode,
+      const candidate = this.#sbobetDiscoveryRequests.get(key);
+      const sbobetDiscovery = candidate !== undefined && candidate.sourceId === source.sourceId &&
+        candidate.url === response.url && Number.isInteger(response.status) &&
+        this.#isSourceGenerationCurrent(source.sourceId, candidate.sourceGeneration) &&
+        this.#captureTabGeneration(source.tabId) === candidate.tabGeneration &&
+        this.#captureBridgeGeneration(source.sourceId) === candidate.bridgeGeneration ? {
+          httpStatus: response.status as number, bridgeGeneration: candidate.bridgeGeneration,
+          diagnosticOnly: !isProviderCatalogHttpResponse(source, response.url, providerFunctionCode, providerPartition)
+        } : undefined;
+      if (sbobetDiscovery === undefined && !isProviderCatalogHttpResponse(source, response.url, providerFunctionCode,
         providerPartition)) {
+        this.#sbobetDiscoveryRequests.delete(key);
         this.#cmdRecoveryRequests.delete(key);
         this.#pending.delete(key);
         this.#requestPartitions.delete(key);
@@ -5138,11 +6423,15 @@ export class NetworkObserver {
         url: response.url, resourceType, ...requestIdentity,
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(providerPartition === undefined ? {} : { providerPartition }),
+        ...(sbobetDiscovery === undefined ? {} : { sbobetDiscovery }),
+        ...(sbobetDiscovery !== undefined && response.status === 200 && candidate?.detailHeaders !== undefined
+          ? { sbobetDetailHeaders: candidate.detailHeaders } : {}),
         ...(streamId === undefined ? {} : { streamId }),
         ...(providerFunctionCode === undefined ? {} : { providerFunctionCode }) });
       return;
     }
     if (method === "Network.loadingFailed" && key) {
+      this.#sbobetDiscoveryRequests.delete(key);
       this.#cmdRecoveryRequests.delete(key);
       this.#pending.delete(key);
       this.#requestPartitions.delete(key);
@@ -5153,6 +6442,7 @@ export class NetworkObserver {
       return;
     }
     if (method === "Network.loadingFinished" && key) {
+      this.#sbobetDiscoveryRequests.delete(key);
       const cmdRecoveryToken = this.#cmdRecoveryRequests.get(key);
       this.#cmdRecoveryRequests.delete(key);
       let pending = this.#pending.get(key);
@@ -5166,6 +6456,23 @@ export class NetworkObserver {
       if (!this.#isPendingCurrent(pending)) return;
       let responseBodyRead = false;
       try {
+        if (pending.sbobetDiscovery !== undefined) {
+          const admitted = () => this.#isPendingCurrent(pending!) &&
+            this.#captureBridgeGeneration(source.sourceId) === pending!.sbobetDiscovery!.bridgeGeneration &&
+            this.#sbobetDiscoveryBudget(source.sourceId) !== null;
+          if (!admitted()) {
+            if (pending.sbobetDiscovery.diagnosticOnly) return;
+            const { sbobetDiscovery: _diagnostic, ...catalogRequest } = pending;
+            pending = catalogRequest;
+          } else {
+            if (!await this.#requestDocumentIsCurrent(pending)) return;
+            if (!admitted()) {
+              if (pending.sbobetDiscovery.diagnosticOnly) return;
+              const { sbobetDiscovery: _diagnostic, ...catalogRequest } = pending;
+              pending = catalogRequest;
+            }
+          }
+        }
         if (pending.providerPartition === undefined && isImGetSeUrl(pending.source, pending.url)) {
           const requestPostData = await (pending.sessionId === undefined
             ? this.#sendCommand(source.tabId, "Network.getRequestPostData", { requestId })
@@ -5185,6 +6492,19 @@ export class NetworkObserver {
         if (!isRecord(response) || typeof response.body !== "string") return;
         if (pending.requestDocumentKey !== undefined && !await this.#requestDocumentIsCurrent(pending)) return;
         if (!this.#isPendingCurrent(pending)) return;
+        if (pending.sbobetDiscovery !== undefined) {
+          if (this.#captureBridgeGeneration(source.sourceId) !== pending.sbobetDiscovery.bridgeGeneration ||
+            this.#sbobetDiscoveryBudget(source.sourceId) === null) {
+            if (pending.sbobetDiscovery.diagnosticOnly) return;
+          } else if (response.base64Encoded !== true) {
+            const summary = summarizeSbobetDiscovery({ url: pending.url, method: pending.method,
+              httpStatus: pending.sbobetDiscovery.httpStatus, body: response.body });
+            if (summary !== null) this.#rememberSbobetDiscovery(source.sourceId,
+              summary.hasNumericEventId ? "detail" : "roster", formatSbobetDiscovery(summary));
+            await this.#rememberObservedSbobetDetail(pending, response.body);
+          }
+          if (pending.sbobetDiscovery.diagnosticOnly) return;
+        }
         responseBodyRead = true;
         if (response.base64Encoded === true) {
           await this.#emit(pending.source, pending.url, pending.resourceType, "HTTP_RESPONSE", {
@@ -5284,6 +6604,7 @@ export class NetworkObserver {
 
   async ingestHttpResponse(source: ObservedSource, url: string, resourceType: "XHR" | "Fetch",
     body: string, requestMetadata: DirectHttpRequestMetadata): Promise<void> {
+    const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
     const requestIdentity = this.#allocateObserverRequestIdentity();
     if (!/^https?:\/\//iu.test(url)) return;
     const method = sanitizeHttpMethod(requestMetadata.method);
@@ -5297,6 +6618,8 @@ export class NetworkObserver {
       verifiedDocument.frameId, verifiedDocument.loaderId) : verifiedTarget !== undefined
       ? requestTargetBinding(this.#observerSessionId, source.tabId, sourceGeneration,
           verifiedTarget.sessionId, verifiedTarget.targetId)
+      : requestMetadata.currentDocumentConfirmed === true
+        ? requestConfirmedDocumentBinding(this.#observerSessionId, source.tabId, sourceGeneration, tabGeneration)
       : null;
     const pending: PendingRequest = { source, sourceGeneration, tabGeneration, url, resourceType, method,
       ...requestIdentity,
@@ -5327,6 +6650,7 @@ export class NetworkObserver {
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
         { ...request, ...clocks, sourceGeneration, tabGeneration });
+      this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration);
       return;
     }
     if (pending.requestFrameKey === undefined || pending.requestDocumentKey === undefined) return;
@@ -5341,23 +6665,38 @@ export class NetworkObserver {
           bodyEncoding: "UTF8", bodyFragment })
       }, { ...request, ...clocks, sourceGeneration, tabGeneration }));
     await Promise.all(emissions);
+    this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration);
   }
 
   async ingestDomSnapshot(source: ObservedSource, hostname: string, body: string): Promise<void> {
     if ((source.lobby !== "CMD" && source.lobby !== "SABA") || !/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    if (source.lobby === "SABA" && (this.#sabaProbePublicationBlocks.has(source.sourceId) ||
+      this.#sabaCollectorDomBlocks.has(source.sourceId))) return;
+    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const sabaProbeVersion = this.#sabaProbePublicationVersions.get(source.sourceId) ?? 0;
+    const stillOwned = () => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration &&
+      (source.lobby !== "SABA" || (!this.#sabaProbePublicationBlocks.has(source.sourceId) &&
+        !this.#sabaCollectorDomBlocks.has(source.sourceId) &&
+        (this.#sabaProbePublicationVersions.get(source.sourceId) ?? 0) === sabaProbeVersion));
     let records: unknown;
     try { records = JSON.parse(body); } catch { return; }
     if (!Array.isArray(records) || records.length === 0) return;
-    const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
     const nowMs = this.#now();
     const receivedMonotonicMs = this.#monotonicNow();
     const snapshotId = `dom:${source.tabId}:${nowMs}`;
     for (const chunk of chunkCmdSnapshot(records, snapshotId)) {
+      if (!stillOwned()) return;
       await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
         encoding: "UTF8", body: JSON.stringify(chunk)
-      }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration });
+      }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration, tabGeneration,
+        beforeForward: async () => stillOwned() });
     }
-    if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+    if (!stillOwned()) return;
+    if (source.lobby === "SABA" && hasStructurallyValidSabaFootballDomRecord(records)) {
+      this.#sabaResponsiveFootballDomAtMs.set(source.sourceId, nowMs);
+    }
     if (isReplayableCmdCatalog(records)) {
       this.#cmdSnapshots.set(source.sourceId, { body, sentAtMs: nowMs, receivedMonotonicMs });
       this.#cmdSnapshotHosts.set(source.sourceId, hostname);
@@ -5375,6 +6714,8 @@ export class NetworkObserver {
   async #capturePublicCatalogSnapshot(source: ObservedSource, hostname: string, expression: string,
     forceGeneration: boolean, alreadyScheduled = false): Promise<void> {
     if (!/^[a-z0-9.-]+$/iu.test(hostname)) return;
+    if (source.lobby === "SABA" && (this.#sabaProbePublicationBlocks.has(source.sourceId) ||
+      this.#sabaCollectorDomBlocks.has(source.sourceId))) return;
     const existing = this.#cmdCapturesInFlight.get(source.sourceId);
     // A capture that never settles holds this entry forever, and every later
     // sweep is handed that dead promise instead of running: measured
@@ -5389,6 +6730,12 @@ export class NetworkObserver {
       try {
       const capture = async (): Promise<void> => {
         const sourceGeneration = this.#captureSourceGeneration(source.sourceId);
+        const tabGeneration = this.#captureTabGeneration(source.tabId);
+        const sabaProbeVersion = this.#sabaProbePublicationVersions.get(source.sourceId) ?? 0;
+        const probeVersionIsCurrent = () => this.#captureTabGeneration(source.tabId) === tabGeneration &&
+          (source.lobby !== "SABA" || (!this.#sabaProbePublicationBlocks.has(source.sourceId) &&
+            !this.#sabaCollectorDomBlocks.has(source.sourceId) &&
+            (this.#sabaProbePublicationVersions.get(source.sourceId) ?? 0) === sabaProbeVersion));
         for (let generation = 0; generation < (forceGeneration ? 2 : 1); generation += 1) {
         const readFrameTree = () => this.#withFrameCommandTimeout(
           this.#sendCommand(source.tabId, "Page.getFrameTree")
@@ -5425,6 +6772,40 @@ export class NetworkObserver {
                 source.tabId, sourceGeneration, frame.id, frame.loaderId), value };
           }));
           values.push(...frameValues.filter((value) => value !== null));
+        }
+        // Page.createIsolatedWorld intermittently stops returning a context for
+        // SABA after a same-tab session reload, even though the default world
+        // remains healthy and continues to render odds. The old collector saw
+        // a non-empty frame tree and therefore never tried the working default
+        // world, leaving the last catalog frozen until the watchdog reloaded
+        // the page again. Fall back only when every isolated frame has no
+        // catalog, then choose the single richest current main-world result so
+        // duplicated frame aliases cannot multiply events.
+        const catalogRecordCount = (value: unknown): number => readEvaluationRecords(value).filter((item) =>
+          !isRecord(item) || (!("__fieldlineSweep" in item) && !("__fieldlineDiagnostic" in item))).length;
+        if (source.lobby === "SABA" && frames.length > 0 &&
+          !values.some(({ value }) => catalogRecordCount(value) > 0)) {
+          const mainWorldEvaluations: Array<Promise<{ readonly frameKey: string; readonly frameId: null;
+            readonly loaderId: null; readonly documentKey: null; readonly value: unknown }>> = [];
+          mainWorldEvaluations.push(this.#withFrameCommandTimeout(this.#sendCommand(source.tabId,
+            "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: false }))
+            .catch(() => ({})).then((value) => ({ frameKey: "saba-main-root", frameId: null,
+              loaderId: null, documentKey: null, value })));
+          const currentContexts = [...(this.#mainWorldContexts.get(source.tabId)?.entries() ?? [])].slice(0, 16);
+          for (const [frameId, binding] of currentContexts) {
+            const params = { expression, contextId: binding.contextId, returnByValue: true, awaitPromise: false };
+            const evaluated = this.#withFrameCommandTimeout(binding.sessionId === undefined
+              ? this.#sendCommand(source.tabId, "Runtime.evaluate", params)
+              : this.#sendCommand(source.tabId, "Runtime.evaluate", params, binding.sessionId))
+              .catch(() => ({}));
+            mainWorldEvaluations.push(evaluated.then((value) => ({
+              frameKey: `saba-main-${safeFrameKey(frameId, mainWorldEvaluations.length)}`,
+              frameId: null, loaderId: null, documentKey: null, value
+            })));
+          }
+          const richest = (await Promise.all(mainWorldEvaluations))
+            .sort((left, right) => catalogRecordCount(right.value) - catalogRecordCount(left.value))[0];
+          if (richest !== undefined && catalogRecordCount(richest.value) > 0) values.push(richest);
         }
         if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) { this.#noteCaptureExit(source, "GENERATION_STALE"); return; }
         const frameCaptures = values.map(({ frameKey, frameId, loaderId, documentKey, value }) => {
@@ -5492,14 +6873,24 @@ export class NetworkObserver {
             if (group.frameId !== null && group.loaderId !== null &&
               currentFrameLoader(await readFrameTree(), group.frameId) !== group.loaderId) return;
             if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+            if (!probeVersionIsCurrent()) return;
             await this.#emit(source, `https://${hostname}/__fieldline_dom_snapshot__`, "DOM", "DOM_SNAPSHOT", {
               encoding: "UTF8", body: JSON.stringify(chunk)
-            }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration });
+            }, { observedAtMs: nowMs, receivedMonotonicMs, sourceGeneration, tabGeneration,
+              beforeForward: async () => probeVersionIsCurrent() });
           }
         }
-        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
+        if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) || !probeVersionIsCurrent()) return;
         this.#cmdLastBodies.set(source.sourceId, semanticBody);
         this.#cmdLastSentAtMs.set(source.sourceId, nowMs);
+        if (source.lobby === "SABA") {
+          if (hasStructurallyValidSabaFootballDomRecord(records)) {
+            this.#sabaResponsiveFootballDomAtMs.set(source.sourceId, nowMs);
+          }
+          const minimumEvents = this.#sabaUsableDomCatalogAtMs.has(source.sourceId)
+            ? SABA_USABLE_DOM_CURRENT_EVENTS : SABA_USABLE_DOM_FIRST_EVENTS;
+          if (records.length >= minimumEvents) this.#sabaUsableDomCatalogAtMs.set(source.sourceId, nowMs);
+        }
         if (isReplayableCmdCatalog(records)) {
           this.#cmdSnapshots.set(source.sourceId, { body: catalogBody, sentAtMs: nowMs, receivedMonotonicMs });
           this.#cmdSnapshotHosts.set(source.sourceId, hostname);
@@ -5911,6 +7302,8 @@ export class NetworkObserver {
       if (identity === null) continue;
       const source: ObservedSource = { lobby: identity[1] as "CMD" | "SABA", sourceId,
         tabId: Number(identity[2]) };
+      if (source.lobby === "SABA" && (this.#sabaProbePublicationBlocks.has(sourceId) ||
+        this.#sabaCollectorDomBlocks.has(sourceId))) continue;
       if (!Number.isSafeInteger(source.tabId)) continue;
       const hostname = this.#hostnameFromCmdSource(sourceId);
       if (hostname === null) continue;
@@ -5965,6 +7358,8 @@ export class NetworkObserver {
       if (requestedSourceId !== undefined && sourceId !== requestedSourceId) continue;
       for (const [partition, snapshots] of partitions) {
         if (snapshots[0]?.source.lobby === "SABA" &&
+          this.#sabaProbePublicationBlocks.has(sourceId)) continue;
+        if (snapshots[0]?.source.lobby === "SABA" &&
           !this.#sabaReadySnapshotPartitions.has(`${sourceId}|${partition}`)) continue;
         let replayableSnapshots = snapshots;
         if (snapshots[0]?.source.lobby === "KSPORT") {
@@ -5997,6 +7392,9 @@ export class NetworkObserver {
   #clearCatalogWsSnapshots(sourceId: string): void {
     this.#catalogWsSnapshots.delete(sourceId);
     this.#catalogWsSnapshotUsage.delete(sourceId);
+    for (const key of this.#sabaBaselineBridgeGenerations.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#sabaBaselineBridgeGenerations.delete(key);
+    }
   }
 
   #replaceCatalogWsSnapshots(sourceId: string,
@@ -6034,6 +7432,14 @@ export class NetworkObserver {
     if (source.lobby !== "SABA" && source.lobby !== "KSPORT" && source.lobby !== "SBO") return;
     let parsedUrl: URL;
     try { parsedUrl = new URL(url); } catch { return; }
+    if (source.lobby === "SABA" && /\/socket\.io\/?$/u.test(parsedUrl.pathname)) {
+      let schema = this.#sabaSchemaContexts.get(source.sourceId);
+      if (schema === undefined) {
+        schema = new SabaSchemaContextCache();
+        this.#sabaSchemaContexts.set(source.sourceId, schema);
+      }
+      schema.remember(body);
+    }
     let partition = streamId;
     let startsBaseline = source.lobby === "KSPORT";
     let completesBaseline = false;
@@ -6070,6 +7476,7 @@ export class NetworkObserver {
     if (existingPartitions === undefined) this.#catalogWsSnapshotUsage.set(source.sourceId, usage);
     const readyKey = `${source.sourceId}|${partition}`;
     if (startsBaseline && source.lobby === "SABA") {
+      this.#sabaBaselineBridgeGenerations.set(readyKey, this.#captureBridgeGeneration(source.sourceId));
       const retired = partitions.get(partition);
       if (retired !== undefined) this.#subtractCatalogWsFrames(usage, retired);
       partitions.set(partition, []);
@@ -6086,8 +7493,13 @@ export class NetworkObserver {
     usage.frames += 1;
     usage.bytes += body.length;
     partitions.set(partition, frames);
-    if (source.lobby === "SABA" && completesBaseline && sabaFramesContainCompleteBaseline(frames)) {
+    if (source.lobby === "SABA" && completesBaseline &&
+      this.#sabaBaselineBridgeGenerations.get(readyKey) === this.#captureBridgeGeneration(source.sourceId) &&
+      this.#sabaSchemaContexts.get(source.sourceId)?.hasBridgeContext(partition.slice(streamId.length + 1)) &&
+      sabaFramesContainCompleteBaseline(frames)) {
       this.#sabaReadySnapshotPartitions.add(readyKey);
+      this.#sabaBaselineMissingSinceMs.delete(source.sourceId);
+      this.#sabaHealthyBaselineRecovery.delete(source.sourceId);
     }
     // Appends update source usage in O(1). Frames are ordered within each
     // partition, so capacity eviction only compares partition heads.
@@ -6106,6 +7518,7 @@ export class NetworkObserver {
         this.#subtractCatalogWsFrames(usage, removed);
         partitions.delete(oldestPartition);
         this.#sabaReadySnapshotPartitions.delete(`${source.sourceId}|${oldestPartition}`);
+        this.#sabaBaselineBridgeGenerations.delete(`${source.sourceId}|${oldestPartition}`);
         continue;
       }
       let oldestKey: string | undefined;
@@ -6145,6 +7558,7 @@ export class NetworkObserver {
     if (!isRecord(raw) || raw.version !== 1 || raw.sourceId !== source.sourceId ||
       raw.documentMarker !== documentMarker || !Array.isArray(raw.partitions)) return;
     const restored = new Map<string, ReplayableWsEvent[]>();
+    const schema = new SabaSchemaContextCache();
     for (const candidate of raw.partitions) {
       if (!isRecord(candidate) || typeof candidate.partition !== "string" || !Array.isArray(candidate.frames)) continue;
       const frames: ReplayableWsEvent[] = [];
@@ -6158,13 +7572,52 @@ export class NetworkObserver {
         frames.push({ source, url: frame.url, body: frame.body, streamId: frame.streamId,
           ...(recoveryGeneration === undefined ? {} : { recoveryGeneration }),
           observedAtMs: frame.observedAtMs, receivedMonotonicMs: frame.receivedMonotonicMs });
+        schema.remember(frame.body);
       }
       if (frames.length === 0 || !sabaFramesContainCompleteBaseline(frames)) continue;
       if (!this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration)) return;
       restored.set(candidate.partition, frames);
-      this.#sabaReadySnapshotPartitions.add(`${source.sourceId}|${candidate.partition}`);
     }
-    if (restored.size > 0) this.#replaceCatalogWsSnapshots(source.sourceId, restored);
+    // The independently retained schema is newer than any partition's first f
+    // row; do not let an older retained baseline overwrite that current table.
+    schema.restore(raw.schemaContexts);
+    // Same-document schema can bootstrap decoding, never fresh native authority.
+    // Do not overwrite a current frame that arrived while durable loading waited.
+    if (schema.size > 0 && (this.#sabaSchemaContexts.get(source.sourceId)?.size ?? 0) === 0) {
+      this.#sabaSchemaContexts.set(source.sourceId, schema);
+    }
+    if (restored.size > 0 && !this.#catalogWsSnapshots.has(source.sourceId)) {
+      this.#replaceCatalogWsSnapshots(source.sourceId, restored);
+    }
+  }
+
+  async #emitSabaSchemaContext(socket: ObservedWebSocketState): Promise<void> {
+    const { source, sourceGeneration, streamId } = socket;
+    const tabGeneration = this.#captureTabGeneration(source.tabId);
+    const bridgeGeneration = this.#captureBridgeGeneration(source.sourceId);
+    const current = () => source.lobby === "SABA" && !socketIsClosing(socket) &&
+      this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === tabGeneration &&
+      this.#captureBridgeGeneration(source.sourceId) === bridgeGeneration &&
+      [...this.#webSockets.values()].some((value) => value === socket) &&
+      this.#sabaDocumentMarkers.has(source.sourceId);
+    if (!current()) return;
+    const sent = this.#sabaSchemaSentStreams.get(source.sourceId) ?? new Set<string>();
+    const sentKey = `${bridgeGeneration}:${streamId}`;
+    if (sent.has(sentKey)) return;
+    const contexts = this.#sabaSchemaContexts.get(source.sourceId)?.exportContexts() ?? [];
+    if (contexts.length === 0) return;
+    for (const context of contexts) {
+      if (!current()) return;
+      await this.#emit(source, "https://saba.invalid/__fieldline_saba_schema_context__", "Diagnostic",
+        "TAB_STATE", { encoding: "UTF8", body: JSON.stringify({ kind: "SABA_SCHEMA_CONTEXT", ...context }) },
+        { request: { streamId }, sourceGeneration, tabGeneration, beforeForward: async () => current() });
+    }
+    if (current()) {
+      sent.add(sentKey);
+      while (sent.size > 64) sent.delete(sent.values().next().value!);
+      this.#sabaSchemaSentStreams.set(source.sourceId, sent);
+    }
   }
 
   #scheduleSabaWsSnapshotSave(sourceId: string, immediate: boolean): void {
@@ -6226,7 +7679,8 @@ export class NetworkObserver {
       return [{ partition, frames: frames.map(({ source: _source, ...frame }) => frame) }];
     });
     if (partitions.length === 0) return null;
-    const value: PersistedSabaWsSnapshots = { version: 1, sourceId, documentMarker, partitions };
+    const value: PersistedSabaWsSnapshots = { version: 1, sourceId, documentMarker, partitions,
+      schemaContexts: this.#sabaSchemaContexts.get(sourceId)?.exportContexts() ?? [] };
     return JSON.stringify(value).length <= 4_000_000 ? value : null;
   }
 
@@ -6252,6 +7706,8 @@ export class NetworkObserver {
     }
     this.#sabaSnapshotLoads.add(sourceId);
     this.#sabaDocumentMarkers.delete(sourceId);
+    this.#sabaSchemaContexts.delete(sourceId);
+    this.#sabaSchemaSentStreams.delete(sourceId);
   }
 
   #rememberTsportWsEvent(source: ObservedSource, url: string, body: string, streamId: string,
@@ -6270,7 +7726,7 @@ export class NetworkObserver {
       retained.set(eventId, { source, url, body, streamId, ...clocks });
       while (retained.size > 1_000) retained.delete(retained.keys().next().value as string);
       this.#tsportSnapshots.set(source.sourceId, retained);
-      this.#scheduleApsportEventDetail(source, eventId);
+      if (event["6"] !== true) this.#scheduleApsportEventDetail(source, eventId);
     } catch { /* Non-event frames are not replayable catalog state. */ }
   }
 
@@ -6362,7 +7818,7 @@ export class NetworkObserver {
       readonly receivedMonotonicMs?: number;
       readonly sourceGeneration?: number;
       readonly tabGeneration?: number;
-      readonly beforeForward?: () => Promise<boolean>;
+      readonly beforeForward?: () => boolean | Promise<boolean>;
     } = {}
   ): Promise<void> {
     const sourceGeneration = metadata.sourceGeneration ?? this.#captureSourceGeneration(source.sourceId);
@@ -6373,7 +7829,12 @@ export class NetworkObserver {
       if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
         this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
         this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
-      if (metadata.beforeForward !== undefined && !await metadata.beforeForward()) return;
+      if (metadata.beforeForward !== undefined) {
+        const admitted = metadata.beforeForward();
+        // A synchronous context/signal fence must stay in the same microtask as
+        // forwarding; awaiting a boolean creates a gap for document retirement.
+        if (typeof admitted === "boolean" ? !admitted : !await admitted) return;
+      }
       if ((this.#sourceGenerations.get(source.sourceId) ?? 0) !== sourceGeneration ||
         this.#captureBridgeGeneration(source.sourceId) !== bridgeGeneration ||
         this.#captureTabGeneration(source.tabId) !== tabGeneration) return;
@@ -6543,7 +8004,8 @@ function ksportPartitionFromRequest(source: ObservedSource,
   try {
     const url = new URL(request.url);
     if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
-      !isKsportEventApiHost(url.hostname) || url.pathname !== "/api/v2/getEvent") return null;
+      !isKsportEventApiHost(url.hostname) || url.pathname !== "/api/v2/getEvent" ||
+      url.searchParams.has("eventId")) return null;
     const timeRange = url.searchParams.get("timeRange")?.toLowerCase();
     return timeRange === "live" ? "KSPORT_LIVE" : timeRange === "today" ? "KSPORT_TODAY" : null;
   } catch { return null; }
@@ -6710,6 +8172,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasStructurallyValidSabaFootballDomRecord(records: readonly unknown[]): boolean {
+  const boundedText = (value: unknown, maximum: number): value is string =>
+    typeof value === "string" && value.length > 0 && value.length <= maximum;
+  return records.some((record) => {
+    if (!isRecord(record) || record.sportId !== "1" ||
+      !boundedText(record.leagueId, 128) || !boundedText(record.leagueName, 256) ||
+      !boundedText(record.matchId, 128) || typeof record.timeText !== "string" || record.timeText.length > 128 ||
+      !Array.isArray(record.teamNames) || record.teamNames.length < 2 || record.teamNames.length > 4 ||
+      record.teamNames.some((name) => !boundedText(name, 256)) ||
+      !Array.isArray(record.groups) || record.groups.length === 0 || record.groups.length > 128) return false;
+    return record.groups.some((group) => {
+      if (!isRecord(group) || !Array.isArray(group.betTypeIds) || group.betTypeIds.length > 8 ||
+        group.betTypeIds.some((value) => !boundedText(value, 80)) ||
+        !Array.isArray(group.labels) || group.labels.length > 32 ||
+        group.labels.some((value) => typeof value !== "string" || value.length > 80) ||
+        !Array.isArray(group.odds) || group.odds.length === 0 || group.odds.length > 128) return false;
+      return group.odds.every((odd) => isRecord(odd) && boundedText(odd.marketOddsId, 128) &&
+        boundedText(odd.priceText, 32) &&
+        (odd.status === null || boundedText(odd.status, 32)) &&
+        (odd.greyedOut === null || boundedText(odd.greyedOut, 32)));
+    });
+  });
+}
+
 function socketIsClosing(socket: ObservedWebSocketState): boolean {
   return socket.closing === true;
 }
@@ -6819,6 +8305,28 @@ function collectFrameIds(value: unknown): string[] {
   };
   visit(value.frameTree);
   return output;
+}
+
+function sbobetDiscoveryDocument(value: unknown, frameId: string): { readonly loaderId: string;
+  readonly origin: string } | null {
+  if (!isRecord(value)) return null;
+  const pending: unknown[] = [value.frameTree];
+  for (let visited = 0; pending.length > 0 && visited < 128; visited += 1) {
+    const node = pending.pop();
+    if (!isRecord(node)) continue;
+    if (isRecord(node.frame) && node.frame.id === frameId && typeof node.frame.loaderId === "string" &&
+      node.frame.loaderId.length > 0 && typeof node.frame.url === "string") {
+      try {
+        const url = new URL(node.frame.url);
+        if (url.protocol === "https:" && isKsportEventApiHost(url.hostname) && !url.username && !url.password) {
+          return { loaderId: node.frame.loaderId, origin: url.origin };
+        }
+      } catch { return null; }
+      return null;
+    }
+    if (Array.isArray(node.childFrames)) pending.push(...node.childFrames.slice(0, 128 - visited));
+  }
+  return null;
 }
 
 function collectFrameDescriptors(value: unknown): Array<{
@@ -6983,6 +8491,40 @@ function requestTargetBinding(observerSessionId: string, tabId: number, sourceGe
     requestFrameKey: opaqueRequestKey("http-frame", [observerSessionId, tabId, sessionId, targetId]),
     requestDocumentKey: opaqueRequestKey("http-document",
       [observerSessionId, tabId, sourceGeneration, sessionId, targetId])
+  };
+}
+
+function sabaPublicDiscoveryCandidate(evaluation: unknown): { readonly body: string;
+  readonly score: number } | null {
+  const body = nestedValue(evaluation, "result", "value");
+  if (typeof body !== "string" || body.length === 0 ||
+    utf8ByteLength(body) > SABA_PUBLIC_DISCOVERY_MAX_BYTES) return null;
+  let value: unknown;
+  try { value = JSON.parse(body); } catch { return null; }
+  if (!isRecord(value) || value.kind !== "SABA_PUBLIC_CATALOG_DISCOVERY" || value.version !== 1 ||
+    !/^(?:LEGACY_SPORTS|COMPACT|UNAVAILABLE)$/u.test(String(value.scope)) ||
+    !Array.isArray(value.navControls) || value.navControls.length > 12 ||
+    !Array.isArray(value.matches) || value.matches.length > 3 ||
+    !Array.isArray(value.scroll) || value.scroll.length > 6 || !isRecord(value.counts) ||
+    !value.matches.every((match) => isRecord(match) && Array.isArray(match.controls) &&
+      match.controls.length <= 12)) return null;
+  const prematchRows = Number.isSafeInteger(value.counts.prematchRows) &&
+    Number(value.counts.prematchRows) >= 0 ? Number(value.counts.prematchRows) : 0;
+  const scopeScore = value.scope === "LEGACY_SPORTS" ? 2_000 : value.scope === "COMPACT" ? 1_000 : 0;
+  return { body, score: scopeScore + value.matches.length * 100 + value.navControls.length * 10 +
+    Math.min(prematchRows, 9) };
+}
+
+function requestConfirmedDocumentBinding(observerSessionId: string, tabId: number,
+  sourceGeneration: number, tabGeneration: number): {
+    readonly requestFrameKey: string;
+    readonly requestDocumentKey: string;
+  } {
+  return {
+    requestFrameKey: opaqueRequestKey("http-frame",
+      [observerSessionId, tabId, "confirmed-evaluation"]),
+    requestDocumentKey: opaqueRequestKey("http-document",
+      [observerSessionId, tabId, sourceGeneration, tabGeneration, "confirmed-evaluation"])
   };
 }
 

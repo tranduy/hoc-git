@@ -39,7 +39,10 @@ export class ImFootballObservedCatalogReader {
       rejectedMarketCount: normalized.diagnostics.length,
       events: normalized.events,
       markets: normalized.markets,
-      quotes: normalized.quotes
+      quotes: normalized.quotes,
+      ...(snapshot.nativeMarketObservations === undefined ? {} : {
+        nativeMarketObservations: snapshot.nativeMarketObservations
+      })
     };
   }
 }

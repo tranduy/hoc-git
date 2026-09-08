@@ -1,3 +1,5 @@
+import { BTI_SOURCE_INVENTORY_EXPRESSION } from "./bti-source-inventory.js";
+
 export type BtiPageHealthStatus = "HEALTHY" | "AUTH_ERROR" | "UNKNOWN";
 
 export interface BtiPageHealthProbe {
@@ -13,7 +15,12 @@ export interface BtiPageHealth extends BtiPageHealthProbe {
 
 export const BTI_PAGE_HEALTH_EXPRESSION = `(() => {
   if (document.readyState === 'loading' || !document.body) return { status: 'UNKNOWN', code: null };
-  const rosterCoverage = String(document.documentElement.dataset.fieldlineBtiRosterCoverage || '').slice(0, 400);
+  let rosterCoverage = String(document.documentElement.dataset.fieldlineBtiRosterCoverage || '');
+  try {
+    if (rosterCoverage.length > 4096) rosterCoverage = '';
+    else if (rosterCoverage) rosterCoverage = JSON.stringify({ ...JSON.parse(rosterCoverage),
+      ...${BTI_SOURCE_INVENTORY_EXPRESSION} });
+  } catch { rosterCoverage = ''; }
   const text = String(document.body.innerText || document.body.textContent || '').slice(0, 20000)
     .normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').replace(/\\u0111/g, 'd').replace(/\\u0110/g, 'D')
     .toLowerCase().replace(/\\s+/g, ' ');
@@ -57,18 +64,30 @@ export function btiSourceControlAction(command: BtiSourceControlCommand,
 
 function parseRosterCoverage(value: unknown): string | null {
   if (value === undefined) return null;
-  if (typeof value !== "string" || value.length === 0 || value.length > 400) return null;
+  if (typeof value !== "string" || value.length === 0 || value.length > 4096) return null;
   let parsed: unknown;
   try { parsed = JSON.parse(value); } catch { return null; }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
   const candidate = parsed as Record<string, unknown>;
   const allowed = ["phase", "liveLeagues", "prematchLeagues", "liveBatches", "prematchBatches",
     "liveDone", "prematchDone", "failed", "events", "namedEvents", "timedEvents", "marketEvents", "validEvents",
-    "detailCachedEvents", "detailCachedBytes", "detailPendingEvents"];
-  if (Object.keys(candidate).some((key) => !allowed.includes(key)) ||
+    "detailCachedEvents", "detailCachedBytes", "detailPendingEvents", "detailRosterEvents",
+    "detailEmptyEvents", "detailFailedEvents", "detailEvictedEvents", "detailQueuedEvents",
+    "detailInFlightEvents", "detailOldestReceiptAgeMs", "detailNearTtlMs", "detailDistantTtlMs",
+    "detailDueEvents", "detailDeferredEvents", "detailRetainedEventCap", "detailQueueCap",
+    "detailOverCapEvents", "nativeRosterEvents", "nativePrematchEvents", "nativeLiveEvents",
+    "nativeDetailEvents", "nativeMarketRows", "nativeSelectionRows", "nativeNumericIds", "nativeMalformedRows"];
+  const booleans = ["detailCoverageComplete", "rosterRefreshFailed", "nativeInventoryTruncated", "nativeTypeCountsTruncated"];
+  if (Object.keys(candidate).some((key) => ![...allowed, ...booleans, "nativeTypeCounts"].includes(key)) ||
     !["INITIAL", "HYDRATING", "COMPLETE", "FAILED"].includes(String(candidate.phase))) return null;
+  if (booleans.some((key) => candidate[key] !== undefined && typeof candidate[key] !== "boolean")) return null;
+  if (candidate.nativeTypeCounts !== undefined && (typeof candidate.nativeTypeCounts !== "string" ||
+    candidate.nativeTypeCounts.length > 1024 ||
+    !/^(?:[A-Z][A-Z0-9_]{0,23}:\d{1,6}(?:,[A-Z][A-Z0-9_]{0,23}:\d{1,6}){0,31})?$/u.test(candidate.nativeTypeCounts))) return null;
   for (const key of allowed.slice(1)) {
-    const maximum = key === "detailCachedBytes" ? 128 * 1024 * 1024 : 1_000_000;
+    if (key === "detailOldestReceiptAgeMs" && candidate[key] === null) continue;
+    const maximum = key === "detailCachedBytes" ? 128 * 1024 * 1024
+      : key === "detailOldestReceiptAgeMs" ? Number.MAX_SAFE_INTEGER : 1_000_000;
     if (candidate[key] !== undefined && (!Number.isSafeInteger(candidate[key]) || Number(candidate[key]) < 0 ||
       Number(candidate[key]) > maximum)) return null;
   }

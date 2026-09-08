@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { footballBinaryMarketSpec } from "./football-binary-market.js";
 export {
   ChromeBridgeControlMessageSchema,
   ChromeBridgeEnvelopeSchema,
@@ -20,6 +21,7 @@ import type {
   MappingEvidence,
   MappingStatus,
   MarketType,
+  NativeMarketObservation,
   OddsFormat,
   Opportunity,
   PreflightLeg,
@@ -155,6 +157,39 @@ export const MarketTypeSchema = z.enum([
   "CARD_FT_TOTAL",
   "CARD_FH_AH",
   "CARD_FH_TOTAL",
+  "FT_ODD_EVEN",
+  "FH_ODD_EVEN",
+  "SH_ODD_EVEN",
+  "CORNER_FT_ODD_EVEN",
+  "CORNER_FH_ODD_EVEN",
+  "FT_BTTS",
+  "FH_BTTS",
+  "SH_BTTS",
+  "SENDING_OFF",
+  "HOME_CORNER_FT_TOTAL",
+  "HOME_CORNER_FH_TOTAL",
+  "AWAY_CORNER_FT_TOTAL",
+  "AWAY_CORNER_FH_TOTAL",
+  "HOME_FT_SCORE_BOTH_HALVES",
+  "AWAY_FT_SCORE_BOTH_HALVES",
+  "HOME_FT_WIN_BOTH_HALVES",
+  "AWAY_FT_WIN_BOTH_HALVES",
+  "HOME_FT_WIN_EITHER_HALF",
+  "AWAY_FT_WIN_EITHER_HALF",
+  "HOME_FT_ODD_EVEN",
+  "AWAY_FT_ODD_EVEN",
+  "HOME_FT_WIN_TO_NIL",
+  "AWAY_FT_WIN_TO_NIL",
+  "HOME_FT_CLEAN_SHEET",
+  "AWAY_FT_CLEAN_SHEET",
+  "FT_BOTH_HALVES_OVER_TOTAL",
+  "FT_BOTH_HALVES_UNDER_TOTAL",
+  "HOME_FT_TOTAL",
+  "AWAY_FT_TOTAL",
+  "HOME_FT_TO_WIN",
+  "AWAY_FT_TO_WIN",
+  "FT_ANY_TEAM_TO_WIN",
+  "YELLOW_CARD_FT_TOTAL",
   "SERIES_WINNER",
   "MAP_WINNER",
   "MAP_TOTAL_KILLS",
@@ -496,11 +531,6 @@ export const TwoLegExecutionResultSchema = z.strictObject({
   }
 }) satisfies z.ZodType<TwoLegExecutionResult>;
 
-const footballMarketTypes = new Set<MarketType>([
-  "FT_1X2", "FT_AH", "FT_TOTAL", "FH_1X2", "FH_AH", "FH_TOTAL", "SH_AH", "SH_TOTAL",
-  "CORNER_FT_AH", "CORNER_FT_TOTAL", "CORNER_FH_AH", "CORNER_FH_TOTAL",
-  "CARD_FT_AH", "CARD_FT_TOTAL", "CARD_FH_AH", "CARD_FH_TOTAL"
-]);
 const lolMarketTypes = new Set<MarketType>([
   "SERIES_WINNER",
   "MAP_WINNER",
@@ -510,24 +540,17 @@ const lolMarketTypes = new Set<MarketType>([
 ]);
 const footballScopes = new Set<Scope>(["FULL_TIME", "FIRST_HALF", "SECOND_HALF"]);
 const lolScopes = new Set<Scope>(["SERIES", "MAP_1", "MAP_2", "MAP_3", "MAP_4", "MAP_5"]);
-const footballMarketScopes = new Map<MarketType, Scope>([
-  ["FT_1X2", "FULL_TIME"], ["FT_AH", "FULL_TIME"], ["FT_TOTAL", "FULL_TIME"],
-  ["FH_1X2", "FIRST_HALF"], ["FH_AH", "FIRST_HALF"], ["FH_TOTAL", "FIRST_HALF"],
-  ["SH_AH", "SECOND_HALF"], ["SH_TOTAL", "SECOND_HALF"],
-  ["CORNER_FT_AH", "FULL_TIME"], ["CORNER_FT_TOTAL", "FULL_TIME"],
-  ["CORNER_FH_AH", "FIRST_HALF"], ["CORNER_FH_TOTAL", "FIRST_HALF"],
-  ["CARD_FT_AH", "FULL_TIME"], ["CARD_FT_TOTAL", "FULL_TIME"],
-  ["CARD_FH_AH", "FIRST_HALF"], ["CARD_FH_TOTAL", "FIRST_HALF"]
-]);
-
 function validateCategoryCompatibility(
   value: { category: Category; marketType: MarketType; scope: Scope },
   context: z.RefinementCtx
 ): void {
-  const compatibleMarketTypes = value.category === "FOOTBALL" ? footballMarketTypes : lolMarketTypes;
+  const compatibleMarketType = value.category === "FOOTBALL"
+    ? value.marketType === "FT_1X2" || value.marketType === "FH_1X2" ||
+      footballBinaryMarketSpec(value.marketType) !== null
+    : lolMarketTypes.has(value.marketType);
   const compatibleScopes = value.category === "FOOTBALL" ? footballScopes : lolScopes;
 
-  if (value.marketType !== "OBSERVE_ONLY" && !compatibleMarketTypes.has(value.marketType)) {
+  if (value.marketType !== "OBSERVE_ONLY" && !compatibleMarketType) {
     context.addIssue({
       code: "custom",
       path: ["marketType"],
@@ -544,7 +567,9 @@ function validateCategoryCompatibility(
   }
 
   const expectedFootballScope = value.category === "FOOTBALL"
-    ? footballMarketScopes.get(value.marketType)
+    ? value.marketType === "FT_1X2" ? "FULL_TIME"
+      : value.marketType === "FH_1X2" ? "FIRST_HALF"
+        : footballBinaryMarketSpec(value.marketType)?.scope
     : undefined;
   if (expectedFootballScope !== undefined && value.scope !== expectedFootballScope) {
     context.addIssue({
@@ -625,6 +650,20 @@ export const ProviderQuoteSchema = z.strictObject({
   receivedMonotonicMs: z.number(),
   sequence: z.number().nullable()
 }).superRefine(validateCategoryCompatibility) satisfies z.ZodType<ProviderQuote>;
+
+export const NativeMarketObservationSchema = z.strictObject({
+  provider: z.string().trim().min(1).max(64),
+  category: CategorySchema,
+  providerEventId: z.string().trim().min(1).max(256),
+  providerMarketId: z.string().trim().min(1).max(256),
+  nativeType: z.string().trim().min(1).max(128),
+  nativeLabel: z.string().trim().min(1).max(512).nullable(),
+  nativeScope: z.string().trim().min(1).max(128).nullable(),
+  outcomeLabels: z.array(z.string().trim().min(1).max(256)).max(32),
+  observedAtMs: z.number().finite().nonnegative(),
+  disposition: z.enum(["NORMALIZED", "EXCLUDED", "UNMAPPED"]),
+  reason: z.string().trim().min(1).max(256)
+}) satisfies z.ZodType<NativeMarketObservation>;
 
 export const MappingEvidenceSchema = z.strictObject({
   gate: z.string(),

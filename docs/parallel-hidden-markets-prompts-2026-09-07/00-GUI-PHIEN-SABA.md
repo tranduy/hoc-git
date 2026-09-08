@@ -1,0 +1,25 @@
+Tin nhắn gửi vào phiên SABA đang chạy:
+
+ĐIỀU CHỈNH: Nếu baseline và checkout đã có, giữ nguyên và bỏ qua phần chuẩn bị đã hoàn tất. Đọc F:\0. PROJECT\tool-chenh\docs\parallel-hidden-markets-prompts-2026-09-07\05-TIEP-TUC-DEN-NGHIEM-THU.md. Worker tự hoàn thiện nguồn thật, collector/wiring và nghiệm thu sàn của mình; phiên soạn prompt nhận review/chuẩn bị gói tích hợp riêng. Không chuyển những việc triển khai còn thiếu của bốn sàn cho SABA. Quyền cây chạy/runtime chỉ thay khi có bàn giao rõ ràng trong ledger.
+
+Tiếp tục nhiệm vụ SABA hiện tại. Tôi sẽ mở 4 phiên BTI, SBOBET, CMD, IM để làm song song. Yêu cầu chung: thu đủ kèo ẩn và giá tiếp tục cập nhật thật theo nhịp 3 giây khi có thay đổi; không đạt realtime thì chưa được gọi hoàn tất.
+
+Làm rõ phạm vi theo người dùng: cơ chế realtime 3 giây đã được triển khai ở phiên trước. Phải giữ nguyên và tái sử dụng đường catalog -> revision -> WebSocket /api/realtime -> CatalogRevisionCoordinator -> UI, cùng cấu hình 3.000 ms và hành vi fallback/reconnect. Các worker chỉ hoàn thiện coverage và đưa kèo ẩn vào luồng đó; không xây lại realtime, không đổi cadence và không coi đây là yêu cầu dựng một nền realtime mới.
+
+Bạn tạm thời là đầu mối duy nhất giữ cây tích hợp F:\0. PROJECT\tool-chenh và quyền build/restart/reload môi trường chung. Các worker mới chỉ sửa/test trong checkout riêng, bàn giao patch. Không cần chờ bạn hoàn thành toàn bộ SABA mới khởi động họ.
+
+Tại mốc thao tác an toàn gần nhất, thực hiện phần chuẩn bị tối thiểu sau rồi tiếp tục SABA:
+1. Kiểm kê thay đổi chưa commit, gồm tệp mới và các sửa đổi BTI/sàn khác đã có. Không stash/reset/di chuyển hay bỏ thay đổi hiện tại. Chốt snapshot mã nhất quán trong lúc tạm ngừng ghi, ghi baseline ID/hash và nguồn gốc; phân biệt snapshot WIP với phiên bản đang chạy/đã nghiệm thu. Không tự coi WIP là bản có thể triển khai.
+2. Chuẩn bị hoặc chỉ định 4 checkout riêng từ cùng snapshot cho BTI, SBOBET, CMD, IM. Đảm bảo không dùng shared writable dist và không copy .auth, session, raw credential, capture nhạy cảm hoặc runtime state làm môi trường live riêng. Bản worker không được tự khởi động vào Chrome/API hiện tại.
+3. Công bố F:\0. PROJECT\tool-chenh\.run\parallel-hidden-markets-2026-09-07\HANDOFF.md: baseline, các thư mục worker, tên integrator, build đang chạy, nguồn/tab được phân công khi đã xác minh, và một đường ledger runtime chung. Tạo 4 thư mục trao đổi bti, sbobet, cmd, im dưới thư mục bàn giao; mỗi worker chỉ ghi gói của mình.
+4. Giữ quyền sở hữu tệp chung: network-observer.ts + test, background.ts, local-bridge.ts, recovery/lease chung, contracts, core/matching, catalog/control/data-plane chung, manifest/package/config. sbobet-normalizer đang được AP dùng và cmd-normalizer đang được SABA dùng cũng cần tích hợp tập trung. Worker viết module riêng và đề nghị patch nối; bạn review/ghép phần chung.
+5. Chỉ bạn triển khai vào môi trường chung, qua một ledger duy nhất. Coordinator hiện tại chưa khoá theo tệp; build thường vẫn có thể ghi dist mà không kiểm tra lease; worktree riêng có ledger riêng nếu không chỉ định đường dùng chung. Không coi các cơ chế đó đã tự bảo vệ.
+6. Trước mỗi đợt triển khai, chốt phần mã được đưa vào, kết thúc cửa sổ nghiệm thu đang bảo vệ và giữ cây tích hợp ổn định qua build/handoff. Không đóng gói sửa đổi WIP chưa review của phiên khác. Không bắt các worker đợi đủ cả bốn mới review; ghép phần đã sẵn sàng nếu độc lập và tương thích.
+7. Cấp đường điều tra nguồn thật sớm theo đúng sàn/thao tác, không đợi tích hợp code xong hoặc SABA xong mới cho điều tra. Worker tự xác minh request/subscription và tự viết patch nối; bạn chỉ phối hợp quyền truy cập hiện có. Các nguồn độc lập có thể cùng đo khi không tranh debugger/controller hay trạng thái chung. Sau triển khai, công bố build ID; worker tự nghiệm thu sàn mình. Không đổi build trong cửa sổ đo; nếu buộc phải đổi, thông báo để tách bằng chứng. Duy trì/gia hạn lease khi đang giữ; mất lease thì dừng thao tác được bảo vệ, không coi expiry là người khác đã dừng.
+8. Nhận gói bàn giao từ thư mục trao đổi theo mốc công việc để không bỏ quên worker. Bàn giao quyền integrator sang phiên khác chỉ bằng một mốc rõ ràng, không để có hai chủ runtime.
+
+Bản phân công worker: docs/parallel-hidden-markets-prompts-2026-09-07/01-BTI.md đến 04-IM.md.
+
+Lưu ý nghiệm thu: bảo toàn phần realtime/AP/SABA đã có, kiểm tra hồi quy và sự tham gia của kèo ẩn mới vào luồng cập nhật hiện hành. Số đo cần tách độ trễ lấy dữ liệu nguồn và nhận dữ liệu -> ingest/API/UI; 3.000 ms trong coordinator là nhịp công bố/fallback, không đồng nghĩa mọi endpoint phải bị quét lại trong 3 giây. Không sửa timestamp cache để giả freshness và không coi detail tải một lần là đủ nếu kèo mới không tiếp tục nhận giá. Nếu phát hiện thiếu đường cập nhật cho kèo mới, sửa đúng phần còn thiếu; không tự mở rộng thành xây lại realtime hay sửa lại AP rồi chặn các worker.
+
+Không dựng lại kiến trúc toàn dự án trước khi giao việc. Ưu tiên mở đường cho các worker bắt đầu phần độc lập sớm, tiếp tục hoàn thành SABA và xử lý các gói tích hợp theo đợt.

@@ -163,6 +163,22 @@ describe("LiveCatalogPage", () => {
     expect(screen.getByText("CMD main")).toBeTruthy();
   });
 
+  it("shows the distinct event and market counts for each provider", async () => {
+    const source: CatalogSourceStatus = {
+      id: "catalog-source:CMD:FOOTBALL", alias: "CMD", provider: "CMD", category: "FOOTBALL",
+      sessionState: "ACTIVE", sessionSource: "FABET_LOGIN", acquiredAtMs: 100, reason: null
+    };
+    const markets = ["market-1", "market-2", "market-3"].map((providerMarketId) => ({
+      ...market, providerMarketId
+    }));
+
+    render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={{ ...accountApi, list: async () => [] }}
+      catalogSourceApi={{ list: async () => [source] }}
+      catalogApi={{ read: async () => ({ ...catalog, accountId: source.id, markets }) }} />);
+
+    expect(await screen.findByText("(1 match · 3 markets)")).toBeTruthy();
+  });
+
   it("shows six evenly grouped provider reload controls and animates the active provider being reloaded", async () => {
     const active: CatalogSourceStatus = {
       id: "catalog-source:CMD:FOOTBALL", alias: "CMD", provider: "CMD", category: "FOOTBALL",
@@ -612,7 +628,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage accountApi={{ ...accountApi, list: async () => [sabaAccount, sbobetAccount] }} catalogApi={api} />);
 
     expect(await screen.findByRole("region", { name: "Live comparison workspace" })).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
 
     expect(screen.queryByText("Best live lag signal")).toBeNull();
     expect(screen.queryByRole("region", { name: "Recent observed price movements" })).toBeNull();
@@ -702,6 +718,16 @@ describe("LiveCatalogPage", () => {
         { ...event, provider: "SABA" as const, providerEventId: "saba-virtual", participantA: "Virtual A",
           participantB: "Virtual B", isVirtual: true, sportVariant: "ESPORTS_FOOTBALL" }],
       markets: [{ ...market, provider: "SABA" as const, providerEventId: "saba-event", providerMarketId: "saba-market" }],
+      nativeMarketObservations: [
+        { provider: "SABA", category: "FOOTBALL" as const, providerEventId: "saba-event",
+          providerMarketId: "saba-market", nativeType: "1", nativeLabel: "Handicap", nativeScope: "FULL_TIME",
+          outcomeLabels: ["Home", "Away"], observedAtMs: 100, disposition: "NORMALIZED" as const,
+          reason: "CANONICAL_MARKET_MAPPED" },
+        { provider: "SABA", category: "FOOTBALL" as const, providerEventId: "saba-event",
+          providerMarketId: "saba-event:native:999", nativeType: "999", nativeLabel: "Unknown", nativeScope: null,
+          outcomeLabels: ["Yes", "No"], observedAtMs: 100, disposition: "UNMAPPED" as const,
+          reason: "NATIVE_TYPE_UNMAPPED" }
+      ],
       quotes: quotes.map((quote) => ({ ...quote, provider: "SABA" as const, providerEventId: "saba-event",
         providerMarketId: "saba-market", providerSelectionId: `saba-${quote.selection}` })) };
     const sbobet = { ...catalog, accountId: sbobetAccount.id, provider: "SBOBET" as const,
@@ -717,8 +743,9 @@ describe("LiveCatalogPage", () => {
     expect((screen.getByRole("checkbox", { name: /SBOBET main/u }) as HTMLInputElement).checked).toBe(true);
     const sabaSelector = screen.getByRole("checkbox", { name: /SABA main/u }).closest("label")!;
     const sbobetSelector = screen.getByRole("checkbox", { name: /SBOBET main/u }).closest("label")!;
-    expect(within(sabaSelector).getByText("(1 match)")).toBeTruthy();
-    expect(within(sbobetSelector).getByText("(1 match)")).toBeTruthy();
+    expect(within(sabaSelector).getByText("1 normalized · 0 excluded · 1 unmapped")).toBeTruthy();
+    expect(within(sabaSelector).getByText("(1 match · 1 market)")).toBeTruthy();
+    expect(within(sbobetSelector).getByText("(1 match · 1 market)")).toBeTruthy();
     expect((await screen.findAllByText("#SABA")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("#SBOBET").length).toBeGreaterThan(0);
     expect(screen.getByText(/Starts in/u)).toBeTruthy();
@@ -775,7 +802,7 @@ describe("LiveCatalogPage", () => {
       accountApi={{ ...accountApi, list: async () => [account, sabaAccount] }} catalogApi={{ read }} />);
 
     expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
 
     const detail = screen.getByRole("complementary", { name: "Selected match detail" });
     expect(within(detail).getByText("Alpha")).toBeTruthy();
@@ -796,7 +823,7 @@ describe("LiveCatalogPage", () => {
     render(<LiveCatalogPage fixedCategory="FOOTBALL" accountApi={accountApi} catalogApi={{ read }} />);
 
     expect(await screen.findByRole("button", { name: "Back to matches" })).toBeTruthy();
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
 
     const detail = screen.getByRole("complementary", { name: "Selected match detail" });
     expect(within(detail).getByText("Alpha vs Beta")).toBeTruthy();
@@ -828,7 +855,7 @@ describe("LiveCatalogPage", () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(fastReads).toBe(1);
 
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
 
     expect(fastReads).toBeGreaterThan(1);
     expect(screen.getByText("No exact two-book comparison is currently available")).toBeTruthy();
@@ -872,9 +899,9 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => sources }} catalogApi={{ read }} />);
     expect(await screen.findByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
 
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
     expect(screen.getByRole("button", { name: "Compare Alpha vs Beta" })).toBeTruthy();
 
     await act(async () => {
@@ -935,7 +962,7 @@ describe("LiveCatalogPage", () => {
       catalogSourceApi={{ list: async () => [source] }} catalogApi={{ read }} />);
     await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1));
 
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
 
     expect(read.mock.calls.length).toBeGreaterThan(1);
     expect(screen.queryByText("STALE")).toBeNull();
@@ -955,7 +982,7 @@ describe("LiveCatalogPage", () => {
     await vi.waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(0));
     const initialReads = read.mock.calls.length;
 
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
 
     expect(read.mock.calls.length).toBeGreaterThan(initialReads);
   });
@@ -979,7 +1006,7 @@ describe("LiveCatalogPage", () => {
     view.rerender(<StrictMode><LiveCatalogPage fixedCategory="FOOTBALL"
       accountApi={{ ...accountApi, list: async () => [] }} catalogSourceApi={sourceApi}
       catalogApi={{ read: secondRead }} /></StrictMode>);
-    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
 
     expect(secondRead.mock.calls.length).toBeGreaterThan(0);
   });
@@ -1112,10 +1139,10 @@ describe("LiveCatalogPage", () => {
       catalogApi={{ read: async (id) => id === sabaAccount.id ? saba : sbobet }} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Compare Alpha vs Beta" }));
-    expect((await screen.findAllByText("T\u00e0i/X\u1ec9u to\u00e0n tr\u1eadn")).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("T\u00e0i").some((node) =>
+    expect((await screen.findAllByText("Full-time total")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Over").some((node) =>
       node.closest(".ranked-ticket-price")?.textContent?.includes("2.2 DECIMAL"))).toBe(true);
-    expect(screen.getAllByText("X\u1ec9u").some((node) =>
+    expect(screen.getAllByText("Under").some((node) =>
       node.closest(".ranked-ticket-price")?.textContent?.includes("1.85 DECIMAL"))).toBe(true);
   });
 

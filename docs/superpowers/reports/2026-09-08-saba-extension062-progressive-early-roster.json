@@ -1,0 +1,198 @@
+{
+  "description": "Exact current-document public Early roster grew20→253 during an owner More transaction;233added,0missing,0duplicate, both closed reads agree. Tool incorrectly treated progressive membership addition as fatal. No full/realtime claim.",
+  "status": {
+    "at": "2026-09-07T23:11:45.566Z",
+    "build": "sha256:66aefd12f586d24b48bacaae8fd4595af55cfc70b5989b1e63230bd1a97cfe35",
+    "firstFailingHop": null,
+    "source": {
+      "sourceId": "chrome:SABA:2105831907",
+      "tabId": 2105831907,
+      "authorityDisposition": "ACTIVE"
+    },
+    "epoch": "9fc17a9c-6ad1-4e4c-a938-f331e707e50a:5",
+    "catalog": {
+      "state": "FRESH",
+      "events": 17,
+      "markets": 109,
+      "quotes": 218,
+      "native": 283,
+      "observedAtMs": 1788822697708
+    },
+    "capture": {
+      "name": "capture-1788822363207.jsonl",
+      "size": 2819802,
+      "mtime": 1788822705099.4731
+    }
+  },
+  "diagnostic": {
+    "at": "2026-09-07T23:11:45.095Z",
+    "sourceId": "chrome:SABA:2105831907",
+    "epoch": "9fc17a9c-6ad1-4e4c-a938-f331e707e50a:5",
+    "binding": {
+      "sourceEpoch": "9fc17a9c-6ad1-4e4c-a938-f331e707e50a:5",
+      "frameKey": "MAIN_WORLD:root:13",
+      "documentKey": "mpplhz2quohmtrul991"
+    },
+    "period": "EARLY",
+    "ownerMatchId": "133672157",
+    "reason": "METADATA_MEMBERSHIP",
+    "capturedAtMs": 1788822705095,
+    "capturedMonotonicMs": 311574.90000009537,
+    "baseline": {
+      "actualPeriod": "EARLY",
+      "rowCount": 20,
+      "uniqueCount": 20,
+      "addedCount": 0,
+      "missingCount": 0,
+      "duplicateCount": 0,
+      "addedMatchIds": [],
+      "missingMatchIds": [],
+      "duplicateMatchIds": [],
+      "controlCounts": {
+        "eligibleMore": 9,
+        "openMore": 0,
+        "noEligibleControl": 11,
+        "unsafe": 0
+      },
+      "timeShapeCounts": {
+        "datedKickoff": 20,
+        "prefixedKickoff": 0,
+        "undatedKickoff": 0
+      },
+      "dateCounts": {
+        "explicit": 0,
+        "unknown": 20
+      }
+    },
+    "restoredReads": {
+      "first": {
+        "actualPeriod": "EARLY",
+        "rowCount": 253,
+        "uniqueCount": 253,
+        "addedCount": 233,
+        "missingCount": 0,
+        "duplicateCount": 0,
+        "addedMatchIds": [
+          "133196353",
+          "133197193",
+          "133200623",
+          "133200624",
+          "133202219",
+          "133202234",
+          "133202241",
+          "133202242",
+          "133202244",
+          "133202773",
+          "133262522",
+          "133305188",
+          "133311142",
+          "133315182",
+          "133324175",
+          "133367595"
+        ],
+        "missingMatchIds": [],
+        "duplicateMatchIds": [],
+        "controlCounts": {
+          "eligibleMore": 205,
+          "openMore": 0,
+          "noEligibleControl": 48,
+          "unsafe": 0
+        },
+        "timeShapeCounts": {
+          "datedKickoff": 253,
+          "prefixedKickoff": 0,
+          "undatedKickoff": 0
+        },
+        "dateCounts": {
+          "explicit": 0,
+          "unknown": 253
+        }
+      },
+      "final": {
+        "actualPeriod": "EARLY",
+        "rowCount": 253,
+        "uniqueCount": 253,
+        "addedCount": 233,
+        "missingCount": 0,
+        "duplicateCount": 0,
+        "addedMatchIds": [
+          "133196353",
+          "133197193",
+          "133200623",
+          "133200624",
+          "133202219",
+          "133202234",
+          "133202241",
+          "133202242",
+          "133202244",
+          "133202773",
+          "133262522",
+          "133305188",
+          "133311142",
+          "133315182",
+          "133324175",
+          "133367595"
+        ],
+        "missingMatchIds": [],
+        "duplicateMatchIds": [],
+        "controlCounts": {
+          "eligibleMore": 205,
+          "openMore": 0,
+          "noEligibleControl": 48,
+          "unsafe": 0
+        },
+        "timeShapeCounts": {
+          "datedKickoff": 253,
+          "prefixedKickoff": 0,
+          "undatedKickoff": 0
+        },
+        "dateCounts": {
+          "explicit": 0,
+          "unknown": 253
+        }
+      }
+    },
+    "kind": "SABA_HIDDEN_COLLECTOR_ROSTER_MISMATCH"
+  },
+  "priorProgress": [
+    {
+      "at": "2026-09-07T23:07:55.138Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "9fc17a9c-6ad1-4e4c-a938-f331e707e50a:5",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 7,
+      "rosterOwners": 7,
+      "expandedOwners": 2
+    },
+    {
+      "at": "2026-09-07T23:09:02.914Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "9fc17a9c-6ad1-4e4c-a938-f331e707e50a:5",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 10,
+      "rosterOwners": 27,
+      "expandedOwners": 4
+    },
+    {
+      "at": "2026-09-07T23:10:08.908Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "9fc17a9c-6ad1-4e4c-a938-f331e707e50a:5",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 20,
+      "rosterOwners": 27,
+      "expandedOwners": 5
+    }
+  ],
+  "limitations": [
+    "No source instability established.",
+    "253 rows is the observed expanded public roster, not a separately proven provider-wide server denominator.",
+    "Pure additions do not authorize omission: all added owners still must be scheduled/captured and final public roster reconciled.",
+    "Native schemaReady remains false; post-close hidden-price acceptance pending."
+  ]
+}

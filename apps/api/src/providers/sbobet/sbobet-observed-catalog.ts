@@ -1,10 +1,12 @@
 import { normalizeSbobetCatalog, type SbobetCatalogInputRecord } from "@tool-chenh/adapters";
+import type { NativeMarketObservation } from "@tool-chenh/contracts";
 import type { ActiveAccountAccess, ObservedProviderCatalog } from "../cmd/cmd-observed-catalog.js";
 
 interface SbobetSourceSnapshot {
   readonly records: readonly SbobetCatalogInputRecord[];
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
+  readonly nativeMarketObservations?: readonly NativeMarketObservation[];
 }
 
 function isSourceSnapshot(value: readonly SbobetCatalogInputRecord[] | SbobetSourceSnapshot): value is SbobetSourceSnapshot {
@@ -50,9 +52,18 @@ export class SbobetObservedCatalogReader {
     }
     if (records.length > 0 && events.length === 0) throw new Error("SBOBET_CATALOG_SCHEMA_ERROR");
     this.#sequences.set(accountId, sequence);
+    const normalizedMarketIds = new Set(markets.map((market) =>
+      `${market.providerEventId}\u0000${market.providerMarketId}`));
+    const nativeMarketObservations = snapshot?.nativeMarketObservations?.map((observation) =>
+      observation.disposition === "NORMALIZED" && !normalizedMarketIds.has(
+        `${observation.providerEventId}\u0000${observation.providerMarketId}`)
+        ? { ...observation, disposition: "EXCLUDED" as const, reason: "NORMALIZATION_REJECTED" }
+        : observation);
     return { dataMode: "LIVE", accountId, provider: "SBOBET", category: "FOOTBALL",
       comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: options.observedAtMs,
-      rejectedMarketCount, events, markets, quotes };
+      rejectedMarketCount, events, markets, quotes, ...(nativeMarketObservations === undefined ? {} : {
+        nativeMarketObservations
+      }) };
   }
 }
 

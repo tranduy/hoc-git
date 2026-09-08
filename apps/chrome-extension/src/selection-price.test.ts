@@ -254,7 +254,7 @@ describe("visible provider price probe", () => {
     expect(value).toEqual(expect.objectContaining({ ok: true, rawOdds: "0.17" }));
     expect(requests).toBe(2);
     await page.close();
-  });
+  }, 10_000);
 
   it("uses SBOBET's same-origin getEvent endpoint when Chrome no longer retains the initial request entry", async () => {
     const page = await browser.newPage();

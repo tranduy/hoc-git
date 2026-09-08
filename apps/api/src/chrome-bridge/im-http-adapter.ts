@@ -1,7 +1,7 @@
 import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
-import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
+import type { ChromeBridgeEnvelope, NativeMarketObservation } from "@tool-chenh/contracts";
 import { extractImFootballCatalog, isLineFieldWellFormed, isValidImFootballDelta, mergeImFootballDelta,
-  normalizeImOdds } from "../providers/im/im-football-catalog-source.js";
+  normalizeImOdds, observeNativeImFootballMarkets } from "../providers/im/im-football-catalog-source.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 
@@ -25,6 +25,7 @@ type PartitionRecords = Map<string, RetainedRecord>;
 interface ClassifiedPartition {
   readonly records: PartitionRecords;
   readonly inputCount: number;
+  readonly nativeMarketObservations: readonly NativeMarketObservation[];
 }
 
 interface SnapshotGeneration {
@@ -36,6 +37,7 @@ interface SnapshotGeneration {
 
 interface SourceState {
   current: Map<ImPartition, PartitionRecords> | null;
+  currentNativeMarketObservations: Map<ImPartition, readonly NativeMarketObservation[]> | null;
   currentGeneration: string | null;
   currentCutoffSequence: number | null;
   pending: SnapshotGeneration | null;
@@ -99,7 +101,8 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
 
   decode(envelope: ChromeBridgeEnvelope): readonly DecodedCatalogUpdate[] {
     if (!this.fingerprint(envelope)) return [];
-    const state = this.#states.get(envelope.sourceId) ?? { current: null, currentGeneration: null,
+    const state = this.#states.get(envelope.sourceId) ?? { current: null, currentNativeMarketObservations: null,
+      currentGeneration: null,
       currentCutoffSequence: null,
       pending: null, obsoleteGenerations: new Set<string>(), rejectedGenerations: new Set<string>(),
       highestGenerationOrdinal: null,
@@ -167,7 +170,8 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
         records.set(record.eventId, { record, observedAtMs: envelope.observedAtMs,
           receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence });
       }
-      state.pending.partitions.set(partition, { records, inputCount: classified.inputCount });
+      state.pending.partitions.set(partition, { records, inputCount: classified.inputCount,
+        nativeMarketObservations: classified.nativeMarketObservations });
       this.#states.set(envelope.sourceId, state);
       if (!state.pending.partitions.has("IM_MARKET_1") || !state.pending.partitions.has("IM_MARKET_2")) {
         return state.current === null ? this.#ignore("snapshot-awaiting-partition") : [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
@@ -183,10 +187,12 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       }
       if (state.currentGeneration !== null) rememberObsolete(state, state.currentGeneration);
       state.current = new Map([...pendingPartitions].map(([key, value]) => [key, value.records]));
+      state.currentNativeMarketObservations = new Map([...pendingPartitions]
+        .map(([key, value]) => [key, value.nativeMarketObservations]));
       state.currentGeneration = state.pending.id;
       state.currentCutoffSequence = state.pending.cutoffSequence;
       for (const delta of state.recentDeltas) {
-        if (delta.sequence > state.pending.cutoffSequence) this.#applyDelta(state.current, delta);
+        if (delta.sequence > state.pending.cutoffSequence) this.#applyDelta(state, delta);
       }
       state.pending = null;
     } else {
@@ -209,7 +215,7 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       this.#states.set(envelope.sourceId, state);
       const sourcePartitions = state.current;
       if (sourcePartitions === null) return [];
-      const changed = this.#applyDelta(sourcePartitions, envelope);
+      const changed = this.#applyDelta(state, envelope);
       if (!changed) return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
         observedAtMs: envelope.observedAtMs, transportAlive: true }];
     }
@@ -227,6 +233,10 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
           settlementProfile: "football-regulation-including-added-time"
         }));
       }
+      const nativeMarketObservations = state.currentNativeMarketObservations?.get(partition);
+      if (nativeMarketObservations !== undefined) {
+        parts.push({ diagnostics: [], events: [], markets: [], quotes: [], nativeMarketObservations });
+      }
     }
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "IM",
       observedAtMs: envelope.observedAtMs, parts });
@@ -237,17 +247,25 @@ export class ImHttpCatalogAdapter implements ChromeTrafficAdapter {
       generation: state.currentGeneration!, provenance: "AUTHENTICATED_HTTP", providerTimestampMs: null }];
   }
 
-  #applyDelta(sourcePartitions: Map<ImPartition, PartitionRecords>, envelope: ChromeBridgeEnvelope): boolean {
+  #applyDelta(state: SourceState, envelope: ChromeBridgeEnvelope): boolean {
     const root = parseRecord(envelope.payload.body);
-    if (root === null) return false;
+    const sourcePartitions = state.current;
+    if (root === null || sourcePartitions === null) return false;
     const target = envelope.request.providerPartition;
     if (target !== undefined && !isImPartition(target)) return false;
     const partitions = target === undefined
       ? sourcePartitions.size === 2 ? [...sourcePartitions.entries()] : []
       : sourcePartitions.has(target) ? [[target, sourcePartitions.get(target)!] as const] : [];
     let changed = false;
-    for (const [, records] of partitions) {
+    for (const [partition, records] of partitions) {
       for (const [eventId, entry] of [...records]) {
+        const currentInventory = state.currentNativeMarketObservations?.get(partition) ?? [];
+        const nextInventory = mergeImDeltaInventory(currentInventory, entry.record, root,
+          envelope.observedAtMs);
+        if (!sameImNativeInventory(currentInventory, nextInventory)) {
+          state.currentNativeMarketObservations?.set(partition, nextInventory);
+          changed = true;
+        }
         const updated = mergeImFootballDelta([entry.record], root);
         if (updated.length === 0) { records.delete(eventId); changed = true; }
         else if (!sameImRecord(updated[0]!, entry.record)) {
@@ -293,7 +311,8 @@ function sameImMarket(left: ImRecord["markets"][number], right: ImRecord["market
 }
 
 function classifySnapshot(root: Record<string, unknown>, nowMs: number): {
-  readonly records: readonly ImRecord[]; readonly inputCount: number } | null {
+  readonly records: readonly ImRecord[]; readonly inputCount: number;
+  readonly nativeMarketObservations: readonly NativeMarketObservation[] } | null {
   const candidates = root.sel;
   if (!Array.isArray(candidates)) return null;
   const accepted: ImRecord[] = [];
@@ -319,7 +338,46 @@ function classifySnapshot(root: Record<string, unknown>, nowMs: number): {
     // Structurally valid but unsupported market/period/line records are an
     // explained provider-domain exclusion rather than malformed evidence.
   }
-  return { records: accepted, inputCount: candidates.length };
+  return { records: accepted, inputCount: candidates.length,
+    nativeMarketObservations: observeNativeImFootballMarkets(root, nowMs) };
+}
+
+function mergeImDeltaInventory(
+  current: readonly NativeMarketObservation[],
+  event: ImRecord,
+  root: Record<string, unknown>,
+  observedAtMs: number
+): readonly NativeMarketObservation[] {
+  if (!Array.isArray(root.dc)) return current;
+  let next = [...current];
+  for (const candidate of root.dc) {
+    if (!isRecord(candidate) || String(candidate.eid) !== event.eventId) continue;
+    if (candidate.a === 1) {
+      next = next.filter((observation) => observation.providerEventId !== event.eventId);
+      continue;
+    }
+    if (candidate.a !== 3 || !Array.isArray(candidate.v)) continue;
+    const incoming = observeNativeImFootballMarkets({ StatusCode: 100, sel: [{
+      eid: event.eventId, htn: event.teamNames[0], atn: event.teamNames[1], cn: event.leagueName,
+      iscyb: false, mls: candidate.v
+    }] }, observedAtMs);
+    const changedIds = new Set(incoming.map((observation) => observation.providerMarketId));
+    next = [...next.filter((observation) => observation.providerEventId !== event.eventId ||
+      !changedIds.has(observation.providerMarketId)), ...incoming];
+  }
+  return next;
+}
+
+function sameImNativeInventory(
+  left: readonly NativeMarketObservation[],
+  right: readonly NativeMarketObservation[]
+): boolean {
+  const semantic = (observations: readonly NativeMarketObservation[]): string => JSON.stringify(
+    observations.map(({ observedAtMs: _observedAtMs, ...observation }) => observation)
+      .sort((a, b) => `${a.providerEventId}\0${a.providerMarketId}`
+        .localeCompare(`${b.providerEventId}\0${b.providerMarketId}`))
+  );
+  return semantic(left) === semantic(right);
 }
 
 function isClassifiedImMarket(value: unknown): boolean {

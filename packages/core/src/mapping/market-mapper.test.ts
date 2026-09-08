@@ -165,6 +165,49 @@ describe("mapMarkets hard gates", () => {
     expect(crossed.evidence.find((item) => item.gate === "sameMarketType")?.passed).toBe(false);
   });
 
+  it.each(["2", "2.25", "2.75"])("rejects push-capable football line %s", (line) => {
+    const result = mapMarkets(
+      footballMapping,
+      footballMarket({ line }),
+      imFootballMarket({ line })
+    );
+
+    expect(result.status).toBe("REJECTED");
+    expect(result.canonicalMarketId).toBeNull();
+    expect(result.executionConfidence).toBe("BLOCKED");
+    expect(result.evidence.find((item) => item.gate === "noPushFootballLine")?.passed).toBe(false);
+  });
+
+  it("verifies an exact line-free football odd/even market", () => {
+    const left = footballMarket({ marketType: "FT_ODD_EVEN", line: null,
+      settlementProfile: "football-goals-odd-even-regulation", selections: [
+        { providerSelectionId: "saba-odd", canonicalOutcomeId: "ODD" },
+        { providerSelectionId: "saba-even", canonicalOutcomeId: "EVEN" }
+      ] });
+    const right = imFootballMarket({ marketType: "FT_ODD_EVEN", line: null,
+      settlementProfile: "football-goals-odd-even-regulation", selections: [
+        { providerSelectionId: "im-even", canonicalOutcomeId: "EVEN" },
+        { providerSelectionId: "im-odd", canonicalOutcomeId: "ODD" }
+      ] });
+
+    expect(mapMarkets(footballMapping, left, right)).toMatchObject({ status: "VERIFIED", normalizedLine: null });
+  });
+
+  it("rejects a line-free binary market carrying an unexpected line", () => {
+    const market = (provider: "SABA" | "IM", line: string | null): NormalizedMarket => footballMarket({
+      provider, providerEventId: provider === "SABA" ? "saba-football" : "im-football",
+      providerMarketId: `${provider}-odd-even`, marketType: "FT_ODD_EVEN", line,
+      settlementProfile: "football-goals-odd-even-regulation", selections: [
+        { providerSelectionId: `${provider}-odd`, canonicalOutcomeId: "ODD" },
+        { providerSelectionId: `${provider}-even`, canonicalOutcomeId: "EVEN" }
+      ]
+    });
+
+    const result = mapMarkets(footballMapping, market("SABA", "0"), market("IM", "0"));
+    expect(result.status).toBe("REJECTED");
+    expect(result.evidence.find((item) => item.gate === "sameLine")?.passed).toBe(false);
+  });
+
   it.each([
     [
       "full-time versus first-half",
@@ -363,10 +406,17 @@ describe("mapMarkets hard gates", () => {
     ["0.0000001", "0.0000001"],
     ["1000000000000000000000", "1000000000000000000000"]
   ] as const)("keeps canonical line %s in plain-decimal notation", (line, expected) => {
+    const selections = [
+      { providerSelectionId: "over", canonicalOutcomeId: "OVER" },
+      { providerSelectionId: "under", canonicalOutcomeId: "UNDER" }
+    ];
     const result = mapMarkets(
-      footballMapping,
-      footballMarket({ line }),
-      imFootballMarket({ line })
+      lolMapping,
+      lolMarket({ marketType: "MAP_TOTAL_KILLS", line, selections }),
+      imLolMarket({ marketType: "MAP_TOTAL_KILLS", line, selections: [
+        { providerSelectionId: "im-under", canonicalOutcomeId: "UNDER" },
+        { providerSelectionId: "im-over", canonicalOutcomeId: "OVER" }
+      ] })
     );
 
     expect(result.status).toBe("VERIFIED");

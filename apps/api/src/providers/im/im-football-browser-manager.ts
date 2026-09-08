@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
+import type { NativeMarketObservation } from "@tool-chenh/contracts";
 import { chromium, type BrowserContext, type Page, type Response } from "playwright";
 import { installCatalogResourcePolicy } from "../browser-resource-policy.js";
 import { extractImFootballCatalog, mergeImFootballDelta,
-  mergeImFootballSnapshots } from "./im-football-catalog-source.js";
+  mergeImFootballSnapshots, observeNativeImFootballMarkets } from "./im-football-catalog-source.js";
 import { ImFootballDirectTransport, type ImFootballRequestTemplate } from "./im-football-direct-transport.js";
 
 const imFootballHost = "imsports.directsb.net";
@@ -19,12 +20,14 @@ function object(value: unknown): Record<string, unknown> | null {
 
 export interface ImFootballCatalogSnapshot {
   readonly records: readonly SbobetCatalogInputRecord[];
+  readonly nativeMarketObservations?: readonly NativeMarketObservation[];
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
 }
 
 interface LivePageState {
   readonly groups: Map<string, readonly SbobetCatalogInputRecord[]>;
+  readonly nativeMarketObservations: Map<string, readonly NativeMarketObservation[]>;
   readonly pending: Set<Promise<void>>;
   readonly directTemplates: Map<string, ImFootballRequestTemplate>;
   observedAtMs: number;
@@ -101,7 +104,7 @@ export class PlaywrightImFootballBrowserManager {
     if (page.isClosed()) throw new Error("IM_FOOTBALL_CATALOG_UNAVAILABLE");
     let state = this.#livePages.get(page);
     if (state === undefined) {
-      state = { groups: new Map(), pending: new Set(), directTemplates: new Map(),
+      state = { groups: new Map(), nativeMarketObservations: new Map(), pending: new Set(), directTemplates: new Map(),
         observedAtMs: 0, receivedMonotonicMs: 0 };
       this.#livePages.set(page, state);
       this.#directState = state;
@@ -123,6 +126,7 @@ export class PlaywrightImFootballBrowserManager {
       const records = mergeImFootballSnapshots([...state.groups.values()]);
       if (records.length > 0) return {
         records,
+        nativeMarketObservations: mergedNativeObservations(state.nativeMarketObservations),
         observedAtMs: state.observedAtMs,
         receivedMonotonicMs: state.receivedMonotonicMs
       };
@@ -144,7 +148,8 @@ export class PlaywrightImFootballBrowserManager {
     }
     const records = mergeImFootballSnapshots([...state.groups.values()]);
     if (records.length === 0) throw new Error("IM_FOOTBALL_CATALOG_UNAVAILABLE");
-    return { records, observedAtMs: state.observedAtMs, receivedMonotonicMs: state.receivedMonotonicMs };
+    return { records, nativeMarketObservations: mergedNativeObservations(state.nativeMarketObservations),
+      observedAtMs: state.observedAtMs, receivedMonotonicMs: state.receivedMonotonicMs };
   }
 
   async #captureLiveResponse(state: LivePageState, response: Response): Promise<void> {
@@ -167,6 +172,7 @@ export class PlaywrightImFootballBrowserManager {
         } catch { /* A catalog response can remain valid even when its replay lease cannot be captured. */ }
       }
       state.groups.set(group, extractImFootballCatalog(body));
+      state.nativeMarketObservations.set(group, observeNativeImFootballMarkets(body, Date.now()));
     } else {
       for (const [group, records] of state.groups) state.groups.set(group, mergeImFootballDelta(records, body));
     }
@@ -181,8 +187,17 @@ export class PlaywrightImFootballBrowserManager {
     if (snapshots.length === 0) return;
     const payloads = await Promise.all(snapshots.map(async ([group, template]) =>
       [group, await this.#directTransport.read(template)] as const));
-    for (const [group, payload] of payloads) state.groups.set(group, extractImFootballCatalog(payload));
+    for (const [group, payload] of payloads) {
+      state.groups.set(group, extractImFootballCatalog(payload));
+      state.nativeMarketObservations.set(group, observeNativeImFootballMarkets(payload, Date.now()));
+    }
     state.observedAtMs = Date.now();
     state.receivedMonotonicMs = performance.now();
   }
+}
+
+function mergedNativeObservations(groups: ReadonlyMap<string, readonly NativeMarketObservation[]>):
+readonly NativeMarketObservation[] {
+  return [...new Map([...groups.values()].flatMap((items) => items)
+    .map((item) => [`${item.providerEventId}|${item.providerMarketId}|${item.nativeType}`, item])).values()];
 }

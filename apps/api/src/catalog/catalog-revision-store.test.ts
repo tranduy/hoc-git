@@ -94,6 +94,29 @@ describe("CatalogRevisionStore", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("does not revise a catalog when only native-market observation clocks advance", () => {
+    const store = new CatalogRevisionStore({ now: () => 200 });
+    stores.push(store);
+    const observed = (observedAtMs: number): ObservedProviderCatalog => ({
+      ...catalog(observedAtMs),
+      nativeMarketObservations: [{
+        provider: "SABA", category: "FOOTBALL", providerEventId: "event-1", providerMarketId: "market-1",
+        nativeType: "o", nativeScope: "FULL_TIME", nativeLabel: "FT_TOTAL",
+        outcomeLabels: ["OVER", "UNDER"], observedAtMs,
+        disposition: "NORMALIZED", reason: "FT_TOTAL"
+      }]
+    });
+    const first = store.publish("catalog-source:SABA:FOOTBALL", observed(100), {
+      snapshotState: "FRESH", freshnessMs: 20
+    });
+    const renewed = store.publish("catalog-source:SABA:FOOTBALL", observed(110), {
+      snapshotState: "FRESH", freshnessMs: 20
+    });
+
+    expect(renewed.revision).toBe(first.revision);
+    expect(renewed.sequence).toBe(first.sequence);
+  });
+
   it("broadcasts APSPORT receipt confirmations so per-quote freshness reaches clients", () => {
     let now = 100;
     const store = new CatalogRevisionStore({ now: () => now });

@@ -1,0 +1,74 @@
+{
+  "note": "Actual .51 newworker showed no collector/probe receipt in this bounded capture. Literalreset/done markers absent; native-ready admission coupling proven bycode/regression, notyetprovenlivecause. Existing observer can restore complete nativeWS snapshots onmatchingdocument workerbootstrap, so absenceofnewresetmarker alone doesnotestablishnativeReadyfalse.",
+  "receipt": {
+    "sourceId": "chrome:SABA:2105831237",
+    "epoch": "639b5181-bb8c-4b8f-8494-f928836bdc6e:4",
+    "size": 1378751,
+    "markers": [],
+    "probes": 0,
+    "collectors": 0,
+    "latest": 1788812968858
+  },
+  "lastLive": [
+    {
+      "at": "2026-09-07T20:27:42.560Z",
+      "build": "sha256:a5135d0b1430a56c82f8025c2c1d4681e94fc3bbfeeafd24a8d9f8cfa9ab8396",
+      "firstFailingHop": null,
+      "source": {
+        "sourceId": "chrome:SABA:2105831237",
+        "tabId": 2105831237,
+        "authorityDisposition": "ACTIVE"
+      },
+      "epoch": "639b5181-bb8c-4b8f-8494-f928836bdc6e:4",
+      "catalog": {
+        "state": "FRESH",
+        "events": 40,
+        "markets": 233,
+        "quotes": 466,
+        "native": 420,
+        "observedAtMs": 1788812798266
+      },
+      "capture": {
+        "name": "capture-1788812735123.jsonl",
+        "size": 863881,
+        "mtime": 1788812859603.1956
+      }
+    },
+    {
+      "probeCount": 0,
+      "probes": [],
+      "collectors": [],
+      "latestEnvelopeEpoch": "639b5181-bb8c-4b8f-8494-f928836bdc6e:4",
+      "lastHealth": {
+        "at": "2026-09-07T20:27:39.601Z",
+        "counters": {
+          "OK": 26,
+          "ERROR": 0,
+          "TIMEOUT": 0,
+          "SKIPPED_INFLIGHT": 5,
+          "forcedUnlocks": 0
+        },
+        "lastOutcome": {
+          "workItem": "pollSabaDomChanges",
+          "outcome": "OK",
+          "durationMs": 2
+        },
+        "lastErrorCode": null,
+        "inFlightAgeMs": 0
+      },
+      "transports": {
+        "WS_FRAME": 35,
+        "TAB_STATE": 36,
+        "DOM_SNAPSHOT": 10,
+        "WS_STATE": 1
+      },
+      "lastDom": {
+        "at": "2026-09-07T20:26:38.266Z",
+        "epoch": "639b5181-bb8c-4b8f-8494-f928836bdc6e:4",
+        "recordCount": 8,
+        "chunkCount": 2,
+        "chunkIndex": 1
+      }
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "at": "2026-09-07T10:12:05.728Z",
+  "scope": "VISIBLE_DOM_BASELINE_ONLY_NOT_FULL_PROVIDER_COVERAGE",
+  "sourceEpoch": "8e856d31-5693-4064-b2eb-c72251861cf4:4",
+  "catalogAt": 1788775916986,
+  "capturedAt": 1788775916986,
+  "receiptAligned": true,
+  "rawRecords": 108,
+  "rawGroups": 930,
+  "publishedEvents": 93,
+  "prematchEvents": 91,
+  "markets": 620,
+  "quotes": 1240,
+  "nativeRows": 930,
+  "rawNativeMissing": 0,
+  "missingSamples": [],
+  "rawNativeTypes": {
+    "1": 160,
+    "2": 91,
+    "3": 161,
+    "5": 100,
+    "7": 158,
+    "8": 159,
+    "15": 98,
+    "22": 1,
+    "461": 1,
+    "462": 1
+  },
+  "dispositions": {
+    "EXCLUDED:INVALID_TWO_WAY_SHAPE": 67,
+    "NORMALIZED:CANONICAL_MARKET_MAPPED": 620,
+    "EXCLUDED:THREE_WAY_OUTCOME_DOMAIN": 90,
+    "UNMAPPED:NATIVE_TYPE_UNMAPPED": 91,
+    "EXCLUDED:EVENT_NOT_COMPARABLE": 62
+  },
+  "prematchMarketTypes": {
+    "FT_AH": 125,
+    "FT_TOTAL": 146,
+    "FT_ODD_EVEN": 90,
+    "FH_AH": 102,
+    "FH_TOTAL": 146
+  },
+  "snapshotState": "FRESH",
+  "firstFailingHop": null
+}

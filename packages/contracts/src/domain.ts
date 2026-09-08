@@ -291,6 +291,39 @@ export type MarketType =
   | "CARD_FT_TOTAL"
   | "CARD_FH_AH"
   | "CARD_FH_TOTAL"
+  | "FT_ODD_EVEN"
+  | "FH_ODD_EVEN"
+  | "SH_ODD_EVEN"
+  | "CORNER_FT_ODD_EVEN"
+  | "CORNER_FH_ODD_EVEN"
+  | "FT_BTTS"
+  | "FH_BTTS"
+  | "SH_BTTS"
+  | "SENDING_OFF"
+  | "HOME_CORNER_FT_TOTAL"
+  | "HOME_CORNER_FH_TOTAL"
+  | "AWAY_CORNER_FT_TOTAL"
+  | "AWAY_CORNER_FH_TOTAL"
+  | "HOME_FT_SCORE_BOTH_HALVES"
+  | "AWAY_FT_SCORE_BOTH_HALVES"
+  | "HOME_FT_WIN_BOTH_HALVES"
+  | "AWAY_FT_WIN_BOTH_HALVES"
+  | "HOME_FT_WIN_EITHER_HALF"
+  | "AWAY_FT_WIN_EITHER_HALF"
+  | "HOME_FT_ODD_EVEN"
+  | "AWAY_FT_ODD_EVEN"
+  | "HOME_FT_WIN_TO_NIL"
+  | "AWAY_FT_WIN_TO_NIL"
+  | "HOME_FT_CLEAN_SHEET"
+  | "AWAY_FT_CLEAN_SHEET"
+  | "FT_BOTH_HALVES_OVER_TOTAL"
+  | "FT_BOTH_HALVES_UNDER_TOTAL"
+  | "HOME_FT_TOTAL"
+  | "AWAY_FT_TOTAL"
+  | "HOME_FT_TO_WIN"
+  | "AWAY_FT_TO_WIN"
+  | "FT_ANY_TEAM_TO_WIN"
+  | "YELLOW_CARD_FT_TOTAL"
   | "SERIES_WINNER"
   | "MAP_WINNER"
   | "MAP_TOTAL_KILLS"
@@ -385,6 +418,22 @@ export interface ProviderQuote {
   readonly sourceTimestampMs: number | null;
   readonly receivedMonotonicMs: number;
   readonly sequence: number | null;
+}
+
+export type NativeMarketDisposition = "NORMALIZED" | "EXCLUDED" | "UNMAPPED";
+
+export interface NativeMarketObservation {
+  readonly provider: string;
+  readonly category: Category;
+  readonly providerEventId: string;
+  readonly providerMarketId: string;
+  readonly nativeType: string;
+  readonly nativeLabel: string | null;
+  readonly nativeScope: string | null;
+  readonly outcomeLabels: readonly string[];
+  readonly observedAtMs: number;
+  readonly disposition: NativeMarketDisposition;
+  readonly reason: string;
 }
 
 export interface MappingEvidence {

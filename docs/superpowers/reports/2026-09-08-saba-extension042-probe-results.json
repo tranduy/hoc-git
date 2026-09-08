@@ -1,0 +1,39 @@
+{
+  "scope": "FAILED_PUBLIC_STRUCTURE_PROBE_NOT_FULL_COVERAGE",
+  "buildIdentity": "sha256:a1c9eb506d9186f8a4f7a97b8969ee922d2ad273ce46aed7fb278ff982575d0b",
+  "extensionVersion": "0.2.42",
+  "sourceId": "chrome:SABA:2105831237",
+  "tabId": 2105831237,
+  "inspectedAt": "2026-09-07T17:17:38.014Z",
+  "results": [
+    {
+      "at": "2026-09-07T17:14:12.965Z",
+      "sourceEpoch": "98edffbb-e012-4efe-847a-f07e89911eef:3",
+      "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+      "reason": "MORE_AFTER_NOT_STABLE",
+      "viewRestored": false,
+      "todayRows": 108,
+      "todayEligibleMore": 47,
+      "early": null,
+      "expansions": [],
+      "recoveryPendingObserved": true
+    },
+    {
+      "at": "2026-09-07T17:17:10.248Z",
+      "sourceEpoch": "98edffbb-e012-4efe-847a-f07e89911eef:7",
+      "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+      "reason": "MORE_BEFORE_UNAVAILABLE",
+      "viewRestored": false,
+      "todayRows": 105,
+      "todayEligibleMore": 46,
+      "early": null,
+      "expansions": [],
+      "recoveryPendingObserved": true
+    }
+  ],
+  "limitations": [
+    "First result proves the guarded More evaluation returned true, not complete detail membership.",
+    "Current payload does not distinguish CDP timeout/context failure from page read null or stability exhaustion.",
+    "Epochs are separate evidence segments and are not pooled for freshness or coverage."
+  ]
+}

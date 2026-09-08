@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "status": "INCOMPLETE",
+  "observedSample": {
+    "at": "2026-09-07T19:31:51.084Z",
+    "build": "sha256:6c6e44b2703501e59355cf2ef2c451363c881d0ac2136d747431887ddc5e2149",
+    "firstFailingHop": null,
+    "source": {
+      "sourceId": "chrome:SABA:2105831237",
+      "tabId": 2105831237,
+      "authorityDisposition": "ACTIVE"
+    },
+    "epoch": "8deed31a-3f2e-49fb-adbf-99a02fd95011:3",
+    "catalog": {
+      "state": "FRESH",
+      "events": 53,
+      "markets": 330,
+      "quotes": 660,
+      "native": 602,
+      "observedAtMs": 1788809482011
+    },
+    "capture": {
+      "name": "capture-1788809309134.jsonl",
+      "size": 3135535,
+      "mtime": 1788809510455.8152
+    }
+  },
+  "runtimeEvidence": {
+    "probeCount": 1,
+    "probes": [
+      {
+        "at": "2026-09-07T19:30:26.988Z",
+        "epoch": "8deed31a-3f2e-49fb-adbf-99a02fd95011:3",
+        "status": "NO_ACTION_INITIAL_TODAY_NOT_STABLE",
+        "reason": "INITIAL_TODAY_NOT_STABLE",
+        "viewRestored": true,
+        "initialRows": 74,
+        "expansions": [],
+        "failureTrace": [
+          {
+            "stage": "INITIAL_TODAY_SETTLE",
+            "outcome": "STABILITY_WINDOW_EXHAUSTED",
+            "reads": 1,
+            "elapsedMs": 5031
+          }
+        ]
+      }
+    ],
+    "collectors": [
+      {
+        "at": "2026-09-07T19:30:59.733Z",
+        "epoch": "8deed31a-3f2e-49fb-adbf-99a02fd95011:3",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "INCOMPLETE",
+        "viewRestored": true,
+        "reason": "SABA_COLLECTOR_OWNER_STRUCTURE_UNCAPTURED",
+        "completedOwners": 0
+      }
+    ],
+    "latestEnvelopeEpoch": "8deed31a-3f2e-49fb-adbf-99a02fd95011:3",
+    "lastHealth": {
+      "at": "2026-09-07T19:31:50.178Z",
+      "counters": {
+        "OK": 27,
+        "ERROR": 0,
+        "TIMEOUT": 0,
+        "SKIPPED_INFLIGHT": 33,
+        "forcedUnlocks": 0
+      },
+      "lastOutcome": {
+        "workItem": "pollSabaDomChanges",
+        "outcome": "OK",
+        "durationMs": 1
+      },
+      "lastErrorCode": null,
+      "inFlightAgeMs": 0
+    },
+    "transports": {
+      "TAB_STATE": 54,
+      "WS_FRAME": 79,
+      "DOM_SNAPSHOT": 22,
+      "WS_STATE": 1
+    },
+    "lastDom": {
+      "at": "2026-09-07T19:31:22.011Z",
+      "epoch": "8deed31a-3f2e-49fb-adbf-99a02fd95011:3",
+      "recordCount": 41,
+      "chunkCount": 2,
+      "chunkIndex": 0
+    }
+  },
+  "conclusion": "First collector owner restored Today but was not accepted because the More DOM structure changed without a represented CMD catalog structural change. No full collector generation was emitted. Cause within the missing representation is not yet proven; shape evidence is required."
+}

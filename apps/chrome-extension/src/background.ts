@@ -14,6 +14,7 @@ import { tabsNeedingContentScriptRefresh } from "./extension-update.js";
 import { SourceTabKeepAlive } from "./source-tab-keepalive.js";
 import { CmdSnapshotPoller } from "./cmd-snapshot-poller.js";
 import { SABA_DIRECT_LOBBY_URL, SourceTabRecovery } from "./source-tab-recovery.js";
+import { SabaBlankHandoffJournal } from "./saba-blank-handoff.js";
 import { retryImBootstrapRefresh } from "./im-bootstrap-refresh.js";
 import { retrySabaBootstrapRefresh } from "./saba-bootstrap-refresh.js";
 import { bootstrapCatalogSources, refreshBootstrapCatalogSources } from "./bootstrap-catalog-refresh.js";
@@ -59,6 +60,7 @@ let restoreInFlight: Promise<void> | null = null;
 const legacySourceLaunchUrlsKey = "sourceLaunchUrls";
 const cmdPageKeepaliveStorageKey = "cmdPageKeepaliveV1";
 const providerPageLeaseStorageKey = "providerPageLeaseV1";
+const sabaBlankHandoffStorageKey = "sabaBlankHandoffV1";
 const sourceLaunchMemory = new SourceLaunchMemory();
 const bootstrappingSourceTabs = new Set<number>();
 const cmdPageActivity = new SourceActivityGuard();
@@ -134,6 +136,16 @@ observer = new NetworkObserver({
     if (attached === undefined) return;
     await providerPageLeaseCoordinator.renewNow({ lobby: "TSPORT",
       sourceId: source.sourceId, tabId: source.tabId });
+  },
+  onSabaSocketUnavailable: async (source, reason) => {
+    const attached = registry.list().find((entry) => entry.lobby === "SABA" &&
+      entry.tabId === source.tabId && source.sourceId === `chrome:SABA:${entry.tabId}`);
+    if (attached === undefined || (reason !== "UNSAFE_VIEW" &&
+      observer.hasResponsiveSabaDocument(source.sourceId))) return;
+    // The in-page heap reconnect has already failed. Restore reuses this exact
+    // tab, terminates only its stale SABA worker and reloads the current
+    // provider-minted session before falling back to the public entry URL.
+    await sourceTabRecovery.restore("SABA");
   },
   onBtiPageHealth: (health) => {
     void btiPageRecovery.observe(health).catch((error) => {
@@ -269,6 +281,24 @@ function rememberRecognizedUrl(tab: TabDescriptor): void {
   sourceLaunchMemory.rememberRecognized(tab);
 }
 
+const sabaBlankHandoffJournal = new SabaBlankHandoffJournal({
+  load: async () => (await chrome.storage.session.get(sabaBlankHandoffStorageKey))[sabaBlankHandoffStorageKey],
+  save: async (entry) => { await chrome.storage.session.set({ [sabaBlankHandoffStorageKey]: entry }); },
+  clear: async () => { await chrome.storage.session.remove(sabaBlankHandoffStorageKey); },
+  get: async (tabId) => chrome.tabs.get(tabId),
+  update: async (tabId, url) => {
+    const tab = await chrome.tabs.update(tabId, { url });
+    if (!tab) throw new Error("SABA_BLANK_HANDOFF_FAILED");
+    return tab;
+  },
+  attachBootstrap: attachRecoveredTabAsExpected,
+  beginSourceEpoch: (sourceId) => { observer.prepareSourceNavigation(sourceId); },
+  onBootstrapStart: (tabId) => {
+    bootstrappingSourceTabs.add(tabId);
+    setTimeout(() => bootstrappingSourceTabs.delete(tabId), 30_000);
+  }
+});
+
 const sourceTabRecovery = new SourceTabRecovery({
   listAttached: () => registry.list(),
   query: async () => chrome.tabs.query({}),
@@ -276,6 +306,12 @@ const sourceTabRecovery = new SourceTabRecovery({
     const tab = await chrome.tabs.update(tabId, { url });
     if (!tab) throw new Error("SOURCE_TAB_RECOVERY_FAILED");
     return tab;
+  },
+  reset: async (tabId, lobby) => {
+    if (lobby !== "SABA") return;
+    await observer.resetSabaSocketWorker({
+      lobby: "SABA", tabId, sourceId: `chrome:SABA:${tabId}`
+    });
   },
   reload: async (tabId, lobby) => reloadAttachedSourceTab(tabId, lobby, {
     reloadDebugTarget: async (attachedTabId) => {
@@ -302,11 +338,13 @@ const sourceTabRecovery = new SourceTabRecovery({
   onBootstrapFailure: (tabId) => { bootstrappingSourceTabs.delete(tabId); },
   validateReady: async (tab, lobby) => {
     if (tab.id === undefined) return false;
-    if (lobby === "SABA") return observer.hasCompleteSabaBaseline(`chrome:SABA:${tab.id}`);
+    if (lobby === "SABA") return observer.hasResponsiveSabaDocument(`chrome:SABA:${tab.id}`);
     if (lobby !== "KSPORT") return true;
     return observer.ensureCompleteKsportBaseline({ lobby: "KSPORT", tabId: tab.id,
       sourceId: `chrome:KSPORT:${tab.id}` });
   },
+  beginBlankHandoff: (tabId, url) => sabaBlankHandoffJournal.begin(tabId, url),
+  completeBlankHandoff: (tabId) => sabaBlankHandoffJournal.complete(tabId),
   recentlyClosed: async () => (await chrome.sessions.getRecentlyClosed({ maxResults: 25 })).map((session) => {
     const sessionId = session.tab?.sessionId ?? session.window?.sessionId;
     return {
@@ -583,10 +621,11 @@ async function configureBridgeOnce(): Promise<boolean> {
             await observer.refreshCatalog(source).catch(() => undefined);
             await retryImBootstrapRefresh(() => observer.refreshCatalog(source));
           } else if (attached.lobby === "SABA") {
-            const hasCompleteBaseline = observer.hasCompleteSabaBaseline(sourceId);
-            if (sabaSourceControlAction("RELOAD", hasCompleteBaseline) === "REFRESH_CURRENT") {
-              // Keep a proved complete document: reloading it would briefly
-              // expose only the small live socket partition.
+            const hasResponsiveDocument = observer.hasResponsiveSabaDocument(sourceId);
+            if (sabaSourceControlAction("RELOAD", hasResponsiveDocument) === "REFRESH_CURRENT") {
+              // Keep a responsive current document. A fresh low-row football
+              // receipt is liveness only, but reloading it would interrupt the
+              // bounded hidden-market collector before coverage can complete.
               await refreshAttachedSaba(attached.tabId);
             } else {
               // A no-content/expired SABA document cannot be repaired by
@@ -618,14 +657,18 @@ async function configureBridgeOnce(): Promise<boolean> {
           const attached = registry.list().find((entry) => entry.lobby === "SABA");
           if (attached !== undefined) {
             const sourceId = `chrome:SABA:${attached.tabId}`;
-            if (sabaSourceControlAction("ENSURE",
-              observer.hasCompleteSabaBaseline(sourceId)) === "REFRESH_CURRENT") {
+            const action = sabaSourceControlAction("ENSURE",
+              observer.hasResponsiveSabaDocument(sourceId));
+            if (action === "REFRESH_CURRENT") {
               await refreshAttachedSaba(attached.tabId);
               return;
             }
-            // ENSURE is the final fallback after current-document restore has
-            // timed out, so consume its fresh launch URL instead of looping on
-            // the already-proved dead document.
+            // The API may supply an opaque Fabet launch here, but SABA's public
+            // entry is sufficient and safer. Rebuild this exact tab through the
+            // crash-safe blank handoff so CDP sees its dynamic field table and
+            // first socket baseline; never consume another portal launch.
+            await sourceTabRecovery.restore("SABA");
+            return;
           }
         }
         if (lobby === "IM") {
@@ -659,7 +702,7 @@ async function configureBridgeOnce(): Promise<boolean> {
           if (attached !== undefined) {
             const sourceId = `chrome:SABA:${attached.tabId}`;
             if (sabaSourceControlAction("RESTORE",
-              observer.hasCompleteSabaBaseline(sourceId)) === "REFRESH_CURRENT") {
+              observer.hasResponsiveSabaDocument(sourceId)) === "REFRESH_CURRENT") {
               await refreshAttachedSaba(attached.tabId);
               return;
             }
@@ -747,6 +790,12 @@ async function restorePreferredTabsOnce(): Promise<void> {
 
 async function reconcilePreferredTabs(): Promise<void> {
   await legacySourceLaunchUrlsPurge;
+  // Finish a SABA about:blank -> direct handoff that was interrupted by an
+  // extension/service-worker replacement. This must run before tab discovery:
+  // about:blank is intentionally not a recognizable provider URL.
+  await sabaBlankHandoffJournal.resume().catch((error) => {
+    console.warn("SABA blank handoff resume failed", error instanceof Error ? error.name : "UNKNOWN");
+  });
   const tabs = (await chrome.tabs.query({})).filter((tab) => {
     const recognized = recognizeLobbyTab(tab);
     return recognized !== null && lobbyIsAllowed(recognized.lobby);

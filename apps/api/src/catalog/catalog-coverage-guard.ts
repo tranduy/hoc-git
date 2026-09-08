@@ -25,6 +25,7 @@ export interface CatalogCoverageCandidate {
   readonly generation: string;
   readonly authoritativeBaseline: boolean;
   readonly providerEventIds: readonly string[];
+  readonly authoritativeRemovedEventIds?: readonly string[];
 }
 
 export interface CatalogCoverageCheckpoint {
@@ -52,6 +53,17 @@ export class CatalogCoverageGuard {
 
   allows(sourceKey: string, candidate: CatalogCoverageCandidate): boolean {
     const current = this.#states.get(sourceKey);
+    const removedIds = candidate.authoritativeRemovedEventIds;
+    if (removedIds !== undefined) {
+      if (sourceKey !== "catalog-source:APSPORT:FOOTBALL" || current === undefined ||
+        candidate.authoritativeBaseline || removedIds.length === 0 ||
+        removedIds.length > current.acceptedEventIds.size) return false;
+      const removed = new Set(removedIds);
+      const proposed = new Set(candidate.providerEventIds);
+      return removed.size === removedIds.length &&
+        [...removed].every((id) => current.acceptedEventIds.has(id) && !proposed.has(id)) &&
+        [...current.acceptedEventIds].every((id) => proposed.has(id) || removed.has(id));
+    }
     if (current === undefined) return true;
     if (candidate.authoritativeBaseline) {
       return allowsAuthoritativeGeneration(current, candidate.generation) &&

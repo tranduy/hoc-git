@@ -83,6 +83,8 @@ export class ComparisonWorkerClient {
   #links: readonly string[];
   #worker: WorkerLike;
   #generation = 0;
+  #inFlightGeneration: number | null = null;
+  #pendingReset = false;
   #restartCount = 0;
   #stopped = false;
 
@@ -106,7 +108,7 @@ export class ComparisonWorkerClient {
     this.#stale.clear();
     for (const catalog of catalogs) this.#catalogs.set(catalog.accountId, catalog);
     for (const accountId of staleAccountIds) this.#stale.add(accountId);
-    return this.#post({ type: "RESET", generation: ++this.#generation,
+    return this.#enqueue({ type: "RESET", generation: ++this.#generation,
       catalogs: [...this.#catalogs.values()], staleAccountIds: [...this.#stale],
       competitionLinks: this.#links });
   }
@@ -114,18 +116,18 @@ export class ComparisonWorkerClient {
   upsert(catalog: LiveCatalogResponse, stale: boolean): number {
     this.#catalogs.set(catalog.accountId, catalog);
     if (stale) this.#stale.add(catalog.accountId); else this.#stale.delete(catalog.accountId);
-    return this.#post({ type: "UPSERT", generation: ++this.#generation, catalog, stale });
+    return this.#enqueue({ type: "UPSERT", generation: ++this.#generation, catalog, stale });
   }
 
   setStale(accountId: string, stale: boolean): number {
     if (stale) this.#stale.add(accountId); else this.#stale.delete(accountId);
-    return this.#post({ type: "SET_STALE", generation: ++this.#generation, accountId, stale });
+    return this.#enqueue({ type: "SET_STALE", generation: ++this.#generation, accountId, stale });
   }
 
   remove(accountId: string): number {
     this.#catalogs.delete(accountId);
     this.#stale.delete(accountId);
-    return this.#post({ type: "REMOVE", generation: ++this.#generation, accountId });
+    return this.#enqueue({ type: "REMOVE", generation: ++this.#generation, accountId });
   }
 
   stop(): void {
@@ -142,19 +144,38 @@ export class ComparisonWorkerClient {
     catch { /* quota or a blocked store; the next session simply starts over */ }
   }
 
-  #post(command: ComparisonWorkerCommand): number {
-    if (!this.#stopped) this.#worker.postMessage(command);
+  #enqueue(command: ComparisonWorkerCommand): number {
+    if (this.#stopped) return command.generation;
+    if (this.#inFlightGeneration !== null) {
+      this.#pendingReset = true;
+      return command.generation;
+    }
+    this.#send(command);
     return command.generation;
+  }
+
+  #send(command: ComparisonWorkerCommand): void {
+    this.#inFlightGeneration = command.generation;
+    this.#worker.postMessage(command);
   }
 
   #spawn(): WorkerLike {
     const worker = this.#createWorker();
     worker.onmessage = (event) => {
-      if (this.#stopped || !isOutput(event.data) || event.data.generation < this.#generation) return;
+      if (this.#stopped || !isOutput(event.data) || event.data.generation !== this.#inFlightGeneration) return;
+      this.#inFlightGeneration = null;
       if (Array.isArray(event.data.competitionLinks)) this.#storeLinks(event.data.competitionLinks);
-      this.#onResult({ generation: event.data.generation,
-        displayEvents: event.data.displayEvents.map((item) => hydrate(item, this.#catalogs)),
-        freshEvents: event.data.freshEvents.map((item) => hydrate(item, this.#catalogs)) });
+      if (event.data.generation === this.#generation) {
+        this.#onResult({ generation: event.data.generation,
+          displayEvents: event.data.displayEvents.map((item) => hydrate(item, this.#catalogs)),
+          freshEvents: event.data.freshEvents.map((item) => hydrate(item, this.#catalogs)) });
+      }
+      if (this.#pendingReset) {
+        this.#pendingReset = false;
+        this.#send({ type: "RESET", generation: this.#generation,
+          catalogs: [...this.#catalogs.values()], staleAccountIds: [...this.#stale],
+          competitionLinks: this.#links });
+      }
     };
     worker.onerror = () => {
       if (this.#stopped) return;
@@ -164,8 +185,10 @@ export class ComparisonWorkerClient {
       }
       this.#restartCount += 1;
       worker.terminate();
+      this.#inFlightGeneration = null;
+      this.#pendingReset = false;
       this.#worker = this.#spawn();
-      this.#post({ type: "RESET", generation: ++this.#generation,
+      this.#send({ type: "RESET", generation: ++this.#generation,
         catalogs: [...this.#catalogs.values()], staleAccountIds: [...this.#stale],
         competitionLinks: this.#links });
     };

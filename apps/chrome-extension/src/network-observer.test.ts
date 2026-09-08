@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { CMD_PUBLIC_CATALOG_EXPRESSION } from "./cmd-dom-snapshot.js";
+import { SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION } from "./saba-catalog-discovery.js";
+import { SABA_NAVIGATION_PROBE_READ_EXPRESSION } from "./saba-navigation-probe.js";
 import { TSPORT_PUBLIC_CATALOG_EXPRESSION } from "./tsport-dom-snapshot.js";
 import { TSPORT_CATALOG_SHAPE_EXPRESSION } from "./tsport-catalog-shape.js";
 import { buildImExactSelectionPriceExpression } from "./im-selection-price.js";
@@ -13,6 +15,18 @@ import type { ApsportCatalogBatch, CollectApsportCatalogOptions,
   CollectApsportEventDetailOptions } from "./apsport-catalog-refresh.js";
 
 const source = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
+
+async function settleObserverBackgroundTasks(turns = 100): Promise<void> {
+  for (let index = 0; index < turns; index += 1) await Promise.resolve();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+function sabaUnknownProbeState(documentToken: string): Record<string, unknown> {
+  return { documentToken, rowCount: 50, tableCount: 1, activePeriod: "UNKNOWN",
+    periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [], moreCandidates: [],
+    rosterMatchIds: ["match-1"], rosterSamples: [], timeShapes: {}, dateContexts: [],
+    headerControls: [], fingerprint: "unknown", truncated: false };
+}
 
 function ksportFullReceipt(partition: "live" | "today", order: number): string {
   const subscription = partition === "live" ? "subSportBookLive" : "subSportBookToday";
@@ -44,6 +58,184 @@ function ksportDeltaReceipt(partition: "live" | "today", order: number): string 
 }
 
 describe("NetworkObserver", () => {
+  it("reports a bounded responsive SABA document without promoting a small DOM receipt to catalog authority", async () => {
+    let now = 10_000;
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => undefined),
+      now: () => now,
+      monotonicNow: () => now
+    });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:71", tabId: 71 } as const;
+    const smallFootballRoster = JSON.stringify([{
+      sportId: "1", leagueId: "league-1", leagueName: "League", matchId: "match-1",
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: "small-over", priceText: "0.91", status: null, greyedOut: null },
+          { marketOddsId: "small-under", priceText: "-0.93", status: null, greyedOut: null }
+        ]
+      }]
+    }]);
+
+    await observer.ingestDomSnapshot(saba, "sports.example", smallFootballRoster);
+
+    expect(observer.hasCompleteSabaBaseline(saba.sourceId)).toBe(false);
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(false);
+    expect(observer.hasResponsiveSabaDocument(saba.sourceId)).toBe(true);
+
+    now += 60_001;
+    expect(observer.hasResponsiveSabaDocument(saba.sourceId)).toBe(false);
+
+    await observer.ingestDomSnapshot(saba, "sports.example", smallFootballRoster);
+    expect(observer.hasResponsiveSabaDocument(saba.sourceId)).toBe(true);
+    observer.beginSourceEpoch(saba.sourceId);
+    expect(observer.hasResponsiveSabaDocument(saba.sourceId)).toBe(false);
+
+    await observer.ingestDomSnapshot(saba, "sports.example", smallFootballRoster);
+    expect(observer.hasResponsiveSabaDocument(saba.sourceId)).toBe(true);
+    observer.releaseTab(saba.tabId);
+    expect(observer.hasResponsiveSabaDocument(saba.sourceId)).toBe(false);
+  });
+
+  it("does not admit a SABA receipt retired by a new source epoch before forwarding completes", async () => {
+    let releaseForward!: () => void;
+    let forwardStarted = false;
+    const heldForward = new Promise<void>((resolve) => { releaseForward = resolve; });
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => { forwardStarted = true; await heldForward; }),
+      now: () => 10_000,
+      monotonicNow: () => 10_000
+    });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:72", tabId: 72 } as const;
+    const ingest = observer.ingestDomSnapshot(saba, "sports.example", JSON.stringify([{
+      sportId: "1", leagueId: "league-1", leagueName: "League", matchId: "match-1", timeText: "11:00PM",
+      teamNames: ["Home", "Away"], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: "retired-over", priceText: "0.91", status: null, greyedOut: null },
+          { marketOddsId: "retired-under", priceText: "-0.93", status: null, greyedOut: null }
+        ]
+      }]
+    }]));
+    await vi.waitFor(() => expect(forwardStarted).toBe(true));
+
+    observer.beginSourceEpoch(saba.sourceId);
+    releaseForward();
+    await ingest;
+
+    expect(observer.hasResponsiveSabaDocument(saba.sourceId)).toBe(false);
+  });
+
+  it.each(["TODAY_SELECTION", "DOM_CAPTURE"] as const)(
+    "retires an old SABA refresh after its awaited %s boundary", async (boundary) => {
+    let releaseHeld!: (value: unknown) => void;
+    let heldStarted = false;
+    const held = new Promise<unknown>((resolve) => { releaseHeld = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-time-baseline")) {
+        if (boundary === "TODAY_SELECTION") {
+          heldStarted = true;
+          return held;
+        }
+        return { result: { value: { status: "today-tab-active" } } };
+      }
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        if (boundary === "DOM_CAPTURE") {
+          heldStarted = true;
+          return held;
+        }
+        return { result: { value: "[]" } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 10_000 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:73", tabId: 73 } as const;
+
+    const refresh = observer.refreshCatalog(saba);
+    await vi.waitFor(() => expect(heldStarted).toBe(true));
+    observer.beginSourceEpoch(saba.sourceId);
+    releaseHeld(boundary === "TODAY_SELECTION"
+      ? { result: { value: { status: "today-tab-active" } } }
+      : { result: { value: "[]" } });
+    await refresh;
+
+    const heapCalls = sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      /window\.(?:io|WebSocket)/u.test(String(params?.expression ?? "")));
+    expect(heapCalls).toHaveLength(0);
+    if (boundary === "TODAY_SELECTION") {
+      expect(sendCommand.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" &&
+        params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toBe(false);
+    }
+  });
+
+  it("stops SABA Today target discovery inside the selector when its source epoch retires", async () => {
+    let releaseToday!: (value: unknown) => void;
+    let todayStarted = false;
+    const heldToday = new Promise<unknown>((resolve) => { releaseToday = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-time-baseline")) {
+        todayStarted = true;
+        return heldToday;
+      }
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "top", childFrames: [{ frame: { id: "child" } }] } } };
+      }
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 91 };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 10_000 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:74", tabId: 74 } as const;
+
+    const refresh = observer.refreshCatalog(saba);
+    await vi.waitFor(() => expect(todayStarted).toBe(true));
+    observer.beginSourceEpoch(saba.sourceId);
+    releaseToday({ result: { value: null } });
+    await refresh;
+
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Page.getFrameTree")).toHaveLength(0);
+    expect(sendCommand.mock.calls.filter(([, method]) => method === "Page.createIsolatedWorld")).toHaveLength(0);
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      /window\.(?:io|WebSocket)/u.test(String(params?.expression ?? "")))).toHaveLength(0);
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      String(params?.expression ?? "").includes("fieldline-saba-time-baseline"))).toHaveLength(1);
+  });
+
+  it("does not retain a Today-selected latch returned by a retired SABA source epoch", async () => {
+    let releaseToday!: (value: unknown) => void;
+    let holdFirst = true;
+    const heldToday = new Promise<unknown>((resolve) => { releaseToday = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-time-baseline")) {
+        if (holdFirst) return heldToday;
+        return { result: { value: { status: "today-tab-selected" } } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => 10_000, monotonicNow: () => 10_000 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:75", tabId: 75 } as const;
+    const firstRefresh = observer.refreshCatalog(saba);
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([, method, params]) =>
+      method === "Runtime.evaluate" && String(params?.expression ?? "")
+        .includes("fieldline-saba-time-baseline"))).toBe(true));
+    observer.beginSourceEpoch(saba.sourceId);
+    releaseToday({ result: { value: { status: "today-tab-selected" } } });
+    await firstRefresh;
+
+    holdFirst = false;
+    sendCommand.mockClear();
+    await observer.refreshCatalog(saba);
+
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      String(params?.expression ?? "").includes("fieldline-saba-time-baseline"))).toHaveLength(1);
+  });
+
   it("publishes APSPORT API roster and hidden-detail batches without using the virtualized DOM", async () => {
     const forwarded: ChromeBridgeEnvelope[] = [];
     // OOPIF Page.getFrameTree can be unavailable even though the exact
@@ -97,6 +289,427 @@ describe("NetworkObserver", () => {
     expect(forwarded).toHaveLength(1);
     expect(JSON.parse(forwarded[0]!.payload.body)).toMatchObject({ phase: "ROSTER", complete: true });
     expect(forwarded[0]!.request).toMatchObject({ replayed: true });
+  });
+
+  it("reports APSPORT detail completion and preserves only current prematch success across roster renewal", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let nowMs = 10_000;
+    let invocation = 0;
+    const prematch = (eventId: string) => ({ "1": "league-1", "2": eventId, "5": "Home", "6": false,
+      "10": "Active", "11": "2026-09-06T01:00:00.000Z", "22": "Away", "50": [], "53": "League" });
+    const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+      invocation += 1;
+      const records = invocation === 1
+        ? [prematch("with-markets"), prematch("failed")]
+        : [prematch("with-markets"), { ...prematch("failed"), "6": true }];
+      await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+        complete: true, prematchWindowHours: 24, records });
+      if (invocation !== 1) return;
+      options.onDetailState?.({ eventId: "with-markets", state: "QUEUED" });
+      options.onDetailState?.({ eventId: "failed", state: "QUEUED" });
+      options.onDetailState?.({ eventId: "with-markets", state: "IN_FLIGHT" });
+      options.onDetailState?.({ eventId: "with-markets", state: "SUCCESS", hasMarkets: true });
+      options.onDetailState?.({ eventId: "failed", state: "IN_FLIGHT" });
+      options.onDetailState?.({ eventId: "failed", state: "FAILURE" });
+    });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+      : {});
+    const observer = new NetworkObserver({ sendCommand, now: () => nowMs,
+      forward: async (envelope) => { forwarded.push(envelope); }, collectApsportCatalog: collect });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+        postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+
+    await observer.refreshCatalog(apsport);
+    await observer.heartbeat(apsport, "pacific.agenate.com");
+    const firstHeartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+      .reverse().find((body) => body.kind === "WS_ATTACH");
+    expect(firstHeartbeat?.apsportDetail).toEqual({
+      rosterEvents: 2, successfulEvents: 1, withMarketsEvents: 1, emptyEvents: 0,
+      pendingEvents: 1, failedEvents: 1, queuedEvents: 0, inFlightEvents: 0,
+      complete: false, oldestSuccessAgeMs: 0
+    });
+
+    nowMs = 12_000;
+    observer.resetApsportRefreshCooldown(apsport.sourceId);
+    await observer.refreshCatalog(apsport);
+    await observer.heartbeat(apsport, "pacific.agenate.com");
+    const renewedHeartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+      .reverse().find((body) => body.kind === "WS_ATTACH");
+    expect(renewedHeartbeat?.apsportDetail).toEqual({
+      rosterEvents: 1, successfulEvents: 1, withMarketsEvents: 1, emptyEvents: 0,
+      pendingEvents: 0, failedEvents: 0, queuedEvents: 0, inFlightEvents: 0,
+      complete: true, oldestSuccessAgeMs: 2_000
+    });
+  });
+
+  it("invalidates an old APSPORT in-flight success on source cleanup", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const record = { "1": "league-1", "2": "old", "5": "Home", "6": false,
+      "10": "Active", "11": "2026-09-06T01:00:00.000Z", "22": "Away", "50": [], "53": "League" };
+    const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+      await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+        complete: true, prematchWindowHours: 24, records: [record] });
+      options.onDetailState?.({ eventId: "old", state: "IN_FLIGHT" });
+      await blocked;
+      options.onDetailState?.({ eventId: "old", state: "SUCCESS", hasMarkets: false });
+    });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+      : {});
+    const observer = new NetworkObserver({ sendCommand, now: () => 10_000,
+      forward: async (envelope) => { forwarded.push(envelope); }, collectApsportCatalog: collect });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+
+    const refresh = observer.refreshCatalog(apsport);
+    await vi.waitFor(() => expect(collect).toHaveBeenCalledOnce());
+    observer.beginSourceEpoch(apsport.sourceId);
+    release();
+    await refresh;
+    await observer.heartbeat(apsport, "pacific.agenate.com");
+
+    const heartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+      .reverse().find((body) => body.kind === "WS_ATTACH");
+    expect(heartbeat?.apsportDetail).toBeUndefined();
+  });
+
+  it("does not let a failed APSPORT roster-only refresh poison independent detail work", async () => {
+    vi.useFakeTimers();
+    try {
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const records = ["event-1", "event-2"].map((eventId) => ({ "1": "league-1", "2": eventId,
+        "5": `Home ${eventId}`, "6": false, "10": "Active", "11": "2026-09-06T01:00:00.000Z",
+        "22": `Away ${eventId}`, "50": [], "53": "League" }));
+      let invocation = 0;
+      const observer = new NetworkObserver({
+        sendCommand: async (_tabId, method) => method === "Page.getFrameTree"
+          ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } } : {},
+        forward: async (envelope) => { forwarded.push(envelope); },
+        collectApsportCatalog: async (options) => {
+          invocation += 1;
+          if (invocation === 2) throw new Error("periodic roster request failed");
+          await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+            complete: true, prematchWindowHours: 24, records });
+        },
+        collectApsportEventDetail: async (options) =>
+          records.find((record) => record["2"] === options.eventId) ?? null,
+        now: () => 10_000
+      });
+      const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+      await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+        context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+      });
+      await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+        requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+        request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+      });
+
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      await vi.advanceTimersByTimeAsync(400);
+      observer.resetApsportRefreshCooldown(apsport.sourceId);
+      await expect(observer.refreshCatalog(apsport, { rosterOnly: true }))
+        .rejects.toThrow("APSPORT_REFRESH_FAILED");
+      await observer.heartbeat(apsport, "pacific.agenate.com");
+
+      const heartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+        .reverse().find((body) => body.kind === "WS_ATTACH");
+      expect(heartbeat?.apsportDetail).toMatchObject({
+        rosterEvents: 2, successfulEvents: 1, pendingEvents: 1,
+        failedEvents: 0, queuedEvents: 1, inFlightEvents: 0
+      });
+      expect(heartbeat?.catalogShape).toContain("APSPORT_REFRESH_FAILED");
+      expect(heartbeat?.catalogShape).not.toContain("periodic roster request failed");
+      observer.beginSourceEpoch(apsport.sourceId);
+      await vi.runAllTimersAsync();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks a current failed APSPORT full sweep incomplete and lets its replacement recover", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let invocation = 0;
+    const record = { "1": "league-1", "2": "event-1", "5": "Home", "6": false,
+      "10": "Active", "11": "2026-09-06T01:00:00.000Z", "22": "Away", "50": [], "53": "League" };
+    const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+      invocation += 1;
+      await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+        complete: true, prematchWindowHours: 24, records: [record] });
+      options.onDetailState?.({ eventId: "event-1", state: "IN_FLIGHT" });
+      if (invocation === 1) throw new Error("transient collector failure");
+      options.onDetailState?.({ eventId: "event-1", state: "SUCCESS", hasMarkets: false });
+    });
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
+      : {});
+    const observer = new NetworkObserver({ sendCommand, now: () => 10_000,
+      forward: async (envelope) => { forwarded.push(envelope); }, collectApsportCatalog: collect });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+
+    await expect(observer.refreshCatalog(apsport)).rejects.toThrow("APSPORT_REFRESH_FAILED");
+    await observer.heartbeat(apsport, "pacific.agenate.com");
+    const failed = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+      .reverse().find((body) => body.kind === "WS_ATTACH");
+    expect(failed?.apsportDetail).toMatchObject({ failedEvents: 1, complete: false });
+
+    observer.resetApsportRefreshCooldown(apsport.sourceId);
+    await expect(observer.refreshCatalog(apsport)).resolves.toBeUndefined();
+    await observer.heartbeat(apsport, "pacific.agenate.com");
+    const recovered = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+      .reverse().find((body) => body.kind === "WS_ATTACH");
+    expect(recovered?.apsportDetail).toMatchObject({ successfulEvents: 1, emptyEvents: 1,
+      failedEvents: 0, complete: true });
+  });
+
+  it.each(["APSPORT_ROSTER_HTTP_0", "APSPORT_ROSTER_HTTP_503", "APSPORT_ROSTER_DATA_SHAPE"])(
+    "propagates the allowlisted APSPORT roster failure %s", async (safeCode) => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({
+      sendCommand: async (_tabId, method) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } } : {},
+      forward: async (envelope) => { forwarded.push(envelope); },
+      collectApsportCatalog: async () => { throw new Error(safeCode); }
+    });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+
+    await expect(observer.refreshCatalog(apsport, { rosterOnly: true })).rejects.toThrow(safeCode);
+    await observer.heartbeat(apsport, "pacific.agenate.com");
+    const heartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+      .reverse().find((body) => body.kind === "WS_ATTACH");
+    expect(heartbeat?.catalogShape).toContain(safeCode);
+  });
+
+  it("does not let a cancelled APSPORT generation poison newer detail evidence", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let invocation = 0;
+    let releaseOld!: () => void;
+    let signalOldReady!: () => void;
+    const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+    const oldReady = new Promise<void>((resolve) => { signalOldReady = resolve; });
+    const record = { "1": "league-1", "2": "event-1", "5": "Home", "6": false,
+      "10": "Active", "11": "2026-09-06T01:00:00.000Z", "22": "Away", "50": [], "53": "League" };
+    const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+      invocation += 1;
+      await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+        complete: true, prematchWindowHours: 24, records: [record] });
+      options.onDetailState?.({ eventId: "event-1", state: "QUEUED" });
+      if (invocation !== 1) return;
+      signalOldReady();
+      await oldBlocked;
+      options.onDetailState?.({ eventId: "event-1", state: "FAILURE" });
+      throw new Error("cancelled generation finished late");
+    });
+    const observer = new NetworkObserver({
+      sendCommand: async (_tabId, method) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } } : {},
+      forward: async (envelope) => { forwarded.push(envelope); }, collectApsportCatalog: collect,
+      collectApsportEventDetail: async () => record, now: () => 10_000
+    });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+
+    const oldRefresh = observer.refreshCatalog(apsport);
+    await oldReady;
+    const currentRefresh = observer.refreshCatalog(apsport, { rosterOnly: true });
+    releaseOld();
+    await Promise.all([oldRefresh, currentRefresh]);
+    await observer.heartbeat(apsport, "pacific.agenate.com");
+
+    const heartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+      .reverse().find((body) => body.kind === "WS_ATTACH");
+    expect(heartbeat?.apsportDetail).toMatchObject({
+      rosterEvents: 1, successfulEvents: 0, pendingEvents: 1,
+      failedEvents: 0, queuedEvents: 1, inFlightEvents: 0
+    });
+    observer.beginSourceEpoch(apsport.sourceId);
+  });
+
+  it("holds a transient 451-to-266 APSPORT roster collapse without losing detail progress or queue", async () => {
+    vi.useFakeTimers();
+    try {
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const records = Array.from({ length: 451 }, (_, index) => ({ "1": "league-1", "2": `event-${index}`,
+        "5": `Home ${index}`, "6": false, "10": "Active", "11": "2026-09-06T01:00:00.000Z",
+        "22": `Away ${index}`, "50": [], "53": "League" }));
+      let invocation = 0;
+      const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+        invocation += 1;
+        const roster = invocation === 2 ? records.slice(0, 266) : records;
+        await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+          complete: true, prematchWindowHours: 24, records: roster });
+      });
+      const observer = new NetworkObserver({
+        sendCommand: async (_tabId, method) => method === "Page.getFrameTree"
+          ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } } : {},
+        forward: async (envelope) => { forwarded.push(envelope); }, collectApsportCatalog: collect,
+        collectApsportEventDetail: async (options) => records[Number(options.eventId.slice(6))] ?? null,
+        now: () => 10_000, monotonicNow: () => 500
+      });
+      const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+      await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+        context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+      });
+      await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+        requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+        request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+      });
+
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      await vi.advanceTimersByTimeAsync(400);
+      observer.resetApsportRefreshCooldown(apsport.sourceId);
+      await expect(observer.refreshCatalog(apsport, { rosterOnly: true }))
+        .rejects.toThrow("APSPORT_ROSTER_COVERAGE_REJECTED_266_OF_451");
+      await observer.heartbeat(apsport, "pacific.agenate.com");
+      const rejectedHeartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+        .reverse().find((body) => body.kind === "WS_ATTACH");
+      expect(rejectedHeartbeat?.catalogShape).toContain("APSPORT_ROSTER_COVERAGE_REJECTED_266_OF_451");
+
+      observer.resetApsportRefreshCooldown(apsport.sourceId);
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      await observer.heartbeat(apsport, "pacific.agenate.com");
+
+      const bodies = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>);
+      expect(bodies.filter((body) => body.phase === "ROSTER")
+        .map((body) => (body.records as unknown[]).length)).toEqual([451, 451]);
+      expect(bodies.reverse().find((body) => body.kind === "WS_ATTACH")?.apsportDetail).toMatchObject({
+        rosterEvents: 451, successfulEvents: 1, pendingEvents: 450, queuedEvents: 450
+      });
+      observer.beginSourceEpoch(apsport.sourceId);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts initial, exact-ninety-percent, and verified-empty APSPORT rosters", async () => {
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const all = Array.from({ length: 100 }, (_, index) => ({ "1": "league-1", "2": `event-${index}`,
+      "5": `Home ${index}`, "6": false, "10": "Active", "11": "2026-09-06T01:00:00.000Z",
+      "22": `Away ${index}`, "50": [], "53": "League" }));
+    const rosters = [all.slice(0, 10), all, all.slice(0, 90), []] as const;
+    let invocation = 0;
+    const observer = new NetworkObserver({
+      sendCommand: async (_tabId, method) => method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } } : {},
+      forward: async (envelope) => { forwarded.push(envelope); },
+      collectApsportCatalog: async (options) => {
+        const records = rosters[invocation++]!;
+        await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+          complete: true, ...(records.length === 0 ? { verifiedEmpty: true as const } : {}),
+          prematchWindowHours: 24, records });
+      }
+    });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+    await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+      context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+    });
+    await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+      requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+      request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+        headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+    });
+
+    for (let index = 0; index < rosters.length; index += 1) {
+      if (index > 0) observer.resetApsportRefreshCooldown(apsport.sourceId);
+      await observer.refreshCatalog(apsport);
+    }
+
+    expect(forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+      .filter((body) => body.phase === "ROSTER").map((body) => (body.records as unknown[]).length))
+      .toEqual([10, 100, 90, 0]);
+  });
+
+  it("subtracts exact inactive APSPORT details before judging the next roster baseline", async () => {
+    vi.useFakeTimers();
+    try {
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const all = Array.from({ length: 100 }, (_, index) => ({ "1": "league-1", "2": `event-${index}`,
+        "5": `Home ${index}`, "6": false, "10": "Active", "11": "2026-09-06T01:00:00.000Z",
+        "22": `Away ${index}`, "50": [], "53": "League" }));
+      let invocation = 0;
+      const observer = new NetworkObserver({
+        sendCommand: async (_tabId, method) => method === "Page.getFrameTree"
+          ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } } : {},
+        forward: async (envelope) => { forwarded.push(envelope); },
+        collectApsportCatalog: async (options) => {
+          const records = invocation++ === 0 ? all : all.slice(30);
+          await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+            complete: true, prematchWindowHours: 24, records });
+        },
+        collectApsportEventDetail: async (options) => {
+          const index = Number(options.eventId.slice(6));
+          const record = all[index];
+          return record === undefined ? null : { ...record, "10": index < 30 ? "Suspended" : "Active" };
+        },
+        now: () => 10_000
+      });
+      const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+      await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+        context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+      });
+      await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+        requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+        request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+      });
+
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+        .filter((body) => body.phase === "DETAIL" &&
+          ((body.records as Array<Record<string, unknown>>)[0]?.["10"] === "Suspended"))).toHaveLength(30);
+
+      observer.resetApsportRefreshCooldown(apsport.sourceId);
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      expect(forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+        .filter((body) => body.phase === "ROSTER").map((body) => (body.records as unknown[]).length))
+        .toEqual([100, 70]);
+      observer.beginSourceEpoch(apsport.sourceId);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("preempts a long APSPORT detail sweep and completes a roster-only bridge resync", async () => {
@@ -153,7 +766,8 @@ describe("NetworkObserver", () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
       ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
       : {});
-    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, forward: async (envelope) => { forwarded.push(envelope); },
       collectApsportCatalog: collect });
     const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
     await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
@@ -177,13 +791,18 @@ describe("NetworkObserver", () => {
     expect(collect).toHaveBeenCalledOnce();
   });
 
-  it("queues every APSPORT roster event for hidden-detail enrichment after a roster-only refresh", async () => {
+  it("queues only APSPORT prematch roster events for hidden-detail enrichment after a roster-only refresh", async () => {
     vi.useFakeTimers();
     try {
-      const records = ["event-1", "event-2", "event-3"].map((id) => ({
-        "1": `league-${id}`, "2": id, "5": `Home ${id}`, "6": true,
-        "10": "Active", "11": null, "22": `Away ${id}`, "50": [], "53": "League"
-      }));
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const records = [
+        { "1": "league-live", "2": "event-live", "5": "Home live", "6": true,
+          "10": "Active", "11": null, "22": "Away live", "50": [], "53": "League" },
+        { "1": "league-soon", "2": "event-soon", "5": "Home soon", "6": false,
+          "10": "Active", "11": "2026-09-06T01:00:00.000Z", "22": "Away soon", "50": [], "53": "League" },
+        { "1": "league-far", "2": "event-far", "5": "Home far", "6": false,
+          "10": "Active", "11": "2026-09-07T01:00:00.000Z", "22": "Away far", "50": [], "53": "League" }
+      ];
       const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
         await options.onRoster({ schemaVersion: 1, generation: options.generation,
           phase: "ROSTER", complete: true, prematchWindowHours: 24, records });
@@ -196,7 +815,8 @@ describe("NetworkObserver", () => {
       const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
         ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
         : {});
-      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      const observer = new NetworkObserver({ sendCommand,
+        forward: async (envelope) => { forwarded.push(envelope); },
         collectApsportCatalog: collect, collectApsportEventDetail: collectDetail,
         now: () => 10_000, monotonicNow: () => 500 });
       const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
@@ -216,9 +836,61 @@ describe("NetworkObserver", () => {
       await vi.advanceTimersByTimeAsync(500);
       expect(collectDetail).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(500);
-      await vi.waitFor(() => expect(collectDetail).toHaveBeenCalledTimes(3));
 
-      expect(requested.sort()).toEqual(["event-1", "event-2", "event-3"]);
+      expect(collectDetail).toHaveBeenCalledTimes(2);
+      expect(requested.sort()).toEqual(["event-far", "event-soon"]);
+      await observer.heartbeat(apsport, "pacific.agenate.com");
+      const heartbeat = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>)
+        .reverse().find((body) => body.kind === "WS_ATTACH");
+      expect(heartbeat?.apsportDetail).toMatchObject({ rosterEvents: 2, successfulEvents: 2,
+        emptyEvents: 2, pendingEvents: 0, failedEvents: 0, complete: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forwards a valid live transition without counting it or malformed detail as prematch success", async () => {
+    vi.useFakeTimers();
+    try {
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const records = ["turned-live", "malformed"].map((eventId) => ({
+        "1": "league-1", "2": eventId, "5": "Home", "6": false, "10": "Active",
+        "11": "2026-09-06T01:00:00.000Z", "22": "Away", "50": [], "53": "League"
+      }));
+      const observer = new NetworkObserver({
+        sendCommand: async (_tabId, method) => method === "Page.getFrameTree"
+          ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } } : {},
+        forward: async (envelope) => { forwarded.push(envelope); },
+        collectApsportCatalog: async (options) => {
+          await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
+            complete: true, prematchWindowHours: 24, records });
+        },
+        collectApsportEventDetail: async (options) => options.eventId === "turned-live"
+          ? { ...records[0]!, "6": true }
+          : { ...records[1]!, "50": [{ "3": 999, "9": [null] }] },
+        now: () => 10_000, monotonicNow: () => 500
+      });
+      const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+      await observer.handleEvent(apsport, "Runtime.executionContextCreated", {
+        context: { id: 91, auxData: { frameId: "ap-app", isDefault: true } }
+      });
+      await observer.handleEvent(apsport, "Network.requestWillBeSent", {
+        requestId: "native-events", type: "Fetch", frameId: "ap-app", loaderId: "loader-ap",
+        request: { method: "POST", url: "https://pacific.agenate.com/be-ui/pac/api/v3/events",
+          headers: { "Content-Type": "application/json" }, postData: JSON.stringify({ mno: 2, si: 1, mg: 1 }) }
+      });
+
+      await observer.refreshCatalog(apsport, { rosterOnly: true });
+      await vi.advanceTimersByTimeAsync(1_500);
+      await observer.heartbeat(apsport, "pacific.agenate.com");
+
+      const bodies = forwarded.map((envelope) => JSON.parse(envelope.payload.body) as Record<string, unknown>);
+      expect(bodies.filter((body) => body.phase === "DETAIL")).toEqual([expect.objectContaining({
+        trigger: "EVENT_CHANGE", records: [expect.objectContaining({ "2": "turned-live", "6": true })]
+      })]);
+      expect(bodies.reverse().find((body) => body.kind === "WS_ATTACH")?.apsportDetail).toMatchObject({
+        rosterEvents: 1, successfulEvents: 0, pendingEvents: 1, failedEvents: 1, complete: false
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -261,20 +933,22 @@ describe("NetworkObserver", () => {
     }]);
   });
 
-  it("refetches the exact APSPORT event detail after an eu socket frame", async () => {
+  it("refetches prematch APSPORT detail after an eu socket frame but skips live detail", async () => {
     vi.useFakeTimers();
     try {
       const forwarded: ChromeBridgeEnvelope[] = [];
-      const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": true,
-        "10": "Active", "11": null, "22": "Away", "50": [], "53": "League" };
+      const live = { "1": "league-live", "2": "event-live", "5": "Home live", "6": true,
+        "10": "Active", "11": null, "22": "Away live", "50": [], "53": "League" };
+      const prematch = { "1": "league-prematch", "2": "event-prematch", "5": "Home prematch", "6": false,
+        "10": "Active", "11": "2026-09-06T01:00:00.000Z", "22": "Away prematch", "50": [], "53": "League" };
       const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
         await options.onRoster({ schemaVersion: 1, generation: options.generation, phase: "ROSTER",
-          complete: true, prematchWindowHours: 24, records: [record] });
+          complete: true, prematchWindowHours: 24, records: [live, prematch] });
       });
       const collectDetail = vi.fn(async (options: CollectApsportEventDetailOptions) => {
-        expect(options.eventId).toBe("event-42");
-        expect(options.leagueId).toBe("league-1");
-        return record;
+        expect(options.eventId).toBe("event-prematch");
+        expect(options.leagueId).toBe("league-prematch");
+        return prematch;
       });
       const sendCommand = vi.fn(async (_tabId: number, method: string) => method === "Page.getFrameTree"
         ? { frameTree: { frame: { id: "ap-app", loaderId: "loader-ap" } } }
@@ -299,7 +973,11 @@ describe("NetworkObserver", () => {
 
       await observer.handleEvent(apsport, "Network.webSocketFrameReceived", {
         requestId: "ap-socket", response: { opcode: 1,
-          payloadData: JSON.stringify({ s: 1, t: "eu", d: JSON.stringify(record) }) }
+          payloadData: JSON.stringify({ s: 1, t: "eu", d: JSON.stringify(live) }) }
+      });
+      await observer.handleEvent(apsport, "Network.webSocketFrameReceived", {
+        requestId: "ap-socket", response: { opcode: 1,
+          payloadData: JSON.stringify({ s: 1, t: "eu", d: JSON.stringify(prematch) }) }
       });
       await vi.advanceTimersByTimeAsync(500);
 
@@ -308,7 +986,7 @@ describe("NetworkObserver", () => {
         try { return JSON.parse(envelope.payload.body) as Record<string, unknown>; } catch { return {}; }
       }).find((body) => body.trigger === "EVENT_CHANGE");
       expect(targeted).toMatchObject({ phase: "DETAIL", complete: false, trigger: "EVENT_CHANGE",
-        records: [expect.objectContaining({ "2": "event-42" })] });
+        records: [expect.objectContaining({ "2": "event-prematch" })] });
     } finally {
       vi.useRealTimers();
     }
@@ -317,8 +995,8 @@ describe("NetworkObserver", () => {
   it("keeps one queued APSPORT event detail across a roster-only bootstrap", async () => {
     vi.useFakeTimers();
     try {
-      const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": true,
-        "10": "Active", "11": null, "22": "Away", "50": [], "53": "League" };
+      const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": false,
+        "10": "Active", "11": "2026-09-06T01:00:00.000Z", "22": "Away", "50": [], "53": "League" };
       const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
         await options.onRoster({ schemaVersion: 1, generation: options.generation,
           phase: "ROSTER", complete: true, prematchWindowHours: 24, records: [record] });
@@ -363,8 +1041,8 @@ describe("NetworkObserver", () => {
     vi.useFakeTimers();
     try {
       const forwarded: ChromeBridgeEnvelope[] = [];
-      const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": true,
-        "10": "Active", "11": null, "22": "Away", "50": [], "53": "League" };
+      const record = { "1": "league-1", "2": "event-42", "5": "Home", "6": false,
+        "10": "Active", "11": "2026-09-06T01:00:00.000Z", "22": "Away", "50": [], "53": "League" };
       const generations: string[] = [];
       const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
         generations.push(options.generation);
@@ -441,6 +1119,41 @@ describe("NetworkObserver", () => {
       expression: expect.stringContaining("fieldlineApsportBootstrap"), contextId: 91,
       returnByValue: true, awaitPromise: false
     }));
+  });
+
+  it("bootstraps APSPORT from a discovered frame when Chrome does not replay existing contexts", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: {
+        id: "ap-shell", loaderId: "loader-shell", url: "https://pacific.agenate.com/"
+      }, childFrames: [{ frame: { id: "ap-app", loaderId: "loader-app",
+        url: "https://spbui.agenate.com/" } }] } };
+      if (method === "Page.createIsolatedWorld") {
+        return { executionContextId: params?.frameId === "ap-app" ? 102 : 101 };
+      }
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldlineApsportBootstrap")) {
+        return { result: { type: "object", value: params?.contextId === 102
+          ? { origin: "https://spbui.agenate.com", language: "vi", timeZone: "Asia/Bangkok" }
+          : null } };
+      }
+      return {};
+    });
+    const collect = vi.fn(async (options: CollectApsportCatalogOptions) => {
+      expect(options.template).toEqual({
+        origin: "https://spbui.agenate.com",
+        headers: { "content-type": "application/json", lng: "vi", tz: "Asia/Bangkok" },
+        body: { mno: 2, si: 1, mg: 1 }
+      });
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      collectApsportCatalog: collect, observerSessionId: "observer-ap-discovery" });
+    const apsport = { lobby: "TSPORT", sourceId: "chrome:TSPORT:7", tabId: 7 } as const;
+
+    await observer.refreshCatalog(apsport, { prematchWindowHours: 24 });
+
+    expect(collect).toHaveBeenCalledOnce();
+    expect(sendCommand).toHaveBeenCalledWith(7, "Page.createIsolatedWorld", {
+      frameId: "ap-app", worldName: "fieldline-apsport-catalog-refresh", grantUniveralAccess: false
+    });
   });
 
   it("does not let its own APSPORT fetch replace and cancel the active request template", async () => {
@@ -591,13 +1304,13 @@ describe("NetworkObserver", () => {
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("/api/EventV6/GetSE");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("new CustomEvent('helo'");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("'x-sc': encodeURI(signature)");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("'x-v': '91460'");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("'x-v': '91938'");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("'x-platform': String(window.global?.PlatForm || '')");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("sessionStorage.getItem('to' + 'ken')");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("new URLSearchParams(location.search).get('to' + 'ken')");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("credentials: 'omit'");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SportId: 1");
-    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("BetTypeIds: [1, 2, 3, 5]");
+    expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("BetTypeIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313]");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("GamePeriods: [1, 2, 3]");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("IsCombo: false");
     expect(IM_CATALOG_DISCOVERY_EXPRESSION).toContain("SortType: 2");
@@ -671,6 +1384,37 @@ describe("NetworkObserver", () => {
     const partitions = forwarded
       .filter((message) => message.transport === "HTTP_RESPONSE");
     expect(new Set(partitions.map((message) => message.request.streamId)).size).toBe(1);
+  });
+
+  it("forwards a large IM in-page snapshot when the live frame tree omits loader ids", async () => {
+    const largeBody = JSON.stringify({ StatusCode: 100,
+      sel: [{ eid: 1, pad: "x".repeat(230_000) }] });
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>) => method === "Page.getFrameTree"
+      ? { frameTree: { frame: { id: "top" }, childFrames: [{ frame: { id: "im-app" } }] } }
+      : method === "Runtime.evaluate"
+        ? { result: { value: params?.contextId === 82
+          ? { status: "catalog-requested", responses: [
+            { market: 1, body: largeBody }, { market: 2, body: largeBody }
+          ] }
+          : { status: "navigation-not-found", responses: [] } } }
+        : {});
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: async (message) => { forwarded.push(message); } });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    await observer.handleEvent(im, "Runtime.executionContextCreated", {
+      context: { id: 82, auxData: { frameId: "im-app", isDefault: true } }
+    });
+
+    await observer.refreshCatalog(im);
+
+    const chunks = forwarded.filter((message) => message.transport === "HTTP_RESPONSE");
+    expect(chunks.length).toBeGreaterThan(2);
+    expect(chunks.every((message) => typeof message.request.requestFrameKey === "string" &&
+      typeof message.request.requestDocumentKey === "string")).toBe(true);
+    expect(new Set(chunks.map((message) => message.request.providerPartition)))
+      .toEqual(new Set(["IM_MARKET_1", "IM_MARKET_2"]));
   });
 
   it("does not forward IM recovery after its owning OOPIF detaches during evaluation", async () => {
@@ -1321,6 +2065,191 @@ describe("NetworkObserver", () => {
       envelope.payload.body === body)).toBe(true);
   });
 
+  it("escalates a SABA source once when heap reconnect cannot recreate an owned socket", async () => {
+    let now = 1_000;
+    const onSabaSocketUnavailable = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async () => ({})),
+      forward: vi.fn(async () => undefined),
+      now: () => now,
+      monotonicNow: () => now,
+      onSabaSocketUnavailable
+    });
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+
+    await observer.pollSabaDomChanges(source, "push.example");
+    now = 47_000;
+    await observer.pollSabaDomChanges(source, "push.example");
+    await vi.waitFor(() => expect(onSabaSocketUnavailable).toHaveBeenCalledExactlyOnceWith(source));
+
+    now = 68_000;
+    await observer.pollSabaDomChanges(source, "push.example");
+    await Promise.resolve();
+    expect(onSabaSocketUnavailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps SABA DOM authority through a measured 120-second sweep gap before bounded recovery", async () => {
+    vi.useFakeTimers();
+    let now = 5_000;
+    let catalogReady = false;
+    const records = JSON.stringify(Array.from({ length: 50 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: `market-${index}`, priceText: "0.91" },
+          { marketOddsId: `market-${index}`, priceText: "0.99" }
+        ]
+      }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: catalogReady ? records : "[]" } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const onSabaSocketUnavailable = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({
+      sendCommand,
+      forward: vi.fn(async () => undefined),
+      now: () => now,
+      monotonicNow: () => now,
+      onSabaSocketUnavailable
+    });
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const advance = async (delayMs: number): Promise<void> => {
+      now += delayMs;
+      await vi.advanceTimersByTimeAsync(delayMs);
+    };
+
+    try {
+      // Seed the missing-baseline watchdog before the first usable DOM sweep
+      // completes, matching a worker that attaches partway through a sweep.
+      await observer.pollSabaDomChanges(source, "sports.example");
+      catalogReady = true;
+      await advance(15_000);
+      await observer.pollSabaDomChanges(source, "sports.example");
+      expect(observer.hasUsableSabaCatalog(source.sourceId)).toBe(true);
+
+      // The measured complete DOM cadence reaches p95=122.54 s and the API
+      // keeps that authority fresh for 150 s. A watchdog whose phase began
+      // before this capture must not destroy the tab at its 120 s firing.
+      await advance(30_000);
+      await advance(45_000);
+      await advance(45_000);
+      expect(onSabaSocketUnavailable).not.toHaveBeenCalled();
+
+      // Once the 150 s authority budget is genuinely exceeded with no
+      // replacement catalog, recover once and retain the five-minute cooldown.
+      catalogReady = false;
+      await advance(45_000);
+      expect(onSabaSocketUnavailable).toHaveBeenCalledExactlyOnceWith(source);
+      await observer.pollSabaDomChanges(source, "sports.example");
+      await advance(299_999);
+      expect(onSabaSocketUnavailable).toHaveBeenCalledTimes(1);
+      await advance(1);
+      expect(onSabaSocketUnavailable).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to SABA's current main world when its isolated frame has no catalog", async () => {
+    const records = JSON.stringify(Array.from({ length: 50 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: `over-${index}`, priceText: "0.91" },
+          { marketOddsId: `under-${index}`, priceText: "0.99" }
+        ]
+      }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" &&
+        String(params?.expression).includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "saba-frame", loaderId: "saba-loader" } } };
+      }
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 71 };
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION &&
+        params.contextId === 71) return { result: { value: "[]" } };
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION &&
+        params.contextId === undefined) return { result: { value: records } };
+      return {};
+    });
+    const forward = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => 5_000, monotonicNow: () => 10 });
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+
+    await observer.pollSabaDomChanges(source, "sports.example");
+
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      lobby: "SABA", transport: "DOM_SNAPSHOT"
+    }));
+    expect(observer.hasUsableSabaCatalog(source.sourceId)).toBe(true);
+  });
+
+  it("escalates SABA even when the DOM probe never settles", async () => {
+    vi.useFakeTimers();
+    let now = 1_000;
+    const onSabaSocketUnavailable = vi.fn(async () => undefined);
+    const sendCommand = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Runtime.evaluate") {
+        return await new Promise<never>(() => undefined);
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({
+      sendCommand,
+      forward: vi.fn(async () => undefined),
+      now: () => now,
+      monotonicNow: () => now,
+      onSabaSocketUnavailable
+    });
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+
+    try {
+      void observer.pollSabaDomChanges(source, "push.example");
+      await Promise.resolve();
+      now = 47_000;
+      await vi.advanceTimersByTimeAsync(46_000);
+      expect(onSabaSocketUnavailable).toHaveBeenCalledExactlyOnceWith(source);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("arms SABA recovery before debugger attachment can hang", async () => {
+    vi.useFakeTimers();
+    let now = 1_000;
+    const source = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const onSabaSocketUnavailable = vi.fn(async () => undefined);
+    const observer = new NetworkObserver({
+      sendCommand: vi.fn(async () => await new Promise<never>(() => undefined)),
+      forward: vi.fn(async () => undefined),
+      now: () => now,
+      monotonicNow: () => now,
+      onSabaSocketUnavailable
+    });
+
+    try {
+      void observer.start(source).catch(() => undefined);
+      await Promise.resolve();
+      now = 47_000;
+      await vi.advanceTimersByTimeAsync(46_000);
+      expect(onSabaSocketUnavailable).toHaveBeenCalledExactlyOnceWith(source);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rotates only the bridge epoch during resync and keeps the live TSPORT socket owned", async () => {
     const forwarded: ChromeBridgeEnvelope[] = [];
     const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})),
@@ -1407,7 +2336,7 @@ describe("NetworkObserver", () => {
     expect(readiness.hasCompleteSabaBaseline?.(saba.sourceId)).toBe(false);
     await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
       requestId: "saba-current", response: { opcode: 1, payloadData:
-        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type"]],
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type", "matchid"]],
           [0, "reset"], [0, "o"], [0, "done"]], "r1"])}` }
     });
     expect(readiness.hasCompleteSabaBaseline?.(saba.sourceId)).toBe(true);
@@ -1436,14 +2365,15 @@ describe("NetworkObserver", () => {
     });
     await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
       requestId: "saba-current", response: { opcode: 1, payloadData:
-        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type"]],
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type", "matchid"]],
           [0, "reset"], [0, "o"], [0, "done"]], "r1"])}` }
     });
     sendCommand.mockClear();
     forward.mockClear();
 
     await observer.pollSabaDomChanges(saba, "sports.example");
-    const cleanupCalls = sendCommand.mock.calls.filter(([, method]) => method === "Runtime.evaluate");
+    const cleanupCalls = sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      String(params?.expression).includes("delete globalThis.__fieldlineSabaOddsMutationV1"));
     expect(cleanupCalls).toHaveLength(1);
     expect(String(cleanupCalls[0]?.[2]?.expression)).toContain("observer.disconnect()");
     expect(String(cleanupCalls[0]?.[2]?.expression)).toContain("delete globalThis.__fieldlineSabaOddsMutationV1");
@@ -1480,15 +2410,66 @@ describe("NetworkObserver", () => {
     });
     await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
       requestId: "saba-current", response: { opcode: 1, payloadData:
-        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type"]],
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type", "matchid"]],
           [0, "reset"], [0, "o"], [0, "done"]], "r1"])}` }
     });
 
     await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
     await observer.pollSabaDomChanges(saba, "sports.example");
     await observer.pollSabaDomChanges(saba, "sports.example");
 
     expect(cleanupAttempts).toBe(2);
+  });
+
+  it.each(["normal", "cleanup"] as const)(
+    "bounds SABA %s mutation reads to twelve contexts in one concurrent timeout window", async (mode) => {
+    vi.useFakeTimers();
+    let releaseReads!: () => void;
+    const heldReads = new Promise<void>((resolve) => { releaseReads = resolve; });
+    try {
+      let mutationReads = 0;
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+        const expression = String(params?.expression ?? "");
+        if (method === "Runtime.evaluate" && expression === "String(performance.timeOrigin)") {
+          return { result: { value: "1787432000000" } };
+        }
+        if (method === "Runtime.evaluate" && expression.includes("__fieldlineSabaOddsMutationV1")) {
+          mutationReads += 1;
+          return heldReads.then(() => ({ result: { value: mode === "cleanup" } }));
+        }
+        return {};
+      });
+      const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+        frameCommandTimeoutMs: 25 });
+      const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+      for (let index = 0; index < 14; index += 1) {
+        await observer.handleEvent(saba, "Runtime.executionContextCreated", {
+          context: { id: index + 1, auxData: { frameId: `frame-${index}`, isDefault: true } }
+        });
+      }
+      if (mode === "cleanup") {
+        await observer.handleEvent(saba, "Network.webSocketCreated", {
+          requestId: "saba-current", url: "wss://sports.example/socket.io/"
+        });
+        await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+          requestId: "saba-current", response: { opcode: 1, payloadData:
+            `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type"]],
+              [0, "reset"], [0, "o"], [0, "done"]], "r1"])}` }
+        });
+      }
+
+      const poll = observer.pollSabaDomChanges(saba, "sports.example");
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mutationReads).toBe(13);
+      await vi.advanceTimersByTimeAsync(25);
+      await poll;
+    } finally {
+      releaseReads();
+      vi.useRealTimers();
+    }
   });
 
   it("renews SABA from the DOM before a completed socket baseline can miss the realtime deadline", async () => {
@@ -1509,6 +2490,9 @@ describe("NetworkObserver", () => {
       }
       if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
         return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        return { result: { value: sabaUnknownProbeState("backoff-close") } };
       }
       if (method === "Runtime.evaluate" && params?.expression ===
         "window.io && window.io.Socket && window.io.Socket.prototype") {
@@ -1532,6 +2516,7 @@ describe("NetworkObserver", () => {
           [0, "reset"], [0, "o"], [0, "done"]], "r1"])}` }
     });
     await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
     forward.mockClear();
 
     now = 22_000;
@@ -1571,8 +2556,128 @@ describe("NetworkObserver", () => {
     expect(forward).toHaveBeenCalledWith(expect.objectContaining({ lobby: "SABA", transport: "DOM_SNAPSHOT" }));
   });
 
-  it("recovers a SABA baseline even while a replacement socket keeps streaming deltas", async () => {
-    let now = 1_000;
+  it("progressively backs off SABA baseline recovery while fresh DOM authority keeps renewing", async () => {
+    let now = 5_000;
+    let catalogReady = true;
+    const records = JSON.stringify(Array.from({ length: 50 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: `market-${index}`, priceText: "0.91" },
+          { marketOddsId: `market-${index}`, priceText: "0.99" }
+        ]
+      }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: catalogReady ? records : "[]" } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        // This test isolates recovery backoff after a safe no-action probe.
+        return { result: { value: sabaUnknownProbeState("healthy-backoff") } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression ===
+        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        return { result: { objectId: "socket-io-prototype" } };
+      }
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const pollAfterDiscovery = async (): Promise<void> => {
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await settleObserverBackgroundTasks();
+      // Drain a read-only non-admission, then evaluate recovery at the same
+      // boundary clock. This fixture tests backoff, not scheduler cadence.
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await settleObserverBackgroundTasks();
+    };
+    const reconnects = (): number => sendCommand.mock.calls.filter(([, method, params]) =>
+      method === "Runtime.callFunctionOn" &&
+      String(params?.functionDeclaration).includes("socket.disconnect(); socket.connect()"))
+      .length;
+    const completedRecoveries = (): number => sendCommand.mock.calls.filter(([, method, params]) =>
+      method === "Runtime.releaseObjectGroup" && params?.objectGroup === "fieldline-baseline-recovery-8")
+      .length;
+    const sendDelta = async (revision: number): Promise<void> => {
+      await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+        requestId: "saba-delta-only", response: { opcode: 1, payloadData:
+          `42${JSON.stringify(["m", "b1", [["f", 0, ["type"]], [0, "o"]], `r${revision}`])}` }
+      });
+    };
+    const pollAt = async (atMs: number, revision?: number): Promise<void> => {
+      now = atMs;
+      if (revision !== undefined) await sendDelta(revision);
+      await pollAfterDiscovery();
+      await settleObserverBackgroundTasks();
+    };
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "saba-delta-only", url: "wss://sports.example/socket.io/"
+    });
+
+    await pollAt(5_000);
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+    await pollAt(25_001, 1);
+    await vi.waitFor(() => expect(reconnects()).toBe(1));
+    await vi.waitFor(() => expect(completedRecoveries()).toBe(1));
+
+    // A quiet catalog is normal while the public DOM remains current. It must
+    // not collapse the healthy-source delay back to the old 20-second loop.
+    await pollAt(45_002);
+    expect(reconnects()).toBe(1);
+
+    await pollAt(65_001, 2);
+    await vi.waitFor(() => expect(reconnects()).toBe(2));
+    await vi.waitFor(() => expect(completedRecoveries()).toBe(2));
+    await pollAt(145_001, 3);
+    await vi.waitFor(() => expect(reconnects()).toBe(3));
+    await vi.waitFor(() => expect(completedRecoveries()).toBe(3));
+    await pollAt(305_001, 4);
+    await vi.waitFor(() => expect(reconnects()).toBe(4));
+    await vi.waitFor(() => expect(completedRecoveries()).toBe(4));
+    await pollAt(604_999);
+    expect(reconnects()).toBe(4);
+    await pollAt(605_001, 5);
+    await vi.waitFor(() => expect(reconnects()).toBe(5));
+    await vi.waitFor(() => expect(completedRecoveries()).toBe(5));
+    await pollAt(905_000);
+    expect(reconnects()).toBe(5);
+    await pollAt(905_001, 6);
+    await vi.waitFor(() => expect(reconnects()).toBe(6));
+    await vi.waitFor(() => expect(completedRecoveries()).toBe(6));
+
+    expect(forward.mock.calls.filter(([envelope]) => envelope.transport === "DOM_SNAPSHOT").length)
+      .toBeGreaterThanOrEqual(7);
+    expect(observer.hasCompleteSabaBaseline(saba.sourceId)).toBe(false);
+
+    // Once the last usable DOM authority expires with no replacement, the
+    // urgent soft path bypasses the healthy source's next 300-second deadline.
+    catalogReady = false;
+    await pollAt(1_055_002);
+    await vi.waitFor(() => expect(reconnects()).toBe(7));
+    await vi.waitFor(() => expect(completedRecoveries()).toBe(7));
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(false);
+
+    observer.beginSourceEpoch(saba.sourceId);
+    catalogReady = true;
+    await pollAt(1_100_000, 7);
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+    await pollAt(1_120_001, 8);
+    await vi.waitFor(() => expect(reconnects()).toBe(8));
+    await vi.waitFor(() => expect(completedRecoveries()).toBe(8));
+  });
+
+  it("keeps SABA backoff across an old close and restarts the initial window after reset done", async () => {
+    let now = 5_000;
     const records = JSON.stringify(Array.from({ length: 50 }, (_, index) => ({
       sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
       timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
@@ -1590,6 +2695,9 @@ describe("NetworkObserver", () => {
       if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
         return { result: { value: records } };
       }
+      if (method === "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        return { result: { value: sabaUnknownProbeState("backoff-overtake") } };
+      }
       if (method === "Runtime.evaluate" && params?.expression ===
         "window.io && window.io.Socket && window.io.Socket.prototype") {
         return { result: { objectId: "socket-io-prototype" } };
@@ -1600,35 +2708,380 @@ describe("NetworkObserver", () => {
       if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
       return {};
     });
-    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
-    const observer = new NetworkObserver({ sendCommand, forward, now: () => now, monotonicNow: () => now });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => now, monotonicNow: () => now });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const pollAfterDiscovery = async (): Promise<void> => {
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await settleObserverBackgroundTasks();
+      // Drain a read-only non-admission, then evaluate recovery at the same
+      // boundary clock. This fixture tests backoff, not scheduler cadence.
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await settleObserverBackgroundTasks();
+    };
+    const reconnects = (): number => sendCommand.mock.calls.filter(([, method, params]) =>
+      method === "Runtime.callFunctionOn" &&
+      String(params?.functionDeclaration).includes("socket.disconnect(); socket.connect()"))
+      .length;
+    const waitForRecoveries = async (count: number): Promise<void> => {
+      await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method, params]) =>
+        method === "Runtime.releaseObjectGroup" &&
+        params?.objectGroup === "fieldline-baseline-recovery-8")).toHaveLength(count));
+    };
+    const delta = (revision: string) => `42${JSON.stringify(
+      ["m", "b1", [["f", 0, ["type"]], [0, "o"]], revision])}`;
+
     await observer.handleEvent(saba, "Network.webSocketCreated", {
-      requestId: "saba-delta-only", url: "wss://sports.example/socket.io/"
+      requestId: "old-socket", url: "wss://sports.example/socket.io/"
     });
+    await pollAfterDiscovery();
+    await settleObserverBackgroundTasks();
+    now = 25_001;
     await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
-      requestId: "saba-delta-only", response: { opcode: 1, payloadData:
-        `42${JSON.stringify(["m", "b1", [["f", 0, ["type"]], [0, "o"]], "r27"])}` }
+      requestId: "old-socket", response: { opcode: 1, payloadData: delta("r1") }
     });
-    forward.mockClear();
-    sendCommand.mockClear();
+    await pollAfterDiscovery();
+    await waitForRecoveries(1);
+    await settleObserverBackgroundTasks();
 
-    await observer.pollSabaDomChanges(saba, "sports.example");
-    now = 21_000;
-    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
-      requestId: "saba-delta-only", response: { opcode: 1, payloadData:
-        `42${JSON.stringify(["m", "b1", [["f", 0, ["type"]], [0, "o"]], "r28"])}` }
+    now = 45_002;
+    await observer.handleEvent(saba, "Network.webSocketClosed", { requestId: "old-socket" });
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "new-socket", url: "wss://sports.example/socket.io/"
     });
-    forward.mockClear();
-    sendCommand.mockClear();
-    now = 22_000;
-    await observer.pollSabaDomChanges(saba, "sports.example");
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "new-socket", response: { opcode: 1, payloadData: delta("r2") }
+    });
+    await pollAfterDiscovery();
     await Promise.resolve();
+    expect(reconnects()).toBe(1);
 
-    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
-      lobby: "SABA", transport: "DOM_SNAPSHOT"
-    }));
-    expect(sendCommand.mock.calls.some(([, method]) => method === "Runtime.callFunctionOn")).toBe(true);
+    now = 65_001;
+    await pollAfterDiscovery();
+    await waitForRecoveries(2);
+    now = 70_000;
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "new-socket", response: { opcode: 1, payloadData:
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type", "matchid"]],
+          [0, "reset"], [0, "o"], [0, "done"]], "r3"])}` }
+    });
+    expect(observer.hasCompleteSabaBaseline(saba.sourceId)).toBe(true);
+
+    now = 110_000;
+    await observer.handleEvent(saba, "Network.webSocketClosed", { requestId: "new-socket" });
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "replacement-socket", url: "wss://sports.example/socket.io/"
+    });
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "replacement-socket", response: { opcode: 1, payloadData: delta("r4") }
+    });
+    await pollAfterDiscovery();
+    await Promise.resolve();
+    expect(reconnects()).toBe(2);
+
+    now = 130_001;
+    await pollAfterDiscovery();
+    await waitForRecoveries(3);
+  });
+
+  it("restarts SABA missing-baseline age when reset done and close overtake deferred DOM work", async () => {
+    let now = 5_000;
+    let holdMutation = false;
+    let mutationHeld = false;
+    let releaseMutation!: () => void;
+    const deferredMutation = new Promise<unknown>((resolve) => {
+      releaseMutation = () => resolve({ result: { value: false } });
+    });
+    const records = JSON.stringify(Array.from({ length: 50 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: `market-${index}`, priceText: "0.91" },
+          { marketOddsId: `market-${index}`, priceText: "0.99" }
+        ]
+      }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        if (holdMutation) { mutationHeld = true; return deferredMutation; }
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        return { result: { value: sabaUnknownProbeState("backoff-inflight") } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression ===
+        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        return { result: { objectId: "socket-io-prototype" } };
+      }
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const pollAfterDiscovery = async (): Promise<void> => {
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await settleObserverBackgroundTasks();
+      // Drain a read-only non-admission, then evaluate recovery at the same
+      // boundary clock. This fixture tests backoff, not scheduler cadence.
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await settleObserverBackgroundTasks();
+    };
+    const reconnects = (): number => sendCommand.mock.calls.filter(([, method, params]) =>
+      method === "Runtime.callFunctionOn" &&
+      String(params?.functionDeclaration).includes("socket.disconnect(); socket.connect()"))
+      .length;
+    const delta = (revision: string) => `42${JSON.stringify(
+      ["m", "b1", [["f", 0, ["type"]], [0, "o"]], revision])}`;
+
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "aged-socket", url: "wss://sports.example/socket.io/"
+    });
+    await pollAfterDiscovery();
+    await settleObserverBackgroundTasks();
+    now = 25_001;
+    holdMutation = true;
+    const agedPoll = observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(mutationHeld).toBe(true));
+
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "aged-socket", response: { opcode: 1, payloadData:
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type", "matchid"]],
+          [0, "reset"], [0, "o"], [0, "done"]], "r1"])}` }
+    });
+    expect(observer.hasCompleteSabaBaseline(saba.sourceId)).toBe(true);
+    await observer.handleEvent(saba, "Network.webSocketClosed", { requestId: "aged-socket" });
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "replacement-socket", url: "wss://sports.example/socket.io/"
+    });
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "replacement-socket", response: { opcode: 1, payloadData: delta("r2") }
+    });
+    releaseMutation();
+    await agedPoll;
+    await settleObserverBackgroundTasks();
+    expect(reconnects()).toBe(0);
+
+    holdMutation = false;
+    now = 45_001;
+    await pollAfterDiscovery();
+    expect(reconnects()).toBe(0);
+    now = 45_002;
+    await pollAfterDiscovery();
+    await vi.waitFor(() => expect(reconnects()).toBe(1));
+  });
+
+  it("does not spend SABA backoff on in-flight skips or retired recovery completion", async () => {
+    let now = 5_000;
+    let queryCount = 0;
+    let releaseFirstQuery!: () => void;
+    let releaseRetiredQuery!: () => void;
+    const firstQuery = new Promise<unknown>((resolve) => {
+      releaseFirstQuery = () => resolve({ objects: { objectId: "socket-io-instances" } });
+    });
+    const retiredQuery = new Promise<unknown>((resolve) => {
+      releaseRetiredQuery = () => resolve({ objects: { objectId: "socket-io-instances" } });
+    });
+    const records = JSON.stringify(Array.from({ length: 50 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "LIVE", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: `market-${index}`, priceText: "0.91" },
+          { marketOddsId: `market-${index}`, priceText: "0.99" }
+        ]
+      }]
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        return { result: { value: sabaUnknownProbeState("backoff-retired") } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression ===
+        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        return { result: { objectId: "socket-io-prototype" } };
+      }
+      if (method === "Runtime.queryObjects") {
+        queryCount += 1;
+        if (queryCount === 1) return firstQuery;
+        if (queryCount === 3) return retiredQuery;
+        return { objects: { objectId: "socket-io-instances" } };
+      }
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const pollAfterDiscovery = async (): Promise<void> => {
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await settleObserverBackgroundTasks();
+      // Drain a read-only non-admission, then evaluate recovery at the same
+      // boundary clock. This fixture tests backoff, not scheduler cadence.
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await settleObserverBackgroundTasks();
+    };
+    const waitForReconnects = async (count: number): Promise<void> => {
+      await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method, params]) =>
+        method === "Runtime.callFunctionOn" &&
+        String(params?.functionDeclaration).includes("socket.disconnect(); socket.connect()")))
+        .toHaveLength(count));
+    };
+    const waitForReleased = async (count: number): Promise<void> => {
+      await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method, params]) =>
+        method === "Runtime.releaseObjectGroup" &&
+        params?.objectGroup === "fieldline-baseline-recovery-8")).toHaveLength(count));
+      await Promise.resolve();
+    };
+
+    await pollAfterDiscovery();
+    await settleObserverBackgroundTasks();
+    now = 25_001;
+    await pollAfterDiscovery();
+    await vi.waitFor(() => expect(queryCount).toBe(1));
+    await settleObserverBackgroundTasks();
+    now = 65_001;
+    await pollAfterDiscovery();
+    expect(queryCount).toBe(1);
+    releaseFirstQuery();
+    await waitForReconnects(1);
+    await waitForReleased(1);
+    await settleObserverBackgroundTasks();
+    now = 70_001;
+    await pollAfterDiscovery();
+    await waitForReconnects(2);
+    await waitForReleased(2);
+    await settleObserverBackgroundTasks();
+
+    now = 150_001;
+    await pollAfterDiscovery();
+    await vi.waitFor(() => expect(queryCount).toBe(3));
+    observer.beginSourceEpoch(saba.sourceId);
+    now = 155_000;
+    await pollAfterDiscovery();
+    await settleObserverBackgroundTasks();
+    now = 175_001;
+    await pollAfterDiscovery();
+    await waitForReconnects(3);
+    await waitForReleased(3);
+    releaseRetiredQuery();
+    await waitForReleased(4);
+    now = 215_001;
+    await pollAfterDiscovery();
+    await waitForReconnects(4);
+    await waitForReleased(5);
+    expect(queryCount).toBe(5);
+  });
+
+  it("pauses background SABA recovery during a probe without blocking manual recovery", async () => {
+    let now = 5_000;
+    let probeEnabled = false;
+    let advanceProbeClock = false;
+    let probeReads = 0;
+    let helperReadHeld = false;
+    let releaseHelperRead!: () => void;
+    const heldHelperRead = new Promise<void>((resolve) => { releaseHelperRead = resolve; });
+    const rosterMatchIds = Array.from({ length: 50 }, (_, index) => `match-${index}`);
+    const records = JSON.stringify(rosterMatchIds.map((matchId, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId,
+      timeText: "09/08 08:00PM", teamNames: [`Home ${index}`, `Away ${index}`], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: `market-${index}`, priceText: "0.91" },
+          { marketOddsId: `market-${index}`, priceText: "0.99" }
+        ]
+      }]
+    })));
+    const pageState = () => ({ documentToken: "doc-1", rowCount: 50, tableCount: 1,
+      eligibleMoreCount: 0, eligibleMoreOwners: [], rosterMatchIds, rosterSamples: [],
+      timeShapes: {}, dateContexts: [], headerControls: [], fingerprint: "TODAY",
+      activePeriod: "TODAY", activePeriodEvidence: "FOOTBALL_PAGE_HEADING", truncated: false });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression ===
+        "window.io && window.io.Socket && window.io.Socket.prototype") {
+        return { result: { objectId: "socket-io-prototype" } };
+      }
+      if (method === "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        if (!probeEnabled) return { result: { value: null } };
+        probeReads += 1;
+        if (probeReads === 2) { helperReadHeld = true; await heldHelperRead; }
+        return { result: { value: pageState() } };
+      }
+      if (method === "Runtime.queryObjects") return { objects: { objectId: "socket-io-instances" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: 1 } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      // This fixture deliberately holds an action while awaiting manual recovery.
+      frameCommandTimeoutMs: 2_500,
+      forward: async (envelope) => { forwarded.push(envelope); },
+      now: () => advanceProbeClock ? (now += 100) : now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+    const reconnects = (): number => sendCommand.mock.calls.filter(([, method, params]) =>
+      method === "Runtime.callFunctionOn" &&
+      String(params?.functionDeclaration).includes("socket.disconnect(); socket.connect()"))
+      .length;
+    const waitForRecoveries = async (count: number): Promise<void> => {
+      await vi.waitFor(() => expect(sendCommand.mock.calls.filter(([, method, params]) =>
+        method === "Runtime.releaseObjectGroup" &&
+        params?.objectGroup === "fieldline-baseline-recovery-8")).toHaveLength(count));
+    };
+
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "saba-delta", url: "wss://sports.example/socket.io/"
+    });
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
+    observer.beginSourceEpoch(saba.sourceId);
+    now = 35_001;
+    probeEnabled = true;
+    advanceProbeClock = true;
+    const probingPoll = observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(helperReadHeld).toBe(true));
+    expect(reconnects()).toBe(0);
+
+    // Explicit refresh remains available during the probe. Its recovery owns
+    // the shared five-second throttle, but does not spend a healthy poll slot.
+    await observer.refreshCatalog(saba);
+    await vi.waitFor(() => expect(reconnects()).toBe(1));
+    await waitForRecoveries(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    releaseHelperRead();
+    await probingPoll;
+    await vi.waitFor(() => expect(forwarded.some((envelope) => {
+      try { return JSON.parse(envelope.payload.body).kind === "SABA_NAVIGATION_PROBE"; }
+      catch { return false; }
+    })).toBe(true), { timeout: 5_000 });
+    advanceProbeClock = false;
+    const probeResult = forwarded.map((envelope) => {
+      try { return JSON.parse(envelope.payload.body) as Record<string, unknown>; } catch { return null; }
+    }).find((body) => body?.kind === "SABA_NAVIGATION_PROBE");
+    expect(probeResult).toMatchObject({ viewRestored: true });
+    expect(reconnects()).toBe(1);
   });
 
   it("does not mistake a partial SABA DOM cache for a complete socket baseline", async () => {
@@ -1745,8 +3198,85 @@ describe("NetworkObserver", () => {
           { wsi: 31, si: 1, hdp: 0.5, dih: "0.5", o: 0.91 },
           { wsi: 32, si: 2, hdp: -0.5, dih: "-0.5", o: -0.99 }
         ]
-      }]
+      }, { mi: 22, bti: 5, gp: 1, ws: [] }]
     }] });
+  });
+
+  it("hydrates a bounded batch of hidden IM prematch markets and merges them into the catalog", async () => {
+    const listeners = new Map<string, (event: { detail: string }) => void>();
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const windowStub: Record<string, unknown> = {
+      global: { PlatForm: "web" },
+      addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
+      removeEventListener: (name: string) => listeners.delete(name),
+      dispatchEvent: (event: { type: string; detail: { c: string } }) => {
+        if (event.type === "helo") listeners.get(`halo_${event.detail.c}`)?.({ detail: "signed" });
+      }
+    };
+    const execute = new Function("document", "location", "window", "sessionStorage", "CustomEvent", "fetch",
+      `return ${IM_CATALOG_DISCOVERY_EXPRESSION}`) as (...args: unknown[]) => Promise<unknown>;
+    const events = Array.from({ length: 12 }, (_, index) => ({
+      eid: index + 1, edt: "2026-09-07T12:00:00Z", htn: `Home ${index + 1}`,
+      atn: `Away ${index + 1}`, cn: "League", isrbt: false, iscyb: false, hs: 0, as: 0,
+      rbt: "", mls: [{ mi: 1000 + index, bti: 1, gp: 1, ws: [] }]
+    }));
+
+    const result = await execute(
+      { documentElement: { dataset: {} }, querySelectorAll: () => [] },
+      { hostname: "imsports.directsb.net", search: "" }, windowStub, { getItem: () => "token" },
+      class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
+        get detail(): { c: string } { return this.init.detail; } },
+      async (path: string, init: { body: string }) => {
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        requests.push({ path, body });
+        if (path === "/api/EventV6/GetMEI") return { text: async () => JSON.stringify({ StatusCode: 100, mei: [{
+          eid: 1, mls: [{ mi: 9001, bti: 5, gp: 1, ws: [
+            { wsi: 9101, si: 10, o: 0.91 }, { wsi: 9102, si: 11, o: -0.99 }
+          ] }]
+        }] }) };
+        return { text: async () => JSON.stringify({ StatusCode: 100, sel: body.Market === 1 ? events : [] }) };
+      }
+    ) as { responses: Array<{ market: number; body: string }> };
+
+    const detailRequest = requests.find((request) => request.path === "/api/EventV6/GetMEI");
+    expect(detailRequest?.body).toMatchObject({ ot: 2, sl: [1], s: 0 });
+    expect(detailRequest?.body.eis).toEqual(events.slice(0, 10).map((item) => ({
+      ei: item.eid, gp: [1, 2, 3],
+      bti: [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 18, 19, 20, 22, 23, 24, 25, 26, 27, 31, 32, 33, 34, 35, 38, 39, 42, 43, 44, 45, 78, 79, 80, 158, 159, 160, 161, 299, 306, 313]
+    })));
+    const marketOne = JSON.parse(result.responses.find((item) => item.market === 1)!.body) as {
+      sel: Array<{ eid: number; mls: Array<{ mi: number }> }> };
+    expect(marketOne.sel[0]?.mls.map((item) => item.mi)).toEqual([1000, 9001]);
+    expect(requests.filter((request) => request.path === "/api/EventV6/GetMEI")).toHaveLength(1);
+  });
+
+  it("marks its compact IM catalog fetch so CDP does not forward the same raw body", async () => {
+    const listeners = new Map<string, (event: { detail: string }) => void>();
+    const sentHeaders: Record<string, string>[] = [];
+    const windowStub = {
+      global: { PlatForm: "web" },
+      addEventListener: (name: string, listener: (event: { detail: string }) => void) => listeners.set(name, listener),
+      removeEventListener: (name: string) => listeners.delete(name),
+      dispatchEvent: (event: { type: string; detail: { c: string } }) => {
+        if (event.type === "helo") listeners.get(`halo_${event.detail.c}`)?.({ detail: "signed" });
+      }
+    };
+    const execute = new Function("document", "location", "window", "sessionStorage", "CustomEvent", "fetch",
+      `return ${IM_CATALOG_DISCOVERY_EXPRESSION}`) as (...args: unknown[]) => Promise<unknown>;
+
+    await execute(
+      { documentElement: { dataset: {} }, querySelectorAll: () => [] },
+      { hostname: "imsports.directsb.net", search: "" }, windowStub, { getItem: () => "token" },
+      class { constructor(readonly type: string, readonly init: { detail: { c: string } }) {}
+        get detail(): { c: string } { return this.init.detail; } },
+      async (_path: string, init: { headers: Record<string, string> }) => {
+        sentHeaders.push(init.headers);
+        return { text: async () => JSON.stringify({ StatusCode: 100, sel: [] }) };
+      }
+    );
+
+    expect(sentHeaders).toHaveLength(2);
+    expect(sentHeaders.every((headers) => headers["x-fieldline-catalog-probe"] === "compact-v1")).toBe(true);
   });
 
   it("prefers the fresh IM URL token over stale same-origin session storage", async () => {
@@ -2572,7 +4102,7 @@ describe("NetworkObserver", () => {
     ]);
     expect((JSON.parse(live!.body) as { serializedData: unknown[][] }).serializedData).toHaveLength(11);
     expect(((JSON.parse(live!.body) as { serializedData: unknown[][] }).serializedData[0]![12] as unknown[][])[0])
-      .toEqual(["live-event-live-league-1", "richer-initial-market-data"]);
+      .toEqual(["live-event-live-league-1"]);
     expect((JSON.parse(prematch!.body) as { serializedData: unknown[][] }).serializedData
       .flatMap((item) => item[12] as string[][]).map(([eventId]) => eventId)).toEqual([
       ...prematchLeagueIds.map((leagueId) => `prematch-event-${leagueId}`)
@@ -2701,10 +4231,7 @@ describe("NetworkObserver", () => {
       const refresh = evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" },
         fetcher, { getItem: () => null });
       await vi.advanceTimersByTimeAsync(10_002);
-      await expect(refresh).resolves.toMatchObject({ status: "catalog-requested",
-        responses: expect.arrayContaining([expect.objectContaining({
-          url: "/api/eventlist/asia/leagues/v2/1/prematch/initial"
-        })]) });
+      await expect(refresh).resolves.toMatchObject({ status: "catalog-failed", responses: [] });
       const listRequests = requests.filter(({ path }) => path.startsWith("/api/eventlist/"));
       expect(listRequests).toHaveLength(3);
       expect(listRequests.filter(({ path }) => path.includes("/live/initial?"))).toHaveLength(2);
@@ -2719,11 +4246,11 @@ describe("NetworkObserver", () => {
   it("returns the complete BTI list generation without waiting for slow detail requests", async () => {
     const root = { dataset: {} as Record<string, string> };
     const league: unknown[] = [];
-    league[12] = [["event-1"]];
+    league[12] = [["event-1", null, null, null, null, false]];
     const fetcher = (path: string) => path.startsWith("/api/eventpage/")
       ? new Promise<never>(() => undefined)
       : Promise.resolve({ ok: true, status: 200,
-        json: async () => ({ serializedData: [league] }) });
+        json: async () => ({ serializedData: path.includes("/prematch/") ? [league] : [] }) });
     const evaluate = new Function("document", "location", "fetch", "localStorage",
       `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (document: { documentElement: typeof root },
         location: { pathname: string; hostname: string }, fetch: typeof fetcher,
@@ -2736,10 +4263,47 @@ describe("NetworkObserver", () => {
       .resolves.toMatchObject({ status: "catalog-requested", responses: expect.any(Array) });
   });
 
+  it("hydrates BTI hidden detail only for current prematch events and evicts stale detail", async () => {
+    const root = { dataset: {} as Record<string, string>,
+      __fieldlineBtiDetailBodiesV10: [{
+        path: "/api/eventpage/events/stale-event",
+        body: '{"data":[["stale-event"]]}'
+      }] };
+    const league = (eventId: string) => {
+      const value = Array.from({ length: 13 }, () => null) as unknown[];
+      value[12] = [[eventId, null, null, null, null, eventId === "live-event"]];
+      return value;
+    };
+    const requested: string[] = [];
+    const fetcher = async (path: string) => {
+      if (path.startsWith("/api/eventpage/events/")) {
+        requested.push(decodeURIComponent(path.slice("/api/eventpage/events/".length).split("?")[0]!));
+        return { ok: true, text: async () => '{"data":[]}' };
+      }
+      const serializedData = path.includes("/live/") ? [league("live-event")]
+        : path.includes("/prematch/") ? [league("prematch-event")] : [];
+      return { ok: true, text: async () => JSON.stringify({ serializedData }) };
+    };
+    const evaluate = new Function("document", "location", "fetch", "localStorage",
+      `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (document: { documentElement: typeof root },
+        location: { pathname: string; hostname: string }, fetch: typeof fetcher,
+        localStorage: { getItem: (_key: string) => null }) => Promise<unknown>;
+
+    await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
+      { getItem: () => null });
+    await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
+
+    expect(requested).toEqual(["prematch-event"]);
+    expect(root.__fieldlineBtiDetailBodiesV10).toEqual([expect.objectContaining({
+      path: "/api/eventpage/events/prematch-event", empty: true
+    })]);
+  });
+
   it("returns completed BTI detail bodies directly on the next catalog generation", async () => {
     const root = { dataset: {} as Record<string, string> };
     const league = Array.from({ length: 13 }, () => null) as unknown[];
-    league[12] = [["event-direct"]];
+    league[12] = [["event-direct", null, null, null, null, false]];
     const detailSelection = Array.from({ length: 30 }, () => null) as unknown[];
     detailSelection[0] = "selection-direct";
     detailSelection[2] = { VI: "Tài" };
@@ -2774,6 +4338,20 @@ describe("NetworkObserver", () => {
     detailHandicap[1] = "HC0";
     detailHandicap[5] = ["HC0", "Asian Handicap"];
     detailHandicap[13] = [homeHandicap, awayHandicap];
+    const unknownYes = [...detailSelection];
+    unknownYes[0] = "unknown-yes";
+    unknownYes[2] = { EN: "Yes" };
+    unknownYes[9] = 7;
+    unknownYes[16] = 0;
+    const unknownNo = [...unknownYes];
+    unknownNo[0] = "unknown-no";
+    unknownNo[2] = { EN: "No" };
+    unknownNo[9] = 8;
+    const unknownMarket = Array.from({ length: 30 }, () => null) as unknown[];
+    unknownMarket[0] = "unknown-card-market";
+    unknownMarket[1] = { VI: "Thẻ phạt bí ẩn", EN: "Mystery cards" };
+    unknownMarket[5] = ["ZZ999", { EN: "Mystery cards" }];
+    unknownMarket[13] = [unknownYes, unknownNo];
     const detailEvent = Array.from({ length: 39 }, () => null) as unknown[];
     detailEvent[0] = "event-direct";
     detailEvent[2] = "Direct League";
@@ -2781,12 +4359,12 @@ describe("NetworkObserver", () => {
       ["away", { VI: "Away" }, { VI: "Beta" }]];
     detailEvent[11] = "2026-09-07T00:15:00.000Z";
     detailEvent[13] = false;
-    detailEvent[20] = [detailMarket, detailHandicap];
+    detailEvent[20] = [detailMarket, detailHandicap, unknownMarket];
     detailEvent[38] = "event-private-canary";
     let detailRead = 0;
     const fetcher = async (path: string) => {
       if (!path.startsWith("/api/eventpage/")) {
-        return { ok: true, text: async () => JSON.stringify({ serializedData: [league] }) };
+        return { ok: true, text: async () => JSON.stringify({ serializedData: path.includes("/prematch/") ? [league] : [] }) };
       }
       const currentDetail = [...detailEvent];
       currentDetail[34] = ++detailRead;
@@ -2803,14 +4381,14 @@ describe("NetworkObserver", () => {
 
     await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
     root.dataset.fieldlineBtiCatalogRefreshAt = "0";
-    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV10;
     await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
     root.dataset.fieldlineBtiCatalogRefreshAt = "0";
-    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV10;
     const next = await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
 
     const batch = next.responses.find(({ url }) =>
@@ -2825,20 +4403,27 @@ describe("NetworkObserver", () => {
     expect(compactEvent[11]).toBe("2026-09-07T00:15:00.000Z");
     expect(compactEvent[13]).toBe(false);
     expect((compactEvent[20] as unknown[][])[0]?.[13]).toHaveLength(2);
+    expect(compactEvent[20]).toEqual(expect.arrayContaining([expect.arrayContaining([
+      "unknown-card-market"
+    ])]));
+    const retainedUnknown = (compactEvent[20] as unknown[][]).find((market) =>
+      market[0] === "unknown-card-market")!;
+    expect((retainedUnknown[13] as unknown[][]).map((selection) => [selection[0], selection[9], selection[16]]))
+      .toEqual([["unknown-yes", 7, 0], ["unknown-no", 8, 0]]);
     expect(batch!.body).not.toContain("must-not-cross-the-bridge");
     expect(batch!.body).not.toContain("private-canary");
     expect(next.responses.indexOf(batch!)).toBeLessThan(next.responses.findIndex(({ url }) =>
       url === "/api/eventlist/asia/leagues/v2/1/live"));
-    expect((root as unknown as Record<string, Array<unknown>>).__fieldlineBtiDetailBodiesV8).toHaveLength(1);
+    expect((root as unknown as Record<string, Array<unknown>>).__fieldlineBtiDetailBodiesV10).toHaveLength(1);
   });
 
-  it("does not cache an empty BTI detail response for later catalog removal", async () => {
+  it("caches authoritative empty BTI detail for later catalog removal", async () => {
     const root = { dataset: {} as Record<string, string> };
     const league = Array.from({ length: 13 }, () => null) as unknown[];
-    league[12] = [["event-empty"]];
+    league[12] = [["event-empty", null, null, null, null, false]];
     const fetcher = async (path: string) => path.startsWith("/api/eventpage/")
       ? { ok: true, text: async () => '{"data":[]}' }
-      : { ok: true, text: async () => JSON.stringify({ serializedData: [league] }) };
+      : { ok: true, text: async () => JSON.stringify({ serializedData: path.includes("/prematch/") ? [league] : [] }) };
     const evaluate = new Function("document", "location", "fetch", "localStorage",
       `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (document: { documentElement: typeof root },
         location: { pathname: string; hostname: string; origin: string }, fetch: typeof fetcher,
@@ -2849,25 +4434,25 @@ describe("NetworkObserver", () => {
 
     await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
     root.dataset.fieldlineBtiCatalogRefreshAt = "0";
-    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV10;
     const next = await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null });
 
     expect(next.responses.some(({ url }) =>
-      url.startsWith("/api/eventpage/events/__fieldline_batch_"))).toBe(false);
+      url.startsWith("/api/eventpage/events/__fieldline_batch_"))).toBe(true);
   });
 
   it("bounds BTI detail enrichment to three concurrent requests", async () => {
     const root = { dataset: {} as Record<string, string> };
     const league = Array.from({ length: 13 }, () => null) as unknown[];
-    league[12] = [["event-1"], ["event-2"], ["event-3"]];
+    league[12] = ["event-1", "event-2", "event-3"].map((id) => [id, null, null, null, null, false]);
     let activeDetails = 0;
     let maxActiveDetails = 0;
     const releases: Array<() => void> = [];
     const fetcher = (path: string) => {
       if (!path.startsWith("/api/eventpage/")) {
-        return Promise.resolve({ ok: true, text: async () => JSON.stringify({ serializedData: [league] }) });
+        return Promise.resolve({ ok: true, text: async () => JSON.stringify({ serializedData: path.includes("/prematch/") ? [league] : [] }) });
       }
       activeDetails += 1;
       maxActiveDetails = Math.max(maxActiveDetails, activeDetails);
@@ -2895,14 +4480,14 @@ describe("NetworkObserver", () => {
     const eventIds = Array.from({ length: 20 }, (_unused, index) => `event-${index + 1}`);
     const root = { dataset: {} as Record<string, string> };
     const league = Array.from({ length: 13 }, () => null) as unknown[];
-    league[12] = eventIds.map((eventId) => [eventId]);
+    league[12] = eventIds.map((eventId) => [eventId, null, null, null, null, false]);
     const requested: string[] = [];
     const fetcher = async (path: string) => {
       if (path.startsWith("/api/eventpage/events/")) {
         requested.push(decodeURIComponent(path.slice("/api/eventpage/events/".length).split("?")[0]!));
         return { ok: true, text: async () => '{"data":[]}' };
       }
-      return { ok: true, text: async () => JSON.stringify({ serializedData: path.includes("/live/initial?")
+      return { ok: true, text: async () => JSON.stringify({ serializedData: path.includes("/prematch/initial?")
         ? [league] : [] }) };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage",
@@ -2914,7 +4499,7 @@ describe("NetworkObserver", () => {
       pathname: "/sports", hostname: "bti.test", origin: "https://bti.test"
     }, fetcher, { getItem: () => null });
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
 
     expect(requested).toEqual(eventIds);
   });
@@ -2922,7 +4507,7 @@ describe("NetworkObserver", () => {
   it("finishes the complete BTI detail queue while adopting the newest generation headers", async () => {
     const root = { dataset: {} as Record<string, string> };
     const league = Array.from({ length: 13 }, () => null) as unknown[];
-    league[12] = [["event-1"], ["event-2"], ["event-3"], ["event-4"]];
+    league[12] = ["event-1", "event-2", "event-3", "event-4"].map((id) => [id, null, null, null, null, false]);
     let detailRequests = 0;
     let activeBodies = 0;
     let maxActiveBodies = 0;
@@ -2930,7 +4515,7 @@ describe("NetworkObserver", () => {
     const releases: Array<() => void> = [];
     const fetcher = async (path: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => {
       if (!path.startsWith("/api/eventpage/")) {
-        return { ok: true, text: async () => JSON.stringify({ serializedData: [league] }) };
+        return { ok: true, text: async () => JSON.stringify({ serializedData: path.includes("/prematch/") ? [league] : [] }) };
       }
       detailRequests += 1;
       detailGenerations.push(init?.headers?.["X-Fieldline-Generation"] ?? "");
@@ -2954,7 +4539,7 @@ describe("NetworkObserver", () => {
     };
     await vi.waitFor(() => expect(detailRequests).toBe(3));
     root.dataset.fieldlineBtiCatalogRefreshAt = "0";
-    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV10;
     const second = await evaluate({ documentElement: root }, location, fetcher, { getItem: () => null }) as {
       generation: string;
     };
@@ -2965,7 +4550,7 @@ describe("NetworkObserver", () => {
     for (const release of releases.splice(0)) release();
 
     await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
     expect(first.generation).not.toBe(second.generation);
     expect(detailGenerations).toEqual([
       first.generation, first.generation, first.generation, second.generation
@@ -3025,6 +4610,7 @@ describe("NetworkObserver", () => {
   });
 
   it("does not starve a BTI event when the provider reorders the event list between detail batches", async () => {
+    const sourceClock = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
     const orders = [
       ["a", "b", "c", "d", "e", "f", "g"],
       ["g", "a", "b", "c", "d", "e", "f"],
@@ -3041,10 +4627,10 @@ describe("NetworkObserver", () => {
         return { ok: true, json: async () => ({ data: [] }) };
       }
       const league = Array.from({ length: 13 }, () => null) as unknown[];
-      league[12] = path.includes("/live/initial?")
-        ? orders[Math.min(round, orders.length - 1)]!.map((id) => [id])
+      league[12] = path.includes("/prematch/initial?")
+        ? orders[Math.min(round, orders.length - 1)]!.map((id) => [id, null, null, null, null, false])
         : [];
-      return { ok: true, json: async () => ({ serializedData: [league] }) };
+      return { ok: true, json: async () => ({ serializedData: path.includes("/prematch/") ? [league] : [] }) };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage",
       `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (
@@ -3055,8 +4641,9 @@ describe("NetworkObserver", () => {
       ) => Promise<string>;
 
     for (round = 0; round < orders.length; round += 1) {
+      sourceClock.mockReturnValue(1_800_000_000_000 + round * 13_000);
       root.dataset.fieldlineBtiCatalogRefreshAt = "0";
-    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+    delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV10;
       await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
         { getItem: () => null });
       await vi.waitFor(() => expect(requestCounts[round]).toBe(7));
@@ -3064,6 +4651,7 @@ describe("NetworkObserver", () => {
 
     expect([...requested].sort()).toEqual(["a", "b", "c", "d", "e", "f", "g"]);
     expect(requestCounts).toEqual([7, 7, 7]);
+    sourceClock.mockRestore();
   });
 
   it("remembers BTI detail visits when prematch pages temporarily disappear from the list", async () => {
@@ -3082,8 +4670,8 @@ describe("NetworkObserver", () => {
         return { ok: true, json: async () => ({ data: [] }) };
       }
       const league = Array.from({ length: 13 }, () => null) as unknown[];
-      league[12] = path.includes("/live/initial?") ? orders[round]!.map((id) => [id]) : [];
-      return { ok: true, json: async () => ({ serializedData: [league] }) };
+      league[12] = path.includes("/prematch/initial?") ? orders[round]!.map((id) => [id, null, null, null, null, false]) : [];
+      return { ok: true, json: async () => ({ serializedData: path.includes("/prematch/") ? [league] : [] }) };
     };
     const evaluate = new Function("document", "location", "fetch", "localStorage",
       `return ${BTI_CATALOG_REFRESH_EXPRESSION}`) as (
@@ -3095,11 +4683,11 @@ describe("NetworkObserver", () => {
 
     for (round = 0; round < orders.length; round += 1) {
       root.dataset.fieldlineBtiCatalogRefreshAt = "0";
-      delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV9;
+      delete (root as unknown as Record<string, unknown>).__fieldlineBtiRosterWorkerV10;
       await evaluate({ documentElement: root }, { pathname: "/sports", hostname: "bti.test" }, fetcher,
         { getItem: () => null });
       await vi.waitFor(() => expect((root as unknown as Record<string, unknown>)
-      .__fieldlineBtiDetailWorkerV9).toBeUndefined());
+      .__fieldlineBtiDetailWorkerV10).toBeUndefined());
     }
 
     expect([...requested].sort()).toEqual(["a", "b", "c", "d", "e", "f", "g",
@@ -3272,6 +4860,1421 @@ describe("NetworkObserver", () => {
       typeof params?.expression === "string" && params.expression.includes("querySelectorAll('body *')"))).toBe(false);
   });
 
+  it("emits a SABA public discovery diagnostic without holding the normal catalog capture", async () => {
+    const discoveryBody = JSON.stringify({ kind: "SABA_PUBLIC_CATALOG_DISCOVERY", version: 1,
+      scope: "LEGACY_SPORTS", navControls: [{ period: "EARLY", label: "Sớm", tag: "button",
+        classes: ["c-side-nav__tab"], selected: false, expanded: null, visible: true }],
+      counts: { footballTables: 1, compactRows: 1, legacyLeagues: 0, legacyRows: 0, prematchRows: 1 },
+      matches: [{ matchId: "match-1", shape: "COMPACT", controls: [] }], scroll: [], truncated: false });
+    const records = JSON.stringify([{ sportId: "1", leagueId: "league-1", leagueName: "League",
+      matchId: "match-1", timeText: "Tomorrow", teamNames: ["Home", "Away"], groups: [{
+        betTypeIds: ["3"], labels: ["2.5"], odds: [
+          { marketOddsId: "home-1", priceText: "0.91" },
+          { marketOddsId: "away-1", priceText: "0.99" }
+        ]
+      }] }]);
+    let resolveDiscovery!: (value: unknown) => void;
+    const pendingDiscovery = new Promise<unknown>((resolve) => { resolveDiscovery = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && params?.expression === SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION) {
+        return pendingDiscovery;
+      }
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { type: "string", value: records } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => 10_000, monotonicNow: () => 20 });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+
+    expect(forwarded.some(({ transport }) => transport === "DOM_SNAPSHOT")).toBe(true);
+    expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_catalog_discovery__")).toBe(false);
+    resolveDiscovery({ result: { type: "string", value: discoveryBody } });
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_catalog_discovery__")).toBe(true));
+    expect(forwarded.find(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_catalog_discovery__")).toEqual(expect.objectContaining({
+        lobby: "SABA", transport: "TAB_STATE", payload: { encoding: "UTF8", body: discoveryBody },
+        request: expect.objectContaining({ resourceType: "Diagnostic",
+          pathnameClass: "/__fieldline_saba_catalog_discovery__" })
+      }));
+
+    const before = sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION).length;
+    await observer.pollSabaDomChanges({ lobby: "CMD", sourceId: "chrome:CMD:10", tabId: 10 }, "sports.example");
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION)).toHaveLength(before);
+  });
+
+  it("rate-limits SABA public discovery and rejects a result from a retired source generation", async () => {
+    const now = { value: 10_000 };
+    const discoveryBody = JSON.stringify({ kind: "SABA_PUBLIC_CATALOG_DISCOVERY", version: 1,
+      scope: "COMPACT", navControls: [], counts: { footballTables: 1, compactRows: 0,
+        legacyLeagues: 0, legacyRows: 0, prematchRows: 0 }, matches: [], scroll: [], truncated: false });
+    let resolveFirst!: (value: unknown) => void;
+    const first = new Promise<unknown>((resolve) => { resolveFirst = resolve; });
+    let discoveryCalls = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && params?.expression === SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION) {
+        discoveryCalls += 1;
+        return discoveryCalls === 1 ? first : { result: { type: "string", value: discoveryBody } };
+      }
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate" && params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { type: "string", value: "[]" } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => now.value, monotonicNow: () => now.value });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    observer.beginSourceEpoch(saba.sourceId);
+    resolveFirst({ result: { type: "string", value: discoveryBody } });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_catalog_discovery__")).toBe(false);
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(forwarded.filter(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_catalog_discovery__")).toHaveLength(1));
+    expect(discoveryCalls).toBe(2);
+
+    now.value += 29_999;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    expect(discoveryCalls).toBe(2);
+    now.value += 1;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(discoveryCalls).toBe(3));
+  });
+
+  it("paces SABA discovery from successful completion after a delayed evaluation", async () => {
+    const now = { value: 10_000 };
+    const body = JSON.stringify({ kind: "SABA_PUBLIC_CATALOG_DISCOVERY", version: 1,
+      scope: "COMPACT", navControls: [], counts: { footballTables: 1, compactRows: 1,
+        legacyLeagues: 0, legacyRows: 0, prematchRows: 1 }, matches: [], scroll: [], truncated: false });
+    let resolveFirst!: (value: unknown) => void;
+    const first = new Promise<unknown>((resolve) => { resolveFirst = resolve; });
+    let calls = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      if (method === "Runtime.evaluate" && params?.expression === SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION) {
+        calls += 1;
+        return calls === 1 ? first : { result: { value: body } };
+      }
+      if (method === "Runtime.evaluate" && String(params?.expression).includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: false } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => now.value, monotonicNow: () => now.value });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    now.value = 15_000;
+    resolveFirst({ result: { value: body } });
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_catalog_discovery__")).toBe(true));
+    now.value = 40_000;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    expect(calls).toBe(1);
+    now.value = 45_000;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(calls).toBe(2));
+  });
+
+  it("runs one bounded SABA probe after a usable DOM baseline without publishing probe views", async () => {
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    let period: "today" | "early" = "today";
+    const probeState = () => ({ documentToken: "doc-1", rowCount: period === "today" ? 20 : 3,
+      tableCount: 1, activePeriod: period === "today" ? "TODAY" : "EARLY",
+      eligibleMoreCount: 0, eligibleMoreOwners: [],
+      rosterMatchIds: Array.from({ length: period === "today" ? 20 : 3 }, (_, i) => `${period}-${i}`),
+      rosterSamples: [], timeShapes: { DATED_KICKOFF: period === "today" ? 20 : 3,
+        PREFIXED_KICKOFF: 0, UNDATED_KICKOFF: 0, BARE_LIVE: 0, LIVE_CLOCK: 0, UNKNOWN: 0 },
+      dateContexts: [], headerControls: [], fingerprint: `${period}:${period === "today" ? 20 : 3}`,
+      truncated: false });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        return { result: { value: probeState() } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes(".c-side-nav__tab") && expression.includes(".click()")) {
+        period = expression.includes('===\"SOM\"') ? "early" : "today";
+        return { result: { value: true } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_PUBLIC_CATALOG_DISCOVERY_EXPRESSION) return {};
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([, method, params]) => method ===
+      "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION)).toBe(true));
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true), { timeout: 5_000 });
+
+    expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(1);
+    const diagnostic = forwarded.find(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__");
+    expect(diagnostic).toEqual(expect.objectContaining({ lobby: "SABA", transport: "TAB_STATE" }));
+    expect(JSON.parse(diagnostic?.payload.body ?? "{}")).toMatchObject({
+      kind: "SABA_NAVIGATION_PROBE", status: "NO_ACTION_COLLECTOR_TARGET_BOUND",
+      mutated: false, viewRestored: true,
+      initial: { activePeriod: "TODAY" }
+    });
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    expect(forwarded.filter(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toHaveLength(1);
+    observer.beginSourceEpoch(saba.sourceId);
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(forwarded.filter(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toHaveLength(2), { timeout: 5_000 });
+  });
+
+  it("publishes usable SABA DOM before a held probe and skips overlapping polls without another lane job", async () => {
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, matchId: `match-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    const unknown = { documentToken: "held-probe", rowCount: 60, tableCount: 1,
+      activePeriod: "UNKNOWN", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      moreCandidates: [], rosterMatchIds: ["match-1"], rosterSamples: [], timeShapes: {},
+      dateContexts: [], headerControls: [], fingerprint: "unknown", truncated: false };
+    let releaseProbe!: (value: unknown) => void;
+    let probeStarted = false;
+    let mutationReads = 0;
+    const heldProbe = new Promise<unknown>((resolve) => { releaseProbe = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        mutationReads += 1;
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeStarted = true;
+        return heldProbe;
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    const poll = observer.pollSabaDomChanges(saba, "sports.example");
+    let pollResolved = false;
+    void poll.then(() => { pollResolved = true; });
+    try {
+      await vi.waitFor(() => expect(probeStarted).toBe(true));
+      await Promise.resolve();
+
+      expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(1);
+      expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+      expect(pollResolved).toBe(true);
+
+      const before = mutationReads;
+      await expect(observer.pollSabaDomChanges(saba, "sports.example")).resolves.toBeUndefined();
+      expect(mutationReads).toBe(before);
+    } finally {
+      releaseProbe({ result: { value: unknown } });
+      await poll;
+    }
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true), { timeout: 5_000 });
+  });
+
+  it("refuses a queued SABA probe whose DOM lease expires before execution", async () => {
+    let now = 10_000;
+    let probeReads = 0;
+    let scheduledJobs = 0;
+    let releaseProbe!: () => void;
+    const probeGate = new Promise<void>((resolve) => { releaseProbe = resolve; });
+    const scheduler = new ProviderWorkScheduler({ maxConcurrent: 2, maxQueuedPerSource: 2 });
+    const run = scheduler.run.bind(scheduler);
+    vi.spyOn(scheduler, "run").mockImplementation(<T>(sourceId: string, operation: () => Promise<T>) => {
+      scheduledJobs += 1;
+      return scheduledJobs === 2
+        ? run(sourceId, async () => { await probeGate; return operation(); })
+        : run(sourceId, operation);
+    });
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, matchId: `match-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeReads += 1;
+        return { result: { value: sabaUnknownProbeState("lease-expired") } };
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      workScheduler: scheduler, now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    try {
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      expect(scheduledJobs).toBeGreaterThanOrEqual(2);
+      expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+      expect(probeReads).toBe(0);
+      now = 160_001;
+      expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(false);
+    } finally {
+      releaseProbe();
+    }
+    await settleObserverBackgroundTasks();
+    expect(probeReads).toBe(0);
+    now += 34_000;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === CMD_PUBLIC_CATALOG_EXPRESSION)).toHaveLength(2);
+  });
+
+  it.each(["PROBE_FIRST", "RECOVERY_FIRST"] as const)(
+    "orders SABA probe and recovery ownership: %s", async (order) => {
+    let now = 5_000;
+    let probeReads = 0;
+    let recoveryEntered = false;
+    let releaseRecovery!: (value: unknown) => void;
+    const heldRecovery = new Promise<unknown>((resolve) => { releaseRecovery = resolve; });
+    const scheduler = new ProviderWorkScheduler({ maxConcurrent: 1 });
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, matchId: `match-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" &&
+        expression === "window.io && window.io.Socket && window.io.Socket.prototype") {
+        recoveryEntered = true;
+        return heldRecovery;
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeReads += 1;
+        return { result: { value: sabaUnknownProbeState("after-owned-recovery") } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => {
+        forwarded.push(envelope);
+        if (envelope.transport === "DOM_SNAPSHOT" && now === 5_000) now = 25_001;
+      }), workScheduler: scheduler, now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    try {
+      if (order === "RECOVERY_FIRST") {
+        await observer.refreshCatalog(saba);
+        await vi.waitFor(() => expect(recoveryEntered).toBe(true));
+      }
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await vi.waitFor(() => expect(scheduler.isBusy(saba.sourceId)).toBe(false));
+      expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+      expect(recoveryEntered).toBe(order === "RECOVERY_FIRST");
+      expect(probeReads).toBe(order === "RECOVERY_FIRST" ? 0 : 2);
+      expect(forwarded.some(({ request }) =>
+        request.pathnameClass === "/__fieldline_saba_navigation_probe__"))
+        .toBe(order === "PROBE_FIRST");
+      if (order === "PROBE_FIRST") {
+        // A due read-only retry owns this poll without spending recovery budget.
+        now = 55_002;
+        await observer.pollSabaDomChanges(saba, "sports.example");
+        await vi.waitFor(() => expect(probeReads).toBe(4));
+        await vi.waitFor(() => expect(scheduler.isBusy(saba.sourceId)).toBe(false));
+        await settleObserverBackgroundTasks();
+        expect(recoveryEntered).toBe(false);
+        now = 58_002;
+        await observer.pollSabaDomChanges(saba, "sports.example");
+        await vi.waitFor(() => expect(recoveryEntered).toBe(true));
+      }
+    } finally {
+      releaseRecovery({});
+    }
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([, method, params]) =>
+      method === "Runtime.releaseObjectGroup" &&
+      params?.objectGroup === "fieldline-baseline-recovery-10")).toBe(true));
+    await settleObserverBackgroundTasks();
+    if (order === "RECOVERY_FIRST") {
+      now = 55_003;
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      // One discovery read finds the target, then the helper reads its initial state.
+      await vi.waitFor(() => expect(probeReads).toBe(2));
+    } else {
+      expect(probeReads).toBe(4);
+    }
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true));
+    expect(sendCommand.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" &&
+      params?.expression === "window.io && window.io.Socket && window.io.Socket.prototype")).toHaveLength(1);
+  });
+
+  it("does not probe from old usable DOM after a failed renewal capture", async () => {
+    let now = 10_000;
+    let catalogReady = true;
+    let probeReads = 0;
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, matchId: `match-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return catalogReady ? { result: { value: records } } : {};
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeReads += 1;
+        return {};
+      }
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined),
+      now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
+    expect(probeReads).toBe(1);
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+
+    now = 44_000;
+    catalogReady = false;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
+    expect(probeReads).toBe(1);
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+  });
+
+  it("paces no-target SABA probe retries and retries a read-only non-Today target", async () => {
+    let now = 10_000;
+    let targetReady = false;
+    let probeReads = 0;
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, matchId: `match-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    const unknown = { documentToken: "paced", rowCount: 60, tableCount: 1,
+      activePeriod: "UNKNOWN", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      moreCandidates: [], rosterMatchIds: ["match-1"], rosterSamples: [], timeShapes: {},
+      dateContexts: [], headerControls: [], fingerprint: "unknown", truncated: false };
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeReads += 1;
+        return targetReady ? { result: { value: unknown } } : {};
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
+    expect(probeReads).toBe(1);
+
+    now = 39_999;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
+    expect(probeReads).toBe(1);
+
+    now = 44_000;
+    targetReady = true;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true));
+    const firstReadOnlyTargetReads = probeReads;
+
+    now = 84_000;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
+    expect(probeReads).toBe(firstReadOnlyTargetReads + 2);
+    expect(forwarded.filter(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toHaveLength(2);
+  });
+
+  it.each(["source", "tab"] as const)(
+    "does not act on a SABA probe after %s retirement and allows the replacement poll", async (retirement) => {
+    let now = 10_000;
+    let holdFirstRead = true;
+    let releaseFirstRead!: (value: unknown) => void;
+    let actions = 0;
+    const firstRead = new Promise<unknown>((resolve) => { releaseFirstRead = resolve; });
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, matchId: `match-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    const unknown = { documentToken: "retired", rowCount: 60, tableCount: 1,
+      activePeriod: "UNKNOWN", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      moreCandidates: [], rosterMatchIds: ["match-1"], rosterSamples: [], timeShapes: {},
+      dateContexts: [], headerControls: [], fingerprint: "unknown", truncated: false };
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        if (holdFirstRead) return firstRead;
+        return { result: { value: unknown } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes(".click()")) {
+        actions += 1;
+        return { result: { value: true } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => now, monotonicNow: () => now });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(sendCommand.mock.calls.some(([, method, params]) => method ===
+      "Runtime.evaluate" && params?.expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION)).toBe(true));
+    if (retirement === "source") observer.beginSourceEpoch(saba.sourceId);
+    else observer.prepareDebuggerReattach(saba.tabId);
+    releaseFirstRead({ result: { value: unknown } });
+    await settleObserverBackgroundTasks();
+    expect(actions).toBe(0);
+    expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(false);
+
+    holdFirstRead = false;
+    now += 4_000;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true));
+  });
+
+  it("finds the SABA probe document in a child isolated world when root and known contexts are empty", async () => {
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    let period: "today" | "early" = "today";
+    let nowMs = 10_000;
+    const probeState = () => ({ documentToken: "child-sports-doc", rowCount: period === "today" ? 20 : 3,
+      tableCount: 1, activePeriod: period === "today" ? "TODAY" : "EARLY",
+      eligibleMoreCount: 0, eligibleMoreOwners: [], moreCandidates: [],
+      rosterMatchIds: Array.from({ length: period === "today" ? 20 : 3 }, (_, index) => `${period}-${index}`),
+      rosterSamples: [], timeShapes: { DATED_KICKOFF: period === "today" ? 20 : 3,
+        PREFIXED_KICKOFF: 0, UNDATED_KICKOFF: 0, BARE_LIVE: 0, LIVE_CLOCK: 0, UNKNOWN: 0 },
+      dateContexts: [], headerControls: [], periodControls: [],
+      fingerprint: `${period}:${period === "today" ? 20 : 3}`, truncated: false });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" }, childFrames: [
+        { frame: { id: "known-empty" } }, { frame: { id: "sports-frame" } }
+      ] } };
+      if (method === "Page.createIsolatedWorld") {
+        if (params?.worldName === "fieldline-saba-navigation-probe") {
+          return { executionContextId: params.frameId === "sports-frame" ? 73 : 72 };
+        }
+        return { executionContextId: 71 };
+      }
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        return params?.contextId === 73 ? { result: { value: probeState() } } : { result: { value: null } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes(".c-side-nav__tab") && expression.includes(".click()")) {
+        if (params?.contextId !== 73) return { result: { value: false } };
+        period = expression.includes('==="SOM"') ? "early" : "today";
+        return { result: { value: true } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => { nowMs += 100; return nowMs; }, monotonicNow: () => nowMs });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    await observer.handleEvent(saba, "Runtime.executionContextCreated", {
+      context: { id: 61, auxData: { frameId: "known-empty", isDefault: true } }
+    });
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true));
+
+    const diagnostic = forwarded.find(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__");
+    expect(JSON.parse(diagnostic?.payload.body ?? "{}")).toMatchObject({
+      kind: "SABA_NAVIGATION_PROBE", status: "NO_ACTION_COLLECTOR_TARGET_BOUND",
+      mutated: false, viewRestored: true,
+      initial: { activePeriod: "TODAY" }
+    });
+    expect(sendCommand).toHaveBeenCalledWith(10, "Page.createIsolatedWorld", expect.objectContaining({
+      frameId: "sports-frame", worldName: "fieldline-saba-navigation-probe", grantUniveralAccess: false
+    }));
+  });
+
+  it("blocks SABA DOM and native reset/done while read-only target binding is in flight", async () => {
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `l-${index}`, matchId: `m-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    const state = { documentToken: "doc-guard", rowCount: 60, tableCount: 1,
+      activePeriod: "TODAY", activePeriodEvidence: "FOOTBALL_PAGE_HEADING",
+      eligibleMoreCount: 0, eligibleMoreOwners: [],
+      rosterMatchIds: Array.from({ length: 60 }, (_, index) => `m-${index}`), rosterSamples: [],
+      timeShapes: { DATED_KICKOFF: 60, PREFIXED_KICKOFF: 0, UNDATED_KICKOFF: 0,
+        BARE_LIVE: 0, LIVE_CLOCK: 0, UNKNOWN: 0 }, dateContexts: [], headerControls: [],
+      fingerprint: "TODAY-60", truncated: false } as const;
+    let probeReads = 0;
+    let helperReadHeld = false;
+    let releaseHelperRead!: () => void;
+    const heldHelperRead = new Promise<void>((resolve) => { releaseHelperRead = resolve; });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeReads += 1;
+        if (probeReads === 2) { helperReadHeld = true; await heldHelperRead; }
+        return { result: { value: state } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    await observer.handleEvent(saba, "Network.webSocketCreated", {
+      requestId: "probe-ws", url: "wss://socket.saba.test/socket.io/"
+    });
+    forwarded.length = 0;
+
+    const poll = observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(helperReadHeld).toBe(true));
+    expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(1);
+    await observer.ingestDomSnapshot(saba, "sports.example", records);
+    const nativeBaseline = `42${JSON.stringify(["m", "b1", [["c", "c2"],
+      ["f", 0, ["type", "matchid"]], [0, "reset"], [0, "o"], [0, "done"]], "probe"])}`;
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "probe-ws", response: { opcode: 1,
+        payloadData: nativeBaseline }
+    });
+    expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(1);
+    expect(forwarded.some(({ transport }) => transport === "WS_FRAME")).toBe(false);
+    expect(observer.hasCompleteSabaBaseline(saba.sourceId)).toBe(false);
+
+    releaseHelperRead();
+    await poll;
+    await vi.waitFor(() => expect(forwarded.some(({ request, payload }) => request.pathnameClass ===
+      "/__fieldline_saba_navigation_probe__" &&
+      JSON.parse(payload.body).status === "NO_ACTION_COLLECTOR_TARGET_BOUND")).toBe(true),
+    { timeout: 5_000 });
+    await observer.ingestDomSnapshot(saba, "sports.example", records);
+    expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(2);
+    await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
+      requestId: "probe-ws", response: { opcode: 1,
+        payloadData: nativeBaseline.replace('"probe"', '"normal"') }
+    });
+    expect(forwarded.some(({ transport }) => transport === "WS_FRAME")).toBe(true);
+    expect(observer.hasCompleteSabaBaseline(saba.sourceId)).toBe(true);
+  });
+
+  it("keeps an initial Early discovery read-only without starting unsafe recovery", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `l-${index}`, matchId: `m-${index}`,
+      timeText: "11:00PM", teamNames: ["Home", "Away"], groups: []
+    })));
+    const earlyState = { documentToken: "doc-fail", rowCount: 60, tableCount: 1,
+      activePeriod: "EARLY", eligibleMoreCount: 0, eligibleMoreOwners: [],
+      rosterMatchIds: Array.from({ length: 60 }, (_, index) => `m-${index}`), rosterSamples: [],
+      timeShapes: { DATED_KICKOFF: 60, PREFIXED_KICKOFF: 0, UNDATED_KICKOFF: 0,
+        BARE_LIVE: 0, LIVE_CLOCK: 0, UNKNOWN: 0 }, dateContexts: [], headerControls: [],
+      fingerprint: "TODAY-60", truncated: false };
+    let viewUnverifiable = false;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        return viewUnverifiable ? {} : { result: { value: earlyState } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes(".c-side-nav__tab") &&
+        expression.includes(".click()")) {
+        if (expression.includes('===\"SOM\"')) viewUnverifiable = true;
+        return { result: { value: true } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let observer!: NetworkObserver;
+    const recover = vi.fn(() => { observer.beginSourceEpoch("chrome:SABA:10"); });
+    observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      onSabaSocketUnavailable: recover });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+
+    await vi.advanceTimersByTimeAsync(46_000);
+    expect(recover).not.toHaveBeenCalled();
+    expect(viewUnverifiable).toBe(false);
+    expect(forwarded.some(({ request, payload }) => request.pathnameClass ===
+      "/__fieldline_saba_navigation_probe__" &&
+      JSON.parse(payload.body).status === "NO_ACTION_UNCONFIRMED_SELECTION")).toBe(true);
+    const before = forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT").length;
+    await observer.ingestDomSnapshot(saba, "sports.example", records);
+    expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(before + 1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("spends one total deadline on target discovery and emits a safe no-action terminal", async () => {
+    const now = { value: 1_000 };
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `l-${index}`, matchId: `m-${index}`,
+      timeText: "11:00PM", teamNames: ["H", "A"], groups: []
+    })));
+    const candidate = { documentToken: "slow", rowCount: 60, tableCount: 1,
+      activePeriod: "TODAY", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {}, dateContexts: [],
+      headerControls: [], fingerprint: "today", truncated: false };
+    let resolveDiscovery!: (value: unknown) => void;
+    let discoveryStarted = false;
+    const actions: string[] = [];
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        discoveryStarted = true;
+        return new Promise((resolve) => { resolveDiscovery = resolve; });
+      }
+      if (method === "Runtime.evaluate" && expression.includes('.click()')) {
+        actions.push(expression); return { result: { value: true } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      now: () => now.value, monotonicNow: () => now.value });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    const poll = observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(discoveryStarted).toBe(true));
+    now.value = 61_001;
+    resolveDiscovery({ result: { value: candidate } });
+    await poll;
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true), { timeout: 5_000 });
+
+    expect(actions).toEqual([]);
+    expect(JSON.parse(forwarded.find(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")?.payload.body ?? "{}"))
+      .toMatchObject({ status: "NO_ACTION_DEADLINE_EXHAUSTED", mutated: false, viewRestored: true });
+  });
+
+  it("returns read-only Early no-action within the remaining total deadline", async () => {
+    const wallStarted = Date.now();
+    let offsetMs = 0;
+    const now = () => 1_000 + offsetMs + (Date.now() - wallStarted);
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({ sportId: "1",
+      leagueId: `l-${index}`, matchId: `m-${index}`, timeText: "11:00PM",
+      teamNames: ["H", "A"], groups: [] })));
+    const state = { documentToken: "remaining", pageNowMs: Date.now(), rowCount: 60, tableCount: 1,
+      activePeriod: "EARLY", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      moreCandidates: [], rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {},
+      dateContexts: [], headerControls: [], fingerprint: "early", truncated: false };
+    let readCalls = 0;
+    const actions: string[] = [];
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) return { result: { value: true } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) return { result: { value: records } };
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        readCalls += 1;
+        if (readCalls === 1) offsetMs = 59_980;
+        return { result: { value: state } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes('.click()')) {
+        actions.push(expression);
+        return new Promise<never>(() => undefined);
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand, frameCommandTimeoutMs: 2_500, now,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    const realStarted = Date.now();
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await settleObserverBackgroundTasks();
+
+    expect(Date.now() - realStarted).toBeLessThan(500);
+    expect(actions).toEqual([]);
+    expect(forwarded.filter(({ request }) => request.pathnameClass ===
+      "/__fieldline_saba_navigation_probe__").map(({ payload }) => JSON.parse(payload.body).status))
+      .toEqual(["NO_ACTION_UNCONFIRMED_SELECTION"]);
+  });
+
+  it("allows a slow SABA probe read to finish beyond the ordinary frame timeout", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    try {
+      const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+        sportId: "1", leagueId: `l-${index}`, matchId: `m-${index}`,
+        timeText: "11:00PM", teamNames: ["H", "A"], groups: []
+      })));
+      const unknown = { documentToken: "slow-read", rowCount: 60, tableCount: 1,
+        activePeriod: "UNKNOWN", eligibleMoreCount: 0, eligibleMoreOwners: [],
+        moreCandidates: [], rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {},
+        dateContexts: [], headerControls: [], periodControls: [], fingerprint: "unknown", truncated: false };
+      let reads = 0;
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+        const expression = String(params?.expression ?? "");
+        if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) return { result: { value: true } };
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+        if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) return { result: { value: records } };
+        if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+          reads += 1;
+          if (reads === 1) return await new Promise<{ result: { value: typeof unknown } }>((resolve) => {
+            setTimeout(() => resolve({ result: { value: unknown } }), 4_000);
+          });
+          return { result: { value: unknown } };
+        }
+        return {};
+      });
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const recover = vi.fn();
+      const observer = new NetworkObserver({ sendCommand, now: () => Date.now(),
+        forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+        onSabaSocketUnavailable: recover });
+      const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await vi.advanceTimersByTimeAsync(4_100);
+
+      const diagnostic = forwarded.find(({ request }) =>
+        request.pathnameClass === "/__fieldline_saba_navigation_probe__");
+      expect(JSON.parse(diagnostic?.payload.body ?? "{}"))
+        .toMatchObject({ status: "NO_ACTION_UNCONFIRMED_SELECTION", mutated: false, viewRestored: true });
+      expect(recover).not.toHaveBeenCalled();
+      expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps a valid DOM lease when UNKNOWN selected-state evidence causes a no-action probe", async () => {
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `l-${index}`, matchId: `m-${index}`,
+      timeText: "11:00PM", teamNames: ["H", "A"], groups: []
+    })));
+    const unknown = { documentToken: "unknown", rowCount: 60, tableCount: 1,
+      activePeriod: "UNKNOWN", periodControls: [{ tag: "div", classes: ["c-side-nav__tab"],
+        text: "Hôm Nay", parentTag: "div", parentClasses: ["period-wrap"], ariaSelected: "" }],
+      eligibleMoreCount: 0, eligibleMoreOwners: [], moreCandidates: [], rosterMatchIds: ["m-1"],
+      rosterSamples: [], timeShapes: {}, dateContexts: [], headerControls: [],
+      fingerprint: "unknown", truncated: false };
+    const actions: string[] = [];
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        return { result: { value: unknown } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes('.click()')) actions.push(expression);
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const recover = vi.fn();
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      onSabaSocketUnavailable: recover });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true), { timeout: 5_000 });
+
+    expect(actions).toEqual([]);
+    expect(recover).not.toHaveBeenCalled();
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+    expect(JSON.parse(forwarded.find(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")?.payload.body ?? "{}"))
+      .toMatchObject({ status: "NO_ACTION_UNCONFIRMED_SELECTION", mutated: false,
+        periodControls: [expect.objectContaining({ parentClasses: ["period-wrap"] })] });
+  });
+
+  it("does not recover when the pre-action initial probe read is unavailable on a current source", async () => {
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: "l-" + index, matchId: "m-" + index,
+      timeText: "11:00PM", teamNames: ["H", "A"], groups: []
+    })));
+    const candidate = { documentToken: "initial-null", rowCount: 60, tableCount: 1,
+      activePeriod: "TODAY", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      moreCandidates: [], rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {},
+      dateContexts: [], headerControls: [], fingerprint: "today", truncated: false };
+    let probeReads = 0;
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: records } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeReads += 1;
+        return probeReads === 1 ? { result: { value: candidate } } : {};
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const recover = vi.fn();
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+      onSabaSocketUnavailable: recover });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true));
+
+    expect(recover).not.toHaveBeenCalled();
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+    expect(JSON.parse(forwarded.find(({ request }) =>
+      request.pathnameClass === "/__fieldline_saba_navigation_probe__")?.payload.body ?? "{}"))
+      .toMatchObject({ status: "NO_ACTION_INITIAL_STATE_UNAVAILABLE", mutated: false,
+        viewRestored: true, failureTrace: [expect.objectContaining({
+          stage: "INITIAL_READ", outcome: "LAST_READ_ABSENT", evaluationFailure: "PAGE_NULL"
+        })] });
+  });
+
+  it.each(["FRAME_COMMAND_TIMEOUT", "CONTEXT_UNAVAILABLE", "CDP_REJECTED", "EXCEPTION_DETAILS"] as const)(
+    "sanitizes the %s category for an unavailable initial probe evaluation", async (category) => {
+      const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+        sportId: "1", leagueId: "l-" + index, matchId: "m-" + index,
+        timeText: "11:00PM", teamNames: ["H", "A"], groups: []
+      })));
+      const candidate = { documentToken: "eval-category", rowCount: 60, tableCount: 1,
+        activePeriod: "TODAY", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+        moreCandidates: [], rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {},
+        dateContexts: [], headerControls: [], fingerprint: "today", truncated: false };
+      let probeReads = 0;
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+        const expression = String(params?.expression ?? "");
+        if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+          return { result: { value: true } };
+        }
+        if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+          return { result: { value: records } };
+        }
+        if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+          probeReads += 1;
+          if (probeReads === 1) return { result: { value: candidate } };
+          if (category === "FRAME_COMMAND_TIMEOUT") return new Promise<never>(() => undefined);
+          if (category === "CONTEXT_UNAVAILABLE") throw new Error("Cannot find context with specified id");
+          if (category === "CDP_REJECTED") throw new Error("secret https://account.invalid/token");
+          return { exceptionDetails: { text: "secret https://account.invalid/token" } };
+        }
+        return {};
+      });
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const observer = new NetworkObserver({ sendCommand, frameCommandTimeoutMs: 10,
+        forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }) });
+      const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await vi.waitFor(() => expect(forwarded.some(({ request }) =>
+        request.pathnameClass === "/__fieldline_saba_navigation_probe__")).toBe(true));
+      const body = JSON.parse(forwarded.find(({ request }) =>
+        request.pathnameClass === "/__fieldline_saba_navigation_probe__")?.payload.body ?? "{}");
+
+      expect(body.failureTrace).toEqual([expect.objectContaining({
+        stage: "INITIAL_READ", outcome: "LAST_READ_ABSENT", evaluationFailure: category,
+        evaluationTarget: expect.objectContaining({ kind: "ROOT", contextIdPresent: false })
+      })]);
+      expect(JSON.stringify(body)).not.toMatch(/secret|account\.invalid|Runtime\.evaluate|c-side-nav/iu);
+    });
+
+  it.each(["REJECTED", "NO_EPOCH"] as const)(
+    "keeps a read-only Early probe out of the unsafe %s recovery handoff", async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+        sportId: "1", leagueId: `l-${index}`, matchId: `m-${index}`,
+        timeText: "11:00PM", teamNames: ["H", "A"], groups: []
+      })));
+      const state = { documentToken: "recovery", rowCount: 60, tableCount: 1,
+        activePeriod: "EARLY", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+        rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {}, dateContexts: [],
+        headerControls: [], fingerprint: "early", truncated: false };
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+        const expression = String(params?.expression ?? "");
+        if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+          return { result: { value: true } };
+        }
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+        if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+          return { result: { value: records } };
+        }
+        if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+          return { result: { value: state } };
+        }
+        if (method === "Runtime.evaluate" && expression.includes('.c-side-nav__tab') &&
+          expression.includes('.click()')) return {};
+        return {};
+      });
+      const forwarded: ChromeBridgeEnvelope[] = [];
+      const recover = vi.fn(() => outcome === "REJECTED"
+        ? Promise.reject(new Error("reload rejected")) : Promise.resolve());
+      const observer = new NetworkObserver({ sendCommand,
+        forward: vi.fn(async (envelope: ChromeBridgeEnvelope) => { forwarded.push(envelope); }),
+        onSabaSocketUnavailable: recover });
+      const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await vi.advanceTimersByTimeAsync(0);
+      const statuses = () => forwarded.filter(({ request }) =>
+        request.pathnameClass === "/__fieldline_saba_navigation_probe__")
+        .map(({ payload }) => JSON.parse(payload.body).status);
+      expect(statuses()).toEqual(["NO_ACTION_UNCONFIRMED_SELECTION"]);
+      expect(recover).not.toHaveBeenCalled();
+      await observer.ingestDomSnapshot(saba, "sports.example", records);
+      expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(2);
+
+      const beforeEpoch = forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT").length;
+      observer.beginSourceEpoch(saba.sourceId);
+      await observer.ingestDomSnapshot(saba, "sports.example", records);
+      expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(beforeEpoch + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pre-probe multi-chunk DOM ingest after the probe version changes", async () => {
+    const baseline = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `l-${index}`, matchId: `baseline-${index}`,
+      timeText: "11:00PM", teamNames: ["H", "A"], groups: []
+    })));
+    const oldLarge = JSON.stringify(Array.from({ length: 500 }, (_, index) => ({
+      sportId: "1", leagueId: "old-large", matchId: `old-large-${index}`,
+      timeText: "11:00PM", teamNames: ["X".repeat(400), "Y".repeat(400)], groups: []
+    })));
+    let probeReads = 0;
+    let releaseProbeRead!: () => void;
+    const probeReadBlocked = new Promise<void>((resolve) => { releaseProbeRead = resolve; });
+    let period: "TODAY" | "EARLY" = "EARLY";
+    let periodActions = 0;
+    const state = () => ({ documentToken: "version", rowCount: 60, tableCount: 1,
+      activePeriod: period, periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      rosterMatchIds: Array.from({ length: 60 }, (_, index) => `baseline-${index}`),
+      rosterSamples: [], timeShapes: {}, dateContexts: [], headerControls: [],
+      fingerprint: `${period}:baseline`, truncated: false });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: baseline } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeReads += 1;
+        if (probeReads === 1) await probeReadBlocked;
+        return { result: { value: state() } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes('.c-side-nav__tab') &&
+        expression.includes('.click()')) {
+        period = expression.includes('===\"SOM\"') ? "EARLY" : "TODAY";
+        periodActions += 1;
+        return { result: { value: true } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let holdOld = false;
+    let releaseOld!: () => void;
+    const forward = vi.fn(async (envelope: ChromeBridgeEnvelope) => {
+      if (holdOld && envelope.transport === "DOM_SNAPSHOT") {
+        const chunk = JSON.parse(envelope.payload.body) as { snapshotId?: string; chunkIndex?: number };
+        if (chunk.snapshotId?.startsWith("dom:") && chunk.chunkIndex === 0) {
+          holdOld = false;
+          await new Promise<void>((resolve) => { releaseOld = resolve; });
+        }
+      }
+      forwarded.push(envelope);
+    });
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(probeReads).toBe(1));
+
+    holdOld = true;
+    const oldIngest = observer.ingestDomSnapshot(saba, "sports.example", oldLarge);
+    await vi.waitFor(() => expect(releaseOld).toBeTypeOf("function"));
+    releaseProbeRead();
+    await vi.waitFor(() => expect(probeReads).toBe(2), { timeout: 5_000 });
+    expect(periodActions).toBe(0);
+    releaseOld();
+    await oldIngest;
+
+    const oldChunks = forwarded.filter(({ transport, payload }) => transport === "DOM_SNAPSHOT" &&
+      String((JSON.parse(payload.body) as { snapshotId?: string }).snapshotId).startsWith("dom:"));
+    expect(oldChunks).toHaveLength(1);
+    forwarded.length = 0;
+    await observer.replaySnapshots(saba.sourceId);
+    expect(JSON.stringify(forwarded)).not.toContain("old-large");
+  });
+
+  it("cancels the first old DOM chunk while it is queued behind an earlier emission tail", async () => {
+    const baseline = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({
+      sportId: "1", leagueId: `l-${index}`, matchId: `base-${index}`,
+      timeText: "11:00PM", teamNames: ["H", "A"], groups: []
+    })));
+    const oldLarge = JSON.stringify(Array.from({ length: 500 }, (_, index) => ({
+      sportId: "1", leagueId: "queued-old", matchId: `queued-old-${index}`,
+      timeText: "11:00PM", teamNames: ["X".repeat(400), "Y".repeat(400)], groups: []
+    })));
+    let probeReads = 0;
+    let releaseProbeRead!: () => void;
+    const probeReadBlocked = new Promise<void>((resolve) => { releaseProbeRead = resolve; });
+    let period: "TODAY" | "EARLY" = "EARLY";
+    let actions = 0;
+    const state = () => ({ documentToken: "queued", rowCount: 60, tableCount: 1,
+      activePeriod: period, periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      moreCandidates: [], rosterMatchIds: ["base-1"], rosterSamples: [], timeShapes: {},
+      dateContexts: [], headerControls: [], fingerprint: `${period}:base`, truncated: false });
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+        return { result: { value: true } };
+      }
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+        return { result: { value: baseline } };
+      }
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+        probeReads += 1;
+        if (probeReads === 1) await probeReadBlocked;
+        return { result: { value: state() } };
+      }
+      if (method === "Runtime.evaluate" && expression.includes('.c-side-nav__tab') &&
+        expression.includes('.click()')) {
+        period = expression.includes('===\"SOM\"') ? "EARLY" : "TODAY";
+        actions += 1;
+        return { result: { value: true } };
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let blockPrior = false;
+    let priorEntered = false;
+    let releasePrior!: () => void;
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async (envelope) => {
+      if (blockPrior) {
+        blockPrior = false;
+        priorEntered = true;
+        await new Promise<void>((resolve) => { releasePrior = resolve; });
+      }
+      forwarded.push(envelope);
+    }) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+    await observer.pollSabaDomChanges(saba, "sports.example");
+    await vi.waitFor(() => expect(probeReads).toBe(1));
+    forwarded.length = 0;
+
+    blockPrior = true;
+    const prior = observer.heartbeat(saba, "sports.example");
+    await vi.waitFor(() => expect(priorEntered).toBe(true));
+    const oldIngest = observer.ingestDomSnapshot(saba, "sports.example", oldLarge);
+    releaseProbeRead();
+    await vi.waitFor(() => expect(probeReads).toBe(2), { timeout: 5_000 });
+    expect(actions).toBe(0);
+    releasePrior();
+    await Promise.all([prior, oldIngest]);
+
+    expect(forwarded.some(({ transport, payload }) => transport === "DOM_SNAPSHOT" &&
+      String((JSON.parse(payload.body) as { snapshotId?: string }).snapshotId).startsWith("dom:"))).toBe(false);
+    forwarded.length = 0;
+    await observer.replaySnapshots(saba.sourceId);
+    expect(JSON.stringify(forwarded)).not.toContain("queued-old");
+  });
+
+  it.each(["REJECT", "HANG"] as const)(
+    "releases a safe UNKNOWN probe when its diagnostic forward will %s", async (mode) => {
+    const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({ sportId: "1",
+      leagueId: `l-${index}`, matchId: `m-${index}`, timeText: "11:00PM",
+      teamNames: ["H", "A"], groups: [] })));
+    const unknown = { documentToken: "unknown-diag", rowCount: 60, tableCount: 1,
+      activePeriod: "UNKNOWN", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+      moreCandidates: [], rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {},
+      dateContexts: [], headerControls: [], fingerprint: "unknown", truncated: false };
+    const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+      const expression = String(params?.expression ?? "");
+      if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) return { result: { value: true } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) return { result: { value: records } };
+      if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) return { result: { value: unknown } };
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    let diagnosticAttempts = 0;
+    let releaseDiagnostic: (() => void) | undefined;
+    const heldDiagnostic = new Promise<void>((resolve) => { releaseDiagnostic = resolve; });
+    const observer = new NetworkObserver({ sendCommand, frameCommandTimeoutMs: 25,
+      forward: vi.fn(async (envelope) => {
+        if (envelope.request.pathnameClass === "/__fieldline_saba_navigation_probe__") {
+          diagnosticAttempts += 1;
+          if (mode === "REJECT") throw new Error("diagnostic rejected");
+          return heldDiagnostic;
+        }
+        forwarded.push(envelope);
+      }) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+    await expect(observer.pollSabaDomChanges(saba, "sports.example")).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(diagnosticAttempts).toBe(1), { timeout: 5_000 });
+    expect(observer.hasUsableSabaCatalog(saba.sourceId)).toBe(true);
+    if (mode === "REJECT") {
+      await settleObserverBackgroundTasks();
+      await observer.ingestDomSnapshot(saba, "sports.example", records);
+      expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(2);
+    } else {
+      expect(forwarded.filter(({ transport }) => transport === "DOM_SNAPSHOT")).toHaveLength(1);
+      releaseDiagnostic!();
+    }
+  });
+
+  it("keeps queued DOM behind a hung probe diagnostic and forwards contiguous sequences after release", async () => {
+    vi.useFakeTimers();
+    try {
+      const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({ sportId: "1",
+        leagueId: `l-${index}`, matchId: `m-${index}`, timeText: "11:00PM",
+        teamNames: ["H", "A"], groups: [] })));
+      const unknown = { documentToken: "unknown-serial", rowCount: 60, tableCount: 1,
+        activePeriod: "UNKNOWN", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+        moreCandidates: [], rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {},
+        dateContexts: [], headerControls: [], fingerprint: "unknown", truncated: false };
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+        const expression = String(params?.expression ?? "");
+        if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) {
+          return { result: { value: true } };
+        }
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+        if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) {
+          return { result: { value: records } };
+        }
+        if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) {
+          return { result: { value: unknown } };
+        }
+        return {};
+      });
+      let releaseDiagnostic!: () => void;
+      let diagnosticEntered!: () => void;
+      const diagnosticHeld = new Promise<void>((resolve) => { releaseDiagnostic = resolve; });
+      const sawDiagnostic = new Promise<void>((resolve) => { diagnosticEntered = resolve; });
+      const entered: Array<{ sequence: number; transport: ChromeBridgeEnvelope["transport"];
+        pathnameClass: string }> = [];
+      let active = 0;
+      let maximumActive = 0;
+      const observer = new NetworkObserver({ sendCommand, frameCommandTimeoutMs: 25,
+        forward: vi.fn(async (envelope) => {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          entered.push({ sequence: envelope.sequence, transport: envelope.transport,
+            pathnameClass: envelope.request.pathnameClass });
+          try {
+            if (envelope.request.pathnameClass === "/__fieldline_saba_navigation_probe__") {
+              diagnosticEntered();
+              await diagnosticHeld;
+            }
+          } finally { active -= 1; }
+        }) });
+      const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+      await observer.pollSabaDomChanges(saba, "sports.example");
+      await sawDiagnostic;
+      let queuedComplete = false;
+      const queuedDom = observer.ingestDomSnapshot(saba, "sports.example", records)
+        .then(() => { queuedComplete = true; });
+      await vi.advanceTimersByTimeAsync(25);
+
+      expect(queuedComplete).toBe(false);
+      expect(maximumActive).toBe(1);
+      expect(entered).toEqual([
+        { sequence: 0, transport: "DOM_SNAPSHOT", pathnameClass: "/__fieldline_dom_snapshot__" },
+        { sequence: 1, transport: "TAB_STATE", pathnameClass: "/__fieldline_saba_navigation_probe__" }
+      ]);
+
+      releaseDiagnostic();
+      await queuedDom;
+      expect(maximumActive).toBe(1);
+      expect(entered).toEqual([
+        { sequence: 0, transport: "DOM_SNAPSHOT", pathnameClass: "/__fieldline_dom_snapshot__" },
+        { sequence: 1, transport: "TAB_STATE", pathnameClass: "/__fieldline_saba_navigation_probe__" },
+        { sequence: 2, transport: "DOM_SNAPSHOT", pathnameClass: "/__fieldline_dom_snapshot__" },
+        { sequence: 3, transport: "TAB_STATE",
+          pathnameClass: "/__fieldline_saba_catalog_discovery_failure__" }
+      ]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not arm unsafe recovery while a read-only diagnostic remains pending", async () => {
+    vi.useFakeTimers();
+    try {
+      const records = JSON.stringify(Array.from({ length: 60 }, (_, index) => ({ sportId: "1",
+        leagueId: `l-${index}`, matchId: `m-${index}`, timeText: "11:00PM",
+        teamNames: ["H", "A"], groups: [] })));
+      const state = { documentToken: "pending", rowCount: 60, tableCount: 1,
+        activePeriod: "EARLY", periodControls: [], eligibleMoreCount: 0, eligibleMoreOwners: [],
+        moreCandidates: [], rosterMatchIds: ["m-1"], rosterSamples: [], timeShapes: {},
+        dateContexts: [], headerControls: [], fingerprint: "early", truncated: false };
+      const sendCommand = vi.fn(async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+        const expression = String(params?.expression ?? "");
+        if (method === "Runtime.evaluate" && expression.includes("fieldline-saba-odds-mutation")) return { result: { value: true } };
+        if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "top" } } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+        if (method === "Runtime.evaluate" && expression === CMD_PUBLIC_CATALOG_EXPRESSION) return { result: { value: records } };
+        if (method === "Runtime.evaluate" && expression === SABA_NAVIGATION_PROBE_READ_EXPRESSION) return { result: { value: state } };
+        if (method === "Runtime.evaluate" && expression.includes('.click()')) return {};
+        return {};
+      });
+      const recover = vi.fn(() => new Promise<never>(() => undefined));
+      const observer = new NetworkObserver({ sendCommand, frameCommandTimeoutMs: 25,
+        forward: vi.fn(async (envelope) => envelope.request.pathnameClass ===
+          "/__fieldline_saba_navigation_probe__" ? new Promise<never>(() => undefined) : undefined),
+        onSabaSocketUnavailable: recover });
+      const saba = { lobby: "SABA", sourceId: "chrome:SABA:10", tabId: 10 } as const;
+
+      const poll = observer.pollSabaDomChanges(saba, "sports.example");
+      await vi.advanceTimersByTimeAsync(25);
+      await poll;
+      expect(recover).not.toHaveBeenCalled();
+      observer.beginSourceEpoch(saba.sourceId);
+      await vi.advanceTimersByTimeAsync(25);
+      expect(recover).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("bootstraps missing SABA authority from DOM and still captures later price mutations", async () => {
     const records = (priceText: string) => JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
       sportId: "1", leagueId: `league-${index}`, leagueName: "League", matchId: `match-${index}`,
@@ -3301,6 +6304,9 @@ describe("NetworkObserver", () => {
     expect(watcherExpression).toContain("'class'");
     expect(watcherExpression).toContain("'aria-disabled'");
 
+    // A small but current football table now admits read-only target discovery.
+    // Let that bounded background attempt finish before testing the next poll.
+    await settleObserverBackgroundTasks();
     dirty = true;
     forward.mockClear();
     await observer.pollSabaDomChanges(saba, "sports.example");
@@ -3913,7 +6919,7 @@ describe("NetworkObserver", () => {
       requestId: "ws", url: "wss://sports.example/socket.io/"
     });
     await observer.handleEvent(saba, "Network.webSocketFrameReceived", { requestId: "ws", response: {
-      opcode: 1, payloadData: '42["m","b1",[[0,"reset"],[0,"e"],[0,"done"]],"r1"]'
+      opcode: 1, payloadData: '42["m","b1",[["f",0,["type","matchid"]],[0,"reset"],[0,"e"],[0,"done"]],"r1"]'
     } });
     await vi.waitFor(() => expect(saveSabaWsSnapshots).toHaveBeenCalledOnce());
 
@@ -3934,7 +6940,7 @@ describe("NetworkObserver", () => {
     });
     const saba = { lobby: "SABA", sourceId: "chrome:SABA:7", tabId: 7 } as const;
     const url = "wss://sports.example/socket.io/";
-    const body = '42["m","b1",[[0,"reset"],[0,"e"],[0,"done"]],"r1"]';
+    const body = '42["m","b1",[["f",0,["type","matchid"]],[0,"reset"],[0,"e"],[0,"done"]],"r1"]';
 
     await observer.handleEvent(saba, "Network.webSocketCreated", { requestId: "ws", url });
     await observer.handleEvent(saba, "Network.webSocketFrameReceived", {
@@ -4354,6 +7360,62 @@ describe("NetworkObserver", () => {
       payload: { encoding: "UTF8",
         body: '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]' }
     }));
+  });
+
+  it("adopts a strict SABA catalog frame when CDP did not replay its socket creation", async () => {
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand: vi.fn(async () => ({})), forward,
+      now: () => 1_000, monotonicNow: () => 50, observerSessionId: "observer-a" });
+    const body = '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]';
+
+    await observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "socket-created-before-worker", response: { opcode: 1, payloadData: body }
+    }, "saba-child-session");
+
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      sourceEpoch: "observer-a:0", sequence: 0, lobby: "SABA", transport: "WS_STATE",
+      request: expect.objectContaining({ pathnameClass: "/socket.io/", streamId: "1" }),
+      payload: { encoding: "UTF8", body: '{"state":"OPEN"}' }
+    }));
+    expect(forward).toHaveBeenCalledWith(expect.objectContaining({
+      sourceEpoch: "observer-a:0", sequence: 1, lobby: "SABA", transport: "WS_FRAME",
+      request: expect.objectContaining({ pathnameClass: "/socket.io/", streamId: "1" }),
+      payload: { encoding: "UTF8", body }
+    }));
+  });
+
+  it("preserves SABA frame arrival order while the first frame resolves its document marker", async () => {
+    const markerResolvers: Array<(value: unknown) => void> = [];
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      params?: Record<string, unknown>): Promise<unknown> => {
+      if (method === "Runtime.evaluate" && params?.expression === "String(performance.timeOrigin)") {
+        return new Promise((resolve) => markerResolvers.push(resolve));
+      }
+      return {};
+    });
+    const forwarded: ChromeBridgeEnvelope[] = [];
+    const observer = new NetworkObserver({ sendCommand,
+      forward: vi.fn(async (value: ChromeBridgeEnvelope) => { forwarded.push(value); }) });
+    await observer.handleEvent(source, "Network.webSocketCreated", {
+      requestId: "ordered-provider-ws", url: "wss://socket.saba.test/socket.io/"
+    });
+
+    const firstBody = '42["m","b1",[[0,"reset"],[0,"done"]],"r1"]';
+    const secondBody = '42["m","b1",[[0,"reset"],[0,"done"]],"r2"]';
+    const first = observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "ordered-provider-ws", response: { opcode: 1, payloadData: firstBody }
+    });
+    const second = observer.handleEvent(source, "Network.webSocketFrameReceived", {
+      requestId: "ordered-provider-ws", response: { opcode: 1, payloadData: secondBody }
+    });
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+
+    expect(markerResolvers).toHaveLength(1);
+    markerResolvers[0]!({ result: { value: "1000" } });
+    await Promise.all([first, second]);
+
+    expect(forwarded.filter((value) => value.transport === "WS_FRAME")
+      .map((value) => value.payload.body)).toEqual([firstBody, secondBody]);
   });
 
   it("does not create a second SABA stream when CDP repeats one socket creation in a child session", async () => {
@@ -5021,6 +8083,26 @@ describe("NetworkObserver", () => {
     })).toBe(true);
   });
 
+  it("does not copy the raw response body from its own compact IM recovery fetch", async () => {
+    const sendCommand = vi.fn(async () => ({ body: "raw-body-must-not-be-read", base64Encoded: false }));
+    const forward = vi.fn(async (_envelope: ChromeBridgeEnvelope) => undefined);
+    const observer = new NetworkObserver({ sendCommand, forward });
+    const im = { lobby: "IM", sourceId: "chrome:IM:8", tabId: 8 } as const;
+    const request = { requestId: "compact-probe", type: "Fetch", request: {
+      method: "POST", url: "https://imsports.directsb.net/api/EventV6/GetSE",
+      headers: { "X-Fieldline-Catalog-Probe": "compact-v1" },
+      postData: JSON.stringify({ Market: 1 })
+    } };
+
+    await observer.handleEvent(im, "Network.requestWillBeSent", request);
+    await observer.handleEvent(im, "Network.responseReceived", { requestId: "compact-probe", type: "Fetch",
+      response: { url: "https://imsports.directsb.net/api/EventV6/GetSE" } });
+    await observer.handleEvent(im, "Network.loadingFinished", { requestId: "compact-probe" });
+
+    expect(sendCommand).not.toHaveBeenCalledWith(8, "Network.getResponseBody", expect.anything());
+    expect(forward).not.toHaveBeenCalled();
+  });
+
   it("validates one direct IM document once before forwarding all of its snapshot chunks", async () => {
     const largeBody = JSON.stringify({ StatusCode: 100,
       sel: Array.from({ length: 5_000 }, (_, index) => ({ eid: index + 1, pad: "x".repeat(80) })) });
@@ -5228,11 +8310,35 @@ describe("NetworkObserver", () => {
     expect(operations).toEqual(["Network.enable", "Runtime.enable", "Runtime.runIfWaitingForDebugger"]);
   });
 
-  it("enables Network and Runtime inside an attached KSPORT worker target", async () => {
+  it("always releases a paused SABA worker when Network observation is unavailable", async () => {
+    const sendCommand = vi.fn(async (_tabId: number, method: string,
+      _params?: Record<string, unknown>, sessionId?: string) => {
+      if (sessionId === "saba-worker" && method === "Network.enable") {
+        throw new Error("Network domain unavailable");
+      }
+      if (method === "Target.getTargets") return { targetInfos: [] };
+      return {};
+    });
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const saba = { lobby: "SABA", sourceId: "chrome:SABA:8", tabId: 8 } as const;
+
+    await observer.handleEvent(saba, "Target.attachedToTarget", {
+      sessionId: "saba-worker",
+      targetInfo: { type: "worker", targetId: "saba-worker-target" }
+    });
+
+    expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.enable", {}, "saba-worker");
+    expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.runIfWaitingForDebugger", {}, "saba-worker");
+    await expect(observer.resetSabaSocketWorker(saba)).resolves.toBe(1);
+    expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.evaluate", expect.objectContaining({
+      expression: expect.stringContaining("self.close")
+    }), "saba-worker");
+  });
+
+  it("observes and then releases an attached paused KSPORT worker target", async () => {
     const sendCommand = vi.fn(async (_tabId: number, method: string, _params?: Record<string, unknown>,
       sessionId?: string) => {
-      if (sessionId === "sportsbook-worker" &&
-        (method === "Target.setAutoAttach" || method === "Runtime.runIfWaitingForDebugger")) {
+      if (sessionId === "sportsbook-worker" && method === "Target.setAutoAttach") {
         throw new Error("WORKER_TARGET_PAUSE_COMMAND_UNSUPPORTED");
       }
       return {};
@@ -5248,7 +8354,19 @@ describe("NetworkObserver", () => {
     expect(sendCommand).toHaveBeenCalledWith(8, "Network.enable", expect.any(Object), "sportsbook-worker");
     expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.enable", {}, "sportsbook-worker");
     expect(sendCommand).not.toHaveBeenCalledWith(8, "Target.setAutoAttach", expect.any(Object), "sportsbook-worker");
-    expect(sendCommand).not.toHaveBeenCalledWith(8, "Runtime.runIfWaitingForDebugger", {}, "sportsbook-worker");
+    expect(sendCommand).toHaveBeenCalledWith(8, "Runtime.runIfWaitingForDebugger", {}, "sportsbook-worker");
+  });
+
+  it("pauses new KSPORT child targets until network observation is armed", async () => {
+    const sendCommand = vi.fn(async () => ({}));
+    const observer = new NetworkObserver({ sendCommand, forward: vi.fn(async () => undefined) });
+    const ksport = { lobby: "KSPORT", sourceId: "chrome:KSPORT:8", tabId: 8 } as const;
+
+    await observer.start(ksport);
+
+    expect(sendCommand).toHaveBeenCalledWith(8, "Target.setAutoAttach", {
+      autoAttach: true, waitForDebuggerOnStart: true, flatten: true
+    });
   });
 
   it("reconnects a pre-existing KSPORT socket owned by a dedicated worker", async () => {
@@ -5527,7 +8645,7 @@ describe("NetworkObserver", () => {
       params?: Record<string, unknown>, sessionId?: string) => {
       if (method === "Target.getTargets") return { targetInfos: [{
         targetId: "saba-worker-target", type: "worker",
-        url: "blob:https://c0z0oa.bpd3a3fn.com/worker-id", attached: false
+        url: "", attached: false
       }] };
       if (method === "Target.attachToTarget" && params?.targetId === "saba-worker-target") {
         return { sessionId: "saba-worker-session" };
@@ -6073,7 +9191,7 @@ describe("NetworkObserver", () => {
   it.each([
     { lobby: "SABA" as const, sourceId: "chrome:SABA:13", url: "wss://sports.example/socket.io/",
       bodies: [
-        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type"]], [0, "reset"],
+        `42${JSON.stringify(["m", "b1", [["c", "c2"], ["f", 0, ["type", "matchid"]], [0, "reset"],
           [0, "o"], [0, "done"]], "r1"])}`,
         `42${JSON.stringify(["m", "b1", [[0, "o", 1, 2]], "r2"])}`
       ] },

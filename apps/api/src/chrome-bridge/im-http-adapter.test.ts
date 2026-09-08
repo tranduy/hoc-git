@@ -36,7 +36,9 @@ describe("ImHttpCatalogAdapter", () => {
       .toMatchObject({
       accountId: "catalog-source:IM:FOOTBALL", provider: "IM",
       events: [{ providerEventId: "112516390" }],
-      markets: [{ providerMarketId: "10", marketType: "FT_AH", line: "0.5" }]
+      markets: [{ providerMarketId: "10", marketType: "FT_AH", line: "0.5" }],
+      nativeMarketObservations: [expect.objectContaining({ providerMarketId: "10",
+        disposition: "NORMALIZED" })]
     });
   });
 
@@ -126,6 +128,28 @@ describe("ImHttpCatalogAdapter", () => {
     };
     expect(update.quotes.map((quote) => [quote.providerSelectionId, quote.rawOdds]))
       .toEqual([["101", "0.8"], ["102", "-0.9"]]);
+  });
+
+  it("publishes a newly observed unmapped IM market from GetSEDelta inventory", () => {
+    const adapter = new ImHttpCatalogAdapter();
+    seedBothPartitions(adapter);
+    const delta = { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [{
+      mi: 777, bti: 777, gp: 1, ws: [
+        { wsi: 7771, si: 801, o: 0.91 }, { wsi: 7772, si: 802, o: -0.97 }
+      ]
+    }] }] };
+
+    const update = adapter.decode(envelope(delta, 3, "/api/EventV6/GetSEDelta"))[0];
+    const catalog = update?.value as {
+      markets: readonly { providerMarketId: string }[];
+      nativeMarketObservations: readonly { providerMarketId: string; disposition: string; reason: string }[];
+    };
+
+    expect(catalog.markets.map((market) => market.providerMarketId)).toEqual(["10"]);
+    expect(catalog.nativeMarketObservations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: "777", disposition: "UNMAPPED",
+        reason: "NATIVE_TYPE_UNMAPPED" })
+    ]));
   });
 
   it("emits authenticated transport continuity for a valid ordered quiet delta after the baseline", () => {

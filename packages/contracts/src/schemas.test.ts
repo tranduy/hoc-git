@@ -6,6 +6,7 @@ import {
   CanonicalMarketSchema,
   ExecutionRequestSchema,
   MarketTypeSchema,
+  NativeMarketObservationSchema,
   OpportunitySchema,
   OddsFormatSchema,
   PreflightRequestSchema,
@@ -102,6 +103,31 @@ describe("expanded exact two-way Football market taxonomy", () => {
     expect(ProviderMarketSchema.safeParse({ ...base, marketType: "SH_TOTAL", scope: "FULL_TIME" }).success).toBe(false);
     expect(ProviderMarketSchema.safeParse({ ...base, marketType: "CORNER_FH_TOTAL", scope: "FULL_TIME" }).success).toBe(false);
     expect(ProviderMarketSchema.safeParse({ ...base, marketType: "CARD_FT_AH", scope: "FIRST_HALF" }).success).toBe(false);
+  });
+});
+
+describe("NativeMarketObservationSchema", () => {
+  const observation = {
+    provider: "APSPORT",
+    category: "FOOTBALL",
+    providerEventId: "event-1",
+    providerMarketId: "market-31",
+    nativeType: "31",
+    nativeLabel: "Total Bookings",
+    nativeScope: "FIRST_HALF",
+    outcomeLabels: ["Over 3.5", "Under 3.5"],
+    observedAtMs: 1_788_711_200_000,
+    disposition: "UNMAPPED",
+    reason: "NATIVE_TYPE_UNMAPPED"
+  } as const;
+
+  it("retains a bounded native market signature that has not been mapped yet", () => {
+    expect(NativeMarketObservationSchema.parse(observation)).toEqual(observation);
+  });
+
+  it("rejects secret-shaped extras and observations without an auditable reason", () => {
+    expect(NativeMarketObservationSchema.safeParse({ ...observation, token: "secret" }).success).toBe(false);
+    expect(NativeMarketObservationSchema.safeParse({ ...observation, reason: "" }).success).toBe(false);
   });
 });
 

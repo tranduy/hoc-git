@@ -6,6 +6,7 @@ export interface NormalizedCatalogPart {
   readonly events: ObservedProviderCatalog["events"];
   readonly markets: ObservedProviderCatalog["markets"];
   readonly quotes: ObservedProviderCatalog["quotes"];
+  readonly nativeMarketObservations?: NonNullable<ObservedProviderCatalog["nativeMarketObservations"]>;
 }
 
 export type CatalogEvent = ObservedProviderCatalog["events"][number];
@@ -39,6 +40,7 @@ function collapseDuplicates(
   events: Map<string, CatalogEvent>,
   markets: Map<string, ObservedProviderCatalog["markets"][number]>,
   quotes: Map<string, ObservedProviderCatalog["quotes"][number]>,
+  nativeMarketObservations: Map<string, NonNullable<ObservedProviderCatalog["nativeMarketObservations"]>[number]>,
   options: { readonly reconcileFeeds: boolean;
     readonly selectEvent?: (current: CatalogEvent, candidate: CatalogEvent) => CatalogEvent } = { reconcileFeeds: false }
 ): void {
@@ -74,6 +76,16 @@ function collapseDuplicates(
     quotes.delete(key);
     quotes.set(`${canonical}|${quote.providerMarketId}|${quote.providerSelectionId}`,
       { ...quote, providerEventId: canonical });
+  }
+  for (const [key, observation] of [...nativeMarketObservations]) {
+    const canonical = rewrite.get(observation.providerEventId);
+    if (canonical === undefined) continue;
+    nativeMarketObservations.delete(key);
+    const rewritten = { ...observation, providerEventId: canonical };
+    nativeMarketObservations.set(
+      `${canonical}|${rewritten.providerMarketId}|${rewritten.nativeType}`,
+      rewritten
+    );
   }
 }
 
@@ -180,6 +192,8 @@ export function mergeObservedCatalogParts(input: {
   const events = new Map<string, ObservedProviderCatalog["events"][number]>();
   const markets = new Map<string, ObservedProviderCatalog["markets"][number]>();
   const quotes = new Map<string, ObservedProviderCatalog["quotes"][number]>();
+  const nativeMarketObservations = new Map<string,
+    NonNullable<ObservedProviderCatalog["nativeMarketObservations"]>[number]>();
   for (const part of input.parts) {
     for (const event of part.events) {
       const current = events.get(event.providerEventId);
@@ -190,9 +204,15 @@ export function mergeObservedCatalogParts(input: {
     for (const quote of part.quotes) {
       quotes.set(`${quote.providerEventId}|${quote.providerMarketId}|${quote.providerSelectionId}`, quote);
     }
+    for (const observation of part.nativeMarketObservations ?? []) {
+      nativeMarketObservations.set(
+        `${observation.providerEventId}|${observation.providerMarketId}|${observation.nativeType}`,
+        observation
+      );
+    }
   }
   if (input.collapseDuplicateEvents === true) {
-    collapseDuplicates(events, markets, quotes, {
+    collapseDuplicates(events, markets, quotes, nativeMarketObservations, {
       reconcileFeeds: false,
       ...(input.selectEvent === undefined ? {} : { selectEvent: input.selectEvent })
     });
@@ -209,6 +229,7 @@ export function mergeObservedCatalogParts(input: {
     rejectedMarketCount: input.parts.reduce((total, part) => total + part.diagnostics.length, 0),
     events: [...events.values()],
     markets: [...markets.values()],
-    quotes: [...quotes.values()]
+    quotes: [...quotes.values()],
+    nativeMarketObservations: [...nativeMarketObservations.values()]
   };
 }

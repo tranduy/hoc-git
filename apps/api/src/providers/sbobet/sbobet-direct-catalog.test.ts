@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { normalizeSbobetCatalog } from "@tool-chenh/adapters";
 import {
   extractSbobetDirectCatalogRecords,
+  extractSbobetNativeMarketObservations,
   extractSbobetMarketDomCandidates,
   inspectSbobetMarketGroups,
   inspectSbobetMarketLabelEvidence,
@@ -20,6 +22,115 @@ describe("extractSbobetDirectCatalogRecords", () => {
     const updated = mergeSbobetSocketCatalogRecords(bootstrap, [{ body: [{ "8": 5574638, "2": "Kairat", "3": "Levski",
       "7": { "5": ["0.5 0.95*55746380050009905h -0.75*55746380050009905a h 730078508161105"] } }] }]);
     expect(updated[0]?.markets[0]?.selections.map((selection) => selection.priceText)).toEqual(["0.95", "-0.75"]);
+  });
+
+  it("preserves detail-only corner and card markets when a socket updates one main market", () => {
+    const bootstrap = extractSbobetDirectCatalogRecords([{ "8": 5574638, "2": "Kairat", "3": "Levski", "7": {
+      "3": ["2.5 0.91*301h -0.93*301a 30001"],
+      "21": ["9.5 0.92*211h -0.94*211a 21001"],
+      "31": ["3.5 0.93*311h -0.95*311a 31001"]
+    } }], fallback);
+    const updated = mergeSbobetSocketCatalogRecords(bootstrap, [{ "8": 5574638,
+      "2": "Kairat", "3": "Levski", "7": { "3": ["2.5 0.95*301h -0.97*301a 30001"] }
+    }]);
+
+    expect(updated[0]?.markets.map((item) => item.marketId)).toEqual(["30001", "21001", "31001"]);
+    expect(updated[0]?.markets[0]?.selections.map((selection) => selection.priceText)).toEqual(["0.95", "-0.97"]);
+    expect(updated[0]?.markets.slice(1)).toEqual(bootstrap[0]?.markets.slice(1));
+  });
+
+  it("uses retained event metadata for an identity-only socket price update", () => {
+    const records = extractSbobetDirectCatalogRecords([{ "8": 5574638,
+      "7": { "21": ["9.5 0.95*211h -0.97*211a 21001"] }
+    }], fallback);
+
+    expect(records).toEqual([expect.objectContaining({
+      eventId: "5574638", leagueName: "Champions League", teamNames: ["Kairat", "Levski"],
+      timeText: "1H 29'", markets: [expect.objectContaining({ marketId: "21001" })]
+    })]);
+  });
+
+  it("returns explicit empty detail membership while a sparse socket container preserves retained markets", () => {
+    const bootstrap = extractSbobetDirectCatalogRecords([{ "8": 5574638,
+      "2": "Kairat", "3": "Levski", "7": { "21": ["9.5 0.92*211h -0.94*211a 21001"] }
+    }], fallback);
+    const empty = { "8": 5574638, "2": "Kairat", "3": "Levski", "7": {} };
+
+    expect(extractSbobetDirectCatalogRecords(empty, bootstrap)).toEqual([
+      expect.objectContaining({ eventId: "5574638", markets: [] })
+    ]);
+    expect(extractSbobetDirectCatalogRecords({ "8": 5574638 }, bootstrap)).toEqual([]);
+    expect(mergeSbobetSocketCatalogRecords(bootstrap, [empty])).toEqual(bootstrap);
+  });
+
+  it("retires an invalidated native market without retaining its old open prices", () => {
+    const bootstrap = extractSbobetDirectCatalogRecords([{ "8": 5574638, "7": {
+      "3": ["2.5 0.91*301h -0.93*301a 30001"],
+      "21": ["9.5 0.92*211h -0.94*211a 21001"]
+    } }], fallback);
+    const delta = { "8": 5574638, "7": {
+      "3": ["2.5 0*301h -0.93*301a 30001 1000000"]
+    } };
+
+    expect(extractSbobetNativeMarketObservations(delta, bootstrap, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "30001", disposition: "EXCLUDED" })
+    ]);
+    expect(mergeSbobetSocketCatalogRecords(bootstrap, [delta])[0]?.markets.map((item) => item.marketId))
+      .toEqual(["21001"]);
+  });
+
+  it("does not treat a malformed detail market container as valid empty membership", () => {
+    expect(extractSbobetDirectCatalogRecords({ "8": 5574638, "7": { error: "unavailable" } }, fallback))
+      .toEqual([]);
+  });
+
+  it("rejects mixed valid and malformed groups as detail authority and accounts for the malformed group", () => {
+    const body = { "8": 5574638, "7": { "3": null, "21": [] } };
+
+    expect(extractSbobetDirectCatalogRecords(body, fallback)).toEqual([]);
+    expect(extractSbobetNativeMarketObservations(body, fallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "5574638:native:3:group", nativeType: "3",
+        outcomeLabels: [], disposition: "EXCLUDED", reason: "INVALID_NATIVE_GROUP_SHAPE" })
+    ]);
+    const mixed = { "8": 5574638, "7": {
+      "3": null, "21": ["9.5 0.91*211h -0.93*211a 21001"]
+    } };
+    expect(extractSbobetDirectCatalogRecords(mixed, fallback)).toEqual([]);
+    expect(extractSbobetNativeMarketObservations(mixed, fallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "5574638:native:3:group", disposition: "EXCLUDED" }),
+      expect.objectContaining({ providerMarketId: "21001", disposition: "EXCLUDED",
+        reason: "INVALID_NATIVE_GROUP_SHAPE" })
+    ]);
+  });
+
+  it("does not infer an unknown native market ID from trailing numbers and delete a known market", () => {
+    const bootstrap = extractSbobetDirectCatalogRecords([{ "8": 5574638, "7": {
+      "3": ["2.5 0.91*301h -0.93*301a 30001"]
+    } }], fallback);
+    const delta = { "8": 5574638, "7": {
+      "777": ["2.5 0.81*777h -0.83*777a 77777 30001"]
+    } };
+
+    expect(extractSbobetNativeMarketObservations(delta, bootstrap, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "5574638:native:777:0", disposition: "UNMAPPED" })
+    ]);
+    expect(mergeSbobetSocketCatalogRecords(bootstrap, [delta])).toEqual(bootstrap);
+  });
+
+  it("retains zero handicap with signed native orientation through normalization", () => {
+    const body = { "8": 5574638, "7": {
+      "5": ["0 0.91*501h -0.93*501a h 50001"]
+    } };
+    const records = extractSbobetDirectCatalogRecords(body, fallback);
+    const catalog = normalizeSbobetCatalog(records, { observedAtMs: 123, receivedMonotonicMs: 456, sequence: 1 });
+
+    expect(catalog.markets).toEqual([expect.objectContaining({ providerMarketId: "50001", line: "0" })]);
+    expect(catalog.quotes.map((quote) => ({ id: quote.providerSelectionId, line: quote.line }))).toEqual([
+      { id: "501h", line: "0" }, { id: "501a", line: "0" }
+    ]);
+    expect(extractSbobetNativeMarketObservations(body, fallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "50001", disposition: "NORMALIZED" })
+    ]);
   });
 
   it("reads exact two-outcome half-goal markets and provider IDs from getEvent", () => {
@@ -96,6 +207,81 @@ describe("extractSbobetDirectCatalogRecords", () => {
       "CARD_FT_TOTAL", "CARD_FH_TOTAL", "CARD_FT_AH", "CARD_FH_AH", "SH_TOTAL", "SH_AH"
     ]);
     expect(record?.markets.some((item) => item.marketId === "25001" || item.marketId === "27001")).toBe(false);
+  });
+
+  it("accounts for mapped, excluded and unknown native groups without guessing their semantics", () => {
+    const body = [{ "8": 5574638, "2": "A", "3": "B", "7": {
+      "3": ["2.5 0.93*1h -0.91*1a 12345"],
+      "1": ["2.1*2h 3.1*2a 3.4*2d 12346"],
+      "777": ["0.81*3h -0.91*3a 12347"]
+    } }];
+
+    const observations = extractSbobetNativeMarketObservations(body, fallback, 123);
+    expect(observations).toHaveLength(3);
+    expect(observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: "12345", nativeType: "3", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "5574638:native:1:0", nativeType: "1", disposition: "EXCLUDED",
+        reason: "THREE_WAY_OUTCOME_DOMAIN" }),
+      expect.objectContaining({ providerMarketId: "5574638:native:777:0", nativeType: "777", disposition: "UNMAPPED",
+        reason: "NATIVE_TYPE_UNMAPPED" })
+    ]));
+  });
+
+  it("excludes malformed prices and outcome identities before they can invalidate a valid market", () => {
+    const body = [{ "8": 5574638, "2": "Kairat", "3": "Levski", "7": {
+      "3": ["2.5 0.93*301h -0.91*301a 30001", "3.5 1.51*302h -0.91*302a 30002",
+        "4.5 0.93*303h -0.91*303h 30003", "5.5 0.93*304a -0.91*304h 30004"]
+    } }];
+
+    expect(extractSbobetDirectCatalogRecords(body, fallback)[0]?.markets.map((item) => item.marketId))
+      .toEqual(["30001"]);
+    expect(extractSbobetNativeMarketObservations(body, fallback, 123).map((item) => ({
+      id: item.providerMarketId, disposition: item.disposition
+    }))).toEqual([
+      { id: "30001", disposition: "NORMALIZED" }, { id: "30002", disposition: "EXCLUDED" },
+      { id: "30003", disposition: "EXCLUDED" }, { id: "30004", disposition: "EXCLUDED" }
+    ]);
+  });
+
+  it("accounts for non-string native rows without inventing a two-outcome domain", () => {
+    const body = [{ "8": 5574638, "7": { "777": [null, { unexpected: "shape" }, 42] } }];
+
+    expect(extractSbobetNativeMarketObservations(body, fallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "5574638:native:777:0", outcomeLabels: [],
+        disposition: "EXCLUDED", reason: "INVALID_NATIVE_ROW_SHAPE" }),
+      expect.objectContaining({ providerMarketId: "5574638:native:777:1", outcomeLabels: [],
+        disposition: "EXCLUDED", reason: "INVALID_NATIVE_ROW_SHAPE" }),
+      expect.objectContaining({ providerMarketId: "5574638:native:777:2", outcomeLabels: [],
+        disposition: "EXCLUDED", reason: "INVALID_NATIVE_ROW_SHAPE" })
+    ]);
+  });
+
+  it("does not count a parsed native row as normalized when its event is rejected", () => {
+    const body = [{ "8": 5574638, "2": "Kairat", "3": "Levski", "7": {
+      "3": ["2.5 0.93*301h -0.91*301a 30001"]
+    } }];
+    const virtualFallback = fallback.map((record) => ({ ...record, leagueName: "Virtual Football" }));
+
+    expect(extractSbobetNativeMarketObservations(body, virtualFallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "30001", disposition: "EXCLUDED",
+        reason: "NORMALIZATION_REJECTED" })
+    ]);
+  });
+
+  it("retains an event whose only native market group is not mapped yet", () => {
+    const body = [{ "1": "Prematch", "2": [{
+      "0": "2026-09-08T12:00:00Z", "2": "Hidden Home", "3": "Hidden Away", "8": 778899,
+      "7": { "777": ["0.5 0.91*77889901h -0.97*77889902a 778899777001"] }
+    }] }];
+
+    const records = extractSbobetDirectCatalogRecords(body, [{
+      eventId: "778899", leagueName: "Prematch", timeText: "PREMATCH", scoreText: null,
+      startAtUtcMs: Date.parse("2026-09-08T12:00:00Z"), teamNames: ["Hidden Home", "Hidden Away"], markets: []
+    }]);
+
+    expect(records).toEqual([expect.objectContaining({
+      eventId: "778899", teamNames: ["Hidden Home", "Hidden Away"], markets: []
+    })]);
   });
 
   it("fails closed before an oversized payload can monopolize the API event loop", () => {

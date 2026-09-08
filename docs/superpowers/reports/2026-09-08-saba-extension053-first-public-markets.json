@@ -1,0 +1,348 @@
+{
+  "measuredAt": "2026-09-07T20:51:52.800Z",
+  "build": "sha256:b841922a50de643a10121e0a2a22807405712595790849a3b48afc6dd0c0253c",
+  "source": {
+    "sourceId": "chrome:SABA:2105831237",
+    "tabId": 2105831237,
+    "authorityDisposition": "ACTIVE"
+  },
+  "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+  "catalog": {
+    "state": "FRESH",
+    "events": 29,
+    "markets": 158,
+    "quotes": 316,
+    "native": 298,
+    "observedAtMs": 1788814308451
+  },
+  "capture": {
+    "name": "capture-1788814254982.jsonl",
+    "size": 744393,
+    "mtime": 1788814308471.4785
+  },
+  "diagnostics": {
+    "probeCount": 1,
+    "probes": [
+      {
+        "at": "2026-09-07T20:51:30.949Z",
+        "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+        "status": "NO_ACTION_COLLECTOR_TARGET_BOUND",
+        "viewRestored": true
+      }
+    ],
+    "collectorState": {
+      "nativeReady": true,
+      "catalogUsable": true,
+      "discoveryPending": false,
+      "discoveryAttempted": true,
+      "collectorState": "RUNNING",
+      "domBlocked": true,
+      "probeBlocked": false
+    },
+    "collectors": [
+      {
+        "at": "2026-09-07T20:51:48.312Z",
+        "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "IN_PROGRESS",
+        "viewRestored": true,
+        "completedOwners": 1,
+        "rosterOwners": 17,
+        "expandedOwners": 1,
+        "publicMarketSample": {
+          "ownerMatchId": "133152892",
+          "capturedAtMs": 1788814305191,
+          "groups": [
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Chính Xác",
+                "1-0",
+                "2-0",
+                "2-1",
+                "3-0",
+                "3-1",
+                "3-2",
+                "4-0"
+              ],
+              "nativeIds": [
+                "133152892__1054290299"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Chính Xác Hiệp 1",
+                "1-0",
+                "2-0",
+                "2-1",
+                "3-0",
+                "3-1",
+                "3-2",
+                "0-0"
+              ],
+              "nativeIds": [
+                "133152892__1054290298"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Chính Xác Hiệp 2",
+                "1-0",
+                "2-0",
+                "2-1",
+                "3-0",
+                "3-1",
+                "3-2",
+                "0-0"
+              ],
+              "nativeIds": [
+                "133152892__1054290246"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Chính Xác Hiệp 1/Cả Trận",
+                "Hiệp 1",
+                "Toàn Trận",
+                "Tỷ Lệ",
+                "View All",
+                "0-0",
+                "0-1",
+                "0-2"
+              ],
+              "nativeIds": [
+                "133152892__1054290296"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tổng Bàn thắng Chính xác Hiệp 1/Cả trận",
+                "Hiệp 1",
+                "Toàn Trận",
+                "Tỷ Lệ",
+                "View All",
+                "0",
+                "1",
+                "2"
+              ],
+              "nativeIds": [
+                "133152892__1054290253"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Kèo Chấp - Score Box",
+                "Tỷ số thắng",
+                "2",
+                "1",
+                "Hòa",
+                "-1",
+                "-2",
+                "Đội nhà"
+              ],
+              "nativeIds": [
+                "133152892__1054290252"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tài/Xỉu - Score Box",
+                "Tổng bàn thắng",
+                "0",
+                "1",
+                "2",
+                "3",
+                "4",
+                "Bằng/Tài"
+              ],
+              "nativeIds": [
+                "133152892__1054290251"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "H1/Cả Trận",
+                "HH",
+                "HD",
+                "HA",
+                "DH",
+                "DD",
+                "DA",
+                "AH"
+              ],
+              "nativeIds": [
+                "133152892__1054290303"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tổng Số Bàn Thắng",
+                "0-1",
+                "2-3",
+                "4-6",
+                "7+"
+              ],
+              "nativeIds": [
+                "133152892__1054290312"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Bàn thắng Đầu/ Cuối",
+                "HF",
+                "HL",
+                "AF",
+                "AL",
+                "Không Có Bàn Thắng"
+              ],
+              "nativeIds": [
+                "133152892__1054290305"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Chẵn / Lẻ của Nửa trận/Toàn trận",
+                "Lẻ/Lẻ",
+                "Lẻ/Chẵn",
+                "Chẵn/Lẻ",
+                "Chẵn/Chẵn"
+              ],
+              "nativeIds": [
+                "133152892__1054290238"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Cả Hai/Một/Không Đội Ghi Bàn",
+                "Cả Hai",
+                "Một",
+                "Không Có Bàn Thắng"
+              ],
+              "nativeIds": [
+                "133152892__1054290293"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Cược chấp 3 Cửa",
+                "Đội Nhà(-1)",
+                "Hòa(Đội Khách+1)",
+                "Đội Khách(+1)"
+              ],
+              "nativeIds": [
+                "133152892__1054290291"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Cơ Hội Kép",
+                "Đội Nhà hoặc Hòa",
+                "Đội Nhà hoặc Đội Khách",
+                "Đội Khách hoặc Hòa"
+              ],
+              "nativeIds": [
+                "133152892__1054290295"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Giữ sạch lưới",
+                "Đội Nhà Có",
+                "Đội Nhà Không",
+                "Đội Khách Có",
+                "Đội Khách Không"
+              ],
+              "nativeIds": [
+                "133152892__1054290306"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Cược Thắng Áp Đảo",
+                "Đội Nhà",
+                "Đội Khách"
+              ],
+              "nativeIds": [
+                "133152892__1054290292"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Đội thắng lội ngược dòng",
+                "Đội Nhà",
+                "Đội Khách"
+              ],
+              "nativeIds": [
+                "133152892__1054290288"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Thắng Cách Biệt",
+                "Đội nhà Thắng cách biệt 1 Bàn",
+                "Đội nhà Thắng cách biệt 2 Bàn",
+                "Đội nhà Thắng cách biệt 3 Bàn trở lên",
+                "Hòa Có Bàn Thắng (Ngoại Trừ 0-0)",
+                "Đội khách Thắng cách biệt 1 Bàn",
+                "Đội khách Thắng cách biệt 2 Bàn",
+                "Đội khách Thắng cách biệt 3 Bàn trở lên"
+              ],
+              "nativeIds": [
+                "133152892__1054290308"
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "latestEnvelopeEpoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+    "lastHealth": {
+      "at": "2026-09-07T20:51:45.126Z",
+      "counters": {
+        "OK": 3,
+        "ERROR": 0,
+        "TIMEOUT": 0,
+        "SKIPPED_INFLIGHT": 5,
+        "forcedUnlocks": 0
+      },
+      "lastOutcome": {
+        "workItem": "pollSabaDomChanges",
+        "outcome": "SKIPPED_INFLIGHT",
+        "durationMs": 10823
+      },
+      "lastErrorCode": null,
+      "inFlightAgeMs": 10823
+    },
+    "transports": {
+      "TAB_STATE": 19,
+      "WS_FRAME": 17,
+      "DOM_SNAPSHOT": 5,
+      "WS_STATE": 1
+    },
+    "lastDom": {
+      "at": "2026-09-07T20:51:48.451Z",
+      "epoch": "3fcae7d1-85a5-4bf9-bf77-90c30c59dbbc:2",
+      "recordCount": 46,
+      "chunkCount": 1,
+      "chunkIndex": 0
+    }
+  },
+  "acceptance": "FIRST_OWNER_ONLY_NOT_FULL_OR_REALTIME"
+}

@@ -1,9 +1,11 @@
 import {
   normalizeObservedFootballCatalog,
+  observeNativeCmdMarkets,
   type CmdCatalogInputRecord
 } from "@tool-chenh/adapters";
 import type {
   Category,
+  NativeMarketObservation,
   ProviderId,
   ProviderEvent,
   ProviderMarket,
@@ -20,6 +22,7 @@ export interface ObservedProviderCatalog {
   readonly comparisonState: "AWAITING_SECOND_PROVIDER";
   readonly observedAtMs: number;
   readonly rejectedMarketCount: number;
+  readonly nativeMarketObservations?: readonly NativeMarketObservation[];
   readonly events: readonly ProviderEvent[];
   readonly markets: readonly ProviderMarket[];
   readonly quotes: readonly ProviderQuote[];
@@ -105,13 +108,11 @@ export class CmdObservedCatalogReader {
     for (const record of records) {
       const eventOnly = normalizeObservedFootballCatalog(this.#provider, [{ ...record, groups: [] }], normalizationOptions);
       if (eventOnly.diagnostics.length > 0 || eventOnly.events.length !== 1) {
-        rejectedMarketCount += Math.max(1, record.groups.filter((group) =>
-          group.betTypeIds.length === 1 && ["1", "7"].includes(group.betTypeIds[0]!)).length);
+        rejectedMarketCount += Math.max(1, record.groups.length);
         continue;
       }
       events.push(eventOnly.events[0]!);
       for (const group of record.groups) {
-        if (group.betTypeIds.length !== 1 || !["1", "3", "7", "8"].includes(group.betTypeIds[0]!)) continue;
         const marketOnly = normalizeObservedFootballCatalog(this.#provider, [{ ...record, groups: [group] }], normalizationOptions);
         if (marketOnly.diagnostics.length > 0) {
           rejectedMarketCount += 1;
@@ -124,6 +125,7 @@ export class CmdObservedCatalogReader {
       }
     }
     if (records.length > 0 && events.length === 0) throw new Error("CMD_CATALOG_SCHEMA_ERROR");
+    const nativeMarketObservations = observeNativeCmdMarkets(this.#provider, records, normalizationOptions);
     this.#sequences.set(accountId, sequence);
     return {
       dataMode: "LIVE",
@@ -133,6 +135,7 @@ export class CmdObservedCatalogReader {
       comparisonState: "AWAITING_SECOND_PROVIDER",
       observedAtMs: now.wallClockNowMs,
       rejectedMarketCount,
+      nativeMarketObservations,
       events,
       markets,
       quotes

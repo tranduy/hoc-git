@@ -15,7 +15,7 @@
     "test:fixture-stack": "node --test scripts/fixture-stack-readiness.test.mjs",
     "test:managed-stack": "node --test scripts/managed-stack.test.mjs scripts/stack-paths.test.mjs scripts/stack-state.test.mjs scripts/automation-browser-cleanup.test.mjs scripts/resource-retention.test.mjs scripts/local-app-data.test.mjs scripts/child-respawn.test.mjs",
     "test:watch-smoke": "node --test scripts/smoke-watch-match.test.mjs",
-    "test:integration": "vitest run tests/integration",
+    "test:integration": "vitest run --dir tests/integration",
     "test:e2e": "playwright test",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "verify": "npm run typecheck && npm test && npm run test:integration && npm run test:fixture-stack && npm run test:watch-smoke"

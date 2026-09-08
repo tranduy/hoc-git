@@ -28,6 +28,9 @@ export class BtiObservedCatalogReader {
     this.#sequences.set(accountId, sequence);
     return { dataMode: "LIVE", accountId, provider: "BTI", category: "FOOTBALL",
       comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: snapshot.observedAtMs,
-      rejectedMarketCount: normalized.diagnostics.length, events: normalized.events, markets: normalized.markets, quotes: normalized.quotes };
+      rejectedMarketCount: normalized.diagnostics.length, events: normalized.events, markets: normalized.markets,
+      quotes: normalized.quotes, ...(snapshot.nativeMarketObservations === undefined ? {} : {
+        nativeMarketObservations: snapshot.nativeMarketObservations
+      }) };
   }
 }

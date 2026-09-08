@@ -40,7 +40,7 @@ describe("fixed-base two-way stake planning", () => {
     ["CORNER_FH_AH", "FIRST_HALF", "football-corners-first-half", "-0.25", "HOME", "AWAY"],
     ["CARD_FT_AH", "FULL_TIME", "football-cards-regulation", "-0.75", "HOME", "AWAY"],
     ["CARD_FH_TOTAL", "FIRST_HALF", "football-cards-first-half", "3.25", "OVER", "UNDER"]
-  ] as const)("balances exact %s quarter-line settlement without a both-loss state",
+  ] as const)("keeps %s quarter-line settlement out of the no-refund ticket set",
     (marketType, scope, settlementProfile, line, firstSelection, secondSelection) => {
       const expandedCell = (provider: "SABA" | "SBOBET", selection: string): ComparisonCell => {
         const providerEventId = `${provider}-event`;
@@ -58,10 +58,7 @@ describe("fixed-base two-way stake planning", () => {
         cells: [expandedCell("SABA", firstSelection), expandedCell("SBOBET", secondSelection)],
         bestBySelection: {}, margin: null, crossBook: true };
       const plan = buildObservedFixedBaseStakeEstimate(expandedRow, selected, policy);
-      expect(plan).not.toBeNull();
-      expect(Number(plan?.profitsBySelection[firstSelection])).toBeGreaterThan(0);
-      expect(Number(plan?.profitsBySelection[secondSelection])).toBeGreaterThan(0);
-      expect(Number(plan?.worstCaseProfit)).toBeGreaterThanOrEqual(10000);
+      expect(plan).toBeNull();
     });
 
   it("rejects selections that are not the exact opposing domain for the market", () => {
@@ -149,7 +146,7 @@ describe("fixed-base two-way stake planning", () => {
     ["FT_TOTAL" as const, "2.75", "OVER", "UNDER"],
     ["FT_AH" as const, "-0.25", "HOME", "AWAY"],
     ["FT_AH" as const, "-0.75", "HOME", "AWAY"]
-  ])("prices %s line %s against every full and half settlement state", (marketType, line, first, second) => {
+  ])("rejects %s line %s because it has partial-refund settlement states", (marketType, line, first, second) => {
     const left = cell("SABA", marketType, { [first]: "2.2" }, "OPEN", line);
     const right = cell("SBOBET", marketType, { [second]: "2.2" }, "OPEN", line);
     const withLine = (value: ComparisonCell): ComparisonCell => ({
@@ -158,12 +155,10 @@ describe("fixed-base two-way stake planning", () => {
 
     const plan = buildObservedFixedBaseStakeEstimate(row(marketType, [withLine(left), withLine(right)], line), selected, policy);
 
-    expect(plan).not.toBeNull();
-    expect(Number(plan?.worstCaseProfit)).toBeGreaterThanOrEqual(10000);
-    expect(Number(plan?.roi)).toBeGreaterThanOrEqual(0.05);
+    expect(plan).toBeNull();
   });
 
-  it("assigns the half-loss and half-win sides correctly for a negative quarter handicap", () => {
+  it("does not create an anchored ticket for a negative quarter handicap", () => {
     const candidate = row("FT_AH", [
       cell("SABA", "FT_AH", { HOME: "3" }, "OPEN", "-0.25"),
       cell("SBOBET", "FT_AH", { AWAY: "2" }, "OPEN", "-0.25")
@@ -177,11 +172,10 @@ describe("fixed-base two-way stake planning", () => {
       provider: "SABA", selection: "HOME", stake: "100000"
     });
 
-    expect(plan?.legs.find((leg) => leg.provider === "SBOBET")?.stake).toBe("120000");
-    expect(plan?.worstCaseProfit).toBe("10000");
+    expect(plan).toBeNull();
   });
 
-  it("maximizes the worst-case return for the observed BTI -0.25 versus CMD +0.25 prices", () => {
+  it("does not rank the observed -0.25 handicap as a no-refund opposing ticket", () => {
     const withMalayPrice = (value: ComparisonCell): ComparisonCell => ({
       ...value,
       quotes: value.quotes.map((quote) => ({ ...quote, rawFormat: "MALAY" as const }))
@@ -199,9 +193,7 @@ describe("fixed-base two-way stake planning", () => {
       provider: "SBOBET", selection: "AWAY", stake: "500000"
     });
 
-    expect(plan?.legs.find((leg) => leg.provider === "SABA")?.stake).toBe("425451");
-    expect(Number(plan?.worstCaseProfit)).toBeCloseTo(107787.142857, 5);
-    expect(Number(plan?.roi)).toBeCloseTo(0.11647, 5);
+    expect(plan).toBeNull();
   });
 
   it("rejects an Asian handicap pair when provider canonical lines disagree", () => {

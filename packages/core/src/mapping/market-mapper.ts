@@ -5,6 +5,7 @@ import type {
   ProviderMarket,
   Scope
 } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, isNoPushFootballLine } from "@tool-chenh/contracts";
 import { Decimal } from "../odds/convert.js";
 import type { EventMappingResult } from "./event-mapper.js";
 
@@ -52,12 +53,10 @@ type MarketGate = (
 ) => MappingEvidence;
 
 const MISSING_REASON = "MISSING_MANDATORY_EVIDENCE";
-const NO_LINE_MARKET_TYPES = new Set<MarketType>([
-  "FT_1X2",
-  "FH_1X2",
-  "SERIES_WINNER",
-  "MAP_WINNER"
-]);
+function isNoLineMarketType(marketType: MarketType): boolean {
+  return marketType === "FT_1X2" || marketType === "FH_1X2" || marketType === "SERIES_WINNER" ||
+    marketType === "MAP_WINNER" || footballBinaryMarketSpec(marketType)?.linePolicy === "NONE";
+}
 
 function printable(value: unknown): string {
   if (value === null || value === undefined || value === "") {
@@ -212,6 +211,9 @@ function validScopeFor(category: NormalizedMarket["category"], marketType: Marke
       : ["SERIES", "MAP_1", "MAP_2", "MAP_3", "MAP_4", "MAP_5"];
   }
 
+  const footballSpec = footballBinaryMarketSpec(marketType);
+  if (footballSpec !== null) return category === "FOOTBALL" ? [footballSpec.scope] : [];
+
   if (
     marketType.startsWith("FT_") ||
     marketType.startsWith("CORNER_FT_") ||
@@ -286,14 +288,14 @@ type NormalizedLine =
 
 function normalizeLine(market: NormalizedMarket): NormalizedLine {
   if (market.line === null) {
-    if (NO_LINE_MARKET_TYPES.has(market.marketType) || market.marketType === "OBSERVE_ONLY") {
+    if (isNoLineMarketType(market.marketType) || market.marketType === "OBSERVE_ONLY") {
       return { kind: "NONE" };
     }
 
     return { kind: "MISSING" };
   }
 
-  if (NO_LINE_MARKET_TYPES.has(market.marketType)) {
+  if (isNoLineMarketType(market.marketType)) {
     return { kind: "INVALID", raw: market.line };
   }
 
@@ -339,6 +341,30 @@ function sameLine(
   return lineValue(expected) === lineValue(actual)
     ? passed(gate, lineValue(expected), lineValue(actual))
     : contradicted(gate, lineValue(expected), lineValue(actual));
+}
+
+function noPushFootballLine(
+  _eventMapping: EventMappingResult,
+  left: NormalizedMarket,
+  right: NormalizedMarket
+): MappingEvidence {
+  const gate = "noPushFootballLine";
+  if (left.category !== "FOOTBALL" || right.category !== "FOOTBALL") {
+    return passed(gate, "not a Football line market", [left.line, right.line]);
+  }
+  const leftSpec = footballBinaryMarketSpec(left.marketType);
+  const rightSpec = footballBinaryMarketSpec(right.marketType);
+  if (leftSpec === null && rightSpec === null) {
+    return passed(gate, "non-Asian observation market", [left.marketType, right.marketType]);
+  }
+  const compatible = leftSpec !== null && rightSpec !== null && leftSpec.linePolicy === rightSpec.linePolicy &&
+    (leftSpec.linePolicy === "NONE"
+      ? left.line === null && right.line === null
+      : isNoPushFootballLine(left.line) && isNoPushFootballLine(right.line));
+  return compatible
+    ? passed(gate, leftSpec?.linePolicy === "NONE" ? "line-free binary settlement" : "half-unit line with no push result",
+      [left.line, right.line])
+    : contradicted(gate, "exact binary line policy with no push result", [left.line, right.line]);
 }
 
 function sameSettlementProfile(
@@ -419,6 +445,11 @@ function expectedOutcomeDomain(
     return ["AWAY", "DRAW", "HOME"];
   }
 
+  const footballSpec = footballBinaryMarketSpec(marketType);
+  if (footballSpec !== null && footballSpec.family !== "HANDICAP") {
+    return [...footballSpec.outcomes].sort();
+  }
+
   if (
     marketType === "FT_TOTAL" ||
     marketType === "FH_TOTAL" ||
@@ -484,6 +515,7 @@ const marketGates: readonly MarketGate[] = [
   sameScope,
   sameMarketType,
   sameLine,
+  noPushFootballLine,
   sameSettlementProfile,
   sameQuoteStatus,
   sameSelections,

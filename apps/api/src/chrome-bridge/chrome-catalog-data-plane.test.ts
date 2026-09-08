@@ -333,7 +333,16 @@ describe("ChromeCatalogDataPlane", () => {
     }
     await expect(plane.read(BTI)).resolves.toMatchObject({ provider: "BTI" });
 
-    expect(plane.ingest(btiPageHealth(5, "AUTH_ERROR"))).toBe(true);
+    const health = btiPageHealth(5, "AUTH_ERROR");
+    const rosterCoverage = JSON.stringify({ phase: "COMPLETE", detailCoverageComplete: false,
+      detailRosterEvents: 159, detailCachedEvents: 158, detailCachedBytes: 17_500_000,
+      detailPendingEvents: 1, detailFailedEvents: 1, detailOldestReceiptAgeMs: 90_000,
+      detailNearTtlMs: 12_000, detailDistantTtlMs: 60_000, detailRetainedEventCap: 2048,
+      nativeRosterEvents: 196, nativeDetailEvents: 158, nativeMarketRows: 4000,
+      nativeSelectionRows: 9000, nativeTypeCounts: "HC39:1500,OU39:2500", nativeInventoryTruncated: false });
+    expect(rosterCoverage.length).toBeGreaterThan(400);
+    expect(plane.ingest({ ...health, payload: { encoding: "UTF8", body: JSON.stringify({
+      ...JSON.parse(health.payload.body), rosterCoverage }) } })).toBe(true);
 
     expect(feeds.snapshot(BTI)).toMatchObject({ state: "STALLED", reason: "PROVIDER_PAGE_INVALID" });
     await expect(plane.read(BTI)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
@@ -373,6 +382,30 @@ describe("ChromeCatalogDataPlane", () => {
     expect(publish).toHaveBeenCalledTimes(2);
   });
 
+  it("promotes a complete BTI replacement baseline after the retained authority is stale", async () => {
+    let now = 2_000;
+    const feeds = new ProviderFeedRegistry({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: feeds });
+    for (const [index, path] of btiListPaths.entries()) {
+      plane.ingest(btiEnvelope(index + 1, path, "worker-a:0", "bti:1000:1", 100),
+        { connectionGeneration: 1 });
+    }
+    expect((await plane.read(BTI)).events).toHaveLength(100);
+
+    now = 100_000;
+    await expect(plane.read(BTI)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    let replacementAccepted = false;
+    for (const [index, path] of btiListPaths.entries()) {
+      replacementAccepted = plane.ingest({
+        ...btiEnvelope(index + 10, path, "worker-b:0", "bti:2000:1", 10),
+        observedAtMs: now + index
+      }, { connectionGeneration: 2 });
+    }
+    expect(replacementAccepted).toBe(true);
+    expect((await plane.read(BTI)).events).toHaveLength(10);
+  });
+
   it("publishes an APSPORT API baseline and applies a later socket price without DOM authority", async () => {
     let now = 1_500;
     const publish = vi.fn();
@@ -393,6 +426,39 @@ describe("ChromeCatalogDataPlane", () => {
     expect(publish).toHaveBeenCalledTimes(2);
     now = 61_100;
     await expect(plane.read(APSPORT)).resolves.toMatchObject({ provider: "APSPORT" });
+  });
+
+  it("recovers APSPORT HTTP authority in the same epoch after socket close without losing hidden detail", async () => {
+    let now = 1_000;
+    const feeds = new ProviderFeedRegistry({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: feeds, publish: vi.fn() });
+    now = 900_000;
+    const roster = apsportRawEvent(501);
+    const detail = { ...roster, "50": [...roster["50"], { "3": 80, "10": "Active", "9": [{
+      "0": "501-hidden-over", "2": "501-hidden-under", "6": "501-hidden-total", "7": "1.5",
+      "8": { "2": "0.75" }, "9": { "2": "-0.85" }
+    }] }] };
+    expect(plane.ingest({ ...apsportApiEnvelope(1, [roster]), observedAtMs: now })).toBe(true);
+    expect(plane.ingest({ ...apsportApiEnvelope(2, [detail], "DETAIL"), observedAtMs: ++now })).toBe(true);
+    expect(plane.ingest({ ...apsportWsEnvelope(3, apsportRawEvent(501, "0.66")), observedAtMs: ++now }))
+      .toBe(true);
+    const closed = { ...apsportWsEnvelope(4, null), observedAtMs: ++now, transport: "WS_STATE" as const,
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ state: "CLOSED" }) } };
+    expect(plane.ingest(closed)).toBe(true);
+    await expect(plane.read(APSPORT)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    expect(feeds.sweep(new Set([APSPORT]))).toEqual([expect.objectContaining({ stage: "SOFT" })]);
+    now += 10_001;
+    expect(feeds.sweep(new Set([APSPORT]))).toEqual([]);
+    await expect(plane.read(APSPORT)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+    now += 6_000;
+    expect(plane.ingest({ ...apsportApiEnvelope(5, [roster], "ROSTER", "worker-a:0", "apsport:7:2"),
+      observedAtMs: now })).toBe(true);
+    expect(feeds.snapshot(APSPORT)).toMatchObject({ state: "LIVE", sourceEpoch: "worker-a:0",
+      activeGeneration: "apsport:7:2", recoveryStage: "NONE" });
+    expect((await plane.read(APSPORT)).markets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: "501-hidden-total" })
+    ]));
+    expect(feeds.sweep(new Set([APSPORT]))).toEqual([]);
   });
 
   it("promotes a late-attached SABA candidate from two stable complete DOM generations", async () => {
@@ -418,6 +484,38 @@ describe("ChromeCatalogDataPlane", () => {
     await expect(plane.read(SABA)).resolves.toMatchObject({ provider: "SABA", events: expect.any(Array) });
   });
 
+  it("accepts exact APSPORT event removal without freezing subsequent detail deltas", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish: vi.fn() });
+    const exactDetail = (sequence: number, records: readonly unknown[]) => {
+      const input = apsportApiEnvelope(sequence, records, "DETAIL");
+      return { ...input, payload: { ...input.payload,
+        body: JSON.stringify({ ...JSON.parse(input.payload.body), trigger: "EVENT_CHANGE" }) } };
+    };
+    expect(plane.ingest(apsportApiEnvelope(1, [apsportRawEvent(501), apsportRawEvent(502)]))).toBe(true);
+    expect(plane.ingest(exactDetail(2, [{ ...apsportRawEvent(501), "10": "Suspended" }]))).toBe(true);
+    expect((await plane.read(APSPORT)).events.map((item) => item.providerEventId)).toEqual(["502"]);
+    expect(plane.ingest(exactDetail(3, [apsportRawEvent(502, "0.66")]))).toBe(true);
+    expect((await plane.read(APSPORT)).quotes[0]?.rawOdds).toBe("0.66");
+    expect(plane.ingest(exactDetail(4, [{ ...apsportRawEvent(502), "10": "Suspended" }]))).toBe(true);
+    expect((await plane.read(APSPORT)).events).toEqual([]);
+    expect((await plane.read(APSPORT)).quotes).toEqual([]);
+  });
+
+  it("publishes proven empty APSPORT event detail instead of retaining the final open prices", async () => {
+    const plane = new ChromeCatalogDataPlane({ now: () => 1_500, publish: vi.fn() });
+    expect(plane.ingest(apsportApiEnvelope(1, [apsportRawEvent(501)]))).toBe(true);
+    const exact = apsportApiEnvelope(2, [{ ...apsportRawEvent(501), "50": [] }], "DETAIL");
+    expect(plane.ingest({ ...exact, payload: { ...exact.payload,
+      body: JSON.stringify({ ...JSON.parse(exact.payload.body), trigger: "EVENT_CHANGE" }) } })).toBe(true);
+    const result = await plane.read(APSPORT);
+    expect(result.events).toHaveLength(1);
+    expect(result.markets).toEqual([]);
+    expect(result.quotes).toEqual([]);
+    expect(plane.ingest(apsportApiEnvelope(3, [apsportRawEvent(501)], "ROSTER", "worker-a:0", "apsport:7:2")))
+      .toBe(true);
+    expect((await plane.read(APSPORT)).quotes).toEqual([]);
+  });
+
   it("does not promote an incomplete APSPORT roster after an API or source epoch handover", async () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const onIngestRejected = vi.fn();
@@ -438,6 +536,24 @@ describe("ChromeCatalogDataPlane", () => {
     expect(plane.ingest(apsportApiEnvelope(3, events(95), "ROSTER", "worker-a:1", "apsport:7:3"),
       { connectionGeneration: 1 })).toBe(true);
     expect((await plane.read(APSPORT)).events).toHaveLength(95);
+  });
+
+  it("promotes a complete APSPORT replacement roster after the retained authority is stale", async () => {
+    let now = 2_000;
+    const feeds = new ProviderFeedRegistry({ now: () => now });
+    const plane = new ChromeCatalogDataPlane({ now: () => now, feedRegistry: feeds });
+    const events = (count: number) => Array.from({ length: count }, (_, index) => apsportRawEvent(index + 1));
+
+    expect(plane.ingest(apsportApiEnvelope(1, events(100)), { connectionGeneration: 1 })).toBe(true);
+    expect((await plane.read(APSPORT)).events).toHaveLength(100);
+
+    now = 500_000;
+    await expect(plane.read(APSPORT)).rejects.toThrow("PROVIDER_FEED_NOT_LIVE");
+
+    const replacement = { ...apsportApiEnvelope(2, events(20), "ROSTER", "worker-a:1", "apsport:7:2"),
+      observedAtMs: now };
+    expect(plane.ingest(replacement, { connectionGeneration: 1 })).toBe(true);
+    expect((await plane.read(APSPORT)).events).toHaveLength(20);
   });
 
   it("does not let a small new-epoch SABA socket baseline replace the complete DOM catalog", async () => {
@@ -470,6 +586,39 @@ describe("ChromeCatalogDataPlane", () => {
     });
     expect((await plane.read(SABA)).events).toHaveLength(20);
   });
+
+  it("promotes a stable SABA DOM replacement despite repeated small socket baselines and removes expired events",
+    async () => {
+      const coordinator = new ProviderAuthorityCoordinator();
+      const feeds = new ProviderFeedRegistry({ now: () => 100_020 });
+      const onIngestRejected = vi.fn();
+      const plane = new ChromeCatalogDataPlane({ now: () => 100_020,
+        authorityCoordinator: coordinator, feedRegistry: feeds, onIngestRejected });
+
+      expect(plane.ingest(sabaDomEnvelope(1, "worker-a:0", 100),
+        { connectionGeneration: 1 })).toBe(true);
+      expect((await plane.read(SABA)).events).toHaveLength(100);
+
+      expect(plane.ingest(sabaPushOpen(2, "1", "worker-a:1"),
+        { connectionGeneration: 1 })).toBe(false);
+      expect(plane.ingest(sabaPushBaseline(3, "1", "worker-a:1"),
+        { connectionGeneration: 1 })).toBe(false);
+      expect(plane.ingest(sabaDomEnvelope(4, "worker-a:1", 20),
+        { connectionGeneration: 1 })).toBe(false);
+      expect(plane.ingest(sabaPushOpen(5, "2", "worker-a:1"),
+        { connectionGeneration: 1 })).toBe(false);
+      expect(plane.ingest(sabaPushBaseline(6, "2", "worker-a:1"),
+        { connectionGeneration: 1 })).toBe(false);
+      expect(plane.ingest(sabaDomEnvelope(7, "worker-a:1", 20),
+        { connectionGeneration: 1 })).toBe(true);
+
+      expect(coordinator.snapshot(SABA)).toMatchObject({
+        active: expect.objectContaining({ sourceEpoch: "worker-a:1" }), candidate: null
+      });
+      const replacement = await plane.read(SABA);
+      expect(replacement.events).toHaveLength(20);
+      expect(replacement.events).not.toContainEqual(expect.objectContaining({ providerEventId: "saba-event-99" }));
+    });
 
   it("keeps an active SABA DOM generation when a non-authoritative socket frame is malformed", async () => {
     const feeds = new ProviderFeedRegistry({ now: () => 100_002 });

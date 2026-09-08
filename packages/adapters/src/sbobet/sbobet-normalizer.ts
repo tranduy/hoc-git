@@ -1,21 +1,23 @@
-import type { MarketType, ProviderEvent, ProviderMarket, ProviderQuote, Scope } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec,
+  type FootballBinaryOutcome, type MarketType, type OddsFormat,
+  type ProviderEvent, type ProviderMarket, type ProviderQuote, type Scope } from "@tool-chenh/contracts";
 import { isSupportedFootballTwoWayLine } from "../football-market-policy.js";
 
 export interface SbobetCatalogSelection {
   readonly selectionId: string;
-  readonly selection: "OVER" | "UNDER" | "HOME" | "DRAW" | "AWAY";
+  readonly selection: FootballBinaryOutcome | "DRAW";
   readonly priceText: string;
+  readonly priceFormat?: OddsFormat;
   readonly locked: boolean;
   readonly lineText?: string | null;
 }
 
 export interface SbobetCatalogMarket {
   readonly marketId: string;
-  readonly marketType: "FT_TOTAL" | "FT_1X2" | "FT_AH" | "FH_TOTAL" | "FH_AH" |
-    "SH_TOTAL" | "SH_AH" |
-    "CORNER_FT_TOTAL" | "CORNER_FT_AH" | "CORNER_FH_TOTAL" | "CORNER_FH_AH" |
-    "CARD_FT_TOTAL" | "CARD_FT_AH" | "CARD_FH_TOTAL" | "CARD_FH_AH";
+  readonly marketType: MarketType;
   readonly lineText: string | null;
+  /** Native numeric lines already carry HOME/AWAY orientation; DOM labels do not. */
+  readonly handicapLineFormat?: "SIGNED";
   readonly selections: readonly SbobetCatalogSelection[];
 }
 
@@ -46,43 +48,36 @@ export interface NormalizedSbobetCatalog {
 
 function virtualFootballEvidence(competition: string, teams: readonly string[]): boolean {
   const label = competition.normalize("NFKC").toLocaleLowerCase("en");
-  if (/(?:e[\s-]?soccer|\bvirtual\b|simulated reality|soccer marble|\bpes\b|ảo|điện tử)/u.test(label)) return true;
+  if (/(?:\be[\s-]?soccer\b|\bvirtual\b|simulated reality|soccer marble|\bpes\b|ảo|điện tử)/u.test(label)) return true;
   return teams.length === 2 && teams.every((team) => /(?:\((?:pg|e|pes|v|s)\)(?:\s*\([^)]*\))*|\([a-z0-9_]{4,}\))\s*$/iu.test(team));
 }
 
 const signedDecimal = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 
-const footballTotalMarketTypes = new Set<MarketType>([
-  "FT_TOTAL", "FH_TOTAL", "SH_TOTAL", "CORNER_FT_TOTAL", "CORNER_FH_TOTAL",
-  "CARD_FT_TOTAL", "CARD_FH_TOTAL"
-]);
-const footballHandicapMarketTypes = new Set<MarketType>([
-  "FT_AH", "FH_AH", "SH_AH", "CORNER_FT_AH", "CORNER_FH_AH", "CARD_FT_AH", "CARD_FH_AH"
-]);
-
 function exactFootballMarketSemantics(marketType: MarketType, fallbackProfile?: string): {
-  readonly isTotal: boolean; readonly isHandicap: boolean; readonly scope: Scope; readonly settlementProfile: string;
+  readonly isTotal: boolean; readonly isHandicap: boolean; readonly scope: Scope;
+  readonly outcomes: readonly FootballBinaryOutcome[]; readonly linePolicy: "HALF_UNIT" | "NONE";
+  readonly settlementProfile: string;
 } | null {
-  const isTotal = footballTotalMarketTypes.has(marketType);
-  const isHandicap = footballHandicapMarketTypes.has(marketType);
-  if (!isTotal && !isHandicap) return null;
-  if (marketType === "SH_TOTAL" || marketType === "SH_AH") return {
-    isTotal, isHandicap, scope: "SECOND_HALF", settlementProfile: "football-second-half-including-added-time"
-  };
-  if (marketType.startsWith("CORNER_")) return {
-    isTotal, isHandicap, scope: marketType.includes("_FH_") ? "FIRST_HALF" : "FULL_TIME",
-    settlementProfile: marketType.includes("_FH_") ? "football-corners-first-half" : "football-corners-regulation"
-  };
-  if (marketType.startsWith("CARD_")) return {
-    isTotal, isHandicap, scope: marketType.includes("_FH_") ? "FIRST_HALF" : "FULL_TIME",
-    settlementProfile: marketType.includes("_FH_") ? "football-cards-first-half" : "football-cards-regulation"
-  };
-  const firstHalf = marketType === "FH_TOTAL" || marketType === "FH_AH";
-  return {
-    isTotal, isHandicap, scope: firstHalf ? "FIRST_HALF" : "FULL_TIME",
-    settlementProfile: firstHalf ? "football-first-half-including-added-time"
-      : fallbackProfile ?? "football-regulation-including-added-time"
-  };
+  const spec = footballBinaryMarketSpec(marketType);
+  if (spec === null) return null;
+  const defaultRegulation = spec.statistic === "GOALS" && spec.scope === "FULL_TIME" &&
+    (marketType === "FT_AH" || marketType === "FT_TOTAL");
+  return { isTotal: spec.family === "TOTAL", isHandicap: spec.family === "HANDICAP",
+    scope: spec.scope, outcomes: spec.outcomes, linePolicy: spec.linePolicy,
+    settlementProfile: defaultRegulation ? fallbackProfile ?? spec.settlementProfile : spec.settlementProfile };
+}
+
+function validPrice(selection: SbobetCatalogSelection): boolean {
+  if (!signedDecimal.test(selection.priceText)) return false;
+  const price = Number(selection.priceText);
+  if (!Number.isFinite(price)) return false;
+  switch (selection.priceFormat ?? "MALAY") {
+    case "MALAY": return price !== 0 && Math.abs(price) <= 1;
+    case "DECIMAL": return price > 1;
+    case "HK": return price > 0;
+    case "AMERICAN": return Math.abs(price) >= 100;
+  }
 }
 
 function canonicalLine(value: string | null): string | null {
@@ -102,14 +97,14 @@ function handicapValue(value: string): number | null {
   return match[1] === "-" ? -magnitude : magnitude;
 }
 
-function canonicalHomeHandicap(selections: readonly SbobetCatalogSelection[]): string | null {
+function canonicalHomeHandicap(selections: readonly SbobetCatalogSelection[], signedNative = false): string | null {
   if (selections.length !== 2) return null;
   const evidence = selections.flatMap((selection) => {
     const raw = selection.lineText?.trim();
-    if (raw === undefined || raw === null || raw.length === 0) return [];
+    if (raw === undefined || raw === null || raw.length === 0) return signedNative ? [Number.NaN] : [];
     const parsed = handicapValue(raw);
-    if (parsed === null || parsed === 0) return [Number.NaN];
-    const selectionLine = /^[+-]/u.test(raw) ? parsed : -Math.abs(parsed);
+    if (parsed === null || (!signedNative && parsed === 0)) return [Number.NaN];
+    const selectionLine = signedNative || /^[+-]/u.test(raw) ? parsed : -Math.abs(parsed);
     return [selection.selection === "HOME" ? selectionLine : -selectionLine];
   });
   if (evidence.length === 0 || evidence.some((value) => !Number.isFinite(value)) ||
@@ -175,19 +170,16 @@ export function normalizeSbobetCatalog(
     for (const market of record.markets) {
       const semantics = exactFootballMarketSemantics(market.marketType, options.settlementProfile);
       if (semantics === null) continue;
-      const { isTotal, isHandicap, scope, settlementProfile } = semantics;
-      const outcomes = isTotal ? ["OVER", "UNDER"] : isHandicap
-        ? ["HOME", "AWAY"] : ["HOME", "DRAW", "AWAY"];
+      const { isTotal, isHandicap, scope, settlementProfile, outcomes, linePolicy } = semantics;
       const actual = market.selections.map((selection) => selection.selection);
       const ids = new Set(market.selections.map((selection) => selection.selectionId));
-      const line = isTotal ? canonicalLine(market.lineText) : isHandicap
-        ? canonicalHomeHandicap(market.selections) : null;
-      if (!isSupportedFootballTwoWayLine(line)) continue;
-      const pricesValid = market.selections.every((selection) => signedDecimal.test(selection.priceText) &&
-        Number(selection.priceText) !== 0 && Math.abs(Number(selection.priceText)) <= 1);
+      const line = linePolicy === "NONE" ? null : isHandicap
+        ? canonicalHomeHandicap(market.selections, market.handicapLineFormat === "SIGNED") : canonicalLine(market.lineText);
+      if (linePolicy === "HALF_UNIT" && !isSupportedFootballTwoWayLine(line)) continue;
+      const pricesValid = market.selections.every(validPrice);
       if (market.marketId.trim() === "" || ids.size !== outcomes.length || actual.length !== outcomes.length ||
         outcomes.some((outcome) => !actual.includes(outcome as never)) ||
-        ((isTotal || isHandicap) && line === null) || !pricesValid) {
+        (linePolicy === "HALF_UNIT" && line === null) || !pricesValid) {
         invalid = true;
         break;
       }
@@ -201,7 +193,7 @@ export function normalizeSbobetCatalog(
         provider, category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, providerSelectionId: selection.selectionId,
         marketType: market.marketType, scope, selection: selection.selection, line,
-        rawOdds: selection.priceText, rawFormat: "MALAY",
+        rawOdds: selection.priceText, rawFormat: selection.priceFormat ?? "MALAY",
         status, isLive: timing.isLive, sourceTimestampMs: null,
         receivedMonotonicMs: options.receivedMonotonicMs, sequence: options.sequence
       })));

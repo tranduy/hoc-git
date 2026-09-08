@@ -60,12 +60,34 @@ describe("CmdDomCatalogAdapter", () => {
         startAtUtcMs: Date.UTC(2026, 7, 16, 18, 30) }],
       markets: [{ marketType: "FT_AH", line: "-0.5" }]
     });
+    expect((updates[0]!.value as { nativeMarketObservations: Array<{ disposition: string }> })
+      .nativeMarketObservations).toEqual([
+        expect.objectContaining({ providerMarketId: "ah-1", disposition: "NORMALIZED" })
+      ]);
   });
 
   it("fails closed on malformed or credential-shaped DOM payloads", () => {
     const adapter = new CmdDomCatalogAdapter();
     expect(adapter.decode(envelope("not-json"))).toEqual([]);
     expect(adapter.decode(envelope(snapshotBody([{ ...record, token: "must-not-pass" }])))).toEqual([]);
+  });
+
+  it("keeps blank-time public DOM records invalid for CMD", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    expect(adapter.decode(envelope(snapshotBody([{ ...record, timeText: "" }])))).toEqual([]);
+  });
+
+  it("retains a native market with no bet-type marker as explicit inventory", () => {
+    const adapter = new CmdDomCatalogAdapter();
+    const unknown = { ...record, groups: [{ ...record.groups[0], betTypeIds: [], labels: ["Mystery"] }] };
+
+    const update = adapter.decode(envelope(snapshotBody([unknown])))[0]!.value as {
+      nativeMarketObservations: Array<{ nativeType: string; disposition: string; reason: string }>;
+    };
+
+    expect(update.nativeMarketObservations).toEqual([expect.objectContaining({
+      nativeType: "UNKNOWN", disposition: "EXCLUDED", reason: "AMBIGUOUS_NATIVE_TYPE"
+    })]);
   });
 
   it("quarantines malformed rows without discarding the remaining public catalog", () => {

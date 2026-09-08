@@ -5,6 +5,10 @@ describe("ImFootballObservedCatalogReader", () => {
   it("publishes the exact IM Football identity with provider event, market and selection ids", async () => {
     const reader = new ImFootballObservedCatalogReader({ source: { readCatalogFromFabet: async () => ({
       observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 20,
+      nativeMarketObservations: [{ provider: "IM", category: "FOOTBALL", providerEventId: "20",
+        providerMarketId: "30", nativeType: "bti=1", nativeLabel: "+0.5 | -0.5", nativeScope: "gp=1",
+        outcomeLabels: ["HOME", "AWAY"], observedAtMs: 1_788_000_000_000,
+        disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" }],
       records: [{ eventId: "20", leagueName: "League", timeText: "PREMATCH", scoreText: null,
         startAtUtcMs: 1_788_000_100_000, teamNames: ["Home", "Away"], markets: [{ marketId: "30",
           marketType: "FT_AH", lineText: null, selections: [
@@ -21,5 +25,8 @@ describe("ImFootballObservedCatalogReader", () => {
     expect(result.markets[0]).toMatchObject({ providerMarketId: "30", marketType: "FT_AH", line: "0.5" });
     expect(result.quotes.map((quote) => [quote.providerSelectionId, quote.selection, quote.sequence]))
       .toEqual([["31", "HOME", 1], ["32", "AWAY", 1]]);
+    expect(result.nativeMarketObservations).toEqual([
+      expect.objectContaining({ providerMarketId: "30", disposition: "NORMALIZED" })
+    ]);
   });
 });

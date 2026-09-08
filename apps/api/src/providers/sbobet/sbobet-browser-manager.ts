@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { SbobetCatalogInputRecord } from "@tool-chenh/adapters";
+import type { NativeMarketObservation } from "@tool-chenh/contracts";
 import { chromium, type BrowserContext, type Page, type Response } from "playwright";
 import { installCatalogResourcePolicy } from "../browser-resource-policy.js";
 import {
   appendBoundedSbobetSocketPayload, decodeSbobetJsonBody,
   isSbobetResponseCandidate, isSbobetSocketUrl, nextSbobetSocketDirtyAtMs
 } from "./sbobet-stomp.js";
-import { extractSbobetDirectCatalogRecords } from "./sbobet-direct-catalog.js";
+import { extractSbobetDirectCatalogRecords,
+  extractSbobetNativeMarketObservations } from "./sbobet-direct-catalog.js";
 import { parseSbobetTicketConstraint, type SbobetTicketConstraintSnapshot } from "./sbobet-ticket-constraint.js";
 import { inspectReadOnlyReceiptProtocol, readReadOnlySbobetReceiptHistory,
   type ReceiptProtocolInspection } from "./sbobet-receipt-protocol.js";
@@ -27,6 +29,7 @@ interface OpenSession {
 
 export interface SbobetCatalogSnapshot {
   readonly records: readonly SbobetCatalogInputRecord[];
+  readonly nativeMarketObservations?: readonly NativeMarketObservation[];
   readonly observedAtMs: number;
   readonly receivedMonotonicMs: number;
 }
@@ -352,8 +355,9 @@ export class PlaywrightSbobetBrowserManager {
     const body = decodeSbobetJsonBody(latest)[0];
     if (body === undefined) throw new Error("SBOBET_DIRECT_CATALOG_SCHEMA_ERROR");
     const records = extractSbobetDirectCatalogRecords(body, fallbackRecords);
+    const nativeMarketObservations = extractSbobetNativeMarketObservations(body, fallbackRecords, clock.observedAtMs);
     if (records.length === 0) throw new Error("SBOBET_DIRECT_CATALOG_EMPTY");
-    const snapshot = { records, ...clock };
+    const snapshot = { records, nativeMarketObservations, ...clock };
     session.catalog.value = snapshot;
     return snapshot;
   }

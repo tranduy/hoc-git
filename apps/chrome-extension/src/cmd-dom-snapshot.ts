@@ -96,7 +96,7 @@ export const CMD_PUBLIC_CATALOG_EXPRESSION = `(() => {
           return { ...base, lineText: evidence.match(/[+-]?\\d+(?:\\.\\d+)?(?:\\s*[\\/-]\\s*\\d+(?:\\.\\d+)?)?/u)?.[0] ?? null };
         }).filter((odd) => odd.marketOddsId && odd.priceText);
         return { betTypeIds, labels, odds };
-      }).filter((group) => group.odds.length > 0 && group.betTypeIds.length === 1);
+      }).filter((group) => group.odds.length > 0);
     });
     result.push({
       sportId: "1",

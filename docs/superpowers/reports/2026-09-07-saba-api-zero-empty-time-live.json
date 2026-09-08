@@ -1,0 +1,158 @@
+{
+  "at": "2026-09-07T12:27:07.671Z",
+  "scope": "VISIBLE_DOM_ONLY_NOT_FULL_PROVIDER_COVERAGE",
+  "sourceEpoch": "2f757e8f-d0f4-4282-9a9b-ab2168e8b9a4:3",
+  "firstFailingHop": null,
+  "captureTransportCounts": {
+    "TAB_STATE": 291,
+    "WS_FRAME": 425,
+    "DOM_SNAPSHOT": 328,
+    "WS_STATE": 36
+  },
+  "diagnostics": {
+    "/__fieldline_saba_catalog_discovery__": {
+      "observedAt": "2026-09-07T12:27:06.615Z",
+      "body": {
+        "kind": "SABA_PUBLIC_CATALOG_DISCOVERY",
+        "version": 1,
+        "scope": "LEGACY_SPORTS",
+        "navControls": [
+          {
+            "period": "EARLY",
+            "label": "Sớm",
+            "tag": "div",
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "selected": false,
+            "expanded": null,
+            "visible": true
+          },
+          {
+            "period": "TODAY",
+            "label": "Hôm Nay",
+            "tag": "div",
+            "classes": [
+              "c-side-nav__tab"
+            ],
+            "selected": false,
+            "expanded": null,
+            "visible": true
+          }
+        ],
+        "counts": {
+          "footballTables": 2,
+          "compactRows": 120,
+          "legacyLeagues": 0,
+          "legacyRows": 0,
+          "prematchRows": 3
+        },
+        "matches": [
+          {
+            "matchId": "134003685",
+            "shape": "COMPACT",
+            "controls": [
+              {
+                "label": "2",
+                "tag": "a",
+                "classes": [
+                  "c-btn",
+                  "c-btn--more",
+                  "c-is-close"
+                ],
+                "selected": false,
+                "expanded": null,
+                "visible": true
+              }
+            ]
+          },
+          {
+            "matchId": "134003749",
+            "shape": "COMPACT",
+            "controls": [
+              {
+                "label": "2",
+                "tag": "a",
+                "classes": [
+                  "c-btn",
+                  "c-btn--more",
+                  "c-is-close"
+                ],
+                "selected": false,
+                "expanded": null,
+                "visible": true
+              }
+            ]
+          },
+          {
+            "matchId": "134019593",
+            "shape": "COMPACT",
+            "controls": []
+          }
+        ],
+        "scroll": [
+          {
+            "tag": "html",
+            "classes": [],
+            "clientHeight": 948,
+            "scrollHeight": 25922,
+            "scrollTop": 0
+          }
+        ],
+        "truncated": false
+      }
+    }
+  },
+  "catalog": {
+    "observedAtMs": 1788784026278,
+    "snapshotState": "FRESH",
+    "events": 104,
+    "markets": 739,
+    "quotes": 1478,
+    "nativeRows": 1025
+  },
+  "receiptAligned": true,
+  "rawRecords": 120,
+  "rawGroups": 1025,
+  "rawZeroHandicapGroups": 79,
+  "rawTypes": {
+    "1": 177,
+    "2": 104,
+    "3": 177,
+    "5": 113,
+    "7": 167,
+    "8": 168,
+    "15": 107,
+    "22": 4,
+    "461": 4,
+    "462": 4
+  },
+  "dispositions": {
+    "NORMALIZED:CANONICAL_MARKET_MAPPED": 739,
+    "EXCLUDED:THREE_WAY_OUTCOME_DOMAIN": 100,
+    "UNMAPPED:NATIVE_TYPE_UNMAPPED": 103,
+    "EXCLUDED:EVENT_NOT_COMPARABLE": 83
+  },
+  "rawNativeMissing": 0,
+  "missingSamples": [],
+  "latestCompleteDomAt": 1788784026278,
+  "stableSourceDuringSample": true,
+  "visibleReceiptCheck": {
+    "scope": "VISIBLE_RECEIPT_ONLY_NOT_FULL_PROVIDER_COVERAGE",
+    "rawGroups": 1025,
+    "rawNativeMissing": 0,
+    "duplicateRawNative": 0,
+    "duplicatePublishedNative": 0,
+    "duplicatePublishedQuotes": 0,
+    "normalizedAbsent": 0,
+    "invalidNormalizedShape": 0,
+    "expectedPrices": 1454,
+    "matchedPrices": 1454,
+    "missingPrices": 0,
+    "olderPrices": 0,
+    "supersededPrices": 0,
+    "mismatchedPrices": 0
+  },
+  "apiBuildIdentity": "sha256:576c19dd9b1de7dbcfab1ca1a482250f16b18d93f5d6ae5ba728599bd09a5c4e",
+  "extensionVersion": "0.2.35"
+}

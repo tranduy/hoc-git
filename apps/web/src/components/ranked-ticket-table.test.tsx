@@ -125,11 +125,11 @@ describe("RankedTicketTable", () => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     render(<RankedTicketTable compact event={footballEvent} providers={["SABA", "IM"]} tickets={[total]} />);
 
-    expect(screen.getByText("T\u00e0i/X\u1ec9u to\u00e0n tr\u1eadn")).toBeTruthy();
+    expect(screen.getByText("Full-time total")).toBeTruthy();
     const first = screen.getByRole("button", { name: "Copy Alpha" });
     const second = screen.getByRole("button", { name: "Copy Beta" });
-    expect(screen.queryByRole("button", { name: "Copy T\u00e0i" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Copy X\u1ec9u" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy Over" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy Under" })).toBeNull();
     fireEvent.click(first);
     fireEvent.click(second);
     expect(writeText).toHaveBeenNthCalledWith(1, "Alpha");

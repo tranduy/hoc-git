@@ -1,0 +1,176 @@
+{
+  "buildIdentity": "sha256:e9e86f1c5d0cd322d06447a37f9bb247b6a03abbec92f19c707ea06f56e45cf8",
+  "sourceEpoch": "74040073-8f28-489c-b83f-5d6f442faf05:5",
+  "status": "OPEN_DEFECT_NOT_FIXED",
+  "finding": "Three explicit Vietnamese home/away multi-match aggregates are currently canonical REGULATION FOOTBALL events, five markets each. They are not individual head-to-head fixtures and need excluded native retention, not silent deletion.",
+  "at": "2026-09-07T14:45:10.993Z",
+  "observedAtMs": 1788792302368,
+  "snapshotState": "FRESH",
+  "cases": [
+    {
+      "id": "134003685",
+      "event": {
+        "provider": "SABA",
+        "category": "FOOTBALL",
+        "providerEventId": "134003685",
+        "competition": "*GIẢI SERIE A Ý - ĐỘI NHÀ/ĐỘI KHÁCH",
+        "seasonStage": null,
+        "startAtUtcMs": 1788795000000,
+        "participantA": "Đội Nhà - Thứ Hai - 2 Trận Đấu",
+        "participantB": "Đội Khách - Thứ Hai - 2 Trận Đấu",
+        "eventScope": "REGULATION",
+        "bestOf": null,
+        "isLive": false,
+        "rematchCandidate": false,
+        "fixtureDiscriminator": null,
+        "isVirtual": false,
+        "sportVariant": "FOOTBALL",
+        "liveState": null
+      },
+      "markets": 5,
+      "quotes": 10,
+      "native": [
+        {
+          "id": "134003685__1062165558",
+          "type": "1",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134003685__1062165554",
+          "type": "3",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134003685__1062165556",
+          "type": "2",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134003685__1062165550",
+          "type": "7",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134003685__1062165548",
+          "type": "8",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        }
+      ]
+    },
+    {
+      "id": "134003749",
+      "event": {
+        "provider": "SABA",
+        "category": "FOOTBALL",
+        "providerEventId": "134003749",
+        "competition": "*GIẢI LALIGA TÂY BAN NHA - ĐỘI NHÀ/ĐỘI KHÁCH",
+        "seasonStage": null,
+        "startAtUtcMs": 1788796800000,
+        "participantA": "Đội Nhà - Thứ Hai - 2 Trận Đấu",
+        "participantB": "Đội Khách - Thứ Hai - 2 Trận Đấu",
+        "eventScope": "REGULATION",
+        "bestOf": null,
+        "isLive": false,
+        "rematchCandidate": false,
+        "fixtureDiscriminator": null,
+        "isVirtual": false,
+        "sportVariant": "FOOTBALL",
+        "liveState": null
+      },
+      "markets": 5,
+      "quotes": 10,
+      "native": [
+        {
+          "id": "134003749__1062166124",
+          "type": "1",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134003749__1062166120",
+          "type": "3",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134003749__1062166123",
+          "type": "2",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134003749__1062166116",
+          "type": "7",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134003749__1062166114",
+          "type": "8",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        }
+      ]
+    },
+    {
+      "id": "134019593",
+      "event": {
+        "provider": "SABA",
+        "category": "FOOTBALL",
+        "providerEventId": "134019593",
+        "competition": "GIẢI ALLSVENSKAN THỤY ĐIỂN - ĐỘI NHÀ/ĐỘI KHÁCH",
+        "seasonStage": null,
+        "startAtUtcMs": 1788796800000,
+        "participantA": "Đội Nhà - Thứ Hai - 3 Trận Đấu",
+        "participantB": "Đội Khách - Thứ Hai - 3 Trận Đấu",
+        "eventScope": "REGULATION",
+        "bestOf": null,
+        "isLive": false,
+        "rematchCandidate": false,
+        "fixtureDiscriminator": null,
+        "isVirtual": false,
+        "sportVariant": "FOOTBALL",
+        "liveState": null
+      },
+      "markets": 5,
+      "quotes": 10,
+      "native": [
+        {
+          "id": "134019593__1062340209",
+          "type": "1",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134019593__1062340207",
+          "type": "3",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134019593__1062340208",
+          "type": "2",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134019593__1062340204",
+          "type": "7",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        },
+        {
+          "id": "134019593__1062340203",
+          "type": "8",
+          "disposition": "NORMALIZED",
+          "reason": "CANONICAL_MARKET_MAPPED"
+        }
+      ]
+    }
+  ]
+}

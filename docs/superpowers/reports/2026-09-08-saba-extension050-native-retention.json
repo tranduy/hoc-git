@@ -1,0 +1,40 @@
+{
+  "evidence": "Root current API+pipeline same-epoch check. Owner retained as prematch, 0 of19 More nativeIDs retained; no source/epoch-retirement explanation supported. No postclose actual price-change evidence proven.",
+  "receipt": {
+    "at": "2026-09-07T20:22:14.938Z",
+    "source": {
+      "sourceId": "chrome:SABA:2105831237",
+      "tabId": 2105831237,
+      "authorityDisposition": "ACTIVE"
+    },
+    "epoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+    "catalogObservedAtMs": 1788812483589,
+    "state": "FRESH",
+    "owner": [
+      {
+        "providerEventId": "133090282",
+        "isLive": false
+      }
+    ],
+    "foundNative": [],
+    "expected": 19
+  },
+  "wsAudit": {
+    "sourceEpoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+    "at": "2026-09-07T20:07:13.849Z",
+    "sequence": 93,
+    "matchedNativeIds": 19,
+    "missingNativeIds": 0,
+    "canonicalMarkets": 0,
+    "nativeUnmapped": 18,
+    "nativeExcluded": 1,
+    "potentialTwoSlotTypes": [
+      425,
+      27,
+      25
+    ],
+    "semanticLabelAndScopeProven": false,
+    "postCloseObservedValueChange": false,
+    "postCloseCaptureEnd": "2026-09-07T20:15:24.735Z"
+  }
+}

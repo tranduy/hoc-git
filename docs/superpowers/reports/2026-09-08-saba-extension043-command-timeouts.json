@@ -1,0 +1,59 @@
+{
+  "provider": "SABA",
+  "sourceId": "chrome:SABA:2105831237",
+  "extensionVersion": "0.2.43",
+  "buildIdentity": "sha256:5f2e205d74cbf85543f1c735ff8210640bf5cd6742d309327d7302fb462bc39b",
+  "captureFile": "capture-1788803368671.jsonl",
+  "scope": "Sanitized navigation-probe diagnostics only; not a full market inventory",
+  "results": [
+    {
+      "at": "2026-09-08T00:56:09.634+07:00",
+      "sourceEpoch": "915b8d4b-8753-40cc-963d-5cfda079f0b0:21",
+      "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+      "reason": "MORE_AFTER_NOT_STABLE",
+      "todayRows": 99,
+      "viewRestored": false,
+      "expansions": [],
+      "failureTrace": [
+        {
+          "stage": "MORE_AFTER_SETTLE",
+          "ownerMatchId": "132973443",
+          "outcome": "LAST_READ_ABSENT",
+          "reads": 2,
+          "elapsedMs": 3061,
+          "evaluationFailure": "FRAME_COMMAND_TIMEOUT",
+          "evaluationTarget": { "kind": "MAIN_WORLD", "contextIdPresent": true },
+          "before": { "relatedRowCount": 1, "marketIdCount": 11 },
+          "last": { "relatedRowCount": 1, "marketIdCount": 11 }
+        },
+        {
+          "stage": "RESTORE_TODAY_ACTION",
+          "outcome": "ACTION_UNCONFIRMED",
+          "reads": 1,
+          "elapsedMs": 2818,
+          "evaluationFailure": "FRAME_COMMAND_TIMEOUT",
+          "evaluationTarget": { "kind": "MAIN_WORLD", "contextIdPresent": true }
+        }
+      ]
+    },
+    {
+      "at": "2026-09-08T00:57:58.281+07:00",
+      "sourceEpoch": "915b8d4b-8753-40cc-963d-5cfda079f0b0:30",
+      "status": "NO_ACTION_INITIAL_TODAY_NOT_STABLE",
+      "reason": "INITIAL_TODAY_NOT_STABLE",
+      "initialRows": 98,
+      "viewRestored": true,
+      "failureTrace": [
+        {
+          "stage": "INITIAL_TODAY_SETTLE",
+          "outcome": "LAST_READ_ABSENT",
+          "reads": 1,
+          "elapsedMs": 4566,
+          "evaluationFailure": "FRAME_COMMAND_TIMEOUT",
+          "evaluationTarget": { "kind": "MAIN_WORLD", "contextIdPresent": true }
+        }
+      ]
+    }
+  ],
+  "conclusion": "Tool-side command timeouts observed. Site failure and full hidden coverage are not established."
+}

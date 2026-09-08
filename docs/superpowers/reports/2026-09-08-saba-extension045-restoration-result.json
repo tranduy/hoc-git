@@ -1,0 +1,47 @@
+{
+  "provider": "SABA",
+  "extensionVersion": "0.2.45",
+  "buildIdentity": "sha256:bd569cb54974ca8ebff944001075f4a30b8fc48ea1d74cc88398ff6d2432be60",
+  "sourceId": "chrome:SABA:2105831237",
+  "observedAt": "2026-09-07T18:28:27.431Z",
+  "captureFile": "capture-1788805477727.jsonl",
+  "results": [
+    {
+      "at": "2026-09-07T18:27:53.843Z",
+      "epoch": "9786cda4-1844-40ff-bfa0-2a5d19ce21ba:13",
+      "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+      "viewRestored": true,
+      "todayRows": 94,
+      "expansions": [
+        {
+          "ownerMatchId": "132973443",
+          "outcome": "NO_STRUCTURAL_CHANGE",
+          "addedMatchIds": [],
+          "addedNativeTypes": [],
+          "addedMarketIds": [],
+          "restored": true,
+          "truncated": false
+        },
+        {
+          "ownerMatchId": "132974263",
+          "outcome": "NO_STRUCTURAL_CHANGE",
+          "addedMatchIds": [],
+          "addedNativeTypes": [],
+          "addedMarketIds": [],
+          "restored": true,
+          "truncated": false
+        }
+      ],
+      "failureTrace": [
+        {
+          "stage": "EARLY_SETTLE",
+          "outcome": "FINGERPRINT_UNSTABLE",
+          "reads": 3,
+          "elapsedMs": 5225
+        }
+      ]
+    }
+  ],
+  "coverageClaim": "PUBLIC_STRUCTURE_ONLY",
+  "conclusion": "Final Today restoration verified. Early roster still unstable across three reads over 5225ms. No complete Today+Early traversal or full market inventory acceptance."
+}

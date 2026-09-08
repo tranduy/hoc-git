@@ -1,6 +1,7 @@
-import { isSupportedFootballTwoWayLine,
+import { isSupportedFootballTwoWayLine, normalizeSbobetCatalog,
   type SbobetCatalogInputRecord, type SbobetCatalogMarket,
   type SbobetCatalogSelection } from "@tool-chenh/adapters";
+import { footballBinaryMarketSpec, type NativeMarketObservation } from "@tool-chenh/contracts";
 
 export interface SbobetMarketGroupShape {
   readonly groupKey: string;
@@ -29,7 +30,9 @@ const pairPattern = /^(-?(?:0|1)(?:\.\d+)?)\*(\d+[had])$/u;
 function pair(value: unknown, selection: SbobetCatalogSelection["selection"]): SbobetCatalogSelection | null {
   if (typeof value !== "string") return null;
   const match = pairPattern.exec(value);
-  if (match === null || Number(match[1]) === 0) return null;
+  if (match === null || Number(match[1]) === 0 || Math.abs(Number(match[1])) > 1) return null;
+  const expectedSide = selection === "HOME" || selection === "OVER" ? "h" : "a";
+  if (!match[2]!.endsWith(expectedSide)) return null;
   return { selectionId: match[2]!, selection, priceText: match[1]!, locked: false };
 }
 
@@ -157,6 +160,8 @@ const sbobetMarketTypeByGroup: Readonly<Record<string, SbobetTwoWayMarketType>> 
   "33": "CARD_FT_AH", "34": "CARD_FH_AH",
   "80": "SH_TOTAL", "85": "SH_AH"
 };
+const sbobetThreeWayGroups = new Set(["1", "2", "17", "18", "29", "30", "68", "81", "82", "87", "88", "89", "90", "97"]);
+const sbobetRefundGroups = new Set(["75", "150", "151"]);
 
 function market(value: unknown, type: SbobetTwoWayMarketType): SbobetCatalogMarket | null {
   if (typeof value !== "string") return null;
@@ -172,11 +177,26 @@ function market(value: unknown, type: SbobetTwoWayMarketType): SbobetCatalogMark
   const marketId = isHandicap ? tokens[4] : tokens[3];
   if (typeof marketId !== "string" || !/^\d{4,30}$/u.test(marketId) ||
     (isHandicap && favored !== "h" && favored !== "a")) return null;
-  const selections = isHandicap ? [
+  const zeroHandicap = isHandicap && Number(line) === 0;
+  const selections = zeroHandicap ? [
+    { ...first, lineText: "0" }, { ...second, lineText: "0" }
+  ] : isHandicap ? [
     { ...first, lineText: favored === "h" ? line : null },
     { ...second, lineText: favored === "a" ? line : null }
   ] : [first, second];
-  return { marketId, marketType: type, lineText: isTotal ? line : null, selections };
+  return { marketId, marketType: type, lineText: isTotal ? line : null, selections,
+    ...(zeroHandicap ? { handicapLineFormat: "SIGNED" as const } : {}) };
+}
+
+function eventRecord(raw: Record<string, unknown>, existing: SbobetCatalogInputRecord,
+  markets: readonly SbobetCatalogMarket[]): SbobetCatalogInputRecord | null {
+  const teams = [raw["2"] === undefined ? existing.teamNames[0] : raw["2"],
+    raw["3"] === undefined ? existing.teamNames[1] : raw["3"]];
+  if (!teams.every((team) => typeof team === "string")) return null;
+  const parsedStart = typeof raw["0"] === "string" ? Date.parse(raw["0"]) : Number.NaN;
+  return { ...existing,
+    ...(Number.isFinite(parsedStart) ? { startAtUtcMs: parsedStart } : {}),
+    teamNames: teams as readonly string[], markets };
 }
 
 export function extractSbobetDirectCatalogRecords(
@@ -200,12 +220,13 @@ export function extractSbobetDirectCatalogRecords(
     }
     const raw = value as Record<string, unknown>;
     const eventId = typeof raw["8"] === "number" || typeof raw["8"] === "string" ? String(raw["8"]) : null;
-    const teams = [raw["2"], raw["3"]];
     const markets = raw["7"];
     const existing = eventId === null ? undefined : fallback.get(eventId);
-    if (eventId !== null && existing !== undefined && teams.every((team) => typeof team === "string") &&
+    if (eventId !== null && existing !== undefined &&
       typeof markets === "object" && markets !== null && !Array.isArray(markets)) {
-      const parsed = Object.entries(markets as Record<string, unknown>).flatMap(([key, rows]) => {
+      const nativeGroups = Object.entries(markets as Record<string, unknown>);
+      const validContainer = nativeGroups.every(([, rows]) => Array.isArray(rows));
+      const parsed = nativeGroups.flatMap(([key, rows]) => {
         const marketType = sbobetMarketTypeByGroup[key] ?? null;
         if (marketType === null || !Array.isArray(rows)) return [];
         return rows.flatMap((row) => {
@@ -214,13 +235,12 @@ export function extractSbobetDirectCatalogRecords(
         });
       });
       const unique = parsed.filter((candidate, index) => parsed.findIndex((other) => other.marketId === candidate.marketId) === index);
-      const parsedStart = typeof raw["0"] === "string" ? Date.parse(raw["0"]) : Number.NaN;
-      if (unique.length > 0) records.set(eventId, {
-        ...existing,
-        ...(Number.isFinite(parsedStart) ? { startAtUtcMs: parsedStart } : {}),
-        teamNames: teams as readonly string[],
-        markets: unique
-      });
+      // Keep the event even when every native group is not mapped yet. The
+      // accompanying inventory observation makes new native groups measurable.
+      // An explicit empty container is valid empty membership; only the caller
+      // knows whether this receipt is authoritative detail or a sparse delta.
+      const record = validContainer ? eventRecord(raw, existing, unique) : null;
+      if (record !== null) records.set(eventId, record);
     }
     const children = Object.values(raw);
     for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -230,14 +250,106 @@ export function extractSbobetDirectCatalogRecords(
   return [...records.values()];
 }
 
+export function extractSbobetNativeMarketObservations(
+  body: unknown,
+  fallbackRecords: readonly SbobetCatalogInputRecord[],
+  observedAtMs: number
+): readonly NativeMarketObservation[] {
+  const fallback = new Map(fallbackRecords.map((record) => [record.eventId, record]));
+  const observations: NativeMarketObservation[] = [];
+  const stack: Array<{ readonly value: unknown; readonly depth: number }> = [{ value: body, depth: 0 }];
+  const visited = new Set<object>();
+  while (stack.length > 0 && visited.size < 50_000 && observations.length < 100_000) {
+    const current = stack.pop()!;
+    const value = current.value;
+    if (current.depth > 20 || value === null || typeof value !== "object" || visited.has(value)) continue;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index -= 1) {
+        stack.push({ value: value[index], depth: current.depth + 1 });
+      }
+      continue;
+    }
+    const raw = value as Record<string, unknown>;
+    const eventIdValue = raw["8"];
+    const eventId = typeof eventIdValue === "number" || typeof eventIdValue === "string"
+      ? String(eventIdValue) : null;
+    const groups = raw["7"];
+    if (eventId !== null && fallback.has(eventId) && groups !== null && typeof groups === "object" && !Array.isArray(groups)) {
+      const nativeGroups = Object.entries(groups as Record<string, unknown>);
+      const validContainer = nativeGroups.every(([, rows]) => Array.isArray(rows));
+      for (const [groupKey, rows] of nativeGroups) {
+        if (!Array.isArray(rows)) {
+          observations.push({ provider: "SBOBET", category: "FOOTBALL", providerEventId: eventId,
+            providerMarketId: `${eventId}:native:${groupKey}:group`, nativeType: groupKey,
+            nativeLabel: null, nativeScope: null, outcomeLabels: [], observedAtMs,
+            disposition: "EXCLUDED", reason: "INVALID_NATIVE_GROUP_SHAPE" });
+          continue;
+        }
+        const mappedType = sbobetMarketTypeByGroup[groupKey] ?? null;
+        for (const [rowIndex, rawRow] of rows.entries()) {
+          const parsed = mappedType === null ? null : market(rawRow, mappedType);
+          const rowText = typeof rawRow === "string" ? rawRow : "";
+          const tokens = rowText.trim().split(/\s+/u);
+          // Unknown groups have no proven market-ID position. Their opaque
+          // inventory identity must never collide with a retained mapped row.
+          const nativeMarketId = mappedType === null
+            ? undefined
+            : tokens[totalMarketTypes.has(mappedType) ? 3 : 4];
+          const fallbackMarketId = nativeMarketId !== undefined && /^\d{4,30}$/u.test(nativeMarketId)
+            ? nativeMarketId : `${eventId}:native:${groupKey}:${rowIndex}`;
+          const selectionSides = [...rowText.matchAll(/\*\d{1,40}([had])/gu)].map((match) => match[1]!.toUpperCase());
+          const spec = mappedType === null ? null : footballBinaryMarketSpec(mappedType);
+          const candidate = parsed === null || !validContainer ? null : eventRecord(raw, fallback.get(eventId)!, [parsed]);
+          const normalized = candidate !== null && normalizeSbobetCatalog([candidate], {
+            observedAtMs, receivedMonotonicMs: 0, sequence: 0
+          }).markets.length === 1;
+          const excludedReason = typeof rawRow !== "string" ? "INVALID_NATIVE_ROW_SHAPE"
+            : parsed !== null && !validContainer ? "INVALID_NATIVE_GROUP_SHAPE"
+            : parsed !== null && !normalized ? "NORMALIZATION_REJECTED"
+            : sbobetThreeWayGroups.has(groupKey) ? "THREE_WAY_OUTCOME_DOMAIN"
+            : sbobetRefundGroups.has(groupKey) ? "PUSH_OR_REFUND_SETTLEMENT" : null;
+          observations.push({ provider: "SBOBET", category: "FOOTBALL", providerEventId: eventId,
+            providerMarketId: parsed?.marketId ?? fallbackMarketId, nativeType: groupKey,
+            nativeLabel: null, nativeScope: spec?.scope ?? null,
+            outcomeLabels: selectionSides,
+            observedAtMs, disposition: normalized ? "NORMALIZED"
+              : excludedReason !== null || mappedType !== null ? "EXCLUDED" : "UNMAPPED",
+            reason: normalized ? "CANONICAL_MARKET_MAPPED" : excludedReason ??
+              (mappedType !== null ? "INVALID_TWO_WAY_SHAPE" : "NATIVE_TYPE_UNMAPPED") });
+        }
+      }
+    }
+    const children = Object.values(raw);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push({ value: children[index], depth: current.depth + 1 });
+    }
+  }
+  return observations;
+}
+
 export function mergeSbobetSocketCatalogRecords(
   bootstrap: readonly SbobetCatalogInputRecord[],
   bodies: readonly unknown[]
 ): readonly SbobetCatalogInputRecord[] {
   const records = new Map(bootstrap.map((record) => [record.eventId, record]));
   for (const body of bodies.slice(-500)) {
-    const updates = extractSbobetDirectCatalogRecords(body, [...records.values()]);
-    updates.forEach((record) => records.set(record.eventId, record));
+    const retained = [...records.values()];
+    const updates = extractSbobetDirectCatalogRecords(body, retained);
+    const observations = extractSbobetNativeMarketObservations(body, retained, 0);
+    for (const record of updates) {
+      const existing = records.get(record.eventId);
+      const incomingIds = new Set(record.markets.map((candidate) => candidate.marketId));
+      const invalidatedIds = new Set(observations.filter((observation) =>
+        observation.providerEventId === record.eventId &&
+        sbobetMarketTypeByGroup[observation.nativeType] !== undefined &&
+        /^\d{4,30}$/u.test(observation.providerMarketId) && !incomingIds.has(observation.providerMarketId))
+        .map((observation) => observation.providerMarketId));
+      records.set(record.eventId, { ...record,
+        markets: [...new Map([...(existing?.markets ?? []).filter((candidate) => !invalidatedIds.has(candidate.marketId)),
+          ...record.markets]
+          .map((candidate) => [candidate.marketId, candidate])).values()] });
+    }
   }
   return [...records.values()];
 }

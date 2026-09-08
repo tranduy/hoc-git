@@ -1,0 +1,91 @@
+{
+  "note": "Actual .52 readonlybinding succeeds withnativeReadytrue; firstcollector failsbeforeownercompletion andrestorefails,DOMblockretained. OriginalpageerrorwasmaskedbyTODAY_RESTORE_UNCONFIRMED; no claimofexactunderlyingpagefailureyet. .53 preservescollection/restorationcodes anddecouplesTodayrestorationfromsupplementalmarketvalidation while retainingclosedcontrol/documentproof.",
+  "snapshots": [
+    {
+      "at": "2026-09-07T20:37:55.113Z",
+      "build": "sha256:2fe74ffd90de3a8d3559ad0e01fcbf5264c4142446aa967121618fd9e79a2eb2",
+      "firstFailingHop": "HOP8_SEMANTIC",
+      "source": {
+        "sourceId": "chrome:SABA:2105831237",
+        "tabId": 2105831237,
+        "authorityDisposition": "CANDIDATE"
+      },
+      "epoch": "f47136c6-f247-4c9a-987a-ee015fd7c861:4",
+      "catalog": {
+        "state": "FRESH",
+        "events": 37,
+        "markets": 221,
+        "quotes": 442,
+        "native": 389,
+        "observedAtMs": 1788813426853
+      },
+      "capture": {
+        "name": "capture-1788813425309.jsonl",
+        "size": 573613,
+        "mtime": 1788813473659.1565
+      }
+    },
+    {
+      "probeCount": 1,
+      "probes": [
+        {
+          "at": "2026-09-07T20:37:40.557Z",
+          "epoch": "f47136c6-f247-4c9a-987a-ee015fd7c861:4",
+          "status": "NO_ACTION_COLLECTOR_TARGET_BOUND",
+          "viewRestored": true
+        }
+      ],
+      "collectorState": {
+        "nativeReady": true,
+        "catalogUsable": true,
+        "discoveryPending": false,
+        "discoveryAttempted": true,
+        "collectorState": "FINISHED",
+        "domBlocked": true,
+        "probeBlocked": false
+      },
+      "collectors": [
+        {
+          "at": "2026-09-07T20:37:40.879Z",
+          "epoch": "f47136c6-f247-4c9a-987a-ee015fd7c861:4",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "INCOMPLETE",
+          "viewRestored": false,
+          "reason": "TODAY_RESTORE_UNCONFIRMED",
+          "completedOwners": 0
+        }
+      ],
+      "latestEnvelopeEpoch": "f47136c6-f247-4c9a-987a-ee015fd7c861:4",
+      "lastHealth": {
+        "at": "2026-09-07T20:37:53.657Z",
+        "counters": {
+          "OK": 5,
+          "ERROR": 0,
+          "TIMEOUT": 0,
+          "SKIPPED_INFLIGHT": 1,
+          "forcedUnlocks": 0
+        },
+        "lastOutcome": {
+          "workItem": "pollSabaDomChanges",
+          "outcome": "OK",
+          "durationMs": 3
+        },
+        "lastErrorCode": null,
+        "inFlightAgeMs": 0
+      },
+      "transports": {
+        "WS_FRAME": 18,
+        "TAB_STATE": 16,
+        "DOM_SNAPSHOT": 6,
+        "WS_STATE": 1
+      },
+      "lastDom": {
+        "at": "2026-09-07T20:37:40.465Z",
+        "epoch": "f47136c6-f247-4c9a-987a-ee015fd7c861:4",
+        "recordCount": 4,
+        "chunkCount": 2,
+        "chunkIndex": 1
+      }
+    }
+  ]
+}

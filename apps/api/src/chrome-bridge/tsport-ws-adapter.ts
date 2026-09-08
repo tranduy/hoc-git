@@ -1,5 +1,6 @@
 import { normalizeSbobetCatalog, type SbobetCatalogInputRecord } from "@tool-chenh/adapters";
-import { CmdSnapshotChunkSchema, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, CmdSnapshotChunkSchema,
+  type ChromeBridgeEnvelope, type MarketType, type NativeMarketObservation, type OddsFormat } from "@tool-chenh/contracts";
 import { z } from "zod";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type NormalizedCatalogPart } from "./catalog-part-merge.js";
@@ -18,6 +19,7 @@ const MAX_SOCKET_ADOPTED_EVENTS = 512;
 const AUTHORITATIVE_BASELINE_REFRESH_MS = 20_000;
 interface RetainedRecord {
   readonly record: SbobetCatalogInputRecord;
+  readonly nativeMarketObservations: readonly NativeMarketObservation[];
   readonly seenAtMs: number;
   readonly receivedMonotonicMs: number;
   readonly sequence: number;
@@ -78,15 +80,97 @@ interface SourceEpochFence {
 }
 
 type JsonRecord = Record<string, unknown>;
-type TsportTwoWayMarketType = Exclude<SbobetCatalogInputRecord["markets"][number]["marketType"], "FT_1X2">;
-const marketTypeByGroup: Readonly<Record<string, TsportTwoWayMarketType>> = {
-  "3": "FT_TOTAL", "4": "FH_TOTAL", "5": "FT_AH", "6": "FH_AH",
-  "19": "CORNER_FT_AH", "20": "CORNER_FH_AH",
-  "21": "CORNER_FT_TOTAL", "22": "CORNER_FH_TOTAL",
-  "31": "CARD_FT_TOTAL", "32": "CARD_FH_TOTAL",
-  "33": "CARD_FT_AH", "34": "CARD_FH_AH",
-  "80": "SH_TOTAL", "85": "SH_AH"
+interface TsportMarketSemantics {
+  readonly marketType: MarketType;
+  readonly selections: readonly ["HOME" | "OVER" | "ODD" | "YES", "AWAY" | "UNDER" | "EVEN" | "NO"];
+}
+
+const marketSemanticsByGroup: Readonly<Record<string, TsportMarketSemantics>> = {
+  "3": { marketType: "FT_TOTAL", selections: ["OVER", "UNDER"] },
+  "4": { marketType: "FH_TOTAL", selections: ["OVER", "UNDER"] },
+  "5": { marketType: "FT_AH", selections: ["HOME", "AWAY"] },
+  "6": { marketType: "FH_AH", selections: ["HOME", "AWAY"] },
+  "8": { marketType: "FT_ODD_EVEN", selections: ["ODD", "EVEN"] },
+  "9": { marketType: "FH_ODD_EVEN", selections: ["ODD", "EVEN"] },
+  "19": { marketType: "CORNER_FT_AH", selections: ["HOME", "AWAY"] },
+  "20": { marketType: "CORNER_FH_AH", selections: ["HOME", "AWAY"] },
+  "21": { marketType: "CORNER_FT_TOTAL", selections: ["OVER", "UNDER"] },
+  "22": { marketType: "CORNER_FH_TOTAL", selections: ["OVER", "UNDER"] },
+  "31": { marketType: "CARD_FT_TOTAL", selections: ["OVER", "UNDER"] },
+  "32": { marketType: "CARD_FH_TOTAL", selections: ["OVER", "UNDER"] },
+  "33": { marketType: "CARD_FT_AH", selections: ["HOME", "AWAY"] },
+  "34": { marketType: "CARD_FH_AH", selections: ["HOME", "AWAY"] },
+  "36": { marketType: "FT_BTTS", selections: ["YES", "NO"] },
+  "37": { marketType: "FH_BTTS", selections: ["YES", "NO"] },
+  "56": { marketType: "CORNER_FT_ODD_EVEN", selections: ["ODD", "EVEN"] },
+  "57": { marketType: "CORNER_FH_ODD_EVEN", selections: ["ODD", "EVEN"] },
+  "60": { marketType: "SENDING_OFF", selections: ["YES", "NO"] },
+  "61": { marketType: "HOME_CORNER_FT_TOTAL", selections: ["OVER", "UNDER"] },
+  "62": { marketType: "HOME_CORNER_FH_TOTAL", selections: ["OVER", "UNDER"] },
+  "63": { marketType: "AWAY_CORNER_FT_TOTAL", selections: ["OVER", "UNDER"] },
+  "64": { marketType: "AWAY_CORNER_FH_TOTAL", selections: ["OVER", "UNDER"] },
+  "69": { marketType: "HOME_FT_SCORE_BOTH_HALVES", selections: ["YES", "NO"] },
+  "70": { marketType: "AWAY_FT_SCORE_BOTH_HALVES", selections: ["YES", "NO"] },
+  "71": { marketType: "HOME_FT_WIN_BOTH_HALVES", selections: ["YES", "NO"] },
+  "72": { marketType: "AWAY_FT_WIN_BOTH_HALVES", selections: ["YES", "NO"] },
+  "73": { marketType: "HOME_FT_WIN_EITHER_HALF", selections: ["YES", "NO"] },
+  "74": { marketType: "AWAY_FT_WIN_EITHER_HALF", selections: ["YES", "NO"] },
+  "76": { marketType: "HOME_FT_ODD_EVEN", selections: ["ODD", "EVEN"] },
+  "77": { marketType: "AWAY_FT_ODD_EVEN", selections: ["ODD", "EVEN"] },
+  "78": { marketType: "HOME_FT_WIN_TO_NIL", selections: ["YES", "NO"] },
+  "79": { marketType: "AWAY_FT_WIN_TO_NIL", selections: ["YES", "NO"] },
+  "80": { marketType: "SH_TOTAL", selections: ["OVER", "UNDER"] },
+  "83": { marketType: "HOME_FT_CLEAN_SHEET", selections: ["YES", "NO"] },
+  "84": { marketType: "AWAY_FT_CLEAN_SHEET", selections: ["YES", "NO"] },
+  "85": { marketType: "SH_AH", selections: ["HOME", "AWAY"] },
+  "86": { marketType: "SH_ODD_EVEN", selections: ["ODD", "EVEN"] },
+  "99": { marketType: "FT_BOTH_HALVES_OVER_TOTAL", selections: ["YES", "NO"] },
+  "100": { marketType: "FT_BOTH_HALVES_UNDER_TOTAL", selections: ["YES", "NO"] },
+  "101": { marketType: "HOME_FT_TOTAL", selections: ["OVER", "UNDER"] },
+  "102": { marketType: "AWAY_FT_TOTAL", selections: ["OVER", "UNDER"] },
+  "139": { marketType: "YELLOW_CARD_FT_TOTAL", selections: ["OVER", "UNDER"] },
+  "148": { marketType: "HOME_FT_TO_WIN", selections: ["YES", "NO"] },
+  "149": { marketType: "AWAY_FT_TO_WIN", selections: ["YES", "NO"] },
+  "154": { marketType: "FT_ANY_TEAM_TO_WIN", selections: ["YES", "NO"] }
 };
+
+const nativeGroupLabelById: Readonly<Record<string, string>> = {
+  "1": "FT_1X2", "2": "FH_1X2", "3": "FT_TOTAL", "4": "FH_TOTAL", "5": "FT_AH", "6": "FH_AH",
+  "7": "NEXT_GOAL", "8": "FT_ODD_EVEN", "9": "FH_ODD_EVEN", "10": "CORRECT_SCORE",
+  "11": "FH_CORRECT_SCORE", "12": "DOUBLE_CHANCE", "13": "FH_DOUBLE_CHANCE", "14": "TOTAL_SCORE",
+  "15": "FH_TOTAL_SCORE", "16": "DRAW_NO_BET", "17": "CORNER_FT_1X2", "18": "CORNER_FH_1X2",
+  "19": "CORNER_FT_AH", "20": "CORNER_FH_AH", "21": "CORNER_FT_TOTAL", "22": "CORNER_FH_TOTAL",
+  "29": "CARD_FT_1X2", "30": "CARD_FH_1X2", "31": "CARD_FT_TOTAL", "32": "CARD_FH_TOTAL",
+  "33": "CARD_FT_AH", "34": "CARD_FH_AH", "36": "FT_BTTS", "37": "FH_BTTS",
+  "56": "CORNER_FT_ODD_EVEN", "57": "CORNER_FH_ODD_EVEN", "58": "TEAM_QUALIFY",
+  "59": "WHICH_TEAM_KICKOFF", "60": "SENDING_OFF", "61": "HOME_CORNER_FT_TOTAL",
+  "62": "HOME_CORNER_FH_TOTAL", "63": "AWAY_CORNER_FT_TOTAL", "64": "AWAY_CORNER_FH_TOTAL",
+  "65": "HIGHEST_SCORING_HALF", "66": "LAST_CORNER", "67": "FH_LAST_CORNER", "68": "HALFTIME_FULLTIME",
+  "69": "HOME_FT_SCORE_BOTH_HALVES", "70": "AWAY_FT_SCORE_BOTH_HALVES",
+  "71": "HOME_FT_WIN_BOTH_HALVES", "72": "AWAY_FT_WIN_BOTH_HALVES",
+  "73": "HOME_FT_WIN_EITHER_HALF", "74": "AWAY_FT_WIN_EITHER_HALF", "75": "FH_DRAW_NO_BET",
+  "76": "HOME_FT_ODD_EVEN", "77": "AWAY_FT_ODD_EVEN", "78": "HOME_FT_WIN_TO_NIL",
+  "79": "AWAY_FT_WIN_TO_NIL", "80": "SH_TOTAL", "81": "FT_1X2_BTTS", "82": "FT_1X2_TOTAL",
+  "83": "HOME_FT_CLEAN_SHEET", "84": "AWAY_FT_CLEAN_SHEET", "85": "SH_AH", "86": "SH_ODD_EVEN",
+  "87": "HOME_HIGHEST_SCORING_HALF", "88": "AWAY_HIGHEST_SCORING_HALF", "89": "SH_1X2",
+  "90": "RACE_TO_CORNERS_FT", "91": "RACE_TO_CORNERS_FH", "97": "LAST_GOAL",
+  "98": "DOUBLE_CHANCE_BTTS", "99": "FT_BOTH_HALVES_OVER_TOTAL", "100": "FT_BOTH_HALVES_UNDER_TOTAL",
+  "101": "HOME_FT_TOTAL", "102": "AWAY_FT_TOTAL", "103": "WHICH_TEAM_TO_SCORE", "129": "PENALTY_WINNER",
+  "130": "PENALTY_TOTAL", "131": "CORNER_RANGE", "132": "HOME_EXACT_GOALS", "133": "AWAY_EXACT_GOALS",
+  "134": "HOME_CORNER_RANGE", "135": "AWAY_CORNER_RANGE", "136": "CORNER_FH_RANGE", "137": "NEXT_CORNER",
+  "138": "YELLOW_CARD_1X2", "139": "YELLOW_CARD_FT_TOTAL", "140": "CORNER_FH_OVER_EXACT_UNDER",
+  "141": "CORNER_FT_OVER_EXACT_UNDER_EXTRA", "142": "CORNER_FT_TOTAL_EXTRA", "143": "YELLOW_CARD_DOUBLE_CHANCE",
+  "144": "EUROPEAN_CORNER_HANDICAP", "146": "EUROPEAN_NEXT_GOAL", "147": "REST_OF_MATCH_WINNER",
+  "148": "HOME_FT_TO_WIN", "149": "AWAY_FT_TO_WIN", "150": "HOME_NO_BET", "151": "AWAY_NO_BET",
+  "153": "NEXT_PLAYER_GOALSCORER", "154": "FT_ANY_TEAM_TO_WIN", "155": "ANYTIME_GOALSCORER",
+  "159": "FAST_BOOKING_1X2_10M", "162": "FAST_TOTAL_10M", "163": "FAST_CORNER_1X2_10M",
+  "164": "FAST_CORNER_ODD_EVEN_5M", "166": "FAST_CORNER_TOTAL_5M", "167": "FAST_1X2_5M",
+  "168": "FAST_1X2_10M", "170": "FAST_CORNER_TOTAL_10M", "172": "FAST_TOTAL_5M"
+};
+
+const threeWayNativeGroups = new Set(["1", "2", "17", "18", "29", "30", "65", "68", "81", "82", "87", "88",
+  "89", "90", "91", "138", "140", "141", "143", "144", "146", "147", "159", "163", "167", "168"]);
+const pushOrRefundNativeGroups = new Set(["16", "75", "150", "151"]);
 
 const boundedText = (max: number) => z.string().trim().min(1).max(max);
 const apsportCatalogBatchSchema = z.object({
@@ -111,7 +195,7 @@ function isVirtualFootballIdentity(sportId: string | number | undefined,
       .test(label)) return true;
   if (sportId === undefined && teams.length === 2 &&
     teams.every((team) => /\bpro w\s*$/iu.test(team))) return true;
-  if (/(?:e[\s-]?soccer|\bvirtual\b|simulated reality|soccer marble|\bpes\b|\u1ea3o|\u0111i\u1ec7n t\u1eed)/u
+  if (/(?:\be[\s-]?soccer\b|\bvirtual\b|simulated reality|soccer marble|\bpes\b|\u1ea3o|\u0111i\u1ec7n t\u1eed)/u
     .test(label)) return true;
   if (teams.some((team) => /\(v\)\s*$/iu.test(team))) return true;
   return teams.length === 2 && teams.every((team) =>
@@ -191,7 +275,7 @@ function activeApsportApiEvent(event: JsonRecord): boolean {
   if (event["10"] !== undefined && event["10"] !== null && event["10"] !== "") return false;
   return Array.isArray(event["50"]) && event["50"].some((candidate) => {
     const group = record(candidate);
-    return group !== null && group["10"] === "Active" && marketTypeByGroup[String(group["3"])] !== undefined &&
+    return group !== null && group["10"] === "Active" &&
       Array.isArray(group["9"]) && group["9"].length > 0;
   });
 }
@@ -210,13 +294,19 @@ function eligibleApsportApiEvent(event: JsonRecord, nowMs: number, prematchWindo
   return startAtMs >= nowMs;
 }
 
-function retainedRecord(record: SbobetCatalogInputRecord, envelope: ChromeBridgeEnvelope): RetainedRecord {
+function retainedRecord(record: SbobetCatalogInputRecord, envelope: ChromeBridgeEnvelope,
+  rawEvent?: JsonRecord): RetainedRecord {
   return { record, seenAtMs: envelope.observedAtMs,
-    receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence };
+    receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence,
+    nativeMarketObservations: rawEvent === undefined ? []
+      : observeTsportNativeMarkets(rawEvent, envelope.observedAtMs) };
 }
 
-function sameRecord(left: SbobetCatalogInputRecord | undefined, right: SbobetCatalogInputRecord): boolean {
-  return left !== undefined && JSON.stringify(left) === JSON.stringify(right);
+function sameRetainedRecord(left: RetainedRecord | undefined, right: RetainedRecord): boolean {
+  const semanticFingerprint = (value: unknown): string => JSON.stringify(value, (key, item) =>
+    key === "observedAtMs" ? undefined : item);
+  return left !== undefined && semanticFingerprint([left.record, left.nativeMarketObservations]) ===
+    semanticFingerprint([right.record, right.nativeMarketObservations]);
 }
 
 /**
@@ -269,9 +359,93 @@ function inverseLine(value: string): string | null {
   return inverse > 0 ? `+${inverse}` : String(inverse);
 }
 
-function price(odd: JsonRecord, key: "8" | "9"): string | null {
+function price(odd: JsonRecord, key: "8" | "9"): { readonly priceText: string; readonly priceFormat: OddsFormat } | null {
   const formats = record(odd[key]);
-  return formats === null ? null : scalar(formats["2"]);
+  if (formats === null) return null;
+  const malay = scalar(formats["2"]);
+  if (malay !== null && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(malay) && Number(malay) !== 0 &&
+    Math.abs(Number(malay)) <= 1) return { priceText: malay, priceFormat: "MALAY" };
+  const decimal = scalar(formats["0"]);
+  return decimal !== null && /^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(decimal) && Number(decimal) > 1
+    ? { priceText: decimal, priceFormat: "DECIMAL" }
+    : null;
+}
+
+function extractTsportMarket(group: JsonRecord, odd: JsonRecord): SbobetCatalogInputRecord["markets"][number] | null {
+  const groupId = scalar(group["3"]);
+  const semantics = groupId === null ? null : marketSemanticsByGroup[groupId] ?? null;
+  if (semantics === null) return null;
+  const spec = footballBinaryMarketSpec(semantics.marketType);
+  const line = scalar(odd["7"]);
+  const firstId = scalar(odd["0"]);
+  const secondId = scalar(odd["2"]);
+  const marketId = scalar(odd["6"]);
+  const firstPrice = price(odd, "8");
+  const secondPrice = price(odd, "9");
+  if (spec === null || (spec.linePolicy !== "NONE" && line === null) ||
+    firstId === null || secondId === null || marketId === null ||
+    firstPrice === null || secondPrice === null || scalar(odd["3"]) !== null) return null;
+  const isHandicap = spec.family === "HANDICAP";
+  const awayLine = isHandicap ? inverseLine(line!) : null;
+  if (isHandicap && awayLine === null) return null;
+  const locked = group["10"] !== "Active";
+  return {
+    marketId, marketType: semantics.marketType, lineText: spec.linePolicy === "NONE" ? null : line!,
+    ...(isHandicap ? { handicapLineFormat: "SIGNED" as const } : {}),
+    selections: [
+      { selectionId: firstId, selection: semantics.selections[0], priceText: firstPrice.priceText,
+        priceFormat: firstPrice.priceFormat, locked, ...(isHandicap ? { lineText: line! } : {}) },
+      { selectionId: secondId, selection: semantics.selections[1], priceText: secondPrice.priceText,
+        priceFormat: secondPrice.priceFormat, locked, ...(isHandicap ? { lineText: awayLine! } : {}) }
+    ]
+  };
+}
+
+function nativeOutcomeLabels(odd: JsonRecord, semantics: TsportMarketSemantics | null): readonly string[] {
+  if (semantics !== null) return semantics.selections;
+  return ([['0', 'NATIVE_0'], ['2', 'NATIVE_2'], ['3', 'NATIVE_3']] as const)
+    .filter(([key]) => scalar(odd[key]) !== null).map(([, label]) => label);
+}
+
+export function observeTsportNativeMarkets(event: JsonRecord, observedAtMs: number): readonly NativeMarketObservation[] {
+  const providerEventId = scalar(event["2"]);
+  if (providerEventId === null || !Number.isFinite(observedAtMs) || !Array.isArray(event["50"])) return [];
+  const observations: NativeMarketObservation[] = [];
+  for (const rawGroup of event["50"]) {
+    const group = record(rawGroup);
+    const groupId = group === null ? null : scalar(group["3"]);
+    if (group === null || groupId === null || !Array.isArray(group["9"])) continue;
+    const semantics = marketSemanticsByGroup[groupId] ?? null;
+    for (let index = 0; index < group["9"].length; index += 1) {
+      const odd = record(group["9"][index]);
+      if (odd === null) continue;
+      const normalized = semantics === null ? null : extractTsportMarket(group, odd);
+      const knownLabel = nativeGroupLabelById[groupId] ?? null;
+      const providerMarketId = scalar(odd["6"]) ?? `${providerEventId}:${groupId}:${index}`;
+      let disposition: NativeMarketObservation["disposition"];
+      let reason: string;
+      if (normalized !== null) {
+        disposition = "NORMALIZED";
+        reason = semantics!.marketType;
+      } else if (semantics !== null) {
+        disposition = "EXCLUDED";
+        reason = "INVALID_TWO_WAY_SHAPE";
+      } else if (knownLabel === null) {
+        disposition = "UNMAPPED";
+        reason = "NATIVE_TYPE_UNMAPPED";
+      } else {
+        disposition = "EXCLUDED";
+        reason = threeWayNativeGroups.has(groupId) ? "THREE_WAY_OUTCOME_DOMAIN"
+          : pushOrRefundNativeGroups.has(groupId) ? "PUSH_OR_REFUND_SETTLEMENT"
+            : "CANONICAL_EQUIVALENCE_NOT_PROVEN";
+      }
+      observations.push({ provider: "APSPORT", category: "FOOTBALL", providerEventId,
+        providerMarketId, nativeType: groupId, nativeLabel: knownLabel,
+        nativeScope: semantics === null ? null : footballBinaryMarketSpec(semantics.marketType)?.scope ?? null,
+        outcomeLabels: nativeOutcomeLabels(odd, semantics), observedAtMs, disposition, reason });
+    }
+  }
+  return observations;
 }
 
 export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInputRecord | null {
@@ -283,6 +457,12 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
   if (home === null || away === null || home === away) return noteRefusal("record-no-teams");
   if (leagueName === null) return noteRefusal("record-no-league");
   if (!Array.isArray(event["50"])) return noteRefusal("record-no-markets");
+  if (!event["50"].every((candidate) => {
+    const group = record(candidate);
+    const groupId = group === null ? null : scalar(group["3"]);
+    return group !== null && groupId !== null && groupId.trim() !== "" &&
+      Array.isArray(group["9"]) && group["9"].every((odd) => record(odd) !== null);
+  })) return noteRefusal("record-malformed-markets");
 
   // A book pausing a market is telling us the price is no longer on offer, and
   // refusing the frame that said so left the price it had standing as current.
@@ -294,42 +474,20 @@ export function extractTsportFootballRecord(event: JsonRecord): SbobetCatalogInp
   for (const rawGroup of event["50"]) {
     const group = record(rawGroup);
     if (group === null || !Array.isArray(group["9"])) continue;
-    const locked = !eventActive || group["10"] !== "Active";
-    const groupId = scalar(group["3"]);
-    const marketType = groupId === null ? null : marketTypeByGroup[groupId] ?? null;
-    if (marketType === null) continue;
     for (const rawOdd of group["9"]) {
       const odd = record(rawOdd);
       if (odd === null) continue;
-      const line = scalar(odd["7"]);
-      const firstId = scalar(odd["0"]);
-      const secondId = scalar(odd["2"]);
-      const marketId = scalar(odd["6"]);
-      const firstPrice = price(odd, "8");
-      const secondPrice = price(odd, "9");
-      if ([line, firstId, secondId, marketId, firstPrice, secondPrice].some((item) => item === null)) continue;
-      const isHandicap = marketType.endsWith("_AH");
-      const awayLine = isHandicap ? inverseLine(line!) : null;
-      if (isHandicap && awayLine === null) continue;
-      markets.push({
-        marketId: marketId!, marketType, lineText: line!, selections: [
-          { selectionId: firstId!, selection: isHandicap ? "HOME" : "OVER",
-            priceText: firstPrice!, locked, ...(isHandicap ? { lineText: line! } : {}) },
-          { selectionId: secondId!, selection: isHandicap ? "AWAY" : "UNDER",
-            priceText: secondPrice!, locked, ...(isHandicap ? { lineText: awayLine! } : {}) }
-        ]
-      });
+      const market = extractTsportMarket({ ...group, ...(eventActive ? {} : { "10": "Suspended" }) }, odd);
+      if (market !== null) markets.push(market);
     }
   }
-  // A frame that carries a score or a clock and no market is ordinary, and
-  // saying so is what keeps it from reading as a fixture nobody carries.
-  if (markets.length === 0) return noteRefusal("record-no-usable-markets");
   const scoreHome = Number(event["25"]);
   const scoreAway = Number(event["26"]);
   const scoreText = Number.isSafeInteger(scoreHome) && scoreHome >= 0 && Number.isSafeInteger(scoreAway) && scoreAway >= 0
     ? `${scoreHome} - ${scoreAway}` : null;
   const startAtUtcMs = typeof event["11"] === "string" ? Date.parse(event["11"]) : Number.NaN;
   const isLive = event["6"] === true;
+  if (!isLive && !Number.isFinite(startAtUtcMs)) return noteRefusal("record-invalid-kickoff");
   return { eventId, leagueName, timeText: isLive ? "LIVE" : "PREMATCH", scoreText: isLive ? scoreText : null,
     ...(Number.isFinite(startAtUtcMs) ? { startAtUtcMs } : {}), teamNames: [home, away], markets };
 }
@@ -459,17 +617,38 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     evidenceMode: "BASELINE" | "DELTA",
     provenance: "WS" | "AUTHENTICATED_HTTP"
   ): DecodedCatalogUpdate {
-    const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => normalizeSbobetCatalog([entry.record], {
-      observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
-      sequence: entry.sequence, provider: "APSPORT",
-      settlementProfile: "football-regulation-including-added-time"
+    const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => ({
+      ...normalizeSbobetCatalog([entry.record], {
+        observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
+        sequence: entry.sequence, provider: "APSPORT",
+        settlementProfile: "football-regulation-including-added-time"
+      }),
+      nativeMarketObservations: entry.nativeMarketObservations
     });
-    const retainedEntries = [...state.rosterRecords.values(), ...state.detailRecords.values(),
+    // A completed event detail owns its market membership. A later shallow
+    // roster can refresh matching main prices, but cannot resurrect omissions.
+    const rosterEntries = [...state.rosterRecords].map(([eventId, entry]) => {
+      const detail = state.detailRecords.get(eventId);
+      if (detail === undefined) return entry;
+      const marketIds = new Set(detail.record.markets.map((market) => market.marketId));
+      const nativeIds = new Set(detail.nativeMarketObservations.map((item) =>
+        `${item.providerMarketId}|${item.nativeType}`));
+      return { ...entry, record: { ...entry.record,
+        markets: entry.record.markets.filter((market) => marketIds.has(market.marketId)) },
+        nativeMarketObservations: entry.nativeMarketObservations.filter((item) =>
+          nativeIds.has(`${item.providerMarketId}|${item.nativeType}`)) };
+    });
+    const retainedEntries = [...rosterEntries, ...state.detailRecords.values(),
       ...state.socketRecords.values()];
     retainedEntries.sort((left, right) => left.sequence - right.sequence ||
       left.receivedMonotonicMs - right.receivedMonotonicMs || left.seenAtMs - right.seenAtMs);
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "APSPORT",
       observedAtMs: envelope.observedAtMs, parts: retainedEntries.map(normalizeEntry) });
+    const authoritativeEmptyMarkets = catalog.events.length > 0 && catalog.markets.length === 0 &&
+      catalog.quotes.length === 0 && catalog.events.every((event) => {
+        const detail = state.detailRecords.get(event.providerEventId);
+        return detail !== undefined && detail.record.markets.length === 0;
+      });
     return {
       sourceId: envelope.sourceId,
       sequence: envelope.sequence,
@@ -478,6 +657,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       evidenceMode,
       provenance,
       generation: state.generation,
+      ...(authoritativeEmptyMarkets ? { authoritativeEmptyMarkets: true as const } : {}),
       providerTimestampMs: null,
       ...(evidenceMode === "BASELINE" ? { authoritativeBaseline: true as const } : {})
     };
@@ -505,7 +685,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         const eventId = apsportRawEventId(rawEvent)!;
         rosterEventIds.add(eventId);
         const extracted = extractTsportFootballRecord(rawEvent);
-        if (extracted !== null) rosterRecords.set(eventId, retainedRecord(extracted, envelope));
+        if (extracted !== null) rosterRecords.set(eventId, retainedRecord(extracted, envelope, rawEvent));
       }
       const sameEpoch = current?.sourceEpoch === sourceEpoch(envelope);
       const retainEligible = (input: ReadonlyMap<string, RetainedRecord>): Map<string, RetainedRecord> =>
@@ -529,12 +709,17 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       current.generation !== batch.data.generation ||
       current.prematchWindowHours !== batch.data.prematchWindowHours) return this.#ignore("delta-generation-mismatch");
     const isExactEventChange = batch.data.trigger === "EVENT_CHANGE";
+    if (isExactEventChange && batch.data.records.length !== 1) return this.#ignore("exact-detail-not-single-event");
     let changed = false;
+    const removedEventIds = new Set<string>();
     for (const rawEvent of batch.data.records) {
       const eventId = apsportRawEventId(rawEvent);
       if (eventId === null) continue;
       const wasKnown = current.rosterEventIds.has(eventId);
       if (!isExactEventChange && (!wasKnown || current.exactEventIds.has(eventId))) continue;
+      // A malformed active response is not evidence that the fixture vanished.
+      const extracted = extractTsportFootballRecord(rawEvent);
+      if (extracted === null) continue;
       if (isExactEventChange &&
         !eligibleApsportApiEvent(rawEvent, envelope.observedAtMs, batch.data.prematchWindowHours)) {
         if (!wasKnown) continue;
@@ -543,33 +728,26 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
         current.rosterRecords.delete(eventId);
         current.detailRecords.delete(eventId);
         current.socketRecords.delete(eventId);
+        removedEventIds.add(eventId);
         changed = true;
         continue;
       }
       if (!eligibleApsportApiEvent(rawEvent, envelope.observedAtMs, batch.data.prematchWindowHours)) continue;
-      const extracted = extractTsportFootballRecord(rawEvent);
-      const previous = current.detailRecords.get(eventId)?.record;
-      if (extracted === null) {
-        if (isExactEventChange && wasKnown) {
-          current.exactEventIds.add(eventId);
-          current.rosterEventIds.delete(eventId);
-          current.rosterRecords.delete(eventId);
-          current.socketRecords.delete(eventId);
-          changed = true;
-        }
-        if (current.detailRecords.delete(eventId)) changed = true;
-        continue;
-      }
+      const previous = current.detailRecords.get(eventId);
       if (isExactEventChange) {
         current.rosterEventIds.add(eventId);
         current.exactEventIds.add(eventId);
         current.socketRecords.delete(eventId);
         changed = true;
-      } else if (!sameRecord(previous, extracted)) changed = true;
-      current.detailRecords.set(eventId, retainedRecord(extracted, envelope));
+      }
+      const retained = retainedRecord(extracted, envelope, rawEvent);
+      if (!isExactEventChange && !sameRetainedRecord(previous, retained)) changed = true;
+      current.detailRecords.set(eventId, retained);
     }
     if (!changed) return this.#ignore("delta-no-change");
-    return [this.#apiCatalogUpdate(envelope, current, "DELTA", "AUTHENTICATED_HTTP")];
+    const removed = [...removedEventIds].filter((id) => !current.rosterEventIds.has(id));
+    return [{ ...this.#apiCatalogUpdate(envelope, current, "DELTA", "AUTHENTICATED_HTTP"),
+      ...(removed.length > 0 ? { authoritativeRemovedEventIds: removed } : {}) }];
   }
 
   #decodeApiSocketState(envelope: ChromeBridgeEnvelope, state: ApsportApiState,
@@ -622,10 +800,11 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     state.openStreams.add(streamId);
     state.footballStreams.add(streamId);
-    const previous = state.socketRecords.get(incoming.eventId)?.record;
-    if (sameRecord(previous, incoming)) return [{ sourceId: envelope.sourceId,
+    const retained = retainedRecord(incoming, envelope, event!);
+    const previous = state.socketRecords.get(incoming.eventId);
+    if (sameRetainedRecord(previous, retained)) return [{ sourceId: envelope.sourceId,
       sequence: envelope.sequence, observedAtMs: envelope.observedAtMs, transportAlive: true }];
-    state.socketRecords.set(incoming.eventId, retainedRecord(incoming, envelope));
+    state.socketRecords.set(incoming.eventId, retained);
     // While the socket is the roster, each update carries fixtures the empty
     // baseline never covered, and the coverage guard rightly refuses a delta
     // that invents events - measured 2026-08-31, that left the book publishing
@@ -643,10 +822,13 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
     stream: TsportStreamGeneration,
     evidenceMode: "BASELINE" | "DELTA"
   ): DecodedCatalogUpdate | null {
-    const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => normalizeSbobetCatalog([entry.record], {
-      observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
-      sequence: entry.sequence, provider: "APSPORT",
-      settlementProfile: "football-regulation-including-added-time"
+    const normalizeEntry = (entry: RetainedRecord): NormalizedCatalogPart => ({
+      ...normalizeSbobetCatalog([entry.record], {
+        observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
+        sequence: entry.sequence, provider: "APSPORT",
+        settlementProfile: "football-regulation-including-added-time"
+      }),
+      nativeMarketObservations: entry.nativeMarketObservations
     });
     const retainedEntries = [...stream.records.values()];
     retainedEntries.sort((left, right) => left.sequence - right.sequence ||
@@ -914,12 +1096,7 @@ export class TsportWsCatalogAdapter implements ChromeTrafficAdapter {
       this.#currentStreams.delete(envelope.sourceId);
       return this.#ignore("stream-closed");
     }
-    current.records.set(incoming.eventId, {
-      record: incoming,
-      seenAtMs: envelope.observedAtMs,
-      receivedMonotonicMs: envelope.receivedMonotonicMs,
-      sequence: envelope.sequence
-    });
+    current.records.set(incoming.eventId, retainedRecord(incoming, envelope, event!));
     if (!current.proofReady) return this.#ignore("proof-not-ready");
     if (!current.baselineEmitted) {
       for (const expectedEventId of current.expectedEventIds) {

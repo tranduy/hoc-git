@@ -1,4 +1,5 @@
-import { normalizeObservedFootballCatalog, type CmdCatalogInputRecord } from "@tool-chenh/adapters";
+import { normalizeObservedFootballCatalog, observeNativeCmdMarkets,
+  type CmdCatalogInputRecord } from "@tool-chenh/adapters";
 import { CmdSnapshotChunkSchema, type ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import { z } from "zod";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
@@ -16,7 +17,7 @@ const oddSchema = z.strictObject({
   lineText: nullableText(32).optional()
 });
 const groupSchema = z.strictObject({
-  betTypeIds: z.array(text(80)).min(1).max(8),
+  betTypeIds: z.array(text(80)).max(8),
   labels: z.array(z.string().trim().max(80)).max(64),
   odds: z.array(oddSchema).min(1).max(16)
 });
@@ -29,14 +30,20 @@ const recordSchema = z.strictObject({
   teamNames: z.array(text(160)).min(2).max(4),
   groups: z.array(groupSchema).max(128)
 });
+const sabaRecordSchema = recordSchema.extend({
+  timeText: z.string().trim().max(80)
+});
+interface PublicDomRecordDecodingOptions {
+  readonly allowEmptyTimeText?: boolean;
+}
 // Five unrelated outcomes used to leave here as the same `null`, and one of them
 // is not a failure at all: a multi-chunk snapshot whose remaining chunks have
 // not arrived. SABA reported `dom-undecodable` for every snapshot it took on
 // 2026-08-29 and the name could not say which of the five it meant, so `note`
 // carries the shape - names and counts, never values.
 /** Which field a record failed on, and how - names and kinds, never values. */
-function schemaComplaint(candidate: unknown): string {
-  const parsed = recordSchema.safeParse(candidate);
+function schemaComplaint(candidate: unknown, schema: typeof recordSchema | typeof sabaRecordSchema): string {
+  const parsed = schema.safeParse(candidate);
   if (parsed.success) return "schema";
   const issue = parsed.error.issues[0];
   if (issue === undefined) return "schema";
@@ -47,7 +54,8 @@ function schemaComplaint(candidate: unknown): string {
 export function decodePublicDomRecords(
   assembler: CmdSnapshotAssembler,
   envelope: ChromeBridgeEnvelope,
-  note?: (reason: string) => void
+  note?: (reason: string) => void,
+  options: PublicDomRecordDecodingOptions = {}
 ): readonly CmdCatalogInputRecord[] | null {
   let raw: unknown;
   try { raw = JSON.parse(envelope.payload.body); } catch { note?.("body-not-json"); return null; }
@@ -61,8 +69,9 @@ export function decodePublicDomRecords(
   }
   if (assembled.length > 5_000) { note?.(`assembled-${assembled.length}-over-5000`); return null; }
   if (assembled.length === 0) return [];
+  const schema = options.allowEmptyTimeText === true ? sabaRecordSchema : recordSchema;
   const records = assembled.flatMap((candidate): CmdCatalogInputRecord[] => {
-    const parsed = recordSchema.safeParse(candidate);
+    const parsed = schema.safeParse(candidate);
     return parsed.success ? [parsed.data as CmdCatalogInputRecord] : [];
   });
   if (records.length === 0) {
@@ -73,7 +82,7 @@ export function decodePublicDomRecords(
     // stuck in - refused every snapshot on 2026-09-01 and could only say that
     // none matched. The schema is strict, so one renamed or added field rejects
     // the record entire. Shape only: field path and the kind of complaint.
-    note?.(`no-record-of-${assembled.length}-matched-${schemaComplaint(assembled[0])}`);
+    note?.(`no-record-of-${assembled.length}-matched-${schemaComplaint(assembled[0], schema)}`);
     return null;
   }
   return records;
@@ -159,9 +168,16 @@ export class CmdDomCatalogAdapter implements ChromeTrafficAdapter {
         timezoneOffsetMinutes: 480,
         sequence: entry.sequence
       });
+      const nativeMarketObservations = observeNativeCmdMarkets("CMD", [entry.record], {
+        observedAtMs: entry.observedAtMs,
+        receivedMonotonicMs: entry.receivedMonotonicMs,
+        timezoneOffsetMinutes: 480,
+        sequence: entry.sequence
+      });
       const markets = normalized.markets.filter((market) => market.marketType !== "FT_1X2");
       const marketKeys = new Set(markets.map((market) => `${market.providerEventId}|${market.providerMarketId}`));
       return { diagnostics: normalized.diagnostics, events: normalized.events, markets,
+        nativeMarketObservations,
         quotes: normalized.quotes.filter((quote) =>
           marketKeys.has(`${quote.providerEventId}|${quote.providerMarketId}`)) };
     });

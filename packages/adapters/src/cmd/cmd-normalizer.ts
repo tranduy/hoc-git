@@ -1,5 +1,7 @@
-import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import type { NativeMarketObservation, ProviderEvent, ProviderId,
+  ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
 import { isSupportedFootballTwoWayLine } from "../football-market-policy.js";
+import { isSabaMultiMatchAggregate } from "../saba/saba-multi-match-aggregate.js";
 
 export interface CmdCatalogOdd {
   readonly marketOddsId: string;
@@ -30,6 +32,9 @@ export interface CmdCatalogOptions {
   readonly receivedMonotonicMs: number;
   readonly timezoneOffsetMinutes: number;
   readonly sequence: number;
+  /** Collector-owned provider calendar date; never inferred from terminal time. */
+  readonly explicitProviderDate?: string;
+  readonly requireExplicitDateForUndatedKickoff?: boolean;
 }
 
 export interface NormalizedCmdCatalog {
@@ -80,6 +85,51 @@ function cmdMarketSemantics(betType: string, family: CmdEventFamily) {
     return cmdTwoWayMarketSemantics[betType as keyof typeof cmdTwoWayMarketSemantics] ?? null;
   }
   return specialTwoWaySemantics[family][betType as keyof typeof specialTwoWaySemantics[typeof family]] ?? null;
+}
+
+type CmdCanonicalOutcome = ProviderQuote["selection"];
+
+interface CmdResolvedSemantics {
+  readonly marketType: ProviderMarket["marketType"];
+  readonly scope: ProviderMarket["scope"];
+  readonly isHandicap: boolean;
+  readonly settlementProfile: string;
+  readonly linePolicy: "LINE" | "NONE";
+  readonly selections: readonly [CmdCanonicalOutcome, CmdCanonicalOutcome];
+}
+
+function normalizedOutcomeLabel(value: string): string {
+  return value.normalize("NFKD").replace(/[\u0300-\u036f]/gu, "").trim().toLocaleLowerCase("en-US");
+}
+
+function provedOddEvenSelections(group: CmdCatalogGroup): readonly ["ODD", "EVEN"] | readonly ["EVEN", "ODD"] | null {
+  if (group.odds.length !== 2) return null;
+  const outcomeLabels = group.labels.map(normalizedOutcomeLabel)
+    .filter((label) => ["o", "odd", "le", "e", "even", "chan"].includes(label));
+  if (outcomeLabels.length !== 2) return null;
+  const outcomes = outcomeLabels.map((label) => ["o", "odd", "le"].includes(label) ? "ODD" : "EVEN");
+  if (outcomes[0] === outcomes[1]) return null;
+  return outcomes as ["ODD", "EVEN"] | ["EVEN", "ODD"];
+}
+
+function cmdGroupSemantics(group: CmdCatalogGroup, family: CmdEventFamily): CmdResolvedSemantics | null {
+  if (group.betTypeIds.length !== 1) return null;
+  const betType = group.betTypeIds[0]!;
+  const lineSemantics = cmdMarketSemantics(betType, family);
+  if (lineSemantics !== null) {
+    return { ...lineSemantics, linePolicy: "LINE",
+      selections: lineSemantics.isHandicap ? ["HOME", "AWAY"] : ["OVER", "UNDER"] };
+  }
+  // A CMD/SABA DOM group with native type 2 is only promoted when its two
+  // rendered selection labels independently prove the Odd/Even outcome domain.
+  // This prevents a coincidental two-price group from being guessed as binary.
+  const selections = betType === "2" && family !== "CARDS" ? provedOddEvenSelections(group) : null;
+  if (selections === null) return null;
+  return family === "GOALS"
+    ? { marketType: "FT_ODD_EVEN", scope: "FULL_TIME", isHandicap: false,
+      settlementProfile: "football-goals-odd-even-regulation", linePolicy: "NONE", selections }
+    : { marketType: "CORNER_FT_ODD_EVEN", scope: "FULL_TIME", isHandicap: false,
+      settlementProfile: "football-corners-odd-even-regulation", linePolicy: "NONE", selections };
 }
 
 function removeLoadingSuffix(value: string): string {
@@ -148,13 +198,13 @@ function handicapValue(value: string): number | null {
   return match[1] === "-" ? -magnitude : magnitude;
 }
 
-function canonicalHomeHandicap(odds: readonly CmdCatalogOdd[]): string | null {
+function canonicalHomeHandicap(odds: readonly CmdCatalogOdd[], allowZero = false): string | null {
   if (odds.length !== 2) return null;
   const evidence = odds.flatMap((odd, index) => {
     const raw = odd.lineText?.trim();
     if (raw === undefined || raw === null || raw.length === 0) return [];
     const parsed = handicapValue(raw);
-    if (parsed === null || parsed === 0) return [Number.NaN];
+    if (parsed === null || (parsed === 0 && !allowZero)) return [Number.NaN];
     const explicitSign = /^[+-]/u.test(raw);
     const selectionLine = explicitSign ? parsed : -Math.abs(parsed);
     return [index === 0 ? selectionLine : -selectionLine];
@@ -162,6 +212,23 @@ function canonicalHomeHandicap(odds: readonly CmdCatalogOdd[]): string | null {
   if (evidence.length === 0 || evidence.some((value) => !Number.isFinite(value)) ||
     evidence.some((value) => value !== evidence[0])) return null;
   return String(evidence[0]);
+}
+
+function undatedStartAt(hour: number, minute: number, options: CmdCatalogOptions): number | null {
+  let calendar: Date;
+  if (options.explicitProviderDate !== undefined) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(options.explicitProviderDate);
+    if (match === null) return null;
+    const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
+    calendar = new Date(Date.UTC(year, month - 1, day));
+    if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month - 1 ||
+      calendar.getUTCDate() !== day) return null;
+  } else {
+    if (options.requireExplicitDateForUndatedKickoff === true) return null;
+    calendar = new Date(options.observedAtMs + options.timezoneOffsetMinutes * 60_000);
+  }
+  return Date.UTC(calendar.getUTCFullYear(), calendar.getUTCMonth(), calendar.getUTCDate(),
+    hour, minute) - options.timezoneOffsetMinutes * 60_000;
 }
 
 function eventTime(timeText: string, options: CmdCatalogOptions): {
@@ -194,9 +261,8 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
     if (rawHour > 23 || minute > 59 || (meridiem !== undefined && (rawHour < 1 || rawHour > 12))) return null;
     const hour = meridiem === undefined ? rawHour
       : meridiem === "PM" ? (rawHour % 12) + 12 : rawHour % 12;
-    const providerNow = new Date(options.observedAtMs + options.timezoneOffsetMinutes * 60_000);
-    const timestamp = Date.UTC(providerNow.getUTCFullYear(), providerNow.getUTCMonth(),
-      providerNow.getUTCDate(), hour, minute) - options.timezoneOffsetMinutes * 60_000;
+    const timestamp = undatedStartAt(hour, minute, options);
+    if (timestamp === null) return null;
     return { startAtUtcMs: timestamp, isLive: false, period: null, clockMs: null };
   }
   if (normalized === "TRỰC TIẾP" || normalized === "LIVE" || /^\dH\d+'$/u.test(normalized)) {
@@ -208,14 +274,22 @@ function eventTime(timeText: string, options: CmdCatalogOptions): {
       clockMs: clock === null ? null : Number(clock[2]) * 60_000
     };
   }
+  const collectorClock = options.requireExplicitDateForUndatedKickoff === true ||
+    options.explicitProviderDate !== undefined ? /^(\d{1,2}):(\d{2})(AM|PM)$/u.exec(normalized) : null;
+  if (collectorClock !== null) {
+    const rawHour = Number(collectorClock[1]), minute = Number(collectorClock[2]);
+    if (rawHour < 1 || rawHour > 12 || minute > 59) return null;
+    const hour = rawHour % 12 + (collectorClock[3] === "PM" ? 12 : 0);
+    const timestamp = undatedStartAt(hour, minute, options);
+    return timestamp === null ? null : { startAtUtcMs: timestamp, isLive: false, period: null, clockMs: null };
+  }
   const todayClock = /^(\d{1,2}):(\d{2})(?:LIVE)?$/u.exec(normalized);
   if (todayClock !== null) {
     const hour = Number(todayClock[1]);
     const minute = Number(todayClock[2]);
     if (hour > 23 || minute > 59) return null;
-    const providerNow = new Date(options.observedAtMs + options.timezoneOffsetMinutes * 60_000);
-    const timestamp = Date.UTC(providerNow.getUTCFullYear(), providerNow.getUTCMonth(),
-      providerNow.getUTCDate(), hour, minute) - options.timezoneOffsetMinutes * 60_000;
+    const timestamp = undatedStartAt(hour, minute, options);
+    if (timestamp === null) return null;
     return { startAtUtcMs: timestamp, isLive: false, period: null, clockMs: null };
   }
   const match = /^(\d{2})\/(\d{2})\s*(\d{1,2}):(\d{2})(AM|PM)?$/u.exec(normalized);
@@ -258,6 +332,52 @@ function validMalay(value: string): boolean {
   return Number.isFinite(numeric) && numeric !== 0 && Math.abs(numeric) <= 1;
 }
 
+export function observeNativeCmdMarkets(
+  provider: ProviderId,
+  records: readonly CmdCatalogInputRecord[],
+  options: CmdCatalogOptions
+): readonly NativeMarketObservation[] {
+  const observations: NativeMarketObservation[] = [];
+  for (const [recordIndex, record] of records.entries()) {
+    const classified = classifyCmdEvent(record.leagueName, record.teamNames);
+    const isSabaAggregate = provider === "SABA" &&
+      isSabaMultiMatchAggregate(record.leagueName, record.teamNames);
+    const comparableEvent = record.sportId === "1" && record.matchId.trim() !== "" && classified !== null &&
+      !virtualFootballEvidence(classified.competition, classified.teams) && !isSabaAggregate &&
+      (provider !== "SABA" || eventTime(record.timeText, options) !== null);
+    for (const [groupIndex, group] of record.groups.entries()) {
+      const nativeType = group.betTypeIds.length === 0 ? "UNKNOWN" : group.betTypeIds.join("+");
+      const uniqueIds = [...new Set(group.odds.map((odd) => odd.marketOddsId.trim()).filter(Boolean))];
+      const fallbackId = `${record.matchId || `UNKNOWN_EVENT_${recordIndex}`}:native:${nativeType}:${groupIndex}`;
+      const providerMarketId = uniqueIds.length === 1 ? uniqueIds[0]! : fallbackId;
+      const semantics = classified === null ? null : cmdGroupSemantics(group, classified.family);
+      const marketLine = semantics === null || semantics.linePolicy === "NONE" ? null : semantics.isHandicap
+        ? canonicalHomeHandicap(group.odds, provider === "SABA") : line(group.labels);
+      const expectedSelections = semantics === null ? 2 : 2;
+      const validShape = semantics !== null && exactMarketId(group, expectedSelections) !== null &&
+        (semantics.linePolicy === "NONE" || isSupportedFootballTwoWayLine(marketLine)) &&
+        group.odds.every((odd) => validMalay(odd.priceText));
+      const threeWay = group.betTypeIds.length === 1 && group.betTypeIds[0] === "5";
+      const disposition: NativeMarketObservation["disposition"] = !comparableEvent ||
+        group.betTypeIds.length !== 1 || semantics !== null && !validShape || threeWay
+        ? "EXCLUDED" : semantics === null ? "UNMAPPED" : "NORMALIZED";
+      const reason = !comparableEvent ? "EVENT_NOT_COMPARABLE"
+        : group.betTypeIds.length !== 1 ? "AMBIGUOUS_NATIVE_TYPE"
+        : threeWay ? "THREE_WAY_OUTCOME_DOMAIN"
+        : semantics === null ? "NATIVE_TYPE_UNMAPPED"
+        : !validShape ? "INVALID_TWO_WAY_SHAPE" : "CANONICAL_MARKET_MAPPED";
+      const canonicalOutcomes = semantics?.selections ?? ["OUTCOME_1", "OUTCOME_2"];
+      observations.push({ provider, category: "FOOTBALL",
+        providerEventId: record.matchId || `UNKNOWN_EVENT_${recordIndex}`, providerMarketId,
+        nativeType, nativeLabel: group.labels.join(" | ").slice(0, 512) || null,
+        nativeScope: semantics?.scope ?? null,
+        outcomeLabels: group.odds.map((_, index) => canonicalOutcomes[index] ?? `OUTCOME_${index + 1}`),
+        observedAtMs: options.observedAtMs, disposition, reason });
+    }
+  }
+  return observations;
+}
+
 export function normalizeObservedFootballCatalog(
   provider: ProviderId,
   records: readonly CmdCatalogInputRecord[],
@@ -276,10 +396,11 @@ export function normalizeObservedFootballCatalog(
     const timing = eventTime(record.timeText, options);
     const classified = classifyCmdEvent(record.leagueName, record.teamNames);
     const teams = classified?.teams ?? [];
-    const supported = record.groups.filter((group) => group.betTypeIds.length === 1 &&
-      classified !== null && cmdMarketSemantics(group.betTypeIds[0]!, classified.family) !== null &&
-      (!cmdMarketSemantics(group.betTypeIds[0]!, classified.family)!.isHandicap ||
-        group.odds.some((odd) => odd.lineText !== undefined)));
+    const supported = record.groups.filter((group) => {
+      if (classified === null) return false;
+      const semantics = cmdGroupSemantics(group, classified.family);
+      return semantics !== null && (!semantics.isHandicap || group.odds.some((odd) => odd.lineText !== undefined));
+    });
     const invalid = record.sportId !== "1" || record.matchId.trim().length === 0 || record.leagueName.trim().length === 0 ||
       teams.length !== 2 || teams[0] === teams[1] || timing === null;
     const recordMarkets: ProviderMarket[] = [];
@@ -296,14 +417,18 @@ export function normalizeObservedFootballCatalog(
       diagnostics.push("CMD_CATALOG_EVENT_UNSUPPORTED");
       continue;
     }
+    if (provider === "SABA" && isSabaMultiMatchAggregate(record.leagueName, record.teamNames)) {
+      diagnostics.push("CMD_CATALOG_EVENT_UNSUPPORTED");
+      continue;
+    }
     for (const group of supported) {
-      const betType = group.betTypeIds[0]!;
-      const semantics = cmdMarketSemantics(betType, classified.family)!;
-      const selections = semantics.isHandicap ? ["HOME", "AWAY"] as const : ["OVER", "UNDER"] as const;
+      const semantics = cmdGroupSemantics(group, classified.family)!;
+      const selections = semantics.selections;
       const marketId = exactMarketId(group, selections.length);
-      const marketLine = semantics.isHandicap ? canonicalHomeHandicap(group.odds) : line(group.labels);
+      const marketLine = semantics.linePolicy === "NONE" ? null
+        : semantics.isHandicap ? canonicalHomeHandicap(group.odds, provider === "SABA") : line(group.labels);
       const pricesValid = group.odds.every((odd) => validMalay(odd.priceText));
-      if (marketId === null || !isSupportedFootballTwoWayLine(marketLine) || !pricesValid) {
+      if (marketId === null || semantics.linePolicy === "LINE" && !isSupportedFootballTwoWayLine(marketLine) || !pricesValid) {
         diagnostics.push("CMD_CATALOG_MARKET_REJECTED");
         continue;
       }

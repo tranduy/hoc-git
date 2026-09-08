@@ -1,0 +1,182 @@
+{
+  "at": "2026-09-07T15:43:50.808Z",
+  "scope": "VISIBLE_DOM_ONLY_NOT_FULL_PROVIDER_COVERAGE",
+  "sourceEpoch": "d713c0d7-06c4-45b7-8ae2-e2c383ad3c84:4",
+  "catalog": {
+    "observedAtMs": 1788795735446,
+    "snapshotState": "FRESH",
+    "events": 109,
+    "markets": 750,
+    "quotes": 1500,
+    "nativeRows": 1076
+  },
+  "rawGroups": 1076,
+  "rawNativeMissing": 0,
+  "visibleReceiptCheck": {
+    "scope": "VISIBLE_RECEIPT_ONLY_NOT_FULL_PROVIDER_COVERAGE",
+    "rawGroups": 1076,
+    "rawNativeMissing": 0,
+    "duplicateRawNative": 0,
+    "duplicatePublishedNative": 0,
+    "duplicatePublishedQuotes": 0,
+    "normalizedAbsent": 0,
+    "invalidNormalizedShape": 0,
+    "expectedPrices": 1228,
+    "matchedPrices": 1228,
+    "missingPrices": 0,
+    "olderPrices": 0,
+    "supersededPrices": 0,
+    "mismatchedPrices": 0
+  },
+  "probe": {
+    "at": "2026-09-07T15:42:16.371Z",
+    "status": "NO_ACTION_UNCONFIRMED_SELECTION",
+    "mutated": false,
+    "activePeriod": "UNKNOWN",
+    "evidence": "NONE",
+    "heading": "Bóng đá / Hôm NayTất CảTất Cả1X2Tỷ Số Chính XácLẻ/ChẵnTổng Số Bàn ThắngHiệp 1/Toàn TrậnChẵn / Lẻ của Nửa trận/",
+    "eligibleMoreCount": 86,
+    "eligibleMoreOwners": [
+      "132968304",
+      "132973443",
+      "132969854",
+      "132974263",
+      "133139869"
+    ]
+  },
+  "aggregateRead": {
+    "atMs": 1788795830920,
+    "stableEpoch": true,
+    "epoch": "d713c0d7-06c4-45b7-8ae2-e2c383ad3c84:4",
+    "responseKeys": [
+      "dataMode",
+      "accountId",
+      "provider",
+      "category",
+      "comparisonState",
+      "observedAtMs",
+      "rejectedMarketCount",
+      "events",
+      "markets",
+      "quotes",
+      "nativeMarketObservations",
+      "snapshotState"
+    ],
+    "rows": [
+      {
+        "id": "134003685",
+        "events": 0,
+        "markets": 0,
+        "quotes": 0,
+        "native": [
+          {
+            "id": "134003685__1062165558",
+            "type": "1",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134003685__1062165554",
+            "type": "3",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134003685__1062165556",
+            "type": "2",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134003685__1062165550",
+            "type": "7",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134003685__1062165548",
+            "type": "8",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          }
+        ]
+      },
+      {
+        "id": "134003749",
+        "events": 0,
+        "markets": 0,
+        "quotes": 0,
+        "native": [
+          {
+            "id": "134003749__1062166124",
+            "type": "1",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134003749__1062166120",
+            "type": "3",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134003749__1062166123",
+            "type": "2",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134003749__1062166116",
+            "type": "7",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134003749__1062166114",
+            "type": "8",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          }
+        ]
+      },
+      {
+        "id": "134019593",
+        "events": 0,
+        "markets": 0,
+        "quotes": 0,
+        "native": [
+          {
+            "id": "134019593__1062340209",
+            "type": "1",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134019593__1062340207",
+            "type": "3",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134019593__1062340208",
+            "type": "2",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134019593__1062340204",
+            "type": "7",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          },
+          {
+            "id": "134019593__1062340203",
+            "type": "8",
+            "disposition": "EXCLUDED",
+            "reason": "EVENT_NOT_COMPARABLE"
+          }
+        ]
+      }
+    ]
+  }
+}

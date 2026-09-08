@@ -61,6 +61,13 @@ export function isRenewableLobby(lobby: ChromeLobbyId): lobby is RenewableLobby 
   return lobby !== "IM" && lobby !== "SABA" && RENEWABLE_LOBBIES.includes(lobby as RenewableLobby);
 }
 
+function isPeriodicRenewalLobby(lobby: RenewableLobby): boolean {
+  // APSPORT's authenticated in-page detail hydration can take most of a lease
+  // interval. Timer navigation erased that healthy progress; observed-failure
+  // recovery still reaches renewNow() through isRenewableLobby above.
+  return lobby !== "TSPORT" && isRenewableLobby(lobby);
+}
+
 export function parseProviderPageLeaseState(value: unknown): ProviderPageLeaseState | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
@@ -144,7 +151,7 @@ export class ProviderPageLeaseCoordinator {
       await this.#remember(seeded);
       return;
     }
-    const dueLobby = RENEWABLE_LOBBIES.filter((lobby) => isRenewableLobby(lobby) &&
+    const dueLobby = RENEWABLE_LOBBIES.filter((lobby) => isPeriodicRenewalLobby(lobby) &&
       state[lobby].nextAttemptAtMs <= nowMs)
       .sort((left, right) => state[left].nextAttemptAtMs - state[right].nextAttemptAtMs)[0];
     if (dueLobby === undefined) return;

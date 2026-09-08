@@ -1,8 +1,48 @@
 import { ProviderEventSchema, ProviderMarketSchema, ProviderQuoteSchema } from "@tool-chenh/contracts";
 import { describe, expect, it } from "vitest";
-import { normalizeCmdCatalog, normalizeObservedFootballCatalog, type CmdCatalogInputRecord } from "./cmd-normalizer.js";
+import { normalizeCmdCatalog, normalizeObservedFootballCatalog, observeNativeCmdMarkets,
+  type CmdCatalogInputRecord } from "./cmd-normalizer.js";
 
 describe("normalizeCmdCatalog", () => {
+  it.each(["TRỰC TIẾP 01:45AM", "01:45AM", "01:45"])(
+    "uses only the explicit collector date for undated SABA kickoff %s", (timeText) => {
+      const input = { ...record, timeText, groups: [record.groups[1]!] };
+      const options = { observedAtMs: Date.UTC(2026, 8, 7, 12), receivedMonotonicMs: 123,
+        timezoneOffsetMinutes: 480, sequence: 7, requireExplicitDateForUndatedKickoff: true,
+        explicitProviderDate: "2026-09-08" };
+      const result = normalizeObservedFootballCatalog("SABA", [input], options);
+      expect(result.events[0]?.startAtUtcMs).toBe(Date.UTC(2026, 8, 7, 17, 45));
+      expect(result.quotes).toHaveLength(2);
+      expect(result.quotes.every((quote) => quote.receivedMonotonicMs === 123 && quote.sequence === 7))
+        .toBe(true);
+    });
+
+  it.each([undefined, "2026-02-30", "09/08"])(
+    "retains an excluded native SABA record when the collector owning date is %s", (explicitProviderDate) => {
+      const input = { ...record, timeText: "TRỰC TIẾP 01:45AM", groups: [record.groups[1]!, {
+        ...record.groups[1]!, betTypeIds: ["999"], odds: record.groups[1]!.odds.map((odd) =>
+          ({ ...odd, marketOddsId: "unknown-native" }))
+      }] };
+      const options = { observedAtMs: Date.UTC(2026, 8, 7, 12), receivedMonotonicMs: 123,
+        timezoneOffsetMinutes: 480, sequence: 7, requireExplicitDateForUndatedKickoff: true,
+        ...(explicitProviderDate === undefined ? {} : { explicitProviderDate }) };
+      expect(normalizeObservedFootballCatalog("SABA", [input], options).events).toEqual([]);
+      expect(observeNativeCmdMarkets("SABA", [input], options)).toEqual([
+        expect.objectContaining({ providerMarketId: "total-1", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" }),
+        expect.objectContaining({ providerMarketId: "unknown-native", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" })
+      ]);
+    });
+
+  it("keeps explicitly dated SABA rows and unknown market signatures when collector date is unknown", () => {
+    const input = { ...record, timeText: "09/08 05:30PM", groups: [{ ...record.groups[1]!, betTypeIds: ["999"] }] };
+    const options = { observedAtMs: Date.UTC(2026, 8, 7, 12), receivedMonotonicMs: 123,
+      timezoneOffsetMinutes: 480, sequence: 7, requireExplicitDateForUndatedKickoff: true };
+    expect(normalizeObservedFootballCatalog("SABA", [input], options).events[0]?.startAtUtcMs)
+      .toBe(Date.UTC(2026, 8, 8, 9, 30));
+    expect(observeNativeCmdMarkets("SABA", [input], options)[0])
+      .toMatchObject({ disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED" });
+  });
+
   it("accepts correctly decoded live labels from provider DOM snapshots", () => {
     for (const timeText of ["TRỰC TIẾP", "LIVE", "1H26'"]) {
       const result = normalizeCmdCatalog([{ ...record, timeText }], {
@@ -63,6 +103,151 @@ describe("normalizeCmdCatalog", () => {
     ]
   };
 
+  it("maps a structurally proven DOM odd/even group without requiring a numeric line", () => {
+    const oddEven: CmdCatalogInputRecord = { ...record, groups: [{
+      betTypeIds: ["2"], labels: ["o", "e"], odds: [
+        { marketOddsId: "odd-even-1", priceText: "0.82", status: null, greyedOut: "false" },
+        { marketOddsId: "odd-even-1", priceText: "-0.94", status: null, greyedOut: "false" }
+      ]
+    }] };
+    const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 1 };
+
+    expect(normalizeObservedFootballCatalog("SABA", [oddEven], options).markets).toEqual([
+      expect.objectContaining({ providerMarketId: "odd-even-1", marketType: "FT_ODD_EVEN", line: null })
+    ]);
+    expect(observeNativeCmdMarkets("SABA", [oddEven], options)).toEqual([
+      expect.objectContaining({ nativeType: "2", disposition: "NORMALIZED", outcomeLabels: ["ODD", "EVEN"] })
+    ]);
+  });
+
+  it("normalizes exact SABA full-time and first-half zero handicaps with stable identities", () => {
+    const zeroHandicaps: CmdCatalogInputRecord = { ...structuredClone(record), groups: [
+      {
+        betTypeIds: ["1"], labels: ["0"], odds: [
+          { marketOddsId: "saba-zero-ft", priceText: "0.82", status: null,
+            greyedOut: "false", lineText: "0" },
+          { marketOddsId: "saba-zero-ft", priceText: "-0.94", status: null,
+            greyedOut: "false", lineText: null }
+        ]
+      },
+      {
+        betTypeIds: ["7"], labels: ["0"], odds: [
+          { marketOddsId: "saba-zero-fh", priceText: "0.84", status: null,
+            greyedOut: "false", lineText: "0" },
+          { marketOddsId: "saba-zero-fh", priceText: "-0.96", status: null,
+            greyedOut: "false", lineText: null }
+        ]
+      }
+    ] };
+    const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 7 };
+
+    const normalized = normalizeObservedFootballCatalog("SABA", [zeroHandicaps], options);
+    expect(normalized.markets.map(({ providerMarketId, marketType, scope, line }) =>
+      [providerMarketId, marketType, scope, line])).toEqual([
+      ["saba-zero-ft", "FT_AH", "FULL_TIME", "0"],
+      ["saba-zero-fh", "FH_AH", "FIRST_HALF", "0"]
+    ]);
+    expect(normalized.quotes.map(({ providerMarketId, providerSelectionId, selection, line }) =>
+      [providerMarketId, providerSelectionId, selection, line])).toEqual([
+      ["saba-zero-ft", "saba-zero-ft:home", "HOME", "0"],
+      ["saba-zero-ft", "saba-zero-ft:away", "AWAY", "0"],
+      ["saba-zero-fh", "saba-zero-fh:home", "HOME", "0"],
+      ["saba-zero-fh", "saba-zero-fh:away", "AWAY", "0"]
+    ]);
+    expect(observeNativeCmdMarkets("SABA", [zeroHandicaps], options).map((observation) =>
+      [observation.providerMarketId, observation.nativeType, observation.disposition, observation.reason]))
+      .toEqual([
+        ["saba-zero-ft", "1", "NORMALIZED", "CANONICAL_MARKET_MAPPED"],
+        ["saba-zero-fh", "7", "NORMALIZED", "CANONICAL_MARKET_MAPPED"]
+      ]);
+  });
+
+  it("keeps SABA zero-handicap tolerance out of the CMD normalization path", () => {
+    const zero = { ...structuredClone(record), groups: [{ betTypeIds: ["1"], labels: ["0"], odds: [
+      { marketOddsId: "cmd-zero", priceText: "0.82", status: null,
+        greyedOut: "false", lineText: "0" },
+      { marketOddsId: "cmd-zero", priceText: "-0.94", status: null,
+        greyedOut: "false", lineText: null }
+    ] }] };
+    const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 8 };
+
+    expect(normalizeObservedFootballCatalog("CMD", [zero], options).markets).toEqual([]);
+    expect(observeNativeCmdMarkets("CMD", [zero], options)).toEqual([
+      expect.objectContaining({ providerMarketId: "cmd-zero", disposition: "EXCLUDED",
+        reason: "INVALID_TWO_WAY_SHAPE" })
+    ]);
+  });
+
+  it.each([
+    ["missing line", [
+      { marketOddsId: "saba-invalid", priceText: "0.82", status: null, greyedOut: "false" },
+      { marketOddsId: "saba-invalid", priceText: "-0.94", status: null, greyedOut: "false" }
+    ]],
+    ["mismatched IDs", [
+      { marketOddsId: "saba-invalid-a", priceText: "0.82", status: null,
+        greyedOut: "false", lineText: "0" },
+      { marketOddsId: "saba-invalid-b", priceText: "-0.94", status: null,
+        greyedOut: "false", lineText: null }
+    ]],
+    ["inconsistent nonzero signs", [
+      { marketOddsId: "saba-invalid", priceText: "0.82", status: null,
+        greyedOut: "false", lineText: "+0.5" },
+      { marketOddsId: "saba-invalid", priceText: "-0.94", status: null,
+        greyedOut: "false", lineText: "+0.5" }
+    ]]
+  ] as const)("rejects SABA handicap evidence with %s", (_label, odds) => {
+    const malformed: CmdCatalogInputRecord = { ...structuredClone(record), groups: [{
+      betTypeIds: ["1"], labels: ["0"], odds
+    }] };
+    const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 9 };
+
+    const normalized = normalizeObservedFootballCatalog("SABA", [malformed], options);
+    expect(normalized.markets).toEqual([]);
+    expect(normalized.quotes).toEqual([]);
+    expect(observeNativeCmdMarkets("SABA", [malformed], options)).toEqual([
+      expect.objectContaining({ disposition: "EXCLUDED", reason: "INVALID_TWO_WAY_SHAPE" })
+    ]);
+  });
+
+  it("preserves every blank-time SABA native group as non-comparable inventory", () => {
+    const market = (betType: string, marketOddsId: string, oddsCount = 2) => ({
+      betTypeIds: [betType], labels: betType === "3" ? ["2.5", "u"] : ["0"],
+      odds: Array.from({ length: oddsCount }, (_, index) => ({
+        marketOddsId, priceText: index % 2 === 0 ? "0.82" : "-0.94",
+        status: null, greyedOut: "false",
+        ...(betType === "1" && index === 0 ? { lineText: "0" } : {})
+      }))
+    });
+    const blankTime: CmdCatalogInputRecord = { ...structuredClone(record), matchId: "133603577",
+      timeText: "", groups: [
+        market("1", "1058624279"), market("3", "1058624277"),
+        market("5", "1058624275", 3), market("1", "1062389532"),
+        market("3", "1062389533")
+      ] };
+    const options = { observedAtMs: Date.UTC(2026, 7, 15, 8), receivedMonotonicMs: 1,
+      timezoneOffsetMinutes: 480, sequence: 10 };
+
+    const normalized = normalizeObservedFootballCatalog("SABA", [blankTime], options);
+    expect(normalized.events).toEqual([]);
+    expect(normalized.markets).toEqual([]);
+    expect(normalized.quotes).toEqual([]);
+    expect(observeNativeCmdMarkets("SABA", [blankTime], options).map((observation) => ({
+      providerMarketId: observation.providerMarketId,
+      disposition: observation.disposition,
+      reason: observation.reason
+    }))).toEqual([
+      { providerMarketId: "1058624279", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" },
+      { providerMarketId: "1058624277", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" },
+      { providerMarketId: "1058624275", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" },
+      { providerMarketId: "1062389532", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" },
+      { providerMarketId: "1062389533", disposition: "EXCLUDED", reason: "EVENT_NOT_COMPARABLE" }
+    ]);
+  });
+
   it("normalizes only exact full-time two-way markets and excludes 1X2", () => {
     const result = normalizeCmdCatalog([record], {
       observedAtMs: Date.UTC(2026, 7, 9),
@@ -86,6 +271,25 @@ describe("normalizeCmdCatalog", () => {
     expect(result.events.every((event) => ProviderEventSchema.safeParse(event).success)).toBe(true);
     expect(result.markets.every((market) => ProviderMarketSchema.safeParse(market).success)).toBe(true);
     expect(result.quotes.every((quote) => ProviderQuoteSchema.safeParse(quote).success)).toBe(true);
+  });
+
+  it("accounts for every CMD market group without promoting unknown types", () => {
+    const result = observeNativeCmdMarkets("CMD", [{ ...record, groups: [
+      record.groups[1]!, record.groups[2]!,
+      { betTypeIds: ["777"], labels: ["Mystery"], odds: [
+        { marketOddsId: "unknown", priceText: "0.8", status: null, greyedOut: "false" },
+        { marketOddsId: "unknown", priceText: "-0.9", status: null, greyedOut: "false" }
+      ] }
+    ] }], { observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 500,
+      timezoneOffsetMinutes: 420, sequence: 7 });
+
+    expect(result).toEqual([
+      expect.objectContaining({ providerMarketId: "total-1", nativeType: "3", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "1x2-1", nativeType: "5", disposition: "EXCLUDED",
+        reason: "THREE_WAY_OUTCOME_DOMAIN" }),
+      expect.objectContaining({ providerMarketId: "unknown", nativeType: "777", disposition: "UNMAPPED",
+        reason: "NATIVE_TYPE_UNMAPPED" })
+    ]);
   });
 
   it("binds every normalized identity to the verified provider", () => {
@@ -351,7 +555,7 @@ describe("normalizeCmdCatalog", () => {
     }
   });
 
-  it("publishes only non-virtual full-time two-way quarter, half, or three-quarter lines", () => {
+  it("retains non-virtual quarter and integer lines for catalog accounting", () => {
     const filtered = structuredClone(record);
     filtered.groups.push({
       betTypeIds: ["3"], labels: ["3"], odds: [
@@ -362,11 +566,80 @@ describe("normalizeCmdCatalog", () => {
     const result = normalizeCmdCatalog([filtered], {
       observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 1
     });
-    expect(result.markets.map(({ marketType, line }) => [marketType, line])).toEqual([["FT_TOTAL", "2.5"]]);
+    expect(result.markets.map(({ marketType, line }) => [marketType, line])).toEqual([
+      ["FT_TOTAL", "2.5"], ["FT_TOTAL", "3"]
+    ]);
 
     const virtual = normalizeCmdCatalog([{ ...filtered, leagueName: "Virtual Football", teamNames: ["A (V)", "B (V)"] }], {
       observedAtMs: Date.UTC(2026, 7, 9), receivedMonotonicMs: 1, timezoneOffsetMinutes: 420, sequence: 2
     });
     expect(virtual).toEqual({ events: [], markets: [], quotes: [], diagnostics: ["CMD_CATALOG_EVENT_UNSUPPORTED"] });
+  });
+});
+
+describe("SABA multi-match aggregate accounting", () => {
+  const options = { observedAtMs: Date.UTC(2026, 8, 7, 14), receivedMonotonicMs: 1,
+    timezoneOffsetMinutes: 480, sequence: 91 };
+  const groups = (stem: string): CmdCatalogInputRecord["groups"] => [
+    { betTypeIds: ["1"], labels: ["0.5"], odds: [
+      { marketOddsId: `${stem}-1`, priceText: "0.90", status: null, greyedOut: "false", lineText: "0.5" },
+      { marketOddsId: `${stem}-1`, priceText: "-0.95", status: null, greyedOut: "false" }
+    ] },
+    { betTypeIds: ["3"], labels: ["2.5"], odds: [
+      { marketOddsId: `${stem}-3`, priceText: "0.88", status: null, greyedOut: "false" },
+      { marketOddsId: `${stem}-3`, priceText: "-0.92", status: null, greyedOut: "false" }
+    ] },
+    { betTypeIds: ["7"], labels: ["0.5"], odds: [
+      { marketOddsId: `${stem}-7`, priceText: "0.86", status: null, greyedOut: "false", lineText: "0.5" },
+      { marketOddsId: `${stem}-7`, priceText: "-0.90", status: null, greyedOut: "false" }
+    ] },
+    { betTypeIds: ["8"], labels: ["1.5"], odds: [
+      { marketOddsId: `${stem}-8`, priceText: "0.84", status: null, greyedOut: "false" },
+      { marketOddsId: `${stem}-8`, priceText: "-0.88", status: null, greyedOut: "false" }
+    ] },
+    { betTypeIds: ["2"], labels: ["o", "e"], odds: [
+      { marketOddsId: `${stem}-2`, priceText: "0.82", status: null, greyedOut: "false" },
+      { marketOddsId: `${stem}-2`, priceText: "-0.86", status: null, greyedOut: "false" }
+    ] }
+  ];
+  const fixture = (matchId: string, leagueName: string, teamNames: string[]): CmdCatalogInputRecord => ({
+    sportId: "1", leagueId: `league-${matchId}`, leagueName, matchId,
+    timeText: "09/08 12:00AM", teamNames, groups: groups(matchId)
+  });
+  const actual = [
+    fixture("134003685", "*GIẢI SERIE A Ý - ĐỘI NHÀ/ĐỘI KHÁCH",
+      ["Đội Nhà - Thứ Hai - 2 Trận Đấu", "Đội Khách - Thứ Hai - 2 Trận Đấu"]),
+    fixture("134003749", "*GIẢI LALIGA TÂY BAN NHA - ĐỘI NHÀ/ĐỘI KHÁCH",
+      ["Đội Nhà - Thứ Hai - 2 Trận Đấu", "Đội Khách - Thứ Hai - 2 Trận Đấu"]),
+    fixture("134019593", "GIẢI ALLSVENSKAN THỤY ĐIỂN - ĐỘI NHÀ/ĐỘI KHÁCH",
+      ["Đội Nhà - Thứ Hai - 3 Trận Đấu", "Đội Khách - Thứ Hai - 3 Trận Đấu"])
+  ];
+
+  it("excludes all three observed SABA aggregates while retaining every native group", () => {
+    expect(normalizeObservedFootballCatalog("SABA", actual, options)).toMatchObject({
+      events: [], markets: [], quotes: []
+    });
+    const inventory = observeNativeCmdMarkets("SABA", actual, options);
+    expect(inventory).toHaveLength(15);
+    expect(inventory.every(({ disposition, reason }) => disposition === "EXCLUDED" &&
+      reason === "EVENT_NOT_COMPARABLE")).toBe(true);
+    expect(new Set(inventory.map(({ providerMarketId }) => providerMarketId))).toEqual(new Set(
+      actual.flatMap(({ groups: nativeGroups }) => nativeGroups.map((group) => group.odds[0]!.marketOddsId))));
+
+    expect(normalizeObservedFootballCatalog("CMD", [actual[2]!], options).markets).toHaveLength(5);
+    expect(observeNativeCmdMarkets("CMD", [actual[2]!], options)
+      .every(({ disposition }) => disposition === "NORMALIZED")).toBe(true);
+  });
+
+  it.each([
+    ["ordinary competition", "League One", ["Đội Nhà - Thứ Hai - 2 Trận Đấu", "Đội Khách - Thứ Hai - 2 Trận Đấu"]],
+    ["only one role", "League One - ĐỘI NHÀ/ĐỘI KHÁCH", ["Đội Nhà - Thứ Hai - 2 Trận Đấu", "Real Away"]],
+    ["mismatched bucket", "League One - ĐỘI NHÀ/ĐỘI KHÁCH", ["Đội Nhà - Thứ Hai - 2 Trận Đấu", "Đội Khách - Thứ Ba - 2 Trận Đấu"]],
+    ["mismatched count", "League One - ĐỘI NHÀ/ĐỘI KHÁCH", ["Đội Nhà - Thứ Hai - 2 Trận Đấu", "Đội Khách - Thứ Hai - 3 Trận Đấu"]],
+    ["single match", "League One - ĐỘI NHÀ/ĐỘI KHÁCH", ["Đội Nhà - Thứ Hai - 1 Trận Đấu", "Đội Khách - Thứ Hai - 1 Trận Đấu"]]
+  ])("keeps the %s near miss eligible", (_label, leagueName, teamNames) => {
+    const result = normalizeObservedFootballCatalog("SABA", [fixture("near", leagueName, teamNames)], options);
+    expect(result.events).toHaveLength(1);
+    expect(result.markets).toHaveLength(5);
   });
 });

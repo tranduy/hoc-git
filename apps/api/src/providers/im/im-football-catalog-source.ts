@@ -1,5 +1,6 @@
 import { isSupportedFootballTwoWayLine,
   type SbobetCatalogInputRecord, type SbobetCatalogMarket, type SbobetCatalogSelection } from "@tool-chenh/adapters";
+import type { FootballBinaryOutcome, MarketType, NativeMarketObservation } from "@tool-chenh/contracts";
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -26,52 +27,169 @@ export function normalizeImOdds(value: unknown): number | null {
   return /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(String(normalized)) ? normalized : null;
 }
 
-type ImFootballMarketType = "FT_AH" | "FT_TOTAL" | "FH_AH" | "FH_TOTAL" | "SH_AH" | "SH_TOTAL";
-
-function isHandicapMarket(marketType: ImFootballMarketType): boolean {
-  return marketType === "FT_AH" || marketType === "FH_AH" || marketType === "SH_AH";
+interface ImFootballMarketSemantics {
+  readonly marketType: MarketType;
+  readonly outcomes: ReadonlyMap<number, FootballBinaryOutcome>;
+  readonly linePolicy: "LINE" | "NONE";
+  readonly handicap: boolean;
 }
 
-function selection(value: unknown, marketType: ImFootballMarketType): SbobetCatalogSelection | null {
+function outcomeMap(...entries: ReadonlyArray<readonly [number, FootballBinaryOutcome]>):
+ReadonlyMap<number, FootballBinaryOutcome> {
+  return new Map(entries);
+}
+
+const handicapOutcomes = outcomeMap([1, "HOME"], [2, "AWAY"]);
+const totalOutcomes = outcomeMap([3, "OVER"], [4, "UNDER"]);
+const oddEvenOutcomes = outcomeMap([10, "ODD"], [11, "EVEN"]);
+const yesNoOutcomes = (yes: number, no: number) => outcomeMap([yes, "YES"], [no, "NO"]);
+const customOddEvenOutcomes = (odd: number, even: number) => outcomeMap([odd, "ODD"], [even, "EVEN"]);
+const customTotalOutcomes = (under: number, over: number) => outcomeMap([under, "UNDER"], [over, "OVER"]);
+
+function periodMarket(gp: number, full: MarketType, first: MarketType, second?: MarketType): MarketType | null {
+  return gp === 1 ? full : gp === 2 ? first : gp === 3 ? second ?? null : null;
+}
+
+function imMarketSemantics(bti: number, gp: number): ImFootballMarketSemantics | null {
+  const line = (marketType: MarketType, outcomes: ReadonlyMap<number, FootballBinaryOutcome>, handicap = false):
+  ImFootballMarketSemantics => ({ marketType, outcomes, linePolicy: "LINE", handicap });
+  const noLine = (marketType: MarketType, outcomes: ReadonlyMap<number, FootballBinaryOutcome>):
+  ImFootballMarketSemantics => ({ marketType, outcomes, linePolicy: "NONE", handicap: false });
+  if (bti === 1) {
+    const marketType = periodMarket(gp, "FT_AH", "FH_AH", "SH_AH");
+    return marketType === null ? null : line(marketType, handicapOutcomes, true);
+  }
+  if (bti === 2) {
+    const marketType = periodMarket(gp, "FT_TOTAL", "FH_TOTAL", "SH_TOTAL");
+    return marketType === null ? null : line(marketType, totalOutcomes);
+  }
+  if (bti === 5) {
+    const marketType = periodMarket(gp, "FT_ODD_EVEN", "FH_ODD_EVEN", "SH_ODD_EVEN");
+    return marketType === null ? null : noLine(marketType, oddEvenOutcomes);
+  }
+  if (bti === 18) {
+    const marketType = periodMarket(gp, "FT_BTTS", "FH_BTTS", "SH_BTTS");
+    return marketType === null ? null : noLine(marketType, yesNoOutcomes(87, 88));
+  }
+  if (gp !== 1 && bti !== 299 && bti !== 306) return null;
+  switch (bti) {
+    case 19: return noLine("HOME_FT_WIN_EITHER_HALF", yesNoOutcomes(89, 90));
+    case 20: return noLine("AWAY_FT_WIN_EITHER_HALF", yesNoOutcomes(91, 92));
+    case 22: return noLine("HOME_FT_CLEAN_SHEET", yesNoOutcomes(97, 98));
+    case 23: return noLine("AWAY_FT_CLEAN_SHEET", yesNoOutcomes(99, 100));
+    case 24: return line("FT_BOTH_HALVES_OVER_TOTAL", yesNoOutcomes(101, 102));
+    case 25: return line("FT_BOTH_HALVES_UNDER_TOTAL", yesNoOutcomes(103, 104));
+    case 26: return noLine("HOME_FT_WIN_BOTH_HALVES", yesNoOutcomes(105, 106));
+    case 27: return noLine("AWAY_FT_WIN_BOTH_HALVES", yesNoOutcomes(107, 108));
+    case 31: return line("HOME_FT_TOTAL", customTotalOutcomes(118, 119));
+    case 32: return line("AWAY_FT_TOTAL", customTotalOutcomes(120, 121));
+    case 33: return noLine("HOME_FT_SCORE_BOTH_HALVES", yesNoOutcomes(122, 123));
+    case 34: return noLine("AWAY_FT_SCORE_BOTH_HALVES", yesNoOutcomes(124, 125));
+    case 42: return noLine("HOME_FT_ODD_EVEN", customOddEvenOutcomes(144, 145));
+    case 43: return noLine("AWAY_FT_ODD_EVEN", customOddEvenOutcomes(146, 147));
+    case 44: return noLine("HOME_FT_WIN_TO_NIL", yesNoOutcomes(148, 149));
+    case 45: return noLine("AWAY_FT_WIN_TO_NIL", yesNoOutcomes(150, 151));
+    case 78: return noLine("HOME_FT_TO_WIN", yesNoOutcomes(334, 335));
+    case 79: return noLine("AWAY_FT_TO_WIN", yesNoOutcomes(336, 337));
+    case 80: return noLine("FT_ANY_TEAM_TO_WIN", yesNoOutcomes(338, 339));
+    case 160: return line("HOME_FT_TOTAL", outcomeMap([638, "OVER"], [639, "UNDER"]));
+    case 161: return line("AWAY_FT_TOTAL", outcomeMap([640, "OVER"], [641, "UNDER"]));
+    case 299: {
+      const marketType = periodMarket(gp, "CORNER_FT_AH", "CORNER_FH_AH");
+      return marketType === null ? null : line(marketType, handicapOutcomes, true);
+    }
+    case 306: {
+      const marketType = periodMarket(gp, "CORNER_FT_TOTAL", "CORNER_FH_TOTAL");
+      return marketType === null ? null : line(marketType, totalOutcomes);
+    }
+    default: return null;
+  }
+}
+
+function selection(value: unknown, semantics: ImFootballMarketSemantics): SbobetCatalogSelection | null {
   const item = record(value);
-  const isHandicap = isHandicapMarket(marketType);
-  const expected = isHandicap ? [1, 2] : [3, 4];
-  if (item === null || !expected.includes(Number(item.si)) || !supportedLine(item.hdp)) return null;
+  const selected = item === null ? undefined : semantics.outcomes.get(Number(item.si));
+  if (item === null || selected === undefined ||
+    (semantics.linePolicy === "LINE" && !supportedLine(item.hdp))) return null;
   const normalizedOdds = normalizeImOdds(item.o);
   if (normalizedOdds === null) return null;
   const selectionId = identifier(item.wsi);
-  const lineText = text(item.dih);
-  if (selectionId === null || lineText === null) return null;
+  const lineText = semantics.linePolicy === "LINE" ? text(item.dih) : null;
+  if (selectionId === null || (semantics.linePolicy === "LINE" && lineText === null)) return null;
   return {
     selectionId,
-    selection: isHandicap ? (item.si === 1 ? "HOME" : "AWAY")
-      : (item.si === 3 ? "OVER" : "UNDER"),
+    selection: selected,
     priceText: String(normalizedOdds),
     locked: false,
-    lineText
+    ...(lineText === null ? {} : { lineText })
   };
 }
 
 function market(value: unknown): SbobetCatalogMarket | null {
   const item = record(value);
-  if (item === null || (item.bti !== 1 && item.bti !== 2) || ![1, 2, 3].includes(Number(item.gp)) ||
-    !Array.isArray(item.ws) || item.ws.length !== 2) return null;
+  const semantics = item === null ? null : imMarketSemantics(Number(item.bti), Number(item.gp));
+  if (item === null || semantics === null || !Array.isArray(item.ws) || item.ws.length !== 2) return null;
   const marketId = identifier(item.mi);
-  const marketType: ImFootballMarketType = item.gp === 1
-    ? item.bti === 1 ? "FT_AH" : "FT_TOTAL"
-    : item.gp === 2
-      ? item.bti === 1 ? "FH_AH" : "FH_TOTAL"
-      : item.bti === 1 ? "SH_AH" : "SH_TOTAL";
-  const selections = item.ws.map((value) => selection(value, marketType));
+  const selections = item.ws.map((value) => selection(value, semantics));
   if (marketId === null || selections.some((item) => item === null)) return null;
   const exact = selections as SbobetCatalogSelection[];
   if (new Set(exact.map((item) => item.selection)).size !== 2) return null;
-  return { marketId, marketType,
-    lineText: isHandicapMarket(marketType) ? null : exact[0]?.lineText ?? null, selections: exact };
+  return { marketId, marketType: semantics.marketType,
+    lineText: semantics.handicap || semantics.linePolicy === "NONE" ? null : exact[0]?.lineText ?? null,
+    selections: exact };
 }
 
 function markets(value: unknown): readonly SbobetCatalogMarket[] {
   return Array.isArray(value) ? value.map(market).filter((item): item is SbobetCatalogMarket => item !== null) : [];
+}
+
+const imKnownExcludedBetTypes = new Set([3, 4, 6, 7, 8, 9, 11, 35, 38, 39, 158, 159, 313]);
+
+export function observeNativeImFootballMarkets(value: unknown, observedAtMs: number):
+readonly NativeMarketObservation[] {
+  const root = record(value);
+  if (root === null || root.StatusCode !== 100 || !Array.isArray(root.sel) || !Number.isFinite(observedAtMs)) return [];
+  const observations: NativeMarketObservation[] = [];
+  for (const [eventIndex, candidate] of root.sel.entries()) {
+    const event = record(candidate);
+    if (event === null || !Array.isArray(event.mls)) continue;
+    const providerEventId = identifier(event.eid) ?? `UNKNOWN_EVENT_${eventIndex}`;
+    const eventComparable = identifier(event.eid) !== null && event.iscyb === false && text(event.htn) !== null &&
+      text(event.atn) !== null && text(event.htn) !== text(event.atn) && text(event.cn) !== null;
+    for (const [marketIndex, candidateMarket] of event.mls.entries()) {
+      const item = record(candidateMarket);
+      const bti = Number(item?.bti);
+      const gp = Number(item?.gp);
+      const nativeType = Number.isSafeInteger(bti) ? `bti=${bti}` : "bti=UNKNOWN";
+      const nativeScope = Number.isSafeInteger(gp) ? `gp=${gp}` : null;
+      const providerMarketId = identifier(item?.mi) ?? `${providerEventId}:native:${nativeType}:${marketIndex}`;
+      const semantics = Number.isSafeInteger(bti) && Number.isSafeInteger(gp) ? imMarketSemantics(bti, gp) : null;
+      const normalized = market(item);
+      const selections = Array.isArray(item?.ws) ? item.ws : [];
+      const rawOutcomeLabels = selections.map((candidateSelection, selectionIndex) => {
+        const rawSelection = record(candidateSelection);
+        const selectionId = Number(rawSelection?.si);
+        return semantics?.outcomes.get(selectionId) ??
+          (Number.isSafeInteger(selectionId) ? String(selectionId) : `OUTCOME_${selectionIndex + 1}`);
+      });
+      const knownExcluded = Number.isSafeInteger(bti) && imKnownExcludedBetTypes.has(bti);
+      const disposition: NativeMarketObservation["disposition"] = !eventComparable || knownExcluded ||
+        (semantics !== null && normalized === null) ? "EXCLUDED" : semantics === null ? "UNMAPPED" : "NORMALIZED";
+      const reason = !eventComparable ? "EVENT_NOT_COMPARABLE"
+        : knownExcluded ? (bti === 4 || bti === 39 ? "PUSH_OR_REFUND_SETTLEMENT"
+          : bti === 3 ? "THREE_WAY_OUTCOME_DOMAIN" : "NON_BINARY_OUTCOME_DOMAIN")
+        : semantics === null ? "NATIVE_TYPE_UNMAPPED"
+        : normalized === null ? "INVALID_TWO_WAY_SHAPE" : "CANONICAL_MARKET_MAPPED";
+      const labels = selections.flatMap((candidateSelection) => {
+        const label = text(record(candidateSelection)?.dih);
+        return label === null ? [] : [label];
+      });
+      observations.push({ provider: "IM", category: "FOOTBALL", providerEventId, providerMarketId,
+        nativeType, nativeLabel: [...new Set(labels)].join(" | ").slice(0, 512) || null, nativeScope,
+        outcomeLabels: rawOutcomeLabels, observedAtMs, disposition, reason });
+    }
+  }
+  return observations;
 }
 
 function validDeltaMarket(value: unknown): boolean {
@@ -79,18 +197,19 @@ function validDeltaMarket(value: unknown): boolean {
   if (item === null || identifier(item.mi) === null || typeof item.bti !== "number" ||
     !Number.isSafeInteger(item.bti) || typeof item.gp !== "number" || !Number.isSafeInteger(item.gp) ||
     !Array.isArray(item.ws)) return false;
-  const supportedDomain = [1, 2].includes(item.bti) && [1, 2, 3].includes(item.gp);
+  const semantics = imMarketSemantics(item.bti, item.gp);
+  const supportedDomain = semantics !== null;
   if (!supportedDomain) return true;
   if (item.ws.length !== 2) return false;
-  const expectedSelections = item.bti === 1 ? new Set([1, 2]) : new Set([3, 4]);
   const actualSelections = new Set<number>();
   for (const candidate of item.ws) {
-    const selection = record(candidate);
-    if (selection === null || identifier(selection.wsi) === null || typeof selection.si !== "number" ||
-      !expectedSelections.has(selection.si) || actualSelections.has(selection.si) ||
-      !isLineFieldWellFormed(selection.hdp) ||
-      text(selection.dih) === null || normalizeImOdds(selection.o) === null) return false;
-    actualSelections.add(selection.si);
+    const itemSelection = record(candidate);
+    const selectionId = Number(itemSelection?.si);
+    if (itemSelection === null || identifier(itemSelection.wsi) === null || !semantics.outcomes.has(selectionId) ||
+      actualSelections.has(selectionId) || normalizeImOdds(itemSelection.o) === null ||
+      (semantics.linePolicy === "LINE" && (!isLineFieldWellFormed(itemSelection.hdp) ||
+        text(itemSelection.dih) === null))) return false;
+    actualSelections.add(selectionId);
   }
   return actualSelections.size === 2;
 }

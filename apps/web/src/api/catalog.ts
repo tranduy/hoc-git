@@ -2,6 +2,7 @@ import {
   ProviderEventSchema,
   ProviderMarketSchema,
   ProviderQuoteSchema,
+  NativeMarketObservationSchema,
   ProviderIdSchema,
   CategorySchema,
   type Category,
@@ -9,6 +10,7 @@ import {
   type ProviderEvent,
   type ProviderMarket,
   type ProviderQuote
+  , type NativeMarketObservation
 } from "@tool-chenh/contracts";
 
 export interface LiveCatalogResponse {
@@ -23,6 +25,7 @@ export interface LiveCatalogResponse {
   readonly events: readonly ProviderEvent[];
   readonly markets: readonly ProviderMarket[];
   readonly quotes: readonly ProviderQuote[];
+  readonly nativeMarketObservations?: readonly NativeMarketObservation[];
 }
 
 export interface CatalogApiLike {
@@ -67,6 +70,8 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
   const events = ProviderEventSchema.array().safeParse(record.events);
   const markets = ProviderMarketSchema.array().safeParse(record.markets);
   const quotes = ProviderQuoteSchema.array().safeParse(record.quotes);
+  const nativeMarketObservations = NativeMarketObservationSchema.array().optional()
+    .safeParse(record.nativeMarketObservations);
   const category = CategorySchema.safeParse(record.category);
   if (
     record.dataMode !== "LIVE" || typeof record.accountId !== "string" || record.accountId !== expectedAccountId ||
@@ -75,7 +80,7 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
     (record.snapshotState !== undefined && record.snapshotState !== "FRESH" && record.snapshotState !== "STALE") ||
     typeof record.observedAtMs !== "number" || !Number.isFinite(record.observedAtMs) ||
     typeof record.rejectedMarketCount !== "number" || !Number.isSafeInteger(record.rejectedMarketCount) || record.rejectedMarketCount < 0 ||
-    !events.success || !markets.success || !quotes.success ||
+    !events.success || !markets.success || !quotes.success || !nativeMarketObservations.success ||
     events.data.some((event) => event.category !== category.data || event.provider !== record.provider) ||
     markets.data.some((market) => market.category !== category.data || market.provider !== record.provider) ||
     quotes.data.some((quote) => quote.category !== category.data || quote.provider !== record.provider)
@@ -85,7 +90,10 @@ export function parseLiveCatalogResponse(value: unknown, expectedAccountId: stri
     comparisonState: "AWAITING_SECOND_PROVIDER", observedAtMs: record.observedAtMs,
     snapshotState: record.snapshotState === "STALE" ? "STALE" : "FRESH",
     rejectedMarketCount: record.rejectedMarketCount,
-    events: events.data, markets: markets.data, quotes: quotes.data
+    events: events.data, markets: markets.data, quotes: quotes.data,
+    ...(nativeMarketObservations.data === undefined ? {} : {
+      nativeMarketObservations: nativeMarketObservations.data
+    })
   };
 }
 

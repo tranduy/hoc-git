@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BtiPageRecoveryWatchdog, btiHardRecoveryAction, btiSourceControlAction,
+import { BTI_PAGE_HEALTH_EXPRESSION, BtiPageRecoveryWatchdog, btiHardRecoveryAction, btiSourceControlAction,
   parseBtiPageHealthProbe } from "./bti-page-health.js";
 
 const failedPage = {
@@ -10,6 +10,24 @@ const failedPage = {
 } as const;
 
 describe("BTI page health", () => {
+  it("preserves bounded current detail diagnostics through the actual page expression", () => {
+    const coverage = { phase: "COMPLETE", liveLeagues: 10, prematchLeagues: 10,
+      liveBatches: 1, prematchBatches: 1, liveDone: 1, prematchDone: 1, failed: 0,
+      events: 196, namedEvents: 196, timedEvents: 196, marketEvents: 196, validEvents: 196,
+      detailCachedEvents: 159, detailCachedBytes: 17_500_000, detailPendingEvents: 0,
+      detailRosterEvents: 159, detailEmptyEvents: 1, detailFailedEvents: 0,
+      detailEvictedEvents: 0, detailCoverageComplete: true, detailQueuedEvents: 0,
+      detailInFlightEvents: 0, detailOldestReceiptAgeMs: 60_000,
+      detailNearTtlMs: 12_000, detailDistantTtlMs: 60_000, detailDueEvents: 0,
+      detailDeferredEvents: 0, detailRetainedEventCap: 2048, detailQueueCap: 128,
+      detailOverCapEvents: 0, rosterRefreshFailed: false };
+    const run = new Function("document", `return ${BTI_PAGE_HEALTH_EXPRESSION}`);
+    const value = run({ readyState: "complete", body: { innerText: "BTI football" },
+      documentElement: { dataset: { fieldlineBtiRosterCoverage: JSON.stringify(coverage) } } });
+    const parsed = parseBtiPageHealthProbe(value);
+    expect(parsed?.status).toBe("HEALTHY");
+    expect(JSON.parse(parsed!.rosterCoverage!)).toMatchObject(coverage);
+  });
   it("accepts only the bounded auth-error probe shape", () => {
     expect(parseBtiPageHealthProbe({ status: "AUTH_ERROR", code: "1008" }))
       .toEqual({ status: "AUTH_ERROR", code: "1008" });

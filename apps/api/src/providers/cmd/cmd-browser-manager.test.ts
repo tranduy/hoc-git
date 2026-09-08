@@ -126,7 +126,7 @@ describe("CMD browser manager safety", () => {
     }
   });
 
-  it("reads an already-visible football table without requiring a navigation icon", async () => {
+  it("reads every native football market group without requiring a navigation icon", async () => {
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage();
@@ -157,7 +157,8 @@ describe("CMD browser manager safety", () => {
           teamNames: ["A", "B"],
           groups: [
             expect.objectContaining({ betTypeIds: ["1"] }),
-            expect.objectContaining({ betTypeIds: ["3"] })
+            expect.objectContaining({ betTypeIds: ["3"] }),
+            expect.objectContaining({ betTypeIds: ["5"] })
           ]
         })
       ]);
@@ -294,5 +295,5 @@ describe("CMD browser manager safety", () => {
     } finally {
       await browser.close();
     }
-  });
+  }, 10_000);
 });

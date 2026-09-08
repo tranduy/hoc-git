@@ -1,0 +1,167 @@
+{
+  "capturedAt": "2026-09-07T14:02:59.276Z",
+  "buildIdentity": "sha256:bead0dcf07e4b7870024222edd295c0503e9a5b8fa31963deb254757b39521d2",
+  "extensionVersion": "0.2.38",
+  "sourceEpoch": "6081c260-45f5-4094-962c-6b3cb84e7dc5:3",
+  "catalog": {
+    "observedAtMs": 1788789763056,
+    "snapshotState": "FRESH",
+    "events": 109,
+    "markets": 799,
+    "quotes": 1598,
+    "nativeRows": 1123
+  },
+  "navigationProbe": {
+    "observedAt": "2026-09-07T14:02:35.535Z",
+    "body": {
+      "kind": "SABA_NAVIGATION_PROBE",
+      "version": 1,
+      "status": "NO_ACTION_UNCONFIRMED_SELECTION",
+      "coverageClaim": "PUBLIC_STRUCTURE_ONLY",
+      "mutated": false,
+      "viewRestored": true,
+      "periodControls": [
+        {
+          "ariaSelected": "",
+          "classes": [
+            "c-side-nav__tab"
+          ],
+          "parentClasses": [
+            "c-side-nav__tab-group"
+          ],
+          "parentTag": "div",
+          "tag": "div",
+          "text": "Sớm"
+        },
+        {
+          "ariaSelected": "",
+          "classes": [
+            "c-side-nav__tab"
+          ],
+          "parentClasses": [
+            "c-side-nav__tab-group"
+          ],
+          "parentTag": "div",
+          "tag": "div",
+          "text": "Hôm Nay"
+        },
+        {
+          "ariaSelected": "",
+          "classes": [
+            "c-side-nav__tab"
+          ],
+          "parentClasses": [
+            "c-side-nav__tab-group"
+          ],
+          "parentTag": "div",
+          "tag": "div",
+          "text": "Trực tiếp156"
+        }
+      ],
+      "today": null,
+      "early": null,
+      "expansions": [],
+      "truncated": true
+    }
+  },
+  "discovery": {
+    "observedAt": "2026-09-07T14:02:35.608Z",
+    "body": {
+      "kind": "SABA_PUBLIC_CATALOG_DISCOVERY",
+      "version": 1,
+      "scope": "LEGACY_SPORTS",
+      "sportsScope": {
+        "headerLabel": "Thể Thao",
+        "navParentClasses": [
+          "c-side-nav",
+          "c-side-nav--event"
+        ]
+      },
+      "navControls": [
+        {
+          "period": "EARLY",
+          "label": "Sớm",
+          "tag": "div",
+          "classes": [
+            "c-side-nav__tab"
+          ],
+          "selected": false,
+          "expanded": null,
+          "visible": true
+        },
+        {
+          "period": "TODAY",
+          "label": "Hôm Nay",
+          "tag": "div",
+          "classes": [
+            "c-side-nav__tab"
+          ],
+          "selected": false,
+          "expanded": null,
+          "visible": true
+        }
+      ],
+      "counts": {
+        "footballTables": 2,
+        "compactRows": 128,
+        "legacyLeagues": 0,
+        "legacyRows": 0,
+        "prematchRows": 95
+      },
+      "matches": [
+        {
+          "matchId": "134003685",
+          "shape": "COMPACT",
+          "controls": [
+            {
+              "label": "2",
+              "tag": "a",
+              "classes": [
+                "c-btn",
+                "c-btn--more",
+                "c-is-close"
+              ],
+              "selected": false,
+              "expanded": null,
+              "visible": true
+            }
+          ]
+        },
+        {
+          "matchId": "134003749",
+          "shape": "COMPACT",
+          "controls": [
+            {
+              "label": "2",
+              "tag": "a",
+              "classes": [
+                "c-btn",
+                "c-btn--more",
+                "c-is-close"
+              ],
+              "selected": false,
+              "expanded": null,
+              "visible": true
+            }
+          ]
+        },
+        {
+          "matchId": "134019593",
+          "shape": "COMPACT",
+          "controls": []
+        }
+      ],
+      "scroll": [
+        {
+          "tag": "html",
+          "classes": [],
+          "clientHeight": 948,
+          "scrollHeight": 28328,
+          "scrollTop": 0
+        }
+      ],
+      "truncated": true
+    }
+  },
+  "limitation": "Public structure only; UNKNOWN selection caused no action, not full hidden membership or realtime acceptance."
+}

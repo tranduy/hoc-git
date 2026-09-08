@@ -1,0 +1,127 @@
+{
+  "note": "Actual .57 evidence only; no full terminal or realtime acceptance.",
+  "records": [
+    {
+      "at": "2026-09-07T21:43:30.425Z",
+      "build": "sha256:6dcb7fcfb6bdef7007b527cc866fdd4671217472827e4e9b50278b312c77343b",
+      "firstFailingHop": null,
+      "source": {
+        "sourceId": "chrome:SABA:2105831237",
+        "tabId": 2105831237,
+        "authorityDisposition": "ACTIVE"
+      },
+      "epoch": "3beba9c1-2191-422d-bb38-e97b73ac9a4f:10",
+      "catalog": {
+        "state": "FRESH",
+        "events": 24,
+        "markets": 151,
+        "quotes": 302,
+        "native": 275,
+        "observedAtMs": 1788817325734
+      },
+      "capture": {
+        "name": "capture-1788816991543.jsonl",
+        "size": 6417383,
+        "mtime": 1788817408131.299
+      }
+    },
+    {
+      "periodFailures": [],
+      "probeCount": 1,
+      "probes": [
+        {
+          "at": "2026-09-07T21:39:11.682Z",
+          "epoch": "3beba9c1-2191-422d-bb38-e97b73ac9a4f:10",
+          "status": "NO_ACTION_COLLECTOR_TARGET_BOUND",
+          "viewRestored": true
+        }
+      ],
+      "collectorState": {
+        "nativeReady": true,
+        "catalogUsable": true,
+        "discoveryPending": false,
+        "discoveryAttempted": true,
+        "collectorState": "FINISHED",
+        "domBlocked": false,
+        "probeBlocked": false
+      },
+      "collectors": [
+        {
+          "at": "2026-09-07T21:42:17.007Z",
+          "epoch": "3beba9c1-2191-422d-bb38-e97b73ac9a4f:10",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "INCOMPLETE",
+          "viewRestored": false,
+          "reason": "TODAY_RESTORE_UNCONFIRMED",
+          "collectionErrorCode": null,
+          "restorationErrorCode": "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT",
+          "completedOwners": 25
+        },
+        {
+          "at": "2026-09-07T21:42:32.706Z",
+          "epoch": "3beba9c1-2191-422d-bb38-e97b73ac9a4f:10",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "INCOMPLETE",
+          "viewRestored": false,
+          "reason": "TODAY_RESTORE_UNCONFIRMED",
+          "collectionErrorCode": "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT",
+          "restorationErrorCode": "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT",
+          "completedOwners": 0
+        },
+        {
+          "at": "2026-09-07T21:42:46.982Z",
+          "epoch": "3beba9c1-2191-422d-bb38-e97b73ac9a4f:10",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "INCOMPLETE",
+          "viewRestored": false,
+          "reason": "TODAY_RESTORE_UNCONFIRMED",
+          "collectionErrorCode": "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT",
+          "restorationErrorCode": "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT",
+          "completedOwners": 0
+        },
+        {
+          "at": "2026-09-07T21:43:05.480Z",
+          "epoch": "3beba9c1-2191-422d-bb38-e97b73ac9a4f:10",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "INCOMPLETE",
+          "viewRestored": false,
+          "reason": "TODAY_RESTORE_UNCONFIRMED",
+          "collectionErrorCode": "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT",
+          "restorationErrorCode": "SABA_COLLECTOR_FRAME_COMMAND_TIMEOUT",
+          "completedOwners": 0
+        }
+      ],
+      "latestEnvelopeEpoch": "3beba9c1-2191-422d-bb38-e97b73ac9a4f:10",
+      "lastHealth": {
+        "at": "2026-09-07T21:43:27.869Z",
+        "counters": {
+          "OK": 59,
+          "ERROR": 0,
+          "TIMEOUT": 0,
+          "SKIPPED_INFLIGHT": 87,
+          "forcedUnlocks": 0
+        },
+        "lastOutcome": {
+          "workItem": "pollSabaDomChanges",
+          "outcome": "OK",
+          "durationMs": 0
+        },
+        "lastErrorCode": null,
+        "inFlightAgeMs": 0
+      },
+      "transports": {
+        "TAB_STATE": 108,
+        "WS_FRAME": 250,
+        "DOM_SNAPSHOT": 19,
+        "WS_STATE": 5
+      },
+      "lastDom": {
+        "at": "2026-09-07T21:42:05.734Z",
+        "epoch": "3beba9c1-2191-422d-bb38-e97b73ac9a4f:10",
+        "recordCount": 40,
+        "chunkCount": 1,
+        "chunkIndex": 0
+      }
+    }
+  ]
+}

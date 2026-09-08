@@ -126,6 +126,8 @@ describe("exact provider tab renewal", () => {
 describe("provider page lease coordinator", () => {
   const BTI = { lobby: "BTI" as const, sourceId: "chrome:BTI:7", tabId: 7 };
   const IM = { lobby: "IM" as const, sourceId: "chrome:IM:8", tabId: 8 };
+  const TSPORT = { lobby: "TSPORT" as const, sourceId: "chrome:TSPORT:9", tabId: 9 };
+  const KSPORT = { lobby: "KSPORT" as const, sourceId: "chrome:KSPORT:10", tabId: 10 };
 
   it("strictly parses one persisted schedule for every renewable lobby", async () => {
     const { parseProviderPageLeaseState } = await import("./provider-page-lease.js");
@@ -188,6 +190,64 @@ describe("provider page lease coordinator", () => {
     expect(renew).toHaveBeenCalledExactlyOnceWith(BTI);
     expect(schedules.BTI).toEqual({ lastCompletedAtMs: 4_000, nextAttemptAtMs: 1_204_000 });
     expect(schedules.IM.nextAttemptAtMs).toBe(3_000);
+  });
+
+  it("does not periodically navigate a healthy APSPORT source when its lease timer is due", async () => {
+    const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
+    const schedules = leaseSchedules(1_000);
+    schedules.TSPORT.nextAttemptAtMs = 2_000;
+    const renew = vi.fn(async () => undefined);
+    const coordinator = new ProviderPageLeaseCoordinator({
+      now: () => 4_000,
+      listAttached: () => [TSPORT],
+      isLoading: async () => false,
+      loadState: async () => schedules,
+      saveState: async () => undefined,
+      renew
+    });
+
+    await coordinator.tick();
+
+    expect(renew).not.toHaveBeenCalled();
+    expect(schedules.TSPORT).toEqual({ lastCompletedAtMs: 1_000, nextAttemptAtMs: 2_000 });
+  });
+
+  it("still explicitly renews APSPORT for observed failure or manual recovery", async () => {
+    const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
+    const schedules = leaseSchedules(1_000);
+    const renew = vi.fn(async () => undefined);
+    const coordinator = new ProviderPageLeaseCoordinator({
+      now: () => 4_000,
+      listAttached: () => [TSPORT],
+      isLoading: async () => false,
+      loadState: async () => schedules,
+      saveState: async () => undefined,
+      renew
+    });
+
+    await coordinator.renewNow(TSPORT);
+
+    expect(renew).toHaveBeenCalledExactlyOnceWith(TSPORT);
+    expect(schedules.TSPORT).toEqual({ lastCompletedAtMs: 4_000, nextAttemptAtMs: 1_204_000 });
+  });
+
+  it("keeps KSPORT eligible for scheduled renewal", async () => {
+    const { ProviderPageLeaseCoordinator } = await import("./provider-page-lease.js");
+    const schedules = leaseSchedules(1_000);
+    schedules.KSPORT.nextAttemptAtMs = 2_000;
+    const renew = vi.fn(async () => undefined);
+    const coordinator = new ProviderPageLeaseCoordinator({
+      now: () => 4_000,
+      listAttached: () => [KSPORT],
+      isLoading: async () => false,
+      loadState: async () => schedules,
+      saveState: async () => undefined,
+      renew
+    });
+
+    await coordinator.tick();
+
+    expect(renew).toHaveBeenCalledExactlyOnceWith(KSPORT);
   });
 
   it("defers a loading tab for thirty seconds without blocking another tick forever", async () => {

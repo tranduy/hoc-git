@@ -7,6 +7,7 @@ import { CmdDomCatalogAdapter } from "./cmd-dom-adapter.js";
 import { CmdHttpCatalogAdapter } from "./cmd-http-adapter.js";
 import { ImHttpCatalogAdapter } from "./im-http-adapter.js";
 import { SabaWsCatalogAdapter } from "./saba-ws-adapter.js";
+import { SabaQuoteClockMapper } from "./saba-quote-clock.js";
 import { KsportWsCatalogAdapter } from "./ksport-ws-adapter.js";
 import { BtiHttpCatalogAdapter } from "./bti-http-adapter.js";
 import { TsportWsCatalogAdapter } from "./tsport-ws-adapter.js";
@@ -27,6 +28,7 @@ import type { PipelineTelemetry } from "../diagnostics/pipeline-telemetry.js";
 
 export interface ChromeCatalogDataPlaneOptions {
   readonly now?: () => number;
+  readonly monotonicNow?: () => number;
   readonly feedRegistry?: ProviderFeedRegistry;
   readonly freshnessMs?: number;
   readonly maxEnvelopeAgeMs?: number;
@@ -63,6 +65,7 @@ type EpochIdentity = CanonicalEpochIdentity | LegacyEpochIdentity;
 
 interface DecodePipeline {
   readonly router: AdapterRouter;
+  readonly sabaAdapter: SabaWsCatalogAdapter;
   readonly networkBodies: NetworkBodyAssembler;
   readonly coverage: CatalogCoverageGuard;
   readonly laneToken: AuthorityLaneToken;
@@ -88,6 +91,7 @@ const DEFAULT_RECOVERABLE_ACCOUNTS: ReadonlySet<string> = new Set([
 
 export class ChromeCatalogDataPlane {
   readonly #now: () => number;
+  readonly #sabaQuoteClocks: SabaQuoteClockMapper;
   readonly #freshnessMs: number;
   readonly #maxEnvelopeAgeMs: number;
   readonly #publish: ((catalog: ObservedProviderCatalog, snapshotState: "FRESH" | "STALE") => void) | null;
@@ -107,6 +111,9 @@ export class ChromeCatalogDataPlane {
 
   constructor(options: ChromeCatalogDataPlaneOptions = {}) {
     this.#now = options.now ?? Date.now;
+    this.#sabaQuoteClocks = new SabaQuoteClockMapper({ now: () => ({
+      wallClockNowMs: this.#now(), monotonicNowMs: (options.monotonicNow ?? (() => performance.now()))()
+    }) });
     // BTI and similar authenticated pages poll their live catalog every
     // 10-15 seconds. A five-second TTL made a healthy source oscillate between
     // LIVE and STALE for most of every poll interval.
@@ -141,6 +148,9 @@ export class ChromeCatalogDataPlane {
   }
 
   ingest(envelope: ChromeBridgeEnvelope, context: ChromeCatalogIngestContext = {}): boolean {
+    if (envelope.request.pathnameClass === "/__fieldline_saba_schema_context__") {
+      return this.#ingestSabaSchemaContext(envelope, context);
+    }
     const transportAccountId = accountIdForLobby(envelope.lobby);
     const ageMs = this.#now() - envelope.observedAtMs;
     const replayed = envelope.request.replayed === true;
@@ -204,7 +214,7 @@ export class ChromeCatalogDataPlane {
     }
     const pipeline = admission.disposition === "ACTIVE"
       ? this.#activePipeline(identity, admission.laneToken)
-      : this.#candidatePipeline(identity, admission.token, admission.laneToken);
+      : this.#candidatePipeline(identity, admission.token, admission.laneToken, envelope.observedAtMs);
     if (pipeline === null) return this.#reject(envelope, "DECODE_PIPELINE_UNAVAILABLE");
     const assembled = pipeline.networkBodies.ingest(envelope);
     if (assembled === null) return this.#reject(envelope, "NETWORK_BODY_INCOMPLETE");
@@ -299,6 +309,7 @@ export class ChromeCatalogDataPlane {
     if (!isObservedCatalog(update.value)) return this.#reject(envelope, `ADAPTER_VALUE_INVALID:${route.adapter.id}`);
     let nextCatalog = update.value;
     const provenance = update.provenance ?? catalogProvenance(envelope.transport);
+    const mode = update.evidenceMode ?? (update.authoritativeBaseline === true ? "BASELINE" : "DELTA");
     if (admission.disposition === "CANDIDATE" && provenance === "DOM_FALLBACK" && envelope.lobby !== "SABA") {
       return this.#reject(envelope, `CANDIDATE_DOM_FALLBACK:${route.adapter.id}`);
     }
@@ -317,7 +328,12 @@ export class ChromeCatalogDataPlane {
     }
     if (envelope.lobby === "SABA" && envelope.transport === "DOM_SNAPSHOT") {
       const retained = this.#catalogs.get(nextCatalog.accountId);
-      if (retained !== undefined) nextCatalog = overlaySabaDomCatalog(retained, nextCatalog);
+      // A qualified DOM BASELINE is a complete replacement generation. Unioning
+      // it with the retained catalog keeps expired events and changed lines
+      // forever. Only a DOM DELTA needs the retained socket/hidden-market view.
+      if (retained !== undefined && mode !== "BASELINE") {
+        nextCatalog = overlaySabaDomCatalog(retained, nextCatalog);
+      }
     }
     if (nextCatalog.category !== "FOOTBALL" || nextCatalog.accountId !== transportAccountId) {
       return this.#reject(envelope, `CATALOG_IDENTITY_MISMATCH:${route.adapter.id}`);
@@ -325,11 +341,19 @@ export class ChromeCatalogDataPlane {
     // A provider page can briefly render the event shell before its market
     // rows. Such a snapshot is transport-valid but unusable for comparison;
     // publishing it would erase the last complete catalog on every refresh.
-    if (nextCatalog.events.length > 0 &&
+    const provenApsportEmptyMarkets = envelope.lobby === "TSPORT" && provenance === "AUTHENTICATED_HTTP" &&
+      update.authoritativeEmptyMarkets === true && nextCatalog.markets.length === 0 && nextCatalog.quotes.length === 0;
+    // KSPORT also proves complete native market containers. An exact empty
+    // detail must retire its last prices, and unmapped native rows still belong
+    // in the catalog. Its applied socket withdrawals retain the HTTP pair's
+    // proof; source authority and generation admission are still required below.
+    const provenSbobetEmptyMarkets = envelope.lobby === "KSPORT" && route.adapter.id === "ksport-ws-catalog-v1" &&
+      (provenance === "AUTHENTICATED_HTTP" || provenance === "WS") && update.authoritativeEmptyMarkets === true &&
+      nextCatalog.markets.length === 0 && nextCatalog.quotes.length === 0;
+    if (!provenApsportEmptyMarkets && !provenSbobetEmptyMarkets && nextCatalog.events.length > 0 &&
       (nextCatalog.markets.length === 0 || nextCatalog.quotes.length === 0)) {
       return this.#reject(envelope, `CATALOG_MARKETS_OR_QUOTES_EMPTY:${route.adapter.id}`);
     }
-    const mode = update.evidenceMode ?? (update.authoritativeBaseline === true ? "BASELINE" : "DELTA");
     const generation = update.generation ?? (mode === "BASELINE" && update.authoritativeBaseline === true
       ? `${sourceEpoch}:${update.sequence}` : null);
     if (generation === null) {
@@ -342,12 +366,22 @@ export class ChromeCatalogDataPlane {
       return this.#reject(envelope, `CANDIDATE_AUTHORITATIVE_BASELINE_REQUIRED:${route.adapter.id}`);
     }
     const coverage = { generation, authoritativeBaseline: mode === "BASELINE",
-      providerEventIds: nextCatalog.events.map((event) => event.providerEventId) };
+      providerEventIds: nextCatalog.events.map((event) => event.providerEventId),
+      ...(envelope.lobby === "TSPORT" && provenance === "AUTHENTICATED_HTTP" && mode === "DELTA" &&
+        update.authoritativeRemovedEventIds !== undefined
+        ? { authoritativeRemovedEventIds: update.authoritativeRemovedEventIds } : {}) };
     const currentAuthority = admission.disposition === "CANDIDATE"
       ? this.#authorityCoordinator.snapshot(transportAccountId).active : null;
     const currentCatalog = this.#catalogs.get(nextCatalog.accountId);
+    let retainedAuthorityIsLive = false;
+    if (admission.disposition === "CANDIDATE" && currentCatalog !== undefined) {
+      try {
+        this.#feeds.read(transportAccountId);
+        retainedAuthorityIsLive = true;
+      } catch { /* stale retained authority must not block a complete replacement baseline */ }
+    }
     if (envelope.lobby === "BTI" && admission.disposition === "CANDIDATE" &&
-      currentAuthority?.sourceId === update.sourceId && currentCatalog !== undefined &&
+      retainedAuthorityIsLive && currentAuthority?.sourceId === update.sourceId && currentCatalog !== undefined &&
       !retainsBtiReplacementCoverage(currentCatalog, nextCatalog)) {
       // An extension/bridge reconnect keeps the same authenticated BTI tab but
       // creates a fresh lane-local adapter. Its first three list responses hold
@@ -358,7 +392,8 @@ export class ChromeCatalogDataPlane {
       return this.#reject(envelope, "BTI_REPLACEMENT_COVERAGE_INCOMPLETE");
     }
     if (envelope.lobby === "TSPORT" && admission.disposition === "CANDIDATE" &&
-      currentCatalog !== undefined && !retainsApsportReplacementCoverage(currentCatalog, nextCatalog)) {
+      retainedAuthorityIsLive && currentCatalog !== undefined &&
+      !retainsApsportReplacementCoverage(currentCatalog, nextCatalog)) {
       // The all-future APSPORT roster can briefly lose a sizeable partition
       // when its page context or detail hydration fails. A fresh bridge/source
       // epoch owns a fresh lane-local coverage guard, so compare it with the
@@ -368,19 +403,22 @@ export class ChromeCatalogDataPlane {
     }
     if (envelope.lobby === "SABA" && admission.disposition === "CANDIDATE" &&
       provenance === "WS" && this.#catalogBases.get(nextCatalog.accountId) === "DOM_FALLBACK" &&
-      currentCatalog !== undefined && !retainsSabaReplacementCoverage(currentCatalog, nextCatalog)) {
+      retainedAuthorityIsLive && currentCatalog !== undefined &&
+      !retainsSabaReplacementCoverage(currentCatalog, nextCatalog)) {
       // SABA's socket baseline can contain only the small live partition while
       // the completed DOM sweep also carries the full pre-match card. A source
       // epoch rotation creates a fresh lane-local coverage guard, so without a
       // cross-authority check that 15-event socket baseline can replace a
       // 190-event catalog. Keep the old authority until the new epoch's DOM
       // sweep proves comparable coverage; that sweep remains eligible below.
-      this.#resetRejectedCandidatePipeline(identity, admission.token, pipeline);
       return this.#reject(envelope, "SABA_REPLACEMENT_COVERAGE_INCOMPLETE");
     }
     const explicitDomSweep = envelope.lobby === "CMD" && envelope.transport === "DOM_SNAPSHOT" &&
       update.completeSweepEvidence === true;
-    if (!explicitDomSweep && !pipeline.coverage.allows(nextCatalog.accountId, coverage)) {
+    const qualifiedSabaDomBaseline = envelope.lobby === "SABA" && envelope.transport === "DOM_SNAPSHOT" &&
+      mode === "BASELINE" && update.authoritativeBaseline === true;
+    if (!explicitDomSweep && !qualifiedSabaDomBaseline &&
+      !pipeline.coverage.allows(nextCatalog.accountId, coverage)) {
       return this.#reject(envelope, `CATALOG_COVERAGE_REJECTED:${route.adapter.id}`);
     }
     if (admission.disposition === "CANDIDATE") {
@@ -394,6 +432,9 @@ export class ChromeCatalogDataPlane {
       const stagedDecision = this.#promoteCandidate(identity, admission.token, pipeline, proof,
         envelope.observedAtMs, catalogEvidence, coverage, catalogBasis);
       if (stagedDecision === null || stagedDecision.publish === null) {
+        // A rejected SABA DOM promotion must not leave inherited inventory in
+        // this candidate's later WS baseline proof. Recreate only this lane.
+        if (envelope.lobby === "SABA") this.#resetRejectedCandidatePipeline(identity, admission.token, pipeline);
         return this.#reject(envelope, `CANDIDATE_PROMOTION_REJECTED:${route.adapter.id}`);
       }
       this.#telemetry?.recordCatalog(stagedDecision.publish.catalog);
@@ -407,6 +448,42 @@ export class ChromeCatalogDataPlane {
     if (decision.accepted) this.#catalogBases.set(nextCatalog.accountId, catalogBasis);
     const applied = this.#applyDecision(decision);
     return applied ? true : this.#reject(envelope, `FEED_CONTROLLER_REJECTED:${route.adapter.id}`);
+  }
+
+  #ingestSabaSchemaContext(envelope: ChromeBridgeEnvelope, context: ChromeCatalogIngestContext): false {
+    if (envelope.lobby !== "SABA" || envelope.transport !== "TAB_STATE" ||
+      envelope.request.resourceType !== "Diagnostic" || envelope.payload.encoding !== "UTF8" ||
+      envelope.request.replayed === true) return false;
+    const ageMs = this.#now() - envelope.observedAtMs;
+    const epoch = envelopeEpoch(envelope);
+    const connectionGeneration = context.connectionGeneration;
+    const identity = context.authorityIdentity;
+    const observation = context.authorityObservation;
+    if (!Number.isFinite(ageMs) || ageMs > this.#maxEnvelopeAgeMs || epoch === null ||
+      !Number.isSafeInteger(connectionGeneration) || (connectionGeneration as number) <= 0 ||
+      identity === undefined || observation === undefined || observation.disposition === "REJECTED" ||
+      !identityMatchesEnvelope(identity, "catalog-source:SABA:FOOTBALL", envelope, epoch.sourceEpoch,
+        connectionGeneration as number)) return false;
+
+    const authority = this.#authorityCoordinator.snapshot(identity.accountId);
+    let pipeline: DecodePipeline | null = null;
+    if (observation.disposition === "ACTIVE" && authority.active !== null &&
+      sameAuthorityIdentity(authority.active, identity) && authority.activeLaneToken === observation.laneToken) {
+      const current = this.#activePipelines.get(identity.accountId);
+      if (current !== undefined && sameAuthorityIdentity(current.identity, identity) &&
+        current.pipeline.laneToken === observation.laneToken) pipeline = current.pipeline;
+    } else if (observation.disposition === "CANDIDATE" && authority.candidate !== null &&
+      sameAuthorityIdentity(authority.candidate, identity) && authority.candidateLaneToken === observation.laneToken &&
+      authority.candidateToken === observation.token) {
+      const current = this.#candidatePipelines.get(identity.accountId);
+      if (current !== undefined && sameAuthorityIdentity(current.identity, identity) &&
+        current.token === observation.token && current.pipeline.laneToken === observation.laneToken) {
+        pipeline = current.pipeline;
+      }
+    }
+    if (pipeline === null) return false;
+    pipeline.sabaAdapter.seedSchemaContext(envelope);
+    return false;
   }
 
   #reject(envelope: ChromeBridgeEnvelope, reason: string): false {
@@ -480,18 +557,36 @@ export class ChromeCatalogDataPlane {
     if (existing !== undefined && existing.pipeline.laneToken === laneToken &&
       sameAuthorityIdentity(existing.identity, identity)) return existing.pipeline;
     existing?.pipeline.networkBodies.dispose();
-    const pipeline = createDecodePipeline(this.#networkBodyBudget, laneToken);
+    const pipeline = createDecodePipeline(this.#networkBodyBudget, laneToken, this.#sabaQuoteClocks);
     this.#activePipelines.set(identity.accountId, { identity, pipeline });
     return pipeline;
   }
 
   #candidatePipeline(identity: AuthorityIdentity, token: AuthorityCandidateToken,
-    laneToken: AuthorityLaneToken): DecodePipeline {
+    laneToken: AuthorityLaneToken, atMs: number): DecodePipeline {
     const current = this.#candidatePipelines.get(identity.accountId);
-    if (current !== undefined && current.token === token && current.pipeline.laneToken === laneToken &&
-      sameAuthorityIdentity(current.identity, identity)) return current.pipeline;
-    current?.pipeline.networkBodies.dispose();
-    const pipeline = createDecodePipeline(this.#networkBodyBudget, laneToken);
+    const reusable = current !== undefined && current.token === token && current.pipeline.laneToken === laneToken &&
+      sameAuthorityIdentity(current.identity, identity);
+    if (!reusable) current?.pipeline.networkBodies.dispose();
+    const pipeline = reusable ? current.pipeline : createDecodePipeline(this.#networkBodyBudget, laneToken, this.#sabaQuoteClocks);
+    if (identity.accountId === "catalog-source:SABA:FOOTBALL") {
+      const active = this.#activePipelines.get(identity.accountId);
+      const authority = this.#authorityCoordinator.snapshot(identity.accountId);
+      const previousEpoch = active === undefined ? null : canonicalSourceEpoch(active.identity.sourceEpoch);
+      const nextEpoch = canonicalSourceEpoch(identity.sourceEpoch);
+      if (active !== undefined && authority.active !== null &&
+        sameAuthorityIdentity(active.identity, authority.active) &&
+        authority.candidateToken === token && authority.candidate !== null &&
+        sameAuthorityIdentity(identity, authority.candidate) &&
+        active.identity.sourceId === identity.sourceId && !sameAuthorityIdentity(active.identity, identity) &&
+        previousEpoch !== null && nextEpoch !== null && previousEpoch.lineage === nextEpoch.lineage &&
+        nextEpoch.generation >= previousEpoch.generation) {
+        // Pending retention cannot affect WS readiness or coverage; only this
+        // candidate's independently qualified fresh DOM may activate it.
+        pipeline.sabaAdapter.seedPendingCollectorRetentionFrom(active.pipeline.sabaAdapter,
+          identity.sourceId, active.identity.sourceEpoch, identity.sourceEpoch, atMs);
+      }
+    }
     this.#candidatePipelines.set(identity.accountId, { identity, token, pipeline });
     return pipeline;
   }
@@ -503,7 +598,7 @@ export class ChromeCatalogDataPlane {
       !sameAuthorityIdentity(current.identity, identity)) return;
     pipeline.networkBodies.dispose();
     this.#candidatePipelines.set(identity.accountId, { identity, token,
-      pipeline: createDecodePipeline(this.#networkBodyBudget, pipeline.laneToken) });
+      pipeline: createDecodePipeline(this.#networkBodyBudget, pipeline.laneToken, this.#sabaQuoteClocks) });
   }
 
   #promoteCandidate(identity: AuthorityIdentity, token: AuthorityCandidateToken,
@@ -555,6 +650,7 @@ export class ChromeCatalogDataPlane {
           // catalog, pipeline, coverage, or ownership pointer.
           const activePipeline: DecodePipeline = {
             router: pipeline.router,
+            sabaAdapter: pipeline.sabaAdapter,
             coverage: pipeline.coverage,
             laneToken: transaction.activeLaneToken,
             networkBodies: new NetworkBodyAssembler({
@@ -619,14 +715,14 @@ function isBtiAuthFailurePageHealth(envelope: ChromeBridgeEnvelope): boolean {
   if (envelope.lobby !== "BTI" || envelope.transport !== "TAB_STATE" ||
     envelope.request.hostname !== "prod20091.fxf774.com" ||
     envelope.request.pathnameClass !== "/__fieldline_heartbeat__" ||
-    envelope.payload.encoding !== "UTF8" || envelope.payload.body.length > 640) return false;
+    envelope.payload.encoding !== "UTF8" || envelope.payload.body.length > 8192) return false;
   try {
     const value = JSON.parse(envelope.payload.body) as unknown;
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     const candidate = value as Record<string, unknown>;
     const keys = Object.keys(candidate);
     const coverageSafe = candidate.rosterCoverage === undefined ||
-      (typeof candidate.rosterCoverage === "string" && candidate.rosterCoverage.length <= 400 &&
+      (typeof candidate.rosterCoverage === "string" && candidate.rosterCoverage.length <= 4096 &&
         /^[-A-Za-z0-9_":{},.]+$/u.test(candidate.rosterCoverage));
     return keys.every((key) => ["kind", "status", "code", "rosterCoverage"].includes(key)) &&
       keys.length >= 3 && coverageSafe && candidate.kind === "PAGE_HEALTH" &&
@@ -685,11 +781,13 @@ function canonicalSourceEpoch(sourceEpoch: string): { readonly lineage: string; 
   return Number.isSafeInteger(generation) ? { lineage: match[1]!, generation } : null;
 }
 
-function createDecodePipeline(budget: NetworkBodyAssemblyBudget, laneToken: AuthorityLaneToken): DecodePipeline {
+function createDecodePipeline(budget: NetworkBodyAssemblyBudget, laneToken: AuthorityLaneToken,
+  sabaQuoteClocks: SabaQuoteClockMapper): DecodePipeline {
+  const sabaAdapter = new SabaWsCatalogAdapter({ quoteClockMapper: sabaQuoteClocks });
   return { router: new AdapterRouter([new CmdHttpCatalogAdapter(), new CmdDomCatalogAdapter(),
-    new ImHttpCatalogAdapter(), new SabaWsCatalogAdapter(), new KsportWsCatalogAdapter(),
+    new ImHttpCatalogAdapter(), sabaAdapter, new KsportWsCatalogAdapter(),
     new TsportWsCatalogAdapter(), new BtiHttpCatalogAdapter()], { confirmationsRequired: 1 }),
-  coverage: new CatalogCoverageGuard(), laneToken,
+  sabaAdapter, coverage: new CatalogCoverageGuard(), laneToken,
   networkBodies: new NetworkBodyAssembler({ budget, laneToken }) };
 }
 

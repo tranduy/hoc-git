@@ -1,0 +1,143 @@
+{
+  "note": "Actual extension0.2.49 first activation: old diagnostic prerequisite mutated More before collector, timeout led to recovery; not source-instability evidence or coverage. Snapshot follows.",
+  "snapshots": [
+    {
+      "at": "2026-09-07T19:48:43.777Z",
+      "build": "sha256:09cbd2944fea0e8d1a2d8cff5f6a1d76478aa67f38c12683a2f6b73295216c4e",
+      "firstFailingHop": null,
+      "source": {
+        "sourceId": "chrome:SABA:2105831237",
+        "tabId": 2105831237,
+        "authorityDisposition": "ACTIVE"
+      },
+      "epoch": "b0035cc6-92d7-4174-b980-470913b4b505:6",
+      "catalog": {
+        "state": "FRESH",
+        "events": 50,
+        "markets": 296,
+        "quotes": 592,
+        "native": 563,
+        "observedAtMs": 1788810500863
+      },
+      "capture": {
+        "name": "capture-1788810370668.jsonl",
+        "size": 3262691,
+        "mtime": 1788810523192.9585
+      }
+    },
+    {
+      "probeCount": 2,
+      "probes": [
+        {
+          "at": "2026-09-07T19:47:19.819Z",
+          "epoch": "b0035cc6-92d7-4174-b980-470913b4b505:4",
+          "status": "RECOVERY_PENDING",
+          "viewRestored": false
+        },
+        {
+          "at": "2026-09-07T19:47:19.820Z",
+          "epoch": "b0035cc6-92d7-4174-b980-470913b4b505:4",
+          "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+          "reason": "MORE_AFTER_NOT_STABLE",
+          "viewRestored": false,
+          "todayRows": 74,
+          "expansions": [
+            {
+              "ownerMatchId": "133152892",
+              "outcome": "OWNER_GROUPS_EXPANDED",
+              "addedMatchIds": [],
+              "addedNativeTypes": [],
+              "addedMarketIds": [
+                "133152892__1054290299",
+                "133152892__1054290298",
+                "133152892__1054290246",
+                "133152892__1054290296",
+                "133152892__1054290253",
+                "133152892__1054290252",
+                "133152892__1054290251",
+                "133152892__1054290303",
+                "133152892__1054290312",
+                "133152892__1054290305",
+                "133152892__1054290238",
+                "133152892__1054290293",
+                "133152892__1054290291",
+                "133152892__1054290295",
+                "133152892__1054290306",
+                "133152892__1054290292",
+                "133152892__1054290288",
+                "133152892__1054290308"
+              ],
+              "restored": true,
+              "truncated": false
+            }
+          ],
+          "failureTrace": [
+            {
+              "stage": "MORE_AFTER_SETTLE",
+              "ownerMatchId": "133090282",
+              "outcome": "LAST_READ_ABSENT",
+              "reads": 3,
+              "elapsedMs": 15088,
+              "evaluationFailure": "FRAME_COMMAND_TIMEOUT",
+              "evaluationTarget": {
+                "kind": "ISOLATED_WORLD",
+                "contextIdPresent": true
+              },
+              "before": {
+                "relatedRowCount": 1,
+                "marketIdCount": 11
+              },
+              "last": {
+                "relatedRowCount": 1,
+                "marketIdCount": 30
+              }
+            },
+            {
+              "stage": "RESTORE_TODAY_SETTLE",
+              "outcome": "LAST_READ_ABSENT",
+              "reads": 2,
+              "elapsedMs": 10302,
+              "evaluationFailure": "FRAME_COMMAND_TIMEOUT",
+              "evaluationTarget": {
+                "kind": "ISOLATED_WORLD",
+                "contextIdPresent": true
+              }
+            }
+          ]
+        }
+      ],
+      "collectors": [],
+      "latestEnvelopeEpoch": "b0035cc6-92d7-4174-b980-470913b4b505:6",
+      "lastHealth": {
+        "at": "2026-09-07T19:48:42.930Z",
+        "counters": {
+          "OK": 24,
+          "ERROR": 0,
+          "TIMEOUT": 0,
+          "SKIPPED_INFLIGHT": 19,
+          "forcedUnlocks": 0
+        },
+        "lastOutcome": {
+          "workItem": "pollSabaDomChanges",
+          "outcome": "OK",
+          "durationMs": 2
+        },
+        "lastErrorCode": null,
+        "inFlightAgeMs": 0
+      },
+      "transports": {
+        "DOM_SNAPSHOT": 30,
+        "WS_FRAME": 36,
+        "TAB_STATE": 43,
+        "WS_STATE": 1
+      },
+      "lastDom": {
+        "at": "2026-09-07T19:48:20.863Z",
+        "epoch": "b0035cc6-92d7-4174-b980-470913b4b505:6",
+        "recordCount": 26,
+        "chunkCount": 2,
+        "chunkIndex": 1
+      }
+    }
+  ]
+}

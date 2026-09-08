@@ -1,0 +1,144 @@
+{
+  "provider": "SABA",
+  "extensionVersion": "0.2.44",
+  "buildIdentity": "sha256:8f3a595b8d6a7fca7c1bd123a4bb89e71836c683754c4ba8953138683c7009df",
+  "sourceId": "chrome:SABA:2105831237",
+  "observedAt": "2026-09-07T18:18:46.004Z",
+  "captureFile": "capture-1788804573813.jsonl",
+  "results": [
+    {
+      "at": "2026-09-07T18:16:12.377Z",
+      "epoch": "fdd062c2-e2d1-4084-a24a-31378f5dac4d:4",
+      "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+      "viewRestored": false,
+      "todayRows": 95,
+      "expansions": [
+        {
+          "ownerMatchId": "132973443",
+          "outcome": "OWNER_GROUPS_EXPANDED",
+          "addedMatchIds": [],
+          "addedNativeTypes": [],
+          "addedMarketIds": [
+            "132973443__1052519859",
+            "132973443__1052519858",
+            "132973443__1052518998",
+            "132973443__1052519856",
+            "132973443__1052518993",
+            "132973443__1052518996",
+            "132973443__1052519004",
+            "132973443__1052519863",
+            "132973443__1052519872",
+            "132973443__1052519865",
+            "132973443__1052518984",
+            "132973443__1052519853",
+            "132973443__1052519851",
+            "132973443__1052519855",
+            "132973443__1052519866",
+            "132973443__1052519852",
+            "132973443__1052519847",
+            "132973443__1052519868"
+          ],
+          "restored": true,
+          "truncated": false
+        },
+        {
+          "ownerMatchId": "132974263",
+          "outcome": "OWNER_GROUPS_EXPANDED",
+          "addedMatchIds": [],
+          "addedNativeTypes": [],
+          "addedMarketIds": [
+            "132974263__1052527465",
+            "132974263__1052527464",
+            "132974263__1052526624",
+            "132974263__1052527462",
+            "132974263__1052526619",
+            "132974263__1052526622",
+            "132974263__1052526630",
+            "132974263__1052527469",
+            "132974263__1052527478",
+            "132974263__1052527471",
+            "132974263__1052526610",
+            "132974263__1052527459",
+            "132974263__1052527457",
+            "132974263__1052527461",
+            "132974263__1052527472",
+            "132974263__1052527458",
+            "132974263__1052527453",
+            "132974263__1052527474"
+          ],
+          "restored": true,
+          "truncated": false
+        }
+      ],
+      "failureTrace": [
+        {
+          "stage": "EARLY_SETTLE",
+          "outcome": "LAST_READ_ABSENT",
+          "reads": 1,
+          "elapsedMs": 1884,
+          "evaluationFailure": "PAGE_NULL",
+          "evaluationTarget": {
+            "kind": "MAIN_WORLD",
+            "contextIdPresent": true
+          }
+        },
+        {
+          "stage": "FINAL_TODAY_SETTLE",
+          "outcome": "STABILITY_WINDOW_EXHAUSTED",
+          "reads": 1,
+          "elapsedMs": 5642
+        },
+        {
+          "stage": "FINAL_TODAY_RETRY_SETTLE",
+          "outcome": "FINGERPRINT_UNSTABLE",
+          "reads": 2,
+          "elapsedMs": 5508
+        }
+      ]
+    },
+    {
+      "at": "2026-09-07T18:17:04.612Z",
+      "epoch": "fdd062c2-e2d1-4084-a24a-31378f5dac4d:23",
+      "status": "AMBIGUOUS_OR_RESTORE_FAILED",
+      "reason": "MORE_AFTER_NOT_STABLE",
+      "viewRestored": false,
+      "todayRows": 97,
+      "expansions": [
+        {
+          "ownerMatchId": "132973443",
+          "outcome": "NO_STRUCTURAL_CHANGE",
+          "addedMatchIds": [],
+          "addedNativeTypes": [],
+          "addedMarketIds": [],
+          "restored": true,
+          "truncated": false
+        }
+      ],
+      "failureTrace": [
+        {
+          "stage": "MORE_AFTER_SETTLE",
+          "ownerMatchId": "132974263",
+          "outcome": "STABILITY_WINDOW_EXHAUSTED",
+          "reads": 1,
+          "elapsedMs": 5344,
+          "before": {
+            "relatedRowCount": 1,
+            "marketIdCount": 11
+          },
+          "last": {
+            "relatedRowCount": 1,
+            "marketIdCount": 11
+          }
+        },
+        {
+          "stage": "RESTORE_TODAY_SETTLE",
+          "outcome": "FINGERPRINT_UNSTABLE",
+          "reads": 3,
+          "elapsedMs": 6212
+        }
+      ]
+    }
+  ],
+  "coverageClaim": "PUBLIC_STRUCTURE_ONLY",
+  "conclusion": "Two prematch More controls added 18 market IDs each and restored. Early and final Today restoration not proven. A later epoch failed settling; no full inventory or ongoing hidden-price acceptance."
+}

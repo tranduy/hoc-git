@@ -84,6 +84,29 @@ describe("CMD public catalog DOM snapshot", () => {
     await page.close();
   });
 
+  it("retains a native odds group whose bet-type marker is missing for inventory", async () => {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <section class="c-odds-table--sport1"><div class="c-league" data-leagueid="l1">
+        <span class="c-league__name">Premier Test</span>
+        <div class="c-match" data-matchid="m1">
+          <span class="c-match-time">08/17 02:30AM</span>
+          <span class="c-team-name">Alpha</span><span class="c-team-name">Beta</span>
+          <div class="c-match__odds-group">
+            <div class="c-odds-button"><span>Mystery A</span><div class="c-odds" data-moid="mystery">0.8</div></div>
+            <div class="c-odds-button"><span>Mystery B</span><div class="c-odds" data-moid="mystery">-0.9</div></div>
+          </div>
+        </div>
+      </div></section>
+    `);
+
+    const serialized = await page.evaluate(CMD_PUBLIC_CATALOG_EXPRESSION) as string;
+    const records = JSON.parse(serialized) as Array<{ groups: Array<{ betTypeIds: string[] }> }>;
+
+    expect(records[0]?.groups).toEqual([expect.objectContaining({ betTypeIds: [] })]);
+    await page.close();
+  });
+
   it("orders legacy handicap prices by their rendered team rows instead of reversed DOM order", async () => {
     const page = await browser.newPage();
     await page.setContent(`

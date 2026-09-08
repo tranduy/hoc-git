@@ -90,8 +90,10 @@ function catalogRevision(catalog: LiveCatalogResponse): string {
   const markets = catalog.markets.map((market) => [market.providerMarketId, market.status, market.line].join(":"));
   const quotes = catalog.quotes.map((quote) => [quote.providerMarketId, quote.providerSelectionId, quote.rawOdds,
     quote.status, quote.sequence, quote.sourceTimestampMs].join(":"));
+  const observations = (catalog.nativeMarketObservations ?? []).map((observation) => [observation.providerMarketId,
+    observation.nativeType, observation.disposition, observation.reason, observation.observedAtMs].join(":"));
   return [catalog.observedAtMs, catalog.snapshotState ?? "FRESH", catalog.rejectedMarketCount,
-    ...events, ...markets, ...quotes].join("|");
+    ...events, ...markets, ...quotes, ...observations].join("|");
 }
 
 function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -278,8 +280,11 @@ export function filterAccountBackedSignals(
   });
 }
 
-function matchCountLabel(count: number): string {
-  return `${count} ${count === 1 ? "match" : "matches"}`;
+function catalogCountLabel(eventCount: number, marketCount: number | null): string {
+  const events = `${eventCount.toLocaleString("en-US")} ${eventCount === 1 ? "match" : "matches"}`;
+  const markets = marketCount === null ? "… markets"
+    : `${marketCount.toLocaleString("en-US")} ${marketCount === 1 ? "market" : "markets"}`;
+  return `${events} · ${markets}`;
 }
 
 function formatRecoveryDuration(seconds: number | null): string {
@@ -299,10 +304,18 @@ function ProviderReloadIcon({ provider, spinning }: {
   </svg>;
 }
 
-function ProviderSelector({ accounts, eventCounts, loaded, selected, toggle,
+interface NativeCoverageCount {
+  readonly normalized: number;
+  readonly excluded: number;
+  readonly unmapped: number;
+}
+
+function ProviderSelector({ accounts, eventCounts, marketCounts, nativeCoverageCounts, loaded, selected, toggle,
   recoveryByProvider, manualRecover }: {
   readonly accounts: readonly CatalogSourceStatus[];
   readonly eventCounts: ReadonlyMap<string, number>;
+  readonly marketCounts: ReadonlyMap<string, number>;
+  readonly nativeCoverageCounts: ReadonlyMap<string, NativeCoverageCount>;
   readonly loaded: boolean;
   readonly selected: ReadonlySet<string>;
   readonly toggle: (id: string) => void;
@@ -319,6 +332,24 @@ function ProviderSelector({ accounts, eventCounts, loaded, selected, toggle,
       : "nguồn không hoạt động";
     const availabilityLabel = providerAccounts.length === 0 ? (loaded ? "unavailable" : "loading") : detail;
     const count = providerAccounts.reduce((total, account) => total + (eventCounts.get(account.id) ?? 0), 0);
+    const loadedMarketCounts = providerAccounts.flatMap((account) => {
+      const value = marketCounts.get(account.id);
+      return value === undefined ? [] : [value];
+    });
+    const marketCount = providerAccounts.length === 0 ? 0 : loadedMarketCounts.length === 0 ? null
+      : loadedMarketCounts.reduce((total, value) => total + value, 0);
+    const nativeCoverage = providerAccounts.reduce<NativeCoverageCount>((total, account) => {
+      const value = nativeCoverageCounts.get(account.id);
+      return value === undefined ? total : {
+        normalized: total.normalized + value.normalized,
+        excluded: total.excluded + value.excluded,
+        unmapped: total.unmapped + value.unmapped
+      };
+    }, { normalized: 0, excluded: 0, unmapped: 0 });
+    const hasNativeCoverage = providerAccounts.some((account) => nativeCoverageCounts.has(account.id));
+    const nativeCoverageText = `${nativeCoverage.normalized.toLocaleString("en-US")} normalized · ${
+      nativeCoverage.excluded.toLocaleString("en-US")} excluded · ${
+      nativeCoverage.unmapped.toLocaleString("en-US")} unmapped`;
     const recoverableProvider = provider as RecoverableProvider;
     const recovery = recoveryByProvider?.get(recoverableProvider);
     const reloading = recovery?.phase === "RECOVERING" || recovery?.phase === "WAITING";
@@ -335,12 +366,14 @@ function ProviderSelector({ accounts, eventCounts, loaded, selected, toggle,
       {activeAccount === undefined ? <label className="provider-selector__unavailable">
         <input aria-label={`${provider} ${availabilityLabel}`} checked={false} disabled readOnly type="checkbox" />
         <ProviderBrand compact provider={provider} />
-        <span className="provider-selector__match-count">({matchCountLabel(count)})</span>
+        <span className="provider-selector__match-count">({catalogCountLabel(count, marketCount)})</span>
+        {hasNativeCoverage && <span className="provider-selector__native-count">{nativeCoverageText}</span>}
         <small>{detail}</small>
       </label> : <label><input checked={selected.has(activeAccount.id)}
         onChange={() => toggle(activeAccount.id)} type="checkbox" />
         <ProviderBrand compact label={activeAccount.alias} provider={activeAccount.provider} />
-        <span className="provider-selector__match-count">({matchCountLabel(count)})</span>
+        <span className="provider-selector__match-count">({catalogCountLabel(count, marketCount)})</span>
+        {hasNativeCoverage && <span className="provider-selector__native-count">{nativeCoverageText}</span>}
       </label>}
       <button aria-label={reloading ? `\u0110ang reload ${provider}` : `Reload ${provider}`}
         className={`provider-recovery-button${reloading ? " provider-recovery-button--reloading" : ""}`}
@@ -570,7 +603,8 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   const recoveryByProvider = new Map(recoverableProviders.map((provider) =>
     [provider, sourceRecoveryCoordinatorRef.current?.snapshot(provider) ??
       storedRecoverySnapshot(window.localStorage, provider, Date.now())] as const));
-  const categorySelectedIds = useMemo(() => categorySources.filter((source) => selectedIds.has(source.id))
+  const categorySelectedIds = useMemo(() => categorySources.filter((source) =>
+    source.sessionState === "ACTIVE" && selectedIds.has(source.id))
     .map((source) => source.id), [categorySources, selectedIds]);
 
   useEffect(() => {
@@ -657,6 +691,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
     const coordinator = new CatalogRevisionCoordinator({
       read: (accountId) => readCatalogRef.current(accountId),
       onCatalog: (result) => acceptRealtimeCatalogRef.current(result),
+      retryDelayMs: catalogRetryDelayMs,
+      minimumPublishIntervalMs: 3_000,
+      fallbackMs: 3_000,
       onError: (accountId, error) => retryAfterMs.current.set(accountId,
         Date.now() + catalogRetryDelayMs(error))
     });
@@ -931,6 +968,28 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
       (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
       .map((candidate) => candidate.providerEventId)).size
   ])), [catalogs, category]);
+  const marketCounts = useMemo(() => new Map(catalogs.map((catalog) => {
+    const eligibleEventIds = new Set(catalog.events.filter((candidate) => candidate.category === category &&
+      (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
+      .map((candidate) => candidate.providerEventId));
+    const marketIds = new Set(catalog.markets.filter((candidate) => candidate.category === category &&
+      eligibleEventIds.has(candidate.providerEventId))
+      .map((candidate) => `${candidate.providerEventId}\u0000${candidate.providerMarketId}`));
+    return [catalog.accountId, marketIds.size] as const;
+  })), [catalogs, category]);
+  const nativeCoverageCounts = useMemo(() => new Map(catalogs.flatMap((catalog) => {
+    if (catalog.nativeMarketObservations === undefined) return [];
+    const eligibleEventIds = new Set(catalog.events.filter((candidate) => candidate.category === category &&
+      (candidate.category !== "FOOTBALL" || candidate.isVirtual === false))
+      .map((candidate) => candidate.providerEventId));
+    const observations = catalog.nativeMarketObservations.filter((observation) =>
+      observation.category === category && eligibleEventIds.has(observation.providerEventId));
+    return [[catalog.accountId, {
+      normalized: observations.filter((observation) => observation.disposition === "NORMALIZED").length,
+      excluded: observations.filter((observation) => observation.disposition === "EXCLUDED").length,
+      unmapped: observations.filter((observation) => observation.disposition === "UNMAPPED").length
+    } satisfies NativeCoverageCount] as const];
+  })), [catalogs, category]);
   // Stale catalogs remain cached for recovery, but stale comparisons are not
   // shown. A cross-book ticket is useful only while every contributing source
   // is fresh.
@@ -1067,7 +1126,9 @@ export function LiveCatalogPage({ accountApi = defaultAccountApi, catalogApi = d
   return <>
     {freshnessApi === undefined ? null : <ProviderFreshnessStrip api={freshnessApi} category={category} />}
     <section className="catalog-toolbar" aria-label="Catalog controls">
-      <ProviderSelector accounts={categorySources} eventCounts={eventCounts} loaded={accountsLoaded}
+      <ProviderSelector accounts={categorySources} eventCounts={eventCounts} marketCounts={marketCounts}
+        nativeCoverageCounts={nativeCoverageCounts}
+        loaded={accountsLoaded}
         manualRecover={(provider) => { void sourceRecoveryCoordinatorRef.current?.manual(provider); }}
         recoveryByProvider={recoveryByProvider} selected={selectedIds} toggle={toggle} />
       <fieldset className="event-phase-filter" aria-label="Thời điểm trận">

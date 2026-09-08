@@ -1,4 +1,6 @@
-import { normalizeObservedFootballCatalog, normalizeSabaFootballRecords } from "@tool-chenh/adapters";
+import { normalizeObservedFootballCatalog, normalizeSabaFootballRecords,
+  observeNativeCmdMarkets } from "@tool-chenh/adapters";
+import type { CmdCatalogInputRecord } from "@tool-chenh/adapters";
 import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { SabaPushDecoder } from "../providers/saba/saba-push-decoder.js";
@@ -7,7 +9,10 @@ import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
 import { mergeObservedCatalogParts, type CatalogEvent, type NormalizedCatalogPart } from "./catalog-part-merge.js";
 import { CmdSnapshotAssembler } from "./cmd-snapshot-assembler.js";
 import { decodePublicDomRecords } from "./cmd-dom-adapter.js";
+import { SabaCollectorDomAssembler, type ValidatedSabaCollectorCandidate } from "./saba-collector-dom.js";
+import { augmentSabaDomCleanSheet } from "./saba-clean-sheet-dom.js";
 import { websocketLifecycleState } from "./websocket-lifecycle.js";
+import type { SabaQuoteClockMapper } from "./saba-quote-clock.js";
 
 const ACCOUNT_ID = "catalog-source:SABA:FOOTBALL";
 const MAX_RETAINED_PART_AGE_MS = 3_600_000;
@@ -27,6 +32,12 @@ const BASELINE_STARVATION_MS = 8_000;
 const FAULT_HOLD_MS = 20_000;
 const MIN_STABLE_DOM_EVENTS = 20;
 const SINGLE_GENERATION_DOM_EVENTS = 50;
+const SABA_SCHEMA_CONTEXT_PATH = "/__fieldline_saba_schema_context__";
+const SABA_SCHEMA_CONTEXT_MAX_BYTES = 256 * 1024;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function isSabaEngineIoHeartbeat(body: string): boolean {
   return body === "2" || body === "3";
@@ -48,6 +59,15 @@ function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
 
 function sourceEpochKey(envelope: ChromeBridgeEnvelope): string {
   return `${envelope.sourceId}|${sourceEpoch(envelope)}`;
+}
+
+function canonicalSabaSourceEpoch(value: string): {
+  readonly lineage: string; readonly generation: number
+} | null {
+  const match = /^([^|]+):(0|[1-9]\d*)$/u.exec(value);
+  if (match === null) return null;
+  const generation = Number(match[2]);
+  return Number.isSafeInteger(generation) ? { lineage: match[1]!, generation } : null;
 }
 
 function liveIdentityScore(event: CatalogEvent): number {
@@ -89,7 +109,21 @@ interface SabaStreamState {
   authorizing: boolean;
 }
 
+interface PendingCollectorRetention {
+  readonly sourceId: string;
+  readonly targetEpoch: string;
+  readonly part: NormalizedCatalogPart;
+  readonly prematchIds: ReadonlySet<string>;
+  readonly originalObservedAtMs: number;
+}
+
 export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
+  readonly #quoteClockMapper: SabaQuoteClockMapper | undefined;
+
+  constructor(options: { readonly quoteClockMapper?: SabaQuoteClockMapper } = {}) {
+    this.#quoteClockMapper = options.quoteClockMapper;
+  }
+
   /**
    * Which gate a frame left through, for the frames that produce nothing.
    *
@@ -117,6 +151,10 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly providerFamily = "SABA";
   readonly #decoders = new Map<string, SabaPushDecoder>();
   readonly #assembler = new CmdSnapshotAssembler();
+  readonly #collectorAssembler = new SabaCollectorDomAssembler();
+  readonly #collectorEpochs = new Map<string, string>();
+  readonly #collectorPrematchIds = new Map<string, ReadonlySet<string>>();
+  readonly #pendingCollectorRetentions = new Map<string, PendingCollectorRetention>();
   readonly #parts = new Map<string, NormalizedCatalogPart>();
   readonly #partObservedAtMs = new Map<string, number>();
   readonly #readyPartitions = new Set<string>();
@@ -129,14 +167,83 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   readonly #baselineStarvedSinceMs = new Map<string, number>();
   readonly #faultHeldSinceMs = new Map<string, number>();
 
+  seedSchemaContext(envelope: ChromeBridgeEnvelope): boolean {
+    if (envelope.lobby !== "SABA" || envelope.transport !== "TAB_STATE" ||
+      envelope.payload.encoding !== "UTF8" || envelope.request.resourceType !== "Diagnostic" ||
+      envelope.request.pathnameClass !== SABA_SCHEMA_CONTEXT_PATH || envelope.request.replayed === true ||
+      typeof envelope.sourceEpoch !== "string" ||
+      new TextEncoder().encode(envelope.payload.body).byteLength > SABA_SCHEMA_CONTEXT_MAX_BYTES) return false;
+    const streamId = envelope.request.streamId;
+    if (streamId === undefined) return false;
+    const streamOrdinal = sabaStreamOrdinal(streamId);
+    if (streamOrdinal === null) return false;
+    const epochKey = sourceEpochKey(envelope);
+    const stream = this.#streamStates.get(epochKey);
+    if (stream?.activeStreamId !== streamId || stream.activeStreamOrdinal !== streamOrdinal) return false;
+
+    let raw: unknown;
+    try { raw = JSON.parse(envelope.payload.body); }
+    catch { return false; }
+    if (!isPlainRecord(raw) || Object.keys(raw).sort().join(",") !== "bridgeId,kind,revision,rows" ||
+      raw.kind !== "SABA_SCHEMA_CONTEXT" || raw.revision !== null ||
+      typeof raw.bridgeId !== "string" || !Array.isArray(raw.rows)) return false;
+
+    const decoderKey = `${epochKey}|${streamId}`;
+    const existing = this.#decoders.get(decoderKey);
+    const decoder = existing ?? new SabaPushDecoder();
+    try {
+      decoder.seedSchemaContext({ bridgeId: raw.bridgeId, rows: raw.rows, revision: null });
+    } catch {
+      return false;
+    }
+    if (existing === undefined) this.#decoders.set(decoderKey, decoder);
+    return true;
+  }
+
+  seedPendingCollectorRetentionFrom(previous: SabaWsCatalogAdapter, sourceId: string,
+    previousEpoch: string, targetEpoch: string, atMs: number): boolean {
+    if (previous === this || sourceId.length === 0 || sourceId.includes("|") ||
+      !Number.isSafeInteger(atMs) || atMs < 0) return false;
+    const previousIdentity = canonicalSabaSourceEpoch(previousEpoch);
+    const targetIdentity = canonicalSabaSourceEpoch(targetEpoch);
+    if (previousIdentity === null || targetIdentity === null ||
+      previousIdentity.lineage !== targetIdentity.lineage ||
+      targetIdentity.generation < previousIdentity.generation) return false;
+    const previousEpochKey = sourceId + "|" + previousEpoch;
+    const targetEpochKey = sourceId + "|" + targetEpoch;
+    const previousPartKey = previousEpochKey + "|COLLECTOR";
+    const targetPartKey = targetEpochKey + "|COLLECTOR";
+    const part = previous.#parts.get(previousPartKey);
+    const prematchIds = previous.#collectorPrematchIds.get(previousEpochKey);
+    const originalObservedAtMs = previous.#partObservedAtMs.get(previousPartKey);
+    if (part === undefined || prematchIds === undefined || originalObservedAtMs === undefined ||
+      !Number.isSafeInteger(originalObservedAtMs) || originalObservedAtMs < 0 ||
+      atMs < originalObservedAtMs || atMs - originalObservedAtMs > MAX_RETAINED_PART_AGE_MS ||
+      this.#parts.has(targetPartKey) || this.#collectorPrematchIds.has(targetEpochKey) ||
+      this.#pendingCollectorRetentions.has(targetEpochKey) ||
+      this.#collectorEpochs.get(sourceId) === targetEpoch) return false;
+    this.#pendingCollectorRetentions.set(targetEpochKey, {
+      sourceId, targetEpoch, part, prematchIds: new Set(prematchIds), originalObservedAtMs
+    });
+    return true;
+  }
+
   resetSource(sourceId: string): void {
     for (const key of this.#decoders.keys()) if (key.startsWith(`${sourceId}|`)) this.#decoders.delete(key);
     this.#assembler.resetSource(sourceId);
+    this.#collectorAssembler.resetSource(sourceId);
+    this.#collectorEpochs.delete(sourceId);
+    for (const key of this.#collectorPrematchIds.keys()) {
+      if (key.startsWith(`${sourceId}|`)) this.#collectorPrematchIds.delete(key);
+    }
     for (const key of this.#parts.keys()) if (key.startsWith(`${sourceId}|`)) this.#parts.delete(key);
     for (const key of this.#partObservedAtMs.keys()) {
       if (key.startsWith(`${sourceId}|`)) this.#partObservedAtMs.delete(key);
     }
     for (const key of this.#readyPartitions) if (key.startsWith(`${sourceId}|`)) this.#readyPartitions.delete(key);
+    for (const key of this.#pendingCollectorRetentions.keys()) {
+      if (key.startsWith(sourceId + "|")) this.#pendingCollectorRetentions.delete(key);
+    }
     this.#domCandidates.delete(sourceId);
     this.#domReadySources.delete(sourceId);
     for (const key of this.#lastWsPublishAtMs.keys()) if (key.startsWith(`${sourceId}|`)) {
@@ -179,6 +286,52 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     // active stream even when this adapter is called outside the data plane.
     if (envelope.request.replayed === true) return this.#ignore("replayed-evidence");
     if (envelope.transport === "DOM_SNAPSHOT") {
+      const collectorChunk = collectorDomChunk(envelope.payload.body);
+      if (collectorChunk.dedicated) {
+        if (collectorChunk.raw === null) return this.#ignore("collector-malformed-json");
+        const epoch = sourceEpoch(envelope);
+        const pinnedEpoch = this.#collectorEpochs.get(envelope.sourceId);
+        if (pinnedEpoch === undefined) {
+          if (!this.#collectorAssembler.activateSourceEpoch(envelope.sourceId, epoch)) {
+            return this.#ignore("collector-invalid-binding");
+          }
+          this.#collectorEpochs.set(envelope.sourceId, epoch);
+        } else if (pinnedEpoch !== epoch) {
+          return this.#ignore("collector-stale-epoch");
+        }
+        const candidate = this.#collectorAssembler.ingest({ sourceId: envelope.sourceId,
+          sourceEpoch: epoch, rawChunk: collectorChunk.raw,
+          receivedMonotonicMs: envelope.receivedMonotonicMs,
+          generationObservedAtMs: envelope.observedAtMs });
+        if (candidate === null) return this.#ignore("collector-incomplete-or-invalid");
+        const normalized = normalizeCollectorCandidate(candidate);
+        if (normalized === null) return this.#ignore("collector-market-id-collision");
+        if (incompleteNormalizedCatalog(normalized, true)) {
+          return this.#ignore("incomplete-normalized-catalog");
+        }
+        const epochKey = sourceEpochKey(envelope);
+        this.#pendingCollectorRetentions.delete(epochKey);
+        const knownPrematchIds = new Set(normalized.events.map(({ providerEventId }) => providerEventId));
+        this.#collectorPrematchIds.set(epochKey, knownPrematchIds);
+        const domKey = `${epochKey}|DOM`;
+        const domPart = this.#parts.get(domKey);
+        if (domPart !== undefined) {
+          const retained = filterCatalogPart(domPart, (event) =>
+            liveIdentityScore(event) > 0 || knownPrematchIds.has(event.providerEventId));
+          if (retained.events.length === 0 && (retained.nativeMarketObservations?.length ?? 0) === 0) {
+            this.#parts.delete(domKey);
+            this.#partObservedAtMs.delete(domKey);
+          } else {
+            this.#parts.set(domKey, retained);
+          }
+        }
+        const establishesCollectorAuthority = this.#domReadySources.has(envelope.sourceId);
+        return this.#update(envelope, "COLLECTOR", normalized, establishesCollectorAuthority
+          ? { authoritativeBaseline: true, evidenceMode: "BASELINE",
+              generation: candidate.collectorGeneration, provenance: "DOM_FALLBACK" }
+          : { evidenceMode: "DELTA", generation: candidate.collectorGeneration,
+              provenance: "DOM_FALLBACK" }, true);
+      }
       // The DOM is only the visible viewport, never an authoritative baseline.
       // Publishing it before reset/done makes a healthy reconnect look LIVE
       // with only a handful of events and overwrites the complete catalog.
@@ -190,10 +343,19 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       // stay in the union while overlapping visible prices are refreshed.
       let domRefusal = "dom-undecodable";
       const records = decodePublicDomRecords(this.#assembler, envelope,
-        (reason) => { domRefusal = `dom-${reason}`; });
+        (reason) => { domRefusal = `dom-${reason}`; }, { allowEmptyTimeText: true });
       if (records === null) return this.#ignore(domRefusal);
-      const usable = records.filter((record) => record.groups.length > 0);
-      if (!socketReady) {
+      const canonicalRecords = canonicalizeSabaDomMarketIds(records);
+      if (canonicalRecords === null) return this.#ignore("dom-market-id-collision");
+      const usable = canonicalRecords.filter((record) =>
+        record.timeText.trim() !== "" && record.groups.length > 0);
+      const normalized = normalizeObservedFootballCatalog("SABA", canonicalRecords, {
+        observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
+        timezoneOffsetMinutes: 480, sequence: envelope.sequence
+      });
+      const normalizedDomComplete = !incompleteNormalizedCatalog(normalized, false);
+      let establishesDomAuthority = false;
+      if (usable.length >= MIN_STABLE_DOM_EVENTS) {
         // Some SABA deployments expose the complete current event table in the
         // page but do not recreate their Socket.IO transport after a service
         // worker restart. One large atomic generation can establish fallback
@@ -204,36 +366,77 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
         // feed, so these three gates are its whole catalog, and every one of
         // them was silent: 44 snapshots were dropped with only the endpoint to
         // show for it. The counts say which gate to move and by how much.
-        if (usable.length < MIN_STABLE_DOM_EVENTS) {
-          return this.#ignore(`dom-${usable.length}-events-under-${MIN_STABLE_DOM_EVENTS}`);
-        }
         const identities = new Set(usable.map((record) => record.matchId));
         const previous = this.#domCandidates.get(envelope.sourceId);
         if (!this.#domReadySources.has(envelope.sourceId)) {
           this.#domCandidates.set(envelope.sourceId, identities);
           if (previous === undefined && usable.length < SINGLE_GENERATION_DOM_EVENTS) {
-            return this.#ignore(`dom-first-generation-${usable.length}-under-${SINGLE_GENERATION_DOM_EVENTS}`);
+            if (!socketReady) {
+              return this.#ignore(`dom-first-generation-${usable.length}-under-${SINGLE_GENERATION_DOM_EVENTS}`);
+            }
           }
           if (previous !== undefined && !stableDomCoverage(previous, identities)) {
             return this.#ignore(`dom-coverage-moved-${previous.size}-to-${identities.size}`);
           }
-          this.#domReadySources.add(envelope.sourceId);
+          if (previous !== undefined || usable.length >= SINGLE_GENERATION_DOM_EVENTS) {
+            this.#domReadySources.add(envelope.sourceId);
+            establishesDomAuthority = true;
+          }
         } else if (previous !== undefined && !stableDomCoverage(previous, identities)) {
+          // One changed viewport is not enough to delete the prior full list,
+          // but keeping the old comparison point forever also rejects a real
+          // fixture roll-off forever. Remember the changed generation; a
+          // second stable capture of that same list proves the replacement.
+          this.#domCandidates.set(envelope.sourceId, identities);
           return this.#ignore(`dom-ready-coverage-moved-${previous.size}-to-${identities.size}`);
+        } else {
+          establishesDomAuthority = true;
         }
         this.#domCandidates.set(envelope.sourceId, identities);
+      } else if (!socketReady) {
+        return this.#ignore(`dom-${usable.length}-events-under-${MIN_STABLE_DOM_EVENTS}`);
       }
-      const normalized = normalizeObservedFootballCatalog("SABA", records, {
+      if (establishesDomAuthority && normalizedDomComplete) {
+        this.#activatePendingCollectorRetention(envelope, normalized);
+      }
+      const nativeMarketObservations = observeNativeCmdMarkets("SABA", canonicalRecords, {
         observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
         timezoneOffsetMinutes: 480, sequence: envelope.sequence
       });
-      const establishesDomAuthority = !socketReady && this.#domReadySources.has(envelope.sourceId);
+      const epochKey = sourceEpochKey(envelope);
+      const collectorPrematchIds = this.#collectorPrematchIds.get(epochKey);
+      const collectorPart = this.#parts.get(epochKey + "|COLLECTOR");
+      const withCleanSheets = canonicalRecords.reduce<NormalizedCatalogPart>((catalog, record) =>
+        augmentSabaDomCleanSheet(catalog, record, {
+          observedAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
+          sequence: envelope.sequence
+        }), { ...normalized, nativeMarketObservations });
+      const normalizedWithNativeInventory = collectorPrematchIds === undefined
+        ? withCleanSheets
+        : filterCatalogPart(withCleanSheets, (event) =>
+          liveIdentityScore(event) > 0 || collectorPrematchIds.has(event.providerEventId));
       const socketGeneration = this.#authoritativeGenerations.get(sourceEpochKey(envelope));
-      return this.#update(envelope, "DOM", normalized, establishesDomAuthority
+      if (establishesDomAuthority) {
+        // A qualified DOM generation is a complete replacement proof. Keeping
+        // an earlier, small socket partition in the adapter union resurrects
+        // fixtures that the current page has already removed and makes a
+        // recovered candidate look larger than the source really is.
+        const epochPrefix = `${sourceEpochKey(envelope)}|`;
+        for (const key of this.#parts.keys()) {
+          if (!key.startsWith(epochPrefix) || collectorPrematchIds !== undefined &&
+            (key.includes("|COLLECTOR") || key.includes("|WS:"))) continue;
+          this.#parts.delete(key);
+          this.#partObservedAtMs.delete(key);
+        }
+      }
+      return this.#update(envelope, "DOM", normalizedWithNativeInventory, establishesDomAuthority
         ? { authoritativeBaseline: true, evidenceMode: "BASELINE",
             generation: `${sourceEpoch(envelope)}:dom:${envelope.sequence}`, provenance: "DOM_FALLBACK" }
         : { evidenceMode: "DELTA", generation: socketGeneration ?? `${sourceEpoch(envelope)}:dom:${envelope.sequence}`,
-            provenance: "DOM_FALLBACK" });
+            provenance: "DOM_FALLBACK" }, establishesDomAuthority && normalizedDomComplete &&
+          collectorPrematchIds !== undefined &&
+          collectorPrematchIds.size > 0 && collectorPart !== undefined &&
+          !incompleteNormalizedCatalog(collectorPart, false));
     }
     const streamId = envelope.request.streamId!;
     const streamOrdinal = sabaStreamOrdinal(streamId)!;
@@ -352,6 +555,8 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     let startsBaseline = false;
     let faultingReadyKey: string | null = null;
+    const hadAuthorityBeforeFrame = this.#authoritativeGenerations.has(epochKey) ||
+      this.#authoritativeBaselineAtMs.has(epochKey);
     try {
       const frame = parseSabaSocketFrame(envelope.payload.body);
       if (frame === null) return this.#ignore("unparsed-frame");
@@ -471,8 +676,17 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       const schemaFault = errorMessage.startsWith("SABA_PUSH_SCHEMA_CHANGED") ||
         errorMessage === "SABA_PUSH_FRAME_INVALID";
       const faultingPartitionWasReady = faultingReadyKey !== null && this.#readyPartitions.has(faultingReadyKey);
-      if (startsBaseline || faultingReadyKey === null ||
-        ((sequenceGap || schemaFault) && faultingPartitionWasReady)) {
+      // A newly announced, non-authoritative stream may deliver reset/data
+      // against the page's existing field table without repeating `f`. Keep
+      // that exact bootstrap failure in the already-bounded fault hold so a
+      // separately verified schema context can seed it. Every other malformed
+      // baseline still retires immediately, and the hold below retires this
+      // stream too if no context arrives before FAULT_HOLD_MS.
+      const awaitingSchemaContext = startsBaseline && !hadAuthorityBeforeFrame &&
+        !faultingPartitionWasReady &&
+        errorMessage.startsWith("SABA_PUSH_SCHEMA_CHANGED:FIELD_INDEX_UNMAPPED:");
+      if (!awaitingSchemaContext && (startsBaseline || faultingReadyKey === null ||
+        (sequenceGap || schemaFault) && faultingPartitionWasReady)) {
         const requireStrictlyNewerOpen = stream.authorizing || this.#authoritativeGenerations.has(epochKey);
         this.#dropStream(envelope.sourceId, sourceEpoch(envelope), streamId);
         if (requireStrictlyNewerOpen) {
@@ -521,14 +735,44 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
     }
   }
 
+  #activatePendingCollectorRetention(envelope: ChromeBridgeEnvelope,
+    freshDom: NormalizedCatalogPart): boolean {
+    const epochKey = sourceEpochKey(envelope);
+    const pending = this.#pendingCollectorRetentions.get(epochKey);
+    if (pending === undefined) return false;
+    this.#pendingCollectorRetentions.delete(epochKey);
+    const partKey = epochKey + "|COLLECTOR";
+    if (pending.sourceId !== envelope.sourceId || pending.targetEpoch !== sourceEpoch(envelope) ||
+      envelope.observedAtMs < pending.originalObservedAtMs ||
+      envelope.observedAtMs - pending.originalObservedAtMs > MAX_RETAINED_PART_AGE_MS ||
+      this.#parts.has(partKey) || this.#collectorPrematchIds.has(epochKey)) return false;
+    const freshEvents = new Map(freshDom.events.map((event) => [event.providerEventId, event]));
+    for (const retained of pending.part.events) {
+      const current = freshEvents.get(retained.providerEventId);
+      if (current !== undefined && (current.competition !== retained.competition ||
+        current.participantA !== retained.participantA ||
+        current.participantB !== retained.participantB ||
+        current.startAtUtcMs !== retained.startAtUtcMs)) return false;
+    }
+    this.#parts.set(partKey, pending.part);
+    this.#partObservedAtMs.set(partKey, pending.originalObservedAtMs);
+    this.#collectorPrematchIds.set(epochKey, new Set(pending.prematchIds));
+    return true;
+  }
+
   #update(envelope: ChromeBridgeEnvelope, partition: string,
     normalized: NormalizedCatalogPart,
     evidence: Pick<Extract<DecodedCatalogUpdate, { readonly value: unknown }>, "authoritativeBaseline" |
       "evidenceMode" | "generation" | "provenance"> = {},
     allowCompleteEmpty = false): readonly DecodedCatalogUpdate[] {
-    const empty = normalized.events.length === 0 && normalized.markets.length === 0 && normalized.quotes.length === 0;
-    if ((!empty && (normalized.events.length === 0 || normalized.markets.length === 0 || normalized.quotes.length === 0)) ||
-      (empty && !allowCompleteEmpty)) return this.#ignore("incomplete-normalized-catalog");
+    if (incompleteNormalizedCatalog(normalized, allowCompleteEmpty)) {
+      return this.#ignore("incomplete-normalized-catalog");
+    }
+    // Source clocks remain in internal parts for native ordering. Each new
+    // quote gets one API-local acquisition clock, shared across candidate
+    // adapters by object identity; publication never renews retained quotes.
+    try { this.#quoteClockMapper?.observe(normalized.quotes, envelope); }
+    catch { return this.#ignore("quote-clock-invalid"); }
     const epochKey = sourceEpochKey(envelope);
     const partitionKey = `${epochKey}|${partition}`;
     this.#parts.delete(partitionKey);
@@ -538,11 +782,23 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
       if (!key.startsWith(`${epochKey}|`) || envelope.observedAtMs - observedAtMs <= MAX_RETAINED_PART_AGE_MS) continue;
       this.#partObservedAtMs.delete(key);
       this.#parts.delete(key);
+      if (key.endsWith("|COLLECTOR")) this.#collectorPrematchIds.delete(epochKey);
     }
-    const sourceParts = [...this.#parts].filter(([key]) => key.startsWith(`${epochKey}|`))
-      .map(([, value]) => value);
+    const sourceEntries = [...this.#parts].filter(([key]) => key.startsWith(`${epochKey}|`));
+    // Collector-owned dates win event identity even when a previously received
+    // legacy DOM quote is newer. Quote clocks are resolved independently below.
+    sourceEntries.sort(([left], [right]) => Number(!left.endsWith("|COLLECTOR")) -
+      Number(!right.endsWith("|COLLECTOR")));
+    const sourceParts = newestQuoteParts(sourceEntries.map(([, value]) => value));
+    let publicationParts = sourceParts;
+    if (this.#quoteClockMapper !== undefined) {
+      try {
+        publicationParts = sourceParts.map((part) => ({ ...part,
+          quotes: part.quotes.map((quote) => this.#quoteClockMapper!.localize(quote)) }));
+      } catch { return this.#ignore("quote-clock-mapping-missing"); }
+    }
     const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SABA",
-      observedAtMs: envelope.observedAtMs, parts: sourceParts, selectEvent: selectStableSabaEvent,
+      observedAtMs: envelope.observedAtMs, parts: publicationParts, selectEvent: selectStableSabaEvent,
       // SABA's live section also lists fixtures that have not kicked off, and
       // only here do its two partitions meet, so only here can its own schedule
       // contradict them.
@@ -575,6 +831,12 @@ export class SabaWsCatalogAdapter implements ChromeTrafficAdapter {
   }
 }
 
+function incompleteNormalizedCatalog(normalized: NormalizedCatalogPart, allowCompleteEmpty: boolean): boolean {
+  const empty = normalized.events.length === 0 && normalized.markets.length === 0 && normalized.quotes.length === 0;
+  return !empty && (normalized.events.length === 0 || normalized.markets.length === 0 ||
+    normalized.quotes.length === 0) || empty && !allowCompleteEmpty;
+}
+
 function sabaStreamOrdinal(streamId: string): number | null {
   if (!/^[1-9]\d*$/u.test(streamId)) return null;
   const ordinal = Number(streamId);
@@ -583,6 +845,154 @@ function sabaStreamOrdinal(streamId: string): number | null {
 
 function sameSabaCatalogPart(left: NormalizedCatalogPart, right: NormalizedCatalogPart): boolean {
   const semanticFingerprint = (part: NormalizedCatalogPart): string => JSON.stringify(part, (key, value) =>
-    key === "receivedMonotonicMs" || key === "sequence" ? undefined : value);
+    key === "receivedMonotonicMs" || key === "sequence" || key === "observedAtMs" ? undefined : value);
   return semanticFingerprint(left) === semanticFingerprint(right);
+}
+
+function collectorDomChunk(body: string): { readonly dedicated: boolean; readonly raw: unknown | null } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    return { dedicated: /"(?:snapshotId|sweepId)"\s*:\s*"saba:collector:/u.test(body), raw: null };
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { dedicated: false, raw };
+  const value = raw as Record<string, unknown>;
+  const dedicated = [value.snapshotId, value.sweepId].some((entry) =>
+    typeof entry === "string" && entry.startsWith("saba:collector:"));
+  return { dedicated, raw };
+}
+
+function quoteKey(quote: NormalizedCatalogPart["quotes"][number]): string {
+  return `${quote.providerEventId}\u0000${quote.providerMarketId}\u0000${quote.providerSelectionId}`;
+}
+
+function marketKey(value: { readonly providerEventId: string; readonly providerMarketId: string }): string {
+  return `${value.providerEventId}\u0000${value.providerMarketId}`;
+}
+
+function newestQuoteParts(parts: readonly NormalizedCatalogPart[]): NormalizedCatalogPart[] {
+  const newest = new Map<string, NormalizedCatalogPart["quotes"][number]>();
+  const marketOwners = new Map<string, { readonly partIndex: number;
+    readonly receivedMonotonicMs: number; readonly sequence: number }>();
+  const nativeOnlyNewest = new Map<string,
+    NonNullable<NormalizedCatalogPart["nativeMarketObservations"]>[number]>();
+  for (const [partIndex, part] of parts.entries()) {
+    for (const quote of part.quotes) {
+      const key = quoteKey(quote);
+      const current = newest.get(key);
+      if (current === undefined || quote.receivedMonotonicMs > current.receivedMonotonicMs ||
+        quote.receivedMonotonicMs === current.receivedMonotonicMs &&
+        (quote.sequence ?? -1) >= (current.sequence ?? -1)) newest.set(key, quote);
+      const ownerKey = marketKey(quote);
+      const owner = marketOwners.get(ownerKey);
+      const sequence = quote.sequence ?? -1;
+      if (owner === undefined || quote.receivedMonotonicMs > owner.receivedMonotonicMs ||
+        quote.receivedMonotonicMs === owner.receivedMonotonicMs && sequence >= owner.sequence) {
+        marketOwners.set(ownerKey, { partIndex, receivedMonotonicMs: quote.receivedMonotonicMs, sequence });
+      }
+    }
+    for (const observation of part.nativeMarketObservations ?? []) {
+      const key = `${marketKey(observation)}\u0000${observation.nativeType}`;
+      const current = nativeOnlyNewest.get(key);
+      if (current === undefined || observation.observedAtMs >= current.observedAtMs) {
+        nativeOnlyNewest.set(key, observation);
+      }
+    }
+  }
+  return parts.map((part, partIndex) => ({ ...part,
+    markets: part.markets.filter((market) => {
+      const owner = marketOwners.get(marketKey(market));
+      return owner === undefined || owner.partIndex === partIndex;
+    }),
+    quotes: part.quotes.filter((quote) => newest.get(quoteKey(quote)) === quote),
+    ...(part.nativeMarketObservations === undefined ? {} : {
+      nativeMarketObservations: part.nativeMarketObservations.filter((observation) => {
+        const owner = marketOwners.get(marketKey(observation));
+        if (owner !== undefined) return owner.partIndex === partIndex;
+        const key = `${marketKey(observation)}\u0000${observation.nativeType}`;
+        return nativeOnlyNewest.get(key) === observation;
+      })
+    }) }));
+}
+
+function filterCatalogPart(part: NormalizedCatalogPart, keepEvent: (event: CatalogEvent) => boolean):
+NormalizedCatalogPart {
+  const events = part.events.filter(keepEvent);
+  const ids = new Set(events.map(({ providerEventId }) => providerEventId));
+  return { ...part, events,
+    markets: part.markets.filter(({ providerEventId }) => ids.has(providerEventId)),
+    quotes: part.quotes.filter(({ providerEventId }) => ids.has(providerEventId)),
+    ...(part.nativeMarketObservations === undefined ? {} : {
+      nativeMarketObservations: part.nativeMarketObservations.filter(({ providerEventId }) =>
+        ids.has(providerEventId))
+    }) };
+}
+
+function canonicalizeSabaDomMarketIds(records: readonly CmdCatalogInputRecord[]):
+readonly CmdCatalogInputRecord[] | null {
+  const rawIdsByOwnerAndCanonicalId = new Map<string, string>();
+  let collided = false;
+  const canonicalRecords = records.map((record) => ({ ...record,
+    groups: record.groups.map((group) => ({ ...group,
+      odds: group.odds.map((odd) => {
+        const prefix = `${record.matchId}__`;
+        const suffix = odd.marketOddsId.startsWith(prefix)
+          ? odd.marketOddsId.slice(prefix.length) : "";
+        const canonicalMarketOddsId = /^\d+$/u.test(suffix) ? suffix : odd.marketOddsId;
+        const collisionKey = `${record.matchId}\u0000${canonicalMarketOddsId}`;
+        const previousRawId = rawIdsByOwnerAndCanonicalId.get(collisionKey);
+        if (previousRawId !== undefined && previousRawId !== odd.marketOddsId) collided = true;
+        else rawIdsByOwnerAndCanonicalId.set(collisionKey, odd.marketOddsId);
+        return canonicalMarketOddsId === odd.marketOddsId ? odd
+          : { ...odd, marketOddsId: canonicalMarketOddsId };
+      })
+    }))
+  }));
+  return collided ? null : canonicalRecords;
+}
+
+function normalizeCollectorCandidate(candidate: ValidatedSabaCollectorCandidate): NormalizedCatalogPart | null {
+  const events = new Map<string, NormalizedCatalogPart["events"][number]>();
+  const markets = new Map<string, NormalizedCatalogPart["markets"][number]>();
+  const quotes = new Map<string, NormalizedCatalogPart["quotes"][number]>();
+  const native = new Map<string,
+    NonNullable<NormalizedCatalogPart["nativeMarketObservations"]>[number]>();
+  const diagnostics: unknown[] = [];
+  const captures = [...candidate.captures].sort((left, right) =>
+    left.captureOrdinal - right.captureOrdinal);
+  const canonicalRecords = canonicalizeSabaDomMarketIds(captures.map(({ record }) => record));
+  if (canonicalRecords === null) return null;
+  for (const [captureIndex, capture] of captures.entries()) {
+    const options = { observedAtMs: capture.capturedAtMs,
+      receivedMonotonicMs: capture.capturedMonotonicMs, timezoneOffsetMinutes: 480,
+      sequence: capture.captureOrdinal, requireExplicitDateForUndatedKickoff: true,
+      ...(capture.kickoffDate.kind === "EXPLICIT" ? {
+        explicitProviderDate: capture.kickoffDate.isoDate
+      } : {}) };
+    const canonicalRecord = canonicalRecords[captureIndex]!;
+    const base = normalizeObservedFootballCatalog("SABA", [canonicalRecord], options);
+    const normalized = augmentSabaDomCleanSheet({ ...base,
+      nativeMarketObservations: observeNativeCmdMarkets("SABA", [canonicalRecord], options)
+    }, canonicalRecord, options);
+    const observedNative = normalized.nativeMarketObservations ?? [];
+    for (const event of normalized.events) events.set(event.providerEventId, event);
+    for (const market of normalized.markets) {
+      markets.set(`${market.providerEventId}\u0000${market.providerMarketId}`, market);
+    }
+    for (const quote of normalized.quotes) {
+      const key = quoteKey(quote);
+      const current = quotes.get(key);
+      if (current === undefined || quote.receivedMonotonicMs >= current.receivedMonotonicMs) {
+        quotes.set(key, quote);
+      }
+    }
+    for (const observation of observedNative) {
+      native.set(`${observation.providerEventId}\u0000${observation.providerMarketId}\u0000${observation.nativeType}`,
+        observation);
+    }
+    diagnostics.push(...normalized.diagnostics);
+  }
+  return { events: [...events.values()], markets: [...markets.values()], quotes: [...quotes.values()],
+    nativeMarketObservations: [...native.values()], diagnostics };
 }

@@ -1,6 +1,7 @@
 import { normalizeSbobetCatalog, type SbobetCatalogInputRecord } from "@tool-chenh/adapters";
-import type { ChromeBridgeEnvelope } from "@tool-chenh/contracts";
-import { extractSbobetDirectCatalogRecords } from "../providers/sbobet/sbobet-direct-catalog.js";
+import type { ChromeBridgeEnvelope, NativeMarketObservation } from "@tool-chenh/contracts";
+import { extractSbobetDirectCatalogRecords,
+  extractSbobetNativeMarketObservations } from "../providers/sbobet/sbobet-direct-catalog.js";
 import { SbobetStompReceiptDecoder,
   type SbobetStompProviderReceipt } from "../providers/sbobet/sbobet-stomp.js";
 import type { ChromeTrafficAdapter, DecodedCatalogUpdate } from "./adapter.js";
@@ -11,10 +12,18 @@ const ACCOUNT_ID = "catalog-source:SBOBET:FOOTBALL";
 
 interface RetainedRecord {
   readonly record: SbobetCatalogInputRecord;
+  readonly nativeMarketObservations: readonly NativeMarketObservation[];
   readonly seenAtMs: number;
   readonly receivedMonotonicMs: number;
   readonly sequence: number;
   readonly receiptSequence: number;
+  readonly marketReceipts: ReadonlyMap<string, MarketReceipt>;
+}
+
+interface MarketReceipt {
+  readonly receivedMonotonicMs: number;
+  readonly sequence: number;
+  readonly provenance: "HTTP" | "WS" | "DETAIL";
 }
 
 type CatalogPartition = "live" | "today";
@@ -32,8 +41,10 @@ interface SocketEpoch {
   committedPartitions: Map<CatalogPartition, PartitionSnapshot>;
   generation: string;
   committedGeneration: number;
-  receiptHighWatermarks: Map<CatalogPartition, number>;
+  marketReceiptHighWatermarks: Map<string, number>;
+  eventReceiptHighWatermarks: Map<string, number>;
   authorityLost: boolean;
+  lastEnvelopeSequence: number;
 }
 
 interface HttpEpoch {
@@ -58,6 +69,15 @@ interface SourceEpochState {
   wsSequenceHighWatermark: number;
   authority: CatalogAuthority;
   httpAuthorityCutoff: number | null;
+  readonly details: Map<string, RetainedRecord>;
+  readonly detailOrdinals: Map<string, number>;
+  readonly prematchAdmissions: Map<string, number>;
+}
+
+function detailOrdinal(envelope: ChromeBridgeEnvelope): number | null {
+  const match = /^sbobet-detail:(0|[1-9]\d*):([1-9]\d*)$/u.exec(envelope.request.streamId ?? "");
+  if (match === null || Number(match[1]) !== envelope.tabId || !Number.isSafeInteger(Number(match[2]))) return null;
+  return Number(match[2]);
 }
 
 function sourceEpoch(envelope: ChromeBridgeEnvelope): string {
@@ -128,7 +148,8 @@ function isFullPartitionSnapshot(body: unknown): boolean {
       return event !== null && (typeof eventId === "string" || typeof eventId === "number") &&
         /^\d+$/u.test(String(eventId)) && typeof home === "string" && home.trim() !== "" &&
         typeof away === "string" && away.trim() !== "" && home.trim() !== away.trim() &&
-        markets !== null && typeof markets === "object" && !Array.isArray(markets);
+        markets !== null && typeof markets === "object" && !Array.isArray(markets) &&
+        Object.values(markets).every((rows) => Array.isArray(rows));
     });
   });
 }
@@ -191,7 +212,8 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         generation: `${sourceEpoch(envelope)}:ksport-http:${envelope.tabId}:0` },
       wsSequenceHighWatermark: 0,
       authority: "NONE",
-      httpAuthorityCutoff: null
+      httpAuthorityCutoff: null,
+      details: new Map(), detailOrdinals: new Map(), prematchAdmissions: new Map()
     };
     this.#states.set(key, created);
     return created;
@@ -201,7 +223,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     if (envelope.lobby !== "KSPORT" || envelope.payload.encoding !== "UTF8") return false;
     if (envelope.transport === "HTTP_RESPONSE") {
       return envelope.request.pathnameClass === "/api/v2/getEvent" &&
-        httpGeneration(envelope) !== null;
+        (httpGeneration(envelope) !== null || detailOrdinal(envelope) !== null);
     }
     const providerSocket = isKsportSocketHost(envelope.request.hostname) &&
       envelope.request.pathnameClass.startsWith("/sport/");
@@ -220,6 +242,13 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     // to establish authority after an API/bridge reconnect.
     if (envelope.request.replayed === true) return [];
     const source = this.#stateFor(envelope);
+    if (envelope.transport === "HTTP_RESPONSE" && detailOrdinal(envelope) !== null) {
+      if (!applyEventDetail(source, envelope)) return [];
+      const catalog = catalogFromPartitions(source.http.committedPartitions, envelope.observedAtMs, source.details);
+      return [{ sourceId: envelope.sourceId, sequence: envelope.sequence, observedAtMs: envelope.observedAtMs,
+        value: catalog, ...emptyMarketProof(source, catalog),
+        evidenceMode: "DELTA", generation: source.http.generation, provenance: "AUTHENTICATED_HTTP" }];
+    }
     if (envelope.transport === "HTTP_RESPONSE") {
       const requestGeneration = httpGeneration(envelope);
       if (requestGeneration === null) return [];
@@ -229,6 +258,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (!isFullPartitionSnapshot(body)) return [];
       const bootstrap = bootstrapRecords(body, requestGeneration.partition === "live");
       const changed = extractSbobetDirectCatalogRecords(body, bootstrap);
+      const nativeMarketObservations = extractSbobetNativeMarketObservations(body, bootstrap, envelope.observedAtMs);
       if (bootstrap.length > 0 && changed.length === 0) return [];
       const epoch = source.http;
       if (requestGeneration.ordinal <= epoch.committedOrdinal ||
@@ -244,9 +274,9 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       const prior = epoch.pendingBaseline.partitions.get(requestGeneration.partition);
       if (prior !== undefined && envelope.sequence <= prior.receiptSequence) return [];
       const records = new Map<string, RetainedRecord>();
-      for (const record of changed) records.set(record.eventId, { record,
-        seenAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
-        sequence: envelope.sequence, receiptSequence: envelope.sequence });
+      for (const record of changed) records.set(record.eventId,
+        retainedRecord(record, envelope, envelope.sequence,
+          nativeMarketObservations.filter((observation) => observation.providerEventId === record.eventId), "HTTP"));
       epoch.pendingBaseline.partitions.set(requestGeneration.partition,
         { records, receiptSequence: envelope.sequence });
       if (!epoch.pendingBaseline.partitions.has("live") || !epoch.pendingBaseline.partitions.has("today")) return [];
@@ -255,16 +285,24 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         return [];
       }
       const committedCutoff = epoch.pendingBaseline.requestStartSequence;
-      epoch.committedPartitions = epoch.pendingBaseline.partitions;
+      const priorPartitions = new Map([...epoch.committedPartitions].map(([partition, snapshot]) =>
+        [partition, { ...snapshot, records: new Map([...snapshot.records].map(([id, entry]) =>
+          [id, combineDetail(entry, source.details.get(id))])) }] as const));
+      epoch.committedPartitions = reconcileHttpSnapshot(epoch.pendingBaseline, priorPartitions);
       epoch.committedOrdinal = epoch.pendingBaseline.ordinal;
       epoch.generation = epoch.pendingBaseline.generation;
       epoch.pendingBaseline = null;
       source.authority = "HTTP";
       source.httpAuthorityCutoff = committedCutoff;
-      const catalog = catalogFromPartitions(epoch.committedPartitions, envelope.observedAtMs);
+      for (const eventId of new Set([...source.prematchAdmissions.keys(),
+        ...epoch.committedPartitions.get("today")!.records.keys()])) {
+        syncPrematchAdmission(source, eventId, envelope.sequence);
+      }
+      const catalog = catalogFromPartitions(epoch.committedPartitions, envelope.observedAtMs, source.details);
       return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
         observedAtMs: envelope.observedAtMs, value: catalog,
         authoritativeBaseline: true, evidenceMode: "BASELINE",
+        ...emptyMarketProof(source, catalog),
         generation: epoch.generation, provenance: "AUTHENTICATED_HTTP" }];
     }
     const streamId = envelope.request.streamId!;
@@ -278,8 +316,7 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
         if (current !== null && streamOrdinal <= current.streamHighWatermark) return [];
         const retiresAuthority = source.authority === "WS" && current !== null &&
           hasCommittedSocketAuthority(current);
-        source.socket = socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal,
-          current?.receiptHighWatermarks);
+        source.socket = socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal);
         if (retiresAuthority) source.authority = "NONE";
         return retiresAuthority ? [streamGap(envelope)] : [];
       }
@@ -299,12 +336,13 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
     }
     let epoch = source.socket;
     if (epoch === null || streamOrdinal > epoch.streamHighWatermark) {
-      epoch = socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal,
-        epoch?.receiptHighWatermarks);
+      epoch = socketEpoch(sourceEpoch(envelope), streamId, streamOrdinal);
       source.socket = epoch;
     }
     if (epoch.activeStreamId !== streamId || epoch.activeStreamOrdinal !== streamOrdinal ||
       epoch.decoder === null) return [];
+    if (envelope.sequence <= epoch.lastEnvelopeSequence) return [];
+    epoch.lastEnvelopeSequence = envelope.sequence;
     if (isSportsbookHeartbeat(envelope.payload.body)) return [];
     const receipts = epoch.decoder.push(envelope.payload.body);
     // Measured 2026-08-30 on the live book: per-event updates arrive in the
@@ -324,17 +362,24 @@ export class KsportWsCatalogAdapter implements ChromeTrafficAdapter {
       if (partition === null) continue;
       if (source.authority !== "HTTP" || source.httpAuthorityCutoff === null ||
         envelope.sequence <= source.httpAuthorityCutoff) continue;
-      appliedHttpLaneDelta = applyHttpLaneDelta(source, receipt, partition, envelope) ||
+      appliedHttpLaneDelta = applyHttpLaneDelta(source, epoch, receipt, partition, envelope) ||
         appliedHttpLaneDelta;
     }
     if (!appliedHttpLaneDelta) return [];
-    const catalog = catalogFromPartitions(source.http.committedPartitions, envelope.observedAtMs);
-    if (catalog.events.length === 0 || catalog.markets.length === 0 ||
-      catalog.quotes.length === 0) return [];
+    const catalog = catalogFromPartitions(source.http.committedPartitions, envelope.observedAtMs, source.details);
     return [{ sourceId: envelope.sourceId, sequence: envelope.sequence,
       observedAtMs: envelope.observedAtMs, value: catalog, evidenceMode: "DELTA",
-      generation: source.http.generation, provenance: "WS" }];
+      generation: source.http.generation, provenance: "WS", ...emptyMarketProof(source, catalog) }];
   }
+}
+
+/** The complete materialized catalog remains owned by the current HTTP pair, including applied deltas. */
+function emptyMarketProof(source: SourceEpochState,
+  catalog: ReturnType<typeof catalogFromPartitions>): { authoritativeEmptyMarkets?: true } {
+  return source.authority === "HTTP" && source.httpAuthorityCutoff !== null &&
+    source.http.committedPartitions.has("live") && source.http.committedPartitions.has("today") &&
+    catalog.events.length > 0 && catalog.markets.length === 0 && catalog.quotes.length === 0
+    ? { authoritativeEmptyMarkets: true } : {};
 }
 
 function hasCommittedSocketAuthority(epoch: SocketEpoch): boolean {
@@ -358,18 +403,17 @@ function wsStreamOrdinal(streamId: string): number | null {
   return Number.isSafeInteger(ordinal) ? ordinal : null;
 }
 
-function socketEpoch(epoch: string, streamId: string, streamOrdinal: number,
-  receiptHighWatermarks: ReadonlyMap<CatalogPartition, number> = new Map()): SocketEpoch {
+function socketEpoch(epoch: string, streamId: string, streamOrdinal: number): SocketEpoch {
   return { activeStreamId: streamId, activeStreamOrdinal: streamOrdinal,
     streamHighWatermark: streamOrdinal, decoder: new SbobetStompReceiptDecoder(),
     committedPartitions: new Map<CatalogPartition, PartitionSnapshot>(),
     generation: `${epoch}:ksport-ws:${streamId}:0`, committedGeneration: 0,
-    receiptHighWatermarks: new Map(receiptHighWatermarks),
-    authorityLost: false };
+    marketReceiptHighWatermarks: new Map(), eventReceiptHighWatermarks: new Map(),
+    authorityLost: false, lastEnvelopeSequence: -1 };
 }
 
 function catalogFromPartitions(partitions: ReadonlyMap<CatalogPartition, PartitionSnapshot>,
-  observedAtMs: number): ReturnType<typeof mergeObservedCatalogParts> {
+  observedAtMs: number, details: ReadonlyMap<string, RetainedRecord> = new Map()): ReturnType<typeof mergeObservedCatalogParts> {
   const retained = new Map<string, RetainedRecord>();
   for (const partition of ["today", "live"] as const) {
     const snapshot = partitions.get(partition);
@@ -377,14 +421,29 @@ function catalogFromPartitions(partitions: ReadonlyMap<CatalogPartition, Partiti
     for (const [eventId, entry] of snapshot.records) retainNewest(retained, eventId, entry);
   }
   const parts: NormalizedCatalogPart[] = [];
-  for (const entry of retained.values()) {
-    parts.push(normalizeSbobetCatalog([entry.record], {
+  for (const mainEntry of retained.values()) {
+    const entry = combineDetail(mainEntry, details.get(mainEntry.record.eventId));
+    const normalized = normalizeSbobetCatalog([entry.record], {
       observedAtMs: entry.seenAtMs, receivedMonotonicMs: entry.receivedMonotonicMs,
       sequence: entry.sequence, provider: "SBOBET",
       settlementProfile: "football-regulation-including-added-time"
-    }));
+    });
+    parts.push({ ...normalized, quotes: normalized.quotes.map((quote) => {
+      const receipt = entry.marketReceipts.get(quote.providerMarketId);
+      return receipt === undefined ? quote : { ...quote,
+        receivedMonotonicMs: receipt.receivedMonotonicMs, sequence: receipt.sequence };
+    }), nativeMarketObservations: entry.nativeMarketObservations });
   }
-  return mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET", observedAtMs, parts });
+  const catalog = mergeObservedCatalogParts({ accountId: ACCOUNT_ID, provider: "SBOBET", observedAtMs, parts });
+  const normalizedMarketIds = new Set(catalog.markets.map((market) =>
+    `${market.providerEventId}\u0000${market.providerMarketId}`));
+  // Native extraction may observe duplicate event containers that were not
+  // retained as canonical membership. Account against the final publication.
+  return { ...catalog, nativeMarketObservations: (catalog.nativeMarketObservations ?? []).map((observation) =>
+    observation.disposition === "NORMALIZED" && !normalizedMarketIds.has(
+      `${observation.providerEventId}\u0000${observation.providerMarketId}`)
+      ? { ...observation, disposition: "EXCLUDED" as const, reason: "NORMALIZATION_REJECTED" }
+      : observation) };
 }
 
 /**
@@ -393,35 +452,253 @@ function catalogFromPartitions(partitions: ReadonlyMap<CatalogPartition, Partiti
  * has already required it to be past the baseline's request-start cutoff, so
  * a delta can never drag the catalog behind the baseline it lands on.
  */
-function applyHttpLaneDelta(source: SourceEpochState, receipt: SbobetStompProviderReceipt,
+function applyHttpLaneDelta(source: SourceEpochState, epoch: SocketEpoch, receipt: SbobetStompProviderReceipt,
   partition: CatalogPartition, envelope: ChromeBridgeEnvelope): boolean {
-  const bootstrap = bootstrapRecords(receipt.body, partition === "live");
-  const changed = extractSbobetDirectCatalogRecords(receipt.body, bootstrap);
-  if (changed.length === 0) return false;
+  const order = receipt.receiptSequence;
+  if (order === null) return false;
   const committed = source.http.committedPartitions.get(partition);
   if (committed === undefined) return false;
+  // Existing roster metadata is authoritative for a sparse event update. An
+  // event-only receipt must not replace the real competition with a default.
+  const bootstrap = [...new Map([
+    ...bootstrapRecords(receipt.body, partition === "live"),
+    ...[...source.http.committedPartitions.values()].flatMap((snapshot) =>
+      [...snapshot.records.values()].map((entry) => entry.record)),
+    ...[...committed.records.values()].map((entry) => entry.record)
+  ].map((entry) => [entry.eventId, { ...entry, timeText: partition === "live" ? "LIVE" : "PREMATCH" }])).values()];
+  const changed = extractSbobetDirectCatalogRecords(receipt.body, bootstrap);
+  const nativeMarketObservations = extractSbobetNativeMarketObservations(receipt.body, bootstrap,
+    envelope.observedAtMs);
+  if (changed.length === 0) return false;
   const records = new Map(committed.records);
-  for (const incoming of changed) {
-    const existing = records.get(incoming.eventId)?.record;
-    records.set(incoming.eventId,
-      retainedRecord(mergeDeltaRecord(existing, incoming), envelope, envelope.sequence));
+  const appliedEventIds: string[] = [];
+  let applied = false;
+  for (const decoded of changed) {
+    const existingEntry = records.get(decoded.eventId);
+    if (existingEntry !== undefined && envelope.sequence < existingEntry.sequence) continue;
+    const live = partition === "live" ? existingEntry :
+      source.http.committedPartitions.get("live")?.records.get(decoded.eventId);
+    const today = partition === "today" ? existingEntry :
+      source.http.committedPartitions.get("today")?.records.get(decoded.eventId);
+    const current = live === undefined ? today : today === undefined || live.receiptSequence >= today.receiptSequence
+      ? live : today;
+    const metadataIsNew = order > (epoch.eventReceiptHighWatermarks.get(decoded.eventId) ?? -1);
+    // Different market rows can arrive out of order within one partition. Their
+    // prices remain useful, but old identity/phase evidence cannot retire detail.
+    if (!metadataIsNew && current !== undefined && current.record.timeText !== decoded.timeText) continue;
+    const marketKey = (id: string): string => `${partition}\u0000${decoded.eventId}\u0000${id}`;
+    const observations = nativeMarketObservations.filter((observation) => observation.providerEventId === decoded.eventId);
+    const acceptedIds = new Set([...decoded.markets.map((market) => market.marketId),
+      ...observations.flatMap((observation) => observation.providerMarketId === null ? [] : [observation.providerMarketId])]
+      .filter((id) => order > (epoch.marketReceiptHighWatermarks.get(marketKey(id)) ?? -1)));
+    if (!metadataIsNew && acceptedIds.size === 0) continue;
+    const incoming = { ...(!metadataIsNew && current !== undefined ? current.record : decoded),
+      markets: decoded.markets.filter((market) => acceptedIds.has(market.marketId)) };
+    const existing = existingEntry?.record;
+    const detail = source.details.get(incoming.eventId);
+    const incomingObservations = observations.filter((observation) =>
+      observation.providerMarketId !== null && acceptedIds.has(observation.providerMarketId));
+    if (partition === "live") source.details.delete(incoming.eventId);
+    const hiddenOnly = (id: string): boolean => partition === "today" && detail !== undefined &&
+      detail.marketReceipts.has(id) && !existingEntry?.marketReceipts.has(id);
+    const mainIncoming = { ...incoming, markets: incoming.markets.filter((market) => !hiddenOnly(market.marketId)) };
+    const mainObservations = incomingObservations.filter((observation) =>
+      observation.providerMarketId === null || !hiddenOnly(observation.providerMarketId));
+    const mergedObservations = [...new Map([...(existingEntry?.nativeMarketObservations ?? []),
+      ...mainObservations].map((observation) => [
+        `${observation.providerMarketId}\u0000${observation.nativeType}`, observation
+      ])).values()];
+    const next = retainedRecord(mainIncoming, envelope, envelope.sequence, mainObservations, "WS");
+    const touchedIds = new Set(mainObservations.flatMap((observation) =>
+      observation.providerMarketId === null ? [] : [observation.providerMarketId]));
+    records.set(incoming.eventId, { ...next, nativeMarketObservations: mergedObservations,
+      record: mergeDeltaRecord(existing, mainIncoming, touchedIds),
+      marketReceipts: new Map([...(existingEntry?.marketReceipts ?? []), ...next.marketReceipts]) });
+    if (partition === "today" && detail !== undefined && envelope.sequence >= detail.sequence) {
+      const detailIncoming = { ...incoming, markets: incoming.markets.filter((market) =>
+        detail.marketReceipts.has(market.marketId)) };
+      const detailObservations = incomingObservations.filter((observation) =>
+        observation.providerMarketId !== null && detail.marketReceipts.has(observation.providerMarketId));
+      const detailTouched = new Set(detailObservations.map((observation) => observation.providerMarketId!));
+      const nextDetail = retainedRecord(detailIncoming, envelope, envelope.sequence, detailObservations, "WS");
+      source.details.set(incoming.eventId, { ...nextDetail,
+        record: mergeDeltaRecord(detail.record, detailIncoming, detailTouched),
+        marketReceipts: new Map([...detail.marketReceipts, ...nextDetail.marketReceipts]),
+        nativeMarketObservations: [...new Map([...detail.nativeMarketObservations, ...detailObservations]
+          .map((observation) => [`${observation.providerMarketId}\u0000${observation.nativeType}`, observation])).values()] });
+    }
+    for (const id of acceptedIds) epoch.marketReceiptHighWatermarks.set(marketKey(id), order);
+    if (metadataIsNew) epoch.eventReceiptHighWatermarks.set(incoming.eventId, order);
+    appliedEventIds.push(incoming.eventId);
+    applied = true;
   }
+  if (!applied) return false;
   source.http.committedPartitions.set(partition,
     { records, receiptSequence: Math.max(committed.receiptSequence, envelope.sequence) });
+  for (const eventId of appliedEventIds) syncPrematchAdmission(source, eventId, envelope.sequence);
   return true;
 }
 
 function retainedRecord(record: SbobetCatalogInputRecord, envelope: ChromeBridgeEnvelope,
-  receiptSequence: number): RetainedRecord {
+  receiptSequence: number, nativeMarketObservations: readonly NativeMarketObservation[] = [],
+  provenance: MarketReceipt["provenance"] = "WS"): RetainedRecord {
   return { record, seenAtMs: envelope.observedAtMs, receivedMonotonicMs: envelope.receivedMonotonicMs,
-    sequence: envelope.sequence, receiptSequence };
+    sequence: envelope.sequence, receiptSequence, nativeMarketObservations,
+    marketReceipts: new Map([...new Set([...record.markets.map((market) => market.marketId),
+      ...nativeMarketObservations.flatMap((observation) =>
+        observation.providerMarketId === null ? [] : [observation.providerMarketId])])].map((marketId) => [marketId, {
+      receivedMonotonicMs: envelope.receivedMonotonicMs, sequence: envelope.sequence, provenance
+    }])) };
+}
+
+function prematchEntry(source: SourceEpochState, eventId: string): RetainedRecord | undefined {
+  const today = source.http.committedPartitions.get("today")?.records.get(eventId);
+  const live = source.http.committedPartitions.get("live")?.records.get(eventId);
+  // Overlapping HTTP partitions do not prove a transition back to prematch.
+  // Only removal from the complete live membership permits event detail again.
+  return live === undefined ? today : undefined;
+}
+
+function syncPrematchAdmission(source: SourceEpochState, eventId: string, sequence: number): void {
+  if (prematchEntry(source, eventId) === undefined) {
+    source.prematchAdmissions.delete(eventId);
+    source.details.delete(eventId);
+    source.detailOrdinals.delete(eventId);
+  } else if (!source.prematchAdmissions.has(eventId)) {
+    // Ordinary refreshes retain this floor; disappearance or a live phase
+    // ends the membership, so a later same-ID admission receives a new floor.
+    source.prematchAdmissions.set(eventId, sequence);
+  }
+}
+
+function combineDetail(main: RetainedRecord, detail: RetainedRecord | undefined): RetainedRecord {
+  if (detail === undefined || main.record.timeText !== "PREMATCH") return main;
+  const markets = new Map(main.record.markets.map((market) => [market.marketId, market]));
+  const detailMarkets = new Map(detail.record.markets.map((market) => [market.marketId, market]));
+  const marketReceipts = new Map(main.marketReceipts);
+  const observations = new Map(main.nativeMarketObservations.map((observation) =>
+    [`${observation.providerMarketId}\u0000${observation.nativeType}`, observation]));
+  for (const [id, clock] of detail.marketReceipts) {
+    if ((marketReceipts.get(id)?.sequence ?? -1) > clock.sequence) continue;
+    marketReceipts.set(id, clock);
+    const market = detailMarkets.get(id);
+    if (market === undefined) markets.delete(id); else markets.set(id, market);
+  }
+  for (const observation of detail.nativeMarketObservations) {
+    const id = observation.providerMarketId;
+    if (id !== null && (main.marketReceipts.get(id)?.sequence ?? -1) >
+      (detail.marketReceipts.get(id)?.sequence ?? -1)) continue;
+    observations.set(`${id}\u0000${observation.nativeType}`, observation);
+  }
+  for (const [key, observation] of observations) {
+    const id = observation.providerMarketId;
+    if (id !== null && !detail.nativeMarketObservations.some((candidate) => candidate.providerMarketId === id) &&
+      (detail.marketReceipts.get(id)?.sequence ?? -1) >= (main.marketReceipts.get(id)?.sequence ?? 0)) {
+      observations.delete(key);
+    }
+  }
+  return { ...main, record: { ...main.record, markets: [...markets.values()] },
+    marketReceipts, nativeMarketObservations: [...observations.values()] };
+}
+
+function applyEventDetail(source: SourceEpochState, envelope: ChromeBridgeEnvelope): boolean {
+  if (source.authority !== "HTTP" || envelope.sourceEpoch === undefined) return false;
+  let payload: Record<string, unknown> | null;
+  try { payload = record(JSON.parse(envelope.payload.body)); } catch { return false; }
+  const cutoff = envelope.request.reconcileCutoffSequence;
+  if (payload === null || payload.kind !== "SBOBET_EVENT_DETAIL" ||
+    payload.generation !== envelope.sourceEpoch || payload.marketContainerComplete !== true ||
+    payload.observedAtMs !== envelope.observedAtMs || typeof cutoff !== "number" ||
+    !Number.isSafeInteger(cutoff) || cutoff < 0 || cutoff >= envelope.sequence ||
+    payload.requestStartSequence !== cutoff || typeof payload.eventId !== "string" ||
+    !/^\d{1,30}$/u.test(payload.eventId)) return false;
+  const eventId = payload.eventId;
+  const admissionSequence = source.prematchAdmissions.get(eventId);
+  if (admissionSequence === undefined || cutoff < admissionSequence) return false;
+  const ordinal = detailOrdinal(envelope)!;
+  if (ordinal <= (source.detailOrdinals.get(eventId) ?? 0) ||
+    envelope.sequence <= (source.details.get(eventId)?.sequence ?? -1)) return false;
+  const main = prematchEntry(source, eventId);
+  const native = record(payload.event);
+  const groups = native === null ? null : record(native["7"]);
+  if (main === undefined || native === null || String(native["8"]) !== eventId || groups === null ||
+    Object.values(groups).some((rows) => !Array.isArray(rows)) ||
+    (native["2"] !== undefined && native["2"] !== main.record.teamNames[0]) ||
+    (native["3"] !== undefined && native["3"] !== main.record.teamNames[1])) return false;
+  const incoming = extractSbobetDirectCatalogRecords(native, [main.record])[0];
+  if (incoming === undefined) return false;
+  const observations = extractSbobetNativeMarketObservations(native, [main.record], envelope.observedAtMs);
+  const next = retainedRecord(incoming, envelope, envelope.sequence, observations, "DETAIL");
+  const previous = combineDetail(main, source.details.get(eventId));
+  const reconciled = reconcileHttpSnapshot({ generation: envelope.sourceEpoch, ordinal,
+    requestStartSequence: cutoff, partitions: new Map([["today", {
+      records: new Map([[eventId, next]]), receiptSequence: envelope.sequence
+    }]]) }, new Map([["today", { records: new Map([[eventId, previous]]),
+      receiptSequence: previous.receiptSequence }]]), true);
+  const detail = reconciled.get("today")!.records.get(eventId)!;
+  const marketReceipts = new Map(detail.marketReceipts);
+  // A proven complete detail also proves absence. Retain that withdrawal's
+  // receipt fence so a main request already in flight cannot resurrect it.
+  for (const [id, priorReceipt] of previous.marketReceipts) {
+    if (marketReceipts.has(id) || priorReceipt.sequence > cutoff) continue;
+    marketReceipts.set(id, { sequence: envelope.sequence,
+      receivedMonotonicMs: envelope.receivedMonotonicMs, provenance: "DETAIL" });
+  }
+  source.details.set(eventId, { ...detail, marketReceipts });
+  source.detailOrdinals.set(eventId, ordinal);
+  return true;
+}
+
+function reconcileHttpSnapshot(pending: HttpPendingBaseline,
+  previous: ReadonlyMap<CatalogPartition, PartitionSnapshot>, preserveHttpPrices = false): Map<CatalogPartition, PartitionSnapshot> {
+  const partitions = new Map<CatalogPartition, PartitionSnapshot>();
+  for (const [partition, snapshot] of pending.partitions) {
+    const records = new Map(snapshot.records);
+    for (const [eventId, incoming] of records) {
+      const prior = previous.get(partition)?.records.get(eventId);
+      if (prior === undefined) continue;
+      const marketReceipts = new Map(incoming.marketReceipts);
+      const newerIds = new Set<string>();
+      const priorMarkets = new Map(prior.record.markets.map((market) => [market.marketId, market]));
+      // HTTP owns membership. Only identities present in this full snapshot
+      // may keep a newer socket price, received after the HTTP request began.
+      for (const [id, clock] of prior.marketReceipts) {
+        if ((preserveHttpPrices || clock.provenance !== "HTTP") &&
+          clock.sequence > pending.requestStartSequence && (preserveHttpPrices || marketReceipts.has(id))) {
+          marketReceipts.set(id, clock);
+          newerIds.add(id);
+        }
+      }
+      const markets = new Map(incoming.record.markets.map((market) => [market.marketId, market]));
+      for (const id of newerIds) {
+        const newer = priorMarkets.get(id);
+        // Preserve new rows and withdrawals even when the older response
+        // omitted them or its invalid native row produced no normalized quote.
+        if (newer === undefined) markets.delete(id); else markets.set(id, newer);
+      }
+      const nativeMarketObservations = incoming.nativeMarketObservations.map((observation) =>
+        newerIds.has(observation.providerMarketId ?? "") ? prior.nativeMarketObservations.find((candidate) =>
+          candidate.providerMarketId === observation.providerMarketId && candidate.nativeType === observation.nativeType)
+          ?? observation : observation);
+      for (const observation of prior.nativeMarketObservations) {
+        if (newerIds.has(observation.providerMarketId ?? "") && !nativeMarketObservations.some((candidate) =>
+          candidate.providerMarketId === observation.providerMarketId && candidate.nativeType === observation.nativeType)) {
+          nativeMarketObservations.push(observation);
+        }
+      }
+      records.set(eventId, { ...incoming, record: { ...incoming.record, markets: [...markets.values()] },
+        marketReceipts, nativeMarketObservations });
+    }
+    partitions.set(partition, { ...snapshot, records });
+  }
+  return partitions;
 }
 
 function mergeDeltaRecord(existing: SbobetCatalogInputRecord | undefined,
-  incoming: SbobetCatalogInputRecord): SbobetCatalogInputRecord {
+  incoming: SbobetCatalogInputRecord, touchedIds: ReadonlySet<string>): SbobetCatalogInputRecord {
   if (existing === undefined) return incoming;
   return { ...existing, ...incoming,
-    markets: [...new Map([...existing.markets, ...incoming.markets]
+    markets: [...new Map([...existing.markets.filter((market) => !touchedIds.has(market.marketId)), ...incoming.markets]
       .map((market) => [market.marketId, market])).values()] };
 }
 

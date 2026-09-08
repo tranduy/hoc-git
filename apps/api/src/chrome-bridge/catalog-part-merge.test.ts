@@ -87,6 +87,24 @@ describe("mergeObservedCatalogParts", () => {
 
     expect(catalog.events).toHaveLength(2);
   });
+
+  it("merges and deduplicates the lossless native market inventory", () => {
+    const observation = {
+      provider: "APSPORT", category: "FOOTBALL", providerEventId: "1", providerMarketId: "native-8",
+      nativeType: "8", nativeLabel: "ODD_EVEN", nativeScope: "FULL_TIME",
+      outcomeLabels: ["ODD", "EVEN"], observedAtMs: 1_000,
+      disposition: "NORMALIZED", reason: "FT_ODD_EVEN"
+    } as const;
+    const catalog = mergeObservedCatalogParts({
+      accountId: "catalog-source:APSPORT:FOOTBALL", provider: "APSPORT", observedAtMs: 1_000,
+      parts: [
+        { ...part([], [], []), nativeMarketObservations: [observation] },
+        { ...part([], [], []), nativeMarketObservations: [observation] }
+      ]
+    });
+
+    expect(catalog.nativeMarketObservations).toEqual([observation]);
+  });
 });
 
 describe("quote phase follows its own event", () => {

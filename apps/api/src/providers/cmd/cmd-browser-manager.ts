@@ -87,17 +87,11 @@ const defaultStableFootballCatalogOptions: StableFootballCatalogOptions = {
   stableSampleCount: 2
 };
 
-const focusedTwoWayBetTypes = new Set(["1", "3", "7", "8"]);
-
-function focusedTwoWayRecords(records: readonly CmdCatalogInputRecord[]): readonly CmdCatalogInputRecord[] {
+function physicalFootballRecords(records: readonly CmdCatalogInputRecord[]): readonly CmdCatalogInputRecord[] {
   return records.filter((record) => {
     const evidence = `${record.leagueName} ${record.teamNames.join(" ")}`.normalize("NFKC").toLocaleLowerCase("en");
     return !/(?:soccer marble|e[\s-]?soccer|\bvirtual\b|simulated reality|spinner world cup|\bpes\b|áº£o|Ä‘iá»‡n tá»­)/u.test(evidence);
-  }).map((record) => ({
-    ...record,
-    groups: record.groups.filter((group) =>
-      group.betTypeIds.length === 1 && focusedTwoWayBetTypes.has(group.betTypeIds[0] ?? ""))
-  }));
+  });
 }
 
 function hasUsableTwoWayMarket(records: readonly CmdCatalogInputRecord[]): boolean {
@@ -131,7 +125,7 @@ export async function readStableFootballCatalog(
     !Number.isSafeInteger(options.stableSampleCount) || options.stableSampleCount < 2) {
     throw new Error("CMD_CATALOG_OPTIONS_INVALID");
   }
-  let records = focusedTwoWayRecords(await probe.read());
+  let records = physicalFootballRecords(await probe.read());
   if (!hasUsableTwoWayMarket(records)) await probe.select();
   let previousFingerprint: string | null = options.trustedStructuralFingerprint ?? null;
   let stableSamples = previousFingerprint === null ? 0 : options.stableSampleCount - 1;
@@ -150,7 +144,7 @@ export async function readStableFootballCatalog(
     }
     if (attempt + 1 < attempts) {
       await probe.wait(options.pollingIntervalMs);
-      records = focusedTwoWayRecords(await probe.read());
+      records = physicalFootballRecords(await probe.read());
     }
   }
   if (fallback.length > 0) return fallback;
@@ -162,7 +156,7 @@ export async function readCmdFootballCatalog(
   trustedStructuralFingerprint?: string
 ): Promise<readonly CmdCatalogInputRecord[]> {
   return readStableFootballCatalog({
-    read: async () => extractCmdCatalogRecords(page, 500, "1", ["1", "3", "7", "8"]),
+    read: async () => extractCmdCatalogRecords(page, 500, "1"),
     select: async () => clickSafeStructuralCategory(page, "1", 0),
     wait: async (delayMs) => page.waitForTimeout(delayMs)
   }, {

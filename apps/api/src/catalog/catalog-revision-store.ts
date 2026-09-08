@@ -21,8 +21,12 @@ function revisionFor(catalog: ObservedProviderCatalog, snapshotState: "FRESH" | 
     sourceTimestampMs: _sourceTimestampMs, ...quote }) => catalog.provider === "APSPORT"
     ? { ...quote, receivedMonotonicMs, sequence }
     : quote);
+  const semanticNativeMarketObservations = catalog.nativeMarketObservations?.map(
+    ({ observedAtMs: _nativeObservedAtMs, ...observation }) => observation);
   return createHash("sha256").update(JSON.stringify({
-    catalog: { ...semanticCatalog, quotes: semanticQuotes }, snapshotState
+    catalog: { ...semanticCatalog, quotes: semanticQuotes,
+      ...(semanticNativeMarketObservations === undefined ? {}
+        : { nativeMarketObservations: semanticNativeMarketObservations }) }, snapshotState
   })).digest("base64url");
 }
 

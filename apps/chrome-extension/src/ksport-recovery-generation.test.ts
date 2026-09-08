@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
+import { isFullKsportPartitionSnapshot, KsportRecoveryGenerationTracker } from "./ksport-recovery-generation.js";
 
 function receipt(partition: "live" | "today", order: number, full: boolean,
   wrap: "none" | "object" | "nested" | "deep" | "encoded" = "none"): string {
@@ -64,20 +64,20 @@ function deltaReceiptWithMarket(partition: "live" | "today", order: number,
 }
 
 describe("KsportRecoveryGenerationTracker", () => {
-  it("does not mark a nonempty partition full when its only market has an unsupported line", () => {
+  it("retains a structurally complete partition whose native row has an unsupported line", () => {
     const tracker = new KsportRecoveryGenerationTracker();
     const payload = receiptWithMarketRow("live", 100, "garbage 0.91*100h -0.99*100a 1000001");
 
     expect(tracker.push(payload)).toEqual([{ payload, recoveryGeneration: 1 }]);
-    expect(tracker.currentBaselineState).toEqual({ live: false, today: false, complete: false });
+    expect(tracker.currentBaselineState).toEqual({ live: true, today: false, complete: false });
   });
 
-  it("does not mark a nonempty partition full when either market price is zero", () => {
+  it("retains a structurally complete partition whose native row has a zero price", () => {
     const tracker = new KsportRecoveryGenerationTracker();
     const payload = receiptWithMarketRow("live", 100, "2.5 0*100h -0.99*100a 1000001");
 
     expect(tracker.push(payload)).toEqual([{ payload, recoveryGeneration: 1 }]);
-    expect(tracker.currentBaselineState).toEqual({ live: false, today: false, complete: false });
+    expect(tracker.currentBaselineState).toEqual({ live: true, today: false, complete: false });
   });
 
   it("completes a baseline whose leagues the provider now nests inside an object", () => {
@@ -141,7 +141,7 @@ describe("KsportRecoveryGenerationTracker", () => {
     expect(tracker.currentBaselineState).toEqual({ live: true, today: true, complete: true });
   });
 
-  it("does not mark a nonempty event shell with no decodable market as a full partition", () => {
+  it("accepts an authoritative league event with an explicitly empty native market container", () => {
     const tracker = new KsportRecoveryGenerationTracker();
     const providerBody = [{ "1": "live league",
       "2": [{ "8": "100", "2": "Home", "3": "Away", "7": {} }] }];
@@ -149,12 +149,110 @@ describe("KsportRecoveryGenerationTracker", () => {
       body: JSON.stringify(providerBody) });
     const stomp = "MESSAGE\ndestination:/topic/sports/1_1/live/ma/event/vi\n" +
       `subscription:subSportBookLive\nmessage-id:socket-100\n\n${wrapper}\u0000`;
-    const malformed = `a${JSON.stringify([stomp])}`;
+    const payload = `a${JSON.stringify([stomp])}`;
 
-    expect(tracker.push(malformed)).toEqual([
-      { payload: malformed, recoveryGeneration: 1 }
+    expect(tracker.push(payload)).toEqual([
+      { payload, recoveryGeneration: 1 }
     ]);
-    expect(tracker.currentBaselineState).toEqual({ live: false, today: false, complete: false });
+    expect(tracker.currentBaselineState).toEqual({ live: true, today: false, complete: false });
+  });
+
+  it.each([
+    ["unknown native group", { "777": ["opaque native row"] }],
+    ["integer total", { "3": ["2 0.91*100h -0.99*100a 1000001"] }],
+    ["zero handicap", { "5": ["0 0.91*100h -0.99*100a h 1000001"] }],
+    ["empty group", { "777": [] }],
+    ["native rows requiring downstream exclusion", { "777": [null, 42, { opaque: true }] }]
+  ])("completes and attributes a %s partition without comparing its outcomes", (_label, groups) => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    const live = receiptWithProviderBody("live", 100, [{ "1": "League", "2": [{
+      "8": "100", "2": "Home", "3": "Away", "7": groups
+    }] }]);
+    const today = receiptWithProviderBody("today", 104, []);
+    expect(tracker.push(live)).toEqual([{ payload: live, recoveryGeneration: 1 }]);
+    expect(tracker.currentBaselineState.live).toBe(true);
+    expect(tracker.catalogEvidenceVersion).toBe(1);
+    tracker.push(today);
+    expect(tracker.currentBaselineState.complete).toBe(true);
+    expect(tracker.catalogAuthorityGeneration).toBe(1);
+  });
+
+  it.each([
+    ["missing event identity", { "2": "Home", "3": "Away", "7": { "777": [] } }],
+    ["malformed event identity", { "8": "bad", "2": "Home", "3": "Away", "7": { "777": [] } }],
+    ["blank participant", { "8": "100", "2": " ", "3": "Away", "7": { "777": [] } }],
+    ["identical participants", { "8": "100", "2": "Home", "3": "Home", "7": { "777": [] } }],
+    ["missing market container", { "8": "100", "2": "Home", "3": "Away" }],
+    ["array market container", { "8": "100", "2": "Home", "3": "Away", "7": [] }],
+    ["nonarray native group", { "8": "100", "2": "Home", "3": "Away", "7": {
+      "3": ["2.5 0.91*100h -0.99*100a 1000001"], "777": { rows: [] }
+    } }]
+  ])("rejects %s without mistaking a nested empty native array for a roster", (_label, event) => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    const body = [{ "1": "League", "2": [event] }];
+    expect(isFullKsportPartitionSnapshot(body)).toBe(false);
+    tracker.push(receiptWithProviderBody("live", 100, body));
+    expect(tracker.currentBaselineState.live).toBe(false);
+    expect(tracker.catalogEvidenceVersion).toBe(0);
+  });
+
+  it("validates every provider date group instead of accepting an earlier valid subset", () => {
+    const body = [[{ "1": "First", "2": [{ "8": "100", "2": "Home", "3": "Away",
+      "7": { "3": ["2.5 0.91*100h -0.99*100a 1000001"] } }] }],
+      [{ "1": "Second", "2": [{ "8": "101", "2": "Home", "3": "Away", "7": null }] }]];
+    expect(isFullKsportPartitionSnapshot(body)).toBe(false);
+  });
+
+  it("does not promote unrelated empty metadata arrays as complete provider membership", () => {
+    expect(isFullKsportPartitionSnapshot({ error: { rows: [] } })).toBe(false);
+    expect(isFullKsportPartitionSnapshot({ data: [{ "1": "League", "2": null }], meta: [] })).toBe(false);
+    expect(isFullKsportPartitionSnapshot({ data: [] })).toBe(true);
+  });
+
+  it.each([
+    ["error with empty data", { error: "failed", data: [] }],
+    ["failed result with empty membership", { success: false, result: [] }],
+    ["mixed date group and error object", [[{ "1": "League", "2": [] }], { error: "failed" }]],
+    ["error alongside valid membership", { error: "failed", data: [{ "1": "League", "2": [] }] }],
+    ["nested failed sibling", { data: [{ "1": "League", "2": [] }], failed: { error: "failed" } }]
+  ])("rejects %s without granting complete partition authority", (_label, body) => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    expect(isFullKsportPartitionSnapshot(body)).toBe(false);
+    tracker.push(receiptWithProviderBody("live", 100, body));
+    expect(tracker.currentBaselineState.live).toBe(false);
+    expect(tracker.catalogEvidenceVersion).toBe(0);
+  });
+
+  it.each([[], [[]], { data: [] }, { result: { leagues: [[]] } }].map((body) => [body]))(
+    "keeps genuine empty direct, date and known wrapper membership eligible", (body) => {
+      expect(isFullKsportPartitionSnapshot(body)).toBe(true);
+    });
+
+  it("tracks native-only delta evidence and suppresses duplicate or older receipts", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    const delta = (order: number, row: unknown) => receiptWithProviderBody("live", order, {
+      "8": "100", "2": "Home", "3": "Away", "7": { "777": [row] }
+    });
+    tracker.push(delta(200, "unknown native row"));
+    expect(tracker.catalogEvidenceVersion).toBe(1);
+    tracker.push(delta(200, "unknown native row"));
+    tracker.push(delta(199, "older native row"));
+    expect(tracker.catalogEvidenceVersion).toBe(1);
+    tracker.push(delta(201, { unknownNativeRow: true }));
+    expect(tracker.catalogEvidenceVersion).toBe(2);
+    expect(tracker.currentBaselineState.complete).toBe(false);
+  });
+
+  it("retains distinct native market identities even when their integer lines cannot be compared", () => {
+    const tracker = new KsportRecoveryGenerationTracker();
+    const delta = (order: number, id: string) => receiptWithProviderBody("live", order, {
+      "8": "100", "2": "Home", "3": "Away", "7": { "3": [`2 0*${id}h -0.99*${id}a ${id}`] }
+    });
+    tracker.push(delta(200, "1000001"));
+    tracker.push(delta(150, "1000002"));
+    expect(tracker.catalogEvidenceVersion).toBe(2);
+    tracker.push(delta(175, "1000001"));
+    expect(tracker.catalogEvidenceVersion).toBe(2);
   });
 
   it("keeps one immutable generation across the initial live and today baseline", () => {

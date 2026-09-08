@@ -1,0 +1,606 @@
+{
+  "note": "Actual same-epoch .50: readonlybinding succeeded; first owner complete, second owner gained19public IDs outside modernodds-group in c-bettype. First specimen c-bettype--cs explicitly correct-score class; otherbettypes needpublicsemanticproof. Fullcollector refused/restored, nofullgeneration.",
+  "snapshots": [
+    {
+      "at": "2026-09-07T20:07:43.919Z",
+      "build": "sha256:5eec73572f139b319282111bf77060f2e146e0efdbf7ad80d0eaa29a4534c6a2",
+      "firstFailingHop": null,
+      "source": {
+        "sourceId": "chrome:SABA:2105831237",
+        "tabId": 2105831237,
+        "authorityDisposition": "ACTIVE"
+      },
+      "epoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+      "catalog": {
+        "state": "FRESH",
+        "events": 39,
+        "markets": 222,
+        "quotes": 444,
+        "native": 434,
+        "observedAtMs": 1788811658259
+      },
+      "capture": {
+        "name": "capture-1788811496430.jsonl",
+        "size": 2769912,
+        "mtime": 1788811660859.8267
+      }
+    },
+    {
+      "probeCount": 1,
+      "probes": [
+        {
+          "at": "2026-09-07T20:06:59.367Z",
+          "epoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+          "status": "NO_ACTION_COLLECTOR_TARGET_BOUND",
+          "viewRestored": true
+        }
+      ],
+      "collectors": [
+        {
+          "at": "2026-09-07T20:07:10.318Z",
+          "epoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "IN_PROGRESS",
+          "viewRestored": true,
+          "completedOwners": 1,
+          "rosterOwners": 17,
+          "expandedOwners": 0
+        },
+        {
+          "at": "2026-09-07T20:07:16.968Z",
+          "epoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+          "binding": {
+            "sourceEpoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+            "frameKey": "MAIN_WORLD:root:43",
+            "documentKey": "yuumla3ee08mtrmpian"
+          },
+          "period": "TODAY",
+          "ownerMatchId": "133090282",
+          "capturedAtMs": 1788811636968,
+          "capturedMonotonicMs": 110224.89999997616,
+          "reason": "ADDED_NATIVE_IDS",
+          "before": {
+            "groupCount": 1,
+            "nativeTypes": [
+              "2",
+              "1",
+              "3",
+              "5",
+              "7",
+              "8",
+              "15"
+            ],
+            "nativeIdCount": 11
+          },
+          "after": {
+            "groupCount": 1,
+            "nativeTypes": [
+              "2",
+              "1",
+              "3",
+              "5",
+              "7",
+              "8",
+              "15"
+            ],
+            "nativeIdCount": 30,
+            "addedNativeIds": [
+              "133090282__1053807189",
+              "133090282__1053807188",
+              "133090282__1053807135",
+              "133090282__1053807186",
+              "133090282__1053807143",
+              "133090282__1053807142",
+              "133090282__1053807140",
+              "133090282__1053807193",
+              "133090282__1053807202",
+              "133090282__1053807184",
+              "133090282__1053807195",
+              "133090282__1053807127",
+              "133090282__1053807183",
+              "133090282__1053807181",
+              "133090282__1053807185",
+              "133090282__1053807196",
+              "133090282__1053807182",
+              "133090282__1053807178",
+              "133090282__1053807198"
+            ]
+          },
+          "catalog": {
+            "groupCount": 11,
+            "nativeIdCount": 11
+          },
+          "unmatched": [
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807189",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype",
+                    "c-bettype--cs"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "7.6"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807188",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "5.8"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807135",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "5.4"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807186",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col-group"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "5.4"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807143",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col-group"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "5.4"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807142",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "1.72"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807140",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "-6.80"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807193",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "7.50"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807202",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "2.03"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807184",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "2.68"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807195",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "2.72"
+            },
+            {
+              "elementClasses": [
+                "c-odds"
+              ],
+              "elementTag": "span",
+              "inOddsGroup": false,
+              "isOdds": true,
+              "nativeId": "133090282__1053807127",
+              "nativeType": null,
+              "parentChain": [
+                {
+                  "classes": [
+                    "c-odds-button"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__col"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype__row"
+                  ],
+                  "tag": "div"
+                },
+                {
+                  "classes": [
+                    "c-bettype"
+                  ],
+                  "tag": "div"
+                }
+              ],
+              "priceText": "3.90"
+            }
+          ],
+          "addedGroupShapes": [],
+          "kind": "SABA_HIDDEN_COLLECTOR_SHAPE"
+        },
+        {
+          "at": "2026-09-07T20:07:19.065Z",
+          "epoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "INCOMPLETE",
+          "viewRestored": true,
+          "reason": "SABA_COLLECTOR_OWNER_STRUCTURE_UNCAPTURED",
+          "completedOwners": 1
+        }
+      ],
+      "latestEnvelopeEpoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+      "lastHealth": {
+        "at": "2026-09-07T20:07:40.858Z",
+        "counters": {
+          "OK": 26,
+          "ERROR": 0,
+          "TIMEOUT": 0,
+          "SKIPPED_INFLIGHT": 28,
+          "forcedUnlocks": 0
+        },
+        "lastOutcome": {
+          "workItem": "pollSabaDomChanges",
+          "outcome": "OK",
+          "durationMs": 13
+        },
+        "lastErrorCode": null,
+        "inFlightAgeMs": 0
+      },
+      "transports": {
+        "WS_FRAME": 78,
+        "DOM_SNAPSHOT": 29,
+        "TAB_STATE": 49,
+        "WS_STATE": 1
+      },
+      "lastDom": {
+        "at": "2026-09-07T20:07:38.259Z",
+        "epoch": "a5fba02c-19d3-42c7-a699-8bb5b4db29e9:2",
+        "recordCount": 47,
+        "chunkCount": 2,
+        "chunkIndex": 0
+      }
+    }
+  ]
+}

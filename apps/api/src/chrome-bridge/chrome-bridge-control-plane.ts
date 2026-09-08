@@ -131,7 +131,12 @@ export class ChromeBridgeControlPlane {
 
   requestLobbySnapshot(lobby: ChromeLobbyId): number {
     let requested = 0;
-    for (const { sourceId, lobby: attachedLobby, socket } of this.#attachedSources()) {
+    this.#pruneInactiveSources();
+    const sources = this.#authorityCoordinator === null
+      ? [...this.#sourcesByAccount.values()]
+      : [...this.#authoritySourcesByAccount.values()]
+        .flatMap((slot) => slot.active !== null ? [slot.active] : slot.candidate !== null ? [slot.candidate] : []);
+    for (const { sourceId, lobby: attachedLobby, socket } of sources) {
       if (socket.readyState !== 1 || attachedLobby !== lobby) continue;
       const control = this.#snapshotControl(sourceId, attachedLobby);
       socket.send(JSON.stringify(control));

@@ -87,6 +87,20 @@ describe("CatalogApi", () => {
     await expect(api.read("account-1")).resolves.toEqual(saba);
   });
 
+  it("preserves validated native market accounting from the provider boundary", async () => {
+    const nativeMarketObservations = [{
+      provider: "CMD", category: "FOOTBALL", providerEventId: "event-1",
+      providerMarketId: "event-1:native:999", nativeType: "999", nativeLabel: "Unknown prop",
+      nativeScope: "FULL_TIME", outcomeLabels: ["Yes", "No"], observedAtMs: 100,
+      disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED"
+    }];
+    const api = new CatalogApi(async () => new Response(JSON.stringify({
+      ...response, nativeMarketObservations
+    }), { status: 200 }));
+
+    await expect(api.read("account-1")).resolves.toMatchObject({ nativeMarketObservations });
+  });
+
   it("aborts a provider request that would otherwise block the whole comparison screen", async () => {
     vi.useFakeTimers();
     const api = new CatalogApi((_input, init) => new Promise((_resolve, reject) => {

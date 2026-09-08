@@ -1,0 +1,484 @@
+{
+  "description": "SABA extension0.2.60 current worker small-roster admission; incomplete live collector, no full/realtime acceptance.",
+  "at": "2026-09-07T22:37:31.609Z",
+  "build": "sha256:fe63e1d89669d3d3c59ac109e1bf0c9b6a8af27826ddc452fff9046512677b31",
+  "firstFailingHop": "HOP1_TAB",
+  "source": {
+    "sourceId": "chrome:SABA:2105831891",
+    "tabId": 2105831891,
+    "authorityDisposition": "ACTIVE"
+  },
+  "epoch": "cd1c60ef-f6fd-417d-836f-974b3fc2e5d8:10",
+  "catalog": {
+    "state": "FRESH",
+    "events": 18,
+    "markets": 111,
+    "quotes": 222,
+    "native": 212,
+    "observedAtMs": 1788820617843
+  },
+  "capture": {
+    "name": "capture-1788820096558.jsonl",
+    "size": 7615917,
+    "mtime": 1788820619172.2039
+  },
+  "receipts": {
+    "schemaContexts": [],
+    "periodFailures": [],
+    "probeCount": 2,
+    "probes": [
+      {
+        "at": "2026-09-07T22:32:11.873Z",
+        "epoch": "cd1c60ef-f6fd-417d-836f-974b3fc2e5d8:6",
+        "status": "NO_ACTION_COLLECTOR_TARGET_BOUND",
+        "viewRestored": true
+      },
+      {
+        "at": "2026-09-07T22:35:23.180Z",
+        "epoch": "cd1c60ef-f6fd-417d-836f-974b3fc2e5d8:10",
+        "status": "NO_ACTION_COLLECTOR_TARGET_BOUND",
+        "viewRestored": true
+      }
+    ],
+    "collectorState": {
+      "nativeReady": false,
+      "schemaContextReady": false,
+      "catalogUsable": false,
+      "discoveryPending": false,
+      "discoveryAttempted": true,
+      "collectorState": "RUNNING",
+      "domBlocked": false,
+      "probeBlocked": false
+    },
+    "collectors": [
+      {
+        "at": "2026-09-07T22:32:17.056Z",
+        "sourceId": "chrome:SABA:2105831887",
+        "epoch": "cd1c60ef-f6fd-417d-836f-974b3fc2e5d8:6",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "IN_PROGRESS",
+        "viewRestored": true,
+        "completedOwners": 1,
+        "rosterOwners": 12,
+        "expandedOwners": 0
+      },
+      {
+        "at": "2026-09-07T22:35:32.493Z",
+        "sourceId": "chrome:SABA:2105831891",
+        "epoch": "cd1c60ef-f6fd-417d-836f-974b3fc2e5d8:10",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "IN_PROGRESS",
+        "viewRestored": true,
+        "completedOwners": 1,
+        "rosterOwners": 12,
+        "expandedOwners": 0
+      },
+      {
+        "at": "2026-09-07T22:36:52.553Z",
+        "sourceId": "chrome:SABA:2105831891",
+        "epoch": "cd1c60ef-f6fd-417d-836f-974b3fc2e5d8:10",
+        "kind": "SABA_HIDDEN_COLLECTOR",
+        "status": "IN_PROGRESS",
+        "viewRestored": true,
+        "completedOwners": 10,
+        "rosterOwners": 12,
+        "expandedOwners": 1,
+        "publicMarketSample": {
+          "ownerMatchId": "133619326",
+          "capturedAtMs": 1788820611535,
+          "groups": [
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Chính Xác",
+                "1-0",
+                "2-0",
+                "2-1",
+                "3-0",
+                "3-1",
+                "3-2",
+                "4-0"
+              ],
+              "outcomeCount": 26,
+              "publicPrices": [
+                "4.8",
+                "18",
+                "4.6",
+                "67"
+              ],
+              "nativeIds": [
+                "133619326__1058735511"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Chính Xác Hiệp 1",
+                "1-0",
+                "2-0",
+                "2-1",
+                "3-0",
+                "3-1",
+                "3-2",
+                "0-0"
+              ],
+              "outcomeCount": 17,
+              "publicPrices": [
+                "2.65",
+                "10",
+                "6.2",
+                "88"
+              ],
+              "nativeIds": [
+                "133619326__1058735510"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Chính Xác Hiệp 2",
+                "1-0",
+                "2-0",
+                "2-1",
+                "3-0",
+                "3-1",
+                "3-2",
+                "0-0"
+              ],
+              "outcomeCount": 17,
+              "publicPrices": [
+                "2.77",
+                "11",
+                "5.4",
+                "75"
+              ],
+              "nativeIds": [
+                "133619326__1058735450"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Chính Xác Hiệp 1/Cả Trận",
+                "Hiệp 1",
+                "Toàn Trận",
+                "Tỷ Lệ",
+                "View All",
+                "0-0",
+                "0-1",
+                "0-2"
+              ],
+              "outcomeCount": 1,
+              "publicPrices": [
+                "8.5"
+              ],
+              "nativeIds": [
+                "133619326__1058735508"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tổng Bàn thắng Chính xác Hiệp 1/Cả trận",
+                "Hiệp 1",
+                "Toàn Trận",
+                "Tỷ Lệ",
+                "View All",
+                "0",
+                "1",
+                "2"
+              ],
+              "outcomeCount": 1,
+              "publicPrices": [
+                "8.5"
+              ],
+              "nativeIds": [
+                "133619326__1058735457"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Kèo Chấp - Score Box",
+                "Tỷ số thắng",
+                "3",
+                "2",
+                "1",
+                "Hòa",
+                "-1",
+                "Đội nhà"
+              ],
+              "outcomeCount": 10,
+              "publicPrices": [
+                "3.00",
+                "1.01",
+                "-0.50",
+                "-2.29"
+              ],
+              "nativeIds": [
+                "133619326__1058735456"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tài/Xỉu - Score Box",
+                "Tổng bàn thắng",
+                "0",
+                "1",
+                "2",
+                "3",
+                "4",
+                "Bằng/Tài"
+              ],
+              "outcomeCount": 10,
+              "publicPrices": [
+                "-6.40",
+                "-2.42",
+                "-0.50",
+                "0.92"
+              ],
+              "nativeIds": [
+                "133619326__1058735455"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "H1/Cả Trận",
+                "HH",
+                "HD",
+                "HA",
+                "DH",
+                "DD",
+                "DA",
+                "AH"
+              ],
+              "outcomeCount": 9,
+              "publicPrices": [
+                "1.88",
+                "20.00",
+                "60.00",
+                "3.65"
+              ],
+              "nativeIds": [
+                "133619326__1058735515"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tổng Số Bàn Thắng",
+                "0-1",
+                "2-3",
+                "4-6",
+                "7+"
+              ],
+              "outcomeCount": 4,
+              "publicPrices": [
+                "2.75",
+                "1.78",
+                "3.90",
+                "30.00"
+              ],
+              "nativeIds": [
+                "133619326__1058735524"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Bàn thắng Đầu/ Cuối",
+                "HF",
+                "HL",
+                "AF",
+                "AL",
+                "Không Có Bàn Thắng"
+              ],
+              "outcomeCount": 5,
+              "publicPrices": [
+                "1.24",
+                "1.24",
+                "4.65",
+                "4.65"
+              ],
+              "nativeIds": [
+                "133619326__1058735517"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Chẵn / Lẻ của Nửa trận/Toàn trận",
+                "Lẻ/Lẻ",
+                "Lẻ/Chẵn",
+                "Chẵn/Lẻ",
+                "Chẵn/Chẵn"
+              ],
+              "outcomeCount": 4,
+              "publicPrices": [
+                "3.80",
+                "4.35",
+                "3.45",
+                "2.99"
+              ],
+              "nativeIds": [
+                "133619326__1058735443"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Cả Hai/Một/Không Đội Ghi Bàn",
+                "Cả Hai",
+                "Một",
+                "Không Có Bàn Thắng"
+              ],
+              "outcomeCount": 3,
+              "publicPrices": [
+                "2.63",
+                "1.56",
+                "8.50"
+              ],
+              "nativeIds": [
+                "133619326__1058735502"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Cược chấp 3 Cửa",
+                "Đội Nhà(-1)",
+                "Hòa(Đội Khách+1)",
+                "Đội Khách(+1)"
+              ],
+              "outcomeCount": 3,
+              "publicPrices": [
+                "2.05",
+                "3.15",
+                "3.15"
+              ],
+              "nativeIds": [
+                "133619326__1058735500"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Cơ Hội Kép",
+                "Đội Nhà hoặc Hòa",
+                "Đội Nhà hoặc Đội Khách",
+                "Đội Khách hoặc Hòa"
+              ],
+              "outcomeCount": 3,
+              "publicPrices": [
+                "1.01",
+                "1.14",
+                "2.72"
+              ],
+              "nativeIds": [
+                "133619326__1058735507"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Giữ sạch lưới",
+                "Đội Nhà Có",
+                "Đội Nhà Không",
+                "Đội Khách Có",
+                "Đội Khách Không"
+              ],
+              "outcomeCount": 4,
+              "publicPrices": [
+                "1.57",
+                "2.31",
+                "6.20",
+                "1.06"
+              ],
+              "nativeIds": [
+                "133619326__1058735518"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Cược Thắng Áp Đảo",
+                "Đội Nhà",
+                "Đội Khách"
+              ],
+              "outcomeCount": 2,
+              "publicPrices": [
+                "1.74",
+                "15.00"
+              ],
+              "nativeIds": [
+                "133619326__1058735501"
+              ]
+            },
+            {
+              "betTypeIds": [],
+              "labels": [
+                "Tỷ Số Thắng Cách Biệt",
+                "Đội nhà Thắng cách biệt 1 Bàn",
+                "Đội nhà Thắng cách biệt 2 Bàn",
+                "Đội nhà Thắng cách biệt 3 Bàn trở lên",
+                "Hòa Có Bàn Thắng (Ngoại Trừ 0-0)",
+                "Đội khách Thắng cách biệt 1 Bàn",
+                "Đội khách Thắng cách biệt 2 Bàn",
+                "Đội khách Thắng cách biệt 3 Bàn trở lên"
+              ],
+              "outcomeCount": 8,
+              "publicPrices": [
+                "3.15",
+                "3.60",
+                "3.60",
+                "7.00"
+              ],
+              "nativeIds": [
+                "133619326__1058735520"
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "latestEnvelopeEpoch": "cd1c60ef-f6fd-417d-836f-974b3fc2e5d8:10",
+    "lastHealth": {
+      "at": "2026-09-07T22:36:57.607Z",
+      "counters": {
+        "OK": 14,
+        "ERROR": 0,
+        "TIMEOUT": 0,
+        "SKIPPED_INFLIGHT": 32,
+        "forcedUnlocks": 0
+      },
+      "lastOutcome": {
+        "workItem": "pollSabaDomChanges",
+        "outcome": "SKIPPED_INFLIGHT",
+        "durationMs": 4634
+      },
+      "lastErrorCode": null,
+      "inFlightAgeMs": 4634
+    },
+    "transports": {
+      "TAB_STATE": 63,
+      "WS_STATE": 12,
+      "DOM_SNAPSHOT": 40,
+      "WS_FRAME": 292
+    },
+    "lastDom": {
+      "at": "2026-09-07T22:36:57.843Z",
+      "epoch": "cd1c60ef-f6fd-417d-836f-974b3fc2e5d8:10",
+      "recordCount": 31,
+      "chunkCount": 1,
+      "chunkIndex": 0
+    }
+  },
+  "limitations": [
+    "Collector IN_PROGRESS receipts are sampled at first owner, multiples of10, new public sample classes and period completion; absence between receipts is not proof of a stall.",
+    "New tab/epoch observed within same worker; exact initiator not present in capture. SourceTabRecovery and backend control have remaining hasUsable-only readiness gates despite current sub50 valid DOM.",
+    "Public untyped grids and non-exhaustive home/away pairs remain observations, not promoted binary markets.",
+    "No full terminal, post-close changing hidden prices, authoritative removal or continuous recovery acceptance."
+  ]
+}

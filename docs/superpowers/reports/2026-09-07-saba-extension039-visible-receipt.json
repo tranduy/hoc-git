@@ -1,0 +1,42 @@
+{
+  "at": "2026-09-07T15:11:33.394Z",
+  "scope": "VISIBLE_DOM_ONLY_NOT_FULL_PROVIDER_COVERAGE",
+  "sourceEpoch": "74040073-8f28-489c-b83f-5d6f442faf05:5",
+  "firstFailingHop": null,
+  "catalog": {
+    "observedAtMs": 1788793891883,
+    "snapshotState": "FRESH",
+    "events": 112,
+    "markets": 771,
+    "quotes": 1542,
+    "nativeRows": 1073
+  },
+  "rawRecords": 127,
+  "rawGroups": 1073,
+  "rawNativeMissing": 0,
+  "dispositions": {
+    "NORMALIZED:CANONICAL_MARKET_MAPPED": 771,
+    "EXCLUDED:THREE_WAY_OUTCOME_DOMAIN": 106,
+    "UNMAPPED:NATIVE_TYPE_UNMAPPED": 134,
+    "EXCLUDED:EVENT_NOT_COMPARABLE": 62
+  },
+  "receiptAligned": true,
+  "latestCompleteDomAt": 1788793891883,
+  "stableSourceDuringSample": true,
+  "visibleReceiptCheck": {
+    "scope": "VISIBLE_RECEIPT_ONLY_NOT_FULL_PROVIDER_COVERAGE",
+    "rawGroups": 1073,
+    "rawNativeMissing": 0,
+    "duplicateRawNative": 0,
+    "duplicatePublishedNative": 0,
+    "duplicatePublishedQuotes": 0,
+    "normalizedAbsent": 0,
+    "invalidNormalizedShape": 0,
+    "expectedPrices": 1314,
+    "matchedPrices": 1314,
+    "missingPrices": 0,
+    "olderPrices": 0,
+    "supersededPrices": 0,
+    "mismatchedPrices": 0
+  }
+}

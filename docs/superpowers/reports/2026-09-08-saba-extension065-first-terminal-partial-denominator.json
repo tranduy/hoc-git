@@ -1,0 +1,127 @@
+{
+  "at": "2026-09-08T00:30:46.182Z",
+  "build": "sha256:014e4466b77e7293a71af7e3fe28b7211af226f09fd01bca18dc4d1d617b0d4a",
+  "sourceId": "chrome:SABA:2105831907",
+  "epoch": "f26809b5-b6fe-42a6-abb5-e6cefa30d22d:14",
+  "files": [
+    {
+      "name": "capture-1788824002246.jsonl",
+      "size": 4159828,
+      "mtime": 1788824793994.1145
+    },
+    {
+      "name": "capture-1788824804788.jsonl",
+      "size": 3807598,
+      "mtime": 1788825737324.9265
+    },
+    {
+      "name": "capture-1788825897373.jsonl",
+      "size": 7724784,
+      "mtime": 1788827445792.3733
+    }
+  ],
+  "generation": "saba:collector:2105831907:1788827110235",
+  "terminal": {
+    "at": 1788827315984,
+    "kind": "SABA_HIDDEN_COLLECTOR",
+    "status": "COMPLETE_CAPTURE",
+    "viewRestored": true,
+    "completedOwners": 24,
+    "periods": [
+      {
+        "period": "TODAY",
+        "rosterCount": 4
+      },
+      {
+        "period": "EARLY",
+        "rosterCount": 20
+      }
+    ],
+    "chunks": 1
+  },
+  "chunks": 1,
+  "assembled": true,
+  "shadowPublications": 1,
+  "captures": 27,
+  "expandedCaptures": 3,
+  "owners": 24,
+  "periods": [
+    {
+      "kind": "PERIOD_COMPLETE",
+      "collectorGeneration": "saba:collector:2105831907:1788827110235",
+      "period": "TODAY",
+      "rosterMatchIds": [
+        "133456872",
+        "133651148",
+        "133829461",
+        "133453427"
+      ],
+      "rosterCount": 4
+    },
+    {
+      "kind": "PERIOD_COMPLETE",
+      "collectorGeneration": "saba:collector:2105831907:1788827110235",
+      "period": "EARLY",
+      "rosterMatchIds": [
+        "133364819",
+        "133364823",
+        "132848655",
+        "132848700",
+        "132848654",
+        "132848657",
+        "132848658",
+        "132848699",
+        "133530062",
+        "133535442",
+        "133535444",
+        "133535446",
+        "133950980",
+        "133381013",
+        "133622135",
+        "133667636",
+        "133672157",
+        "133672180",
+        "133672177",
+        "133676820"
+      ],
+      "rosterCount": 20
+    }
+  ],
+  "capturedHiddenNativeIds": 56,
+  "runtimeHiddenNativePresent": 56,
+  "hiddenDispositions": {
+    "EXCLUDED|AMBIGUOUS_NATIVE_TYPE": 53,
+    "NORMALIZED|CANONICAL_MARKET_MAPPED": 3
+  },
+  "shadow": {
+    "events": 20,
+    "markets": 85,
+    "quotes": 170,
+    "native": 186
+  },
+  "runtime": {
+    "state": "FRESH",
+    "events": 29,
+    "markets": 134,
+    "quotes": 268,
+    "native": 263,
+    "dispositions": {
+      "EXCLUDED": 102,
+      "NORMALIZED": 131,
+      "UNMAPPED": 30
+    },
+    "families": {
+      "AWAY_FT_CLEAN_SHEET|FULL_TIME": 3,
+      "FH_AH|FIRST_HALF": 18,
+      "FH_TOTAL|FIRST_HALF": 18,
+      "FT_AH|FULL_TIME": 39,
+      "FT_ODD_EVEN|FULL_TIME": 14,
+      "FT_TOTAL|FULL_TIME": 39,
+      "HOME_FT_CLEAN_SHEET|FULL_TIME": 3
+    }
+  },
+  "runtimeEpoch": "f26809b5-b6fe-42a6-abb5-e6cefa30d22d:16",
+  "runtimeEpochMatchesCandidate": false,
+  "fullProviderDenominatorProven": false,
+  "postClosePriceChangeProven": false
+}

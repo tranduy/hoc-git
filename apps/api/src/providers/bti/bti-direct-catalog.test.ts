@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractBtiCatalogRecords } from "./bti-direct-catalog.js";
+import { extractBtiCatalogRecords, extractBtiNativeMarketObservations } from "./bti-direct-catalog.js";
 
 const selection = (id: string, side: 1 | 3, line: number, malay: string, locked = false) =>
   [id, { VI: "team" }, { VI: "team line" }, locked, false, 1.9, ["", "1.90", "", "", "", malay], side, 2, {}, "", "event", "market", line];
@@ -9,7 +9,7 @@ const market = (id: string, code: "HC39" | "HC0" | "HC1" | "OU39" | "OU0" | "OU1
 
 describe("BTI direct catalog", () => {
   it("extracts proven two-outcome markets from an event-page detail response", () => {
-    const detailSelection = (id: string, side: 1 | 3, points: number, malay: string, displayName?: string) => {
+    const detailSelection = (id: string, side: number, points: number | null, malay: string, displayName?: string) => {
       const value = Array<unknown>(30).fill(null);
       value[0] = id;
       const name = displayName ?? (id.includes("over") ? "Over" : id.includes("under") ? "Under" :
@@ -53,16 +53,36 @@ describe("BTI direct catalog", () => {
         detailSelection("detail-away", 3, 0.75, "-0.92")]),
       detailMarket("detail-ou", "OU0", [detailSelection("detail-over", 1, 2.75, "0.90"),
         detailSelection("detail-under", 3, 2.75, "-0.99")]),
-      detailMarket("corner-ft-ah", "BTI-CORNER", [detailSelection("corner-home", 1, -0.5, "0.77"),
+      detailMarket("corner-ft-ah", "HC619", [detailSelection("corner-home", 1, -0.5, "0.77"),
         detailSelection("corner-away", 3, 0.5, "-0.87")], "Corners Asian Handicap"),
-      detailMarket("corner-fh-ou", "BTI-CORNER-1H", [detailSelection("corner-over", 1, 4.5, "0.78"),
+      detailMarket("corner-fh-ou", "OU14", [detailSelection("corner-over", 1, 4.5, "0.78"),
         detailSelection("corner-under", 3, 4.5, "-0.88")], "First Half Corners Total"),
-      detailMarket("card-ft-ou", "BTI-CARD", [detailSelection("card-over", 1, 3.5, "0.79"),
+      detailMarket("card-ft-ou", "OU10", [detailSelection("card-over", 1, 3.5, "0.79"),
         detailSelection("card-under", 3, 3.5, "-0.89")], "Cards Over Under"),
       detailMarket("card-fh-ah", "BTI-CARD-1H", [detailSelection("card-home", 1, -0.5, "0.80"),
         detailSelection("card-away", 3, 0.5, "-0.90")], "First Half Bookings Handicap"),
-      detailMarket("second-half-ou", "BTI-2H", [detailSelection("sh-over", 1, 1.5, "0.81"),
+      detailMarket("second-half-ou", "OU2", [detailSelection("sh-over", 1, 1.5, "0.81"),
         detailSelection("sh-under", 3, 1.5, "-0.91")], "Second Half Total"),
+      detailMarket("odd-even", "QA38", [detailSelection("odd", 7, null, "0.81", "Lẻ"),
+        detailSelection("even", 8, null, "-0.91", "Chẵn")], "Lẻ/Chẵn"),
+      detailMarket("btts", "QA158", [detailSelection("yes", 9, null, "0.81", "Có"),
+        detailSelection("no", 10, null, "-0.91", "Không")], "Cả 2 đội đều ghi bàn"),
+      detailMarket("fh-btts", "QA2934", [detailSelection("fh-yes", 9, null, "0.81", "Có"),
+        detailSelection("fh-no", 10, null, "-0.91", "Không")], "Cả 2 đội ghi bàn hiệp 1"),
+      detailMarket("sh-btts", "QA2936", [detailSelection("sh-yes", 9, null, "0.81", "Có"),
+        detailSelection("sh-no", 10, null, "-0.91", "Không")], "Cả 2 đội ghi bàn hiệp 2"),
+      detailMarket("corner-odd-even", "QA616", [detailSelection("corner-odd", 7, null, "0.81", "Lẻ"),
+        detailSelection("corner-even", 8, null, "-0.91", "Chẵn")], "Cược Chẵn/Lẻ số quả phạt góc"),
+      detailMarket("sending-off", "QA4409", [detailSelection("red-yes", 9, null, "0.81", "Có"),
+        detailSelection("red-no", 10, null, "-0.91", "Không")], "Có thẻ đỏ / Truất quyền thi đấu"),
+      detailMarket("home-clean-sheet", "QA272", [detailSelection("home-clean-yes", 9, null, "0.81", "Yes"),
+        detailSelection("home-clean-no", 10, null, "-0.91", "No")], "Alpha: Team clean sheet"),
+      detailMarket("away-win-both-halves", "QA6095", [detailSelection("away-both-yes", 9, null, "0.81", "Yes"),
+        detailSelection("away-both-no", 10, null, "-0.91", "No")], "Beta: Team to win both halves"),
+      detailMarket("home-win-to-nil", "QA5185", [detailSelection("home-nil-yes", 9, null, "0.81", "Yes"),
+        detailSelection("home-nil-no", 10, null, "-0.91", "No")], "Alpha: Win to nil"),
+      detailMarket("away-to-win", "QA6078", [detailSelection("away-win-yes", 9, null, "0.81", "Yes"),
+        detailSelection("away-win-no", 10, null, "-0.91", "No")], "Beta: Team to win match"),
       detailMarket("ambiguous-total", "BTI-OTHER", [detailSelection("yes", 1, 2.5, "0.81", "Yes"),
         detailSelection("no", 3, 2.5, "-0.91", "No")], "Total"),
       detailMarket("swapped-handicap", "BTI-HC", [detailSelection("wrong-home", 1, -0.5, "0.81", "Beta"),
@@ -80,10 +100,22 @@ describe("BTI direct catalog", () => {
         expect.objectContaining({ marketId: "corner-ft-ah:-0.5", marketType: "CORNER_FT_AH" }),
         expect.objectContaining({ marketId: "corner-fh-ou:4.5", marketType: "CORNER_FH_TOTAL" }),
         expect.objectContaining({ marketId: "card-ft-ou:3.5", marketType: "CARD_FT_TOTAL" }),
-        expect.objectContaining({ marketId: "card-fh-ah:-0.5", marketType: "CARD_FH_AH" }),
-        expect.objectContaining({ marketId: "second-half-ou:1.5", marketType: "SH_TOTAL" })]
+        expect.objectContaining({ marketId: "second-half-ou:1.5", marketType: "SH_TOTAL" }),
+        expect.objectContaining({ marketId: "odd-even", marketType: "FT_ODD_EVEN", lineText: null }),
+        expect.objectContaining({ marketId: "btts", marketType: "FT_BTTS", lineText: null }),
+        expect.objectContaining({ marketId: "fh-btts", marketType: "FH_BTTS", lineText: null }),
+        expect.objectContaining({ marketId: "sh-btts", marketType: "SH_BTTS", lineText: null }),
+        expect.objectContaining({ marketId: "corner-odd-even", marketType: "CORNER_FT_ODD_EVEN", lineText: null }),
+        expect.objectContaining({ marketId: "sending-off", marketType: "SENDING_OFF", lineText: null }),
+        expect.objectContaining({ marketId: "home-clean-sheet", marketType: "HOME_FT_CLEAN_SHEET", lineText: null }),
+        expect.objectContaining({ marketId: "away-win-both-halves", marketType: "AWAY_FT_WIN_BOTH_HALVES", lineText: null }),
+        expect.objectContaining({ marketId: "home-win-to-nil", marketType: "HOME_FT_WIN_TO_NIL", lineText: null }),
+        expect.objectContaining({ marketId: "away-to-win", marketType: "AWAY_FT_TO_WIN", lineText: null })]
     })]);
     const extracted = extractBtiCatalogRecords({ data: [event] })[0]!.markets;
+    expect(extractBtiNativeMarketObservations({ data: [event] }, 123)).toContainEqual(
+      expect.objectContaining({ providerMarketId: "card-fh-ah", nativeType: "BTI-CARD-1H", disposition: "UNMAPPED" })
+    );
     expect(extracted.some(({ marketId }) => marketId.includes("ambiguous-total") || marketId.includes("swapped-handicap")))
       .toBe(false);
   });
@@ -144,6 +176,61 @@ describe("BTI direct catalog", () => {
     expect(markets.some(({ marketId }) => marketId.startsWith("european-handicap:"))).toBe(false);
   });
 
+  it("does not relabel three-way or unrelated stat markets as canonical two-way football lines", () => {
+    const detailSelection = (id: string, name: string, side: 1 | 3, points: number, malay: string) => {
+      const value = Array<unknown>(30).fill(null);
+      value[0] = id; value[2] = { VI: name }; value[5] = false;
+      value[8] = ["", "1.90", "", "", "", malay]; value[9] = side;
+      value[13] = false; value[16] = points;
+      return value;
+    };
+    const detailMarket = (id: string, code: string, label: string, selections: unknown[]) => {
+      const value = Array<unknown>(30).fill(null);
+      value[0] = id; value[1] = label; value[5] = [code, label]; value[13] = selections;
+      return value;
+    };
+    const pair = (prefix: string, points: number) => [
+      detailSelection(`${prefix}-over`, "Tài", 1, points, "0.81"),
+      detailSelection(`${prefix}-under`, "Xỉu", 3, points, "-0.91")
+    ];
+    const event = Array<unknown>(39).fill(null);
+    event[0] = "strict-event"; event[2] = "Strict League";
+    event[8] = [["home", { VI: "Alpha" }], ["away", { VI: "Beta" }]];
+    event[11] = "2026-09-07T12:00:00.000Z"; event[13] = false;
+    event[20] = [
+      detailMarket("goal-total", "OU200", "Cược Tài/Xỉu tổng số bàn thắng", pair("goal", 2.5)),
+      detailMarket("three-way-ah", "HC270", "Cược chấp 3 chiều", pair("three-way-ah", 0.5)),
+      detailMarket("three-way-corner", "OU621", "Cược Tài/Xỉu số quả phạt góc 3 chiều",
+        pair("three-way-corner", 9.5)),
+      detailMarket("team-goal", "OU7", "Alpha: Cược Tài/Xỉu tổng số bàn thắng của đội",
+        pair("team-goal", 1.5)),
+      detailMarket("team-fh-goal", "OU257", "Alpha: Cược Tài/Xỉu tổng số bàn thắng của đội hiệp 1",
+        pair("team-fh-goal", 0.5)),
+      detailMarket("shots", "OU2083", "Cược Tài/Xỉu tổng số lần sút trong trận đấu",
+        pair("shots", 20.5))
+    ];
+
+    const markets = extractBtiCatalogRecords({ data: [event] })[0]!.markets;
+    expect(markets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ marketId: "goal-total:2.5", marketType: "FT_TOTAL" }),
+      expect.objectContaining({ marketId: "team-goal:1.5", marketType: "HOME_FT_TOTAL" })
+    ]));
+    expect(markets.map(({ marketId }) => marketId)).not.toEqual(expect.arrayContaining([
+      expect.stringMatching(/^three-way-ah:/u), expect.stringMatching(/^three-way-corner:/u),
+      expect.stringMatching(/^team-fh-goal:/u), expect.stringMatching(/^shots:/u)
+    ]));
+
+    const observations = extractBtiNativeMarketObservations({ data: [event] }, 123);
+    expect(observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: "three-way-ah", disposition: "EXCLUDED",
+        reason: "THREE_WAY_OUTCOME_DOMAIN" }),
+      expect.objectContaining({ providerMarketId: "three-way-corner", disposition: "EXCLUDED",
+        reason: "THREE_WAY_OUTCOME_DOMAIN" }),
+      expect.objectContaining({ providerMarketId: "team-fh-goal", disposition: "UNMAPPED" }),
+      expect.objectContaining({ providerMarketId: "shots", disposition: "UNMAPPED" })
+    ]));
+  });
+
   it("extracts exact live full-time half-lines and public provider IDs", () => {
     const payload = { serializedData: [["league", "Champions League", 0, "", false, "", "", "", "", "", "1", "Football", [[
       "event-1", [["home-id", { VI: "NEC Nijmegen" }, "Home"], ["away-id", { VI: "Olympiakos" }, "Away"]],
@@ -187,6 +274,45 @@ describe("BTI direct catalog", () => {
       markets: [expect.objectContaining({ marketType: "FT_AH", lineText: "-0.75" }),
         expect.objectContaining({ marketType: "FT_TOTAL", lineText: "2.75" })]
     })]);
+  });
+
+  it("accounts for every detail market as normalized, excluded, or unmapped", () => {
+    const detailSelection = (id: string, side: 1 | 3, points: number, malay: string, name: string) => {
+      const value: unknown[] = [];
+      value[0] = id; value[2] = { EN: name }; value[5] = false;
+      value[8] = ["", "1.9", "", "", "", malay]; value[9] = side;
+      value[13] = false; value[16] = points;
+      return value;
+    };
+    const detailMarket = (id: string, code: string, label: string, selections: unknown[]) => {
+      const value: unknown[] = [];
+      value[0] = id; value[1] = label; value[5] = [code, label]; value[13] = selections;
+      return value;
+    };
+    const event: unknown[] = [];
+    event[0] = "event-detail"; event[2] = "Detail League";
+    event[8] = [["a", { EN: "Alpha" }], ["b", { EN: "Beta" }]];
+    event[11] = "2026-09-07T12:00:00.000Z"; event[13] = false;
+    event[20] = [
+      detailMarket("known", "OU0", "Total", [detailSelection("o", 1, 2.5, "0.8", "Over"),
+        detailSelection("u", 3, 2.5, "-0.9", "Under")]),
+      detailMarket("refund", "HC157", "Draw no bet", [detailSelection("h", 1, 0, "0.8", "Alpha"),
+        detailSelection("a", 3, 0, "-0.9", "Beta")]),
+      Object.assign(detailMarket("closed", "OU0", "Total", [detailSelection("co", 1, 3.5, "0.8", "Over"),
+        detailSelection("cu", 3, 3.5, "-0.9", "Under")]), { 15: true }),
+      detailMarket("unknown", "ZZ999", "Mystery yes no", [detailSelection("y", 1, 0, "0.8", "Yes"),
+        detailSelection("n", 3, 0, "-0.9", "No")])
+    ];
+
+    expect(extractBtiNativeMarketObservations({ data: [event] }, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: "known:2.5", disposition: "NORMALIZED" }),
+      expect.objectContaining({ providerMarketId: "refund", disposition: "EXCLUDED",
+        reason: "PUSH_OR_REFUND_SETTLEMENT" }),
+      expect.objectContaining({ providerMarketId: "closed", disposition: "EXCLUDED",
+        reason: "MARKET_CLOSED" }),
+      expect.objectContaining({ providerMarketId: "unknown", disposition: "UNMAPPED",
+        reason: "NATIVE_TYPE_UNMAPPED" })
+    ]);
   });
 
   it("retains a structurally valid roster event while its supported markets are still hidden", () => {

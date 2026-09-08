@@ -1,0 +1,114 @@
+{
+  "at": "2026-09-07T23:50:55.903Z",
+  "build": "sha256:7aa2e0fc1a19627a4133754c9ed36d6b8f464048dab1c9084c164db8af69ad97",
+  "firstFailingHop": null,
+  "source": {
+    "sourceId": "chrome:SABA:2105831907",
+    "tabId": 2105831907,
+    "authorityDisposition": "ACTIVE"
+  },
+  "epoch": "af43c437-a66c-4cd3-b8fb-b4deb2c3f044:6",
+  "catalog": {
+    "state": "FRESH",
+    "events": 11,
+    "markets": 58,
+    "quotes": 116,
+    "native": 188,
+    "observedAtMs": 1788825040579
+  },
+  "capture": {
+    "name": "capture-1788824804788.jsonl",
+    "size": 1505897,
+    "mtime": 1788825055258.9768
+  },
+  "collectorState": {
+    "nativeReady": false,
+    "schemaContextReady": false,
+    "catalogUsable": false,
+    "discoveryPending": false,
+    "discoveryAttempted": true,
+    "collectorState": "FINISHED",
+    "domBlocked": false,
+    "probeBlocked": false
+  },
+  "collectors": [
+    {
+      "at": "2026-09-07T23:48:41.258Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "af43c437-a66c-4cd3-b8fb-b4deb2c3f044:6",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 3,
+      "rosterOwners": 8,
+      "expandedOwners": 1
+    },
+    {
+      "at": "2026-09-07T23:49:12.793Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "af43c437-a66c-4cd3-b8fb-b4deb2c3f044:6",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 8,
+      "rosterOwners": 8,
+      "expandedOwners": 1
+    },
+    {
+      "at": "2026-09-07T23:50:23.496Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "af43c437-a66c-4cd3-b8fb-b4deb2c3f044:6",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "IN_PROGRESS",
+      "viewRestored": true,
+      "completedOwners": 10,
+      "rosterOwners": 28,
+      "expandedOwners": 1
+    },
+    {
+      "at": "2026-09-07T23:50:54.615Z",
+      "sourceId": "chrome:SABA:2105831907",
+      "epoch": "af43c437-a66c-4cd3-b8fb-b4deb2c3f044:6",
+      "kind": "SABA_HIDDEN_COLLECTOR",
+      "status": "INCOMPLETE",
+      "viewRestored": true,
+      "reason": "SABA_COLLECTOR_ALTERNATE_ROW_OWNERSHIP_UNPROVEN",
+      "collectionErrorCode": "SABA_COLLECTOR_ALTERNATE_ROW_OWNERSHIP_UNPROVEN",
+      "restorationErrorCode": null,
+      "collectionFailure": {
+        "operation": "CAPTURE_OWNER",
+        "period": "EARLY",
+        "ownerMatchId": "133950980",
+        "code": "SABA_COLLECTOR_ALTERNATE_ROW_OWNERSHIP_UNPROVEN",
+        "capturedAtMs": 1788825050270,
+        "capturedMonotonicMs": 215226.5
+      },
+      "restorationFailure": null,
+      "completedOwners": 20
+    }
+  ],
+  "lastHealth": {
+    "at": "2026-09-07T23:50:51.159Z",
+    "counters": {
+      "OK": 20,
+      "ERROR": 0,
+      "TIMEOUT": 0,
+      "SKIPPED_INFLIGHT": 70,
+      "forcedUnlocks": 0
+    },
+    "lastOutcome": {
+      "workItem": "pollSabaDomChanges",
+      "outcome": "SKIPPED_INFLIGHT",
+      "durationMs": 17898
+    },
+    "lastErrorCode": null,
+    "inFlightAgeMs": 17898
+  },
+  "acceptance": {
+    "fullCapture": false,
+    "postCloseRealtime": false,
+    "knownFailureOperation": "CAPTURE_OWNER",
+    "knownFailurePeriod": "EARLY",
+    "unknownFailureDetail": "ALTERNATE_ROW_OWNERSHIP_UNPROVEN conflates membership/control/time/date; actual subtype not observed"
+  }
+}

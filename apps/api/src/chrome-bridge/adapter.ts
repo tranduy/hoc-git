@@ -12,6 +12,10 @@ export type DecodedCatalogUpdate = {
   readonly provenance?: FeedProvenance;
   readonly providerTimestampMs?: number | null;
   readonly completeSweepEvidence?: boolean;
+  /** Exact authenticated event responses, not a partial roster's missing IDs. */
+  readonly authoritativeRemovedEventIds?: readonly string[];
+  /** All retained fixtures have valid event-detail partitions with no canonical markets. */
+  readonly authoritativeEmptyMarkets?: true;
   readonly invalidateAccountId?: never;
   readonly reason?: never;
   readonly transportAlive?: never;

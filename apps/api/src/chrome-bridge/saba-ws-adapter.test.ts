@@ -33,6 +33,10 @@ describe("SabaWsCatalogAdapter", () => {
     expect(update.value).toMatchObject({ accountId: "catalog-source:SABA:FOOTBALL", provider: "SABA" });
     expect((update.value as { events: unknown[] }).events).toHaveLength(1);
     expect((update.value as { markets: unknown[] }).markets).toHaveLength(1);
+    expect((update.value as { nativeMarketObservations: Array<{ disposition: string }> })
+      .nativeMarketObservations).toEqual([expect.objectContaining({
+        providerMarketId: "3", disposition: "NORMALIZED"
+      })]);
     expect((update.value as { quotes: unknown[] }).quotes).toHaveLength(2);
   });
 
@@ -386,6 +390,155 @@ describe("SabaWsCatalogAdapter", () => {
     expect(bigger.takeIgnoreReason()).toBe("dom-first-generation-24-under-50");
   });
 
+  it("retains every blank-time SABA native group without publishing its event", () => {
+    const validRecords = Array.from({ length: 50 }, (_, index) => ({
+      sportId: "1", leagueId: String(index + 1), leagueName: `League ${index}`,
+      matchId: String(index + 2), timeText: "1H0'", teamNames: [`Home ${index}`, `Away ${index}`],
+      groups: [{ betTypeIds: ["3"], labels: ["2.5", "u"], odds: [
+        { marketOddsId: String(index + 3), priceText: "0.92", status: null, greyedOut: null },
+        { marketOddsId: String(index + 3), priceText: "-0.98", status: null, greyedOut: null }
+      ] }]
+    }));
+    const blankTime = {
+      sportId: "1", leagueId: "49866", leagueName: "Public league",
+      matchId: "133603577", timeText: "", teamNames: ["Home blank", "Away blank"], groups: [
+        { betTypeIds: ["1"], labels: ["0"], odds: [
+          { marketOddsId: "1058624279", priceText: "0.82", status: null, greyedOut: null, lineText: "0" },
+          { marketOddsId: "1058624279", priceText: "-0.94", status: null, greyedOut: null }
+        ] },
+        { betTypeIds: ["3"], labels: ["2.5", "u"], odds: [
+          { marketOddsId: "1058624277", priceText: "0.84", status: null, greyedOut: null },
+          { marketOddsId: "1058624277", priceText: "-0.96", status: null, greyedOut: null }
+        ] },
+        { betTypeIds: ["5"], labels: [], odds: [
+          { marketOddsId: "1058624275", priceText: "2.10", status: null, greyedOut: null },
+          { marketOddsId: "1058624275", priceText: "3.20", status: null, greyedOut: null },
+          { marketOddsId: "1058624275", priceText: "3.40", status: null, greyedOut: null }
+        ] },
+        { betTypeIds: ["1"], labels: ["0.5"], odds: [
+          { marketOddsId: "1062389532", priceText: "0.80", status: null, greyedOut: null, lineText: "0.5" },
+          { marketOddsId: "1062389532", priceText: "-0.90", status: null, greyedOut: null }
+        ] },
+        { betTypeIds: ["3"], labels: ["1.5", "u"], odds: [
+          { marketOddsId: "1062389533", priceText: "0.86", status: null, greyedOut: null },
+          { marketOddsId: "1062389533", priceText: "-0.98", status: null, greyedOut: null }
+        ] }
+      ]
+    };
+    const dom: ChromeBridgeEnvelope = { ...envelope(""), sequence: 20, transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: "saba:7:blank-time-accounting", chunkIndex: 0, chunkCount: 1,
+        records: [...validRecords, blankTime] }) } };
+
+    const update = new SabaWsCatalogAdapter().decode(dom)[0]!;
+    expect(update).toMatchObject({ authoritativeBaseline: true, evidenceMode: "BASELINE" });
+    const catalog = update.value as { events: Array<{ providerEventId: string }>;
+      markets: Array<{ providerEventId: string }>; quotes: Array<{ providerEventId: string }>;
+      nativeMarketObservations: Array<{ providerEventId: string; providerMarketId: string;
+        disposition: string; reason: string }> };
+    expect(catalog.events).toHaveLength(50);
+    expect(catalog.events.some((event) => event.providerEventId === "133603577")).toBe(false);
+    expect(catalog.markets.some((market) => market.providerEventId === "133603577")).toBe(false);
+    expect(catalog.quotes.some((quote) => quote.providerEventId === "133603577")).toBe(false);
+    expect(catalog.nativeMarketObservations.filter((observation) =>
+      observation.providerEventId === "133603577").map((observation) => observation.providerMarketId)).toEqual([
+      "1058624279", "1058624277", "1058624275", "1062389532", "1062389533"
+    ]);
+    expect(catalog.nativeMarketObservations.filter((observation) =>
+      observation.providerEventId === "133603577").map(({ disposition, reason }) =>
+      [disposition, reason])).toEqual(Array.from({ length: 5 }, () =>
+      ["EXCLUDED", "EVENT_NOT_COMPARABLE"]));
+  });
+
+  it.each(["DOM", "WS"] as const)(
+    "retains all fifteen observed aggregate groups but no aggregate fixtures through the %s boundary", (transport) => {
+    const actual = [
+      [134003685, "*GIẢI SERIE A Ý - ĐỘI NHÀ/ĐỘI KHÁCH", 2],
+      [134003749, "*GIẢI LALIGA TÂY BAN NHA - ĐỘI NHÀ/ĐỘI KHÁCH", 2],
+      [134019593, "GIẢI ALLSVENSKAN THỤY ĐIỂN - ĐỘI NHÀ/ĐỘI KHÁCH", 3]
+    ] as const;
+    const fixtures = [
+      ...Array.from({ length: 50 }, (_, index) => ({
+        id: index + 100, competition: "Real league", home: `Home ${index}`,
+        away: `Away ${index}`, types: [3]
+      })),
+      ...actual.map(([id, competition, count]) => ({ id, competition,
+        home: `Đội Nhà - Thứ Hai - ${count} Trận Đấu`,
+        away: `Đội Khách - Thứ Hai - ${count} Trận Đấu`, types: [1, 3, 2, 7, 8]
+      }))
+    ];
+    const input: ChromeBridgeEnvelope = transport === "DOM" ? {
+      ...envelope(""), transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: "saba:7:aggregate-accounting", chunkIndex: 0, chunkCount: 1,
+        records: fixtures.map(({ id, competition, home, away, types }) => ({
+          sportId: "1", leagueId: String(id), leagueName: competition,
+          matchId: String(id), timeText: "1H0'", teamNames: [home, away],
+          groups: types.map((type) => ({ betTypeIds: [String(type)],
+            labels: type === 2 ? ["o", "e"] : ["0.5"], odds: [
+              { marketOddsId: String(id * 10 + type), priceText: "0.92", status: null,
+                greyedOut: null, lineText: "0.5" },
+              { marketOddsId: String(id * 10 + type), priceText: "-0.98", status: null, greyedOut: null }
+            ] }))
+        })) }) }
+    } : envelope(`42${JSON.stringify(["m", "b1", [["f", 0, fields], [0, "reset"],
+      ...fixtures.flatMap(({ id, competition, home, away, types }) => [
+        encoded({ type: "l", leagueid: id, leaguenameen: competition, sporttype: 1 }),
+        encoded({ type: "m", matchid: id, leagueid: id, hteamnameen: home, ateamnameen: away,
+          kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+        ...types.map((type) => encoded({ type: "o", oddsid: id * 10 + type, matchid: id,
+          bettype: type, parenttypeid: type, oddsstatus: "running", enable: 1,
+          odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }))
+      ]), [0, "done"]], 1])}`);
+    const adapter = new SabaWsCatalogAdapter();
+    const update = adapter.decode(input)[0]!;
+    expect(update, adapter.takeIgnoreReason() ?? undefined).toMatchObject({
+      authoritativeBaseline: true, evidenceMode: "BASELINE"
+    });
+    const catalog = update.value as { events: Array<{ providerEventId: string }>;
+      markets: Array<{ providerEventId: string }>; quotes: Array<{ providerEventId: string }>;
+      nativeMarketObservations: Array<{ providerEventId: string; providerMarketId: string;
+        nativeType: string; disposition: string; reason: string }> };
+    const aggregateIds = new Set(actual.map(([id]) => String(id)));
+    expect(catalog.events).toHaveLength(50);
+    expect(catalog.markets).toHaveLength(50);
+    expect(catalog.quotes).toHaveLength(100);
+    for (const rows of [catalog.events, catalog.markets, catalog.quotes]) {
+      expect(rows.some(({ providerEventId }) => aggregateIds.has(providerEventId))).toBe(false);
+    }
+    expect(catalog.nativeMarketObservations).toHaveLength(65);
+    for (const [id] of actual) {
+      const native = catalog.nativeMarketObservations.filter(({ providerEventId }) => providerEventId === String(id));
+      expect(native).toHaveLength(5);
+      expect(new Set(native.map(({ providerMarketId }) => providerMarketId)))
+        .toEqual(new Set([1, 3, 2, 7, 8].map((type) => String(id * 10 + type))));
+      expect(native.every(({ disposition, reason }) => disposition === "EXCLUDED" &&
+        reason === "EVENT_NOT_COMPARABLE")).toBe(true);
+    }
+  });
+
+  it("does not count a blank-time SABA record toward the first-generation authority floor", () => {
+    const records = Array.from({ length: 49 }, (_, index) => ({
+      sportId: "1", leagueId: String(index + 1), leagueName: `League ${index}`,
+      matchId: String(index + 2), timeText: "1H0'", teamNames: [`Home ${index}`, `Away ${index}`],
+      groups: [{ betTypeIds: ["3"], labels: ["2.5", "u"], odds: [
+        { marketOddsId: String(index + 3), priceText: "0.92", status: null, greyedOut: null },
+        { marketOddsId: String(index + 3), priceText: "-0.98", status: null, greyedOut: null }
+      ] }]
+    }));
+    records.push({ ...records[0]!, matchId: "blank-time", timeText: "" });
+    const dom: ChromeBridgeEnvelope = { ...envelope(""), sequence: 21, transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: "saba:7:blank-time-floor", chunkIndex: 0, chunkCount: 1, records }) } };
+    const adapter = new SabaWsCatalogAdapter();
+
+    expect(adapter.decode(dom)).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("dom-first-generation-49-under-50");
+  });
+
   it("does not borrow socket readiness from a different source epoch for DOM fallback", () => {
     const rows = [["f", 0, fields], [0, "reset"],
       encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
@@ -421,7 +574,10 @@ describe("SabaWsCatalogAdapter", () => {
       groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
         { marketOddsId: String(30_000 + index), priceText, status: null, greyedOut: null, lineText: "0.5" },
         { marketOddsId: String(30_000 + index), priceText: "-0.98", status: null, greyedOut: null }
-      ] }]
+      ] }, ...(index === 0 ? [{ betTypeIds: ["987654"], labels: ["Native hidden market"], odds: [
+        { marketOddsId: "saba-native-unmapped", priceText: "0.80", status: null, greyedOut: null },
+        { marketOddsId: "saba-native-unmapped", priceText: "-0.90", status: null, greyedOut: null }
+      ] }] : [])]
     }));
     const dom = (snapshotId: string, sequence: number, values: readonly unknown[]): ChromeBridgeEnvelope => ({
       ...envelope(""), sequence, observedAtMs: 1_786_449_540_000 + sequence * 1_000,
@@ -434,6 +590,16 @@ describe("SabaWsCatalogAdapter", () => {
     const baseline = adapter.decode(dom("saba-full-generation-0001", 10, records("0.92")));
     expect(baseline).toHaveLength(1);
     expect((baseline[0]!.value as { events: unknown[] }).events).toHaveLength(50);
+    expect((baseline[0]!.value as { nativeMarketObservations: Array<{
+      nativeType: string; disposition: string; reason: string
+    }> }).nativeMarketObservations).toContainEqual(expect.objectContaining({
+      nativeType: "1", disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED"
+    }));
+    expect((baseline[0]!.value as { nativeMarketObservations: Array<{
+      nativeType: string; disposition: string; reason: string
+    }> }).nativeMarketObservations).toContainEqual(expect.objectContaining({
+      nativeType: "987654", disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED"
+    }));
     expect(baseline[0]).toMatchObject({ provenance: "DOM_FALLBACK", evidenceMode: "BASELINE",
       authoritativeBaseline: true });
 
@@ -488,6 +654,40 @@ describe("SabaWsCatalogAdapter", () => {
       provenance: "DOM_FALLBACK", evidenceMode: "DELTA", generation: baseline[0]!.generation,
       value: { observedAtMs: 1_786_449_550_000 } });
     expect(refreshed[0]).not.toHaveProperty("authoritativeBaseline");
+  });
+
+  it("lets two stable full-page DOM generations supersede a small socket partition", () => {
+    const rows = [["f", 0, fields], [0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.decode(envelope(`42${JSON.stringify(["m", "b1", rows, 1])}`))).toHaveLength(1);
+    const records = Array.from({ length: 20 }, (_, index) => ({
+      sportId: "1", leagueId: String(10_000 + index), leagueName: `League ${index}`,
+      matchId: String(20_000 + index), timeText: "1H0'", teamNames: [`Home ${index}`, `Away ${index}`],
+      groups: [{ betTypeIds: ["1"], labels: ["0.5"], odds: [
+        { marketOddsId: String(30_000 + index), priceText: "0.91", lineText: "0.5",
+          status: null, greyedOut: null },
+        { marketOddsId: String(30_000 + index), priceText: "-0.97", status: null, greyedOut: null }
+      ] }]
+    }));
+    const dom = (sequence: number): ChromeBridgeEnvelope => ({ ...envelope(""), sequence,
+      observedAtMs: 1_786_449_540_000 + sequence * 1_000, transport: "DOM_SNAPSHOT",
+      request: { hostname: "sports.example", pathnameClass: "/__fieldline_dom_snapshot__", resourceType: "DOM" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ schemaVersion: 2,
+        snapshotId: `saba-after-socket-${sequence}`, chunkIndex: 0, chunkCount: 1, records }) } });
+
+    const firstDom = adapter.decode(dom(5));
+    expect(firstDom, adapter.takeIgnoreReason() ?? "no adapter refusal").toEqual([expect.objectContaining({
+      provenance: "DOM_FALLBACK", evidenceMode: "DELTA"
+    })]);
+    expect(adapter.decode(dom(6))).toEqual([expect.objectContaining({
+      provenance: "DOM_FALLBACK", evidenceMode: "BASELINE", authoritativeBaseline: true
+    })]);
   });
 
   it("retires hidden socket partitions older than SABA's maximum baseline age", () => {
@@ -682,6 +882,92 @@ describe("SabaWsCatalogAdapter", () => {
     expect(adapter.decode(refused)).toEqual([expect.objectContaining({
       invalidateAccountId: "catalog-source:SABA:FOOTBALL", reason: "PROVIDER_STREAM_GAP"
     })]);
+  });
+
+  it("seeds schema into only the announced current stream without granting authority", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    const base = { ...envelope(""), sourceEpoch: "worker-a:1" };
+    const opened = { ...base, transport: "WS_STATE" as const,
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ state: "OPEN" }) } };
+    const schema = { ...base, transport: "TAB_STATE" as const,
+      request: { ...base.request, pathnameClass: "/__fieldline_saba_schema_context__",
+        resourceType: "Diagnostic" },
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ kind: "SABA_SCHEMA_CONTEXT",
+        bridgeId: "b1", rows: [["c", "c2"], ["f", 0, fields]], revision: null }) } };
+    const rows = [[0, "reset"],
+      encoded({ type: "l", leagueid: 1, leaguenameen: "League", sporttype: 1 }),
+      encoded({ type: "m", matchid: 2, leagueid: 1, hteamnameen: "Home", ateamnameen: "Away",
+        kickofftime: 1_786_449_540, marketid: "L", sporttype: 1 }),
+      encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1, parenttypeid: 1,
+        oddsstatus: "running", enable: 1, odds1a: 0.92, odds2a: -0.98, hdp1: 0.5, hdp2: 0 }),
+      [0, "done"]];
+    expect(adapter.decode(opened)).toEqual([]);
+    expect(adapter.decode({ ...base, sequence: 5, payload: { encoding: "UTF8",
+      body: `42${JSON.stringify(["m", "b1", rows, "r1"])}` } })).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("decode-fault-held-field-index-unmapped-i0-f0-d0-c0-a0-m0");
+    const before = adapter.streamStats();
+    expect(adapter.seedSchemaContext(schema)).toBe(true);
+    expect(adapter.streamStats()).toEqual(before);
+
+    const delta = [encoded({ type: "o", oddsid: 3, matchid: 2, bettype: 1,
+      oddsstatus: "running", enable: 1, odds1a: 0.5, odds2a: -0.5 })];
+    expect(adapter.decode({ ...base, payload: { encoding: "UTF8",
+      body: `42${JSON.stringify(["m", "b1", delta, "r0"])}` } })).toEqual([]);
+    expect(adapter.takeIgnoreReason()).toBe("partition-not-ready");
+
+    expect(adapter.decode({ ...base, sequence: 6, payload: { encoding: "UTF8",
+      body: `42${JSON.stringify(["m", "b1", rows, "r1"])}` } })).toEqual([
+      expect.objectContaining({ authoritativeBaseline: true, evidenceMode: "BASELINE", provenance: "WS" })
+    ]);
+  });
+
+  it("rejects schema context for replayed, stale, unannounced, or closed streams", () => {
+    const makeSchema = (sourceEpoch: string, streamId = "1"): ChromeBridgeEnvelope => ({
+      ...envelope(""), sourceEpoch, transport: "TAB_STATE",
+      request: { ...envelope("").request, streamId,
+        pathnameClass: "/__fieldline_saba_schema_context__", resourceType: "Diagnostic" },
+      payload: { encoding: "UTF8", body: JSON.stringify({ kind: "SABA_SCHEMA_CONTEXT",
+        bridgeId: "b1", rows: [["c", "c2"], ["f", 0, fields]], revision: null }) }
+    });
+    const adapter = new SabaWsCatalogAdapter();
+    expect(adapter.seedSchemaContext(makeSchema("worker-a:1"))).toBe(false);
+
+    const open = { ...envelope(""), sourceEpoch: "worker-a:1", transport: "WS_STATE" as const,
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ state: "OPEN" }) } };
+    expect(adapter.decode(open)).toEqual([]);
+    expect(adapter.seedSchemaContext(makeSchema("worker-b:1"))).toBe(false);
+    expect(adapter.seedSchemaContext({ ...makeSchema("worker-a:1"),
+      request: { ...makeSchema("worker-a:1").request, replayed: true } })).toBe(false);
+    expect(adapter.seedSchemaContext(makeSchema("worker-a:1", "2"))).toBe(false);
+
+    const closed = { ...open, sequence: 5,
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ state: "CLOSED" }) } };
+    expect(adapter.decode(closed)).toEqual([expect.objectContaining({ reason: "PROVIDER_STREAM_CLOSED" })]);
+    expect(adapter.seedSchemaContext(makeSchema("worker-a:1"))).toBe(false);
+  });
+
+  it("strictly rejects malformed or data-bearing schema contexts without poisoning a valid retry", () => {
+    const adapter = new SabaWsCatalogAdapter();
+    const base = { ...envelope(""), sourceEpoch: "worker-a:1" };
+    const opened = { ...base, transport: "WS_STATE" as const,
+      payload: { encoding: "UTF8" as const, body: JSON.stringify({ state: "OPEN" }) } };
+    expect(adapter.decode(opened)).toEqual([]);
+    const context = (body: unknown): ChromeBridgeEnvelope => ({ ...base, transport: "TAB_STATE",
+      request: { ...base.request, pathnameClass: "/__fieldline_saba_schema_context__",
+        resourceType: "Diagnostic" }, payload: { encoding: "UTF8", body: JSON.stringify(body) } });
+
+    expect(adapter.seedSchemaContext(context({ kind: "SABA_SCHEMA_CONTEXT", bridgeId: "b1",
+      rows: [["f", 0, fields], [0, "reset"]], revision: null }))).toBe(false);
+    expect(adapter.seedSchemaContext(context({ kind: "SABA_SCHEMA_CONTEXT", bridgeId: "b1",
+      rows: [["f", 0, fields]], revision: "old" }))).toBe(false);
+    expect(adapter.seedSchemaContext({ ...context({ kind: "SABA_SCHEMA_CONTEXT", bridgeId: "b1",
+      rows: [["f", 0, fields]], revision: null }), request: { ...base.request,
+        pathnameClass: "/wrong", resourceType: "Diagnostic" } })).toBe(false);
+    const valid = context({ kind: "SABA_SCHEMA_CONTEXT", bridgeId: "b1",
+      rows: [["f", 0, fields]], revision: null });
+    expect(adapter.seedSchemaContext({ ...valid, payload: { ...valid.payload,
+      body: `${valid.payload.body}${" ".repeat(256 * 1024)}` } })).toBe(false);
+    expect(adapter.seedSchemaContext(valid)).toBe(true);
   });
 
 });

@@ -20,6 +20,23 @@ const record: SbobetCatalogInputRecord = {
 };
 
 describe("normalizeSbobetCatalog", () => {
+  it.each([true, false])("retains real Major League Soccer events (empty=%s)", (empty) => {
+    const result = normalizeSbobetCatalog([{ ...record, leagueName: "USA Major League Soccer",
+      teamNames: ["DC United", "Atlanta United"], timeText: "PREMATCH", startAtUtcMs: Date.UTC(2026, 8, 12),
+      markets: empty ? [] : [record.markets[0]!] }],
+    { provider: "APSPORT", observedAtMs: Date.UTC(2026, 8, 7), receivedMonotonicMs: 1, sequence: 1 });
+    expect(result.diagnostics).toEqual([]);
+    expect(result.events).toEqual([expect.objectContaining({ competition: "USA Major League Soccer", isLive: false })]);
+    expect(result.markets).toHaveLength(empty ? 0 : 1);
+  });
+
+  it.each(["eSoccer", "e-Soccer", "e Soccer"])("still excludes explicit %s competitions", (label) => {
+    const result = normalizeSbobetCatalog([{ ...record, leagueName: `World ${label} Battle` }],
+      { provider: "APSPORT", observedAtMs: 1, receivedMonotonicMs: 1, sequence: 1 });
+    expect(result.events).toEqual([]);
+    expect(result.diagnostics).toEqual(["SBOBET_CATALOG_EVENT_UNSUPPORTED"]);
+  });
+
   it("normalizes exact live two-way totals and excludes 1X2", () => {
     const result = normalizeSbobetCatalog([record], { observedAtMs: 1_788_000_000_000, receivedMonotonicMs: 20, sequence: 3 });
     expect(result.diagnostics).toEqual([]);
@@ -144,7 +161,49 @@ describe("normalizeSbobetCatalog", () => {
     ]);
   });
 
-  it("publishes only non-virtual full-time two-way quarter, half, or three-quarter lines", () => {
+  it("normalizes exact no-line binary props and preserves decimal source odds", () => {
+    const binary = (marketId: string, marketType: string, selections: readonly [string, string]) => ({
+      marketId, marketType, lineText: null, selections: [
+        { selectionId: `${marketId}-first`, selection: selections[0], priceText: "1.91",
+          priceFormat: "DECIMAL", locked: false },
+        { selectionId: `${marketId}-second`, selection: selections[1], priceText: "1.77",
+          priceFormat: "DECIMAL", locked: false }
+      ]
+    });
+    const expanded = { ...record, markets: [
+      binary("odd-even", "FT_ODD_EVEN", ["ODD", "EVEN"]),
+      binary("btts", "FT_BTTS", ["YES", "NO"])
+    ] } as unknown as SbobetCatalogInputRecord;
+
+    const result = normalizeSbobetCatalog([expanded], { observedAtMs: 1_788_000_000_000,
+      receivedMonotonicMs: 20, sequence: 3, provider: "APSPORT" });
+
+    expect(result.markets.map(({ marketType, line, settlementProfile }) =>
+      [marketType, line, settlementProfile])).toEqual([
+        ["FT_ODD_EVEN", null, "football-goals-odd-even-regulation"],
+        ["FT_BTTS", null, "football-btts-regulation"]
+      ]);
+    expect(result.quotes.map(({ selection, rawOdds, rawFormat }) => [selection, rawOdds, rawFormat])).toEqual([
+      ["ODD", "1.91", "DECIMAL"], ["EVEN", "1.77", "DECIMAL"],
+      ["YES", "1.91", "DECIMAL"], ["NO", "1.77", "DECIMAL"]
+    ]);
+  });
+
+  it("retains integer line markets for inventory while comparison rejects their push settlement", () => {
+    const integer = { ...record, markets: [{
+      marketId: "integer-total", marketType: "FT_TOTAL", lineText: "3", selections: [
+        { selectionId: "integer-over", selection: "OVER", priceText: "0.82", locked: false },
+        { selectionId: "integer-under", selection: "UNDER", priceText: "-0.96", locked: false }
+      ]
+    }] } as SbobetCatalogInputRecord;
+
+    const result = normalizeSbobetCatalog([integer], { observedAtMs: 1_788_000_000_000,
+      receivedMonotonicMs: 20, sequence: 3 });
+
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: "FT_TOTAL", line: "3" })]);
+  });
+
+  it("publishes only non-virtual full-time two-way quarter-unit lines", () => {
     const mixed = { ...record, markets: [
       record.markets[0]!,
       record.markets[1]!,
@@ -164,7 +223,7 @@ describe("normalizeSbobetCatalog", () => {
     const result = normalizeSbobetCatalog([mixed], { observedAtMs: 1_788_000_000_000,
       receivedMonotonicMs: 20, sequence: 3 });
     expect(result.markets.map(({ marketType, line }) => [marketType, line])).toEqual([
-      ["FT_TOTAL", "2.5"], ["FT_AH", "-0.25"], ["FH_TOTAL", "1.5"]
+      ["FT_TOTAL", "2.5"], ["FT_TOTAL", "3"], ["FT_AH", "-0.25"], ["FH_TOTAL", "1.5"]
     ]);
 
     const virtual = normalizeSbobetCatalog([{ ...mixed, leagueName: "Virtual Football", teamNames: ["A (V)", "B (V)"] }],

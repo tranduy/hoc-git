@@ -1,0 +1,147 @@
+{
+  "note": "Actual .58 read-only receipt; no full terminal or real hidden-price change accepted.",
+  "records": [
+    {
+      "at": "2026-09-07T21:54:17.997Z",
+      "build": "sha256:11c91ab6324a35dc3c52e398042b680e68def0c717d645202d25428be032263a",
+      "firstFailingHop": null,
+      "source": {
+        "sourceId": "chrome:SABA:2105831237",
+        "tabId": 2105831237,
+        "authorityDisposition": "ACTIVE"
+      },
+      "epoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+      "catalog": {
+        "state": "FRESH",
+        "events": 20,
+        "markets": 125,
+        "quotes": 250,
+        "native": 249,
+        "observedAtMs": 1788817923130
+      },
+      "capture": {
+        "name": "capture-1788817875443.jsonl",
+        "size": 897132,
+        "mtime": 1788818055772.5886
+      }
+    },
+    {
+      "periodFailures": [],
+      "probeCount": 1,
+      "probes": [
+        {
+          "at": "2026-09-07T21:52:04.223Z",
+          "epoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+          "status": "NO_ACTION_COLLECTOR_TARGET_BOUND",
+          "viewRestored": true
+        }
+      ],
+      "collectorState": {
+        "nativeReady": true,
+        "catalogUsable": true,
+        "discoveryPending": false,
+        "discoveryAttempted": true,
+        "collectorState": "FINISHED",
+        "domBlocked": false,
+        "probeBlocked": false
+      },
+      "collectors": [
+        {
+          "at": "2026-09-07T21:52:13.972Z",
+          "epoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "IN_PROGRESS",
+          "viewRestored": true,
+          "completedOwners": 1,
+          "rosterOwners": 15,
+          "expandedOwners": 1
+        },
+        {
+          "at": "2026-09-07T21:53:01.884Z",
+          "epoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "IN_PROGRESS",
+          "viewRestored": true,
+          "completedOwners": 10,
+          "rosterOwners": 15,
+          "expandedOwners": 1
+        },
+        {
+          "at": "2026-09-07T21:53:24.233Z",
+          "epoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "IN_PROGRESS",
+          "viewRestored": true,
+          "completedOwners": 15,
+          "rosterOwners": 15,
+          "expandedOwners": 1
+        },
+        {
+          "at": "2026-09-07T21:54:11.293Z",
+          "epoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+          "kind": "SABA_HIDDEN_COLLECTOR",
+          "status": "INCOMPLETE",
+          "viewRestored": true,
+          "reason": "SABA_COLLECTOR_MORE_RESTORE_ROSTER_MISMATCH",
+          "collectionErrorCode": "SABA_COLLECTOR_MORE_RESTORE_ROSTER_MISMATCH",
+          "restorationErrorCode": null,
+          "completedOwners": 16
+        }
+      ],
+      "latestEnvelopeEpoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+      "lastHealth": {
+        "at": "2026-09-07T21:54:11.294Z",
+        "counters": {
+          "OK": 24,
+          "ERROR": 0,
+          "TIMEOUT": 1,
+          "SKIPPED_INFLIGHT": 46,
+          "forcedUnlocks": 0
+        },
+        "lastOutcome": {
+          "workItem": "pollSabaDomChanges",
+          "outcome": "OK",
+          "durationMs": 9529
+        },
+        "lastErrorCode": "WORK_ITEM_TIMEOUT",
+        "inFlightAgeMs": 0
+      },
+      "transports": {
+        "WS_FRAME": 78,
+        "TAB_STATE": 54,
+        "DOM_SNAPSHOT": 5,
+        "WS_STATE": 1
+      },
+      "lastDom": {
+        "at": "2026-09-07T21:52:03.130Z",
+        "epoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+        "recordCount": 37,
+        "chunkCount": 1,
+        "chunkIndex": 0
+      }
+    }
+  ],
+  "additionalBoundedSchemaSample": {
+    "at": "2026-09-07T21:54:22Z",
+    "sourceId": "chrome:SABA:2105831237",
+    "sourceEpoch": "61d7e068-691e-408f-8683-132d9bd9e700:2",
+    "beforeAfterIdentityMatched": true,
+    "capture": "capture-1788817875443.jsonl",
+    "sizeAtRead": 1099514,
+    "webSocketFrames": 79,
+    "validPushFrames": 71,
+    "numericRows": 3556,
+    "fieldTableRows": 0,
+    "catalog": {
+      "events": 20,
+      "markets": 125,
+      "quotes": 250,
+      "native": 249,
+      "normalizedNative": 125,
+      "excludedNative": 101,
+      "unmappedNative": 23,
+      "cleanSheetMarkets": 0,
+      "observedAtMs": 1788817923130
+    }
+  }
+}

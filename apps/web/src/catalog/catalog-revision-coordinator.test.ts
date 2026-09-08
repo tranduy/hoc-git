@@ -92,6 +92,42 @@ describe("CatalogRevisionCoordinator", () => {
     coordinator.stop();
   });
 
+  it("publishes the latest revision every three seconds without starving on a continuous stream", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const accepted: CatalogReadResult[] = [];
+    let currentRevision = "r1";
+    const coordinator = new CatalogRevisionCoordinator({
+      read: async () => result(accountId, currentRevision),
+      onCatalog: (value) => accepted.push(value),
+      coalesceMs: 50,
+      minimumPublishIntervalMs: 3_000
+    });
+    coordinator.setSelected([accountId]);
+    coordinator.acceptBaseline([entry(accountId, "r1")], 1);
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(accepted.map((value) => value.revision)).toEqual(["r1"]);
+
+    currentRevision = "r2";
+    coordinator.acceptRevision(entry(accountId, "r2"), 2);
+    await vi.advanceTimersByTimeAsync(950);
+    currentRevision = "r3";
+    coordinator.acceptRevision(entry(accountId, "r3"), 3);
+    await vi.advanceTimersByTimeAsync(1_000);
+    currentRevision = "r4";
+    coordinator.acceptRevision(entry(accountId, "r4"), 4);
+    await vi.advanceTimersByTimeAsync(1_000);
+    currentRevision = "r5";
+    coordinator.acceptRevision(entry(accountId, "r5"), 5);
+
+    await vi.advanceTimersByTimeAsync(49);
+    expect(accepted.map((value) => value.revision)).toEqual(["r1"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(accepted.map((value) => value.revision)).toEqual(["r1", "r5"]);
+    coordinator.stop();
+  });
+
   it("remembers unselected revisions until selection and repairs a reconnect baseline", async () => {
     vi.useFakeTimers();
     const accepted: CatalogReadResult[] = [];
@@ -160,5 +196,25 @@ describe("CatalogRevisionCoordinator", () => {
     expect(accepted).toHaveLength(2);
     coordinator.stop();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("backs off a failed revision read instead of retrying at the coalesce cadence", async () => {
+    vi.useFakeTimers();
+    const accountId = "catalog-source:SABA:FOOTBALL";
+    const read = vi.fn(async (): Promise<CatalogReadResult> => {
+      throw new Error("temporarily unavailable");
+    });
+    const coordinator = new CatalogRevisionCoordinator({ read, onCatalog: () => undefined,
+      coalesceMs: 50, fallbackMs: 1_000 });
+    coordinator.setSelected([accountId]);
+    coordinator.acceptBaseline([entry(accountId, "r1")], 1);
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    coordinator.stop();
   });
 });

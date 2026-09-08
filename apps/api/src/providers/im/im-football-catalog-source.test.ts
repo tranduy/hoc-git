@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractImFootballCatalog, mergeImFootballDelta,
-  mergeImFootballSnapshots } from "./im-football-catalog-source.js";
+  mergeImFootballSnapshots, observeNativeImFootballMarkets } from "./im-football-catalog-source.js";
 
 const event = {
   eid: 112516390, htn: "Monterrey Rayados", atn: "Nashville SC",
@@ -22,6 +22,27 @@ const event = {
 };
 
 describe("extractImFootballCatalog", () => {
+  it("accounts for every native IM market without treating an unknown type as a comparable ticket", () => {
+    const candidate = { ...event, mls: [
+      event.mls[0],
+      { mi: 40, bti: 3, gp: 1, ws: [
+        { wsi: 401, si: 5, o: 2.1 }, { wsi: 402, si: 7, o: 3.2 }, { wsi: 403, si: 6, o: 3.4 }
+      ] },
+      { mi: 41, bti: 777, gp: 19, ws: [
+        { wsi: 411, si: 801, o: 0.9 }, { wsi: 412, si: 802, o: -0.95 }
+      ] }
+    ] };
+
+    expect(observeNativeImFootballMarkets({ StatusCode: 100, sel: [candidate] }, 1234)).toEqual([
+      expect.objectContaining({ providerMarketId: "10", nativeType: "bti=1", nativeScope: "gp=1",
+        outcomeLabels: ["HOME", "AWAY"], disposition: "NORMALIZED", reason: "CANONICAL_MARKET_MAPPED" }),
+      expect.objectContaining({ providerMarketId: "40", nativeType: "bti=3", nativeScope: "gp=1",
+        outcomeLabels: ["5", "7", "6"], disposition: "EXCLUDED", reason: "THREE_WAY_OUTCOME_DOMAIN" }),
+      expect.objectContaining({ providerMarketId: "41", nativeType: "bti=777", nativeScope: "gp=19",
+        outcomeLabels: ["801", "802"], disposition: "UNMAPPED", reason: "NATIVE_TYPE_UNMAPPED" })
+    ]);
+  });
+
   it("keeps live events and every future prematch event without a time horizon", () => {
     const nowMs = Date.parse("2026-08-19T00:00:00.000Z");
     const candidate = (eid: number, edt: string, isrbt = false) => ({ ...event, eid, edt, isrbt });
@@ -53,6 +74,45 @@ describe("extractImFootballCatalog", () => {
         { selectionId: "122", selection: "UNDER", priceText: "-0.84", locked: false, lineText: "2.5" }
       ] }]
     }]);
+  });
+
+  it("normalizes proved line-free, team and corner two-way IM markets", () => {
+    const candidate = { ...event, mls: [
+      { mi: 50, bti: 5, gp: 1, ws: [
+        { wsi: 501, si: 10, o: 0.88 }, { wsi: 502, si: 11, o: -0.96 }
+      ] },
+      { mi: 51, bti: 18, gp: 1, ws: [
+        { wsi: 511, si: 87, o: 0.83 }, { wsi: 512, si: 88, o: -0.91 }
+      ] },
+      { mi: 55, bti: 18, gp: 3, ws: [
+        { wsi: 551, si: 87, o: 0.81 }, { wsi: 552, si: 88, o: -0.89 }
+      ] },
+      { mi: 52, bti: 31, gp: 1, ws: [
+        { wsi: 521, si: 118, hdp: 1.5, dih: "1.5", o: -0.9 },
+        { wsi: 522, si: 119, hdp: 1.5, dih: "1.5", o: 0.82 }
+      ] },
+      { mi: 53, bti: 299, gp: 2, ws: [
+        { wsi: 531, si: 1, hdp: -0.5, dih: "+0.5", o: 0.8 },
+        { wsi: 532, si: 2, hdp: -0.5, dih: "-0.5", o: -0.9 }
+      ] },
+      { mi: 54, bti: 306, gp: 1, ws: [
+        { wsi: 541, si: 3, hdp: 9.5, dih: "9.5", o: 0.86 },
+        { wsi: 542, si: 4, hdp: 9.5, dih: "9.5", o: -0.94 }
+      ] }
+    ] };
+
+    expect(extractImFootballCatalog({ StatusCode: 100, sel: [candidate] })[0]?.markets).toEqual([
+      expect.objectContaining({ marketId: "50", marketType: "FT_ODD_EVEN", lineText: null,
+        selections: [expect.objectContaining({ selection: "ODD" }), expect.objectContaining({ selection: "EVEN" })] }),
+      expect.objectContaining({ marketId: "51", marketType: "FT_BTTS", lineText: null,
+        selections: [expect.objectContaining({ selection: "YES" }), expect.objectContaining({ selection: "NO" })] }),
+      expect.objectContaining({ marketId: "55", marketType: "SH_BTTS", lineText: null,
+        selections: [expect.objectContaining({ selection: "YES" }), expect.objectContaining({ selection: "NO" })] }),
+      expect.objectContaining({ marketId: "52", marketType: "HOME_FT_TOTAL", lineText: "1.5",
+        selections: [expect.objectContaining({ selection: "UNDER" }), expect.objectContaining({ selection: "OVER" })] }),
+      expect.objectContaining({ marketId: "53", marketType: "CORNER_FH_AH" }),
+      expect.objectContaining({ marketId: "54", marketType: "CORNER_FT_TOTAL", lineText: "9.5" })
+    ]);
   });
 
   it("preserves Malay odds and normalizes positive Hong Kong odds without rounding", () => {
@@ -190,7 +250,7 @@ describe("extractImFootballCatalog", () => {
     expect(extractImFootballCatalog({ StatusCode: 100, sel: [{ ...event, htn: "" }] })).toEqual([]);
   });
 
-  it("applies exact delta prices and removes a ticket when its line becomes integer", () => {
+  it("applies exact delta prices and retains an integer-line market for inventory", () => {
     const initial = extractImFootballCatalog({ StatusCode: 100, sel: [event] });
     const updated = mergeImFootballDelta(initial, { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [
       { mi: 10, bti: 1, gp: 1, ws: [
@@ -201,14 +261,15 @@ describe("extractImFootballCatalog", () => {
     expect(updated[0]?.markets.find((item) => item.marketId === "10")?.selections
       .map((item) => item.priceText)).toEqual(["0.8", "-0.9"]);
 
-    const withoutInteger = mergeImFootballDelta(updated, { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [
+    const withInteger = mergeImFootballDelta(updated, { StatusCode: 100, dc: [{ eid: 112516390, a: 3, v: [
       { mi: 10, bti: 1, gp: 1, ws: [
         { wsi: 101, si: 1, hdp: -1, dih: "+1", o: 0.8, ot: 1 },
         { wsi: 102, si: 2, hdp: -1, dih: "-1", o: -0.9, ot: 1 }
       ] }
     ] }] });
-    expect(withoutInteger).toHaveLength(1);
-    expect(withoutInteger[0]?.markets.some((item) => item.marketId === "10")).toBe(false);
+    expect(withInteger).toHaveLength(1);
+    expect(withInteger[0]?.markets.find((item) => item.marketId === "10"))
+      .toEqual(expect.objectContaining({ marketType: "FT_AH" }));
   });
 
   it("keeps an existing event on metadata action 2 and deletes it only on action 1", () => {

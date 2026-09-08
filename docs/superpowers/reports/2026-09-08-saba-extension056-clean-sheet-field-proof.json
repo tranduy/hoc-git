@@ -1,0 +1,26 @@
+{
+  "acceptance": "SEMANTIC_FIELD_MAPPING_ONLY_NOT_FULL_OR_POST_CLOSE_REALTIME",
+  "capture": "capture-1788816007272.jsonl",
+  "checkedBytes": 759249,
+  "sourceId": "chrome:SABA:2105831237",
+  "sourceEpoch": "94fd10d0-e35f-460e-b53b-d3783226d48e:5",
+  "build": "sha256:40c74e12f637ff755d04016a7d79730b71077a90ad5f0605f0f84a1010067dfa",
+  "ownerMatchId": "133152892",
+  "publicNativeId": "133152892__1054290306",
+  "wsOddsId": "1054290306",
+  "publicCapturedAtMs": 1788816065105,
+  "wsObservedAt": "2026-09-07T21:21:05.367Z",
+  "nativeType": 13,
+  "parentType": 13,
+  "nativeStatus": "running",
+  "enable": 1,
+  "publicHeader": "Giữ sạch lưới",
+  "mapping": [
+    {"label": "Đội Nhà Có", "field": "cs11", "rawPrice": 2.72, "publicPrice": "2.72", "selection": "HOME_YES"},
+    {"label": "Đội Nhà Không", "field": "cs10", "rawPrice": 1.36, "publicPrice": "1.36", "selection": "HOME_NO"},
+    {"label": "Đội Khách Có", "field": "cs21", "rawPrice": 3.60, "publicPrice": "3.60", "selection": "AWAY_YES"},
+    {"label": "Đội Khách Không", "field": "cs20", "rawPrice": 1.22, "publicPrice": "1.22", "selection": "AWAY_NO"}
+  ],
+  "format": "DECIMAL",
+  "schemaEvidence": {"parsedFrames": 43, "fieldTableRows": 22, "namedFields": 205, "olderEpochImported": false}
+}

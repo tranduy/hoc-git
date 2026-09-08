@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { normalizeSabaFootballRecords } from "@tool-chenh/adapters";
 import { SabaPushDecoder } from "./saba-push-decoder.js";
 
 const fields = [
@@ -68,6 +69,46 @@ describe("SabaPushDecoder", () => {
     const deleted = decoder.apply({ bridgeId: "b5", revision: "a0003", rows: [[0, "-o", 2, 7]] });
     expect(deleted.records).toEqual([]);
     expect(deleted.changes).toEqual([expect.objectContaining({ operation: "DELETE", key: "o:7" })]);
+  });
+
+  it("retains all type 13 clean-sheet fields while a sparse delta updates home yes and status", () => {
+    const decoder = new SabaPushDecoder();
+    const cleanSheetFields = ["type", "leagueid", "leaguenameen", "sporttype", "matchid",
+      "hteamnameen", "ateamnameen", "kickofftime", "marketid", "oddsid", "bettype",
+      "parenttypeid", "oddsstatus", "enable", "cs10", "cs11", "cs20", "cs21"] as const;
+    const observedAtMs = 1_788_816_065_105;
+    decoder.apply({ bridgeId: "b13", revision: "cs-1", rows: [
+      ["f", 0, cleanSheetFields],
+      [0, "reset"],
+      [0, "l", 1, 1, 2, "League", 3, 1],
+      [0, "m", 1, 1, 3, 1, 4, 133152892, 5, "Home", 6, "Away",
+        7, Math.floor(observedAtMs / 1_000) + 3_600, 8, "T"],
+      [0, "o", 4, 133152892, 9, 1054290306, 10, 13, 11, 13, 12, "running", 13, 1,
+        14, 1.36, 15, 2.72, 16, 1.22, 17, 3.60],
+      [0, "done"]
+    ] });
+
+    const changed = decoder.apply({ bridgeId: "b13", revision: "cs-2", rows: [
+      [0, "o", 9, 1054290306, 12, "suspended", 15, 2.95]
+    ] });
+    expect(changed.records).toEqual(expect.arrayContaining([expect.objectContaining({
+      type: "o", oddsid: 1054290306, cs10: 1.36, cs11: 2.95, cs20: 1.22, cs21: 3.60,
+      oddsstatus: "suspended"
+    })]));
+
+    const normalized = normalizeSabaFootballRecords(changed.records, {
+      observedAtMs: observedAtMs + 1_000, receivedMonotonicMs: 123.5, sequence: 4
+    });
+    expect(normalized.markets).toHaveLength(2);
+    expect(normalized.markets.every(({ status }) => status === "SUSPENDED")).toBe(true);
+    expect(normalized.quotes.map(({ providerMarketId, selection, rawOdds, rawFormat, status,
+      receivedMonotonicMs, sequence }) => [providerMarketId, selection, rawOdds, rawFormat, status,
+        receivedMonotonicMs, sequence])).toEqual([
+      ["1054290306:home-clean-sheet", "YES", "2.95", "DECIMAL", "SUSPENDED", 123.5, 4],
+      ["1054290306:home-clean-sheet", "NO", "1.36", "DECIMAL", "SUSPENDED", 123.5, 4],
+      ["1054290306:away-clean-sheet", "YES", "3.6", "DECIMAL", "SUSPENDED", 123.5, 4],
+      ["1054290306:away-clean-sheet", "NO", "1.22", "DECIMAL", "SUSPENDED", 123.5, 4]
+    ]);
   });
 
   it("inherits compressed field names exactly like the live v2 protocol", () => {
@@ -257,5 +298,93 @@ describe("SabaPushDecoder", () => {
     expect(() => wide.apply({ bridgeId: "b1", revision: "r1", rows: [
       ["f", 0, Array.from({ length: 513 }, (_, index) => `field${index}`)]
     ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:BOUND_EXCEEDED");
+  });
+
+  it("seeds only a field-table context and lets a later genuine reset/done establish the snapshot", () => {
+    const decoder = new SabaPushDecoder();
+    decoder.seedSchemaContext({ bridgeId: "b41", revision: null, rows: [
+      ["c", "c2"], ["f", 0, fields]
+    ] });
+
+    const snapshot = decoder.apply({ bridgeId: "b41", revision: "fresh-1", rows: [
+      [0, "reset"],
+      [0, "m", 1, 41385687, 4, "T", 5, "running"],
+      [0, "o", 2, 90001, 1, 41385687, 3, 1, 6, 2.2, 7, 1],
+      [0, "done"]
+    ] });
+
+    expect(snapshot).toMatchObject({ fullSnapshot: true, duplicate: false, revision: "fresh-1" });
+    expect(snapshot.records).toEqual([
+      expect.objectContaining({ type: "m", matchid: 41385687 }),
+      expect.objectContaining({ type: "o", oddsid: 90001, matchid: 41385687 })
+    ]);
+  });
+
+  it("seeds a bridge that already committed a channel-only fresh frame", () => {
+    const decoder = new SabaPushDecoder();
+    expect(decoder.apply({ bridgeId: "b41", revision: null, rows: [["c", "c2"]] }))
+      .toMatchObject({ fullSnapshot: false, records: [] });
+
+    decoder.seedSchemaContext({ bridgeId: "b41", revision: null, rows: [
+      ["c", "c2"], ["f", 0, fields]
+    ] });
+    expect(decoder.apply({ bridgeId: "b41", revision: "fresh-1", rows: [
+      [0, "reset"], [0, "m", 1, 55], [0, "done"]
+    ] })).toMatchObject({ fullSnapshot: true,
+      records: [expect.objectContaining({ type: "m", matchid: 55 })] });
+  });
+
+  it("adds schema fields without closing or replacing an in-progress reset snapshot", () => {
+    const decoder = new SabaPushDecoder();
+    decoder.apply({ bridgeId: "b41", revision: "batch-1", rows: [
+      ["c", "c2"], ["f", 0, ["type"]], [0, "reset"]
+    ] });
+    decoder.seedSchemaContext({ bridgeId: "b41", revision: null, rows: [
+      ["c", "c2"], ["f", 0, fields]
+    ] });
+
+    expect(decoder.apply({ bridgeId: "b41", revision: "batch-1", rows: [
+      [0, "m", 1, 55], [0, "done"]
+    ] })).toMatchObject({ fullSnapshot: true, revision: "batch-1",
+      records: [expect.objectContaining({ type: "m", matchid: 55 })] });
+  });
+
+  it("rejects non-schema rows and conflicting schema seeds atomically", () => {
+    const decoder = new SabaPushDecoder();
+    decoder.seedSchemaContext({ bridgeId: "b41", revision: null, rows: [
+      ["c", "c2"], ["f", 0, fields]
+    ] });
+
+    expect(() => decoder.seedSchemaContext({ bridgeId: "b41", revision: null, rows: [
+      ["c", "c2"], [0, "reset"]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:SCHEMA_CONTEXT_ROW_INVALID");
+    expect(() => decoder.seedSchemaContext({ bridgeId: "b41", revision: null, rows: [
+      ["c", "c9"], ["f", 0, ["type", "matchid"]]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:SCHEMA_CONTEXT_CHANNEL_CONFLICT");
+    expect(() => decoder.seedSchemaContext({ bridgeId: "b41", revision: null, rows: [
+      ["c", "c2"], ["f", 0, ["different", "matchid"]]
+    ] })).toThrow("SABA_PUSH_SCHEMA_CHANGED:SCHEMA_CONTEXT_FIELD_CONFLICT");
+
+    expect(decoder.apply({ bridgeId: "b41", revision: "fresh-1", rows: [
+      [0, "reset"], [0, "m", 1, 5], [0, "done"]
+    ] })).toMatchObject({ fullSnapshot: true,
+      records: [expect.objectContaining({ type: "m", matchid: 5 })] });
+  });
+
+  it.each([
+    { name: "revision", frame: { bridgeId: "b1", revision: "old", rows: [["f", 0, fields]] },
+      reason: "SCHEMA_CONTEXT_FRAME_INVALID" },
+    { name: "missing field row", frame: { bridgeId: "b1", revision: null, rows: [["c", "c1"]] },
+      reason: "SCHEMA_CONTEXT_EMPTY" },
+    { name: "non-catalog table", frame: { bridgeId: "b1", revision: null,
+      rows: [["c", "c1"], ["f", 0, ["type", "siteid"]]] }, reason: "SCHEMA_CONTEXT_NON_CATALOG" },
+    { name: "wide table", frame: { bridgeId: "b1", revision: null,
+      rows: [["c", "c1"], ["f", 0, Array.from({ length: 513 }, (_, index) => `f${index}`)]] },
+      reason: "BOUND_EXCEEDED" },
+    { name: "oversized bridge id", frame: { bridgeId: `b${"1".repeat(64)}`, revision: null,
+      rows: [["f", 0, ["type", "matchid"]]] }, reason: "SCHEMA_CONTEXT_FRAME_INVALID" }
+  ])("strictly bounds a $name schema context", ({ frame, reason }) => {
+    expect(() => new SabaPushDecoder().seedSchemaContext(frame))
+      .toThrow(`SABA_PUSH_SCHEMA_CHANGED:${reason}`);
   });
 });

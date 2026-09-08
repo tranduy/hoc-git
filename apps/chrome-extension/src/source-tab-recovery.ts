@@ -10,6 +10,7 @@ interface SourceTabRecoveryOptions {
   readonly listAttached: () => readonly AttachedSource[];
   readonly query: () => Promise<readonly TabDescriptor[]>;
   readonly update: (tabId: number, url: string) => Promise<TabDescriptor>;
+  readonly reset?: (tabId: number, lobby: ChromeLobbyId) => Promise<void>;
   readonly reload?: (tabId: number, lobby: ChromeLobbyId) => Promise<TabDescriptor>;
   readonly create: (url: string, active: boolean) => Promise<TabDescriptor>;
   readonly remove?: (tabId: number) => Promise<void>;
@@ -31,6 +32,8 @@ interface SourceTabRecoveryOptions {
   readonly onBootstrapFailure?: (tabId: number) => void;
   readonly beginSourceEpoch?: (sourceId: string) => void;
   readonly validateReady?: (tab: TabDescriptor, lobby: ChromeLobbyId) => Promise<boolean>;
+  readonly beginBlankHandoff?: (tabId: number, url: string) => Promise<void>;
+  readonly completeBlankHandoff?: (tabId: number) => Promise<void>;
 }
 
 export const SABA_DIRECT_LOBBY_URL =
@@ -214,31 +217,67 @@ export class SourceTabRecovery {
         } catch { /* no complete baseline yet; continue with the exact-tab reload */ }
       }
       let navigated: TabDescriptor;
+      let blankHandoffStarted = false;
       if (deadSessionFallbackUrl !== undefined) {
         // A SABA /(S(...))/ document can remain visually open after its
         // server-side session and Socket.IO catalog have died. Reloading that
         // exact URL only replays the dead session. Once lightweight same-tab
         // recovery fails, enter the public tokenless URL so SABA mints a new
         // session on this same tab.
+        // A same-origin SABA worker can survive the document navigation and
+        // keep its pre-observer Socket.IO connection. Terminate that exact
+        // provider worker before navigating so the replacement page must
+        // create a socket after CDP observation has been armed.
+        // Persist the intended destination before touching the current page.
+        // A Manifest V3 worker can be replaced after the blank commit; the next
+        // worker can then finish this exact tab instead of losing the source.
+        await this.#options.beginBlankHandoff?.(tab.id, deadSessionFallbackUrl);
+        blankHandoffStarted = true;
+        await this.#options.reset?.(tab.id, lobby);
+        // A same-origin navigation can preserve the old renderer/worker long
+        // enough for its replacement Socket.IO connection to publish the
+        // dynamic field table before Network observation is re-armed. Park the
+        // exact source tab on a cross-document blank page first. This tears
+        // down every root-owned and worker-owned connection without creating a
+        // duplicate provider tab, then the observer is attached to the blank
+        // target before the public SABA entry starts its bootstrap.
+        await this.#parkOnBlank(tab.id);
         this.#options.beginSourceEpoch?.(`chrome:${lobby}:${tab.id}`);
         // beginSourceEpoch retires every frame/session binding from the dead
         // document. Re-arm CDP before navigation so the replacement document's
         // first socket and roster requests cannot race past the observer.
         await (this.#options.attachBootstrap ?? ((value) => this.#options.attach(value)))(
           { ...tab, url: deadSessionFallbackUrl }, lobby);
-        navigated = sameUrl(tab.url, deadSessionFallbackUrl) && this.#options.reload !== undefined
-          ? await this.#options.reload(tab.id, lobby)
-          : await this.#options.update(tab.id, deadSessionFallbackUrl);
+        navigated = await this.#options.update(tab.id, deadSessionFallbackUrl);
       } else {
         navigated = reload && this.#options.reload !== undefined
           ? await this.#options.reload(tab.id, lobby)
           : await this.#options.update(tab.id, url);
       }
       await this.#waitForLobby(navigated, lobby);
+      if (blankHandoffStarted) await this.#options.completeBlankHandoff?.(tab.id);
     } catch (error) {
       this.#options.onBootstrapFailure?.(tab.id);
       throw error;
     }
+  }
+
+  async #parkOnBlank(tabId: number): Promise<void> {
+    const blankUrl = "about:blank";
+    let parked = await this.#options.update(tabId, blankUrl);
+    const delay = this.#options.delay ?? ((delayMs: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+    if (!blankCommitComplete(parked, blankUrl) && this.#options.get !== undefined) {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await delay(50);
+        parked = await this.#options.get(tabId);
+        if (blankCommitComplete(parked, blankUrl)) break;
+      }
+    }
+    if (!blankCommitComplete(parked, blankUrl)) throw new Error("SOURCE_TAB_BLANK_HANDOFF_FAILED");
+    // Give Chrome one task after the about:blank commit to dispose the old
+    // document before another navigation is queued on this same tab id.
+    await delay(100);
   }
 
   async #removeRecoveryDuplicates(
@@ -274,6 +313,10 @@ export class SourceTabRecovery {
     return this.#options.validateReady?.(tab, lobby) ?? true;
   }
 
+}
+
+function blankCommitComplete(tab: TabDescriptor, blankUrl: string): boolean {
+  return tab.url === blankUrl && (tab.status === undefined || tab.status === "complete");
 }
 
 function isRecoveryTabForLobby(tab: TabDescriptor, lobby: ChromeLobbyId): boolean {
@@ -315,12 +358,6 @@ function sabaExistingSessionRecovery(value: string): { readonly url: string; rea
   } catch {
     return null;
   }
-}
-
-function sameUrl(left: string | undefined, right: string): boolean {
-  if (left === undefined) return false;
-  try { return new URL(left).href === new URL(right).href; }
-  catch { return false; }
 }
 
 function isReadyLobbyTab(tab: TabDescriptor, lobby: ChromeLobbyId): boolean {

@@ -269,7 +269,7 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.ensureLobby).not.toHaveBeenCalled();
   });
 
-  it("refreshes a reachable one-time SABA launch in place before any destructive restore", async () => {
+  it("rebuilds the exact SABA tab when browser refresh is disabled and the socket baseline is gone", async () => {
     const context = setup(() => 2_000, false);
     context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
       sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
@@ -281,9 +281,9 @@ describe("AutomaticSourceRecovery", () => {
     await expect(context.recovery.recover(request(SABA, "HARD"))).resolves.toEqual({
       accountId: SABA, stage: "HARD", outcome: "RECOVERED", reason: null
     });
-    expect(context.reloadSource).not.toHaveBeenCalled();
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:SABA:7");
     expect(context.reloadRecoverySource).not.toHaveBeenCalled();
-    expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("SABA");
+    expect(context.requestLobbySnapshot).not.toHaveBeenCalled();
     expect(context.restoreLobby).not.toHaveBeenCalled();
   });
 
@@ -321,7 +321,51 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.restoreLobby).not.toHaveBeenCalled();
   });
 
-  it("does not restore SABA twice inside the provider settling window", async () => {
+  it("keeps an APSPORT soft timeout non-destructive until an explicit hard recovery", async () => {
+    let clock = 2_000;
+    const context = setup(() => clock, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT, { sourceId: "chrome:TSPORT:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "apsport:7:1", tabReachableAtMs: 1_999 }));
+    context.waitForFreshBaseline.mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
+
+    await expect(context.recovery.recover(request(APSPORT, "SOFT"))).resolves.toEqual({
+      accountId: APSPORT, stage: "SOFT", outcome: "DELIVERED", reason: "BASELINE_TIMEOUT"
+    });
+    expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("TSPORT");
+    expect(context.reloadSource).not.toHaveBeenCalled();
+    expect(context.reloadRecoverySource).not.toHaveBeenCalled();
+    expect(context.restoreLobby).not.toHaveBeenCalled();
+    expect(context.ensureLobby).not.toHaveBeenCalled();
+
+    clock = 3_001;
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(APSPORT, {
+      state: "LIVE", reason: null, sourceId: "chrome:TSPORT:7", sourceEpoch: "observer-b:0",
+      activeGeneration: "apsport:7:2", lastCompleteBaselineAtMs: 3_002
+    }));
+    await expect(context.recovery.recover(request(APSPORT, "HARD"))).resolves.toEqual({
+      accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null
+    });
+    expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:TSPORT:7");
+  });
+
+  it("accepts a timely same-epoch APSPORT baseline after a soft snapshot", async () => {
+    const context = setup(() => 2_000, false);
+    context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT, { sourceId: "chrome:TSPORT:7",
+      sourceEpoch: "observer-a:0", activeGeneration: "apsport:7:1", tabReachableAtMs: 1_999 }));
+    context.waitForFreshBaseline.mockResolvedValueOnce(snapshot(APSPORT, {
+      state: "LIVE", reason: null, sourceId: "chrome:TSPORT:7", sourceEpoch: "observer-a:0",
+      activeGeneration: "apsport:7:1", lastCompleteBaselineAtMs: 2_001
+    }));
+
+    await expect(context.recovery.recover(request(APSPORT, "SOFT"))).resolves.toEqual({
+      accountId: APSPORT, stage: "SOFT", outcome: "RECOVERED", reason: null
+    });
+    expect(context.requestLobbySnapshot).toHaveBeenCalledExactlyOnceWith("TSPORT");
+    expect(context.reloadSource).not.toHaveBeenCalled();
+    expect(context.reloadRecoverySource).not.toHaveBeenCalled();
+  });
+
+  it("does not rebuild SABA twice inside the provider settling window", async () => {
     let clock = 1_000_000;
     const context = setup(() => clock, false);
     context.feedRegistry.snapshot.mockReturnValue(snapshot(SABA, { sourceId: "chrome:SABA:7",
@@ -329,12 +373,14 @@ describe("AutomaticSourceRecovery", () => {
     context.waitForFreshBaseline.mockRejectedValue(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"));
 
     await context.recovery.recover(request(SABA, "HARD"));
-    expect(context.restoreLobby).toHaveBeenCalledTimes(1);
+    expect(context.reloadSource).toHaveBeenCalledTimes(1);
+    expect(context.restoreLobby).not.toHaveBeenCalled();
     expect(context.requestLobbySnapshot).toHaveBeenCalledTimes(1);
 
     clock += 60_000;
     await context.recovery.recover(request(SABA, "HARD"));
-    expect(context.restoreLobby).toHaveBeenCalledTimes(1);
+    expect(context.reloadSource).toHaveBeenCalledTimes(1);
+    expect(context.restoreLobby).not.toHaveBeenCalled();
     expect(context.requestLobbySnapshot).toHaveBeenCalledTimes(2);
   });
 
@@ -533,21 +579,18 @@ describe("AutomaticSourceRecovery", () => {
     context.feedRegistry.snapshot.mockReturnValue(snapshot(APSPORT, { sourceId: "chrome:TSPORT:9",
       sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
     context.waitForFreshBaseline
-      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
       .mockResolvedValueOnce(snapshot(APSPORT, { state: "LIVE", reason: null,
         sourceId: "chrome:TSPORT:9", sourceEpoch: "observer-a:0", activeGeneration: "generation-2",
         lastCompleteBaselineAtMs: 2_001 }));
 
-    const result = await context.recovery.recover(request(APSPORT));
+    const result = await context.recovery.recover(request(APSPORT, "HARD"));
 
     expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
     expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:TSPORT:9");
     expect(context.refreshFabetLaunches).not.toHaveBeenCalled();
     expect(context.ensureLobby).not.toHaveBeenCalled();
-    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(2);
-    expect(context.waitForFreshBaseline).toHaveBeenNthCalledWith(
-      2, APSPORT, 2_000, 50, expect.any(AbortSignal)
-    );
+    expect(context.waitForFreshBaseline).toHaveBeenCalledExactlyOnceWith(
+      APSPORT, 2_000, 50, expect.any(AbortSignal));
   });
 
   it("gives a reloaded tab far longer to answer than an in-page lobby snapshot", async () => {
@@ -673,11 +716,10 @@ describe("AutomaticSourceRecovery", () => {
       sourceEpoch: "observer-a:0", activeGeneration: "generation-1" }));
     context.waitForFreshBaseline
       .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
-      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
       .mockResolvedValueOnce(snapshot(APSPORT, { state: "LIVE", reason: null,
         lastCompleteBaselineAtMs: 2_001 }));
 
-    const result = await context.recovery.recover(request(APSPORT));
+    const result = await context.recovery.recover(request(APSPORT, "HARD"));
 
     expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
     expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:TSPORT:9");
@@ -685,7 +727,7 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith(
       "TSPORT", "https://apsport.provider.test/fresh"
     );
-    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(3);
+    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -699,11 +741,10 @@ describe("AutomaticSourceRecovery", () => {
     context.reloadSource.mockImplementationOnce(reload);
     context.reloadRecoverySource.mockReturnValueOnce(0);
     context.waitForFreshBaseline
-      .mockRejectedValueOnce(new Error("PROVIDER_FEED_BASELINE_TIMEOUT"))
       .mockResolvedValueOnce(snapshot(APSPORT, { state: "LIVE", reason: null,
         lastCompleteBaselineAtMs: 2_001 }));
 
-    const result = await context.recovery.recover(request(APSPORT));
+    const result = await context.recovery.recover(request(APSPORT, "HARD"));
 
     expect(result).toEqual({ accountId: APSPORT, stage: "HARD", outcome: "RECOVERED", reason: null });
     expect(context.reloadSource).toHaveBeenCalledExactlyOnceWith("chrome:TSPORT:9");
@@ -712,7 +753,7 @@ describe("AutomaticSourceRecovery", () => {
     expect(context.ensureLobby).toHaveBeenCalledExactlyOnceWith(
       "TSPORT", "https://apsport.provider.test/fresh"
     );
-    expect(context.waitForFreshBaseline).toHaveBeenCalledTimes(2);
+    expect(context.waitForFreshBaseline).toHaveBeenCalledOnce();
   });
 
   it("does not report soft command delivery as recovery before a newer baseline arrives", async () => {

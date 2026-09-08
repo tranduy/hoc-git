@@ -1,6 +1,7 @@
 import { utf8ByteLength } from "./utf8-length.js";
 import {
   ChromeBridgeControlMessageSchema,
+  ChromeNetworkBodyChunkSchema,
   type ChromeBridgeEnvelope,
   type ChromeBridgeControlMessage
 } from "@tool-chenh/contracts";
@@ -186,6 +187,7 @@ export class LocalBridge {
       envelope.transport === "HTTP_RESPONSE"
       && "providerContentIntent" in envelope.request
       && envelope.request.providerContentIntent === "FOOTBALL_FULL_CATALOG") ||
+      (envelope.lobby === "IM" && isFinalNetworkBodyChunkEnvelope(envelope)) ||
       isBtiAuthFailureEnvelope(envelope);
     let settleAcknowledgement: (() => void) | null = null;
     const acknowledgement = waitsForIndividualAcknowledgement
@@ -587,6 +589,16 @@ function isBtiAuthFailureEnvelope(envelope: ChromeBridgeEnvelope): boolean {
     const candidate = value as Record<string, unknown>;
     return candidate.kind === "PAGE_HEALTH" && candidate.status === "AUTH_ERROR" &&
       candidate.code === "1008";
+  } catch {
+    return false;
+  }
+}
+
+function isFinalNetworkBodyChunkEnvelope(envelope: ChromeBridgeEnvelope): boolean {
+  if (envelope.transport !== "HTTP_RESPONSE" || envelope.payload.encoding !== "UTF8") return false;
+  try {
+    const parsed = ChromeNetworkBodyChunkSchema.safeParse(JSON.parse(envelope.payload.body));
+    return parsed.success && parsed.data.chunkIndex === parsed.data.chunkCount - 1;
   } catch {
     return false;
   }

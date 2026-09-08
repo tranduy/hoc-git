@@ -72,6 +72,17 @@ describe("eligibleApsportFootballEvent", () => {
     }), NOW, 24)).toBe(false);
   });
 
+  it("keeps empty-market Major League Soccer events without admitting eSoccer leagues", () => {
+    expect(eligibleApsportFootballEvent(event("mls-empty", {
+      league: "USA Major League Soccer", home: "Austin FC", away: "LA Galaxy"
+    }), NOW, 24)).toBe(true);
+    for (const leagueName of ["eSoccer Battle", "e-Soccer Battle", "e Soccer Battle"]) {
+      expect(eligibleApsportFootballEvent(event(`virtual-${leagueName}`, {
+        league: leagueName, home: "Alpha", away: "Beta"
+      }), NOW, 24)).toBe(false);
+    }
+  });
+
   it("keeps a status-sparse provider event when its market groups prove it is active", () => {
     const statusSparse = { ...event("status-sparse"), "10": undefined,
       "50": [{ "3": 3, "9": [{ "6": "market-1" }], "10": "Active" }] };
@@ -79,6 +90,13 @@ describe("eligibleApsportFootballEvent", () => {
     expect(eligibleApsportFootballEvent(statusSparse, NOW, 24)).toBe(true);
     expect(eligibleApsportFootballEvent({ ...statusSparse,
       "50": [{ "3": 3, "9": [{ "6": "market-1" }], "10": "Suspended" }] }, NOW, 24)).toBe(false);
+  });
+
+  it("does not discard a status-sparse event merely because its active native group is not mapped yet", () => {
+    const statusSparse = { ...event("unknown-active"), "10": undefined,
+      "50": [{ "3": 999, "9": [{ "6": "native-market" }], "10": "Active" }] };
+
+    expect(eligibleApsportFootballEvent(statusSparse, NOW, 24)).toBe(true);
   });
 });
 
@@ -99,6 +117,19 @@ describe("collectApsportCatalog", () => {
       providerSelectionId: "closed-selection", marketType: "SH_TOTAL", scope: "SECOND_HALF",
       selection: "UNDER", line: "1.5"
     })).toEqual({ status: "NOT_FOUND" });
+  });
+
+  it("reads exact AP binary props whose source publishes decimal odds without a Malay slot", () => {
+    const detailed = { ...event("binary-prop"), "50": [{ "3": 8, "10": "Active", "9": [{
+      "0": "binary-odd", "2": "binary-even", "6": "binary-market", "7": "0.0",
+      "8": { "0": "1.9091743119", "1": "1.91" }, "9": { "0": "1.7660550458", "1": "1.77" }
+    }] }] };
+
+    expect(apsportSelectionPriceFromEvent(detailed, {
+      providerEventId: "binary-prop", providerMarketId: "binary-market",
+      providerSelectionId: "binary-even", marketType: "FT_ODD_EVEN", scope: "FULL_TIME",
+      selection: "EVEN", line: null
+    })).toEqual({ status: "FOUND", rawOdds: "1.7660550458" });
   });
 
   it("refetches one exact event detail after a realtime event signal", async () => {
@@ -124,6 +155,27 @@ describe("collectApsportCatalog", () => {
       body: expect.objectContaining({ li: "league-42" })
     })]);
     expect(result).toEqual(expect.objectContaining({ "2": "live-42" }));
+  });
+
+  it("rejects structurally incomplete detail and non-object raw market rows", async () => {
+    const malformedDetails: ApsportRawEvent[] = [
+      { ...event("missing-home"), "5": "" },
+      { ...event("same-teams"), "22": "Home same-teams" },
+      { ...event("missing-league"), "53": "" },
+      { ...event("missing-start"), "11": null },
+      { ...event("missing-group-id"), "50": [{ "9": [] }] },
+      { ...event("malformed-odd"), "50": [{ "3": 999, "9": [null] }] }
+    ];
+
+    for (const malformed of malformedDetails) {
+      const id = String(malformed["2"]);
+      const result = await collectApsportEventDetail({
+        eventId: id, template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+        request: async () => ({ status: 200, data: [league("Detail", [malformed])] }),
+        sleep: async () => undefined, isCurrent: () => true
+      });
+      expect(result, id).toBeNull();
+    }
   });
 
   it("uses the provider's distinct native bodies for event and lazy-league rosters", async () => {
@@ -154,27 +206,143 @@ describe("collectApsportCatalog", () => {
       .toEqual(expect.objectContaining({ mno: "3", do: "0" }));
   });
 
-  it("does not publish an empty authoritative roster when a mandatory list request fails", async () => {
+  it("does not retry or publish when a mandatory roster endpoint returns a permanent 403", async () => {
     const onRoster = vi.fn(async () => undefined);
+    let attempts = 0;
 
     await expect(collectApsportCatalog({
       generation: "apsport-failed-roster",
       nowMs: NOW,
       prematchWindowHours: 24,
       template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
-      request: async (input) => input.kind === "EVENTS" && input.mode === 2
-        ? { status: 500, data: { message: "temporary provider failure" } }
-        : { status: 200, data: [] },
+      request: async () => { attempts += 1; return { status: 403, data: null }; },
       sleep: async () => undefined,
       isCurrent: () => true,
       onRoster,
       onDetail: async () => undefined
-    })).rejects.toThrow("APSPORT_ROSTER_HTTP_500");
+    })).rejects.toThrow("APSPORT_ROSTER_HTTP_403");
 
+    expect(attempts).toBe(1);
     expect(onRoster).not.toHaveBeenCalled();
   });
 
-  it("uses lazy-league cursor field 17 and requests detail for live plus every future event", async () => {
+  it("retries only each failed roster endpoint before publishing one complete roster", async () => {
+    const attempts = new Map<string, number>();
+    const sleeps: number[] = [];
+    const rosters: ApsportRawEvent[][] = [];
+
+    await collectApsportCatalog({
+      generation: "apsport-roster-retry", nowMs: NOW, prematchWindowHours: 24,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async (input) => {
+        if (input.kind === "DETAIL") throw new Error("UNEXPECTED_DETAIL");
+        const key = `${input.kind}:${input.mode}`;
+        const attempt = (attempts.get(key) ?? 0) + 1;
+        attempts.set(key, attempt);
+        if (attempt === 1) return { status: 0, data: null };
+        if (input.kind === "EVENTS") return { status: 200,
+          data: [league("Top", [event(`top-${input.mode}`, { live: true, startAt: null })])] };
+        if (input.kind === "OTHER_LEAGUES") return { status: 200,
+          data: [{ "4": `league-${input.mode}`, "5": "Lazy", "7": 999, "17": input.mode }] };
+        return { status: 200,
+          data: [league("Lazy", [event(`lazy-${input.mode}`, { live: true, startAt: null })])] };
+      },
+      sleep: async (delayMs) => { sleeps.push(delayMs); }, isCurrent: () => true,
+      onRoster: async (batch) => { rosters.push([...batch.records]); },
+      onDetail: async () => undefined
+    });
+
+    expect(Object.fromEntries(attempts)).toEqual({
+      "EVENTS:2": 2, "OTHER_LEAGUES:2": 2, "LEAGUE_TOPS:2": 2,
+      "EVENTS:4": 2, "OTHER_LEAGUES:4": 2, "LEAGUE_TOPS:4": 2,
+      "EVENTS:3": 2, "OTHER_LEAGUES:3": 2, "LEAGUE_TOPS:3": 2
+    });
+    expect(sleeps).toEqual(Array.from({ length: 9 }, () => 1_000));
+    expect(rosters).toHaveLength(1);
+    expect(rosters[0]).toHaveLength(6);
+  });
+
+  it.each([
+    [408, undefined, 1_000],
+    [429, 90_000, 60_000],
+    [503, undefined, 1_000]
+  ] as const)("retries transient roster status %s with a bounded delay",
+    async (status, retryAfterMs, expectedDelayMs) => {
+    let attempts = 0;
+    const sleeps: number[] = [];
+    await collectApsportCatalog({
+      generation: `apsport-roster-${status}`, nowMs: NOW, prematchWindowHours: 24,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async () => {
+        attempts += 1;
+        return attempts === 1 ? { status, data: null, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) }
+          : { status: 200, data: [] };
+      },
+      sleep: async (delayMs) => { sleeps.push(delayMs); }, isCurrent: () => true,
+      onRoster: async () => undefined, onDetail: async () => undefined
+    });
+
+    expect(attempts).toBe(7);
+    expect(sleeps).toEqual([expectedDelayMs]);
+  });
+
+  it("exhausts one transient roster endpoint after three attempts without publishing", async () => {
+    let attempts = 0;
+    const sleeps: number[] = [];
+    const onRoster = vi.fn(async () => undefined);
+
+    await expect(collectApsportCatalog({
+      generation: "apsport-roster-exhausted", nowMs: NOW, prematchWindowHours: 24,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async () => { attempts += 1; return { status: 0, data: null }; },
+      sleep: async (delayMs) => { sleeps.push(delayMs); }, isCurrent: () => true,
+      onRoster, onDetail: async () => undefined
+    })).rejects.toThrow("APSPORT_ROSTER_HTTP_0");
+
+    expect(attempts).toBe(3);
+    expect(sleeps).toEqual([1_000, 2_000]);
+    expect(onRoster).not.toHaveBeenCalled();
+  });
+
+  it("stops a roster retry after cancellation without requesting another endpoint", async () => {
+    let current = true;
+    let attempts = 0;
+    const onRoster = vi.fn(async () => undefined);
+
+    await expect(collectApsportCatalog({
+      generation: "apsport-roster-cancelled", nowMs: NOW, prematchWindowHours: 24,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async () => { attempts += 1; return { status: 0, data: null }; },
+      sleep: async () => { current = false; }, isCurrent: () => current,
+      onRoster, onDetail: async () => undefined
+    })).resolves.toBeUndefined();
+
+    expect(attempts).toBe(1);
+    expect(onRoster).not.toHaveBeenCalled();
+  });
+
+  it("stops after a successful roster response retires the current generation", async () => {
+    let current = true;
+    const requests: ApsportCatalogPageRequest[] = [];
+    const onRoster = vi.fn(async () => undefined);
+
+    await collectApsportCatalog({
+      generation: "apsport-roster-retired", nowMs: NOW, prematchWindowHours: 24,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async (input) => {
+        requests.push(input);
+        current = false;
+        return { status: 200, data: [] };
+      },
+      sleep: async () => undefined, isCurrent: () => current,
+      onRoster, onDetail: async () => undefined
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(onRoster).not.toHaveBeenCalled();
+  });
+
+  it("keeps live in the roster but hydrates hidden details only for nearest-first prematch events", async () => {
     const requests: ApsportCatalogPageRequest[] = [];
     const detailIds: string[] = [];
     const rosterBatches: unknown[] = [];
@@ -209,10 +377,10 @@ describe("collectApsportCatalog", () => {
       detailBatchSize: 10
     });
 
-    expect(detailIds.sort()).toEqual(["far", "live", "soon"]);
+    expect(detailIds).toEqual(["soon", "far"]);
     expect(requests.filter((item): item is Extract<ApsportCatalogPageRequest, { readonly kind: "DETAIL" }> =>
-      item.kind === "DETAIL").map((item) => item.eventId).sort())
-      .toEqual(["far", "live", "soon"]);
+      item.kind === "DETAIL").map((item) => item.eventId))
+      .toEqual(["soon", "far"]);
     const lazyBodies = requests.filter((item) => item.kind === "LEAGUE_TOPS").map((item) => item.body);
     expect(lazyBodies).toContainEqual(expect.objectContaining({
       lis: [{ li: "lazy-league", in: "42" }]
@@ -221,8 +389,7 @@ describe("collectApsportCatalog", () => {
     expect(rosterBatches).toHaveLength(1);
     expect(detailBatches).toEqual([expect.objectContaining({
       complete: true,
-      records: [expect.objectContaining({ "2": "live" }), expect.objectContaining({ "2": "far" }),
-        expect.objectContaining({ "2": "soon" })]
+      records: [expect.objectContaining({ "2": "soon" }), expect.objectContaining({ "2": "far" })]
     })]);
   });
 
@@ -235,11 +402,11 @@ describe("collectApsportCatalog", () => {
       active += 1;
       maximumActive = Math.max(maximumActive, active);
       try {
-        if (input.kind === "EVENTS") return { status: 200, data: [league("Top", [event("1", { live: true })])] };
+        if (input.kind === "EVENTS") return { status: 200, data: [league("Top", [event("1")])] };
         if (input.kind === "OTHER_LEAGUES" || input.kind === "LEAGUE_TOPS") return { status: 200, data: [] };
         attempts += 1;
         if (attempts === 1) return { status: 429, data: null, retryAfterMs: 1_500 };
-        return { status: 200, data: [league("Detail", [event("1", { live: true })])] };
+        return { status: 200, data: [league("Detail", [event("1")])] };
       } finally {
         active -= 1;
       }
@@ -257,18 +424,89 @@ describe("collectApsportCatalog", () => {
     expect(maximumActive).toBe(1);
   });
 
+  it("retries transient detail transport failures but not an ordinary permanent 4xx", async () => {
+    const transientStatuses = [0, 408, 503, 200];
+    const sleeps: number[] = [];
+    const transient = await collectApsportEventDetail({
+      eventId: "transient", template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async () => {
+        const status = transientStatuses.shift()!;
+        return status === 200
+          ? { status, data: [league("Detail", [event("transient")])] }
+          : { status, data: null };
+      },
+      sleep: async (delayMs) => { sleeps.push(delayMs); }, isCurrent: () => true
+    });
+
+    let permanentAttempts = 0;
+    const permanent = await collectApsportEventDetail({
+      eventId: "permanent", template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async () => { permanentAttempts += 1; return { status: 403, data: null }; },
+      sleep: async () => undefined, isCurrent: () => true
+    });
+
+    expect(transient).toEqual(expect.objectContaining({ "2": "transient" }));
+    expect(sleeps).toEqual([1_000, 2_000, 3_000]);
+    expect(permanent).toBeNull();
+    expect(permanentAttempts).toBe(1);
+  });
+
+  it("stops a transient detail retry when cancellation happens during its backoff", async () => {
+    let current = true;
+    let attempts = 0;
+
+    const result = await collectApsportEventDetail({
+      eventId: "cancelled", template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async () => { attempts += 1; return { status: 503, data: null }; },
+      sleep: async () => { current = false; }, isCurrent: () => current
+    });
+
+    expect(result).toBeNull();
+    expect(attempts).toBe(1);
+  });
+
+  it("does not complete a sweep when detail is missing or has a malformed raw market container", async () => {
+    const completed: boolean[] = [];
+    const detailRecords: ApsportRawEvent[][] = [];
+    const roster = [event("missing"), event("malformed"), event("empty")];
+
+    await collectApsportCatalog({
+      generation: "apsport-invalid-detail", nowMs: NOW, prematchWindowHours: 24,
+      template: { origin: "https://pacific.agenate.com", headers: {}, body: {} },
+      request: async (input) => {
+        if (input.kind === "EVENTS") return { status: 200, data: [league("Top", roster)] };
+        if (input.kind === "OTHER_LEAGUES" || input.kind === "LEAGUE_TOPS") return { status: 200, data: [] };
+        if (input.kind !== "DETAIL") throw new Error("UNEXPECTED_ROSTER_REQUEST");
+        if (input.eventId === "missing") return { status: 200, data: [] };
+        if (input.eventId === "malformed") {
+          const malformed = { ...event("malformed") };
+          delete malformed["50"];
+          return { status: 200, data: [league("Detail", [malformed])] };
+        }
+        return { status: 200, data: [league("Detail", [{ ...event("empty"), "50": [] }])] };
+      },
+      sleep: async () => undefined, isCurrent: () => true,
+      onRoster: async () => undefined,
+      onDetail: async (batch) => { completed.push(batch.complete); detailRecords.push([...batch.records]); },
+      detailBatchSize: 10
+    });
+
+    expect(completed).toEqual([false]);
+    expect(detailRecords).toEqual([[expect.objectContaining({ "2": "empty", "50": [] })]]);
+  });
+
   it("stops a superseded generation before requesting another event detail", async () => {
     let current = true;
     const detailIds: string[] = [];
     const completed: boolean[] = [];
     const request = vi.fn(async (input: ApsportCatalogPageRequest) => {
       if (input.kind === "EVENTS") return { status: 200,
-        data: [league("Top", [event("1", { live: true }), event("2", { live: true })])] };
+        data: [league("Top", [event("1"), event("2")])] };
       if (input.kind === "OTHER_LEAGUES" || input.kind === "LEAGUE_TOPS") return { status: 200, data: [] };
       if (input.kind !== "DETAIL") throw new Error("UNEXPECTED_ROSTER_REQUEST");
       detailIds.push(input.eventId);
       current = false;
-      return { status: 200, data: [league("Detail", [event(input.eventId, { live: true })])] };
+      return { status: 200, data: [league("Detail", [event(input.eventId)])] };
     });
 
     await collectApsportCatalog({

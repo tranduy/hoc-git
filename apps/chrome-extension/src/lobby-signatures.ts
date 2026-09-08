@@ -20,6 +20,7 @@ export interface TabDescriptor {
   readonly id?: number | undefined;
   readonly url?: string | undefined;
   readonly title?: string | undefined;
+  readonly status?: "loading" | "complete" | "unloaded" | undefined;
 }
 
 export interface LobbyTabCandidate {

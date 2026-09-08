@@ -1,4 +1,6 @@
-import type { ProviderEvent, ProviderId, ProviderMarket, ProviderQuote } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, isNoPushFootballLine,
+  type MarketType, type ProviderEvent, type ProviderId, type ProviderMarket,
+  type ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { compareProviders, sortProviderItems } from "./provider-order.js";
 
@@ -249,9 +251,37 @@ const SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS = 2;
 /** How far two books may disagree on a kickoff and still mean one fixture. */
 const FOOTBALL_KICKOFF_TOLERANCE_MS = 120_000;
 
-function linkedCompetitionIdentity(value: string, links?: ReadonlyMap<string, string>): string {
+type FootballMarketFamily = "GOALS" | "CORNERS" | "CARDS";
+type ComparisonMarketFamily = FootballMarketFamily | "ESPORTS";
+
+function footballMarketFamily(marketType: string): FootballMarketFamily {
+  if (marketType.startsWith("CORNER_") || marketType.startsWith("HOME_CORNER_") ||
+    marketType.startsWith("AWAY_CORNER_")) return "CORNERS";
+  if (marketType.startsWith("CARD_") || marketType.startsWith("YELLOW_CARD_") ||
+    marketType === "SENDING_OFF") return "CARDS";
+  return "GOALS";
+}
+
+function competitionIdentityForFamily(value: string, family: FootballMarketFamily): string {
   const identity = competitionIdentity(value);
-  return links?.get(identity) ?? identity;
+  if (family === "CORNERS") {
+    return identity.replace(/\s+(?:corners?|corner bets?|phat goc|goc)$/u, "").trim();
+  }
+  if (family === "CARDS") {
+    return identity.replace(/\s+(?:bookings?|cards?|booking bets?|the phat|phat the)$/u, "").trim();
+  }
+  return identity;
+}
+
+function competitionLinkKey(identity: string, family: FootballMarketFamily): string {
+  return `${family}\u0000${identity}`;
+}
+
+function linkedCompetitionIdentity(value: string, links: ReadonlyMap<string, string> | undefined,
+  family: FootballMarketFamily): string {
+  const identity = competitionIdentityForFamily(value, family);
+  const key = competitionLinkKey(identity, family);
+  return links?.get(key) ?? key;
 }
 
 /**
@@ -331,20 +361,6 @@ function fixtureBlockKeys(fixture: LearnedFixture): readonly string[] {
  * on those alone would let one book's corner line be priced against another
  * book's match odds.
  */
-function competitionMarketFamily(marketTypes: Iterable<string>): "GOALS" | "CORNERS" | "CARDS" {
-  let corners = 0;
-  let cards = 0;
-  let goals = 0;
-  for (const marketType of marketTypes) {
-    if (marketType.startsWith("CORNER_")) corners += 1;
-    else if (marketType.startsWith("CARD_")) cards += 1;
-    else goals += 1;
-  }
-  if (corners > goals && corners >= cards) return "CORNERS";
-  if (cards > goals && cards > corners) return "CARDS";
-  return "GOALS";
-}
-
 /**
  * Fixtures two books have been seen to share, kept between snapshots.
  *
@@ -429,8 +445,8 @@ function rememberedFixtureKey(fixture: LearnedFixture): string | null {
 function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
   memory?: CompetitionLinkMemory): ReadonlyMap<string, string> {
   const fixturesByBookCompetition = new Map<string, { readonly identity: string;
-    readonly provider: ProviderId; readonly fixtures: LearnedFixture[];
-    readonly marketTypes: string[] }>();
+    readonly provider: ProviderId; readonly family: FootballMarketFamily;
+    readonly fixtures: LearnedFixture[] }>();
   for (const catalog of catalogs) {
     const marketsByEvent = new Map<string, string[]>();
     for (const market of catalog.markets) {
@@ -440,15 +456,19 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
     }
     for (const event of catalog.events) {
       if (event.category !== "FOOTBALL") continue;
-      const identity = competitionIdentity(event.competition);
-      if (identity.length === 0) continue;
-      const key = `${catalog.provider} ${identity}`;
-      const entry = fixturesByBookCompetition.get(key) ??
-        { identity, provider: catalog.provider, fixtures: [], marketTypes: [] };
-      entry.fixtures.push({ participantA: event.participantA, participantB: event.participantB,
-        startAtUtcMs: event.startAtUtcMs, isLive: event.isLive });
-      entry.marketTypes.push(...(marketsByEvent.get(event.providerEventId) ?? []));
-      fixturesByBookCompetition.set(key, entry);
+      const marketTypes = marketsByEvent.get(event.providerEventId) ?? [];
+      const families = marketTypes.length === 0 ? ["GOALS" as const]
+        : [...new Set(marketTypes.map(footballMarketFamily))];
+      for (const family of families) {
+        const identity = competitionIdentityForFamily(event.competition, family);
+        if (identity.length === 0) continue;
+        const key = `${catalog.provider} ${family} ${identity}`;
+        const entry = fixturesByBookCompetition.get(key) ??
+          { identity, provider: catalog.provider, family, fixtures: [] };
+        entry.fixtures.push({ participantA: event.participantA, participantB: event.participantB,
+          startAtUtcMs: event.startAtUtcMs, isLive: event.isLive });
+        fixturesByBookCompetition.set(key, entry);
+      }
     }
   }
   // How many of its own fixtures each pair of book-competitions holds in
@@ -481,10 +501,6 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
       }
     }
   }
-  const familyByKey = new Map<string, "GOALS" | "CORNERS" | "CARDS">();
-  for (const [key, entry] of fixturesByBookCompetition) {
-    familyByKey.set(key, competitionMarketFamily(entry.marketTypes));
-  }
   const parent = new Map<string, string>();
   const find = (value: string): string => {
     let root = value;
@@ -506,19 +522,23 @@ function learnCompetitionLinks(catalogs: readonly LiveCatalogResponse[],
       const [rightKey, rightEntry] = entries[right]!;
       if (leftKey.split(" ")[0] === rightKey.split(" ")[0]) continue;
       if (leftEntry.identity === rightEntry.identity) continue;
-      if (familyByKey.get(leftKey) !== familyByKey.get(rightKey)) continue;
+      if (leftEntry.family !== rightEntry.family) continue;
       // A pair the memory has watched agree on two fixtures is carrying the
       // same evidence as two sitting on one board, gathered over more than one
       // glance because that is how a 24-hour window shows a league its season.
       const pair = pairKey(leftKey, rightKey);
       const shared = Math.max(sharedFixtures.get(pair)?.size ?? 0, rememberedCounts.get(pair) ?? 0);
       if (shared >= SHARED_FIXTURES_REQUIRED_TO_LINK_COMPETITIONS) {
-        union(leftEntry.identity, rightEntry.identity);
+        union(competitionLinkKey(leftEntry.identity, leftEntry.family),
+          competitionLinkKey(rightEntry.identity, rightEntry.family));
       }
     }
   }
   const links = new Map<string, string>();
-  for (const { identity } of fixturesByBookCompetition.values()) links.set(identity, find(identity));
+  for (const { identity, family } of fixturesByBookCompetition.values()) {
+    const key = competitionLinkKey(identity, family);
+    links.set(key, find(key));
+  }
   return links;
 }
 
@@ -597,24 +617,28 @@ function unorderedParticipantKey(event: ProviderEvent): string {
 
 const footballKickoffCandidateBucketMs = 120_000;
 
-function footballCandidatePrefix(event: ProviderEvent, links: ReadonlyMap<string, string>): string | null {
+function footballCandidatePrefix(event: ProviderEvent, links: ReadonlyMap<string, string>,
+  family: ComparisonMarketFamily): string | null {
   if (event.category !== "FOOTBALL") return null;
-  const competition = linkedCompetitionIdentity(event.competition, links);
+  if (family === "ESPORTS") return null;
+  const competition = linkedCompetitionIdentity(event.competition, links, family);
   if (competition.length === 0) return null;
-  return [event.category, event.isLive ? "LIVE" : "PREMATCH", event.eventScope,
+  return [event.category, family, event.isLive ? "LIVE" : "PREMATCH", event.eventScope,
     event.isVirtual === true ? "VIRTUAL" : event.isVirtual === false ? "REAL" : "UNKNOWN",
     event.sportVariant ?? "UNKNOWN", competition].join("|");
 }
 
-function footballCandidateIndexKey(event: ProviderEvent, links: ReadonlyMap<string, string>): string | null {
-  const prefix = footballCandidatePrefix(event, links);
+function footballCandidateIndexKey(event: ProviderEvent, links: ReadonlyMap<string, string>,
+  family: ComparisonMarketFamily): string | null {
+  const prefix = footballCandidatePrefix(event, links, family);
   if (prefix === null) return null;
   return event.isLive ? `${prefix}|LIVE`
     : `${prefix}|${Math.floor(event.startAtUtcMs / footballKickoffCandidateBucketMs)}`;
 }
 
-function footballCandidateLookupKeys(event: ProviderEvent, links: ReadonlyMap<string, string>): readonly string[] {
-  const prefix = footballCandidatePrefix(event, links);
+function footballCandidateLookupKeys(event: ProviderEvent, links: ReadonlyMap<string, string>,
+  family: ComparisonMarketFamily): readonly string[] {
+  const prefix = footballCandidatePrefix(event, links, family);
   if (prefix === null) return [];
   if (event.isLive) return [`${prefix}|LIVE`];
   const bucket = Math.floor(event.startAtUtcMs / footballKickoffCandidateBucketMs);
@@ -688,13 +712,16 @@ function completeFootballLiveEvidenceMatches(left: ProviderEvent, right: Provide
 }
 
 function hasIndependentFootballLiveIdentity(left: ProviderEvent, right: ProviderEvent,
-  orientation: EventOrientation, links?: ReadonlyMap<string, string>): boolean {
+  orientation: EventOrientation, family: ComparisonMarketFamily,
+  links?: ReadonlyMap<string, string>): boolean {
   const sameFixture = left.fixtureDiscriminator !== null && left.fixtureDiscriminator.length > 0 &&
     right.fixtureDiscriminator !== null && right.fixtureDiscriminator.length > 0 &&
     left.fixtureDiscriminator === right.fixtureDiscriminator;
   if (sameFixture) return true;
-  const sameCompetitionAndKickoff = linkedCompetitionIdentity(left.competition, links).length > 0 &&
-    linkedCompetitionIdentity(left.competition, links) === linkedCompetitionIdentity(right.competition, links) &&
+  const sameCompetitionAndKickoff = family !== "ESPORTS" &&
+    linkedCompetitionIdentity(left.competition, links, family).length > 0 &&
+    linkedCompetitionIdentity(left.competition, links, family) ===
+      linkedCompetitionIdentity(right.competition, links, family) &&
     Math.abs(left.startAtUtcMs - right.startAtUtcMs) <= 120_000;
   return sameCompetitionAndKickoff || completeFootballLiveEvidenceMatches(left, right, orientation);
 }
@@ -723,7 +750,7 @@ function participantOrientation(left: ProviderEvent, right: ProviderEvent): Part
 }
 
 function compatibleEventOrientation(left: ProviderEvent, right: ProviderEvent,
-  links?: ReadonlyMap<string, string>): EventOrientation | null {
+  family: ComparisonMarketFamily, links?: ReadonlyMap<string, string>): EventOrientation | null {
   if (left.category !== right.category || left.isLive !== right.isLive) return null;
   if (!sameEventVariant(left, right)) return null;
   if (left.category === "LOL" && right.category === "LOL" && left.bestOf !== null && right.bestOf !== null &&
@@ -734,14 +761,15 @@ function compatibleEventOrientation(left: ProviderEvent, right: ProviderEvent,
   const participantMatch = participantOrientation(left, right);
   if (participantMatch === null || !footballLiveEvidenceCompatible(left, right, participantMatch.orientation)) return null;
   if (!left.isLive && left.category === "FOOTBALL") {
+    if (family === "ESPORTS") return null;
     const sameFixture = left.fixtureDiscriminator !== null && left.fixtureDiscriminator.length > 0 &&
       left.fixtureDiscriminator === right.fixtureDiscriminator;
-    const leftCompetition = linkedCompetitionIdentity(left.competition, links);
-    const rightCompetition = linkedCompetitionIdentity(right.competition, links);
+    const leftCompetition = linkedCompetitionIdentity(left.competition, links, family);
+    const rightCompetition = linkedCompetitionIdentity(right.competition, links, family);
     if (!sameFixture && (leftCompetition.length === 0 || leftCompetition !== rightCompetition)) return null;
   }
   if (left.isLive && left.category === "FOOTBALL" &&
-    !hasIndependentFootballLiveIdentity(left, right, participantMatch.orientation, links)) return null;
+    !hasIndependentFootballLiveIdentity(left, right, participantMatch.orientation, family, links)) return null;
   const kickoffToleranceMs = left.category === "LOL" ? 30 * 60_000 : FOOTBALL_KICKOFF_TOLERANCE_MS;
   if (!left.isLive && Math.abs(left.startAtUtcMs - right.startAtUtcMs) > kickoffToleranceMs) return null;
   if (left.category === "LOL" && eventSemanticKey(left) !==
@@ -763,19 +791,29 @@ function canonicalLine(line: string | null): string | null {
   return String(Object.is(value, -0) ? 0 : value);
 }
 
-const footballHandicapMarketTypes = new Set([
-  "FT_AH", "FH_AH", "SH_AH", "CORNER_FT_AH", "CORNER_FH_AH", "CARD_FT_AH", "CARD_FH_AH"
-]);
-const footballTotalMarketTypes = new Set([
-  "FT_TOTAL", "FH_TOTAL", "SH_TOTAL", "CORNER_FT_TOTAL", "CORNER_FH_TOTAL", "CARD_FT_TOTAL", "CARD_FH_TOTAL"
-]);
-
 function isFootballHandicapMarketType(marketType: string): boolean {
-  return footballHandicapMarketTypes.has(marketType);
+  return footballBinaryMarketSpec(marketType as MarketType)?.family === "HANDICAP";
 }
 
 function isFootballTotalMarketType(marketType: string): boolean {
-  return footballTotalMarketTypes.has(marketType);
+  return footballBinaryMarketSpec(marketType as MarketType)?.family === "TOTAL";
+}
+
+const swappedFootballSubjectMarketType: Readonly<Partial<Record<MarketType, MarketType>>> = {
+  HOME_CORNER_FT_TOTAL: "AWAY_CORNER_FT_TOTAL", AWAY_CORNER_FT_TOTAL: "HOME_CORNER_FT_TOTAL",
+  HOME_CORNER_FH_TOTAL: "AWAY_CORNER_FH_TOTAL", AWAY_CORNER_FH_TOTAL: "HOME_CORNER_FH_TOTAL",
+  HOME_FT_SCORE_BOTH_HALVES: "AWAY_FT_SCORE_BOTH_HALVES", AWAY_FT_SCORE_BOTH_HALVES: "HOME_FT_SCORE_BOTH_HALVES",
+  HOME_FT_WIN_BOTH_HALVES: "AWAY_FT_WIN_BOTH_HALVES", AWAY_FT_WIN_BOTH_HALVES: "HOME_FT_WIN_BOTH_HALVES",
+  HOME_FT_WIN_EITHER_HALF: "AWAY_FT_WIN_EITHER_HALF", AWAY_FT_WIN_EITHER_HALF: "HOME_FT_WIN_EITHER_HALF",
+  HOME_FT_ODD_EVEN: "AWAY_FT_ODD_EVEN", AWAY_FT_ODD_EVEN: "HOME_FT_ODD_EVEN",
+  HOME_FT_WIN_TO_NIL: "AWAY_FT_WIN_TO_NIL", AWAY_FT_WIN_TO_NIL: "HOME_FT_WIN_TO_NIL",
+  HOME_FT_CLEAN_SHEET: "AWAY_FT_CLEAN_SHEET", AWAY_FT_CLEAN_SHEET: "HOME_FT_CLEAN_SHEET",
+  HOME_FT_TOTAL: "AWAY_FT_TOTAL", AWAY_FT_TOTAL: "HOME_FT_TOTAL",
+  HOME_FT_TO_WIN: "AWAY_FT_TO_WIN", AWAY_FT_TO_WIN: "HOME_FT_TO_WIN"
+};
+
+function orientFootballMarketType(marketType: MarketType, orientation: EventOrientation): MarketType {
+  return orientation === "SWAPPED" ? swappedFootballSubjectMarketType[marketType] ?? marketType : marketType;
 }
 
 export function selectionHandicapLine(
@@ -792,7 +830,13 @@ export function selectionHandicapLine(
 function orientMarket(market: ProviderMarket, orientation: EventOrientation): ProviderMarket {
   const shouldInvert = orientation === "SWAPPED" && market.category === "FOOTBALL" &&
     isFootballHandicapMarketType(market.marketType);
-  return { ...market, line: canonicalLine(shouldInvert ? invertLine(market.line) : market.line) };
+  const marketType = market.category === "FOOTBALL" ? orientFootballMarketType(market.marketType, orientation)
+    : market.marketType;
+  const settlementProfile = market.category === "FOOTBALL" && marketType !== market.marketType
+    ? footballBinaryMarketSpec(marketType)?.settlementProfile ?? market.settlementProfile
+    : market.settlementProfile;
+  return { ...market, marketType, settlementProfile,
+    line: canonicalLine(shouldInvert ? invertLine(market.line) : market.line) };
 }
 
 function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrientation): readonly ProviderQuote[] {
@@ -806,7 +850,7 @@ function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrient
     if (quote.category === "FOOTBALL") {
       const selection = quote.selection === "HOME" ? "AWAY" : quote.selection === "AWAY" ? "HOME" : quote.selection;
       const line = canonicalLine(isFootballHandicapMarketType(quote.marketType) ? invertLine(quote.line) : quote.line);
-      return { ...quote, selection, line };
+      return { ...quote, marketType: orientFootballMarketType(quote.marketType, orientation), selection, line };
     }
     return quote;
   }).sort((left, right) => left.selection.localeCompare(right.selection));
@@ -854,21 +898,12 @@ function displayTwoWayCells(cells: readonly ComparisonCell[]): readonly Comparis
   return accepted;
 }
 
-function isSupportedAsianLine(line: string | null): boolean {
-  if (line === null) return false;
-  const value = Math.abs(Number(line));
-  if (!Number.isFinite(value)) return false;
-  const fraction = value % 1;
-  return [0.25, 0.5, 0.75].some((supported) => Math.abs(fraction - supported) < 1e-9);
-}
-
 export function exactTwoWayOutcomeDomain(marketType: string, scope: string,
   line: string | null): readonly string[] | null {
-  const expectedScope = marketType === "SH_AH" || marketType === "SH_TOTAL" ? "SECOND_HALF"
-    : marketType.includes("_FH_") || marketType === "FH_AH" || marketType === "FH_TOTAL" ? "FIRST_HALF"
-    : isFootballHandicapMarketType(marketType) || isFootballTotalMarketType(marketType) ? "FULL_TIME" : null;
-  if (expectedScope !== null && scope === expectedScope && isSupportedAsianLine(line)) {
-    return isFootballTotalMarketType(marketType) ? ["OVER", "UNDER"] : ["AWAY", "HOME"];
+  const spec = footballBinaryMarketSpec(marketType as MarketType);
+  if (spec !== null && scope === spec.scope &&
+    (spec.linePolicy === "NONE" ? line === null : isNoPushFootballLine(line))) {
+    return [...spec.outcomes].sort();
   }
   if (marketType === "SERIES_WINNER" && scope === "SERIES" && line === null) return ["TEAM_A", "TEAM_B"];
   if (marketType === "MAP_WINNER" && /^MAP_[1-5]$/u.test(scope) && line === null) return ["TEAM_A", "TEAM_B"];
@@ -925,15 +960,19 @@ export function decimalOdds(quote: ProviderQuote): number | null {
 export function selectionLabel(event: ProviderEvent, selection: string): string {
   if (selection === "TEAM_A" || selection === "HOME") return event.participantA;
   if (selection === "TEAM_B" || selection === "AWAY") return event.participantB;
-  if (selection === "OVER") return "Tài";
-  if (selection === "UNDER") return "Xỉu";
+  if (selection === "OVER") return "Over";
+  if (selection === "UNDER") return "Under";
+  if (selection === "ODD") return "Odd";
+  if (selection === "EVEN") return "Even";
+  if (selection === "YES") return "Yes";
+  if (selection === "NO") return "No";
   return selection;
 }
 
 export function ticketMarketLabel(marketType: string): string {
-  if (marketType === "FT_AH") return "Chấp toàn trận";
-  if (marketType === "FT_TOTAL") return "Tài/Xỉu toàn trận";
-  if (marketType === "SERIES_WINNER") return "Thắng series";
+  if (marketType === "FT_AH") return "Full-time handicap";
+  if (marketType === "FT_TOTAL") return "Full-time total";
+  if (marketType === "SERIES_WINNER") return "Series winner";
   if (marketType === "MAP_WINNER") return "Map winner";
   if (marketType === "FH_AH") return "First-half handicap";
   if (marketType === "FH_TOTAL") return "First-half total";
@@ -947,6 +986,39 @@ export function ticketMarketLabel(marketType: string): string {
   if (marketType === "CARD_FT_TOTAL") return "Card total";
   if (marketType === "CARD_FH_AH") return "First-half card handicap";
   if (marketType === "CARD_FH_TOTAL") return "First-half card total";
+  if (marketType === "FT_ODD_EVEN") return "Full-time goals odd/even";
+  if (marketType === "FH_ODD_EVEN") return "First-half goals odd/even";
+  if (marketType === "SH_ODD_EVEN") return "Second-half goals odd/even";
+  if (marketType === "CORNER_FT_ODD_EVEN") return "Full-time corners odd/even";
+  if (marketType === "CORNER_FH_ODD_EVEN") return "First-half corners odd/even";
+  if (marketType === "FT_BTTS") return "Both teams to score";
+  if (marketType === "FH_BTTS") return "First-half both teams to score";
+  if (marketType === "SH_BTTS") return "Second-half both teams to score";
+  if (marketType === "SENDING_OFF") return "Sending off";
+  if (marketType === "HOME_CORNER_FT_TOTAL") return "Home team corner total";
+  if (marketType === "HOME_CORNER_FH_TOTAL") return "First-half home team corner total";
+  if (marketType === "AWAY_CORNER_FT_TOTAL") return "Away team corner total";
+  if (marketType === "AWAY_CORNER_FH_TOTAL") return "First-half away team corner total";
+  if (marketType === "HOME_FT_SCORE_BOTH_HALVES") return "Home team to score in both halves";
+  if (marketType === "AWAY_FT_SCORE_BOTH_HALVES") return "Away team to score in both halves";
+  if (marketType === "HOME_FT_WIN_BOTH_HALVES") return "Home team to win both halves";
+  if (marketType === "AWAY_FT_WIN_BOTH_HALVES") return "Away team to win both halves";
+  if (marketType === "HOME_FT_WIN_EITHER_HALF") return "Home team to win either half";
+  if (marketType === "AWAY_FT_WIN_EITHER_HALF") return "Away team to win either half";
+  if (marketType === "HOME_FT_ODD_EVEN") return "Home team goals odd/even";
+  if (marketType === "AWAY_FT_ODD_EVEN") return "Away team goals odd/even";
+  if (marketType === "HOME_FT_WIN_TO_NIL") return "Home team to win to nil";
+  if (marketType === "AWAY_FT_WIN_TO_NIL") return "Away team to win to nil";
+  if (marketType === "HOME_FT_CLEAN_SHEET") return "Home team clean sheet";
+  if (marketType === "AWAY_FT_CLEAN_SHEET") return "Away team clean sheet";
+  if (marketType === "FT_BOTH_HALVES_OVER_TOTAL") return "Both halves over total";
+  if (marketType === "FT_BOTH_HALVES_UNDER_TOTAL") return "Both halves under total";
+  if (marketType === "HOME_FT_TOTAL") return "Home team total";
+  if (marketType === "AWAY_FT_TOTAL") return "Away team total";
+  if (marketType === "HOME_FT_TO_WIN") return "Home team to win";
+  if (marketType === "AWAY_FT_TO_WIN") return "Away team to win";
+  if (marketType === "FT_ANY_TEAM_TO_WIN") return "Either team to win";
+  if (marketType === "YELLOW_CARD_FT_TOTAL") return "Yellow-card total";
   return marketType;
 }
 
@@ -1061,6 +1133,22 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
     }
     catalogIndexes.set(catalog, { marketsByEvent, quotesByMarket });
   }
+  type EventProjection = { readonly catalog: LiveCatalogResponse; readonly event: ProviderEvent;
+    readonly family: ComparisonMarketFamily };
+  const projections: EventProjection[] = [];
+  for (const catalog of orderedCatalogs) {
+    const index = catalogIndexes.get(catalog)!;
+    for (const event of catalog.events) {
+      if (event.category === "LOL") {
+        projections.push({ catalog, event, family: "ESPORTS" });
+        continue;
+      }
+      const eventMarkets = index.marketsByEvent.get(event.providerEventId) ?? [];
+      const families = eventMarkets.length === 0 ? ["GOALS" as const]
+        : [...new Set(eventMarkets.map((market) => footballMarketFamily(market.marketType)))];
+      for (const family of families) projections.push({ catalog, event, family });
+    }
+  }
   const competitionLinks = learnCompetitionLinks(orderedCatalogs, competitionMemory);
   // A book listing one fixture twice cannot say which entry a rival's price
   // belongs to, so both are withheld. Its own competition string is what tells
@@ -1071,46 +1159,50 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
   // only entry another book can price against, is withheld with them. The raw
   // string is deliberate: linking it first would fold those products back into
   // one identity and lose the distinction again.
-  const identityKey = (provider: ProviderId, event: ProviderEvent): string =>
-    [provider, event.category, event.isLive ? "LIVE" : String(event.startAtUtcMs),
-      competitionIdentity(event.competition), unorderedParticipantKey(event)].join("|");
+  const identityKey = (provider: ProviderId, event: ProviderEvent, family: ComparisonMarketFamily): string =>
+    [provider, event.category, family, event.isLive ? "LIVE" : String(event.startAtUtcMs),
+      event.category === "FOOTBALL" && family !== "ESPORTS"
+        ? competitionIdentityForFamily(event.competition, family)
+        : competitionIdentity(event.competition), unorderedParticipantKey(event)].join("|");
   const identityCounts = new Map<string, number>();
-  for (const catalog of orderedCatalogs) for (const event of catalog.events) {
-    const key = identityKey(catalog.provider, event);
+  for (const { catalog, event, family } of projections) {
+    const key = identityKey(catalog.provider, event, family);
     identityCounts.set(key, (identityCounts.get(key) ?? 0) + 1);
   }
-  const ambiguous = (catalog: LiveCatalogResponse, event: ProviderEvent): boolean =>
-    (identityCounts.get(identityKey(catalog.provider, event)) ?? 0) > 1;
+  const ambiguous = (catalog: LiveCatalogResponse, event: ProviderEvent,
+    family: ComparisonMarketFamily): boolean =>
+    (identityCounts.get(identityKey(catalog.provider, event, family)) ?? 0) > 1;
   type MutableEventGroup = { key: string; event: ProviderEvent; catalogs: LiveCatalogResponse[];
+    family: ComparisonMarketFamily;
     ids: Partial<Record<ProviderId, string>>; orientations: Partial<Record<ProviderId, EventOrientation>>;
     sourceEvents: Partial<Record<ProviderId, ProviderEvent>> };
   const groups: MutableEventGroup[] = [];
   const groupsByParticipants = new Map<string, MutableEventGroup[]>();
   const footballGroupsByCandidate = new Map<string, MutableEventGroup[]>();
-  for (const catalog of orderedCatalogs) {
-    for (const event of catalog.events) {
+  for (const { catalog, event, family } of projections) {
       let orientation: EventOrientation | null = null;
-      const participantKey = [event.category, event.isLive ? "LIVE" : "PREMATCH",
+      const participantKey = [event.category, family, event.isLive ? "LIVE" : "PREMATCH",
         unorderedParticipantKey(event)].join("|");
       const exactCandidates = groupsByParticipants.get(participantKey) ?? [];
       const candidatePool = exactCandidates.length > 0 ? exactCandidates : [...new Set(
-        footballCandidateLookupKeys(event, competitionLinks)
+        footballCandidateLookupKeys(event, competitionLinks, family)
           .flatMap((key) => footballGroupsByCandidate.get(key) ?? []))];
       const matches = candidatePool.flatMap((candidate) => {
-        if (candidate.ids[catalog.provider] !== undefined || ambiguous(catalog, event) ||
-          candidate.catalogs.some((source) => ambiguous(source, candidate.sourceEvents[source.provider] ?? candidate.event))) return [];
-        const candidateOrientation = compatibleEventOrientation(candidate.event, event, competitionLinks);
+        if (candidate.family !== family || candidate.ids[catalog.provider] !== undefined ||
+          ambiguous(catalog, event, family) || candidate.catalogs.some((source) =>
+            ambiguous(source, candidate.sourceEvents[source.provider] ?? candidate.event, family))) return [];
+        const candidateOrientation = compatibleEventOrientation(candidate.event, event, family, competitionLinks);
         return candidateOrientation === null ? [] : [{ candidate, orientation: candidateOrientation }];
       });
       let group = matches.length === 1 ? matches[0]!.candidate : undefined;
       orientation = matches.length === 1 ? matches[0]!.orientation : null;
       if (group === undefined) {
         orientation = "SAME";
-        group = { key: eventKey(event), event: displayEvent(event), catalogs: [], ids: {}, orientations: {},
-          sourceEvents: {} };
+        group = { key: `${eventKey(event)}|family:${family}`, event: displayEvent(event), family,
+          catalogs: [], ids: {}, orientations: {}, sourceEvents: {} };
         groups.push(group);
         groupsByParticipants.set(participantKey, [...(groupsByParticipants.get(participantKey) ?? []), group]);
-        const candidateKey = footballCandidateIndexKey(event, competitionLinks);
+        const candidateKey = footballCandidateIndexKey(event, competitionLinks, family);
         if (candidateKey !== null) {
           footballGroupsByCandidate.set(candidateKey,
             [...(footballGroupsByCandidate.get(candidateKey) ?? []), group]);
@@ -1120,7 +1212,6 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
       group.ids[catalog.provider] = event.providerEventId;
       group.orientations[catalog.provider] = orientation ?? "SAME";
       group.sourceEvents[catalog.provider] = event;
-    }
   }
   return groups.map((group) => {
     const key = group.key;
@@ -1129,6 +1220,9 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
       const providerEventId = group.ids[catalog.provider];
       const index = catalogIndexes.get(catalog)!;
       for (const market of index.marketsByEvent.get(providerEventId ?? "") ?? []) {
+        const marketFamily: ComparisonMarketFamily = market.category === "LOL"
+          ? "ESPORTS" : footballMarketFamily(market.marketType);
+        if (marketFamily !== group.family) continue;
         const orientation = group.orientations[catalog.provider] ?? "SAME";
         const orientedMarket = orientMarket(market, orientation);
         const rowKey = marketKey(orientedMarket);

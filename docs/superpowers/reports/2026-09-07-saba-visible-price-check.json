@@ -1,0 +1,29 @@
+{
+  "at": "2026-09-07T11:06:12.980Z",
+  "sourceEpoch": "51a90050-ad18-4ff8-8c96-94c444595e50:3",
+  "catalog": {
+    "observedAtMs": 1788779149221,
+    "snapshotState": "FRESH",
+    "events": 99,
+    "markets": 649,
+    "quotes": 1298,
+    "nativeRows": 975
+  },
+  "receiptAligned": true,
+  "stableSourceDuringSample": true,
+  "visibleReceiptCheck": {
+    "scope": "VISIBLE_RECEIPT_ONLY_NOT_FULL_PROVIDER_COVERAGE",
+    "rawGroups": 975,
+    "rawNativeMissing": 0,
+    "duplicateRawNative": 0,
+    "duplicatePublishedNative": 0,
+    "normalizedAbsent": 0,
+    "invalidNormalizedShape": 0,
+    "expectedPrices": 1264,
+    "matchedPrices": 1264,
+    "missingPrices": 0,
+    "olderPrices": 0,
+    "supersededPrices": 0,
+    "mismatchedPrices": 0
+  }
+}

@@ -746,7 +746,7 @@ describe("Runtime", () => {
       providerMarketId,
       marketType: "FT_AH",
       scope: "FULL_TIME",
-      line: "0",
+      line: "0.5",
       settlementProfile: "football-regulation-including-added-time",
       status: "OPEN"
     });

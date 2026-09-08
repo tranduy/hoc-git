@@ -68,6 +68,22 @@ describe("ChromeBridgeControlPlane", () => {
     expect(activeSocket.send).not.toHaveBeenCalled();
   });
 
+  it("requests a lobby snapshot from its candidate when no active authority exists yet", () => {
+    const coordinator = new ProviderAuthorityCoordinator();
+    const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });
+    const socket = { send: vi.fn(), readyState: 1 };
+    const identity: AuthorityIdentity = { accountId: SABA_ACCOUNT, sourceId: "chrome:SABA:1",
+      sourceEpoch: "observer-a:0", connectionGeneration: 1 };
+    const observation = coordinator.observe(identity, "CANDIDATE_DATA");
+    if (observation.disposition !== "CANDIDATE") throw new Error("expected candidate");
+    plane.attachAuthority(identity, observation, "SABA", socket);
+
+    expect(plane.requestLobbySnapshot("SABA")).toBe(1);
+    expect(socket.send).toHaveBeenCalledExactlyOnceWith(JSON.stringify({
+      version: 1, kind: "REQUEST_SNAPSHOT", sourceId: "chrome:SABA:1"
+    }));
+  });
+
   it("keeps exact routine snapshot control active-only while candidate bootstrap requires its token", () => {
     const coordinator = new ProviderAuthorityCoordinator();
     const plane = new ChromeBridgeControlPlane({ authorityCoordinator: coordinator });

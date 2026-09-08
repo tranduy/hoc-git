@@ -151,4 +151,25 @@ describe("CmdObservedCatalogReader", () => {
     expect(result.markets).toEqual([expect.objectContaining({ provider: "SABA", marketType: "FT_AH", line: "-0.5" })]);
     expect(result.quotes.map((quote) => quote.selection)).toEqual(["HOME", "AWAY"]);
   });
+
+  it("normalizes native odd-even groups proved by Vietnamese outcome labels", async () => {
+    const reader = new CmdObservedCatalogReader({
+      accounts: { withActiveHandle: async (_id, _provider, consume) => consume(handle) },
+      source: { readCatalog: async () => [{
+        sportId: "1", leagueId: "l", leagueName: "Premier Test", matchId: "m", timeText: "1H27'",
+        teamNames: ["Alpha", "Beta"], groups: [{ betTypeIds: ["2"], labels: ["Lẻ", "Chẵn"], odds: [
+          { marketOddsId: "odd-even", priceText: "0.8", status: null, greyedOut: null },
+          { marketOddsId: "odd-even", priceText: "-0.9", status: null, greyedOut: null }
+        ] }]
+      }] },
+      clock: { now: () => ({ wallClockNowMs: 1_788_000_000_000, monotonicNowMs: 500 }) },
+      timezoneOffsetMinutes: 420
+    });
+
+    const result = await reader.read("account-1");
+    expect(result.markets).toEqual([expect.objectContaining({
+      providerMarketId: "odd-even", marketType: "FT_ODD_EVEN", line: null
+    })]);
+    expect(result.quotes.map((quote) => quote.selection)).toEqual(["ODD", "EVEN"]);
+  });
 });

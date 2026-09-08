@@ -44,39 +44,62 @@ export interface EventEdgeSummary {
 
 const APSPORT_LIVE_QUOTE_MAX_AGE_MS = 5_000;
 const APSPORT_PREMATCH_QUOTE_MAX_AGE_MS = 15_000;
+const apsportQuoteDeadlineCache = new WeakMap<ComparisonEvent["catalogs"][number], ReadonlyMap<string, number>>();
 
-function sameQuoteIdentity(left: ProviderQuote, right: ProviderQuote): boolean {
-  return left.providerEventId === right.providerEventId && left.providerMarketId === right.providerMarketId &&
-    left.providerSelectionId === right.providerSelectionId;
+function quoteIdentity(quote: ProviderQuote): string {
+  return `${quote.providerEventId}\u0000${quote.providerMarketId}\u0000${quote.providerSelectionId}`;
 }
 
-function isFreshApsportQuote(event: ComparisonEvent, quote: ProviderQuote, nowMs: number): boolean {
+function apsportQuoteDeadlines(catalog: ComparisonEvent["catalogs"][number]): ReadonlyMap<string, number> {
+  const cached = apsportQuoteDeadlineCache.get(catalog);
+  if (cached !== undefined) return cached;
+  const newestByEvent = new Map<string, number>();
+  for (const quote of catalog.quotes) {
+    const newest = newestByEvent.get(quote.providerEventId);
+    if (newest === undefined || quote.receivedMonotonicMs > newest) {
+      newestByEvent.set(quote.providerEventId, quote.receivedMonotonicMs);
+    }
+  }
+  const result = new Map<string, number>();
+  for (const quote of catalog.quotes) {
+    const newestReceivedAt = newestByEvent.get(quote.providerEventId) ?? quote.receivedMonotonicMs;
+    const offsetMs = Math.max(0, newestReceivedAt - quote.receivedMonotonicMs);
+    result.set(quoteIdentity(quote), catalog.observedAtMs + (quote.isLive
+      ? APSPORT_LIVE_QUOTE_MAX_AGE_MS : APSPORT_PREMATCH_QUOTE_MAX_AGE_MS) - offsetMs);
+  }
+  apsportQuoteDeadlineCache.set(catalog, result);
+  return result;
+}
+
+function apsportFreshnessIndexes(event: ComparisonEvent): readonly ReadonlyMap<string, number>[] {
+  return event.catalogs.flatMap((catalog) => catalog.provider === "APSPORT" &&
+    catalog.snapshotState !== "STALE" && catalog.quotes.length > 0 ? [apsportQuoteDeadlines(catalog)] : []);
+}
+
+function isFreshApsportQuote(indexes: readonly ReadonlyMap<string, number>[], quote: ProviderQuote,
+  nowMs: number): boolean {
   if (quote.provider !== "APSPORT") return true;
-  const catalog = event.catalogs.find((candidate) => candidate.provider === "APSPORT" &&
-    candidate.snapshotState !== "STALE" && candidate.quotes.some((current) => sameQuoteIdentity(current, quote)));
-  if (catalog === undefined || catalog.quotes.length === 0) return false;
-  const current = catalog.quotes.find((candidate) => sameQuoteIdentity(candidate, quote));
-  if (current === undefined) return false;
-  const newestReceivedAt = catalog.quotes.filter((candidate) =>
-    candidate.providerEventId === current.providerEventId).reduce((latest, candidate) =>
-    Math.max(latest, candidate.receivedMonotonicMs), current.receivedMonotonicMs);
-  const estimatedAgeMs = Math.max(0, nowMs - catalog.observedAtMs) +
-    Math.max(0, newestReceivedAt - current.receivedMonotonicMs);
-  return estimatedAgeMs <= (current.isLive ? APSPORT_LIVE_QUOTE_MAX_AGE_MS : APSPORT_PREMATCH_QUOTE_MAX_AGE_MS);
+  const key = quoteIdentity(quote);
+  for (const index of indexes) {
+    const deadlineMs = index.get(key);
+    if (deadlineMs !== undefined) return nowMs <= deadlineMs;
+  }
+  return false;
 }
 
-function freshnessFilteredRow(event: ComparisonEvent, row: ComparisonRow, nowMs: number): {
+function freshnessFilteredRow(row: ComparisonRow,
+  freshnessIndexes: readonly ReadonlyMap<string, number>[], nowMs: number): {
   readonly row: ComparisonRow; readonly rejectedApsportQuote: boolean;
 } {
   let rejectedApsportQuote = false;
   const cells = row.cells.map((cell) => {
     if (cell.provider !== "APSPORT") return cell;
     const quotes = cell.quotes.filter((quote) => {
-      const fresh = isFreshApsportQuote(event, quote, nowMs);
+      const fresh = isFreshApsportQuote(freshnessIndexes, quote, nowMs);
       if (!fresh) rejectedApsportQuote = true;
       return fresh;
     });
-    const sourceQuotes = cell.sourceQuotes?.filter((quote) => isFreshApsportQuote(event, quote, nowMs));
+    const sourceQuotes = cell.sourceQuotes?.filter((quote) => isFreshApsportQuote(freshnessIndexes, quote, nowMs));
     return { ...cell, quotes, ...(sourceQuotes === undefined ? {} : { sourceQuotes }) };
   });
   return { row: { ...row, cells }, rejectedApsportQuote };
@@ -205,8 +228,9 @@ export function rankTicketsForEvent(input: {
   readonly nowMs: number;
   readonly limit?: number;
 }): readonly RankedTicket[] {
+  const freshnessIndexes = apsportFreshnessIndexes(input.event);
   const tickets = input.event.rows.map((row): RankedTicket => {
-    const freshness = freshnessFilteredRow(input.event, row, input.nowMs);
+    const freshness = freshnessFilteredRow(row, freshnessIndexes, input.nowMs);
     const safeRow = freshness.row;
     const verified = input.verified.get(`${input.event.key}::${row.key}`);
     const movementMagnitude = movementFor(input.event.key, row.key, input.movements);
