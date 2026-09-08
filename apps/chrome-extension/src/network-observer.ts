@@ -1391,6 +1391,8 @@ export class NetworkObserver {
   readonly #ksportPeriodSelectionAtMs = new Map<string, number>();
   readonly #ksportMaintenanceRecoveryAtMs = new Map<string, number>();
   readonly #ksportHttpFallbackModes = new Map<string, KsportHttpFallbackMode>();
+  readonly #ksportHttpPairReceipts = new Map<string, { readonly sourceGeneration: number;
+    readonly tabGeneration: number; readonly bridgeGeneration: number; readonly observedAtMs: number }>();
   readonly #ksportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #ksportNativeHttpCaptures = new Map<string, KsportNativeHttpCapture>();
   readonly #ksportNativeHttpRecoveryAtMs = new Map<string, number>();
@@ -1655,6 +1657,7 @@ export class NetworkObserver {
 
   async #ensureCompleteKsportBaseline(source: ObservedSource): Promise<boolean> {
     if (source.lobby !== "KSPORT") return false;
+    if (this.#hasFreshKsportHttpPair(source)) return true;
     const activeStream = this.#activeKsportStreams.get(source.sourceId);
     const frames = activeStream === undefined
       ? undefined : this.#catalogWsSnapshots.get(source.sourceId)?.get(activeStream);
@@ -3455,7 +3458,7 @@ export class NetworkObserver {
     mode?: KsportHttpFallbackMode): Promise<boolean> {
     const lastRecoveryAtMs = this.#ksportMaintenanceRecoveryAtMs.get(source.sourceId);
     if (lastRecoveryAtMs !== undefined &&
-      nowMs - lastRecoveryAtMs < KSPORT_HTTP_RECONCILE_INTERVAL_MS) return false;
+      nowMs - lastRecoveryAtMs < KSPORT_HTTP_RECONCILE_INTERVAL_MS) return this.#hasFreshKsportHttpPair(source);
     this.#ksportMaintenanceRecoveryAtMs.set(source.sourceId, nowMs);
     this.#ksportRefreshesInFlight.add(source.sourceId);
     try {
@@ -4521,7 +4524,7 @@ export class NetworkObserver {
     preferredSessionId?: string, onAttemptAdmitted?: () => void, ownsRequest?: () => boolean): Promise<void> {
     const sourceGeneration = this.#sourceGenerations.get(source.sourceId) ?? 0;
     const isCurrent = (): boolean => this.#isSourceGenerationCurrent(source.sourceId, sourceGeneration) &&
-      ownsRequest?.() !== false;
+      ownsRequest?.() !== false && !this.#hasFreshKsportHttpPair(source);
     if (!isCurrent()) return;
     const nowMs = this.#now();
     const previous = this.#socketBaselineRecoveryAtMs.get(source.sourceId);
@@ -4957,7 +4960,19 @@ export class NetworkObserver {
     await this.#requestFreshKsportNativeHttpBaseline(source);
   }
 
+  #hasFreshKsportHttpPair(source: ObservedSource): boolean {
+    if (source.lobby !== "KSPORT") return false;
+    const receipt = this.#ksportHttpPairReceipts.get(source.sourceId);
+    if (receipt === undefined) return false;
+    const ageMs = this.#now() - receipt.observedAtMs;
+    return this.#isSourceGenerationCurrent(source.sourceId, receipt.sourceGeneration) &&
+      this.#captureTabGeneration(source.tabId) === receipt.tabGeneration &&
+      this.#captureBridgeGeneration(source.sourceId) === receipt.bridgeGeneration &&
+      ageMs >= 0 && ageMs < KSPORT_BASELINE_LEASE_RENEW_MS;
+  }
+
   async #requestFreshKsportHttpBaseline(source: ObservedSource): Promise<boolean> {
+    const priorReceipt = this.#ksportHttpPairReceipts.get(source.sourceId);
     const activeEntry = this.#activeKsportSocket(source.sourceId);
     let refreshed = false;
     if (activeEntry === undefined) {
@@ -4977,10 +4992,16 @@ export class NetworkObserver {
       socket.ksportFrameTail = operation;
       await operation;
     }
+    // A due failed fetch restores recovery immediately. A newer native pair
+    // received during that fetch retains its own successful receipt.
+    if (!refreshed && this.#ksportHttpPairReceipts.get(source.sourceId) === priorReceipt) {
+      this.#ksportHttpPairReceipts.delete(source.sourceId);
+    }
     return refreshed;
   }
 
   async #requestFreshKsportNativeHttpBaseline(source: ObservedSource): Promise<boolean> {
+    if (this.#hasFreshKsportHttpPair(source)) return true;
     // An observed list URL can stop returning a usable paired baseline. Let
     // the provider issue its own period requests through the existing selectors
     // and capture their responses, including after established fallback expires.
@@ -5892,6 +5913,7 @@ export class NetworkObserver {
   }
 
   #clearSbobetDetail(sourceId: string): void {
+    this.#ksportHttpPairReceipts.delete(sourceId);
     this.#clearSbobetEarly(sourceId);
     this.#clearSbobetMore(sourceId);
     const state = this.#sbobetDetailStates.get(sourceId);
@@ -5963,7 +5985,8 @@ export class NetworkObserver {
     if (state.lane.rememberTemplate(template, state.generation!)) state.template = template;
   }
 
-  #rememberSbobetDetailRoster(pending: PendingRequest, body: string, bridgeGeneration: number): void {
+  #rememberSbobetDetailRoster(pending: PendingRequest, body: string, bridgeGeneration: number,
+    observedAtMs: number): void {
     if (pending.source.lobby !== "KSPORT" || !this.#isPendingCurrent(pending) ||
       this.#captureBridgeGeneration(pending.source.sourceId) !== bridgeGeneration ||
       pending.providerContentIntent !== "FOOTBALL_FULL_CATALOG" ||
@@ -5999,6 +6022,12 @@ export class NetworkObserver {
     if (state.lane.setRoster({ generation: state.generation!, events: today.events.filter((event) => !inPlay.ids.has(event.eventId)) })) {
       state.committedOrdinal = ordinal;
       state.pendingRoster = null;
+      // This is a validated Live/Today pair already forwarded in the current
+      // source. Its original receipt clock guards recovery, never quote age.
+      this.#ksportHttpPairReceipts.set(pending.source.sourceId, {
+        sourceGeneration: pending.sourceGeneration, tabGeneration: pending.tabGeneration,
+        bridgeGeneration, observedAtMs
+      });
     }
   }
 
@@ -7298,7 +7327,7 @@ export class NetworkObserver {
     if (fragments.length === 1) {
       await this.#emit(source, url, resourceType, "HTTP_RESPONSE", { encoding: "UTF8", body: safeBody },
         { ...request, ...clocks, sourceGeneration, tabGeneration });
-      this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration);
+      this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration, clocks.observedAtMs);
       await this.#rememberSbobetMoreRoster(pending, safeBody, bridgeGeneration);
       return;
     }
@@ -7314,7 +7343,7 @@ export class NetworkObserver {
           bodyEncoding: "UTF8", bodyFragment })
       }, { ...request, ...clocks, sourceGeneration, tabGeneration }));
     await Promise.all(emissions);
-    this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration);
+    this.#rememberSbobetDetailRoster(pending, safeBody, bridgeGeneration, clocks.observedAtMs);
     await this.#rememberSbobetMoreRoster(pending, safeBody, bridgeGeneration);
   }
 

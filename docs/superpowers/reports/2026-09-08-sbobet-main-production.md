@@ -1,6 +1,12 @@
 # SBOBET main deployment and bounded live evidence
 
-## Current status: 0.2.70 deployed; expanded coverage verification running
+## Current status: 0.2.71 deployed; Early proven, recovery interruption being fixed
+
+Version 0.2.71, commit `dc9669e`, was activated with stack identity `sha256:4681311406f237e786d037e7a1f7a84f776a2b583ee980414e8d4dc89726ca83`, extension `sha256:6c5d164a602d5b3657c36175f99d49986b9df49fd3e3c281f36178849e76a06a`; actual worker confirmed 14:22:50. Focused 44 tests, manifest four tests, typecheck, build and peer review passed. **Actual Early now contains 382 owners**; catalog reached 491 prematch owners and over 10,000 quotes. Latest native Today120 + Early382 - Live11 gives exactly 491 prematch owners.
+
+The 14:23-14:28 capture recorded 134 valid More owners (87 priced, 47 empty), 216 completed HTTP responses all 200, no parse/ownership failures and 266 source selection price changes. Artifact `production071/coverage-native-1788852502920.json`, SHA256 `7c047808db6d3c460a17824f3aa6ca8099cfb5f614baffbb595cb6bdcf4ca9e1`. Coverage remains partial: a source epoch transition interrupted the pass and dropped Early/More until automatic reacquisition. The window was stopped once this concrete failure was identified.
+
+The existing KSPORT maintenance calls disruptive socket recovery even after a successful HTTP refresh, and treats an HTTP cadence skip as a possible reason for native tab recovery. Version 0.2.72 targets these proven unnecessary recovery calls while retaining recovery for failed/stale HTTP. No shared realtime cadence or API rebuild is involved. Exact attribution of the observed epoch transition is narrower than the code finding and is not claimed without direct lifecycle evidence.
 
 The completed 0.2.70 window (14:08:29-14:18:30 UTC+7) has 200 FRESH samples, one epoch, zero errors, 306 hidden changes and 753 main changes; raw evidence SHA256 `6c20a18d3c5dd66bd0d57122901ac6ac22e17f9772db76c2cb3529137b55dea0`. Passive native comparison matched **109/109 prematch IDs** and 3 eligible live IDs. More was captured for 108 owners (63 priced, 45 valid empty); 1,301 supported market IDs were additional to captured main. Existing line/price differences had newer API receipts. Native artifact `production070/coverage-native-1788851680548.json` SHA256 `6d1f945c6bb6ff43ae46c6ed062f1d3db8eff7d201a962b3e3c1c32c9f5e0351`; findings are in `production070/COVERAGE-FINDINGS-1788851680548.json`.
 
