@@ -18,4 +18,10 @@ The user explicitly deferred continuous operation, session maintenance and 24/7 
 
 ## Runtime and verification boundary
 
+### BTI follow-up completed
+
+The subsequent user-authorized BTI task is integrated on this same branch in `665dc88` and `6eabfd0`. Current runtime is extension **0.2.75** and managed stack `sha256:b98e008181348abe1a356870f86f274d7fd04ad32b695bb3382d4d61a6920e97`. Current evidence verifies detail for all 1,466 prematch owners and 26,760 supported markets added beyond the roster, with actual automatic hidden-price updates. See [the BTI production report](2026-09-08-bti-all-early-production.md). Deployment leases are released; continuous/session/24-hour work remains deferred by the user.
+
+The paragraph below records the earlier SBOBET-only consolidation boundary and is historical.
+
 The managed runtime remains on extension **0.2.73**, implementation `30e1bea`. This consolidation only preserves documentation and records the accepted handoff; it does not change application code, build output, source tabs or processes. Earlier focused implementation tests and live evidence remain the applicable checks; no test/build/live window was repeated for these documentation changes. Git diff checks and branch ancestry were verified for this handoff.
