@@ -12,6 +12,8 @@ The consolidated working branch is **`feat/realtime-hardening`**, checked out at
 
 ## Accepted scope and next step
 
+The user has now accepted the current BTI collection as sufficient for this phase and requested consolidation before the next action. All completed SBOBET and BTI implementation commits are already contained in `feat/realtime-hardening`. Continue from the main checkout above. The old worker branches still retain their separate historical WIP baseline; their implemented changes were integrated through the checkpoints listed above. Historical dirty worker copies remain preserved and must not be reapplied over the newer integrated implementation.
+
 The user accepted the current SBOBET hidden-market collection with a tolerance of one or two missing markets. Current evidence covers More for 491/491 prematch owners, with actual automatic hidden-price changes and automatic recovery of the two delayed owners. This is acceptance of the current collection scope, not a claim that every provider has passed live hidden-market acceptance.
 
 The user explicitly deferred continuous operation, session maintenance and 24/7 hardening to a later phase. Preserve the deployed SBOBET functionality; do not begin another maintenance audit or provider implementation until the user supplies the next provider plan. SABA is not an active task in this handoff.
