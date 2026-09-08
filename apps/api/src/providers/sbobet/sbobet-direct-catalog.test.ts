@@ -22,6 +22,76 @@ const observedFallback = [{ eventId: "5717357", leagueName: "K-Sports Football",
   teamNames: [String(observedContainers[0]!["2"]), String(observedContainers[0]!["3"])], markets: [] }];
 const observedOptions = { observedAtMs: 1788841583335, receivedMonotonicMs: 126424, sequence: 1 };
 
+const publicBinaryProof = JSON.parse(readFileSync(new URL("./sbobet-public-binary-gaps.fixture.json", import.meta.url),
+  "utf8")) as { cases: Array<{ group: string; marketType: string; settlementProfile: string;
+    format: "MALAY" | "DECIMAL"; line: string | null; outcomes: string[]; pairStart: number; marketId: string; row: string }> };
+
+describe("public-source binary formats with synthetic quotes", () => {
+  it.each(publicBinaryProof.cases)("preserves group $group exact predicate, line, format and native IDs", (proof) => {
+    const body = { "8": 5717357, "7": { [proof.group]: [proof.row] } };
+    const result = normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(body, observedFallback), observedOptions);
+    expect(result.markets).toEqual([expect.objectContaining({ marketType: proof.marketType, line: proof.line,
+      providerMarketId: proof.marketId, scope: "FULL_TIME", settlementProfile: proof.settlementProfile, status: "OPEN" })]);
+    expect(result.quotes.map(({ providerSelectionId, selection, rawOdds, rawFormat }) =>
+      ({ providerSelectionId, selection, rawOdds, rawFormat }))).toEqual(
+      proof.row.split(" ").slice(proof.pairStart, proof.pairStart + 2).map((token, index) => ({
+        providerSelectionId: token.split("*")[1], selection: proof.outcomes[index], rawOdds: token.split("*")[0], rawFormat: proof.format
+      })));
+    expect(extractSbobetNativeMarketObservations(body, observedFallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: proof.marketId, nativeType: proof.group, disposition: "NORMALIZED" })
+    ]);
+  });
+
+  it.each(publicBinaryProof.cases)("suspends and invalidates only group $group's exact native ID", (proof) => {
+    const control = { "8": 5717357, "7": { "3": ["2.5 0.92*30001h -0.98*30001a 30001"] } };
+    const bootstrap = extractSbobetDirectCatalogRecords({ "8": 5717357,
+      "7": { ...control["7"], [proof.group]: [proof.row] } }, observedFallback);
+    const tokens = proof.row.split(" ");
+    tokens[proof.pairStart + 3] = "1";
+    const suspended = { "8": 5717357, "7": { [proof.group]: [tokens.join(" ")] } };
+    const result = normalizeSbobetCatalog(mergeSbobetSocketCatalogRecords(bootstrap, [suspended]), observedOptions);
+    expect(result.markets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ providerMarketId: proof.marketId, status: "SUSPENDED" }),
+      expect.objectContaining({ providerMarketId: "30001", status: "OPEN" })
+    ]));
+    expect(result.quotes.filter((quote) => quote.providerMarketId === proof.marketId)).toHaveLength(2);
+    tokens[proof.pairStart] = tokens[proof.pairStart]!.replace(/^[^*]+/u, "0");
+    const invalid = { "8": 5717357, "7": { [proof.group]: [tokens.join(" ")] } };
+    expect(extractSbobetNativeMarketObservations(invalid, observedFallback, 123)).toEqual([
+      expect.objectContaining({ providerMarketId: proof.marketId, disposition: "EXCLUDED" })
+    ]);
+    expect(mergeSbobetSocketCatalogRecords(bootstrap, [invalid])[0]?.markets.map((market) => market.marketId)).toEqual(["30001"]);
+  });
+
+  it.each(publicBinaryProof.cases)("rejects group $group opposite formats, reversed sides and invalid status", (proof) => {
+    const wrongFormat = proof.row.split(" ");
+    wrongFormat[proof.pairStart] = wrongFormat[proof.pairStart]!.replace(/^[^*]+/u, proof.format === "MALAY" ? "1.91" : "0.91");
+    const reversed = proof.row.split(" ");
+    [reversed[proof.pairStart], reversed[proof.pairStart + 1]] = [reversed[proof.pairStart + 1]!, reversed[proof.pairStart]!];
+    const wrongStatus = proof.row.split(" ");
+    wrongStatus[proof.pairStart + 3] = "9";
+    for (const tokens of [wrongFormat, reversed, wrongStatus]) {
+      const body = { "8": 5717357, "7": { [proof.group]: [tokens.join(" ")] } };
+      expect(extractSbobetDirectCatalogRecords(body, observedFallback)[0]?.markets).toEqual([]);
+      expect(extractSbobetNativeMarketObservations(body, observedFallback, 123)).toEqual([
+        expect.objectContaining({ providerMarketId: proof.marketId, disposition: "EXCLUDED" })
+      ]);
+    }
+  });
+
+  it("preserves the separate yellow-card statistic and rejects a missing total line", () => {
+    const body = { "8": 5717357, "7": {
+      "31": ["4.25 0.91*31001h -0.87*31001a 31001"],
+      "139": ["4.25 0.91*139001h -0.87*139001a 139001 0", "0.91*139002h -0.87*139002a 139002 0"]
+    } };
+    const result = normalizeSbobetCatalog(extractSbobetDirectCatalogRecords(body, observedFallback), observedOptions);
+    expect(result.markets.map(({ marketType, settlementProfile, line }) => ({ marketType, settlementProfile, line }))).toEqual([
+      { marketType: "CARD_FT_TOTAL", settlementProfile: "football-cards-regulation", line: "4.25" },
+      { marketType: "YELLOW_CARD_FT_TOTAL", settlementProfile: "football-yellow-cards-regulation", line: "4.25" }
+    ]);
+  });
+});
+
 // Exact getEventBetMore rows from the sanitized 5717357 HTTP receipt. Outcome
 // order/indices are independently established by public chunk 7409 renderers.
 const observedMoreRows = [

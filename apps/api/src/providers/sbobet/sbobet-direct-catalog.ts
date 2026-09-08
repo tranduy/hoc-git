@@ -204,7 +204,13 @@ const sbobetMarketByGroup: Readonly<Record<string, SbobetNativeMarketLayout>> = 
   "99": { type: "FT_BOTH_HALVES_OVER_TOTAL", layout: "LINE_YES_NO", format: "DECIMAL" },
   "100": { type: "FT_BOTH_HALVES_UNDER_TOTAL", layout: "LINE_YES_NO", format: "DECIMAL" },
   "101": { type: "HOME_FT_TOTAL", layout: "TOTAL", format: "DECIMAL" },
-  "102": { type: "AWAY_FT_TOTAL", layout: "TOTAL", format: "DECIMAL" }
+  "102": { type: "AWAY_FT_TOTAL", layout: "TOTAL", format: "DECIMAL" },
+  // Public-source proof and synthetic schemas: sbobet-public-binary-gaps.fixture.json.
+  // Yellow-card OU retains the collector's requested ma style; win predicates force Decimal.
+  "139": { type: "YELLOW_CARD_FT_TOTAL", layout: "TOTAL", format: "MALAY" },
+  "148": { type: "HOME_FT_TO_WIN", layout: "YES_NO", format: "DECIMAL" },
+  "149": { type: "AWAY_FT_TO_WIN", layout: "YES_NO", format: "DECIMAL" },
+  "154": { type: "FT_ANY_TEAM_TO_WIN", layout: "YES_NO", format: "DECIMAL" }
 };
 const sbobetThreeWayGroups = new Set(["1", "2", "17", "18", "29", "30", "68", "81", "82", "87", "88", "89", "90", "97"]);
 const sbobetRefundGroups = new Set(["16", "75", "150", "151"]);

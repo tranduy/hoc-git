@@ -54,6 +54,7 @@ const PREEXISTING_SOCKET_GRACE_MS = 8_000;
 const PREEXISTING_SOCKET_MAX_ATTEMPTS = 5;
 const KSPORT_HTTP_RECONCILE_INTERVAL_MS = 4_000;
 const KSPORT_NATIVE_HTTP_CAPTURE_WINDOW_MS = 60_000;
+const KSPORT_MAIN_FOOTBALL_QUERY = { sportId: "1", sportType: "1_1", oddsStyle: "ma" } as const;
 const KSPORT_IGNORED_SOCKETS_PER_SOURCE = 64;
 // Long enough that a failed reconnect cannot become a per-frame storm, short
 // enough that a provider is never dark for more than a minute.
@@ -310,6 +311,19 @@ interface SbobetMoreRequestCapture {
   readonly generation: string;
   readonly requestStartSequence: number;
   readonly active?: SbobetActiveMore;
+}
+
+interface SbobetEventRequestTemplate {
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly method: "GET";
+  readonly hasPostData: false;
+  readonly observerRequestOrdinal: number;
+}
+
+interface SbobetEventRequestCapture extends SbobetEventRequestTemplate {
+  readonly sourceGeneration: number;
+  readonly bridgeGeneration: number;
 }
 
 interface SbobetMoreTemplate {
@@ -1210,7 +1224,8 @@ export class NetworkObserver {
     readonly observerRequestId: string; readonly observerRequestOrdinal: number;
     readonly tabGeneration: number; readonly frameId?: string; readonly loaderId?: string;
     readonly requestFrameKey?: string; readonly requestDocumentKey?: string;
-    readonly sbobetMore?: SbobetMoreRequestCapture }>();
+    readonly sbobetMore?: SbobetMoreRequestCapture;
+    readonly sbobetEventRequest?: SbobetEventRequestCapture }>();
   #nextObserverRequestOrdinal = 0;
   readonly #pending = new Map<string, PendingRequest>();
   // Direct IM recovery returns a compact, adapter-shaped copy through
@@ -1335,9 +1350,7 @@ export class NetworkObserver {
   readonly #apsportOrphanFrameRecoveryAtMs = new Map<string, number>();
   readonly #apsportNavigationStartedAtMs = new Map<string, number>();
   readonly #apsportRosterOnlyRefreshes = new Map<string, Promise<void>>();
-  readonly #sbobetEventRequests = new Map<string, { readonly url: string;
-    readonly headers: Readonly<Record<string, string>>; readonly method: "GET" | "POST";
-    readonly hasPostData: boolean }>();
+  readonly #sbobetEventRequests = new Map<string, SbobetEventRequestTemplate>();
   readonly #sbobetDiscoveryRequests = new Map<string, { readonly sourceId: string; readonly url: string;
     readonly bridgeGeneration: number; readonly sourceGeneration: number; readonly tabGeneration: number;
     readonly detailHeaders?: Readonly<Record<string, string>> }>();
@@ -5039,10 +5052,13 @@ export class NetworkObserver {
       const isProviderHost = (hostname) => hostname === "sb21.net" || hostname.endsWith(".sb21.net") ||
         hostname === "zenandfe.com" || hostname === "prod20091.fxf774.com";
       const isProviderUrl = (url) => isProviderHost(url.hostname) || url.origin === executionOrigin;
+      const footballQuery = ${JSON.stringify(KSPORT_MAIN_FOOTBALL_QUERY)};
+      const isFootballScope = (url) => Object.entries(footballQuery).every(([name, expected]) =>
+        url.searchParams.getAll(name).every((value) => value === expected));
       const capturedUrl = ${JSON.stringify(templateUrl?.href ?? null)};
       const performanceUrls = [...performance.getEntriesByType("resource")].map((entry) => entry.name)
         .filter((value) => { try { const url = new URL(value); return url.protocol === "https:" &&
-          url.username === "" && url.password === "" && isProviderUrl(url) &&
+          url.username === "" && url.password === "" && isProviderUrl(url) && isFootballScope(url) &&
           url.pathname === "/api/v2/getEvent" && !url.searchParams.has("eventId"); } catch { return false; } });
       const sameOriginFallback = executionSurface === "WORKER" && (() => {
         try {
@@ -5055,7 +5071,7 @@ export class NetworkObserver {
       if (!templateUrl) return { status: marker + "-template-missing", page: location.origin + location.pathname };
       const base = new URL(templateUrl);
       if (base.protocol !== "https:" || base.username !== "" || base.password !== "" ||
-        !isProviderUrl(base) || base.pathname !== "/api/v2/getEvent") {
+        !isProviderUrl(base) || !isFootballScope(base) || base.pathname !== "/api/v2/getEvent") {
         return { status: marker + "-url-invalid" };
       }
       const headers = ${JSON.stringify(template?.headers ?? {})};
@@ -5064,7 +5080,9 @@ export class NetworkObserver {
       const rangeCarrier = base.searchParams.has("timeRange") ? "URL" : hasPostData ? "BODY" : "NONE";
       const responses = [];
       const exactUrls = new Map();
-      for (const value of [capturedUrl, ...performanceUrls]) {
+      // Resource timing includes stale views and failed recovery attempts. A
+      // successful observed URL must stay paired with its own request headers.
+      for (const value of capturedUrl ? [capturedUrl] : performanceUrls) {
         if (!value) continue;
         const candidate = new URL(value);
         if (candidate.protocol !== "https:" || candidate.username !== "" || candidate.password !== "" ||
@@ -6235,20 +6253,23 @@ export class NetworkObserver {
       }
       if (source.lobby === "KSPORT" && (!this.#ksportRefreshesInFlight.has(source.sourceId) ||
         this.#currentKsportNativeHttpCapture(source) !== null) &&
-        request !== null && typeof request.url === "string") {
+        request !== null && typeof request.url === "string" && requestMethod === "GET" &&
+        request.hasPostData !== true && !(typeof request.postData === "string" && request.postData.length > 0)) {
         try {
           const url = new URL(request.url);
           if (url.protocol === "https:" && url.username === "" && url.password === "" &&
             isKsportEventApiHost(url.hostname) && url.pathname === "/api/v2/getEvent" &&
-            !url.searchParams.has("eventId")) {
+            !url.searchParams.has("eventId") && isKsportMainFootballQuery(url)) {
             const rawHeaders = isRecord(request.headers) ? request.headers : {};
             const headers = Object.fromEntries(Object.entries(rawHeaders).flatMap(([name, value]) =>
               /^(?:cookie|host|content-length|accept-encoding|connection|origin|referer|user-agent|sec-|:)/iu.test(name) ||
                 (typeof value !== "string" && typeof value !== "number") ? [] : [[name, String(value)]]));
-            const method: "GET" | "POST" = requestMethod === "POST" ? "POST" : "GET";
-            const template = { url: request.url, headers, method,
-              hasPostData: typeof request.postData === "string" && request.postData.length > 0 };
-            this.#sbobetEventRequests.set(source.sourceId, template);
+            const identity = this.#requestIdentities.get(key);
+            if (identity !== undefined) this.#requestIdentities.set(key, { ...identity,
+              sbobetEventRequest: { url: request.url, headers, method: "GET", hasPostData: false,
+                observerRequestOrdinal: identity.observerRequestOrdinal,
+                sourceGeneration: this.#captureSourceGeneration(source.sourceId),
+                bridgeGeneration: this.#captureBridgeGeneration(source.sourceId) } });
           }
         } catch { /* Ignore malformed provider URLs. */ }
       }
@@ -6708,7 +6729,17 @@ export class NetworkObserver {
       const providerFunctionCode = this.#requestFunctionCodes.get(key);
       const requestIdentity = this.#requestIdentities.get(key);
       if (requestIdentity === undefined) return;
-      const { sbobetMore: moreCandidate, ...httpIdentity } = requestIdentity;
+      const { sbobetMore: moreCandidate, sbobetEventRequest: eventCandidate, ...httpIdentity } = requestIdentity;
+      // A pending, failed, redirected or retired request cannot replace the
+      // last working main-feed URL/header pair. Response arrival is not request order.
+      if (eventCandidate !== undefined && response.status === 200 && response.url === eventCandidate.url &&
+        this.#isSourceGenerationCurrent(source.sourceId, eventCandidate.sourceGeneration) &&
+        this.#captureTabGeneration(source.tabId) === requestIdentity.tabGeneration &&
+        this.#captureBridgeGeneration(source.sourceId) === eventCandidate.bridgeGeneration &&
+        eventCandidate.observerRequestOrdinal >
+          (this.#sbobetEventRequests.get(source.sourceId)?.observerRequestOrdinal ?? -1)) {
+        this.#sbobetEventRequests.set(source.sourceId, eventCandidate);
+      }
       const sbobetMore = moreCandidate !== undefined && response.status === 200 &&
         response.url === moreCandidate.request.url &&
         this.#captureBridgeGeneration(source.sourceId) === moreCandidate.bridgeGeneration &&
@@ -8332,10 +8363,17 @@ function ksportPartitionFromRequest(source: ObservedSource,
     const url = new URL(request.url);
     if (url.protocol !== "https:" || url.username !== "" || url.password !== "" ||
       !isKsportEventApiHost(url.hostname) || url.pathname !== "/api/v2/getEvent" ||
-      url.searchParams.has("eventId")) return null;
+      url.searchParams.has("eventId") || !isKsportMainFootballQuery(url)) return null;
     const timeRange = url.searchParams.get("timeRange")?.toLowerCase();
     return timeRange === "live" ? "KSPORT_LIVE" : timeRange === "today" ? "KSPORT_TODAY" : null;
   } catch { return null; }
+}
+
+function isKsportMainFootballQuery(url: URL): boolean {
+  // Legacy observed URLs can omit these fields; an explicit other sport or
+  // odds format cannot establish this football/Malay collection lane.
+  return Object.entries(KSPORT_MAIN_FOOTBALL_QUERY).every(([name, expected]) =>
+    url.searchParams.getAll(name).every(value => value === expected));
 }
 
 function pendingRequestMetadata(pending: PendingRequest): EmissionRequestMetadata {

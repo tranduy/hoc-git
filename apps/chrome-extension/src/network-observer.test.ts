@@ -3771,6 +3771,8 @@ describe("NetworkObserver", () => {
       auxData: { frameId: "root", isDefault: true } } });
     await observer.handleEvent(ksport, "Network.requestWillBeSent", { requestId: "catalog", type: "Fetch",
       request: { method: "GET", url: rawUrl, headers: { Authorization: authorization } } });
+    await observer.handleEvent(ksport, "Network.responseReceived", { requestId: "catalog", type: "Fetch",
+      response: { url: rawUrl, status: 200 } });
 
     await observer.refreshCatalog(ksport);
 
@@ -3808,10 +3810,14 @@ describe("NetworkObserver", () => {
       request: { method: "GET",
         url: "https://api.sb21.net/api/v2/getEvent?timeRange=live&listProof=keep",
         headers: { "x-list-proof": "keep" } } });
+    await observer.handleEvent(ksport, "Network.responseReceived", { requestId: "list", type: "Fetch",
+      response: { url: "https://api.sb21.net/api/v2/getEvent?timeRange=live&listProof=keep", status: 200 } });
     await observer.handleEvent(ksport, "Network.requestWillBeSent", { requestId: "detail", type: "Fetch",
       request: { method: "GET",
         url: "https://api.sb21.net/api/v2/getEvent?timeRange=live&eventId=event-1&detailProof=drop",
         headers: { "x-detail-proof": "drop" } } });
+    await observer.handleEvent(ksport, "Network.responseReceived", { requestId: "detail", type: "Fetch",
+      response: { url: "https://api.sb21.net/api/v2/getEvent?timeRange=live&eventId=event-1&detailProof=drop", status: 200 } });
 
     await observer.refreshCatalog(ksport);
 
@@ -8542,12 +8548,12 @@ describe("NetworkObserver", () => {
     publishNativeCatalog = async () => {
       for (const partition of ["live", "today"] as const) {
         const requestId = `native-${partition}`;
-        const url = `https://be.sb21.net/api/v2/getEvent?agentId=4&sportId=1&sportType=1&timeRange=${partition}`;
+        const url = `https://be.sb21.net/api/v2/getEvent?agentId=4&sportId=1&sportType=1_1&timeRange=${partition}`;
         await observer.handleEvent(ksport, "Network.requestWillBeSent", { requestId, type: "Fetch",
           frameId: "provider-page", loaderId: "provider-document",
           request: { method: "GET", url, headers: { Authorization: "current-page-session" } } });
         await observer.handleEvent(ksport, "Network.responseReceived", { requestId, type: "Fetch",
-          response: { url } });
+          response: { url, status: 200 } });
         await observer.handleEvent(ksport, "Network.loadingFinished", { requestId });
       }
     };

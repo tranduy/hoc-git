@@ -82,7 +82,7 @@ interface ActiveRequest {
   readonly controller: AbortController;
 }
 
-/** Caller-driven; request timeouts are the only timers this module creates. */
+/** Caller-driven; timers only bound requests and space starts within the current finite batch. */
 export class SbobetCatalogRefresh {
   readonly #options: SbobetRefreshOptions | SbobetMoreRefreshOptions;
   readonly #now: () => number;
@@ -102,6 +102,7 @@ export class SbobetCatalogRefresh {
   #generation: string | null = null;
   #lifecycle = {};
   #tick: Promise<void> | null = null;
+  #drainController: AbortController | null = null;
   #lastRequestSequence = -1;
   #providerRetryAtMs = 0;
   #nextRequestAtMs = 0;
@@ -142,6 +143,10 @@ export class SbobetCatalogRefresh {
         item.phase !== "PREMATCH" || ids.has(item.eventId)) throw new Error("SBOBET_ROSTER_INVALID");
       ids.add(item.eventId);
     }
+    if (input.generation !== this.#generation || ids.size !== this.#events.size ||
+      input.events.some(item => this.#events.get(item.eventId)?.event.startAtUtcMs !== item.startAtUtcMs)) {
+      this.#drainController?.abort();
+    }
     if (input.generation !== this.#generation) {
       this.#lifecycle = {};
       this.#generation = input.generation;
@@ -174,6 +179,7 @@ export class SbobetCatalogRefresh {
     this.#disposed = true;
     this.#lifecycle = {};
     this.#events.clear();
+    this.#drainController?.abort();
     for (const active of this.#active) active.controller.abort();
   }
 
@@ -191,17 +197,37 @@ export class SbobetCatalogRefresh {
       ![...this.#active].some((active) => active.state === state))
       .sort((a, b) => this.#dueAt(a, now) - this.#dueAt(b, now) || a.event.startAtUtcMs - b.event.startAtUtcMs)
       .slice(0, this.#maxRequestsPerTick);
-    const workers = Math.min(this.#maxConcurrent - this.#active.size, selected.length);
+    const controller = new AbortController();
+    this.#drainController = controller;
+    const running = new Set<Promise<void>>();
+    const started: Promise<void>[] = [];
     let next = 0;
-    await Promise.all(Array.from({ length: Math.max(0, workers) }, async () => {
-      while (next < selected.length && this.#active.size < this.#maxConcurrent &&
-        this.#now() >= this.#providerRetryAtMs && this.#now() >= this.#nextRequestAtMs &&
-        lifecycle === this.#lifecycle && !this.#disposed) {
+    try {
+      while (next < selected.length && !controller.signal.aborted &&
+        this.#now() >= this.#providerRetryAtMs && lifecycle === this.#lifecycle && !this.#disposed) {
+        if (this.#active.size >= this.#maxConcurrent) {
+          // A timed-out callback can retain a physical slot after its logical request ends.
+          // Leave that slot to a later caller tick; never wait indefinitely for its promise.
+          if (running.size === 0) break;
+          await Promise.race(running);
+          continue;
+        }
+        const delay = this.#nextRequestAtMs - this.#now();
+        if (delay > 0) {
+          await waitForSpacing(delay, controller.signal);
+          continue; // Recheck ownership, capacity and provider backoff after every wait.
+        }
         const state = selected[next++]!;
         if (this.#events.get(state.event.eventId) !== state) continue;
-        await this.#refresh(state, generation, lifecycle);
+        const operation = this.#refresh(state, generation, lifecycle);
+        started.push(operation);
+        running.add(operation);
+        void operation.then(() => running.delete(operation), () => running.delete(operation));
       }
-    }));
+      await Promise.all(started);
+    } finally {
+      if (this.#drainController === controller) this.#drainController = null;
+    }
   }
 
   async #refresh(state: EventState, generation: string, lifecycle: object): Promise<void> {
@@ -300,10 +326,26 @@ export class SbobetCatalogRefresh {
     const providerDelay = typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs > 0
       ? Math.min(this.#maxRetryAfterMs, retryAfterMs) : 0;
     state.retryAtMs = this.#now() + Math.max(exponential, providerDelay);
-    if (providerLimited) this.#providerRetryAtMs = Math.max(this.#providerRetryAtMs, state.retryAtMs);
+    if (providerLimited) {
+      this.#providerRetryAtMs = Math.max(this.#providerRetryAtMs, state.retryAtMs);
+      this.#drainController?.abort();
+    }
     try { this.#options.onFailure?.({ generation, eventId: state.event.eventId, reason, retryAtMs: state.retryAtMs }); }
     catch { /* Diagnostics must not interrupt independent provider work. */ }
   }
+}
+
+function waitForSpacing(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise(resolve => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 function completeNativeEvent(value: unknown, eventId: string): SbobetDetailBatch["event"] | null {

@@ -1,0 +1,91 @@
+{
+  "kind": "PUBLIC_SOURCE_FORMAT_PROOF_WITH_SYNTHETIC_TEST_ROWS",
+  "liveObserved": false,
+  "testRowsAreSynthetic": true,
+  "offsetUnit": "UTF16 code units in decoded JavaScript",
+  "sources": {
+    "bundle": {
+      "asset": "bundledb9779-1788595195773.js",
+      "sha256": "f8af91799b2562f12ba14c3c37b468173f46b45c597d5a3c37c4045071f2240a",
+      "pricePolicy": "module 75895 z/T8: te=(e,t)=>e&&z(e)?i._C.DECIMAL:t",
+      "pricePredicateStart": 491311,
+      "priceSelectorOffset": 498477,
+      "yesNoSchemaOffset": 152919,
+      "yesNoSchema": "te={YES:0,NO:1,OFFER_ID:2,IS_SUSPENDED_ODDS:3,GROUP_ID:4,IS_PROMOTION:5,IS_PARLAY_ODD:6,IS_CASHOUT:7}",
+      "yellowCardSchemaOffset": 157114,
+      "yellowCardSchema": "ke={RATE:0,OVER:1,UNDER:2,OFFER_ID:3,IS_SUSPENDED_ODDS:4,GROUP_ID:5,IS_PROMOTION:6,IS_PARLAY_ODD:7,IS_CASHOUT:8}"
+    },
+    "moreRenderer": {
+      "webpackChunk": 7409,
+      "sha256": "c37303b372b886e0a1e55af3d934530570ad3ac579b8d4718b4391f35168a68c"
+    }
+  },
+  "limits": [
+    "These four groups have not been observed in the live response samples used for this change.",
+    "Synthetic prices and IDs below exercise the public renderer's proven schemas; they are not captured quotes.",
+    "Group 139 retains the requested odds style. MALAY below applies to the collector's existing oddsStyle=ma request contract.",
+    "Groups 148, 149 and 154 explicitly force DECIMAL through z/T8. Their NO outcome remains the complement of the named win predicate."
+  ],
+  "cases": [
+    {
+      "group": "139",
+      "nativeName": "YELLOW_CARD_OU_FT",
+      "marketType": "YELLOW_CARD_FT_TOTAL",
+      "settlementProfile": "football-yellow-cards-regulation",
+      "format": "MALAY",
+      "line": "4.25",
+      "outcomes": ["OVER", "UNDER"],
+      "pairStart": 1,
+      "marketId": "9000139",
+      "rendererRange": [763596, 765840],
+      "rowSchemaExport": "52287.hI -> ke",
+      "forcedDecimal": false,
+      "row": "4.25 0.91*9000139h -0.87*9000139a 9000139 0 4 0 0 0"
+    },
+    {
+      "group": "148",
+      "nativeName": "HOME_TO_WIN",
+      "marketType": "HOME_FT_TO_WIN",
+      "settlementProfile": "football-home-to-win-regulation",
+      "format": "DECIMAL",
+      "line": null,
+      "outcomes": ["YES", "NO"],
+      "pairStart": 0,
+      "marketId": "9000148",
+      "rendererRange": [885443, 887650],
+      "rowSchemaExport": "52287.mx -> te",
+      "forcedDecimal": true,
+      "row": "2.25*9000148h 1.70*9000148a 9000148 0 2 0 0 0"
+    },
+    {
+      "group": "149",
+      "nativeName": "AWAY_TO_WIN",
+      "marketType": "AWAY_FT_TO_WIN",
+      "settlementProfile": "football-away-to-win-regulation",
+      "format": "DECIMAL",
+      "line": null,
+      "outcomes": ["YES", "NO"],
+      "pairStart": 0,
+      "marketId": "9000149",
+      "rendererRange": [885443, 887650],
+      "rowSchemaExport": "52287.mx -> te",
+      "forcedDecimal": true,
+      "row": "3.50*9000149h 1.25*9000149a 9000149 0 2 0 0 0"
+    },
+    {
+      "group": "154",
+      "nativeName": "ANY_TEAM_TO_WIN",
+      "marketType": "FT_ANY_TEAM_TO_WIN",
+      "settlementProfile": "football-any-team-to-win-regulation",
+      "format": "DECIMAL",
+      "line": null,
+      "outcomes": ["YES", "NO"],
+      "pairStart": 0,
+      "marketId": "9000154",
+      "rendererRange": [894782, 896850],
+      "rowSchemaExport": "52287.mx -> te",
+      "forcedDecimal": true,
+      "row": "1.30*9000154h 3.75*9000154a 9000154 0 2 0 0 0"
+    }
+  ]
+}

@@ -46,6 +46,133 @@ describe("SbobetCatalogRefresh complementary More mode", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(10_000); });
   afterEach(() => { vi.useRealTimers(); });
 
+  it("uses all four bounded request starts in one caller tick despite sub-250ms responses", async () => {
+    const starts: Array<[string, number]> = [];
+    const { collector, batches } = setupMore({ minimumDelayMs: 250, nearTtlMs: 30_000, farTtlMs: 120_000,
+      request: async input => {
+        starts.push([input.eventId, Date.now()]);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return moreResponse(input.eventId);
+      } });
+    collector.setRoster({ generation: "source:1", events: Array.from({ length: 6 }, (_, index) => event(String(101 + index))) });
+    const tick = collector.tick();
+    expect(collector.tick()).toBe(tick);
+    await vi.advanceTimersByTimeAsync(760);
+    await tick;
+    expect(starts).toEqual([["101", 10_000], ["102", 10_250], ["103", 10_500], ["104", 10_750]]);
+    expect(batches.map(batch => batch.observedAtMs)).toEqual([10_010, 10_260, 10_510, 10_760]);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(starts).toHaveLength(4); // No recurring refresh/publication timer.
+  });
+
+  it("uses two physical slots for slow responses while spacing every request start", async () => {
+    const starts: Array<[string, number]> = [];
+    let active = 0;
+    let maximum = 0;
+    const { collector } = setupMore({ minimumDelayMs: 250, timeoutMs: 2_000, request: async input => {
+      starts.push([input.eventId, Date.now()]);
+      maximum = Math.max(maximum, ++active);
+      await new Promise(resolve => setTimeout(resolve, 600));
+      active -= 1;
+      return moreResponse(input.eventId);
+    } });
+    collector.setRoster({ generation: "source:1", events: [event(), event("102"), event("103"), event("104"), event("105")] });
+    const tick = collector.tick();
+    await vi.advanceTimersByTimeAsync(1_450);
+    await tick;
+    expect(starts).toEqual([["101", 10_000], ["102", 10_250], ["103", 10_600], ["104", 10_850]]);
+    expect(maximum).toBe(2);
+    expect(active).toBe(0);
+  });
+
+  it.each(["generation", "removal", "dispose"])("cancels pending spacing immediately on %s", async change => {
+    const starts: string[] = [];
+    const { collector } = setupMore({ minimumDelayMs: 250, request: async input => {
+      starts.push(input.eventId); return moreResponse(input.eventId);
+    } });
+    collector.setRoster({ generation: "source:1", events: [event(), event("102")] });
+    let settled = false;
+    const tick = collector.tick().then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(settled).toBe(false);
+    if (change === "dispose") collector.dispose();
+    else collector.setRoster({ generation: change === "generation" ? "source:2" : "source:1", events: [event()] });
+    await tick;
+    expect(settled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(starts).toEqual(["101"]);
+  });
+
+  it("keeps a paced batch alive across identical canonical roster receipts", async () => {
+    const starts: Array<[string, number]> = [];
+    const { collector } = setupMore({ minimumDelayMs: 250, request: async input => {
+      starts.push([input.eventId, Date.now()]); return moreResponse(input.eventId);
+    } });
+    const roster = { generation: "source:1", events: [event(), event("102")] };
+    collector.setRoster(roster);
+    const tick = collector.tick();
+    await vi.advanceTimersByTimeAsync(10);
+    collector.setRoster(roster);
+    await vi.advanceTimersByTimeAsync(240);
+    await tick;
+    expect(starts).toEqual([["101", 10_000], ["102", 10_250]]);
+  });
+
+  it("gives provider 429 priority over a pending spacing wait", async () => {
+    const starts: string[] = [];
+    const { collector } = setupMore({ minimumDelayMs: 250, request: async input => {
+      starts.push(input.eventId);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      return { status: 429, retryAfterMs: 1_500 };
+    } });
+    collector.setRoster({ generation: "source:1", events: [event(), event("102")] });
+    const tick = collector.tick();
+    await vi.advanceTimersByTimeAsync(10);
+    await tick;
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1_499);
+    await collector.tick();
+    expect(starts).toEqual(["101"]);
+  });
+
+  it.each(["request", "emission"])("does not exceed physical capacity or hang a paced tick on an uncooperative %s", async held => {
+    const pending = deferred<void>();
+    const starts: string[] = [];
+    const { collector } = setupMore({ minimumDelayMs: 250, timeoutMs: 300,
+      request: async input => {
+        starts.push(input.eventId);
+        if (held === "request") await pending.promise;
+        return moreResponse(input.eventId);
+      }, onBatch: async () => { if (held === "emission") await pending.promise; } });
+    collector.setRoster({ generation: "source:1", events: [event(), event("102"), event("103"), event("104")] });
+    const tick = collector.tick();
+    await vi.advanceTimersByTimeAsync(550);
+    await tick;
+    expect(starts).toEqual(["101", "102"]);
+    collector.setRoster({ generation: "source:2", events: [event("105")] });
+    await collector.tick();
+    expect(starts).toEqual(["101", "102"]);
+    pending.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    await collector.tick();
+    expect(starts).toEqual(["101", "102", "105"]);
+  });
+
+  it("backs off empty More without spending the rest of a bounded batch on the same owner", async () => {
+    const starts: string[] = [];
+    const { collector, batches } = setupMore({ minimumDelayMs: 250, request: async input => {
+      starts.push(input.eventId);
+      return moreResponse(input.eventId, input.eventId === "101" ? {} : undefined);
+    } });
+    collector.setRoster({ generation: "source:1", events: [event(), event("102"), event("103"), event("104")] });
+    const tick = collector.tick();
+    await vi.advanceTimersByTimeAsync(750);
+    await tick;
+    expect(starts).toEqual(["101", "102", "103", "104"]);
+    expect(batches.map(batch => batch.eventId)).toEqual(["102", "103", "104"]);
+  });
+
   it("emits observed native More groups unchanged with no complete-event claim", async () => {
     // Exact representative rows from the observed 2026-09-08 More receipt.
     const groups = { "0": ["2,3,4,11,12"],
@@ -203,21 +330,24 @@ describe("SbobetCatalogRefresh", () => {
     expect(batches.map((item) => item.eventId)).toEqual(["101", "102", "103"]);
   });
 
-  it("spaces provider request starts until a later caller tick without starting its own cadence timer", async () => {
+  it("spaces bounded request starts inside one caller tick without starting a recurring cadence timer", async () => {
     const starts: Array<[string, number]> = [];
     const { collector } = setup({ minimumDelayMs: 250, request: async (input) => {
       starts.push([input.eventId, Date.now()]); return response(input.eventId);
     } });
     collector.setRoster({ generation: "source:1", events: [event(), event("102"), event("103")] });
-    await collector.tick();
+    const tick = collector.tick();
     expect(starts).toEqual([["101", 10_000]]);
     await vi.advanceTimersByTimeAsync(249);
-    await collector.tick();
+    expect(collector.tick()).toBe(tick);
     expect(starts).toEqual([["101", 10_000]]);
     await vi.advanceTimersByTimeAsync(1);
-    expect(starts).toEqual([["101", 10_000]]);
-    await collector.tick();
     expect(starts).toEqual([["101", 10_000], ["102", 10_250]]);
+    await vi.advanceTimersByTimeAsync(250);
+    await tick;
+    expect(starts).toEqual([["101", 10_000], ["102", 10_250], ["103", 10_500]]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(starts).toHaveLength(3);
   });
 
   it("aborts retired generation requests and rejects their late successful response", async () => {
