@@ -48,7 +48,7 @@ export interface NormalizedSbobetCatalog {
 
 function virtualFootballEvidence(competition: string, teams: readonly string[]): boolean {
   const label = competition.normalize("NFKC").toLocaleLowerCase("en");
-  if (/(?:\be[\s-]?soccer\b|\bvirtual\b|simulated reality|soccer marble|\bpes\b|ảo|điện tử)/u.test(label)) return true;
+  if (/(?:\be[\s-]?soccer\b|\bvirtual\b|simulated reality|soccer marble|\bpes\b|(?<![\p{L}\p{M}\p{N}_])ảo(?![\p{L}\p{M}\p{N}_])|điện tử)/u.test(label)) return true;
   return teams.length === 2 && teams.every((team) => /(?:\((?:pg|e|pes|v|s)\)(?:\s*\([^)]*\))*|\([a-z0-9_]{4,}\))\s*$/iu.test(team));
 }
 

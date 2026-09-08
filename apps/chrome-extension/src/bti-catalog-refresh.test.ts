@@ -117,19 +117,19 @@ describe("BTI bounded cached delivery", () => {
     return { h, ids, initial };
   }
 
-  it("reserves all three roster responses while bounding detail delivery to two batches and four MiB", async () => {
+  it("reserves all three roster responses while bounding detail delivery to eight batches and sixteen MiB", async () => {
     const { h } = await seededCache(10);
     await vi.advanceTimersByTimeAsync(2_000);
     const result = await h.refresh();
     const details = result.responses.filter((row: any) => row.url.startsWith("/api/eventpage/"));
-    expect(details).toHaveLength(2);
-    expect(details.reduce((sum: number, row: any) => sum + Buffer.byteLength(row.body), 0)).toBeLessThanOrEqual(4 * 1024 * 1024);
+    expect(details).toHaveLength(8);
+    expect(details.reduce((sum: number, row: any) => sum + Buffer.byteLength(row.body), 0)).toBeLessThanOrEqual(16 * 1024 * 1024);
     expect(result.responses.filter((row: any) => row.url.startsWith("/api/eventlist/"))).toHaveLength(3);
     expect(h.cache()).toHaveLength(10);
   });
 
   it("eventually replays every owner through cache reorder and a new roster generation without changing receipt clocks", async () => {
-    const { h, ids, initial } = await seededCache(7);
+    const { h, ids, initial } = await seededCache(19);
     const received: string[] = [];
     for (let index = 0; index < 8; index += 1) {
       // Receipts move refreshed owners to the cache tail; this must not reset delivery fairness.
@@ -137,7 +137,7 @@ describe("BTI bounded cached delivery", () => {
       await vi.advanceTimersByTimeAsync(index === 2 ? 13_000 : 2_000);
       const result = await h.refresh();
       const metadata = detailBodies(result).flatMap((body: any) => body.fieldlineBtiDetails);
-      expect(metadata).toHaveLength(2);
+      expect(metadata).toHaveLength(8);
       for (const row of metadata) expect(row).toEqual({ eventId: row.eventId,
         observedAtMs: START, requestedAtMs: START - 50, generation: initial.generation });
       if (index >= 2) expect(result.generation).not.toBe(initial.generation);

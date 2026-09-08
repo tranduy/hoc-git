@@ -775,10 +775,10 @@ export const BTI_CATALOG_REFRESH_EXPRESSION = String.raw`(async () => {
     for (let visited = 0; visited < pendingCount; visited += 1) {
       const eventId = deliveryOrder[0];
       const item = cachedById.get(eventId);
-      // The collector admits at most two MiB per event. Two bounded batches
+      // The collector admits at most two MiB per event. Eight bounded batches
       // leave the three authoritative list responses available on every tick.
       if (batchMetadata.length > 0 && batchBytes + item.body.length > 1536 * 1024) flushBatch();
-      if (cachedDetails.length >= 2) break;
+      if (cachedDetails.length >= 8) break;
       deliveryOrder.push(deliveryOrder.shift());
       try {
         if (item.body.length > 2 * 1024 * 1024) continue;

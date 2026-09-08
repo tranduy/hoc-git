@@ -20,6 +20,23 @@ const record: SbobetCatalogInputRecord = {
 };
 
 describe("normalizeSbobetCatalog", () => {
+  it("retains the real BTI Faroe Islands fixture whose competition contains đảo", () => {
+    const result = normalizeSbobetCatalog([{ ...record, eventId: "884501820779810816",
+      leagueName: "Giải ngoại hạng - Quần đảo Faroe", teamNames: ["AB Argir", "B68 Toftir"],
+      timeText: "PREMATCH", startAtUtcMs: Date.parse("2026-09-11T17:30:00.000Z"), markets: [] }],
+    { provider: "BTI", observedAtMs: 1_788_859_512_328, receivedMonotonicMs: 1, sequence: 1 });
+    expect(result.diagnostics).toEqual([]);
+    expect(result.events).toEqual([expect.objectContaining({ providerEventId: "884501820779810816",
+      provider: "BTI", competition: "Giải ngoại hạng - Quần đảo Faroe", participantA: "AB Argir",
+      participantB: "B68 Toftir", isLive: false, startAtUtcMs: Date.parse("2026-09-11T17:30:00.000Z") })]);
+  });
+
+  it("still excludes the standalone Vietnamese virtual-football word ảo", () => {
+    const result = normalizeSbobetCatalog([{ ...record, leagueName: "Giải bóng đá ảo" }],
+      { provider: "BTI", observedAtMs: 1, receivedMonotonicMs: 1, sequence: 1 });
+    expect(result).toEqual({ events: [], markets: [], quotes: [], diagnostics: ["SBOBET_CATALOG_EVENT_UNSUPPORTED"] });
+  });
+
   it.each([true, false])("retains real Major League Soccer events (empty=%s)", (empty) => {
     const result = normalizeSbobetCatalog([{ ...record, leagueName: "USA Major League Soccer",
       teamNames: ["DC United", "Atlanta United"], timeText: "PREMATCH", startAtUtcMs: Date.UTC(2026, 8, 12),
