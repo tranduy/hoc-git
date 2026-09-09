@@ -139,6 +139,70 @@ const imLolMarket = (overrides: Partial<NormalizedMarket> = {}): NormalizedMarke
   });
 
 describe("mapMarkets hard gates", () => {
+  const namedPlayerMarket = (right = false, overrides: Partial<NormalizedMarket> = {}): NormalizedMarket =>
+    (right ? imFootballMarket : footballMarket)({ marketType: "PLAYER_FT_SHOTS_TOTAL", line: "1.5",
+      settlementProfile: "football-player-shots-regulation", player: { providerPlayerId: right ? "native-right" : "native-left",
+        name: "Brian Aguirre", teamSide: "HOME" }, ...overrides });
+
+  it("withholds execution and canonical identity until a same-name player has explicit identity evidence", () => {
+    const result = mapMarkets(footballMapping, namedPlayerMarket(), namedPlayerMarket(true));
+    expect(result.status).toBe("REVIEW_REQUIRED");
+    expect(result.executionConfidence).toBe("BLOCKED");
+    expect(result.canonicalMarketId).toBeNull();
+    expect(result.selectionMappings).toEqual([]);
+    expect(result.evidence.find(item => item.gate === "resolvedPlayerIdentity")?.reason)
+      .toContain("MISSING_MANDATORY_EVIDENCE");
+  });
+
+  it.each([
+    { providerPlayerId: "native-right", name: "Lucas Alario", teamSide: "HOME" },
+    { providerPlayerId: "native-left", name: "Brian Aguirre", teamSide: "AWAY" }
+  ] as const)("rejects a different player or team even if all market terms match: %j", player => {
+    const result = mapMarkets(footballMapping, namedPlayerMarket(), namedPlayerMarket(true, { player }));
+    expect(result.status).toBe("REJECTED");
+    expect(result.evidence.find(item => item.gate === "resolvedPlayerIdentity")?.reason).toContain("CONTRADICTION");
+    expect(result.executionConfidence).toBe("BLOCKED");
+  });
+
+  it.each([undefined, { providerPlayerId: "native-right", name: "Brian Aguirre", teamSide: null },
+    { providerPlayerId: "native-right", name: "B. Aguirre", teamSide: "HOME" }] as const)(
+    "requires review instead of joining a player with missing team or full name evidence %j", player => {
+      const right = namedPlayerMarket(true);
+      const { player: _knownPlayer, ...withoutPlayer } = right;
+      const result = mapMarkets(footballMapping, namedPlayerMarket(), player === undefined ? withoutPlayer : { ...right, player });
+      expect(result.status).toBe("REVIEW_REQUIRED");
+      expect(result.canonicalMarketId).toBeNull();
+      expect(result.executionConfidence).toBe("BLOCKED");
+    });
+
+  it("uses verified event reversal for the player team but still requires explicit player resolution", () => {
+    const reversed = { ...footballMapping, participantOrientation: "REVERSED" as const };
+    const right = namedPlayerMarket(true, { player: { providerPlayerId: "native-right", name: "Brian Aguirre", teamSide: "AWAY" } });
+    expect(mapMarkets(reversed, namedPlayerMarket(), right).status).toBe("REVIEW_REQUIRED");
+    expect(mapMarkets(reversed, namedPlayerMarket(), namedPlayerMarket(true)).status).toBe("REJECTED");
+  });
+
+  it.each(["600", "600.0"])("accepts integer time predicate %s as YES/NO without an Asian push", line => {
+    const props: Partial<NormalizedMarket> = { marketType: "FT_FIRST_GOAL_BEFORE", line,
+      settlementProfile: "football-first-goal-before-seconds", selections: [
+        { providerSelectionId: "yes", canonicalOutcomeId: "YES" }, { providerSelectionId: "no", canonicalOutcomeId: "NO" }
+      ] };
+    const result = mapMarkets(footballMapping, footballMarket(props), imFootballMarket(props));
+    expect(result.status).toBe("VERIFIED");
+    expect(result.normalizedLine).toBe("600");
+    expect(result.evidence.find(item => item.gate === "noPushFootballLine")?.passed).toBe(true);
+  });
+
+  it.each(["600.5", "600.25", "600.0000000000000001", "0", "-600", "9007199254740992"])("rejects invalid integer time predicate %s", line => {
+    const props: Partial<NormalizedMarket> = { marketType: "FT_FIRST_GOAL_BEFORE", line,
+      settlementProfile: "football-first-goal-before-seconds", selections: [
+        { providerSelectionId: "yes", canonicalOutcomeId: "YES" }, { providerSelectionId: "no", canonicalOutcomeId: "NO" }
+      ] };
+    const result = mapMarkets(footballMapping, footballMarket(props), imFootballMarket(props));
+    expect(result.status).toBe("REJECTED");
+    expect(result.evidence.find(item => item.gate === "noPushFootballLine")?.passed).toBe(false);
+  });
+
   it("normalizes equivalent decimal lines in a verified canonical market ID", () => {
     const result = mapMarkets(
       footballMapping,

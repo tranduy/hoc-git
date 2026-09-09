@@ -100,6 +100,7 @@ function sameName(actual: string, expected: string): boolean {
 
 function namedTeam(label: string, expectedTeams?: readonly [string, string]): "HOME" | "AWAY" | null {
   if (expectedTeams === undefined) return null;
+  if (label.includes(":")) return btiNamedSubject(label, expectedTeams);
   const evidence = normalizedLabel(label);
   const home = normalizedLabel(expectedTeams[0]);
   const away = normalizedLabel(expectedTeams[1]);
@@ -362,13 +363,17 @@ export function extractBtiNativeMarketObservations(
           reason: "CANONICAL_MARKET_MAPPED" });
       }
       if (accounted.size < native.values.length) {
+        const remainingSelections=nativeSelections.filter((_selection,index)=>!accounted.has(index));
+        const pendingSemantics=btiCategoricalCodes.has(native.code)&&remainingSelections.some(selection=>
+          (selection.status==="OPEN"||selection.status==="SUSPENDED")&&selection.price!==null&&
+          Number(selection.price)!==0&&Math.abs(Number(selection.price))<=1);
         observations.push({ status: native.status, provider: "BTI", category: "FOOTBALL", providerEventId: native.eventId,
           providerMarketId: native.observationMarketId, nativeType: native.code || "UNKNOWN", nativeLabel: native.label || null,
           nativeScope: null, outcomeLabels: labels.filter((_label, index) => !accounted.has(index))
             .map((label) => label || "UNNAMED_SELECTION"),
-          nativeSelections: nativeSelections.filter((_selection, index) => !accounted.has(index)),
-          observedAtMs, disposition: "EXCLUDED",
-          reason: "UNPAIRED_OR_INVALID_NATIVE_SELECTIONS" });
+          nativeSelections: remainingSelections,
+          observedAtMs, disposition: pendingSemantics?"UNMAPPED":"EXCLUDED",
+          reason: pendingSemantics?"NATIVE_SELECTION_SEMANTICS_UNRESOLVED":"UNPAIRED_OR_INVALID_NATIVE_SELECTIONS" });
       }
       continue;
     }
@@ -402,10 +407,14 @@ function normalizedMarket(
     const invalid=new Set<string>();
     for(const item of candidates){
       const decoded=decodeBtiCategoricalTerms(code,marketId,item,label,expectedTeams);if(decoded===null)continue;
-      const key=`${marketId}:${decoded.marketType}:${decoded.lineText??"none"}`;
-      const previous=groups.get(key),quote={selectionId:item.id,selection:decoded.selection,priceText:item.malay,locked:item.locked};
+      const key=`${marketId}:${decoded.marketType}:${decoded.lineText??"none"}${decoded.player===undefined?"":`:player:${decoded.player.providerPlayerId}`}`;
+      const handicap=footballBinaryMarketSpec(decoded.marketType)?.family==="HANDICAP";
+      const previous=groups.get(key),quote={selectionId:item.id,selection:decoded.selection,priceText:item.malay,locked:item.locked,
+        ...(handicap&&decoded.lineText!==null?{lineText:decoded.selection==="AWAY"?String(-Number(decoded.lineText)):decoded.lineText}:{})};
       if(previous?.selections.some(q=>q.selection===quote.selection)){invalid.add(key);continue;}
-      groups.set(key,{marketId:key,marketType:decoded.marketType,lineText:decoded.lineText,selections:[...(previous?.selections??[]),quote]});
+      groups.set(key,{marketId:key,marketType:decoded.marketType,lineText:decoded.lineText,
+        ...(handicap?{handicapLineFormat:"SIGNED" as const}:{}),
+        ...(decoded.player===undefined?{}:{player:decoded.player}),selections:[...(previous?.selections??[]),quote]});
     }
     return [...groups.values()].filter(m=>!invalid.has(m.marketId));
   }

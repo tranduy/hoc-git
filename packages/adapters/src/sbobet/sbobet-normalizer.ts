@@ -1,6 +1,6 @@
 import { footballBinaryMarketSpec, footballResultMarketSpec, footballCategoricalMarketSpec, isFootballCategoricalSelection,
   type MarketType, type OddsFormat,
-  type ProviderEvent, type ProviderMarket, type ProviderQuote, type Scope } from "@tool-chenh/contracts";
+  type ProviderEvent, type ProviderMarket, type ProviderPlayerIdentity, type ProviderQuote, type Scope } from "@tool-chenh/contracts";
 import { isSupportedFootballSplitLine, isSupportedFootballTwoWayLine } from "../football-market-policy.js";
 
 export interface SbobetCatalogSelection {
@@ -13,6 +13,7 @@ export interface SbobetCatalogSelection {
 }
 
 export interface SbobetCatalogMarket {
+  readonly player?: ProviderPlayerIdentity;
   readonly marketId: string;
   readonly marketType: MarketType;
   readonly lineText: string | null;
@@ -56,7 +57,7 @@ const signedDecimal = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 
 function exactFootballMarketSemantics(marketType: MarketType, fallbackProfile?: string): {
   readonly isTotal: boolean; readonly isHandicap: boolean; readonly scope: Scope;
-  readonly outcomes: readonly string[]; readonly linePolicy: "HALF_UNIT" | "NONE";
+  readonly outcomes: readonly string[]; readonly linePolicy: "HALF_UNIT" | "NONE" | "INTEGER" | "POSITIVE_INTEGER";
   readonly partialSelections: boolean;
   readonly settlementProfile: string;
 } | null {
@@ -187,9 +188,13 @@ export function normalizeSbobetCatalog(
       const { isTotal, isHandicap, scope, settlementProfile, outcomes, linePolicy } = semantics;
       const actual = market.selections.map((selection) => selection.selection);
       const ids = new Set(market.selections.map((selection) => selection.selectionId));
-      const line = linePolicy === "NONE" ? null : isHandicap
+      const indexedLine = market.lineText !== null && /^-?(?:0|[1-9]\d*)$/u.test(market.lineText) ? String(Number(market.lineText)) : null;
+      const line = linePolicy === "NONE" ? null : linePolicy === "INTEGER" || linePolicy === "POSITIVE_INTEGER" ? indexedLine : isHandicap
         ? canonicalHomeHandicap(market.selections, market.handicapLineFormat === "SIGNED") : canonicalLine(market.lineText);
       if (linePolicy === "HALF_UNIT" && !isSupportedFootballTwoWayLine(line)) continue;
+      if (linePolicy === "INTEGER" && (line === null || !/^-?(?:0|[1-9]\d*)$/u.test(line))) continue;
+      if (linePolicy === "POSITIVE_INTEGER" && (line === null || !/^[1-9]\d*$/u.test(line) || Number(line)>86400)) continue;
+      if (market.marketType.startsWith("PLAYER_") !== (market.player !== undefined)) continue;
       const pricesValid = market.selections.every(validPrice);
       const exactDomain = actual.length > 0 && ids.size === actual.length && new Set(actual).size === actual.length &&
         actual.every((outcome) => outcomes.includes(outcome) || isFootballCategoricalSelection(market.marketType, outcome)) &&
@@ -202,11 +207,13 @@ export function normalizeSbobetCatalog(
       const status = (semantics.partialSelections ? market.selections.every((selection) => selection.locked)
         : market.selections.some((selection) => selection.locked)) ? "SUSPENDED" as const : "OPEN" as const;
       recordMarkets.push({
+        ...(market.player === undefined ? {} : { player: market.player }),
         provider, category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, marketType: market.marketType, scope, line,
         settlementProfile, status
       });
       recordQuotes.push(...market.selections.map((selection): ProviderQuote => ({
+        ...(market.player === undefined ? {} : { player: market.player }),
         provider, category: "FOOTBALL", providerEventId: record.eventId,
         providerMarketId: market.marketId, providerSelectionId: selection.selectionId,
         marketType: market.marketType, scope, selection: selection.selection, line,

@@ -1,5 +1,49 @@
 # Trạng thái làm việc — 2026-09-10
 
+## BTI remaining normalization — 2026-09-10 03:45 local
+
+User requested immediate continuation of remaining BTI normalization. Implemented
+player/statistic/sequence/window/combined contracts, strict native identities,
+partial UNMAPPED visibility, player lifecycle/schema/receipt/stake guards and
+proven prematch comparison equivalents. DNB remains separate. Native aliases
+Or Blorian/Cengiz Under/Ünder/Over Mandanda preserved; ambiguous composite labels
+remain source evidence, not guessed individual players.
+
+NEW immutable baseline .run/bti-remaining-2026-09-10/ (do not mix with prior
+bti-normalization capture): 1,600 events/140,100 native observations; before
+97,657 canonical/320,229 quotes/17,305 UNMAPPED/25,138 EXCLUDED. Final after-r3:
+291,411 canonical (+193,754);16,804 UNMAPPED rows and11,174 EXCLUDED handled.
+501 whole rows remain (QA5193/5195/5202=136each,QA6020=93), plus61 partially
+handled rows with92 available residual selections. These remain visible.
+Native selection entries323,454 conserved exactly, diagnostics0; old canonical
+markets/quotes unchanged. Additions144,182 player+49,572 nonplayer; only2,449
+new source markets actually pair, no player pairs in fixed peers.
+
+BTI native pairs32,133→37,487 (+5,354,lost0); all-book58,339→64,500 (+6,161,lost0).
+BTI by peer AP15,038→17,929/SBO11,267→12,936/CMD5,582→6,330/SABA246→292.
+AP normalization held fixed; APsnapshotSTALE andIMabsent. Reconstructed quotes
+receipt/sequence0; this is structural matching, not fresh profit/execution.
+Final bundle44467b5117b3667af186aded828fca37b3e51875ac4b1c3b04ed7f9611c4ac39.
+See final-evidence-summary.json/.md, after-r3-ap-latest-result.json and partial
+available report. Authenticated BTI rule descriptions for4ambiguouscodes and
+HC157/ML159/ML160/HC270/HC2219 returned404; no guessed rules or reload.
+
+Worker retains original catalogs/counts but skips construction of PLAYER rows
+if fewer than2providers have that type; projection omits unmatched PLAYER
+detail from repeated UI messages. Default direct detail unchanged. Matched
+pair parity verified inr2; don't report duplicated JSON size as actual clone
+transfer size. r3 only adds5surname offers and leaves pairs unchanged.
+
+Single deployment03:44:35: instance04747496-3e44-480a-a578-33b979a8aec3,
+APIsha256:f0b5d8d4d9afee6c941b7e39f7707909e85212a88e837c0a9e178f490c8455d4,
+webindex-C4wz23d4.js/workercomparison.worker-9lUTM009.js. Lease released.
+Local/public200 newasset. Runtime03:45:40 BTIFRESH1,537events/136,221markets/
+281,501quotes/260unmapped. This is a changing live snapshot, not auditinput.
+Report docs/bti-remaining-normalization-2026-09-10.md. No six-feed uptime claim.
+In-app Browser setup errored sandbox-state-meta missing sandboxPolicy; bounded
+standalone headless Chrome local verification used instead. Initial UIcheck
+was duringloading; use settled verification for actual comparison evidence.
+
 ## BTI categorical normalization — 2026-09-10 02:50 local
 
 Latest user asked to continue BTI normalization. Implemented strict BTI

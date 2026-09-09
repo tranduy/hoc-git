@@ -82,6 +82,25 @@ describe("BTI native categorical contracts and opposing equivalents", () => {
     expect(new Set(result.markets.map(m=>m.providerMarketId)).size).toBe(2);
     expect(extractBtiNativeMarketObservations(raw,100).flatMap(o=>o.nativeSelections??[])).toHaveLength(2);
   });
+  it.each([
+    ["ML619","Cược 1X2 số quả phạt góc toàn trận","H","Norwich",1,null,"CORNER_FT_1X2","HOME",null],
+    ["HC157","Hoà được hoàn tiền","HMM","Norwich",1,0,"FT_DRAW_NO_BET","HOME",null],
+    ["HC270","Cược chấp 3 chiều","HMM","Norwich",1,-1,"FT_EUROPEAN_HANDICAP","HOME","-1"],
+    ["HC270","Cược chấp 3 chiều","AMM","Birmingham",3,1,"FT_EUROPEAN_HANDICAP","AWAY","-1"],
+    ["HC2219","Kèo cược chấp châu Âu thay thế (Được thanh toán dựa trên tỷ số cuối cùng)","HMM","Norwich",1,-0.5,"FT_FINAL_SCORE_AH","HOME","-0.5"],
+    ["OU6309","Tài/Xỉu cả trận 3 cửa","OMM","Tài",1,3,"FT_TOTAL","OVER","3.5"],
+    ["OU6309","Tài/Xỉu cả trận 3 cửa","UMM","Xỉu",3,3,"FT_TOTAL","UNDER","2.5"],
+    ["OU6309","Tài/Xỉu cả trận 3 cửa","EMM","Chính xác",2,3,"FT_GOAL_RANGE","RANGE_3_3",null],
+    ["QA6113","Các khoảng tổng bàn thắng","Q0Q2","0-2",0,null,"FT_TOTAL","UNDER","2.5"],
+    ["OU1968","Birmingham: Tổng số thẻ của đội","OMM","Tài",1,2.5,"AWAY_CARD_FT_TOTAL","OVER","2.5"],
+    ["QA6036","Bàn thắng đầu tiên trước phút","Q600Q1","10:00 - Có",1,null,"FT_FIRST_GOAL_BEFORE","YES","600"],
+    ["QA5401","Not translated","Q150Q123456","Jon Player Tài 1.5",1,null,"PLAYER_FT_SHOTS_TOTAL","OVER","1.5"]
+  ] as const)("normalizes remaining %s %s %s with native identities",(code,label,suffix,name,side,nativeLine,type,outcome,line)=>{
+    const s=selection(suffix,name,side);s[16]=nativeLine;
+    const result=normalize(payload(code,label,[s]));
+    expect(result.markets).toEqual([expect.objectContaining({marketType:type,line})]);
+    expect(result.quotes).toEqual([expect.objectContaining({selection:outcome,providerSelectionId:marketId+suffix})]);
+  });
   it("retains all halftime/fulltime outcomes when a native participant contains a slash",()=>{
     // Captured QA62 market 0QA884777943912706070: Bodo/Glimt versus Sandefjord Fb.
     const names=["Bodo/Glimt/Bodo/Glimt","Bodo/Glimt/Sandefjord Fb","Bodo/Glimt/Hoà",
@@ -115,6 +134,13 @@ describe("BTI native categorical contracts and opposing equivalents", () => {
     expect(normalize(payload("QA277","Norwich: second half scores",[selection("Q0Q21","Có",1)])).markets).toEqual([]);
     expect(normalize(payload("QA4451","Norwich: highest scoring half",[selection("Q0Q11","Hiệp 1",1)])).markets).toEqual([]);
     expect(normalize(payload("QA4451","Birmingham: highest scoring half",[selection("Q0Q11","Hiệp 1",1)])).quotes[0]?.selection).toBe("FIRST_HALF");
+  });
+  it("keeps an unresolved OPEN player offer visibly unmapped when another player in the container maps",()=>{
+    const raw=payload("QA1337","Cầu thủ ghi bàn",[
+      selection("Q3Q123456","Jon Player",1),selection("Q3Q123457","Home or draw",1)]);
+    const unresolved=extractBtiNativeMarketObservations(raw,100).find(o=>o.nativeSelections?.some(s=>s.selectionId===marketId+"Q3Q123457"));
+    expect(unresolved?.disposition).toBe("UNMAPPED");
+    expect(unresolved?.nativeSelections?.[0]?.price).toBe("-0.091");
   });
   it.each([["QA277","Lẻ"],["QA276","Có"]])("does not interpret the wrong outcome vocabulary for %s",(code,name)=>{
     expect(normalize(payload(code,"Norwich: named team",[selection("Q0Q11",name,1)])).markets).toEqual([]);

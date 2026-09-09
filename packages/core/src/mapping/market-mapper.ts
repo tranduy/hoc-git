@@ -5,7 +5,7 @@ import type {
   ProviderMarket,
   Scope
 } from "@tool-chenh/contracts";
-import { footballBinaryMarketSpec, isNoPushFootballLine } from "@tool-chenh/contracts";
+import { footballBinaryMarketSpec, isNoPushFootballLine, isValidProviderPlayerIdentity, playerComparisonKey } from "@tool-chenh/contracts";
 import { Decimal } from "../odds/convert.js";
 import type { EventMappingResult } from "./event-mapper.js";
 
@@ -343,6 +343,37 @@ function sameLine(
     : contradicted(gate, lineValue(expected), lineValue(actual));
 }
 
+function resolvedPlayerIdentity(
+  eventMapping: EventMappingResult,
+  left: NormalizedMarket,
+  right: NormalizedMarket
+): MappingEvidence {
+  const gate = "resolvedPlayerIdentity";
+  const leftPlayerMarket = left.marketType.startsWith("PLAYER_");
+  const rightPlayerMarket = right.marketType.startsWith("PLAYER_");
+  if (!leftPlayerMarket && !rightPlayerMarket) {
+    return left.player === undefined && right.player === undefined
+      ? passed(gate, "non-player markets", "non-player markets")
+      : contradicted(gate, "player identity only on player markets", [left.player, right.player]);
+  }
+  if (!leftPlayerMarket || !rightPlayerMarket) return contradicted(gate, left.marketType, right.marketType);
+  if (!isValidProviderPlayerIdentity(left.player) || !isValidProviderPlayerIdentity(right.player) ||
+    eventMapping.status !== "VERIFIED" || eventMapping.participantOrientation === null) {
+    return missing(gate, "complete native player identities and verified event orientation", [left.player, right.player]);
+  }
+  const rightPlayer = eventMapping.participantOrientation === "REVERSED" ? { ...right.player,
+    teamSide: right.player.teamSide === "HOME" ? "AWAY" as const : right.player.teamSide === "AWAY" ? "HOME" as const : null
+  } : right.player;
+  const expected = playerComparisonKey(left.player);
+  const actual = playerComparisonKey(rightPlayer);
+  if (expected === null || actual === null) return missing(gate, "unambiguous full player names and known teams", [expected, actual]);
+  if (expected !== actual) return contradicted(gate, expected, actual);
+  // A full-name candidate is sufficient for a structural comparison, but this
+  // execution mapper has neither a verified player registry nor the event roster
+  // needed to disambiguate namesakes. Do not promote it to executable identity.
+  return missing(gate, "explicit resolved player identity", expected);
+}
+
 function noPushFootballLine(
   _eventMapping: EventMappingResult,
   left: NormalizedMarket,
@@ -360,9 +391,15 @@ function noPushFootballLine(
   const compatible = leftSpec !== null && rightSpec !== null && leftSpec.linePolicy === rightSpec.linePolicy &&
     (leftSpec.linePolicy === "NONE"
       ? left.line === null && right.line === null
+      : leftSpec.linePolicy === "POSITIVE_INTEGER"
+      ? leftSpec.family === "YES_NO" && rightSpec.family === "YES_NO" && [left, right].every(market => {
+        const line = normalizeLine(market);
+        return line.kind === "VALUE" && /^[1-9]\d*$/u.test(line.value) && Number.isSafeInteger(Number(line.value));
+      })
       : isNoPushFootballLine(left.line) && isNoPushFootballLine(right.line));
   return compatible
-    ? passed(gate, leftSpec?.linePolicy === "NONE" ? "line-free binary settlement" : "half-unit line with no push result",
+    ? passed(gate, leftSpec?.linePolicy === "NONE" ? "line-free binary settlement"
+      : leftSpec?.linePolicy === "POSITIVE_INTEGER" ? "positive integer predicate with binary settlement" : "half-unit line with no push result",
       [left.line, right.line])
     : contradicted(gate, "exact binary line policy with no push result", [left.line, right.line]);
 }
@@ -514,6 +551,7 @@ const marketGates: readonly MarketGate[] = [
   validCategoryMarketScope,
   sameScope,
   sameMarketType,
+  resolvedPlayerIdentity,
   sameLine,
   noPushFootballLine,
   sameSettlementProfile,
@@ -572,13 +610,17 @@ function canonicalMarketId(
     return null;
   }
 
+  const playerKey = market.marketType.startsWith("PLAYER_") ? playerComparisonKey(market.player) : null;
+  if (market.marketType.startsWith("PLAYER_") && playerKey === null) return null;
+
   return [
     "market",
     encodeURIComponent(eventMapping.canonicalEventId),
     market.scope,
     market.marketType,
     normalizedLine ?? "none",
-    encodeURIComponent(market.settlementProfile)
+    encodeURIComponent(market.settlementProfile),
+    ...(playerKey === null ? [] : [encodeURIComponent(playerKey)])
   ].join("|");
 }
 

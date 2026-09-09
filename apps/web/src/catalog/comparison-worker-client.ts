@@ -78,17 +78,24 @@ function quoteTerms(quote: NativeQuote, projected = false): string {
 
 function matchingRoster(catalog: LiveCatalogResponse): string {
   const families = new Map<string, Set<string>>();
+  const players = new Map<string, Set<string>>();
   for (const market of catalog.markets) {
     const types = families.get(market.providerEventId) ?? new Set<string>();
     types.add(`${market.marketType}:${market.scope}`);
     families.set(market.providerEventId, types);
+    if (market.marketType.startsWith("PLAYER_")) {
+      const identities = players.get(market.providerEventId) ?? new Set<string>();
+      identities.add(JSON.stringify(market.player ?? null));
+      players.set(market.providerEventId, identities);
+    }
   }
   const quotedEvents = new Set(catalog.quotes.map(quote => quote.providerEventId));
   return JSON.stringify([catalog.provider, catalog.category, catalog.events.map(event => {
     // Running clock ticks do not affect fixture identity. Scores and periods do.
     const liveState = Object.fromEntries(Object.entries(event.liveState ?? {}).filter(([key]) => key !== "clockMs"));
     return [{ ...event, liveState: event.liveState === null ? null : liveState },
-      [...(families.get(event.providerEventId) ?? [])].sort(), quotedEvents.has(event.providerEventId)];
+      [...(families.get(event.providerEventId) ?? [])].sort(), [...(players.get(event.providerEventId) ?? [])].sort(),
+      quotedEvents.has(event.providerEventId)];
   })]);
 }
 

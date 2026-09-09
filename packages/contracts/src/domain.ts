@@ -274,7 +274,7 @@ export type QuoteIneligibilityReason =
 
 export type OddsFormat = "DECIMAL" | "HK" | "AMERICAN" | "MALAY";
 
-export type MarketType =
+export type MarketType = import("./football-extended-market.js").ExtendedFootballMarketType
   | "FT_CORRECT_SCORE" | "FH_CORRECT_SCORE" | "SH_CORRECT_SCORE" | "CORNER_FT_CORRECT_SCORE"
   | "CORNER_FH_CORRECT_SCORE" | "FT_SCORE_SET" | "FT_WIN_MARGIN" | "FH_WIN_MARGIN"
   | "FT_GOAL_RANGE" | "FH_GOAL_RANGE" | "SH_GOAL_RANGE"
@@ -408,7 +408,14 @@ export interface ProviderLolEvent extends ProviderEventBase {
 
 export type ProviderEvent = ProviderFootballEvent | ProviderLolEvent;
 
+export interface ProviderPlayerIdentity {
+  readonly providerPlayerId: string;
+  readonly name: string;
+  readonly teamSide: "HOME" | "AWAY" | null;
+}
+
 export interface ProviderMarket {
+  readonly player?: ProviderPlayerIdentity | undefined;
   readonly provider: string;
   readonly category: Category;
   readonly providerEventId: string;
@@ -421,6 +428,7 @@ export interface ProviderMarket {
 }
 
 export interface ProviderQuote {
+  readonly player?: ProviderPlayerIdentity | undefined;
   readonly provider: string;
   readonly category: Category;
   readonly providerEventId: string;

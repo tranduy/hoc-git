@@ -1,13 +1,17 @@
-import type { MarketType } from "@tool-chenh/contracts";
+import type { MarketType, ProviderPlayerIdentity } from "@tool-chenh/contracts";
+import { btiSequenceCodes, decodeBtiSequenceTerms } from "./bti-sequence-terms.js";
+import { btiPlayerCodes, decodeBtiPlayerTerms } from "./bti-player-terms.js";
+import { btiStatCodes, decodeBtiStatTerms } from "./bti-stat-terms.js";
+import { btiCombinationCodes, decodeBtiCombinationTerms } from "./bti-combination-terms.js";
 
 export interface BtiNamedSelection {
   readonly id: string; readonly name: string; readonly side: number;
   readonly line: number; readonly lineWasMissing: boolean;
 }
-interface Terms { readonly marketType: MarketType; readonly selection: string; readonly lineText: string | null }
-export const btiCategoricalCodes = new Set(["QA60","QA144","QA3580","QA4030","QA119","QA120","QA4452",
+interface Terms { readonly marketType: MarketType; readonly selection: string; readonly lineText: string | null; readonly player?: ProviderPlayerIdentity }
+export const btiCategoricalCodes = new Set([...btiSequenceCodes,...btiPlayerCodes,...btiStatCodes,...btiCombinationCodes,"QA60","QA144","QA3580","QA4030","QA119","QA120","QA4452",
   "QA154","QA155","QA4300","QA4302","QA62","QA89","QA4451","QA3583","QA696","QA697",
-  "QA277","QA4274","QA276","QA278","ML159","ML160","QA291","QA93","QA4303","QA4031"]);
+  "QA277","QA4274","QA276","QA278","ML159","ML160","QA291","QA93","QA4303","QA4031","QA5528","QA5165","QA5170"]);
 const terms = (marketType: MarketType, selection: string, lineText: string | null = null): Terms => ({marketType,selection,lineText});
 const nameKey = (value: string): string => value.normalize("NFD").replace(/[\u0300-\u036f]/gu,"").replace(/[đð]/giu,"d")
   .toLocaleLowerCase("en").replace(/[^a-z0-9]+/gu," ").trim();
@@ -35,12 +39,16 @@ function namedResult(label: string, teams: readonly [string,string]): "HOME" | "
  * are not binary positions: correct-score grids legitimately repeat them. */
 export function decodeBtiCategoricalTerms(code: string, marketId: string, item: BtiNamedSelection,
   label: string, teams?: readonly [string,string]): Terms | null {
+  if(btiSequenceCodes.has(code))return decodeBtiSequenceTerms(code,marketId,item,label,teams);
+  if(btiPlayerCodes.has(code))return decodeBtiPlayerTerms(code,marketId,item,label,teams);
+  if(btiStatCodes.has(code))return decodeBtiStatTerms(code,marketId,item,label,teams);
+  if(btiCombinationCodes.has(code))return decodeBtiCombinationTerms(code,marketId,item,label,teams);
   if (!btiCategoricalCodes.has(code) || !item.id.startsWith(marketId) || (!item.lineWasMissing && item.line !== 0)) return null;
   const suffix=item.id.slice(marketId.length), name=nameKey(item.name);
   const scoreTypes: Readonly<Record<string, readonly [MarketType,MarketType]>> = {
     QA60:["FT_CORRECT_SCORE","FT_TOTAL"],QA144:["FH_CORRECT_SCORE","FH_TOTAL"],
     QA3580:["SH_CORRECT_SCORE","SH_TOTAL"],QA4030:["CORNER_FT_CORRECT_SCORE","CORNER_FT_TOTAL"],
-    QA4031:["CORNER_FH_CORRECT_SCORE","CORNER_FH_TOTAL"]
+    QA4031:["CORNER_FH_CORRECT_SCORE","CORNER_FH_TOTAL"],QA5170:["CARD_FT_CORRECT_SCORE","CARD_FT_TOTAL"]
   };
   const scoreType=scoreTypes[code];
   if (scoreType!==undefined) {
@@ -106,7 +114,7 @@ export function decodeBtiCategoricalTerms(code: string, marketId: string, item: 
     return range(code==="QA4452"?"FT_GOAL_RANGE":code==="QA4300"?"CORNER_FT_RANGE":"CORNER_FH_RANGE",
       code==="QA4452"?"FT_TOTAL":code==="QA4300"?"CORNER_FT_TOTAL":"CORNER_FH_TOTAL",lower,upper);
   }
-  if(code==="QA62"){
+  if(code==="QA62"||code==="QA5528"||code==="QA5165"){
     if(teams===undefined)return null;
     const outcomes:Readonly<Record<string,readonly [string,string,number]>>={Q9Q1:["HOME","HOME",1],Q10Q1:["HOME","AWAY",1],Q11Q1:["HOME","DRAW",1],
       Q12Q1:["AWAY","HOME",3],Q13Q1:["AWAY","AWAY",3],Q14Q1:["AWAY","DRAW",3],Q15Q1:["DRAW","HOME",2],Q16Q1:["DRAW","DRAW",2],Q17Q1:["DRAW","AWAY",2]};
@@ -118,7 +126,7 @@ export function decodeBtiCategoricalTerms(code: string, marketId: string, item: 
     const composedKey=(value:string):string=>value.replace(/[^/]+/gu,part=>nameKey(part));
     const actual=composedKey(item.name);
     if(!namesFor(pair[0]).some(first=>namesFor(pair[1]).some(second=>composedKey(`${first}/${second}`)===actual)))return null;
-    return terms("FT_HALF_FULL_RESULT",`${pair[0]}_${pair[1]}`);
+    return terms(code==="QA5528"?"CORNER_FT_HALF_FULL_RESULT":code==="QA5165"?"CARD_FT_HALF_FULL_RESULT":"FT_HALF_FULL_RESULT",`${pair[0]}_${pair[1]}`);
   }
   if(code==="QA89"||code==="QA4451"){
     const lookup:Readonly<Record<string,readonly [string,number]>>=code==="QA89"?{Q624Q0:["FIRST_HALF",0],Q625Q0:["SECOND_HALF",0],Q626Q0:["EQUAL",0]}

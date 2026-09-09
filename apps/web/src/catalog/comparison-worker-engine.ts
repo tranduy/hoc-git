@@ -1,11 +1,18 @@
 import type { LiveCatalogResponse } from "../api/catalog.js";
+import { sameNativePlayer } from "@tool-chenh/contracts";
 import { buildComparisonEvents, createCompetitionLinkMemory, exactTwoWayOutcomeDomain,
   isFocusedTwoWayTicket, isAvailableTwoWayTicket, type ComparisonEvent } from "./comparison.js";
 import type { ComparisonProjection, ComparisonWorkerCommand, ComparisonWorkerOutput } from "./comparison-worker-protocol.js";
 
 function project(event: ComparisonEvent): ComparisonProjection {
   const { catalogs, ...comparison } = event;
-  return { ...comparison, accountIds: catalogs.map((catalog) => catalog.accountId) };
+  const matchedPlayerRows = new Set(event.rows.filter(row => row.marketType.startsWith("PLAYER_")).map(row => row.key));
+  // A player proposition with no opposing source remains in the cached catalog
+  // and direct detail model. Repeating those rows in every worker message can
+  // clone more than 140,000 unusable player offers back onto the UI thread.
+  const observedRows = event.observedRows.filter(row =>
+    !row.marketType.startsWith("PLAYER_") || matchedPlayerRows.has(row.key));
+  return { ...comparison, observedRows, accountIds: catalogs.map((catalog) => catalog.accountId) };
 }
 
 export class ComparisonWorkerEngine {
@@ -51,14 +58,14 @@ export class ComparisonWorkerEngine {
     const catalogs = [...this.#catalogs.values()];
     const displayCatalogs = [...this.#displayCatalogs.values()];
     const freshCatalogs = catalogs.filter((catalog) => !this.#stale.has(catalog.accountId));
-    const displayEvents = buildComparisonEvents(displayCatalogs, this.#competitionMemory).map(project);
+    const displayEvents = buildComparisonEvents(displayCatalogs, this.#competitionMemory, { playerComparisonsOnly: true }).map(project);
     // The two lists are the same list whenever nothing is stale and every
     // supported market is complete, which is most of the time. Comparing a list twice
     // spends the same 227ms to reach the answer already in hand - 44 times a
     // minute at the sizes measured 2026-08-29, a third of a core for nothing.
     const output = { generation: command.generation, displayEvents,
       freshEvents: sameCatalogs(displayCatalogs, freshCatalogs) ? displayEvents
-        : buildComparisonEvents(freshCatalogs, this.#competitionMemory).map(project) };
+        : buildComparisonEvents(freshCatalogs, this.#competitionMemory, { playerComparisonsOnly: true }).map(project) };
     // Sent only when the proven set grows, because it rides on every catalog
     // update and most of them prove nothing new.
     const confirmed = this.#competitionMemory.confirmed();
@@ -114,7 +121,11 @@ function completeDisplayCatalog(catalog: LiveCatalogResponse,
     const previousMarket = previousMarkets.get(key);
     const lastCompleteQuotes = previousQuotes.get(key) ?? [];
     const sameTicket = previousMarket !== undefined && previousMarket.marketType === market.marketType &&
-      previousMarket.scope === market.scope && previousMarket.line === market.line;
+      previousMarket.scope === market.scope && previousMarket.line === market.line &&
+      (market.marketType.startsWith("PLAYER_") || previousMarket.player !== undefined || market.player !== undefined
+        ? sameNativePlayer(previousMarket.player, market.player) : true) &&
+      currentQuotes.every(quote => market.marketType.startsWith("PLAYER_")
+        ? sameNativePlayer(market.player, quote.player) : quote.player === undefined);
     if (sameTicket && isFocusedTwoWayTicket({ provider: catalog.provider,
       market: previousMarket, quotes: lastCompleteQuotes })) {
       markets.push(previousMarket);

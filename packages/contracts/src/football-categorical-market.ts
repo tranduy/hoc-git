@@ -1,10 +1,11 @@
 import type { MarketType, Scope } from "./domain.js";
+import { extendedFootballCategoricalSpecs } from "./football-extended-market.js";
 
 /** Native multi-outcome offers. Keeping a quote does not assert a binary complement. */
 export interface FootballCategoricalMarketSpec {
   readonly scope: Extract<Scope, "FULL_TIME" | "FIRST_HALF" | "SECOND_HALF">;
   readonly settlementProfile: string;
-  readonly linePolicy: "NONE" | "HALF_UNIT";
+  readonly linePolicy: "NONE" | "HALF_UNIT" | "INTEGER";
   readonly selectionPattern: RegExp;
 }
 
@@ -52,9 +53,9 @@ const entries = [
   ["FH_DRAW_NO_BET", "FIRST_HALF", "football-draw-no-bet-first-half", /^(?:HOME|AWAY)$/u],
   ["SH_DRAW_NO_BET", "SECOND_HALF", "football-draw-no-bet-second-half", /^(?:HOME|AWAY)$/u]
 ] as const;
-const specs: Readonly<Partial<Record<MarketType, FootballCategoricalMarketSpec>>> = Object.fromEntries(entries.map(
+const specs: Readonly<Partial<Record<MarketType, FootballCategoricalMarketSpec>>> = { ...extendedFootballCategoricalSpecs, ...Object.fromEntries(entries.map(
   ([type, scope, settlementProfile, selectionPattern]) => [type, { scope, settlementProfile, selectionPattern,
-    linePolicy: type === "FT_RESULT_TOTAL" ? "HALF_UNIT" : "NONE" }]));
+    linePolicy: type === "FT_RESULT_TOTAL" ? "HALF_UNIT" : "NONE" }])) };
 
 export function footballCategoricalMarketSpec(type: MarketType): FootballCategoricalMarketSpec | null {
   return specs[type] ?? null;
@@ -75,5 +76,9 @@ export function isFootballCategoricalSelection(type: MarketType, selection: stri
     }
   }
   const bounds = /^RANGE_(\d+)_(\d+)$/u.exec(selection);
-  return bounds === null || Number(bounds[1]) <= Number(bounds[2]);
+  if (bounds !== null && Number(bounds[1]) > Number(bounds[2])) return false;
+  const time = /(?:^|_)(SECONDS|MINUTES)_(\d+)_(\d+)$/u.exec(selection);
+  if (time !== null) return /^(?:0|[1-9]\d*)$/u.test(time[2]!) && /^(?:0|[1-9]\d*)$/u.test(time[3]!) &&
+    Number.isSafeInteger(Number(time[2])) && Number.isSafeInteger(Number(time[3])) && Number(time[2]) <= Number(time[3]);
+  return true;
 }

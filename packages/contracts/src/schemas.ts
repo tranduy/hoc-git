@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { footballBinaryMarketSpec } from "./football-binary-market.js";
+import { extendedFootballMarketTypes } from "./football-extended-market.js";
 import { footballResultMarketSpec } from "./football-result-market.js";
 import { footballCategoricalMarketSpec } from "./football-categorical-market.js";
+import { isValidProviderPlayerIdentity } from "./football-player-identity.js";
 export {
   ChromeBridgeControlMessageSchema,
   ChromeBridgeEnvelopeSchema,
@@ -143,6 +145,7 @@ export const QuoteIneligibilityReasonSchema = z.enum([
 export const OddsFormatSchema = z.enum(["DECIMAL", "HK", "AMERICAN", "MALAY"]) satisfies z.ZodType<OddsFormat>;
 
 export const MarketTypeSchema = z.enum([
+  ...extendedFootballMarketTypes,
   "FT_CORRECT_SCORE", "FH_CORRECT_SCORE", "SH_CORRECT_SCORE", "CORNER_FT_CORRECT_SCORE",
   "CORNER_FH_CORRECT_SCORE", "FT_SCORE_SET", "FT_WIN_MARGIN", "FH_WIN_MARGIN",
   "FT_GOAL_RANGE", "FH_GOAL_RANGE", "SH_GOAL_RANGE",
@@ -639,7 +642,20 @@ export const ProviderEventSchema = z.discriminatedUnion("category", [
   })
 ]) satisfies z.ZodType<ProviderEvent>;
 
+export const ProviderPlayerIdentitySchema = z.strictObject({
+  providerPlayerId: z.string().min(1).max(256),
+  name: z.string().min(1).max(256),
+  teamSide: z.enum(["HOME", "AWAY"]).nullable()
+}).refine(isValidProviderPlayerIdentity, { message: "player identity must contain an exact native ID and a real individual name" });
+
+function validatePlayerIdentity(value: { marketType: MarketType; player?: unknown }, context: z.RefinementCtx): void {
+  if (value.marketType.startsWith("PLAYER_") !== (value.player !== undefined)) {
+    context.addIssue({ code: "custom", path: ["player"], message: "player markets require their native player identity" });
+  }
+}
+
 export const ProviderMarketSchema = z.strictObject({
+  player: ProviderPlayerIdentitySchema.optional(),
   provider: z.string(),
   category: CategorySchema,
   providerEventId: z.string(),
@@ -649,9 +665,10 @@ export const ProviderMarketSchema = z.strictObject({
   line: DecimalStringSchema.nullable(),
   settlementProfile: z.string(),
   status: QuoteStatusSchema
-}).superRefine(validateCategoryCompatibility) satisfies z.ZodType<ProviderMarket>;
+}).superRefine(validateCategoryCompatibility).superRefine(validatePlayerIdentity) satisfies z.ZodType<ProviderMarket>;
 
 export const ProviderQuoteSchema = z.strictObject({
+  player: ProviderPlayerIdentitySchema.optional(),
   provider: z.string(),
   category: CategorySchema,
   providerEventId: z.string(),
@@ -668,7 +685,7 @@ export const ProviderQuoteSchema = z.strictObject({
   sourceTimestampMs: z.number().nullable(),
   receivedMonotonicMs: z.number(),
   sequence: z.number().nullable()
-}).superRefine(validateCategoryCompatibility) satisfies z.ZodType<ProviderQuote>;
+}).superRefine(validateCategoryCompatibility).superRefine(validatePlayerIdentity) satisfies z.ZodType<ProviderQuote>;
 
 export const NativeMarketObservationSchema = z.strictObject({
   provider: z.string().trim().min(1).max(64),

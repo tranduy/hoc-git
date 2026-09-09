@@ -1,7 +1,7 @@
-import type { ProviderId, ProviderQuote, ProviderStakeConstraint } from "@tool-chenh/contracts";
+import { sameNativePlayer, footballBinaryMarketSpec, type ProviderId, type ProviderQuote, type ProviderStakeConstraint, type ProviderPlayerIdentity } from "@tool-chenh/contracts";
 import { Decimal, effectiveDecimal, type FeeModel } from "@tool-chenh/core";
 import { comparisonOutcomeDomain, comparisonSettlementCases, isResultOppositionCell, distinctResultSourceCells,
-  isAvailableTwoWayTicket, type TwoWaySettlementCase,
+  isAvailableTwoWayTicket, hasValidComparisonPlayerBinding, sameComparisonPlayer, type TwoWaySettlementCase,
   type ComparisonCell, type ComparisonRow } from "../catalog/comparison.js";
 
 export interface FixedBaseStakePolicy {
@@ -16,6 +16,7 @@ export interface FixedBaseStakePolicy {
 }
 
 export interface FixedBaseStakeLeg {
+  readonly player?: ProviderPlayerIdentity;
   readonly providerEventId?: string;
   readonly providerMarketId?: string;
   readonly providerSelectionId?: string;
@@ -75,6 +76,7 @@ function oddsOf(quote: ProviderQuote): Decimal | null {
 }
 
 interface BestLeg {
+  readonly player?: ProviderPlayerIdentity;
   readonly provider: ProviderId;
   readonly selection: string;
   readonly odds: Decimal;
@@ -83,12 +85,14 @@ interface BestLeg {
   readonly providerEventId: string;
 }
 
-export function stakeLegMatchesQuote(leg: Pick<FixedBaseStakeLeg, "provider" | "selection" | "providerEventId" | "providerMarketId" | "providerSelectionId">,
+export function stakeLegMatchesQuote(leg: Pick<FixedBaseStakeLeg, "provider" | "selection" | "providerEventId" | "providerMarketId" | "providerSelectionId" | "player">,
   quote: ProviderQuote): boolean {
   return leg.provider === quote.provider && leg.selection === quote.selection &&
     (leg.providerEventId === undefined || leg.providerEventId === quote.providerEventId) &&
     (leg.providerMarketId === undefined || leg.providerMarketId === quote.providerMarketId) &&
-    (leg.providerSelectionId === undefined || leg.providerSelectionId === quote.providerSelectionId);
+    (leg.providerSelectionId === undefined || leg.providerSelectionId === quote.providerSelectionId) &&
+    (quote.marketType.startsWith("PLAYER_") || leg.player !== undefined || quote.player !== undefined
+      ? sameNativePlayer(leg.player, quote.player) : true);
 }
 
 type SettlementFactors = readonly [Decimal, Decimal];
@@ -115,7 +119,8 @@ function exactMarketCell(row: StakeComparableRow, cell: ComparisonCell,
     cell.market.scope !== row.scope || !sameLine(cell.market.line, row.line) || cell.quotes.length === 0) return false;
   const expectedCategory = row.marketType === "SERIES_WINNER" || row.marketType === "MAP_WINNER"
     ? "LOL" : "FOOTBALL";
-  if (cell.market.category !== expectedCategory) return false;
+  if (cell.market.category !== expectedCategory || !hasValidComparisonPlayerBinding(cell)) return false;
+  if (footballBinaryMarketSpec(cell.market.marketType)?.linePolicy === "POSITIVE_INTEGER" && !isAvailableTwoWayTicket(cell)) return false;
   const selections = cell.quotes.map((quote) => quote.selection);
   const selectionIds = cell.quotes.map((quote) => quote.providerSelectionId);
   if (new Set(selections).size !== selections.length || new Set(selectionIds).size !== selectionIds.length ||
@@ -135,7 +140,7 @@ function exactMarketCells(row: StakeComparableRow,
   }
   const expectedDomain = new Set(expected);
   const byProvider = new Map<ProviderId, ComparisonCell[]>();
-  for (const cell of row.cells) {
+  for (const cell of distinctResultSourceCells(row.cells)) {
     if (!selectedProviders.has(cell.provider)) continue;
     byProvider.set(cell.provider, [...(byProvider.get(cell.provider) ?? []), cell]);
   }
@@ -205,7 +210,8 @@ export function enumerateOpposingLegPairs(row: ComparisonRow,
   }).sort((left, right) => left.provider.localeCompare(right.provider) ||
     left.quote.providerSelectionId.localeCompare(right.quote.providerSelectionId));
   return quotesFor(firstSelection).flatMap((first) => quotesFor(secondSelection)
-    .filter((second) => second.provider !== first.provider && second.settlementProfile === first.settlementProfile)
+    .filter((second) => second.provider !== first.provider && second.settlementProfile === first.settlementProfile &&
+      sameComparisonPlayer(first.quote, second.quote))
     .map((second) => ({
       first: { provider: first.provider, quote: first.quote },
       second: { provider: second.provider, quote: second.quote }
@@ -220,17 +226,19 @@ function pairLegs(row: StakeComparableRow, pair: OpposingLegPair): [BestLeg, Bes
   const cells = exactMarketCells(row, pairProviders).filter(cell => [pair.first, pair.second].some(candidate =>
     candidate.provider === cell.provider && candidate.quote.providerMarketId === cell.market.providerMarketId &&
     cell.quotes.some(quote => quote.providerSelectionId === candidate.quote.providerSelectionId)));
-  if (cells.length !== 2 || cells[0]!.market.settlementProfile !== cells[1]!.market.settlementProfile) return null;
+  if (cells.length !== 2 || cells[0]!.market.settlementProfile !== cells[1]!.market.settlementProfile ||
+    !sameComparisonPlayer(cells[0]!.market, cells[1]!.market)) return null;
   const legs = [pair.first, pair.second].flatMap((candidate): BestLeg[] => {
     const cell = cells.find((item) => item.provider === candidate.provider && item.market.status === "OPEN" &&
       item.market.providerMarketId === candidate.quote.providerMarketId &&
       item.quotes.some((quote) => quote.providerSelectionId === candidate.quote.providerSelectionId));
     const quote = cell?.quotes.find((item) => item.providerSelectionId === candidate.quote.providerSelectionId &&
-      item.selection === candidate.quote.selection && item.status === "OPEN");
+      item.selection === candidate.quote.selection && item.status === "OPEN" &&
+      (item.marketType.startsWith("PLAYER_") ? sameNativePlayer(item.player, candidate.quote.player) : candidate.quote.player === undefined));
     const odds = quote === undefined ? null : oddsOf(quote);
     return quote === undefined || odds === null ? [] : [{ provider: candidate.provider, selection: quote.selection, odds,
       providerSelectionId: quote.providerSelectionId, providerMarketId: quote.providerMarketId,
-      providerEventId: quote.providerEventId }];
+      providerEventId: quote.providerEventId, ...(quote.player === undefined ? {} : { player: quote.player }) }];
   });
   if (legs.length !== 2) return null;
   legs.sort((left, right) => left.odds.comparedTo(right.odds) || left.selection.localeCompare(right.selection) ||
@@ -305,11 +313,13 @@ function buildPlanForPair(row: StakeComparableRow, pair: OpposingLegPair,
 
   const legs: readonly FixedBaseStakeLeg[] = [
     { provider: anchor.provider, selection: anchor.selection, providerEventId: anchor.providerEventId,
+      ...(anchor.player === undefined ? {} : { player: anchor.player }),
       providerMarketId: anchor.providerMarketId, providerSelectionId: anchor.providerSelectionId,
       decimalOdds: plain(anchor.odds), stake: plain(anchorStake),
       payout: plain(plan.anchorPayout), profit: plain(plan.anchorProfit), role: "BASE",
       feeType: anchorConstraint.feeType, feeRate: anchorConstraint.feeRate },
     { provider: calculated.provider, selection: calculated.selection, providerEventId: calculated.providerEventId,
+      ...(calculated.player === undefined ? {} : { player: calculated.player }),
       providerMarketId: calculated.providerMarketId, providerSelectionId: calculated.providerSelectionId,
       decimalOdds: plain(calculated.odds), stake: plain(plan.hedgeStake),
       payout: plain(plan.calculatedPayout), profit: plain(plan.calculatedProfit), role: "HEDGE",
@@ -318,7 +328,8 @@ function buildPlanForPair(row: StakeComparableRow, pair: OpposingLegPair,
   return {
     fingerprint: [row.key, plain(anchorStake), ...legs.map((leg) => {
       const identity = bestLegs.find((candidate) => candidate.provider === leg.provider && candidate.selection === leg.selection)!;
-      return `${leg.provider}|${leg.selection}|${identity.providerEventId}|${identity.providerMarketId}|${identity.providerSelectionId}|${leg.decimalOdds}|${leg.stake}`;
+      const player = leg.player === undefined ? "" : `|${JSON.stringify(leg.player)}`;
+      return `${leg.provider}|${leg.selection}|${identity.providerEventId}|${identity.providerMarketId}|${identity.providerSelectionId}|${leg.decimalOdds}|${leg.stake}${player}`;
     })].join("::"),
     currency: policy.currency, legs, totalStake: plain(plan.totalStake),
     profitsBySelection: { [anchor.selection]: plain(plan.anchorProfit), [calculated.selection]: plain(plan.calculatedProfit) },

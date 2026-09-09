@@ -1,9 +1,10 @@
-import { footballBinaryMarketSpec, footballResultMarketSpec, resultComplement, isNoPushFootballLine,
+import { footballBinaryMarketSpec, footballCategoricalMarketSpec, isFootballCategoricalSelection, footballResultMarketSpec, resultComplement, isNoPushFootballLine, playerComparisonKey, sameNativePlayer,
   type MarketType, type ProviderEvent, type ProviderId, type ProviderMarket,
   type ProviderQuote } from "@tool-chenh/contracts";
 import type { LiveCatalogResponse } from "../api/catalog.js";
 import { compareProviders, sortProviderItems } from "./provider-order.js";
 import { observedCompetitionAliases } from "./observed-competition-aliases.js";
+import { footballComparisonEquivalents } from "./football-comparison-equivalents.js";
 
 export interface ComparisonCell {
   readonly provider: ProviderId;
@@ -381,6 +382,7 @@ function footballMarketFamily(marketType: string): FootballMarketFamily {
   if (marketType.startsWith("CORNER_") || marketType.startsWith("HOME_CORNER_") ||
     marketType.startsWith("AWAY_CORNER_")) return "CORNERS";
   if (marketType.startsWith("CARD_") || marketType.startsWith("YELLOW_CARD_") ||
+    marketType.startsWith("HOME_CARD_") || marketType.startsWith("AWAY_CARD_") ||
     marketType === "SENDING_OFF") return "CARDS";
   return "GOALS";
 }
@@ -954,7 +956,26 @@ const swappedFootballSubjectMarketType: Readonly<Partial<Record<MarketType, Mark
 };
 
 function orientFootballMarketType(marketType: MarketType, orientation: EventOrientation): MarketType {
-  return orientation === "SWAPPED" ? swappedFootballSubjectMarketType[marketType] ?? marketType : marketType;
+  if (orientation !== "SWAPPED") return marketType;
+  const candidate = marketType.replace(/^(HOME|AWAY)_/u, prefix => prefix === "HOME_" ? "AWAY_" : "HOME_") as MarketType;
+  return swappedFootballSubjectMarketType[marketType] ??
+    (footballBinaryMarketSpec(candidate) !== null || footballCategoricalMarketSpec(candidate) !== null ? candidate : marketType);
+}
+
+function orientFootballSelection(type: MarketType, selection: string): string {
+  if (footballCategoricalMarketSpec(type) !== null && isFootballCategoricalSelection(type, selection)) {
+    const score = /^SCORE_(\d+)_(\d+)$/u.exec(selection);
+    if (score !== null) return `SCORE_${score[2]}_${score[1]}`;
+    if (selection.startsWith("SCORES_")) return "SCORES_" + selection.slice(7).split("|")
+      .map(pair => pair.split("_").reverse().map(Number)).sort((a,b) => a[0]! - b[0]! || a[1]! - b[1]!)
+      .map(pair => pair.join("_")).join("|");
+    const swapped = selection.replace(/\b(?:HOME|AWAY)\b|(?<=_)(?:HOME|AWAY)(?=_|$)|^(?:HOME|AWAY)(?=_)/gu,
+      token => token === "HOME" ? "AWAY" : "HOME");
+    return type.includes("DOUBLE_CHANCE") ? swapped.replace(/^AWAY_HOME/u,"HOME_AWAY")
+      .replace(/^AWAY_DRAW/u,"DRAW_AWAY").replace(/^DRAW_HOME/u,"HOME_DRAW") : swapped;
+  }
+  return selection === "HOME" ? "AWAY" : selection === "AWAY" ? "HOME"
+    : selection === "HOME_DRAW" ? "DRAW_AWAY" : selection === "DRAW_AWAY" ? "HOME_DRAW" : selection;
 }
 
 export function selectionHandicapLine(
@@ -970,20 +991,23 @@ export function selectionHandicapLine(
 
 function orientMarket(market: ProviderMarket, orientation: EventOrientation): ProviderMarket {
   const shouldInvert = orientation === "SWAPPED" && market.category === "FOOTBALL" &&
-    isFootballHandicapMarketType(market.marketType);
+    (isFootballHandicapMarketType(market.marketType) || market.marketType.endsWith("EUROPEAN_HANDICAP"));
   const marketType = market.category === "FOOTBALL" ? orientFootballMarketType(market.marketType, orientation)
     : market.marketType;
   // Only the registry's known subject-specific profile can be reoriented.
   // A provider-specific rule must not become verified merely by swapping teams.
   const settlementProfile = market.category === "FOOTBALL" && marketType !== market.marketType &&
-    market.settlementProfile === footballBinaryMarketSpec(market.marketType)?.settlementProfile
-    ? footballBinaryMarketSpec(marketType)?.settlementProfile ?? market.settlementProfile
+    market.settlementProfile === (footballBinaryMarketSpec(market.marketType) ?? footballCategoricalMarketSpec(market.marketType))?.settlementProfile
+    ? (footballBinaryMarketSpec(marketType) ?? footballCategoricalMarketSpec(marketType))?.settlementProfile ?? market.settlementProfile
     : market.settlementProfile;
   const line = canonicalLine(shouldInvert ? invertLine(market.line) : market.line);
+  const player = orientation === "SWAPPED" && market.category === "FOOTBALL" && market.player !== undefined
+    ? { ...market.player, teamSide: market.player.teamSide === "HOME" ? "AWAY" as const
+      : market.player.teamSide === "AWAY" ? "HOME" as const : null } : market.player;
   // Unchanged canonical and native values can share one immutable record,
   // including through the worker's structured clone.
-  return marketType === market.marketType && settlementProfile === market.settlementProfile && line === market.line
-    ? market : { ...market, marketType, settlementProfile, line };
+  return marketType === market.marketType && settlementProfile === market.settlementProfile && line === market.line && player === market.player
+    ? market : { ...market, marketType, settlementProfile, line, ...(player === undefined ? {} : { player }) };
 }
 
 function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrientation): readonly ProviderQuote[] {
@@ -998,19 +1022,47 @@ function orientQuotes(quotes: readonly ProviderQuote[], orientation: EventOrient
       return quote;
     }
     if (quote.category === "FOOTBALL") {
-      const selection = quote.selection === "HOME" ? "AWAY" : quote.selection === "AWAY" ? "HOME"
-        : quote.selection === "HOME_DRAW" ? "DRAW_AWAY" : quote.selection === "DRAW_AWAY" ? "HOME_DRAW" : quote.selection;
-      const line = canonicalLine(isFootballHandicapMarketType(quote.marketType) ? invertLine(quote.line) : quote.line);
+      const selection = orientFootballSelection(quote.marketType, quote.selection);
+      const line = canonicalLine(isFootballHandicapMarketType(quote.marketType) || quote.marketType.endsWith("EUROPEAN_HANDICAP") ? invertLine(quote.line) : quote.line);
       const marketType = orientFootballMarketType(quote.marketType, orientation);
-      return marketType === quote.marketType && selection === quote.selection && line === quote.line
-        ? quote : { ...quote, marketType, selection, line };
+      const player = quote.player === undefined ? undefined : { ...quote.player,
+        teamSide: quote.player.teamSide === "HOME" ? "AWAY" as const : quote.player.teamSide === "AWAY" ? "HOME" as const : null };
+      return marketType === quote.marketType && selection === quote.selection && line === quote.line && player === quote.player
+        ? quote : { ...quote, marketType, selection, line, ...(player === undefined ? {} : { player }) };
     }
     return quote;
   }).sort((left, right) => left.selection.localeCompare(right.selection));
 }
 
 function marketKey(market: ProviderMarket): string {
-  return [market.marketType, market.scope, canonicalLine(market.line) ?? ""].join("|");
+  const terms = [market.marketType, market.scope, canonicalLine(market.line) ?? ""];
+  if (market.marketType.startsWith("PLAYER_")) terms.push(playerComparisonKey(market.player) ??
+    `UNRESOLVED|${JSON.stringify([market.provider, market.providerEventId, market.providerMarketId, market.player ?? null])}`);
+  return terms.join("|");
+}
+
+/** A full name and oriented team identify a comparison candidate, not an execution registry ID. */
+export function sameComparisonPlayer(left: Pick<ProviderMarket, "marketType" | "player">,
+  right: Pick<ProviderMarket, "marketType" | "player">): boolean {
+  if (!left.marketType.startsWith("PLAYER_") && !right.marketType.startsWith("PLAYER_"))
+    return left.player === undefined && right.player === undefined;
+  if (!left.marketType.startsWith("PLAYER_") || !right.marketType.startsWith("PLAYER_")) return false;
+  const key = playerComparisonKey(left.player);
+  return key !== null && key === playerComparisonKey(right.player);
+}
+
+export function hasValidComparisonPlayerBinding(cell: ComparisonCell): boolean {
+  if (!cell.market.marketType.startsWith("PLAYER_")) return cell.market.player === undefined &&
+    cell.quotes.every(quote => quote.player === undefined);
+  if (playerComparisonKey(cell.market.player) === null ||
+    !cell.quotes.every(quote => sameNativePlayer(cell.market.player, quote.player))) return false;
+  const nativeMarket = cell.sourceMarket ?? cell.market;
+  const nativeQuotes = cell.sourceQuotes ?? cell.quotes;
+  return nativeMarket.player?.providerPlayerId === cell.market.player?.providerPlayerId &&
+    nativeMarket.player?.name === cell.market.player?.name &&
+    nativeQuotes.every(quote => sameNativePlayer(nativeMarket.player, quote.player)) &&
+    cell.quotes.every(quote => nativeQuotes.some(native => native.providerSelectionId === quote.providerSelectionId &&
+      native.providerEventId === quote.providerEventId && native.providerMarketId === quote.providerMarketId));
 }
 
 function eligibleTwoWayCells(cells: readonly ComparisonCell[], requireSameSettlement = true): readonly ComparisonCell[] {
@@ -1040,7 +1092,8 @@ export function binaryOpposingCellPairs(cells: readonly ComparisonCell[]): reado
     const domain = exactTwoWayOutcomeDomain(a.market.marketType, a.market.scope, a.market.line);
     if (a.provider === b.provider || domain === null || a.market.marketType !== b.market.marketType ||
       a.market.scope !== b.market.scope || !sameMarketLine(a.market.line, b.market.line) ||
-      a.market.settlementProfile !== b.market.settlementProfile) continue;
+      a.market.settlementProfile !== b.market.settlementProfile || !sameComparisonPlayer(a.market, b.market) ||
+      !hasValidComparisonPlayerBinding(a) || !hasValidComparisonPlayerBinding(b)) continue;
     if (domain.some((selection, index) => a.quotes.some(quote => quote.selection === selection &&
       quote.status === "OPEN" && decimalOdds(quote) !== null) && b.quotes.some(quote =>
         quote.selection === domain[1 - index] && quote.status === "OPEN" && decimalOdds(quote) !== null))) pairs.push([a, b]);
@@ -1058,7 +1111,8 @@ export function exactTwoWayOutcomeDomain(marketType: string, scope: string,
   const asianLine = line !== null && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(line) &&
     Number.isSafeInteger(Number(line) * 4);
   if (spec !== null && scope === spec.scope &&
-    (spec.linePolicy === "NONE" ? line === null :
+    (spec.linePolicy === "NONE" ? line === null : spec.linePolicy === "POSITIVE_INTEGER"
+      ? spec.family === "YES_NO" && line !== null && /^[1-9]\d*(?:\.0+)?$/u.test(line) && Number.isSafeInteger(Number(line)) :
       spec.family === "TOTAL" || spec.family === "HANDICAP"
         ? asianLine : isNoPushFootballLine(line))) {
     return [...spec.outcomes].sort();
@@ -1108,7 +1162,16 @@ export function resultOppositionCellPairs(row: Pick<ComparisonRow, "marketType" 
 }
 
 export function distinctResultSourceCells(cells: readonly ComparisonCell[]): readonly ComparisonCell[] {
-  return cells.filter(cell => cells.filter(other => other.provider === cell.provider &&
+  const players = new Map<string, Set<string>>();
+  for (const cell of cells) {
+    const playerKey = playerComparisonKey(cell.market.player);
+    if (playerKey === null) continue;
+    const key = JSON.stringify([cell.provider, cell.market.providerEventId, playerKey]);
+    const ids = players.get(key) ?? new Set<string>();
+    ids.add(cell.market.player!.providerPlayerId); players.set(key, ids);
+  }
+  return cells.filter(cell => (players.size === 0 || (players.get(JSON.stringify([cell.provider, cell.market.providerEventId,
+    playerComparisonKey(cell.market.player)]))?.size ?? 0) <= 1) && cells.filter(other => other.provider === cell.provider &&
     other.market.providerEventId === cell.market.providerEventId &&
     other.market.providerMarketId === cell.market.providerMarketId).length === 1 &&
     !cells.some(other => other.provider === cell.provider && other.market.providerEventId !== cell.market.providerEventId));
@@ -1167,7 +1230,8 @@ export function twoWaySettlementCases(marketType: string, scope: string,
     { kind: "FIRST_WINS", factors: [[1, 0], [0, 0]] },
     { kind: "SECOND_WINS", factors: [[0, 0], [1, 0]] }
   ];
-  if (line === null || isNoPushFootballLine(line)) return extremes;
+  if (line === null || isNoPushFootballLine(line) ||
+    footballBinaryMarketSpec(marketType as MarketType)?.linePolicy === "POSITIVE_INTEGER") return extremes;
   const value = Number(line);
   if (Number.isInteger(value)) return [...extremes, { kind: "PUSH", factors: [[0, 1], [0, 1]] }];
   const spec = footballBinaryMarketSpec(marketType as MarketType);
@@ -1229,9 +1293,14 @@ function availableTwoWayCell(cell: ComparisonCell): ComparisonCell | null {
   const expectedDomain = exactTwoWayOutcomeDomain(cell.market.marketType, cell.market.scope, cell.market.line);
   if (expectedDomain === null || cell.market.status !== "OPEN" || cell.quotes.length === 0 ||
     cell.quotes.length > expectedDomain.length) return null;
+  // Number-based display canonicalization must not turn a fractional source threshold into an integer predicate.
+  if (footballBinaryMarketSpec(cell.market.marketType)?.linePolicy === "POSITIVE_INTEGER" &&
+    [cell.market, cell.sourceMarket ?? cell.market, ...cell.quotes, ...(cell.sourceQuotes ?? [])].some(item =>
+      exactTwoWayOutcomeDomain(item.marketType, item.scope, item.line) === null)) return null;
   const expectedCategory = cell.market.marketType === "SERIES_WINNER" || cell.market.marketType === "MAP_WINNER"
     ? "LOL" : "FOOTBALL";
-  if (cell.market.provider !== cell.provider || cell.market.category !== expectedCategory) return null;
+  if (cell.market.provider !== cell.provider || cell.market.category !== expectedCategory ||
+    !hasValidComparisonPlayerBinding(cell)) return null;
   const selections = cell.quotes.map((quote) => quote.selection);
   if (new Set(selections).size !== selections.length || selections.some(selection => !expectedDomain.includes(selection))) return null;
   const selectionIds = cell.quotes.map((quote) => quote.providerSelectionId);
@@ -1464,17 +1533,23 @@ function withScheduledPhase(
 }
 
 export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
-  competitionMemory?: CompetitionLinkMemory): readonly ComparisonEvent[] {
+  competitionMemory?: CompetitionLinkMemory,
+  options: { readonly playerComparisonsOnly?: boolean } = {}): readonly ComparisonEvent[] {
   const orderedCatalogs = sortProviderItems(withScheduledPhase(catalogs), (catalog) => catalog.provider,
     (left, right) => left.accountId.localeCompare(right.accountId));
   const catalogIndexes = new Map<LiveCatalogResponse, {
     readonly marketsByEvent: ReadonlyMap<string, readonly ProviderMarket[]>;
     readonly quotesByMarket: ReadonlyMap<string, readonly ProviderQuote[]>;
     readonly quotedEventIds: ReadonlySet<string>;
+    readonly ambiguousPlayers: ReadonlySet<string>;
   }>();
   // Native market identifiers can be local to a fixture (observed in APSPORT).
   const nativeMarketKey = (eventId: string, marketId: string): string =>
     JSON.stringify([eventId, marketId]);
+  // This conservative worker-only precheck cannot remove a possible route:
+  // matching player markets must first share a type at two distinct books.
+  // Keep the source inventories and the default detail projection complete.
+  const playerProvidersByType = new Map<MarketType, Set<ProviderId>>();
   for (const catalog of orderedCatalogs) {
     const marketsByEvent = new Map<string, ProviderMarket[]>();
     for (const market of catalog.markets) {
@@ -1491,7 +1566,21 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
       values.push(quote);
       quotesByMarket.set(quoteKey, values);
     }
-    catalogIndexes.set(catalog, { marketsByEvent, quotesByMarket, quotedEventIds });
+    const playerIds = new Map<string, Set<string>>();
+    for (const market of catalog.markets) {
+      if (options.playerComparisonsOnly && market.marketType.startsWith("PLAYER_")) {
+        const providers = playerProvidersByType.get(market.marketType) ?? new Set<ProviderId>();
+        providers.add(catalog.provider);
+        playerProvidersByType.set(market.marketType, providers);
+      }
+      const playerKey = playerComparisonKey(market.player);
+      if (playerKey === null) continue;
+      const key = JSON.stringify([market.providerEventId, playerKey]);
+      const ids = playerIds.get(key) ?? new Set<string>();
+      ids.add(market.player!.providerPlayerId); playerIds.set(key, ids);
+    }
+    const ambiguousPlayers = new Set([...playerIds].filter(([, ids]) => ids.size > 1).map(([key]) => key));
+    catalogIndexes.set(catalog, { marketsByEvent, quotesByMarket, quotedEventIds, ambiguousPlayers });
   }
   type EventProjection = { readonly catalog: LiveCatalogResponse; readonly event: ProviderEvent;
     readonly family: ComparisonMarketFamily };
@@ -1666,6 +1755,11 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
       const providerEventId = group.ids[catalog.provider];
       const index = catalogIndexes.get(catalog)!;
       for (const market of index.marketsByEvent.get(providerEventId ?? "") ?? []) {
+        if (options.playerComparisonsOnly && market.marketType.startsWith("PLAYER_") &&
+          (playerProvidersByType.get(market.marketType)?.size ?? 0) < 2) continue;
+        // Source inventory remains in the catalog; ambiguous names cannot establish a comparison route.
+        if (index.ambiguousPlayers.size > 0 &&
+          index.ambiguousPlayers.has(JSON.stringify([market.providerEventId, playerComparisonKey(market.player)]))) continue;
         const marketFamily: ComparisonMarketFamily = market.category === "LOL"
           ? "ESPORTS" : footballMarketFamily(market.marketType);
         if (marketFamily !== group.family) continue;
@@ -1680,6 +1774,12 @@ export function buildComparisonEvents(catalogs: readonly LiveCatalogResponse[],
           sourceMarket: market, sourceQuotes: phaseQuotes };
         cells.push(availableTwoWayCell(sourceCell) ?? sourceCell);
         rowGroups.set(rowKey, cells);
+        for (const equivalent of footballComparisonEquivalents(sourceCell)) {
+          const equivalentKey = marketKey(equivalent.market);
+          const equivalentCells = rowGroups.get(equivalentKey) ?? [];
+          equivalentCells.push(availableTwoWayCell(equivalent) ?? equivalent);
+          rowGroups.set(equivalentKey, equivalentCells);
+        }
       }
     }
     const resultRows = resultOppositionRows([...rowGroups.values()].flat());

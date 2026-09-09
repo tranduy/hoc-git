@@ -65,4 +65,10 @@ describe("BTI team props follow the team across reversed fixtures", () => {
       expect(events.flatMap(event => event.rows)).toHaveLength(0);
     }
   });
+  it("does not project live draw-no-bet onto remaining-score Asian handicap", () => {
+    const sources = [catalog("APSPORT", "SH_DRAW_NO_BET", false, ["HOME"]), catalog("BTI", "SH_DRAW_NO_BET", false, ["AWAY"])]
+      .map(source => ({ ...source, events: source.events.map(event => ({ ...event, isLive: true })),
+        quotes: source.quotes.map(quote => ({ ...quote, isLive: true })) }));
+    expect(summarizeComparisonCounts(buildComparisonEvents(sources)).crossBookPairCount).toBe(0);
+  });
 });

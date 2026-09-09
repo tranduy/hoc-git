@@ -118,6 +118,63 @@ describe("BtiHttpCatalogAdapter", () => {
     return body;
   }
 
+  function playerRoster() {
+    const body = categoricalRoster("QA1337"), event = (body.serializedData[0]![12] as unknown[][])[0]!;
+    const value = ((event[8] as unknown[])[3] as unknown[][])[0]!;
+    value[7] = [[1, 11, "Kanya Fujimoto"], [2, 11, "Kanya Fujimoto"], [3, 11, "Kanya Fujimoto"],
+      [1, 22, "Josh King"]].map(([role, id, name]) => {
+      const choice = selection(`categoryQ${role}Q${id}`, 1, 0, "-0.25");
+      choice[1] = { VI: String(name) }; choice[2] = { VI: String(name) };
+      return choice;
+    });
+    return body;
+  }
+
+  function playerDetail() {
+    const body = categoricalDetail("QA1337"), value = (body.data[0]![20] as unknown[][])[0]!;
+    const template = (value[13] as unknown[][])[0]!;
+    value[13] = [[1, 11, "Kanya Fujimoto"], [2, 11, "Kanya Fujimoto"], [3, 11, "Kanya Fujimoto"],
+      [1, 22, "Josh King"]].map(([role, id, name]) => {
+      const choice = structuredClone(template); choice[0] = `categoryQ${role}Q${id}`;
+      choice[2] = { VI: String(name) }; return choice;
+    });
+    return body;
+  }
+
+  it.each(["closed", "omitted", "empty", "event closed"])("retires every player and scorer-role variant after %s", kind => {
+    const adapter = new BtiHttpCatalogAdapter();
+    const initial = committedCatalog(adapter, "bti:1000:1", 1, JSON.stringify(playerRoster())) as ObservedProviderCatalog;
+    expect(initial.markets).toHaveLength(4);
+    expect(initial.markets.every(market => market.providerMarketId.endsWith(`:player:${market.player!.providerPlayerId}`))).toBe(true);
+    adapter.decode(cachedDetail(playerDetail(), now + 100));
+    const changed = kind === "empty" ? { data: [] } : kind === "omitted" ? detailPayload() as { data: unknown[][] } : playerDetail();
+    if (kind === "closed") ((changed.data[0]![20] as unknown[][])[0]!)[15] = true;
+    if (kind === "event closed") changed.data[0]![32] = true;
+    const catalog = adapter.decode(cachedDetail(changed, now + 200))[0]!.value as ObservedProviderCatalog;
+    expect(catalog.markets.filter(market => market.providerMarketId.startsWith("category:"))).toHaveLength(0);
+    expect(catalog.quotes.filter(quote => quote.providerSelectionId.startsWith("categoryQ"))).toHaveLength(0);
+    const later = adapter.decode(cachedDetail({ data: [] }, now + 300))[0]!.value as ObservedProviderCatalog;
+    expect(later.markets.filter(market => market.providerMarketId.startsWith("category:"))).toHaveLength(0);
+  });
+
+  it.each(["player ID", "missing player", "type", "period"])("does not retain a malformed derived player family with conflicting %s", kind => {
+    const body = playerRoster(), records = btiCatalog.extractBtiCatalogRecords(body);
+    const extract = vi.spyOn(btiCatalog, "extractBtiCatalogRecords").mockReturnValue(records.map(record => ({ ...record,
+      markets: record.markets.map(market => {
+        if (kind === "missing player") { const { player: _player, ...missing } = market; return missing; }
+        return { ...market, ...(kind === "player ID" ? { player: { ...market.player!, providerPlayerId: "99" } }
+          : { marketType: kind === "period" ? "PLAYER_FH_ANYTIME_SCORER" as const : "PLAYER_FT_BOOKED" as const }) };
+      }) })));
+    try {
+      const catalog = committedCatalog(new BtiHttpCatalogAdapter(), "bti:1000:1", 1, JSON.stringify(body)) as ObservedProviderCatalog;
+      expect(catalog.markets).toHaveLength(0);
+      expect(catalog.quotes).toHaveLength(0);
+      expect(catalog.nativeMarketObservations!.length).toBeGreaterThan(0);
+      expect(catalog.nativeMarketObservations!.filter(item => item.providerMarketId.includes(":player:"))
+        .every(item => item.disposition === "UNMAPPED" && item.reason === "INVALID_DERIVED_MARKET_BINDING")).toBe(true);
+    } finally { extract.mockRestore(); }
+  });
+
   it.each(["closed", "omitted", "empty"].flatMap(kind => [0, 2].map(count => [kind, count] as const)))(
     "retires derived categorical quotes after native family %s (goal count %d)", (kind, count) => {
     const adapter = new BtiHttpCatalogAdapter();

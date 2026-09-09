@@ -1,5 +1,5 @@
 import { isSupportedFootballTwoWayLine, normalizeSbobetCatalog } from "@tool-chenh/adapters";
-import { footballBinaryMarketSpec, footballCategoricalMarketSpec, footballResultMarketSpec,
+import { footballBinaryMarketSpec, footballCategoricalMarketSpec, footballResultMarketSpec, isValidProviderPlayerIdentity,
   type ChromeBridgeEnvelope, type MarketType, type Scope } from "@tool-chenh/contracts";
 import type { ObservedProviderCatalog } from "../providers/cmd/cmd-observed-catalog.js";
 import { extractBtiCatalogRecords,
@@ -436,12 +436,12 @@ function mergeMarketParts(parts: readonly BtiPart[]): Pick<ObservedProviderCatal
       .map(({ eventId, marketId }) => `${eventId}\u0000${marketId}`));
     const familyFor = (item: { readonly providerEventId: string; readonly providerMarketId: string;
       readonly marketType?: MarketType; readonly scope?: Scope; readonly line?: string | null;
-      readonly nativeScope?: string | null }): string => {
+      readonly nativeScope?: string | null; readonly player?: unknown }): string | null => {
       const key = `${item.providerEventId}\u0000${item.providerMarketId}`;
       if (nativeKeys.has(key)) return key;
       // A categorical family can expose several independent canonical terms.
       // All remain owned by the exact native family for closure and replacement.
-      const derived = /^(.+):([A-Z][A-Z0-9_]+):(none|-?\d+(?:\.\d+)?)$/u.exec(item.providerMarketId);
+      const derived = /^(.+):([A-Z][A-Z0-9_]+):(none|-?\d+(?:\.\d+)?)(?::player:([1-9]\d*))?$/u.exec(item.providerMarketId);
       if (derived !== null) {
         const type = derived[2] as MarketType;
         const binary = footballBinaryMarketSpec(type), categorical = footballCategoricalMarketSpec(type);
@@ -449,14 +449,23 @@ function mergeMarketParts(parts: readonly BtiPart[]): Pick<ObservedProviderCatal
         const linePolicy = binary?.linePolicy ?? categorical?.linePolicy ?? "NONE";
         const encodedLine = derived[3] === "none" ? null : derived[3]!;
         const family = `${item.providerEventId}\u0000${derived[1]}`;
-        if (spec !== null && nativeKeys.has(family) &&
+        if (spec !== null && nativeKeys.has(family) && type.startsWith("PLAYER_") === (derived[4] !== undefined) &&
+          (item.marketType === undefined || (type.startsWith("PLAYER_")
+            ? isValidProviderPlayerIdentity(item.player) && item.player.providerPlayerId === derived[4]
+            : item.player === undefined)) &&
           (item.marketType === undefined || item.marketType === type) &&
           (item.scope === undefined || item.scope === spec.scope) &&
           (item.nativeScope == null || item.nativeScope === spec.scope) &&
           (item.line === undefined || item.line === encodedLine) &&
-          (linePolicy === "NONE" ? encodedLine === null :
-            encodedLine !== null && isSupportedFootballTwoWayLine(encodedLine))) return family;
+          (linePolicy === "NONE" ? encodedLine === null : encodedLine !== null &&
+            (linePolicy === "POSITIVE_INTEGER" ? /^[1-9]\d*$/u.test(encodedLine) && Number.isSafeInteger(Number(encodedLine))
+              : linePolicy === "INTEGER" ? /^-?(?:0|[1-9]\d*)$/u.test(encodedLine) && Number.isSafeInteger(Number(encodedLine))
+                : isSupportedFootballTwoWayLine(encodedLine)))) return family;
+        // A malformed canonical variant cannot become an orphan that outlives
+        // native family closure. Its native observation is retained below.
+        return null;
       }
+      if (item.marketType?.startsWith("PLAYER_") || item.player !== undefined) return null;
       const separator = item.providerMarketId.lastIndexOf(":");
       const parent = `${item.providerEventId}\u0000${item.providerMarketId.slice(0, separator)}`;
       return separator >= 0 && nativeKeys.has(parent) &&
@@ -467,15 +476,26 @@ function mergeMarketParts(parts: readonly BtiPart[]): Pick<ObservedProviderCatal
       nativeMarketObservations: NonNullable<ObservedProviderCatalog["nativeMarketObservations"]>[number][] };
     const groups = new Map<string, Group>([...nativeKeys].map((key) =>
       [key, { markets: [], quotes: [], nativeMarketObservations: [] }]));
-    const groupFor = (item: { readonly providerEventId: string; readonly providerMarketId: string }): Group => {
-      const key = familyFor(item);
+    const invalidBindings = new Set<string>();
+    const identityFor = (item: { readonly providerEventId: string; readonly providerMarketId: string }): string =>
+      `${item.providerEventId}\u0000${item.providerMarketId}`;
+    const normalizedMarketIds = new Set(part.markets.map(identityFor));
+    const groupFor = (item: { readonly providerEventId: string; readonly providerMarketId: string }, retainInvalid = false): Group | null => {
+      const family = familyFor(item);
+      if (family === null && !retainInvalid) { invalidBindings.add(identityFor(item)); return null; }
+      const key = family ?? identityFor(item);
       const group = groups.get(key) ?? { markets: [], quotes: [], nativeMarketObservations: [] };
       groups.set(key, group);
       return group;
     };
-    for (const item of part.markets) groupFor(item).markets.push(item);
-    for (const item of part.quotes) groupFor(item).quotes.push(item);
-    for (const item of part.nativeMarketObservations ?? []) groupFor(item).nativeMarketObservations.push(item);
+    for (const item of part.markets) groupFor(item)?.markets.push(item);
+    for (const item of part.quotes) groupFor(item)?.quotes.push(item);
+    for (const item of part.nativeMarketObservations ?? []) {
+      const invalid = invalidBindings.has(identityFor(item)) || familyFor(item) === null ||
+        (item.providerMarketId.includes(":player:") && item.disposition === "NORMALIZED" && !normalizedMarketIds.has(identityFor(item)));
+      groupFor(item, true)!.nativeMarketObservations.push(invalid
+        ? { ...item, disposition: "UNMAPPED", reason: "INVALID_DERIVED_MARKET_BINDING" } : item);
+    }
     for (const [key, group] of groups) {
       const previous = families.get(key);
       if (!part.isDetail && previous !== undefined && group.markets.length > 0) {

@@ -1,9 +1,10 @@
 import type { MarketType, Scope } from "./domain.js";
+import { extendedFootballBinarySpecs } from "./football-extended-market.js";
 
-export type FootballStatistic = "GOALS" | "CORNERS" | "CARDS" | "YELLOW_CARDS";
+export type FootballStatistic = "GOALS" | "CORNERS" | "CARDS" | "YELLOW_CARDS" | "SHOTS" | "SHOTS_ON_TARGET" | "ASSISTS" | "FOULS" | "TACKLES" | "OFFSIDES" | "THROW_INS" | "GOAL_KICKS" | "SAVES" | "WOODWORK";
 export type FootballBinaryFamily = "HANDICAP" | "TOTAL" | "ODD_EVEN" | "YES_NO";
 export type FootballBinaryOutcome = "HOME" | "AWAY" | "OVER" | "UNDER" | "ODD" | "EVEN" | "YES" | "NO";
-export type FootballBinaryLinePolicy = "HALF_UNIT" | "NONE";
+export type FootballBinaryLinePolicy = "HALF_UNIT" | "NONE" | "POSITIVE_INTEGER";
 
 export interface FootballBinaryMarketSpec {
   readonly marketType: MarketType;
@@ -29,6 +30,7 @@ function noLineSpec(input: Omit<FootballBinaryMarketSpec, "linePolicy">): Footba
 }
 
 const specs: Readonly<Partial<Record<MarketType, FootballBinaryMarketSpec>>> = {
+  ...extendedFootballBinarySpecs,
   FT_AH: lineSpec({ marketType: "FT_AH", statistic: "GOALS", scope: "FULL_TIME", family: "HANDICAP",
     outcomes: handicapOutcomes, settlementProfile: "football-regulation-including-added-time" }),
   FT_TOTAL: lineSpec({ marketType: "FT_TOTAL", statistic: "GOALS", scope: "FULL_TIME", family: "TOTAL",
